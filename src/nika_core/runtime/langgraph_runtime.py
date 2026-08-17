@@ -68,14 +68,15 @@ async def open_langgraph_sqlite(path: Path) -> AsyncIterator[LangGraphSqliteHand
     try:
         checkpointer = AsyncSqliteSaver(connection)
         await checkpointer.setup()
-        handle = LangGraphSqliteHandle(connection=connection, checkpointer=checkpointer)
-        try:
-            yield handle
-        finally:
-            await handle.close()
     except Exception:
         await connection.close()
         raise
+
+    handle = LangGraphSqliteHandle(connection=connection, checkpointer=checkpointer)
+    try:
+        yield handle
+    finally:
+        await handle.close()
 
 
 class LangGraphRuntime:
