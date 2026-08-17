@@ -109,6 +109,12 @@ class LangGraphRuntime:
         return self._normalize(raw, thread_id=request.thread_id)
 
     async def resume(self, request: RuntimeResumeRequest) -> RuntimeResult:
+        if request.resume_token != request.thread_id:
+            return RuntimeResult(
+                outcome=RuntimeOutcome.FAILED,
+                error="resume token does not match LangGraph thread_id",
+            )
+
         config = self._config(request.thread_id, request.max_steps)
         graph_input = (
             None
