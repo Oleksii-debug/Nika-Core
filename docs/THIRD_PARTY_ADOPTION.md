@@ -9,8 +9,13 @@ Canonical rule: before implementing a new subsystem, inspect current official do
 - REUSE — Python `importlib.metadata.entry_points()` as the installed-workspace discovery mechanism. Nika owns only the stable workspace contract and entry-point group.
 - CUSTOM — Agent/Workspace registries, Action Registry/Keymap and Audit Log because they encode Nika-specific versioning, accessibility, safety and product policy.
 
-## Agent runtime selection gate
-Do not lock the domain to one orchestration framework before M2 proof evidence. Current primary candidates are LangGraph and Microsoft Agent Framework. Microsoft Agent Framework is the forward Microsoft foundation incorporating AutoGen/Semantic Kernel experience and now documents workflows, checkpoint/resume, human-in-the-loop and multi-agent patterns. Nika domain will depend on `AgentRuntimePort`; concrete framework types must remain behind adapters.
+## M2 runtime decision — 2026-08-18
+- ADAPT — LangGraph as the primary durable orchestration runtime behind Nika `AgentRuntimePort`.
+- REUSE — `langgraph-checkpoint-sqlite` for the first local durable checkpoint adapter/proof.
+- KEEP AS SECONDARY CANDIDATE — Microsoft Agent Framework. Its Python core is production/stable and its workflows provide checkpointing, HITL and multi-agent patterns, but the native Python Ollama package remains prerelease and the current local checkpoint story is less directly aligned with Nika's SQLite-first desktop target.
+- CUSTOM (thin) — Nika runtime contracts, normalized events/results, capability registry and selection boundary. These intentionally prevent LangGraph or Microsoft framework types from leaking into Nika domain APIs.
+
+The dated comparison and required executable proof are in `docs/RUNTIME_SELECTION.md`. Do not run several orchestration kernels in production simultaneously without measured benefit. Re-run the selection gate if upstream stability, persistence or provider support materially changes.
 
 Deep Agents, LiteLLM, MCP Python SDK, APScheduler and DSPy remain candidates for their planned milestones and must be re-verified immediately before adoption.
 
