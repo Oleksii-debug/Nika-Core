@@ -7,55 +7,66 @@ Development mode: ACTIVE DEVELOPMENT
 ## Weighted progress
 - M0 research/reuse/governance/bootstrap: GREEN 100% of its 6% weight.
 - Overall proven final A–Z product remains 6.0%.
-- M1 foundation candidate is IMPLEMENTED on `dev/m1-foundation` but not INTEGRATED; its 10% product weight is not credited until executable CI is green.
-- M2 runtime-selection/adapter/integration preparation is IMPLEMENTED on `dev/m2-runtime-selection` but not INTEGRATED and receives no final percentage credit yet.
+- M1 foundation candidate is IMPLEMENTED on `dev/m1-foundation` / PR #2 but not INTEGRATED; its 10% product weight is not credited until executable CI is green.
+- M2 runtime selection/adapter/durability package is IMPLEMENTED/PREPARED on `dev/m2-runtime-selection`, not INTEGRATED, and receives no final percentage credit until real framework tests execute and are green.
 
 ## Current milestone
-M1 integration gate is blocked by GitHub Actions account billing/spending infrastructure. Parallel safe preparation for M2 is active without bypassing the M1 merge gate.
+M1 integration is still blocked by GitHub Actions account billing/spending infrastructure. Parallel safe M2 preparation continues on the dependent branch without bypassing the M1 merge gate.
 
 ## M1 candidate
-PR #2: typed/versioned configuration, SQLite migration v1→v2, persisted Agent/Workspace registries, Audit Log, workspace discovery contract, central Action Registry and persisted remappable Keymap. Current PR head before M2 branch: `9f73aa4b4a560bd66410295ccc75303e1a037e70`.
+PR #2: typed/versioned configuration, SQLite migration v1→v2, persisted Agent/Workspace registries, Audit Log, workspace discovery contract, central Action Registry and persisted remappable Keymap. Current PR head: `9f73aa4b4a560bd66410295ccc75303e1a037e70`.
 
-## Current blocker
-GitHub Actions PR jobs continue to fail before any workflow step starts. The prior exact check annotation identified recent account payment failure or Actions spending-limit configuration. No runner/steps means this is not code-test evidence. Do not merge PR #2 or credit M1 until Ruff/compile/pytest actually execute successfully.
+## Current infrastructure blocker
+The latest known PR #2 Actions job fails before workflow steps execute. Prior exact annotation identifies account payment failure or Actions spending-limit configuration. No runner/steps means this is infrastructure evidence, not code-test evidence. Do not merge PR #2 or credit M1 until Ruff/compile/pytest actually execute successfully.
 
-## M2 large coherent batch completed this cycle
+## M2 large coherent batch — current cycle
 Dependent branch: `dev/m2-runtime-selection`.
-Current branch head before this status update: `f1241a4ef9f83bfd9545fc6bfa3397b0723e5c18`.
+Head before this status commit: `c9f36e3f6391caf67b033cc91f75cf927ab776a4`.
 
-Implemented/prepared:
-- fresh official-source comparison of LangGraph and Microsoft Agent Framework;
-- LangGraph selected as primary current runtime for Nika's local Windows/SQLite target;
-- Microsoft Agent Framework retained as a secondary adapter candidate;
-- framework-neutral `AgentRuntimePort` with explicit start/resume/cancel surface;
-- normalized request/resume/event/result/outcome contracts and resume modes;
-- both initial execution and resume carry explicit positive max-step limits;
-- capability-based `RuntimeRegistry`;
-- deterministic no-LLM `ReferenceRuntime`;
-- dated runtime selection evidence matrix;
-- thin `LangGraphRuntime` adapter that normalizes completed results, failures and human-approval interrupts without leaking framework object types into Nika callers;
-- Nika max-step limits map to LangGraph per-run recursion limits;
-- explicit ordinary continuation versus approval continuation behavior;
-- cancellation deliberately not advertised until a real behavior proof exists;
-- `open_langgraph_sqlite()` secure local checkpoint boundary with explicit connection lifecycle, `check_same_thread=False`, saver setup and strict MsgPack deserialization forced on at the Nika boundary even if the environment previously requested an insecure value;
-- `TaskRuntimeCoordinator` maps runtime results into Nika TaskQueue states and AuditLog evidence;
-- deterministic tests for runtime contracts, registry selection, adapter normalization, approval resume, bounded execution, output isolation, failure normalization, truthful capabilities, SQLite helper security/lifecycle, task-state mapping and audit mapping;
-- expanded `docs/RUNTIME_SELECTION.md` with exact real-framework durability proof still required before M2 credit.
+### Reuse/architecture evidence
+- ADAPT LangGraph behind framework-neutral `AgentRuntimePort`.
+- REUSE `langgraph-checkpoint-sqlite` for the first local durable checkpoint proof.
+- REUSE `aiosqlite` because Nika invokes LangGraph asynchronously and upstream requires the async SQLite saver for async graph execution.
+- KEEP Microsoft Agent Framework as a secondary adapter/migration candidate.
+- Nika task IDs, task state, audit, approvals, permissions and product contracts remain Nika-owned.
 
-## Runtime reuse decision
-ADAPT LangGraph; REUSE `langgraph-checkpoint-sqlite`; KEEP Microsoft Agent Framework as secondary candidate. Selection rationale: LangGraph v1 stable runtime plus direct official SQLite checkpoint package is the closest match to Nika's single-machine durable desktop requirement. Microsoft core is production/stable and workflows are strong, but native Python Ollama integration is currently prerelease and local persistence is less directly SQLite-aligned.
+### Defect found and repaired before integration
+The earlier M2 branch paired `graph.ainvoke()` with synchronous `SqliteSaver`. Current official LangGraph source states the synchronous saver deliberately raises `NotImplementedError` for its async checkpoint methods and directs async callers to `AsyncSqliteSaver`.
 
-## Exact evidence and limitations
-- GitHub branch history contains the runtime contracts, selection evidence, LangGraph adapter, secure checkpoint helper, coordinator and associated deterministic tests/documents.
-- Hosted CI cannot currently execute because of the account Billing/Actions blocker.
-- Therefore no claim is made that Ruff/compile/pytest or the real LangGraph package durability proof passed this cycle.
-- Manual source review in this cycle caught and removed an unused import before CI and corrected two contract risks: an ignored max-step limit and insecure strict-deserialization override behavior.
-- No M1 or M2 progress weight is credited without executable evidence.
+Repair implemented entirely inside the adapter boundary:
+- `open_langgraph_sqlite()` is now an async context manager;
+- uses `aiosqlite` + `langgraph.checkpoint.sqlite.aio.AsyncSqliteSaver`;
+- awaits saver setup;
+- owns and closes the async connection;
+- closes the connection on setup failure;
+- forces `LANGGRAPH_STRICT_MSGPACK=true` before saver creation;
+- retains idempotent handle close behavior;
+- `aiosqlite` added to `agent` dependencies;
+- M2 CI definition installs `.[dev,agent]` so real LangGraph tests will run once GitHub runner allocation works.
+
+### Real-framework proof tests now prepared
+New `tests/test_langgraph_real_durability.py` uses actual LangGraph graph APIs and actual SQLite checkpoint persistence, not fake graph objects.
+
+Prepared acceptance scenarios:
+1. completed preparation node performs an external side effect, later node fails, all graph/runtime/checkpointer objects are destroyed, fresh objects reopen the DB and resume without repeating the completed side effect;
+2. approval interrupt is persisted, all runtime/checkpointer objects are destroyed, fresh objects resume the same thread with approval, and the completed preparation side effect remains exactly once;
+3. a persisted checkpoint blob is deliberately corrupted; resume must return typed FAILED and must not silently restart the thread or repeat the prior side effect.
+
+Existing deterministic tests still cover max-step bounds, result/interrupt normalization, approval and ordinary resume, exception normalization, framework-output isolation, capability truthfulness, runtime registry, TaskQueue/AuditLog coordinator mapping and strict checkpoint configuration.
+
+### Security evidence
+Current upstream LangGraph checkpoint documentation warns that unrestricted checkpoint deserialization may execute code if checkpoint storage is compromised. Nika therefore forces strict MsgPack deserialization at the construction boundary and does not expose it as a user-disableable option.
+
+## Test truth
+- Source and proof code are committed on the development branch.
+- GitHub Actions cannot currently provide executable evidence because the account-level runner allocation blocker remains.
+- Therefore this cycle does NOT claim that Ruff/compile/pytest or the new real LangGraph durability scenarios passed.
+- No M1 or M2 product weight is credited without executable evidence.
 
 ## Truth state
 - M0: INTEGRATED / green CI.
 - M1: IMPLEMENTED, not INTEGRATED, not PACKAGED, not HUMAN_TESTED.
-- M2 runtime boundary/selection/adapter/coordinator: IMPLEMENTED on dependent branch, not INTEGRATED, real-framework durable proof not yet executed, not PACKAGED, not HUMAN_TESTED.
+- M2: primary runtime selected; adapter/coordinator/async checkpoint boundary and real durability proof suite IMPLEMENTED/PREPARED; not INTEGRATED; not PACKAGED; not HUMAN_TESTED.
 
 ## Packaging policy
 No EXE in this cycle. Build Windows standalone only at milestone/user-test/release gates.
@@ -64,4 +75,9 @@ No EXE in this cycle. Build Windows standalone only at milestone/user-test/relea
 Real NVDA usability is never marked VERIFIED by automation.
 
 ## Next large coherent batch
-First re-check Actions infrastructure. If executable CI becomes available, run PR #2 and fix any real defect before merge. Then retarget/rebase the M2 runtime branch onto green main and execute the real LangGraph SQLite durability proof: persist a completed step, destroy/recreate runtime/checkpointer objects, resume without repeating completed work, approval interrupt/persist/recreate/resume, invalid/corrupt checkpoint fail-closed behavior, real TaskRuntimeCoordinator TaskQueue/AuditLog mapping and cancellation semantics before adding the cancellation capability. If Actions remains billing-blocked, continue that proof on the dependent dev branch but do not merge or credit progress without executable evidence.
+1. Re-check Actions infrastructure first.
+2. When runners execute: run/fix/merge PR #2 only if its M1 suite is actually green.
+3. Run the M2 PR with `.[dev,agent]`; execute/fix the real LangGraph SQLite restart, approval recreation and corruption tests.
+4. Rebase/retarget M2 onto green `main` only after M1 is integrated.
+5. Extend the real proof through `TaskRuntimeCoordinator` with actual LangGraph persistence and define/prove cancellation semantics before advertising cancellation.
+6. Only then award M1/M2 weighted progress according to closed acceptance gates.
