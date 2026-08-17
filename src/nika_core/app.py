@@ -11,7 +11,7 @@ from nika_core.kernel.task_queue import TaskQueue
 def build_runtime(config: AppConfig) -> tuple[SQLiteStore, AgentRegistry, TaskQueue]:
     store = SQLiteStore(config.database_path)
     store.initialize()
-    registry = AgentRegistry()
+    registry = AgentRegistry(store)
     queue = TaskQueue(store)
     return store, registry, queue
 

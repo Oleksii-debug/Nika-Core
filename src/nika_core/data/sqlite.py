@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from nika_core.data.schema import SCHEMA_SQL, SCHEMA_VERSION
+from nika_core.data.schema import MIGRATIONS, SCHEMA_VERSION
 
 
 class SQLiteStore:
@@ -17,6 +17,7 @@ class SQLiteStore:
     def connection(self) -> Iterator[sqlite3.Connection]:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.path)
+        conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         try:
             yield conn
@@ -29,13 +30,28 @@ class SQLiteStore:
 
     def initialize(self) -> None:
         with self.connection() as conn:
-            conn.executescript(SCHEMA_SQL)
             conn.execute(
-                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-                (SCHEMA_VERSION, datetime.now(UTC).isoformat()),
+                "CREATE TABLE IF NOT EXISTS schema_migrations ("
+                "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
             )
+            row = conn.execute("SELECT MAX(version) AS version FROM schema_migrations").fetchone()
+            current = int(row["version"] or 0)
+            if current > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"database schema {current} is newer than supported schema {SCHEMA_VERSION}"
+                )
+            for version in range(current + 1, SCHEMA_VERSION + 1):
+                statements = MIGRATIONS.get(version)
+                if statements is None:
+                    raise RuntimeError(f"missing migration {version}")
+                for statement in statements:
+                    conn.execute(statement)
+                conn.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (version, datetime.now(UTC).isoformat()),
+                )
 
     def schema_version(self) -> int:
         with self.connection() as conn:
-            row = conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
-        return int(row[0] or 0)
+            row = conn.execute("SELECT MAX(version) AS version FROM schema_migrations").fetchone()
+        return int(row["version"] or 0)

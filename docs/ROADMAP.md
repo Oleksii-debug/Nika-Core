@@ -6,12 +6,12 @@ Progress is acceptance-gate weighted, not commit-count based. Regressions may re
 | Stage | Weight | Goal |
 |---|---:|---|
 | M0 Research, reuse audit, governance & bootstrap | 6% | final architecture, adoption map, repo rules, status, cheap CI |
-| M1 Kernel foundation | 10% | config, registries, SQLite schema/migrations, task state, audit/events, workspace contract, Action Registry/keymap schema |
-| M2 Durable agent runtime | 11% | LangGraph run loop, cancellation, retries, approvals, bounded planning, durable checkpoint/resume |
-| M3 Memory, scheduler & resource control | 9% | memory namespaces, APScheduler adapter, resource budgets, queue fairness |
-| M4 Model Gateway, tools & MCP | 8% | mock/no-LLM, Ollama, cloud/OpenAI-compatible, LiteLLM adapter, MCP tool layer |
+| M1 Kernel foundation | 10% | typed config, persisted registries, SQLite migrations, task state, audit/events, workspace/plugin contract, Action Registry/keymap |
+| M2 Durable agent runtime | 11% | AgentRuntimePort, framework proof/selection, run loop, cancellation, retries, approvals, bounded planning, durable checkpoint/resume |
+| M3 Memory, scheduler & resource control | 9% | memory namespaces, SchedulerPort/APScheduler adapter, resource budgets, queue fairness |
+| M4 Model Gateway, tools & MCP | 8% | mock/no-LLM, Ollama, cloud/OpenAI-compatible, provider adapter, MCP tool layer |
 | M5 Accessible web-style Windows GUI | 11% | local HTML/CSS/JS + pywebview/WebView2 shell, keyboard/NVDA semantics, configurable shortcut editor, logs/tasks/agents/workspaces |
-| M6 Agent Builder & permissions | 8% | NL draft -> schema -> permission review -> versioned activation |
+| M6 Agent Builder & permissions | 8% | natural-language draft -> schema -> permission review -> versioned activation |
 | M7 Multi-agent laboratory | 9% | supervisor/subagents, teams, typed handoffs, parallel fan-out, quotas, evaluator |
 | M8 Self-learning & experiment engine | 10% | metrics, replay, prompt/strategy versions, champion/challenger, rollback, optional DSPy |
 | M9 Plugin SDK & real workspaces | 8% | stable plugin/workspace API and at least two independent real workspaces |
@@ -22,10 +22,16 @@ Progress is acceptance-gate weighted, not commit-count based. Regressions may re
 Total: 100%.
 
 ## Current baseline
-After bootstrap CI is green: M0 = 100%, overall final product = 6%. M1–M12 begin at 0 until their gates close. Until CI is green, report M0 as 90% and overall as 5.4%.
+M0 is GREEN at 100%; overall proven product progress = 6.0% before M1 integration evidence. M1 closes only after its coherent foundation branch passes PR/main CI and the persisted config/registry/migration/keymap tests are green.
+
+## M1 acceptance slice
+M1 is one coherent foundation milestone, not micro-tickets: typed settings; ordered backward migrations; persisted Agent/Workspace registries; generic audit log; stable workspace plugin discovery contract; central Action Registry and persisted remappable Keymap with conflict/clear/restore/import/export behavior.
+
+## M2 selection gate
+Before choosing the primary orchestration runtime, compare current LangGraph and Microsoft Agent Framework behind `AgentRuntimePort` with the same Nika proof scenario. Do not let either framework's public types become Nika domain contracts.
 
 ## Normal critical path
 M0 -> M1 -> M2 -> M3/M4 -> M5 -> M6 -> M7 -> M8 -> M9 -> M10 -> M11 -> M12. Independent work may overlap only after contracts stabilize.
 
 ## Actions/minutes policy
-Every PR gets cheap Linux compile/lint/unit tests. Windows hosted runner is reserved for milestone integration, Windows/WebView2-specific defects, accessibility/package gates and release candidates. Do not build EXE every hourly run. Python-source tests are the normal development loop; package when a milestone needs user/release verification.
+Development branches use source/static/unit checks without triggering hosted Actions on every push. Coherent PR/main gates use cheap Linux CI. Windows hosted runner is reserved for Windows/WebView2-specific defects, accessibility/package gates and release candidates. Do not build EXE every development cycle.

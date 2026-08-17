@@ -1,27 +1,24 @@
 # Third-party adoption policy — reuse before rewrite
 
-Canonical rule: before implementing a new subsystem, search current official documentation and maintained upstream projects for a reusable component. Adopt or adapt a maintained library when it satisfies our contract and license/security requirements. Write custom code only for Nika-specific policy, glue, accessibility, safety, or a missing capability.
+Canonical rule: before implementing a new subsystem, inspect current official documentation and maintained upstream projects. Record REUSE, ADAPT or CUSTOM. Prefer package dependencies/adapters over vendored source.
 
-Do not vendor random copied source into the repository. Prefer package dependencies with version constraints and a lock file, preserving upstream update/security paths and license metadata.
+## M1 decisions — 2026-08-18
+- REUSE — Pydantic + Pydantic Settings for typed/versioned configuration and `NIKA_*` environment loading.
+- REUSE — Python `sqlite3` for the local deterministic store and transactional writes.
+- CUSTOM (thin) — ordered SQLite schema migrations. At the current small local-only schema, Alembic would add SQLAlchemy/migration complexity without a corresponding benefit. Re-evaluate Alembic when schema transforms become complex or another SQL backend is introduced.
+- REUSE — Python `importlib.metadata.entry_points()` as the installed-workspace discovery mechanism. Nika owns only the stable workspace contract and entry-point group.
+- CUSTOM — Agent/Workspace registries, Action Registry/Keymap and Audit Log because they encode Nika-specific versioning, accessibility, safety and product policy.
 
-## Adopt
-- LangGraph: primary durable orchestration runtime; persistence, loops, branching, parallel execution and human-in-the-loop.
-- langgraph-checkpoint-sqlite: local graph checkpoints; enable strict deserialization policy.
-- Deep Agents: selective planning/subagent/filesystem/memory/permission harness behind Nika interfaces.
-- LiteLLM: provider normalization inside ModelGateway, including Ollama/cloud adapters, normalized errors and routing/fallback where needed.
-- MCP Python SDK v2: standard tool/resource interoperability; still governed by Nika permissions.
-- APScheduler stable 3.x: implementation behind SchedulerPort.
-- PySide6/Qt Widgets: accessible Windows GUI baseline.
-- pyside6-deploy/Nuitka: standalone Windows distribution at packaging gates.
-- DSPy: optional M8 optimizer only when explicit metrics/evaluation datasets exist.
+## Agent runtime selection gate
+Do not lock the domain to one orchestration framework before M2 proof evidence. Current primary candidates are LangGraph and Microsoft Agent Framework. Microsoft Agent Framework is the forward Microsoft foundation incorporating AutoGen/Semantic Kernel experience and now documents workflows, checkpoint/resume, human-in-the-loop and multi-agent patterns. Nika domain will depend on `AgentRuntimePort`; concrete framework types must remain behind adapters.
 
-## Evaluated but not primary kernel runtimes
-- Microsoft AutoGen: strong teams/memory/event-driven agent framework, retained as future adapter/research option.
-- CrewAI: strong crews/flows/memory/guardrails, retained as future adapter/research option.
-Running multiple orchestration runtimes inside the kernel would duplicate state/checkpoint/team semantics and increase integration debt.
+Deep Agents, LiteLLM, MCP Python SDK, APScheduler and DSPy remain candidates for their planned milestones and must be re-verified immediately before adoption.
 
-## Write custom code only for
-Nika domain schemas/IDs; public workspace/plugin contract; audit/permission/approval policy; accessible Windows UX; artifact/release metadata; target-PC resource policy; experiment promotion governance; thin adapters where upstream APIs do not match stable Nika interfaces.
+## Windows UI
+ADAPT — pywebview + EdgeChromium/WebView2 with local HTML/CSS/JS. Reuse the Accessible Chess WebView2 accessibility-host lessons. React + TypeScript + Vite + React Aria Components remain the M5 frontend candidate subject to a fresh audit.
+
+## Packaging
+ADAPT — PyInstaller is the first pywebview Windows freezing path; Nuitka remains a measured fallback. Do not package every development cycle.
 
 ## Mandatory pre-code record
-Every new subsystem decision must be classified as REUSE, ADAPT or CUSTOM before implementation. CUSTOM requires a short explanation of why maintained upstream options do not satisfy the requirement.
+Every new subsystem decision is classified REUSE, ADAPT or CUSTOM. CUSTOM requires a short explanation of why maintained upstream options do not satisfy the requirement.
