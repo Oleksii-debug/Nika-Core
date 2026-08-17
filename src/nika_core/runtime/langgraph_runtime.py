@@ -24,6 +24,16 @@ def _default_resume_command(value: Any) -> Any:
     return Command(resume=value)
 
 
+def _safe_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        return {str(key): _safe_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_safe_value(item) for item in value]
+    return repr(value)
+
+
 @dataclass(slots=True)
 class LangGraphSqliteHandle:
     connection: sqlite3.Connection
@@ -42,7 +52,7 @@ class LangGraphSqliteHandle:
 def open_langgraph_sqlite(path: Path) -> LangGraphSqliteHandle:
     """Open the local LangGraph SQLite checkpointer with strict deserialization enabled."""
 
-    os.environ.setdefault("LANGGRAPH_STRICT_MSGPACK", "true")
+    os.environ["LANGGRAPH_STRICT_MSGPACK"] = "true"
     from langgraph.checkpoint.sqlite import SqliteSaver
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -78,7 +88,7 @@ class LangGraphRuntime:
         self._resume_command_factory = resume_command_factory or _default_resume_command
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
-        config = self._config(request.thread_id)
+        config = self._config(request.thread_id, request.max_steps)
         try:
             raw = await self._graph.ainvoke(dict(request.payload), config=config)
         except Exception as exc:
@@ -86,7 +96,7 @@ class LangGraphRuntime:
         return self._normalize(raw, thread_id=request.thread_id)
 
     async def resume(self, request: RuntimeResumeRequest) -> RuntimeResult:
-        config = self._config(request.thread_id)
+        config = self._config(request.thread_id, request.max_steps)
         graph_input = (
             None
             if request.mode == RuntimeResumeMode.CONTINUE
@@ -103,25 +113,32 @@ class LangGraphRuntime:
         return False
 
     @staticmethod
-    def _config(thread_id: str) -> dict[str, dict[str, str]]:
-        return {"configurable": {"thread_id": thread_id}}
+    def _config(thread_id: str, max_steps: int) -> dict[str, Any]:
+        return {
+            "configurable": {"thread_id": thread_id},
+            "recursion_limit": max_steps,
+        }
 
     @staticmethod
     def _normalize(raw: Any, *, thread_id: str) -> RuntimeResult:
         if not isinstance(raw, Mapping):
             return RuntimeResult(
                 outcome=RuntimeOutcome.COMPLETED,
-                output={"value": raw},
+                output={"value": _safe_value(raw)},
             )
 
         interrupts = tuple(raw.get("__interrupt__", ()) or ())
-        output = {key: value for key, value in raw.items() if key != "__interrupt__"}
+        output = {
+            str(key): _safe_value(value)
+            for key, value in raw.items()
+            if key != "__interrupt__"
+        }
         if interrupts:
             events = tuple(
                 RuntimeEvent(
                     sequence=index,
                     event_type="runtime.approval_requested",
-                    payload={"value": getattr(item, "value", repr(item))},
+                    payload={"value": _safe_value(getattr(item, "value", repr(item)))},
                 )
                 for index, item in enumerate(interrupts)
             )
