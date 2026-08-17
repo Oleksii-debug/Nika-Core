@@ -10,6 +10,7 @@ from nika_core.runtime.contracts import (
     RuntimeOutcome,
     RuntimeRequest,
     RuntimeResult,
+    RuntimeResumeRequest,
 )
 from nika_core.runtime.reference import ReferenceRuntime
 from nika_core.runtime.registry import RuntimeRegistry
@@ -25,6 +26,13 @@ def test_runtime_request_fails_closed_for_invalid_limits() -> None:
         RuntimeRequest(task_id="task", thread_id="thread", max_steps=0)
     with pytest.raises(ValueError):
         RuntimeRequest(task_id="", thread_id="thread")
+    with pytest.raises(ValueError):
+        RuntimeResumeRequest(
+            task_id="task",
+            thread_id="thread",
+            resume_token="token",
+            max_steps=0,
+        )
 
 
 def test_runtime_result_requires_resume_token_for_approval() -> None:
