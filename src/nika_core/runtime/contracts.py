@@ -24,13 +24,21 @@ class RuntimeOutcome(StrEnum):
     FAILED = "failed"
 
 
+class RuntimeResumeMode(StrEnum):
+    CONTINUE = "continue"
+    APPROVAL = "approval"
+
+
+class RuntimeUnsupportedError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeRequest:
     task_id: str
     thread_id: str
     payload: Mapping[str, Any] = field(default_factory=dict)
     max_steps: int = 64
-    resume_token: str | None = None
 
     def __post_init__(self) -> None:
         if not self.task_id.strip():
@@ -39,6 +47,19 @@ class RuntimeRequest:
             raise ValueError("thread_id must not be empty")
         if self.max_steps < 1:
             raise ValueError("max_steps must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeResumeRequest:
+    task_id: str
+    thread_id: str
+    resume_token: str
+    mode: RuntimeResumeMode = RuntimeResumeMode.CONTINUE
+    value: Any = None
+
+    def __post_init__(self) -> None:
+        if not self.task_id.strip() or not self.thread_id.strip() or not self.resume_token.strip():
+            raise ValueError("resume identifiers must not be empty")
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,3 +99,7 @@ class AgentRuntimePort(Protocol):
     def capabilities(self) -> frozenset[RuntimeCapability]: ...
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult: ...
+
+    async def resume(self, request: RuntimeResumeRequest) -> RuntimeResult: ...
+
+    async def cancel(self, *, task_id: str, thread_id: str) -> bool: ...

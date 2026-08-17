@@ -6,6 +6,8 @@ from nika_core.runtime.contracts import (
     RuntimeOutcome,
     RuntimeRequest,
     RuntimeResult,
+    RuntimeResumeRequest,
+    RuntimeUnsupportedError,
 )
 
 
@@ -26,3 +28,11 @@ class ReferenceRuntime:
             events=(event,),
             output={"echo": dict(request.payload), "max_steps": request.max_steps},
         )
+
+    async def resume(self, request: RuntimeResumeRequest) -> RuntimeResult:
+        raise RuntimeUnsupportedError(
+            f"Runtime {self.runtime_id} does not support resume for {request.task_id}"
+        )
+
+    async def cancel(self, *, task_id: str, thread_id: str) -> bool:
+        return False
