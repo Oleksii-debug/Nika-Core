@@ -45,14 +45,16 @@ def test_reference_runtime_satisfies_port_and_keeps_framework_types_out() -> Non
     assert result.events[0].event_type == "reference.completed"
 
 
-def test_runtime_registry_selects_by_capability_not_framework_class() -> None:
+def test_runtime_registry_selects_only_truthful_capabilities() -> None:
     registry = RuntimeRegistry()
     reference = ReferenceRuntime()
     registry.register(reference)
     assert registry.get("reference") is reference
-    assert registry.select({RuntimeCapability.CANCELLATION}) is reference
+    assert registry.select({RuntimeCapability.DETERMINISTIC_NO_LLM}) is reference
     with pytest.raises(LookupError):
         registry.select({RuntimeCapability.DURABLE_RESUME})
+    with pytest.raises(LookupError):
+        registry.select({RuntimeCapability.CANCELLATION})
     with pytest.raises(ValueError):
         registry.register(reference)
 

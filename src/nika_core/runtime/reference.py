@@ -13,7 +13,7 @@ class ReferenceRuntime:
     """Deterministic no-LLM runtime used to prove Nika's framework-neutral contract."""
 
     runtime_id = "reference"
-    capabilities = frozenset({RuntimeCapability.CANCELLATION, RuntimeCapability.LOCAL_MODELS})
+    capabilities = frozenset({RuntimeCapability.DETERMINISTIC_NO_LLM})
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
         event = RuntimeEvent(

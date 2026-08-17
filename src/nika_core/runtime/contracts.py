@@ -6,6 +6,7 @@ from typing import Any, Mapping, Protocol, runtime_checkable
 
 
 class RuntimeCapability(StrEnum):
+    DETERMINISTIC_NO_LLM = "deterministic_no_llm"
     DURABLE_RESUME = "durable_resume"
     HUMAN_APPROVAL = "human_approval"
     CANCELLATION = "cancellation"
