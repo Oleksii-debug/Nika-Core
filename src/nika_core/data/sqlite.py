@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
-from datetime import datetime, timezone
-from pathlib import Path
 import sqlite3
-from typing import Iterator
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime
+from pathlib import Path
 
 from nika_core.data.schema import SCHEMA_SQL, SCHEMA_VERSION
 
@@ -32,7 +32,7 @@ class SQLiteStore:
             conn.executescript(SCHEMA_SQL)
             conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-                (SCHEMA_VERSION, datetime.now(timezone.utc).isoformat()),
+                (SCHEMA_VERSION, datetime.now(UTC).isoformat()),
             )
 
     def schema_version(self) -> int:

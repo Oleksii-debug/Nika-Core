@@ -1,8 +1,8 @@
-name: Cheap Core CI
+name: Core CI
 
 on:
   push:
-    branches: [main, "dev/**", "feature/**", "fix/**", "integration/**", "bootstrap/**"]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 

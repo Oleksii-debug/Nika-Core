@@ -1,5 +1,7 @@
 from pathlib import Path
+
 import pytest
+
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.agent_registry import AgentDefinition, AgentRegistry
 from nika_core.kernel.checkpoint import CheckpointService
@@ -8,23 +10,51 @@ from nika_core.kernel.task_state import TaskState, can_transition, require_trans
 from nika_core.model_gateway.base import ModelRequest
 from nika_core.model_gateway.mock import MockProvider
 
-def test_task_state():
+
+def test_created_can_become_ready() -> None:
     assert can_transition(TaskState.CREATED, TaskState.READY)
-    with pytest.raises(ValueError): require_transition(TaskState.COMPLETED, TaskState.RUNNING)
 
-def test_registry_versions():
-    r=AgentRegistry(); r.register(AgentDefinition("a1","Agent",1,"Test"))
-    with pytest.raises(ValueError): r.register(AgentDefinition("a1","Agent",1,"Again"))
-    r.register(AgentDefinition("a1","Agent",2,"Updated")); assert r.get("a1").version==2
 
-def test_queue_checkpoint(tmp_path: Path):
-    s=SQLiteStore(tmp_path/"nika.db"); s.initialize(); assert s.schema_version()==1
-    q=TaskQueue(s); t=q.create(workspace_id="lab",agent_id="a1",payload={"x":1}); q.transition(t.task_id,TaskState.READY); assert q.count_ready==1
-    cp=CheckpointService(s); saved=cp.save(task_id=t.task_id,stage="plan",payload={"step":2}); assert cp.latest(t.task_id)==saved
+def test_completed_cannot_run_again() -> None:
+    assert not can_transition(TaskState.COMPLETED, TaskState.RUNNING)
+    with pytest.raises(ValueError):
+        require_transition(TaskState.COMPLETED, TaskState.RUNNING)
 
-def test_invalid_transition_atomic(tmp_path: Path):
-    s=SQLiteStore(tmp_path/"nika.db"); s.initialize(); q=TaskQueue(s); t=q.create(workspace_id="lab",agent_id="a1")
-    with pytest.raises(ValueError): q.transition(t.task_id,TaskState.COMPLETED)
 
-def test_mock_provider():
-    p=MockProvider(); r=p.chat(ModelRequest(messages=({"role":"user","content":"hello"},))); assert p.health(); assert r.text=="MOCK:hello"
+def test_registry_requires_increasing_version() -> None:
+    registry = AgentRegistry()
+    registry.register(AgentDefinition("a1", "Agent", 1, "Test"))
+    with pytest.raises(ValueError):
+        registry.register(AgentDefinition("a1", "Agent", 1, "Again"))
+    registry.register(AgentDefinition("a1", "Agent", 2, "Updated"))
+    assert registry.get("a1").version == 2
+
+
+def test_queue_checkpoint_round_trip(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    assert store.schema_version() == 1
+    queue = TaskQueue(store)
+    task = queue.create(workspace_id="lab", agent_id="a1", payload={"x": 1})
+    queue.transition(task.task_id, TaskState.READY)
+    assert queue.count_ready == 1
+    service = CheckpointService(store)
+    saved = service.save(task_id=task.task_id, stage="plan", payload={"step": 2})
+    assert service.latest(task.task_id) == saved
+
+
+def test_invalid_transition_is_atomic(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    queue = TaskQueue(store)
+    task = queue.create(workspace_id="lab", agent_id="a1")
+    with pytest.raises(ValueError):
+        queue.transition(task.task_id, TaskState.COMPLETED)
+
+
+def test_mock_provider_is_deterministic() -> None:
+    provider = MockProvider()
+    response = provider.chat(ModelRequest(messages=({"role": "user", "content": "hello"},)))
+    assert provider.health()
+    assert response.text == "MOCK:hello"
+    assert response.provider == "mock"

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -13,7 +13,7 @@ class AppConfig:
     model_provider: str
 
     @classmethod
-    def from_environment(cls) -> "AppConfig":
+    def from_environment(cls) -> AppConfig:
         db = Path(os.environ.get("NIKA_DB_PATH", "./data/nika_core.db"))
         return cls(
             app_version="0.0.1",
