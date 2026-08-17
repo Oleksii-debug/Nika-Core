@@ -18,6 +18,11 @@ class _Interrupt:
     value: object
 
 
+class _OpaqueValue:
+    def __repr__(self) -> str:
+        return "<opaque>"
+
+
 class _FakeGraph:
     def __init__(self) -> None:
         self.calls: list[tuple[object, object]] = []
@@ -30,16 +35,18 @@ class _FakeGraph:
         return self.responses.pop(0)
 
 
-def test_langgraph_adapter_normalizes_completed_result() -> None:
+def test_langgraph_adapter_normalizes_completed_result_and_step_limit() -> None:
     graph = _FakeGraph()
     graph.responses.append({"answer": "done"})
     runtime = LangGraphRuntime(graph)
-    result = asyncio.run(runtime.run(RuntimeRequest("task-1", "thread-1", {"goal": "x"})))
+    result = asyncio.run(
+        runtime.run(RuntimeRequest("task-1", "thread-1", {"goal": "x"}, max_steps=12))
+    )
     assert result.outcome == RuntimeOutcome.COMPLETED
     assert result.output == {"answer": "done"}
     assert graph.calls[0] == (
         {"goal": "x"},
-        {"configurable": {"thread_id": "thread-1"}},
+        {"configurable": {"thread_id": "thread-1"}, "recursion_limit": 12},
     )
 
 
@@ -67,12 +74,16 @@ def test_langgraph_adapter_normalizes_interrupt_and_resume() -> None:
                 resume_token="thread-2",
                 mode=RuntimeResumeMode.APPROVAL,
                 value=True,
+                max_steps=7,
             )
         )
     )
     assert resumed.outcome == RuntimeOutcome.COMPLETED
     assert resumed.output["approved"] is True
-    assert graph.calls[1][0] == ("resume", True)
+    assert graph.calls[1] == (
+        ("resume", True),
+        {"configurable": {"thread_id": "thread-2"}, "recursion_limit": 7},
+    )
 
 
 def test_langgraph_adapter_continue_resume_uses_none_input() -> None:
@@ -105,3 +116,21 @@ def test_langgraph_adapter_converts_runtime_exception_to_typed_failure() -> None
     result = asyncio.run(runtime.run(RuntimeRequest("task-4", "thread-4")))
     assert result.outcome == RuntimeOutcome.FAILED
     assert "No fake response configured" in (result.error or "")
+
+
+def test_langgraph_adapter_does_not_leak_framework_objects() -> None:
+    graph = _FakeGraph()
+    graph.responses.append(
+        {
+            "opaque": _OpaqueValue(),
+            "nested": {"value": _OpaqueValue()},
+            "items": (_OpaqueValue(),),
+        }
+    )
+    runtime = LangGraphRuntime(graph)
+    result = asyncio.run(runtime.run(RuntimeRequest("task-5", "thread-5")))
+    assert result.output == {
+        "opaque": "<opaque>",
+        "nested": {"value": "<opaque>"},
+        "items": ["<opaque>"],
+    }
