@@ -104,6 +104,24 @@ def test_langgraph_adapter_continue_resume_uses_none_input() -> None:
     assert graph.calls[0][0] is None
 
 
+def test_langgraph_adapter_rejects_resume_token_thread_mismatch_before_graph_call() -> None:
+    graph = _FakeGraph()
+    runtime = LangGraphRuntime(graph)
+    result = asyncio.run(
+        runtime.resume(
+            RuntimeResumeRequest(
+                task_id="task-mismatch",
+                thread_id="thread-a",
+                resume_token="thread-b",
+                mode=RuntimeResumeMode.CONTINUE,
+            )
+        )
+    )
+    assert result.outcome == RuntimeOutcome.FAILED
+    assert "resume token" in (result.error or "")
+    assert graph.calls == []
+
+
 def test_langgraph_adapter_does_not_claim_unproven_cancellation() -> None:
     runtime = LangGraphRuntime(_FakeGraph())
     assert RuntimeCapability.CANCELLATION not in runtime.capabilities
