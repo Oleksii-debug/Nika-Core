@@ -56,10 +56,13 @@ class RuntimeResumeRequest:
     resume_token: str
     mode: RuntimeResumeMode = RuntimeResumeMode.CONTINUE
     value: Any = None
+    max_steps: int = 64
 
     def __post_init__(self) -> None:
         if not self.task_id.strip() or not self.thread_id.strip() or not self.resume_token.strip():
             raise ValueError("resume identifiers must not be empty")
+        if self.max_steps < 1:
+            raise ValueError("max_steps must be positive")
 
 
 @dataclass(frozen=True, slots=True)
