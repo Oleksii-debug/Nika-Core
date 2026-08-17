@@ -4,18 +4,20 @@ Canonical rule: before implementing a new subsystem, inspect current official do
 
 ## M1 decisions — 2026-08-18
 - REUSE — Pydantic + Pydantic Settings for typed/versioned configuration and `NIKA_*` environment loading.
-- REUSE — Python `sqlite3` for the local deterministic store and transactional writes.
+- REUSE — Python `sqlite3` for the local deterministic Nika store and transactional writes.
 - CUSTOM (thin) — ordered SQLite schema migrations. At the current small local-only schema, Alembic would add SQLAlchemy/migration complexity without a corresponding benefit. Re-evaluate Alembic when schema transforms become complex or another SQL backend is introduced.
 - REUSE — Python `importlib.metadata.entry_points()` as the installed-workspace discovery mechanism. Nika owns only the stable workspace contract and entry-point group.
 - CUSTOM — Agent/Workspace registries, Action Registry/Keymap and Audit Log because they encode Nika-specific versioning, accessibility, safety and product policy.
 
 ## M2 runtime decision — 2026-08-18
 - ADAPT — LangGraph as the primary durable orchestration runtime behind Nika `AgentRuntimePort`.
-- REUSE — `langgraph-checkpoint-sqlite` for the first local durable checkpoint adapter/proof.
-- KEEP AS SECONDARY CANDIDATE — Microsoft Agent Framework. Its Python core is production/stable and its workflows provide checkpointing, HITL and multi-agent patterns, but the native Python Ollama package remains prerelease and the current local checkpoint story is less directly aligned with Nika's SQLite-first desktop target.
-- CUSTOM (thin) — Nika runtime contracts, normalized events/results, capability registry and selection boundary. These intentionally prevent LangGraph or Microsoft framework types from leaking into Nika domain APIs.
+- REUSE — `langgraph-checkpoint-sqlite` with `AsyncSqliteSaver` for the first local durable checkpoint adapter/proof because Nika's runtime contract invokes graphs asynchronously.
+- REUSE — `aiosqlite` as the SQLite driver required by the official LangGraph async SQLite saver.
+- SECURITY ADAPTATION — force strict MsgPack deserialization at the Nika checkpointer construction boundary. This follows current upstream security guidance and is not user-disableable.
+- KEEP AS SECONDARY CANDIDATE — Microsoft Agent Framework. Its Python core/workflow surface is strong, but the current local SQLite path is less direct for Nika's first desktop durability proof.
+- CUSTOM (thin) — Nika runtime contracts, normalized events/results, capability registry, task/audit coordinator and selection boundary. These prevent any framework type from becoming a Nika domain dependency.
 
-The dated comparison and required executable proof are in `docs/RUNTIME_SELECTION.md`. Do not run several orchestration kernels in production simultaneously without measured benefit. Re-run the selection gate if upstream stability, persistence or provider support materially changes.
+The dated comparison and executable proof design are in `docs/RUNTIME_SELECTION.md`. Do not run several orchestration kernels in production simultaneously without measured benefit. Re-run the selection gate if upstream stability, persistence or provider support materially changes.
 
 Deep Agents, LiteLLM, MCP Python SDK, APScheduler and DSPy remain candidates for their planned milestones and must be re-verified immediately before adoption.
 
