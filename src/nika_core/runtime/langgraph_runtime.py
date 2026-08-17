@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import os
-import sqlite3
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -36,34 +36,46 @@ def _safe_value(value: Any) -> Any:
 
 @dataclass(slots=True)
 class LangGraphSqliteHandle:
-    connection: sqlite3.Connection
+    """Owned async SQLite/checkpointer pair used by LangGraphRuntime graphs."""
+
+    connection: Any
     checkpointer: Any
+    _closed: bool = False
 
-    def close(self) -> None:
-        self.connection.close()
-
-    def __enter__(self) -> LangGraphSqliteHandle:
-        return self
-
-    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
-        self.close()
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        await self.connection.close()
 
 
-def open_langgraph_sqlite(path: Path) -> LangGraphSqliteHandle:
-    """Open the local LangGraph SQLite checkpointer with strict deserialization enabled."""
+@asynccontextmanager
+async def open_langgraph_sqlite(path: Path) -> AsyncIterator[LangGraphSqliteHandle]:
+    """Open a durable async SQLite checkpointer with strict deserialization enabled.
+
+    LangGraphRuntime uses ``graph.ainvoke``. The synchronous ``SqliteSaver`` deliberately
+    does not implement the asynchronous checkpoint API, so the runtime boundary must use
+    ``AsyncSqliteSaver`` and own/close its aiosqlite connection explicitly.
+    """
 
     os.environ["LANGGRAPH_STRICT_MSGPACK"] = "true"
-    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    import aiosqlite
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(path, check_same_thread=False)
+    connection = await aiosqlite.connect(path)
     try:
-        checkpointer = SqliteSaver(connection)
-        checkpointer.setup()
+        checkpointer = AsyncSqliteSaver(connection)
+        await checkpointer.setup()
+        handle = LangGraphSqliteHandle(connection=connection, checkpointer=checkpointer)
+        try:
+            yield handle
+        finally:
+            await handle.close()
     except Exception:
-        connection.close()
+        await connection.close()
         raise
-    return LangGraphSqliteHandle(connection, checkpointer)
 
 
 class LangGraphRuntime:
