@@ -1,12 +1,12 @@
 # Nika Core — final technical baseline
 
-Version 1.1, 2026-08-17. Windows 11 x64, NVDA-first.
+Version 1.2, 2026-08-17. Windows 11 x64, NVDA-first.
 
 ## Product definition
-Nika Core is one modular Windows platform, not a collection of unrelated scripts. It contains: Nika Kernel (deterministic core), Agent Lab (autonomous agents and experiments), Model Gateway (all model providers), Agent Builder, Plugin/Workspace SDK, accessible desktop UI, and the personal Nika agent. Planned workspaces include GrantScanner/Universal Research, Telegram, YouTube Research, Transcription, Business Agent Lab, My Corrector, Product Search, Table Tennis Stats, AI Trader research, Model Engineering Lab and future adapters.
+Nika Core is one modular Windows platform, not a collection of unrelated scripts. It contains: Nika Kernel (deterministic core), Agent Lab (autonomous agents and experiments), Model Gateway (all model providers), Agent Builder, Plugin/Workspace SDK, accessible web-style desktop UI, and the personal Nika agent. Planned workspaces include GrantScanner/Universal Research, Telegram, YouTube Research, Transcription, Business Agent Lab, My Corrector, Product Search, Table Tennis Stats, AI Trader research, Model Engineering Lab and future adapters.
 
 ## End-state user capabilities
-The final product must let the user install one normal Windows application without Python; create/import workspaces; create agents from natural language or templates; assign goals/tools/limits/success criteria; run one-shot or long-running tasks and agent teams; pause/restart/resume after app or PC failure; inspect state/log/audit/artifacts; choose no-LLM/mock, Ollama or cloud providers through one gateway; connect standardized external tools; run experiments and promote only verified strategies; approve dangerous actions; and operate the complete UI with keyboard and NVDA.
+The final product must let the user install one normal Windows application without Python; create/import workspaces; create agents from natural language or templates; assign goals/tools/limits/success criteria; run one-shot or long-running tasks and agent teams; pause/restart/resume after app or PC failure; inspect state/log/audit/artifacts; choose no-LLM/mock, Ollama or cloud providers through one gateway; connect standardized external tools; run experiments and promote only verified strategies; approve dangerous actions; remap application keyboard shortcuts; and operate the complete UI with keyboard and NVDA.
 
 ## Architecture principles
 1. Modular monolith first; no premature microservices.
@@ -19,9 +19,11 @@ The final product must let the user install one normal Windows application witho
 8. Accessibility is an acceptance gate from the first GUI build.
 9. Reuse before rewrite: maintained upstream libraries are preferred to custom infrastructure.
 10. Self-learning may change memory, prompts, strategies and experiment candidates; production source changes only through isolated branch/sandbox, tests, CI, integration and release gates.
+11. All application-specific hotkeys use a central Action Registry/Keymap and are remappable by the user.
+12. The primary desktop UI is web-style local HTML/CSS/JS inside a Windows WebView2 shell, following the Accessible Chess design direction but with its accessibility-host lessons incorporated from the start.
 
 ## Core services
-Config Service; Workspace Registry; Agent Registry; Task Queue and state machine; Agent Runtime/Orchestrator; SchedulerPort; Tool Registry; Permission Engine; Approval Engine; Event/Audit Log; Checkpoint/Resume; Memory Service; Resource Manager; Artifact Registry; ModelGateway; Plugin SDK; Diagnostics/Health; Backup/Restore.
+Config Service; Workspace Registry; Agent Registry; Task Queue and state machine; Agent Runtime/Orchestrator; SchedulerPort; Tool Registry; Permission Engine; Approval Engine; Event/Audit Log; Checkpoint/Resume; Memory Service; Resource Manager; Artifact Registry; ModelGateway; Plugin SDK; Action Registry/Keymap; Diagnostics/Health; Backup/Restore.
 
 ## Canonical agent loop
 Observe -> Plan -> Validate -> Act -> Record -> Evaluate -> Adapt -> Checkpoint -> Continue/Stop/Escalate. Every loop is bounded by max steps, deadline, cancellation and resource budget.
@@ -53,14 +55,17 @@ Support supervisor/subagents, router/fan-out, typed handoffs/messages, evaluator
 ## Controlled self-learning
 Experiment Registry stores dataset/corpus version, strategy/prompt version, model/provider, seed where applicable, metrics and artifacts. Champion/challenger promotion requires explicit metrics and held-out/replay evidence. DSPy may later optimize prompt/program behavior against fixed metrics. Failed challengers roll back automatically. No hidden autonomous production code rewrite.
 
-## Windows UI and accessibility
-Baseline: PySide6 Qt Widgets. Standard controls, QAccessible/UI Automation semantics, accessible name/role/value, logical Tab order, keyboard-only navigation, predictable focus restore, copyable error details and text logs. No status communicated by color alone. Automated semantics are not human NVDA verification.
+## Windows web-style UI and accessibility
+Baseline: pywebview with EdgeChromium/WebView2 on Windows, local HTML/CSS/JavaScript assets and a narrow validated JS/Python bridge. Native semantic HTML first; accessible names/roles/value, logical Tab order, keyboard-only navigation, predictable focus restore, copyable error details and text logs. No status communicated by color alone. The packaged WebView2 host accessibility boundary is tested explicitly. Automated semantics are not human NVDA verification.
+
+## Keyboard customization
+A central Action Registry assigns stable IDs to every application command. Default bindings are configuration, never implementation constants in random UI code. Users can reassign, clear, restore, export/import and validate shortcuts through an accessible settings page. Standard editing keys remain standard in editable controls unless deliberately scoped.
 
 ## Security
 No API keys, OAuth credentials, token/session files, cookies, browser profiles or private logs in Git. `.env`/local config is excluded. Tool permissions are least-privilege. File/shell access is sandboxed/restricted. Send/delete/publish/financial/legal/high-impact operations require preview/audit/approval as applicable.
 
 ## Packaging
-Development is Python-first for speed. Use `pyside6-deploy`/Nuitka to produce standalone Windows `.exe`/distribution at milestone, user-test and release gates. Do not rebuild EXE on every hourly code change. Final releases contain executable, config templates, docs/licenses, changelog, manifest and SHA-256 checksums and must run without Python installed.
+Development is Python-first for speed. For the WebView shell, PyInstaller is the initial supported standalone Windows packaging path documented by pywebview; Nuitka remains an evaluated alternative. Build a diagnosable standalone/on-dir candidate before optional one-file. Do not rebuild EXE on every hourly code change. Final releases contain executable, local web assets, config templates, docs/licenses, changelog, manifest and SHA-256 checksums and must run without Python installed.
 
 ## Release truth states
 IMPLEMENTED != INTEGRATED != PACKAGED != HUMAN_TESTED. Only exact tested SHA may become a candidate. Real NVDA verification is performed by Oleksii on Windows/NVDA and is never inferred from automated UIA tests.

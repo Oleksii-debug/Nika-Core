@@ -23,10 +23,12 @@ agent = [
   "mcp>=2,<3",
   "httpx>=0.28,<1",
 ]
-gui = ["PySide6>=6.10,<7"]
+gui = [
+  "pywebview>=6.2.1,<7",
+]
 learning = ["dspy>=3,<4", "scikit-learn>=1.7,<2"]
 dev = ["pytest>=8,<9", "ruff>=0.12,<1", "pytest-cov>=6,<8"]
-qa = ["pip-audit>=2,<3"]
+qa = ["pip-audit>=2,<3", "pyinstaller>=6,<7"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
