@@ -9,6 +9,7 @@ from nika_core.runtime.contracts import (
     RuntimeResumeRequest,
     RuntimeUnsupportedError,
 )
+from nika_core.runtime.coordinator import TaskRuntimeCoordinator
 from nika_core.runtime.langgraph_runtime import (
     LangGraphRuntime,
     LangGraphSqliteHandle,
@@ -31,5 +32,6 @@ __all__ = [
     "RuntimeResumeMode",
     "RuntimeResumeRequest",
     "RuntimeUnsupportedError",
+    "TaskRuntimeCoordinator",
     "open_langgraph_sqlite",
 ]
