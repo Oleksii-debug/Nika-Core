@@ -21,6 +21,23 @@ def test_config_uses_nika_environment(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert config.model_provider == "ollama"
 
 
+def test_config_accepts_explicit_database_path_and_long_env_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    explicit = tmp_path / "explicit.db"
+    assert AppConfig(database_path=explicit).database_path == explicit
+    monkeypatch.setenv("NIKA_DATABASE_PATH", str(tmp_path / "long-name.db"))
+    assert AppConfig.from_environment().database_path == tmp_path / "long-name.db"
+
+
+def test_legacy_db_path_has_priority_when_both_env_names_exist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("NIKA_DB_PATH", str(tmp_path / "legacy.db"))
+    monkeypatch.setenv("NIKA_DATABASE_PATH", str(tmp_path / "long-name.db"))
+    assert AppConfig.from_environment().database_path == tmp_path / "legacy.db"
+
+
 def test_invalid_config_fails_closed() -> None:
     with pytest.raises(ValueError):
         AppConfig(log_level="verbose")
