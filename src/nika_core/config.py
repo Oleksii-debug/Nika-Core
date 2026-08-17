@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,7 +11,10 @@ class AppConfig(BaseSettings):
 
     schema_version: int = 1
     app_version: str = "0.0.2"
-    database_path: Path = Path("./data/nika_core.db")
+    database_path: Path = Field(
+        default=Path("./data/nika_core.db"),
+        validation_alias=AliasChoices("NIKA_DB_PATH", "NIKA_DATABASE_PATH"),
+    )
     log_level: str = "INFO"
     model_provider: str = "mock"
 
@@ -20,6 +23,7 @@ class AppConfig(BaseSettings):
         case_sensitive=False,
         extra="ignore",
         validate_default=True,
+        populate_by_name=True,
     )
 
     @field_validator("schema_version")
