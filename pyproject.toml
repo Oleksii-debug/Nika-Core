@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nika-core"
+version = "0.0.1"
+description = "Accessible Windows-first modular multi-agent platform"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "platformdirs>=4,<5",
+  "pydantic>=2,<3",
+  "pydantic-settings>=2,<3",
+]
+
+[project.optional-dependencies]
+agent = [
+  "langgraph>=1,<2",
+  "langgraph-checkpoint-sqlite>=3.1,<4",
+  "deepagents>=0.5.2,<1",
+  "litellm>=1,<2",
+  "apscheduler>=3.11,<4",
+  "mcp>=2,<3",
+  "httpx>=0.28,<1",
+]
+gui = ["PySide6>=6.10,<7"]
+learning = ["dspy>=3,<4", "scikit-learn>=1.7,<2"]
+dev = ["pytest>=8,<9", "ruff>=0.12,<1", "pytest-cov>=6,<8"]
+qa = ["pip-audit>=2,<3"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
