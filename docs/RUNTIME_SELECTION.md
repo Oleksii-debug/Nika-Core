@@ -1,99 +1,107 @@
 # M2 agent runtime selection — evidence record
 
 Decision date: 2026-08-18.
-Status: LangGraph selected as primary; Nika adapter/integration boundary implemented on dependent dev branch; executable real-framework durability proof still blocked from independent GitHub CI by account Actions billing/spending infrastructure.
+Status: LangGraph selected as primary behind `AgentRuntimePort`; adapter/coordinator and real SQLite durability proof tests are prepared on the dependent M2 branch. Executable CI remains blocked by GitHub account Actions billing/spending infrastructure, so no M2 progress weight is credited yet.
 
 ## Decision
 ADAPT LangGraph as Nika Core's primary durable orchestration runtime behind `AgentRuntimePort`.
 KEEP Microsoft Agent Framework as the secondary adapter candidate and future migration/interop path; do not run both orchestration kernels in production simultaneously without measured need.
 
 ## Why LangGraph wins the current Windows-local target
-1. LangGraph v1 is stability-focused and retains durable execution, checkpointing, persistence and human-in-the-loop as first-class core behavior.
-2. The official `langgraph-checkpoint-sqlite` package provides local SQLite checkpoint savers. That directly matches Nika's single-machine Windows/SQLite recovery target with minimal extra infrastructure.
-3. LangGraph persistence records graph state at execution steps and supports restart/resume from persisted checkpoints.
-4. Its low-level runtime makes it practical to keep Nika task IDs, permissions, audit, approvals and model gateway as Nika-owned domain concepts rather than framework-owned product state.
+1. LangGraph v1 keeps durable execution, checkpointing, persistence and human-in-the-loop as first-class behavior.
+2. The official `langgraph-checkpoint-sqlite` package directly matches Nika's single-machine local SQLite recovery target.
+3. LangGraph persistence stores step-level graph state and pending writes, which is the mechanism needed to resume without re-running already completed work.
+4. Its low-level runtime lets Nika keep task IDs, permissions, audit, approvals and model routing as Nika-owned domain concepts.
 
 ## Microsoft Agent Framework comparison
-Microsoft Agent Framework is a serious production-grade alternative: Python core is marked Production/Stable; workflows provide typed routing, checkpointing, human-in-the-loop and multi-agent orchestration; persistent checkpoint storage is documented; and Ollama is officially documented.
+Microsoft Agent Framework remains a serious production-grade alternative: stable Python core, workflows, typed routing, checkpointing, human-in-the-loop and multi-agent orchestration, plus Ollama support. It remains behind the same Nika runtime boundary so it can be introduced later without rewriting domain logic.
 
-For Nika's current target it scores lower because:
-- the native Python Ollama package is currently published as prerelease, while local models are a first-class Nika requirement;
-- the built-in local persistence story is less directly aligned with Nika's SQLite-first desktop target;
-- adopting its broader workflow/provider surface now would add more framework surface before Nika's own domain contracts are stable.
+For the present Windows-local target LangGraph remains preferred because its official SQLite checkpoint package gives a smaller and more direct persistence surface for the first durable desktop proof.
 
-This is not a rejection. The adapter boundary is intentionally preserved so Microsoft Agent Framework can be added later for specific workflows or replace the primary runtime if measured evidence becomes stronger.
-
-## Nika-owned boundary now implemented
+## Nika-owned boundary
 Framework types do not enter kernel/domain public APIs. Runtime code uses:
 - `AgentRuntimePort` — async start/resume/cancel contract;
 - `RuntimeRequest` — framework-neutral task/thread/payload/max-step input;
-- `RuntimeResumeRequest` + `RuntimeResumeMode` — explicit normal continuation versus human-approval continuation, also bounded by max steps;
+- `RuntimeResumeRequest` + `RuntimeResumeMode` — explicit continuation versus approval continuation;
 - `RuntimeResult` and `RuntimeEvent` — normalized outcome/evidence;
-- `RuntimeCapability` — feature-based selection; a runtime may advertise only behavior backed by evidence;
-- `RuntimeRegistry` — runtime registration/selection without framework imports;
+- `RuntimeCapability` — advertise only behavior backed by evidence;
+- `RuntimeRegistry` — selection without framework imports;
 - `ReferenceRuntime` — deterministic no-LLM contract proof;
-- `LangGraphRuntime` — thin adapter around a compiled LangGraph graph, normalizing completion/failure/interrupt results without exposing LangGraph types to Nika callers;
-- `TaskRuntimeCoordinator` — maps normalized runtime outcomes/events into Nika TaskQueue state transitions and AuditLog entries.
+- `LangGraphRuntime` — thin compiled-graph adapter;
+- `TaskRuntimeCoordinator` — maps normalized outcomes into Nika TaskQueue/AuditLog.
 
-`LangGraphRuntime` deliberately does not advertise cancellation yet. Returning `False` for cancel is safer than claiming behavior not proven by a real adapter test.
+Cancellation is deliberately not advertised until a real cancellation behavior proof exists.
 
 ## Bounded execution
-Nika `max_steps` is mapped to LangGraph's per-run `recursion_limit` for both initial execution and resume. A resume request cannot silently lose the task bound. Invalid non-positive bounds fail closed at the Nika contract before framework execution.
+Nika `max_steps` maps to LangGraph's per-run `recursion_limit` for both initial execution and resume. Invalid non-positive bounds fail closed before framework execution.
 
 ## Framework-output isolation
-Adapter output is recursively normalized to primitive/mapping/list values. Unknown framework objects are converted to textual representations rather than leaking arbitrary framework instances into Nika public result/audit contracts. This keeps storage, UI and future runtime adapters independent of LangGraph object types.
+Adapter output is recursively normalized to primitive/mapping/list values. Unknown framework objects become textual representations rather than leaking framework instances into Nika public result/audit contracts.
 
-## Local SQLite checkpointer security
-`open_langgraph_sqlite()` is the Nika-owned construction boundary for the first LangGraph SQLite checkpointer. It:
-- creates parent directories;
-- opens SQLite with `check_same_thread=False`, matching upstream guidance for `SqliteSaver`;
-- forces `LANGGRAPH_STRICT_MSGPACK=true` before saver construction; an insecure pre-existing false value is overridden because strict deserialization is a Nika security requirement;
-- initializes the saver and closes the connection on construction failure;
-- returns an explicit closeable/context-managed handle so the database connection lifecycle is not leaked.
+## Important defect found in this proof cycle — synchronous saver with async graph
+The first M2 implementation paired `graph.ainvoke()` with LangGraph's synchronous `SqliteSaver`. Current official LangGraph source explicitly states that `SqliteSaver.aget_tuple`, `alist` and `aput` are not supported and raise `NotImplementedError`; asynchronous graph execution must use `AsyncSqliteSaver`.
 
-Strict checkpoint deserialization is a security requirement, not an optional UI setting.
+This is now corrected before integration:
+- `open_langgraph_sqlite()` is an async context manager;
+- it opens `aiosqlite` and constructs `langgraph.checkpoint.sqlite.aio.AsyncSqliteSaver`;
+- `aiosqlite` is an explicit `agent` dependency;
+- the helper owns and closes the async connection;
+- `LANGGRAPH_STRICT_MSGPACK=true` is forced before checkpointer construction;
+- checkpoint setup is awaited;
+- CI for the M2 branch installs both development and agent extras so the real framework tests can run when GitHub runners become available.
 
-## Adapter/integration deterministic tests prepared
-Tests cover:
-- correct thread-id and per-run step-bound configuration;
-- completed-output normalization;
-- interrupt -> `WAITING_APPROVAL` normalization and stable resume token;
-- approval resume through an injected command factory with a retained step bound;
-- ordinary continuation with `None` input;
-- runtime exceptions -> typed `FAILED` result;
-- no unsupported cancellation capability claim;
-- opaque framework objects cannot leak through normalized output;
-- SQLite helper forces strict deserialization before saver construction and owns the connection lifecycle;
-- coordinator maps RUNNING -> WAITING_APPROVAL -> RUNNING -> COMPLETED into Nika task state;
-- coordinator records runtime lifecycle/approval evidence in AuditLog;
-- unexpected runtime exceptions fail the Nika task closed to FAILED;
-- non-approval resume is rejected before changing a waiting-approval task.
+This defect is evidence for the ports/adapters rule: the correction stays inside the LangGraph adapter/checkpoint boundary and does not require Nika domain changes.
 
-These tests are source-prepared but cannot be credited as green until an executable test runner actually runs them.
+## Real-framework durability proof now prepared
+`tests/test_langgraph_real_durability.py` uses the actual LangGraph graph API and actual async SQLite checkpointer rather than fakes. It prepares three acceptance proofs:
 
-## Required real-framework proof before M2 receives progress credit
-1. install the pinned M2 LangGraph/checkpoint dependencies;
-2. create a deterministic graph and local SQLite checkpoint database;
-3. complete one task step and persist it;
-4. terminate/recreate graph/checkpointer/process objects;
-5. resume the same thread without repeating the completed step;
-6. interrupt before a simulated dangerous action;
-7. persist the waiting state;
-8. recreate runtime objects again;
-9. approve and resume via `Command(resume=...)` using the same thread ID;
-10. verify no completed side effect was repeated;
-11. test corrupt/invalid checkpoint fail-closed behavior;
-12. run the real adapter through `TaskRuntimeCoordinator` and verify TaskQueue/AuditLog mapping;
-13. prove cancellation semantics before adding the `CANCELLATION` capability.
+1. **Completed-step persistence after runtime recreation**
+   - a first node performs an externally visible side effect once;
+   - a later node fails intentionally;
+   - the SQLite connection, graph and runtime objects are destroyed;
+   - fresh objects reopen the same checkpoint database;
+   - `CONTINUE` resumes the same thread;
+   - the failed node completes while the earlier side effect remains exactly once.
 
-Until that executable proof and CI are green, M2 is IMPLEMENTED/PREPARED only, not INTEGRATED and receives no final A–Z percentage credit.
+2. **Approval interrupt survives recreation**
+   - a completed preparation node performs a side effect;
+   - a second node calls LangGraph `interrupt()`;
+   - the runtime/checkpointer objects are destroyed;
+   - fresh objects reopen the same database;
+   - Nika resumes with an approval value via `Command(resume=...)`;
+   - the completed preparation side effect is not repeated.
+
+3. **Corrupt checkpoint fails closed**
+   - an approval-waiting thread is persisted;
+   - its checkpoint blob is deliberately corrupted in SQLite;
+   - a fresh runtime attempts resume;
+   - Nika must return typed `FAILED` rather than silently starting a new thread;
+   - the pre-interrupt side effect remains exactly once.
+
+The existing deterministic adapter tests still cover thread ID, max-step bounds, result/interrupt normalization, ordinary and approval resume, exception normalization, output isolation and truthful capability advertisement. Coordinator tests cover TaskQueue and AuditLog mapping.
+
+## Security
+Strict checkpoint deserialization is a Nika requirement, not a user preference. Current LangGraph documentation warns that unrestricted checkpoint deserialization can permit code execution when checkpoint storage is compromised. Nika therefore forces strict MsgPack deserialization at its construction boundary.
+
+## Remaining gate before M2 credit
+When GitHub Actions runners are available:
+1. execute Ruff and compile checks;
+2. install `.[dev,agent]` and execute the full test suite;
+3. fix any real-framework API/test failures found by execution;
+4. run the real SQLite restart, interrupt/recreate/resume and corruption proofs;
+5. run the adapter through real `TaskRuntimeCoordinator` persistence mapping;
+6. define and prove cancellation before adding `RuntimeCapability.CANCELLATION`;
+7. only after M1 is independently green/merged, rebase or retarget M2 onto green main and integrate through its own green PR.
+
+Until executable evidence is green, M2 is IMPLEMENTED/PREPARED only, not INTEGRATED and receives no final A–Z percentage credit.
 
 ## Official sources checked 2026-08-18
 - LangGraph persistence: https://docs.langchain.com/oss/python/langgraph/persistence
 - LangGraph interrupts: https://docs.langchain.com/oss/python/langgraph/interrupts
-- LangGraph v1: https://docs.langchain.com/oss/python/releases/langgraph-v1
-- LangGraph SQLite source/docs: https://github.com/langchain-ai/langgraph/tree/main/libs/checkpoint-sqlite
+- LangGraph checkpoint reference: https://reference.langchain.com/python/langgraph/checkpoints
+- LangGraph SQLite implementation: https://github.com/langchain-ai/langgraph/blob/main/libs/checkpoint-sqlite/langgraph/checkpoint/sqlite/__init__.py
+- LangGraph async SQLite implementation: https://github.com/langchain-ai/langgraph/blob/main/libs/checkpoint-sqlite/langgraph/checkpoint/sqlite/aio.py
+- LangGraph SQLite README/security note: https://github.com/langchain-ai/langgraph/blob/main/libs/checkpoint-sqlite/README.md
 - Microsoft Agent Framework overview: https://learn.microsoft.com/en-us/agent-framework/overview/
 - Microsoft workflows: https://learn.microsoft.com/en-us/agent-framework/workflows/
-- Microsoft WorkflowBuilder checkpointing: https://learn.microsoft.com/en-us/python/api/agent-framework-core/agent_framework.workflowbuilder
 - Microsoft Ollama provider: https://learn.microsoft.com/en-us/agent-framework/agents/providers/ollama
