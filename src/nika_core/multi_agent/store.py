@@ -9,7 +9,6 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
 from nika_core.multi_agent.contracts import (
     AgentHandoff,
-    HandoffKind,
     MemberState,
     TeamMember,
     TeamQuota,
