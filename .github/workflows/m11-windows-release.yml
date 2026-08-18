@@ -1,0 +1,53 @@
+name: M11 Windows Release Candidate
+
+on:
+  pull_request:
+    paths:
+      - "src/nika_core/packaging/**"
+      - "src/nika_core/qa/**"
+      - "src/nika_core/ui/**"
+      - "scripts/nika_windows.py"
+      - "scripts/m11_release.py"
+      - "scripts/m5_uia_proof.ps1"
+      - "tests/test_m11_m12_release.py"
+      - ".github/workflows/m11-windows-release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: m11-release-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install GUI, packaging and test dependencies
+        run: python -m pip install -e ".[gui,qa,dev]"
+      - name: Run M11 M12 source regressions
+        run: python -m pytest tests/test_m11_m12_release.py -q
+      - name: Build standalone one-dir Windows candidate and manifest
+        shell: pwsh
+        run: python scripts/m11_release.py --version 0.0.2
+      - name: Verify packaged WebView2 UI Automation and keyboard focus
+        shell: pwsh
+        run: ./scripts/m5_uia_proof.ps1 -ExePath ./dist/NikaCore/NikaCore.exe
+      - name: Create distributable ZIP
+        shell: pwsh
+        run: Compress-Archive -Path ./dist/NikaCore/* -DestinationPath ./dist/NikaCore-0.0.2-windows-x64.zip -Force
+      - name: Upload M11 release candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: NikaCore-0.0.2-windows-x64
+          path: |
+            dist/NikaCore-0.0.2-windows-x64.zip
+            dist/NikaCore/release-manifest.json
+          if-no-files-found: error
