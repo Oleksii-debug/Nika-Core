@@ -16,7 +16,7 @@ M1 integration remains externally blocked by GitHub Actions account billing/spen
 ## Exact branches
 - Last proven green `main`: `df48f70b738f9227cad1df08ce3d7f40115b5f08`.
 - M1 PR #2 current head: `58f5d49c10389216e0f26c28747a820faf9325c3`.
-- M2 PR #3 source head before this status commit: `aeafa5420511dace3f946f8717a3354e462980fd`.
+- M2 PR #3 source head before this status commit: `0cd6e50575a8985c3a0025a41924ac9f268f7133`.
 - PR #3 still targets an older M1 base commit and must be rebased/retargeted only after M1 is executable-CI green and integrated.
 
 ## M1 candidate
@@ -32,18 +32,18 @@ PR #2 includes typed/versioned configuration, persisted Agent/Workspace registri
 - `IdempotencyLedger` provides framework-neutral stable operation keys, input fingerprints and fail-closed reconciliation for external side effects.
 - `RuntimeRecoveryService` inventories persisted sessions after process recreation and separates safe crash continuation from approval/manual/reconciliation/error cases.
 
-## Current cycle — explicit persisted approval safety boundary
-Source review found that generic task-ID resume could infer `APPROVAL` mode from a stored `WAITING_APPROVAL` outcome. Startup recovery did not call that path automatically, but the public coordinator API was too easy for a future GUI/plugin/workspace to misuse.
+## Current cycle — approval authorization hardening
+Manual M2 source review found a real defense-in-depth gap. The new task-ID-based `resume_saved_approval()` path was fail-closed, but the older public request-oriented `resume_approval()` only checked that the request mode was APPROVAL. A future GUI/plugin/workspace could therefore call that lower-level public method with a stale/wrong thread or token and rely on the task transition rather than proving ownership of the persisted approval session.
 
-This cycle made the boundary fail closed:
-- generic `TaskRuntimeCoordinator.resume_saved()` now rejects persisted approval waits without changing task/session state;
-- new `resume_saved_approval()` is the explicit task-ID-based authorization path and requires a caller-supplied `approval_value` argument;
-- explicit approval continuation verifies runtime ownership, persisted `WAITING_APPROVAL` outcome and Nika `WAITING_APPROVAL` task state before invoking the runtime;
-- approval continuation has a separate `runtime.saved_approval_resumed` audit event and does not log the decision value;
-- prepared persistence tests prove generic resume rejection, explicit approval success and rejection of the approval API for non-approval sessions;
-- `docs/STARTUP_RECOVERY.md` now documents the API boundary so future UI/plugin work cannot treat generic “Continue” as authorization.
+This cycle closes that bypass before any M3+ work:
+- direct `resume_approval()` now requires an explicit non-`None` decision, Nika `WAITING_APPROVAL` state and a persisted `WAITING_APPROVAL` session;
+- runtime ID, thread ID and resume token must all match the persisted session before the task can transition to RUNNING;
+- `resume_saved_approval()` also rejects `None`, while explicit false/deny remains valid so omission cannot masquerade as authorization;
+- regression tests were added for wrong persisted token, wrong task state, implicit/None decision and explicit deny;
+- the crash-recovery helper was simplified to remove a duplicated READY transition branch without changing its state-machine contract;
+- `docs/STARTUP_RECOVERY.md` now documents the same approval boundary for both public continuation APIs.
 
-This is defense in depth: startup recovery already classified approval waits as human-only, and now the lower coordinator API enforces the same distinction.
+This is a prepared safety fix, not integration evidence. The changed tests have not executed in hosted CI.
 
 ## Reuse-first digital worker architecture already recorded
 - ADAPT Microsoft UFO² as first Windows computer-use proof candidate rather than rebuilding a full Windows AgentOS.
@@ -57,10 +57,10 @@ This is defense in depth: startup recovery already classified approval waits as 
 ## Infrastructure blocker
 Most recent canonical M1 evidence remains a GitHub Actions job that failed before checkout/dependency/test steps (`steps = null`), with previously captured GitHub annotation identifying account payment failure or Actions spending-limit configuration. This is infrastructure evidence, not code-test evidence.
 
-No explicit duplicate rerun was spent in this cycle. Branch updates did not produce executable workflow evidence. No new test is claimed PASSED.
+No explicit duplicate rerun was requested in this cycle. Branch pushes may still create automatic PR workflow attempts, but no result is treated as test evidence unless checkout/install/Ruff/compile/pytest actually execute.
 
 ## Test truth
-- New approval-safety code, tests and documentation are committed on M2.
+- New approval-safety code, regression tests and documentation are committed on M2.
 - M1/M2 executable tests remain unproven in hosted CI.
 - No product percentage is credited for prepared/unexecuted tests or documentation.
 
@@ -80,6 +80,6 @@ Real NVDA usability is never marked VERIFIED by automation.
 1. Respect the duplicate infrastructure-probe interval; re-check Actions only when the interval/configuration warrants it.
 2. As soon as runners execute: run/fix/merge PR #2 only if M1 Ruff/compile/pytest are genuinely green.
 3. Retarget/rebase PR #3 onto green main, execute `.[dev,agent]` Ruff/compile/pytest and fix all real API/runtime/migration failures.
-4. Execute the full real LangGraph/SQLite durability suite together: startup recovery, pre-result process loss, no-repeat completed work, explicit approval recreation, corrupt checkpoint fail-closed, cancellation, timeout/retry and persisted sessions.
+4. Execute the full real LangGraph/SQLite durability suite together: startup recovery, pre-result process loss, no-repeat completed work, explicit approval recreation and authorization checks, corrupt checkpoint fail-closed, cancellation, timeout/retry and persisted sessions.
 5. Only after M2 is executable-green begin M3 as one coherent implementation package.
 6. When the roadmap reaches Computer Interaction/Software Factory implementation, run bounded proof branches for Playwright, UFO² and OpenHands before accepting them as dependencies.
