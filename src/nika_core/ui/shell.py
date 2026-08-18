@@ -20,6 +20,11 @@ def launch_windows_shell(bridge: UIActionBridge, *, title: str = "Nika Core") ->
     Import pywebview lazily so headless/core installations can import Nika without
     loading GUI dependencies. The renderer is explicit: M5 acceptance is WebView2,
     not an accidental legacy Windows web engine.
+
+    Pass a local filesystem path rather than a ``file://`` URI. Current pywebview
+    guidance discourages file URLs and resolves local paths through its supported
+    local-content hosting path, which preserves the injected JS API bridge in the
+    packaged WebView2 host.
     """
 
     import webview
@@ -29,7 +34,7 @@ def launch_windows_shell(bridge: UIActionBridge, *, title: str = "Nika Core") ->
         raise FileNotFoundError(f"UI entry point is missing: {asset}")
     window = webview.create_window(
         title,
-        asset.as_uri(),
+        str(asset),
         js_api=bridge,
         width=1180,
         height=760,
