@@ -128,6 +128,9 @@ class TaskRuntimeCoordinator:
     ) -> RuntimeResult:
         if request.mode != RuntimeResumeMode.APPROVAL:
             raise ValueError("resume_approval requires APPROVAL mode")
+        if request.value is None:
+            raise ValueError("approval decision must be explicit and not None")
+        self._require_approval_session(runtime, request)
         self._queue.transition(request.task_id, TaskState.RUNNING)
         self._audit.append(
             event_type="runtime.approval_resumed",
@@ -203,8 +206,12 @@ class TaskRuntimeCoordinator:
         """Explicitly continue a persisted human-approval wait.
 
         ``approval_value`` is mandatory by API design. The coordinator does not infer an
-        approval decision from a generic resume request or from process startup.
+        approval decision from a generic resume request or from process startup. ``None``
+        is rejected so omission/empty UI state cannot become authorization accidentally;
+        explicit false/deny values remain valid decisions for runtimes that support them.
         """
+        if approval_value is None:
+            raise ValueError("approval decision must be explicit and not None")
         record = self._sessions.get(task_id)
         if record is None:
             raise KeyError(f"No resumable runtime session for task: {task_id}")
@@ -261,6 +268,30 @@ class TaskRuntimeCoordinator:
             )
         return accepted
 
+    def _require_approval_session(
+        self,
+        runtime: AgentRuntimePort,
+        request: RuntimeResumeRequest,
+    ) -> RuntimeSessionRecord:
+        """Validate the durable approval cursor before any approval state transition."""
+        if self._task_state(request.task_id) != TaskState.WAITING_APPROVAL:
+            raise ValueError("Nika task is not in WAITING_APPROVAL state")
+        record = self._sessions.get(request.task_id)
+        if record is None:
+            raise KeyError(f"No resumable runtime session for task: {request.task_id}")
+        if record.outcome != RuntimeOutcome.WAITING_APPROVAL:
+            raise ValueError("Persisted runtime session is not waiting for human approval")
+        if record.runtime_id != runtime.runtime_id:
+            raise ValueError(
+                f"Task {request.task_id} belongs to runtime {record.runtime_id}, "
+                f"not {runtime.runtime_id}"
+            )
+        if record.thread_id != request.thread_id:
+            raise ValueError("Approval request thread does not match persisted runtime session")
+        if record.resume_token != request.resume_token:
+            raise ValueError("Approval resume token does not match persisted runtime session")
+        return record
+
     def _bind_active_session(self, runtime: AgentRuntimePort, request: RuntimeRequest) -> None:
         """Persist a pre-run durable cursor when the runtime can provide one.
 
@@ -300,10 +331,7 @@ class TaskRuntimeCoordinator:
                 raise ValueError(
                     f"Active runtime session has incompatible task state: {current.value}"
                 )
-            if self._task_state(task_id) == TaskState.FAILED:
-                self._queue.transition(task_id, TaskState.READY)
-            else:
-                self._queue.transition(task_id, TaskState.READY)
+            self._queue.transition(task_id, TaskState.READY)
             self._queue.transition(task_id, TaskState.RUNNING)
             self._audit.append(
                 event_type="runtime.crash_recovery_started",
