@@ -55,7 +55,7 @@ Implemented on PR #3:
 Existing migration proof now expects schema v3 and verifies both new tables are created when upgrading an older database.
 
 ## Current infrastructure blocker
-Re-checked Actions at the beginning of this cycle. PR #2 run `32073570804` is still a completed failure with job `95521808540` returning `steps = null`; no runner executed Ruff, compile or pytest. Previously captured GitHub annotation identified account payment failure or Actions spending-limit configuration. This remains infrastructure evidence, not code-test evidence.
+Actions was checked both before and after this batch. M1 run `32073570804` still has job `95521808540` with `steps = null`. The new M2 run `32092695971` initially queued but then completed failure; job `95577914010` also returned `steps = null`. No runner executed Ruff, compile or pytest. Previously captured GitHub annotation identified account payment failure or Actions spending-limit configuration. This remains infrastructure evidence, not code-test evidence.
 
 ## Test truth
 - Source/tests/docs for this persisted recovery/idempotency package are committed.
