@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nika Core</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Перейти до основного вмісту</a>
+  <header>
+    <h1>Nika Core</h1>
+    <p id="app-status" role="status" aria-live="polite" aria-atomic="true">Готово.</p>
+  </header>
+
+  <nav aria-label="Основна навігація">
+    <button type="button" data-action-id="nav.tasks" data-focus-target="tasks-heading">Завдання</button>
+    <button type="button" data-action-id="nav.agents" data-focus-target="agents-heading">Агенти</button>
+    <button type="button" data-action-id="nav.logs" data-focus-target="logs-heading">Журнал</button>
+    <a href="#keyboard-heading">Клавіатура</a>
+  </nav>
+
+  <main id="main" tabindex="-1">
+    <section aria-labelledby="command-heading">
+      <h2 id="command-heading" tabindex="-1">Команда</h2>
+      <label for="command-input">Що має зробити Nika?</label>
+      <textarea id="command-input" rows="5"></textarea>
+      <div class="actions">
+        <button type="button" data-action-id="task.create">Створити завдання</button>
+        <button type="button" data-action-id="task.pause">Призупинити</button>
+        <button type="button" data-action-id="task.resume">Продовжити</button>
+        <button type="button" data-action-id="agent.stop">Зупинити агента</button>
+      </div>
+    </section>
+
+    <section aria-labelledby="tasks-heading">
+      <h2 id="tasks-heading" tabindex="-1">Завдання</h2>
+      <p id="tasks-empty">Список завдань буде доступний через backend adapter.</p>
+    </section>
+
+    <section aria-labelledby="agents-heading">
+      <h2 id="agents-heading" tabindex="-1">Агенти</h2>
+      <p id="agents-empty">Список агентів буде доступний через backend adapter.</p>
+    </section>
+
+    <section aria-labelledby="logs-heading">
+      <h2 id="logs-heading" tabindex="-1">Журнал активності</h2>
+      <ol id="activity-log" aria-label="Журнал активності"></ol>
+    </section>
+
+    <section aria-labelledby="keyboard-heading">
+      <h2 id="keyboard-heading" tabindex="-1">Клавіатура</h2>
+      <p>Комбінації Nika можна змінювати. Стандартні клавіші редагування в полях вводу не перехоплюються.</p>
+      <table>
+        <caption>Комбінації клавіш Nika Core</caption>
+        <thead>
+          <tr><th scope="col">Дія</th><th scope="col">Комбінація</th><th scope="col">Керування</th></tr>
+        </thead>
+        <tbody id="keymap-body"></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
