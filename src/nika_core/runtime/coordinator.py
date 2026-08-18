@@ -147,13 +147,22 @@ class TaskRuntimeCoordinator:
         max_steps: int = 64,
         timeout_seconds: float | None = None,
     ) -> RuntimeResult:
-        """Resume durable work after process recreation using only its Nika task ID."""
+        """Resume durable non-approval work after process recreation.
+
+        Persisted approval waits are intentionally rejected here. Call
+        ``resume_saved_approval`` so a generic resume path can never accidentally become
+        a human authorization path.
+        """
         record = self._sessions.get(task_id)
         if record is None:
             raise KeyError(f"No resumable runtime session for task: {task_id}")
         if record.runtime_id != runtime.runtime_id:
             raise ValueError(
                 f"Task {task_id} belongs to runtime {record.runtime_id}, not {runtime.runtime_id}"
+            )
+        if record.outcome == RuntimeOutcome.WAITING_APPROVAL:
+            raise ValueError(
+                "Persisted approval wait requires explicit resume_saved_approval()"
             )
 
         mode = self._prepare_saved_resume_state(task_id, record)
@@ -176,6 +185,53 @@ class TaskRuntimeCoordinator:
                 resume_token=record.resume_token,
                 mode=mode,
                 value=value,
+                max_steps=max_steps,
+                timeout_seconds=timeout_seconds,
+            ),
+        )
+        return self._finish(runtime.runtime_id, task_id, record.thread_id, result)
+
+    async def resume_saved_approval(
+        self,
+        runtime: AgentRuntimePort,
+        *,
+        task_id: str,
+        approval_value,
+        max_steps: int = 64,
+        timeout_seconds: float | None = None,
+    ) -> RuntimeResult:
+        """Explicitly continue a persisted human-approval wait.
+
+        ``approval_value`` is mandatory by API design. The coordinator does not infer an
+        approval decision from a generic resume request or from process startup.
+        """
+        record = self._sessions.get(task_id)
+        if record is None:
+            raise KeyError(f"No resumable runtime session for task: {task_id}")
+        if record.runtime_id != runtime.runtime_id:
+            raise ValueError(
+                f"Task {task_id} belongs to runtime {record.runtime_id}, not {runtime.runtime_id}"
+            )
+        if record.outcome != RuntimeOutcome.WAITING_APPROVAL:
+            raise ValueError("Persisted runtime session is not waiting for human approval")
+        if self._task_state(task_id) != TaskState.WAITING_APPROVAL:
+            raise ValueError("Nika task is not in WAITING_APPROVAL state")
+
+        self._queue.transition(task_id, TaskState.RUNNING)
+        self._audit.append(
+            event_type="runtime.saved_approval_resumed",
+            entity_type="task",
+            entity_id=task_id,
+            payload={"runtime_id": runtime.runtime_id, "thread_id": record.thread_id},
+        )
+        result = await self._safe_resume(
+            runtime,
+            RuntimeResumeRequest(
+                task_id=task_id,
+                thread_id=record.thread_id,
+                resume_token=record.resume_token,
+                mode=RuntimeResumeMode.APPROVAL,
+                value=approval_value,
                 max_steps=max_steps,
                 timeout_seconds=timeout_seconds,
             ),
@@ -257,9 +313,6 @@ class TaskRuntimeCoordinator:
             )
             return RuntimeResumeMode.CONTINUE
 
-        if record.outcome == RuntimeOutcome.WAITING_APPROVAL:
-            self._queue.transition(task_id, TaskState.RUNNING)
-            return RuntimeResumeMode.APPROVAL
         if record.outcome in {RuntimeOutcome.PAUSED, RuntimeOutcome.FAILED}:
             self._queue.transition(task_id, TaskState.READY)
             self._queue.transition(task_id, TaskState.RUNNING)
