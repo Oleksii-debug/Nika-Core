@@ -64,6 +64,29 @@ class TaskRuntimeCoordinator:
             result = RuntimeResult(outcome=RuntimeOutcome.FAILED, error=str(exc))
         return self._finish(runtime.runtime_id, request.task_id, request.thread_id, result)
 
+    async def cancel(
+        self,
+        runtime: AgentRuntimePort,
+        *,
+        task_id: str,
+        thread_id: str,
+    ) -> bool:
+        self._audit.append(
+            event_type="runtime.cancel_requested",
+            entity_type="task",
+            entity_id=task_id,
+            payload={"runtime_id": runtime.runtime_id, "thread_id": thread_id},
+        )
+        accepted = await runtime.cancel(task_id=task_id, thread_id=thread_id)
+        if not accepted:
+            self._audit.append(
+                event_type="runtime.cancel_not_active",
+                entity_type="task",
+                entity_id=task_id,
+                payload={"runtime_id": runtime.runtime_id, "thread_id": thread_id},
+            )
+        return accepted
+
     def _finish(
         self,
         runtime_id: str,
