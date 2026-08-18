@@ -7,6 +7,7 @@
   const keymapJson = document.getElementById("keymap-json");
   const commandInput = document.getElementById("command-input");
   let actions = [];
+  let actionsReady = false;
 
   const reservedEditingKeys = new Set(["a", "c", "x", "v", "z", "y"]);
 
@@ -52,6 +53,14 @@
       .join("+");
   }
 
+  function focusElementById(focusId) {
+    if (!focusId) return false;
+    const element = document.getElementById(focusId);
+    if (!(element instanceof HTMLElement)) return false;
+    element.focus({ preventScroll: false });
+    return document.activeElement === element;
+  }
+
   async function dispatch(actionId, trigger = null) {
     if (!globalThis.pywebview?.api?.dispatch) {
       announce("Міст Nika ще не готовий.", true);
@@ -67,12 +76,18 @@
     announce(result.message || (result.status === "completed" ? "Виконано." : result.status), result.status === "failed");
     appendLog(result.message);
     const focusId = result.focus_id || trigger?.dataset?.focusTarget;
-    if (focusId) document.getElementById(focusId)?.focus();
-    else trigger?.focus?.();
+    if (focusId) {
+      focusElementById(focusId);
+    } else {
+      trigger?.focus?.();
+    }
   }
 
   async function refreshKeymap() {
-    if (!globalThis.pywebview?.api?.list_actions) return;
+    if (!globalThis.pywebview?.api?.list_actions) {
+      actionsReady = false;
+      return false;
+    }
     actions = await globalThis.pywebview.api.list_actions();
     keymapBody.replaceChildren();
     for (const action of actions) {
@@ -111,6 +126,8 @@
       row.append(labelCell, bindingCell, controlCell);
       keymapBody.appendChild(row);
     }
+    actionsReady = true;
+    return true;
   }
 
   document.getElementById("keymap-export").addEventListener("click", async () => {
@@ -139,6 +156,7 @@
     if (isEditable(event.target) && event.ctrlKey && !event.altKey && !event.metaKey && reservedEditingKeys.has(event.key.toLowerCase())) {
       return;
     }
+    if (!actionsReady) return;
     const pressed = eventBinding(event);
     if (!pressed) return;
     const action = actions.find((candidate) => normalizedBinding(candidate.binding) === pressed);
@@ -147,8 +165,18 @@
     void dispatch(action.action_id, event.target instanceof HTMLElement ? event.target : null);
   });
 
-  document.addEventListener("pywebviewready", () => {
-    announce("Nika Core готова до роботи.");
-    void refreshKeymap();
+  document.addEventListener("pywebviewready", async () => {
+    announce("Завантаження команд Nika Core…");
+    try {
+      const ready = await refreshKeymap();
+      if (!ready) throw new Error("Action Registry bridge unavailable");
+      document.documentElement.dataset.nikaReady = "true";
+      announce("Nika Core готова до роботи.");
+    } catch (error) {
+      actionsReady = false;
+      document.documentElement.dataset.nikaReady = "false";
+      announce("Не вдалося завантажити команди Nika Core.", true);
+      appendLog(error instanceof Error ? error.message : String(error));
+    }
   });
 })();
