@@ -16,7 +16,7 @@ from nika_core.runtime.contracts import (
     RuntimeResumeRequest,
 )
 from nika_core.runtime.retry import RetryPolicy
-from nika_core.runtime.session_store import RuntimeSessionStore
+from nika_core.runtime.session_store import RuntimeSessionRecord, RuntimeSessionStore
 
 
 _OUTCOME_TO_STATE: dict[RuntimeOutcome, TaskState] = {
@@ -68,6 +68,7 @@ class TaskRuntimeCoordinator:
             entity_id=request.task_id,
             payload={"runtime_id": runtime.runtime_id, "thread_id": request.thread_id},
         )
+        self._bind_active_session(runtime, request)
 
         result = await self._safe_run(runtime, request)
         retries_used = 0
@@ -146,7 +147,7 @@ class TaskRuntimeCoordinator:
         max_steps: int = 64,
         timeout_seconds: float | None = None,
     ) -> RuntimeResult:
-        """Resume a durable task after process recreation using only its Nika task ID."""
+        """Resume durable work after process recreation using only its Nika task ID."""
         record = self._sessions.get(task_id)
         if record is None:
             raise KeyError(f"No resumable runtime session for task: {task_id}")
@@ -155,20 +156,7 @@ class TaskRuntimeCoordinator:
                 f"Task {task_id} belongs to runtime {record.runtime_id}, not {runtime.runtime_id}"
             )
 
-        if record.outcome == RuntimeOutcome.WAITING_APPROVAL:
-            mode = RuntimeResumeMode.APPROVAL
-            self._queue.transition(task_id, TaskState.RUNNING)
-        elif record.outcome == RuntimeOutcome.PAUSED:
-            mode = RuntimeResumeMode.CONTINUE
-            self._queue.transition(task_id, TaskState.READY)
-            self._queue.transition(task_id, TaskState.RUNNING)
-        elif record.outcome == RuntimeOutcome.FAILED:
-            mode = RuntimeResumeMode.CONTINUE
-            self._queue.transition(task_id, TaskState.READY)
-            self._queue.transition(task_id, TaskState.RUNNING)
-        else:
-            raise ValueError(f"Stored runtime outcome is not resumable: {record.outcome}")
-
+        mode = self._prepare_saved_resume_state(task_id, record)
         self._audit.append(
             event_type="runtime.saved_resume_started",
             entity_type="task",
@@ -176,7 +164,7 @@ class TaskRuntimeCoordinator:
             payload={
                 "runtime_id": runtime.runtime_id,
                 "thread_id": record.thread_id,
-                "stored_outcome": record.outcome.value,
+                "stored_outcome": record.outcome.value if record.outcome else "active",
                 "mode": mode.value,
             },
         )
@@ -216,6 +204,74 @@ class TaskRuntimeCoordinator:
                 payload={"runtime_id": runtime.runtime_id, "thread_id": thread_id},
             )
         return accepted
+
+    def _bind_active_session(self, runtime: AgentRuntimePort, request: RuntimeRequest) -> None:
+        """Persist a pre-run durable cursor when the runtime can provide one.
+
+        This record intentionally exists before awaiting the runtime. If the Python process
+        disappears after LangGraph has persisted a checkpoint but before it returns a result,
+        the next Nika process can still recover the thread from only the Nika task ID.
+        """
+        token_factory = getattr(runtime, "initial_resume_token", None)
+        if not callable(token_factory):
+            return
+        resume_token = token_factory(task_id=request.task_id, thread_id=request.thread_id)
+        if not resume_token:
+            return
+        self._sessions.record_active(
+            task_id=request.task_id,
+            runtime_id=runtime.runtime_id,
+            thread_id=request.thread_id,
+            resume_token=str(resume_token),
+        )
+        self._audit.append(
+            event_type="runtime.session_bound",
+            entity_type="task",
+            entity_id=request.task_id,
+            payload={"runtime_id": runtime.runtime_id, "thread_id": request.thread_id},
+        )
+
+    def _prepare_saved_resume_state(
+        self,
+        task_id: str,
+        record: RuntimeSessionRecord,
+    ) -> RuntimeResumeMode:
+        if record.is_active:
+            current = self._task_state(task_id)
+            if current == TaskState.RUNNING:
+                self._queue.transition(task_id, TaskState.PAUSED)
+            elif current not in {TaskState.PAUSED, TaskState.FAILED}:
+                raise ValueError(
+                    f"Active runtime session has incompatible task state: {current.value}"
+                )
+            if self._task_state(task_id) == TaskState.FAILED:
+                self._queue.transition(task_id, TaskState.READY)
+            else:
+                self._queue.transition(task_id, TaskState.READY)
+            self._queue.transition(task_id, TaskState.RUNNING)
+            self._audit.append(
+                event_type="runtime.crash_recovery_started",
+                entity_type="task",
+                entity_id=task_id,
+                payload={"runtime_id": record.runtime_id, "thread_id": record.thread_id},
+            )
+            return RuntimeResumeMode.CONTINUE
+
+        if record.outcome == RuntimeOutcome.WAITING_APPROVAL:
+            self._queue.transition(task_id, TaskState.RUNNING)
+            return RuntimeResumeMode.APPROVAL
+        if record.outcome in {RuntimeOutcome.PAUSED, RuntimeOutcome.FAILED}:
+            self._queue.transition(task_id, TaskState.READY)
+            self._queue.transition(task_id, TaskState.RUNNING)
+            return RuntimeResumeMode.CONTINUE
+        raise ValueError(f"Stored runtime outcome is not resumable: {record.outcome}")
+
+    def _task_state(self, task_id: str) -> TaskState:
+        with self._queue.store.connection() as conn:
+            row = conn.execute("SELECT state FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown task: {task_id}")
+        return TaskState(row["state"])
 
     async def _safe_run(
         self,
