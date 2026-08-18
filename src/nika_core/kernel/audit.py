@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -29,16 +30,34 @@ class AuditLog:
         entity_id: str,
         payload: dict[str, object] | None = None,
     ) -> int:
+        with self._store.connection() as conn:
+            return self.append_with_connection(
+                conn,
+                event_type=event_type,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                payload=payload,
+            )
+
+    def append_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        event_type: str,
+        entity_type: str,
+        entity_id: str,
+        payload: dict[str, object] | None = None,
+    ) -> int:
+        """Append audit evidence inside a caller-owned SQLite transaction."""
         if not event_type.strip() or not entity_type.strip() or not entity_id.strip():
             raise ValueError("audit event identifiers must not be empty")
         body = json.dumps(payload or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        with self._store.connection() as conn:
-            cursor = conn.execute(
-                "INSERT INTO audit_events(event_type, entity_type, entity_id, payload_json, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (event_type, entity_type, entity_id, body, datetime.now(UTC).isoformat()),
-            )
-            return int(cursor.lastrowid)
+        cursor = conn.execute(
+            "INSERT INTO audit_events(event_type, entity_type, entity_id, payload_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (event_type, entity_type, entity_id, body, datetime.now(UTC).isoformat()),
+        )
+        return int(cursor.lastrowid)
 
     def list_for(self, *, entity_type: str, entity_id: str) -> tuple[AuditEvent, ...]:
         with self._store.connection() as conn:
