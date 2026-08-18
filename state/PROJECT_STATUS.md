@@ -5,49 +5,57 @@ Canonical repository: Oleksii-debug/Nika-Core
 Development mode: ACTIVE DEVELOPMENT
 
 ## Proven weighted progress
-- M0 research/reuse/governance/bootstrap: GREEN 100% of its 6% weight.
-- Overall proven final A–Z product remains 6.0%.
-- M1 foundation candidate is IMPLEMENTED on `dev/m1-foundation` but is not yet INTEGRATED, so its 10% product weight is not credited.
-- M1 candidate implementation scope is approximately 95% complete; the remaining gate is executable CI/test evidence and any defects that evidence reveals. This 95% is not added to final A–Z progress.
+- M0 research/reuse/governance/bootstrap: GREEN / INTEGRATED, 100% of its 6% weight.
+- Overall proven final A–Z product remains **6.0%**.
+- M1 foundation candidate is IMPLEMENTED on `dev/m1-foundation` / PR #2 but not INTEGRATED; its 10% product weight is not credited until executable verification is green.
+- M2 durable runtime remains IMPLEMENTED/PREPARED on dependent PR #3 but is not integrated and receives no percentage credit.
 
 ## Current milestone
-M1 — kernel foundation.
+M1 — kernel foundation integration gate.
 
-## M1 coherent candidate scope
-- Pydantic Settings based typed/versioned configuration;
-- backward-compatible `NIKA_DB_PATH` plus explicit/long-form database path configuration;
-- ordered SQLite migrations from schema 1 to schema 2 and future-schema fail-closed behavior;
-- persisted versioned Agent Registry;
-- persisted versioned Workspace Registry;
-- generic deterministic Audit Log;
-- standard Python entry-point workspace discovery contract;
+## M1 candidate scope
+- typed/versioned Pydantic Settings configuration;
+- backward-compatible database path environment aliases and explicit configuration;
+- ordered SQLite migrations and future-schema fail-closed behavior;
+- persisted versioned Agent and Workspace registries;
+- deterministic Audit Log;
+- standard installed-workspace discovery contract;
 - central Action Registry;
-- persisted user Keymap with remap/unbind/restore/import/export/conflict detection;
-- existing task/checkpoint behavior retained;
-- updated architecture/reuse documentation removing stale UI/runtime assumptions.
+- persisted remappable Keymap with remap/unbind/restore/import/export/conflict detection;
+- existing task/checkpoint behavior retained.
+
+## Current source-review hardening batch
+The GitHub Actions account-level runner blocker was not re-probed because the equivalent failure was checked recently and the canonical six-hour duplicate-probe policy is active.
+
+Instead, M1 was hardened for the first executable runner/local verification:
+- added `scripts/verify.py` as the single reproducible verification path for dependency consistency, Ruff, compileall and pytest;
+- GitHub CI now invokes that same harness after installing milestone dependencies, reducing local/CI command drift;
+- README documents the exact local verification command;
+- source review found a real keymap defect: semantically identical shortcuts with reordered or aliased modifiers (for example `Ctrl+Shift+S` and `shift+control+s`) could evade duplicate/conflict detection;
+- keymap canonicalization now normalizes modifier order/aliases and rejects ambiguous multi-primary-key or duplicate-modifier bindings;
+- regression tests were added for equivalent modifier order/aliases and invalid shortcut shapes.
 
 ## Exact evidence
-Main green baseline: `df48f70b738f9227cad1df08ce3d7f40115b5f08` — Core CI SUCCESS.
-M1 original coherent implementation commit: `1d3c0eaa7293b58ce8765662a0e3efbe35f2f5c9`.
-Current PR #2 head after configuration compatibility fix/tests: `1c6f544106c3448a37c7bb3b0bb950f24079dda3`.
-PR #2 currently changes 19 files and remains mergeable but unmerged.
+- Last green main baseline: `df48f70b738f9227cad1df08ce3d7f40115b5f08`.
+- PR #2 source head before this status-only commit: `c10d88db63ee0c1e8238095847f2a3ec9168b119`.
+- PR #2 remains open and mergeable into main.
+- No new Ruff/compile/pytest result is claimed PASSED in this cycle because GitHub Actions did not execute and this automation environment did not obtain an authenticated local checkout.
 
-## Current blocker — confirmed GitHub billing/Actions infrastructure
-PR CI run 32073395855 attempt 2 failed before any workflow step started. GitHub check annotation states: `The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings`.
-The job has `runner_id=0`, empty runner name and zero steps. This is account/Actions infrastructure evidence, not a code-test failure. Do not merge or credit M1 until a runner executes Ruff/compile/pytest successfully.
+## Current blocker
+Most recent canonical GitHub Actions evidence remains the account billing/spending runner-allocation failure before checkout with no workflow steps executed. This is infrastructure evidence, not code-test evidence. Do not merge or credit M1 until the verification harness actually executes successfully on the exact candidate SHA.
 
-## Reuse decisions verified this cycle
-- REUSE Pydantic Settings for typed environment configuration. Current official Pydantic Settings docs support validation aliases/AliasChoices and explicit environment prefixes; the M1 configuration preserves the legacy `NIKA_DB_PATH` name while accepting a long-form name and explicit constructor values.
-- REUSE Python `sqlite3` for local transactional storage and thin ordered migrations at the current schema size.
-- REUSE Python `importlib.metadata.entry_points()` for installed workspace discovery without eager imports.
-- CUSTOM thin Nika-specific registries/audit/action/keymap policy because they encode product versioning, safety and accessibility semantics.
-- Agent runtime remains intentionally unlocked: M2 will compare current LangGraph and Microsoft Agent Framework behind `AgentRuntimePort`.
+## M2 dependency note
+PR #3 targets `dev/m1-foundation`. Because M1 moved during this hardening batch, M2 must be synchronized/rebased onto the eventual green M1/main before its runtime suite is accepted. Do not duplicate the new M1 commits manually into production main.
 
 ## Packaging policy
-No EXE for this foundation cycle. Development remains Python/source-first. Windows standalone is built at milestone/user-test/release gates; final product must run without Python.
+No EXE in this cycle. Development remains Python/source-first. Windows standalone is built at milestone/user-test/release gates; final users must not need Python.
 
 ## Human-only gate
-Real NVDA usability is never marked VERIFIED by automation. Oleksii performs human NVDA acceptance for relevant candidates.
+Real NVDA usability is never marked VERIFIED by automation.
 
 ## Next large coherent batch
-First priority: obtain executable PR #2 CI after GitHub Billing & plans / Actions spending is restored. Then inspect exact Ruff/compile/pytest evidence and fix any real defects in the same M1 branch. If green, integrate M1 and immediately start one large M2 runtime-selection proof comparing current LangGraph and Microsoft Agent Framework behind `AgentRuntimePort` with the same durable restart/resume/approval scenario.
+1. Respect the duplicate infrastructure-probe interval.
+2. When Actions can allocate a runner, execute PR #2 with `python scripts/verify.py`; fix any dependency/Ruff/compile/pytest failures in the same branch.
+3. Merge M1 only after exact green evidence.
+4. Synchronize PR #3 onto green main/M1 and execute the full real LangGraph/SQLite durability/recovery/cancellation/deadline/retry/idempotency suite.
+5. Begin M3 only after M2 is executable-green and integrated.
