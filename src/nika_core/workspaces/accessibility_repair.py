@@ -66,3 +66,42 @@ class AccessibilityInteractionPort(Protocol):
     async def inspect_browser(self, target: str) -> AccessibilityEvidence: ...
 
     async def inspect_windows(self, target: str) -> AccessibilityEvidence: ...
+
+
+@runtime_checkable
+class AccessibilityFallbackPort(Protocol):
+    """Optional lower-confidence vision/OCR fallback when semantic inspection is insufficient."""
+
+    async def inspect_visual(self, target: str) -> AccessibilityEvidence: ...
+
+
+class AccessibilityRepairService:
+    """Enforce semantic DOM/UIA inspection before any visual fallback is consulted."""
+
+    def __init__(
+        self,
+        semantic: AccessibilityInteractionPort,
+        fallback: AccessibilityFallbackPort | None = None,
+    ) -> None:
+        self._semantic = semantic
+        self._fallback = fallback
+
+    async def inspect_browser(self, target: str) -> AccessibilityEvidence:
+        evidence = await self._semantic.inspect_browser(target)
+        return await self._maybe_fallback(target, evidence)
+
+    async def inspect_windows(self, target: str) -> AccessibilityEvidence:
+        evidence = await self._semantic.inspect_windows(target)
+        return await self._maybe_fallback(target, evidence)
+
+    async def _maybe_fallback(
+        self,
+        target: str,
+        evidence: AccessibilityEvidence,
+    ) -> AccessibilityEvidence:
+        if evidence.accessible_controls or self._fallback is None:
+            return evidence
+        fallback = await self._fallback.inspect_visual(target)
+        if fallback.method not in {EvidenceMethod.VISION, EvidenceMethod.COORDINATE}:
+            raise ValueError("fallback adapter must return visual or coordinate provenance")
+        return fallback
