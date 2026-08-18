@@ -10,6 +10,7 @@ from typing import Any
 
 from nika_core.runtime.contracts import (
     RuntimeCapability,
+    RuntimeErrorCode,
     RuntimeEvent,
     RuntimeOutcome,
     RuntimeRequest,
@@ -110,6 +111,7 @@ class LangGraphRuntime:
             thread_id=request.thread_id,
             graph_input=dict(request.payload),
             config=config,
+            timeout_seconds=request.timeout_seconds,
         )
 
     async def resume(self, request: RuntimeResumeRequest) -> RuntimeResult:
@@ -117,6 +119,7 @@ class LangGraphRuntime:
             return RuntimeResult(
                 outcome=RuntimeOutcome.FAILED,
                 error="resume token does not match LangGraph thread_id",
+                error_code=RuntimeErrorCode.INVALID_RESUME,
             )
 
         config = self._config(request.thread_id, request.max_steps)
@@ -130,6 +133,7 @@ class LangGraphRuntime:
             thread_id=request.thread_id,
             graph_input=graph_input,
             config=config,
+            timeout_seconds=request.timeout_seconds,
         )
 
     async def cancel(self, *, task_id: str, thread_id: str) -> bool:
@@ -149,6 +153,7 @@ class LangGraphRuntime:
         thread_id: str,
         graph_input: Any,
         config: Mapping[str, Any],
+        timeout_seconds: float | None,
     ) -> RuntimeResult:
         key = (task_id, thread_id)
         existing = self._active.get(key)
@@ -156,16 +161,32 @@ class LangGraphRuntime:
             return RuntimeResult(
                 outcome=RuntimeOutcome.FAILED,
                 error="runtime execution is already active for task/thread",
+                error_code=RuntimeErrorCode.DUPLICATE_ACTIVE,
             )
 
         invocation = asyncio.create_task(self._graph.ainvoke(graph_input, config=config))
         self._active[key] = invocation
         try:
-            raw = await invocation
+            if timeout_seconds is None:
+                raw = await invocation
+            else:
+                raw = await asyncio.wait_for(invocation, timeout=timeout_seconds)
+        except TimeoutError:
+            return RuntimeResult(
+                outcome=RuntimeOutcome.FAILED,
+                error=f"runtime invocation exceeded {timeout_seconds:g} seconds",
+                error_code=RuntimeErrorCode.TIMEOUT,
+                resume_token=thread_id,
+            )
         except asyncio.CancelledError:
             return RuntimeResult(outcome=RuntimeOutcome.CANCELLED)
         except Exception as exc:
-            return RuntimeResult(outcome=RuntimeOutcome.FAILED, error=str(exc))
+            return RuntimeResult(
+                outcome=RuntimeOutcome.FAILED,
+                error=str(exc),
+                error_code=RuntimeErrorCode.INTERNAL,
+                resume_token=thread_id,
+            )
         finally:
             if self._active.get(key) is invocation:
                 self._active.pop(key, None)
