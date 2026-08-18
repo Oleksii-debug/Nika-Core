@@ -26,6 +26,8 @@ agent = [
   "httpx>=0.28,<1",
 ]
 gui = ["pywebview>=6.2.1,<7"]
+browser = ["playwright>=1.60,<2"]
+windows-interaction = ["pywinauto>=0.6.8,<0.7; sys_platform == 'win32'"]
 learning = ["dspy>=3,<4", "scikit-learn>=1.7,<2"]
 dev = ["pytest>=8,<9", "ruff>=0.12,<1", "pytest-cov>=6,<8"]
 qa = ["pip-audit>=2,<3", "pyinstaller>=6,<7"]
