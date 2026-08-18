@@ -61,8 +61,15 @@ try {
         throw "Expected keyboard focus '$Expected', got '$actualName'."
     }
 
-    $window.SetFocus()
-    Start-Sleep -Milliseconds 300
+    $startCondition = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::NameProperty,
+        'Створити завдання'
+    )
+    $startControl = $window.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $startCondition)
+    if ($null -eq $startControl) { throw 'Focusable start control was not found.' }
+    $startControl.SetFocus()
+    Wait-FocusName 'Створити завдання'
+
     [System.Windows.Forms.SendKeys]::SendWait('%1')
     Wait-FocusName 'Завдання'
     [System.Windows.Forms.SendKeys]::SendWait('^+p')
