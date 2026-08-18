@@ -63,9 +63,21 @@ On process recreation Nika inventories every persisted runtime session and class
 
 This service is a reusable application-level primitive. A future GUI/startup policy may choose whether to invoke automatic crash recovery immediately, show the inventory first, or require a user preference. The safety classification does not depend on the UI.
 
+## Explicit approval boundary
+
+Persisted approval waits now have a deliberately separate continuation API.
+
+- `TaskRuntimeCoordinator.resume_saved()` is for non-approval durable continuation only.
+- If the persisted outcome is `WAITING_APPROVAL`, generic `resume_saved()` fails closed and leaves both the task state and persisted session untouched.
+- `TaskRuntimeCoordinator.resume_saved_approval()` is the only task-ID-based API that may resume a persisted approval wait. It requires an explicit `approval_value` argument and verifies that both the persisted runtime outcome and the Nika task state are actually waiting for approval before invoking the runtime.
+- The approval decision is never inferred from startup, from the presence of a resume token, from a generic resume command, or from a default value.
+- The explicit approval continuation is separately audit-logged as `runtime.saved_approval_resumed`.
+
+This separation is intentional defense in depth for future GUI/plugin/workspace callers: accidentally wiring a generic “Continue” button to a waiting approval must raise an error rather than silently act as authorization.
+
 ## External side-effect rule
 
-`IdempotencyLedger.list_for_task()` now exposes the per-task operation inventory needed by startup recovery. Both `PENDING` and `UNCERTAIN` block automatic replay:
+`IdempotencyLedger.list_for_task()` exposes the per-task operation inventory needed by startup recovery. Both `PENDING` and `UNCERTAIN` block automatic replay:
 - `PENDING` can mean the process died in the dangerous window after reservation and before outcome recording;
 - `UNCERTAIN` explicitly means the external result could not be proven.
 
@@ -80,5 +92,10 @@ Only provider reconciliation or a known completed record can remove this ambigui
 - missing runtimes failing closed;
 - bounded automatic recovery resuming only the safe crash candidate and leaving the blocked task untouched;
 - invalid automatic recovery limits failing before a side effect.
+
+`tests/test_runtime_persistence.py` additionally prepares approval-boundary proofs:
+- generic task-ID resume rejects a persisted approval wait without consuming its session;
+- explicit persisted approval continuation completes only through `resume_saved_approval()` with a caller-supplied decision;
+- the explicit approval API rejects sessions that are not actually waiting for approval.
 
 These tests are PREPARED, not PASSED, until an executable runner actually runs them.
