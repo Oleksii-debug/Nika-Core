@@ -26,8 +26,7 @@ class ToolGrant(BaseModel):
     @field_validator("scopes")
     @classmethod
     def normalize_scopes(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        cleaned = tuple(dict.fromkeys(scope.strip() for scope in value if scope.strip()))
-        return cleaned
+        return tuple(dict.fromkeys(scope.strip() for scope in value if scope.strip()))
 
 
 class PermissionPolicy(BaseModel):
@@ -46,7 +45,7 @@ class PermissionPolicy(BaseModel):
     allow_process_launch: bool = False
 
     @model_validator(mode="after")
-    def reject_r4_pre_authorization(self) -> "PermissionPolicy":
+    def reject_r4_pre_authorization(self) -> PermissionPolicy:
         if self.default_risk >= RiskLevel.R4_EXPLICIT_HUMAN:
             raise ValueError("R4 cannot be pre-authorized")
         if any(grant.max_risk >= RiskLevel.R4_EXPLICIT_HUMAN for grant in self.tool_grants):
@@ -81,5 +80,5 @@ class AgentSpec(BaseModel):
         return self.model_dump_json(indent=2)
 
     @classmethod
-    def import_json(cls, payload: str) -> "AgentSpec":
+    def import_json(cls, payload: str) -> AgentSpec:
         return cls.model_validate_json(payload)

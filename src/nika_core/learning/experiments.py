@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from statistics import fmean
-from typing import Iterable, Mapping
 
 
 class ExperimentStatus(StrEnum):
@@ -30,11 +30,7 @@ class Evaluation:
 
 @dataclass(slots=True)
 class Experiment:
-    """Controlled champion/challenger experiment.
-
-    This object can select versioned strategy/prompt/config artifacts, but it
-    intentionally has no capability to edit production source code.
-    """
+    """Controlled champion/challenger experiment without source-code mutation capability."""
 
     experiment_id: str
     champion: Candidate
@@ -80,11 +76,9 @@ class Experiment:
         missing = [c.candidate_id for c in self.challengers if c.candidate_id not in scores]
         if missing:
             raise ValueError(f"challengers missing evaluation data: {', '.join(missing)}")
-
         best = max(self.challengers, key=lambda candidate: scores[candidate.candidate_id])
-        improvement = scores[best.candidate_id] - champion_score
         self.status = ExperimentStatus.COMPLETED
-        if improvement >= self.minimum_improvement:
+        if scores[best.candidate_id] - champion_score >= self.minimum_improvement:
             self.promoted_candidate_id = best.candidate_id
             self.status = ExperimentStatus.PROMOTED
             return best.candidate_id
