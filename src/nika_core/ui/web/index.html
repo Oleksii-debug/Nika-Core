@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nika Core</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Перейти до основного вмісту</a>
+  <header>
+    <h1>Nika Core</h1>
+    <p id="app-status" role="status" aria-live="polite">Готово.</p>
+  </header>
+
+  <nav aria-label="Основна навігація">
+    <button type="button" data-action-id="nav.tasks">Завдання</button>
+    <button type="button" data-action-id="nav.agents">Агенти</button>
+    <button type="button" data-action-id="nav.lab">Лабораторія</button>
+    <button type="button" data-action-id="nav.settings">Налаштування</button>
+  </nav>
+
+  <main id="main" tabindex="-1">
+    <section aria-labelledby="command-heading">
+      <h2 id="command-heading">Команда</h2>
+      <label for="command-input">Що має зробити Nika?</label>
+      <textarea id="command-input" rows="5"></textarea>
+      <div class="actions">
+        <button type="button" data-action-id="task.create">Запустити завдання</button>
+        <button type="button" data-action-id="agent.stop">Зупинити активного агента</button>
+      </div>
+    </section>
+
+    <section aria-labelledby="activity-heading">
+      <h2 id="activity-heading">Активність</h2>
+      <ol id="activity-log" aria-label="Журнал активності"></ol>
+    </section>
+
+    <section aria-labelledby="approval-heading">
+      <h2 id="approval-heading">Дії, що очікують підтвердження</h2>
+      <p id="approval-empty">Немає дій, що очікують підтвердження.</p>
+      <div id="approval-list"></div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
