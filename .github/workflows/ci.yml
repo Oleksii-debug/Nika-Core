@@ -12,14 +12,14 @@ permissions:
 jobs:
   core:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install cheap test dependencies
-        run: python -m pip install -e ".[dev]"
+      - name: Install core and agent test dependencies
+        run: python -m pip install -e ".[dev,agent]"
       - name: Verify source, dependencies and tests
         run: python scripts/verify.py

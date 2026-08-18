@@ -17,6 +17,7 @@ dependencies = [
 agent = [
   "langgraph>=1,<2",
   "langgraph-checkpoint-sqlite>=3.1,<4",
+  "aiosqlite>=0.20,<1",
   "deepagents>=0.5.2,<1",
   "litellm>=1,<2",
   "apscheduler>=3.11,<4",

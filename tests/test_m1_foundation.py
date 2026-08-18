@@ -60,10 +60,17 @@ def test_schema_migrates_existing_v1_database(tmp_path: Path) -> None:
 
     store = SQLiteStore(path)
     store.initialize()
-    assert store.schema_version() == 2
+    assert store.schema_version() == 3
     with store.connection() as check:
         names = {row["name"] for row in check.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert {"agents", "workspaces", "audit_events", "keymap_overrides"} <= names
+    assert {
+        "agents",
+        "workspaces",
+        "audit_events",
+        "keymap_overrides",
+        "runtime_sessions",
+        "idempotency_records",
+    } <= names
 
 
 def test_future_schema_is_rejected(tmp_path: Path) -> None:
