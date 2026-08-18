@@ -53,14 +53,19 @@ Human truth: diagnostic packaged proof does not equal release PACKAGED; HUMAN_TE
 Ownership: `src/nika_core/builder`, agent-definition compiler/validation, permission/risk models.
 Goal: transform a natural-language agent request into a deterministic versioned definition with tools, schedule, model, budgets and safety boundaries.
 Integration dependency: M2 runtime + M4 model/tool contracts are integrated — satisfied.
-Current state: PREPARED / NEXT WEIGHTED MILESTONE; draft PR #11 may contain reusable candidate work but has no integration credit.
-Next batch: audit PR #11 M6 candidate, then implement versioned specs, structured drafting, fail-closed tool/permission compilation, R0–R4 review, persistence/versioning/audit and acceptance tests.
+Branch: `dev/m6-agent-builder-permissions`.
+Current state: IMPLEMENTED / GREEN / INTEGRATED.
+Exact green head: `b2f5939dae432f2bb0b819b3c70adf8c9d0dafe4`.
+Acceptance evidence: Core CI run 142 passed the complete shared verification on Ubuntu and Windows; PR #15 merged as `088da78b45be390fe0aab0c6d1c84c5a8f5d9d53`.
+Integrated evidence: versioned strict Pydantic agent definitions and JSON Schema; Model Gateway drafting with strict post-validation; deterministic registry-backed model/schedule/resource/tool compilation; fail-closed R0–R4 risk matching; persisted compiled R4 approvals; migration v5 immutable versions; one-active-version invariant; atomic retirement/activation/audit; approval-bypass and mutation regressions.
+Safety truth: configuration activation approval never substitutes for execution-time high-impact tool approval.
 
 ### L5 — M7 multi-agent laboratory
 Ownership: `src/nika_core/multi_agent`, supervisor/child contracts, typed messages and quota tests.
 Goal: durable delegation, bounded parallel children, depth/concurrency quotas, privilege attenuation and parent/child evidence.
-Integration dependency: builds on AgentRuntimePort; M2 already integrated.
-Current state: PREPARED FOR IMPLEMENTATION.
+Integration dependency: builds on AgentRuntimePort; M2 and M6 are now integrated.
+Current state: PREPARED / NEXT WEIGHTED MILESTONE.
+Next batch: reuse LangGraph graph/subgraph durability behind Nika-owned supervisor/child contracts; implement durable parent-child identity, typed handoffs/results, bounded fan-out, spawn depth/concurrency limits, privilege attenuation, cancellation propagation, restart-safe evidence and evaluator aggregation with deterministic acceptance tests.
 
 ### L6 — M8 controlled learning and experiments
 Ownership: `src/nika_core/experiments`, strategy/eval/replay models and migrations/tests.
