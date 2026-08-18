@@ -21,6 +21,7 @@ agent = [
   "deepagents>=0.5.2,<1",
   "litellm>=1,<2",
   "apscheduler>=3.11,<4",
+  "psutil>=7,<8",
   "mcp>=2,<3",
   "httpx>=0.28,<1",
 ]
