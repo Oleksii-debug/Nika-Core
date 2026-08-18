@@ -2,32 +2,30 @@
 
 Updated: 2026-08-18
 Canonical repository: Oleksii-debug/Nika-Core
-Development mode: ACTIVE DEVELOPMENT
+Development mode: ACTIVE DEVELOPMENT / PARALLEL-FIRST
 
 ## Weighted progress
 - M0 research/reuse/governance/bootstrap: GREEN / INTEGRATED, 100% of its 6% weight.
 - M1 kernel foundation: GREEN / INTEGRATED, 100% of its 10% weight.
 - M2 durable agent runtime: GREEN / INTEGRATED, 100% of its 11% weight.
-- Overall proven final A–Z product progress is now **27.0%**.
+- Overall proven final A–Z product progress is **27.0%**.
 
-## Current milestone
-M2 is closed. M3 — memory, scheduler and resource control — is the next production integration milestone. Independent future lanes may continue bounded research/contracts in parallel, but no later milestone receives product credit before its own acceptance gate.
+No later milestone receives product-weight credit until its own acceptance gate passes, even when multiple later lanes are being implemented simultaneously.
 
 ## Proven M1 evidence
 - PR #2 exact green head: `67df93c355e813dfc297bd1111df40d3c4ad6175`.
-- GitHub Actions `Core CI` run `32133041861` (run 74) completed `success` on that exact head.
+- GitHub Actions `Core CI` run 74 completed `success` on that exact head.
 - PR #2 merged into `main` as `b40ee58ce9c585efe7dad8ebfa23490e842c753a`.
 
 ## Proven M2 evidence
 - PR #3 exact green head: `c890a5eadbea01afe92617f440ca83005c3b5f0c`.
-- GitHub Actions `Core CI` run `32134139940` (run 85) completed `success` on that exact head.
-- The job successfully executed checkout, Python setup, `.[dev,agent]` dependency installation and the shared `python scripts/verify.py` harness.
-- The full verification gate therefore passed dependency consistency, Ruff, Python compilation and the complete pytest suite on the exact candidate.
+- GitHub Actions `Core CI` run 85 completed `success` on that exact head.
+- The job executed checkout, Python setup, `.[dev,agent]` dependency installation and `python scripts/verify.py`.
 - PR #3 merged into `main` as `7c13b070d7b3c99c41e8cafaea855c9214322abe`.
 - M2 therefore earns its full 11% acceptance-gate weight.
 
 ## M2 integrated capability
-- Framework-neutral `AgentRuntimePort`; LangGraph is the primary implemented runtime while Microsoft Agent Framework remains a secondary research/migration alternative.
+- Framework-neutral `AgentRuntimePort`; LangGraph is the primary implemented runtime while Microsoft Agent Framework remains a migration/interop candidate.
 - Async local durability through LangGraph `AsyncSqliteSaver` + `aiosqlite` with strict checkpoint deserialization.
 - Persisted Nika task→runtime session routing and restart recovery.
 - Explicit human-approval resume boundary; ordinary continuation cannot silently grant approval.
@@ -35,23 +33,23 @@ M2 is closed. M3 — memory, scheduler and resource control — is the next prod
 - Persistent idempotency/reconciliation ledger for potentially duplicated external side effects.
 - Startup recovery classifies safe crash continuation separately from approval, manual resume, unresolved side effects, missing runtime and inconsistent state.
 - Durable start commits `READY -> RUNNING` plus the initial recovery cursor atomically.
-- Runtime finalization commits session mutation/deletion, task state transition, normalized runtime events and final audit evidence atomically in one Nika SQLite transaction.
-- Fresh starts cannot overwrite an existing persisted recovery cursor.
+- Runtime finalization commits session mutation/deletion, task state transition, normalized runtime events and final audit evidence atomically.
 
-## Crash-consistency evidence included in the green M2 suite
-Deterministic fault-injection coverage includes:
-1. durable-start failure rolls back both task transition and initial cursor;
-2. a fresh start cannot overwrite an existing recovery cursor;
-3. terminal session-delete failure rolls back the whole local finalization;
-4. terminal final-audit failure rolls back task terminalization and cursor deletion;
-5. resumable WAITING_APPROVAL final-audit failure rolls back the wait-state/new checkpoint cursor and preserves the previous ACTIVE recovery cursor.
+## CI repair history
+The old private-repository runner/minute blocker is RESOLVED and must not be treated as current. After the repository became public, executable CI exposed real source/test defects; those were repaired without weakening checks. M1 and M2 then passed exact green gates.
 
-Real LangGraph + SQLite tests also cover persistent approval/resume and the integrated coordinator path. Startup recovery tests verify that only clean crash sessions auto-resume while unresolved external side effects remain blocked for reconciliation.
+## Parallel-development governance
+- PR #4 `Parallel Development Policy` is MERGED and is no longer merely prepared.
+- `docs/PARALLEL_DEVELOPMENT_POLICY.md` is binding repository governance.
+- Development scans the entire M3–M12 backlog and normally advances 5–10 independent large lanes.
+- Dependencies constrain integration order, not isolated implementation, research, fixtures, mocks, tests or prototypes.
+- Unrelated work must branch from the latest green `main`; unrelated branches must not be stacked.
+- See `state/PARALLEL_EXECUTION_BOARD.md` for lane ownership and evidence states.
 
-## CI repair history from this integration cycle
-The old account/billing/runner-allocation blocker is RESOLVED and must not be treated as current.
-
-The first executable M2 CI exposed Ruff defects; those were fixed rather than bypassed. The next run passed dependency check, Ruff and compile but found 4 pytest contract issues: stale schema-v2 expectation, an audit expectation missing the new durable `runtime.session_bound` event, and two async tests that depended on an undeclared pytest plugin. These were repaired without weakening production checks or adding an unnecessary dependency. Run 85 then passed the complete gate.
+## Public-repository hardening now in flight
+- secret/credential/session/cookie/private-state ignore patterns are being strengthened;
+- current-tree searches for common secret names have not identified an actual credential value;
+- public visibility means secret hygiene is now a permanent gate, including history-aware scanning when the appropriate scanner is added.
 
 ## Reuse-first digital-worker architecture already recorded
 - ADAPT Microsoft UFO² as first Windows computer-use proof candidate.
@@ -65,22 +63,26 @@ The first executable M2 CI exposed Ruff defects; those were fixed rather than by
 - M0: IMPLEMENTED / INTEGRATED / GREEN; not PACKAGED; not HUMAN_TESTED.
 - M1: IMPLEMENTED / INTEGRATED / GREEN; not PACKAGED; not HUMAN_TESTED.
 - M2: IMPLEMENTED / INTEGRATED / GREEN; not PACKAGED; not HUMAN_TESTED.
-- M3+: not yet credited as integrated production milestones.
-- Digital-worker reuse architecture: RESEARCHED/DOCUMENTED; production implementation remains milestone-gated.
-- Parallel-development governance: PREPARED on PR #4 unless/until separately integrated.
+- M3–M12: parallel source lanes may be PREPARED/IMPLEMENTED/GREEN independently; none is credited INTEGRATED until its own gate.
+- Parallel-development governance: INTEGRATED through PR #4.
+- Digital-worker reuse architecture: RESEARCHED/DOCUMENTED; production adapters remain milestone-gated.
+- No Windows standalone package yet.
+- No human NVDA verification yet.
 
-## Packaging policy
-No EXE this cycle. Windows standalone is built only at milestone/user-test/release gates; heavy browser/coding/vision/model workers remain optional components.
+## Parallel CI acceleration
+The CI control-plane change under review runs the same verification harness independently on Ubuntu and Windows with fail-fast disabled, so one operating-system failure does not hide evidence from the other. Stale runs for the same PR/ref are cancelled to avoid wasting runner capacity.
 
-## Human-only gate
-Real NVDA usability is never marked VERIFIED by automation.
+## Active development wave
+Ten lanes are opened conceptually in `state/PARALLEL_EXECUTION_BOARD.md`:
+1. M3 durable memory/scheduler/resource control;
+2. M4 Model Gateway/tools/MCP;
+3. M5 accessible Windows UI;
+4. M6 Agent Builder/permissions;
+5. M7 multi-agent laboratory;
+6. M8 controlled learning/experiments;
+7. M9 plugin/workspace SDK;
+8. M10 security/sandbox/reliability;
+9. M11 Windows packaging/distribution;
+10. M12 continuous full-system QA/accessibility/release gates.
 
-## Next LARGE coherent batch
-Primary M3 production lane:
-1. reread current `main` and perform reuse audit for durable memory, scheduling and local resource-control primitives;
-2. define versioned ports/contracts for task/agent/workspace/user-approved memory, scheduler jobs and resource budgets without binding the domain to a specific backend;
-3. implement the largest coherent SQLite-backed memory/scheduler/resource slice that can reach an acceptance boundary in one development branch;
-4. include migrations, deterministic expiration/retention semantics, cancellation-safe scheduling, resource-limit enforcement, audit evidence and restart proofs;
-5. run the shared verification harness and integrate M3 work only on exact green evidence.
-
-Parallel independent lanes may research Computer Interaction Layer, Software Factory, offline-minimal intelligence and M5 UI reuse candidates, but they must remain isolated from M3 integration dependencies and cannot bypass milestone gates.
+The immediate execution rule is not “finish M3, then start M4”. Each cycle advances independent large slices from as many of these lanes as can be safely isolated, while merge order and product-credit rules remain strict.
