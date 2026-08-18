@@ -47,6 +47,16 @@ class MCPClientAdapter:
         tool_name = call.tool_id.removeprefix(prefix)
         if not tool_name:
             return ToolResult(call_id=call.call_id, tool_id=call.tool_id, error="invalid MCP tool id")
+        if (
+            self._config.default_risk
+            in {ToolRisk.EXTERNAL_SIDE_EFFECT, ToolRisk.HIGH_IMPACT}
+            and not call.approved
+        ):
+            return ToolResult(
+                call_id=call.call_id,
+                tool_id=call.tool_id,
+                error="approval required",
+            )
         async with Client(self._config.target) as client:
             result = await client.call_tool(tool_name, call.arguments)
         if result.is_error:
