@@ -5,8 +5,8 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Protocol, runtime_checkable
 
 from nika_core.tools import ToolRisk
-from .catalog import PluginRequirement, WorkspaceCapabilityGrant, WorkspaceManifest
 
+from .catalog import PluginRequirement, WorkspaceCapabilityGrant, WorkspaceManifest
 
 SOFTWARE_FACTORY_MANIFEST = WorkspaceManifest(
     workspace_id="software.factory",
