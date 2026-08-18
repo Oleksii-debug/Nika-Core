@@ -14,58 +14,74 @@ Progress is acceptance-gate weighted, not commit-count based. Regressions may re
 | M6 Agent Builder & permissions | 8% | natural-language draft -> schema -> permission review -> versioned activation | GREEN / INTEGRATED |
 | M7 Multi-agent laboratory | 9% | supervisor/subagents, teams, typed handoffs, parallel fan-out, quotas, evaluator | GREEN / INTEGRATED |
 | M8 Self-learning & experiment engine | 10% | metrics, replay, prompt/strategy versions, champion/challenger, rollback, optional DSPy | GREEN / INTEGRATED |
-| M9 Plugin SDK & real workspaces | 8% | stable plugin/workspace API and real independent workspaces | NEXT WEIGHTED MILESTONE / NO CREDIT YET |
-| M10 Security, sandbox & reliability | 5% | sandbox, secrets, backup/restore, corruption/crash recovery, threat hardening | PARALLEL LANE / NO CREDIT YET |
-| M11 Windows packaging & distribution | 3% | standalone EXE/ZIP, local assets, manifest/checksums/licenses, no-Python execution | PARALLEL LANE / NO CREDIT YET |
-| M12 Full-system QA, NVDA acceptance & v1.0 | 2% | full P0 gates, recovery drill, human NVDA acceptance, production release | PARALLEL LANE / NO CREDIT YET |
+| M9 Plugin SDK & real workspaces | 8% | stable plugin/workspace API and real independent workspaces | GREEN / INTEGRATED |
+| M10 Security, sandbox & reliability | 5% | sandbox, secrets, backup/restore, corruption/crash recovery, threat hardening | GREEN / INTEGRATED |
+| M11 Windows packaging & distribution | 3% | standalone EXE/ZIP, local assets, manifest/checksums/licenses, no-Python execution | GREEN / INTEGRATED / PACKAGED candidate evidence |
+| M12 Full-system QA, NVDA acceptance & v1.0 | 2% | full P0 gates, recovery drill, human NVDA acceptance, production release | AUTOMATED PRE-HUMAN GATE GREEN / INTEGRATED; HUMAN GATE OPEN |
 
 Total: 100%.
 
 ## Current proven progress
-M0 + M1 + M2 + M3 + M4 + M5 + M6 + M7 + M8 are GREEN / INTEGRATED. Overall proven final A–Z product progress is therefore **82.0%**. M9–M12 can contain prepared or implemented work, but they receive no weighted credit until their own acceptance evidence is green and integrated.
+M0–M11 and the automated pre-human portion of M12 are GREEN / INTEGRATED. The final human-only M12 credit remains intentionally unawarded. Overall proven final A–Z product progress is therefore **98.0%**.
+
+- HUMAN_TESTED: false.
+- NVDA_VERIFIED: false.
+- PRODUCTION_RELEASE_READY: false.
+- The final 2% may be awarded only after the exact packaged candidate passes the human Windows/NVDA protocol in `docs/M12_HUMAN_NVDA_ACCEPTANCE.md`.
 
 Canonical detailed truth is `state/PROJECT_STATUS.md`; parallel lane ownership/evidence states are in `state/PARALLEL_EXECUTION_BOARD.md`.
 
 ## Reuse-first implementation map
-The current A–Z component audit is `docs/REUSE_CATALOG_2026-08-18.md`. Every lane must use **REUSE -> ADAPT -> CUSTOM (thin)** as the default decision order. Do not build generic schedulers, browser engines, Windows automation stacks, coding agents, model-provider gateways, OCR/speech engines, vector databases, retry engines, resource monitors or packaging systems from scratch when a maintained compatible component satisfies the requirement.
+The current A–Z component audit is `docs/REUSE_CATALOG_2026-08-18.md`. Every lane uses **REUSE -> ADAPT -> CUSTOM (thin)** by default. Do not build generic schedulers, browser engines, Windows automation stacks, coding agents, model-provider gateways, OCR/speech engines, vector databases, retry engines, resource monitors or packaging systems from scratch when a maintained compatible component satisfies the requirement.
 
-## M1 integrated slice
+## Integrated milestone summary
+
+### M1 — Kernel foundation
 Typed settings; ordered backward migrations; persisted Agent/Workspace registries; generic audit log; stable workspace plugin discovery contract; central Action Registry and persisted remappable Keymap with conflict/clear/restore/import/export behavior are integrated.
 
-## M2 integrated slice
-LangGraph is the implemented primary runtime behind framework-neutral `AgentRuntimePort`; async SQLite durability, Nika task-to-runtime recovery mapping, explicit approval, cancellation, bounded retry, idempotency/reconciliation and crash-consistency proofs are integrated. Microsoft Agent Framework remains a secondary migration/interop candidate rather than a simultaneous production kernel.
+### M2 — Durable runtime
+LangGraph is integrated behind framework-neutral `AgentRuntimePort`; local durable resume/crash recovery, explicit approval, cancellation, bounded retry, side-effect idempotency/reconciliation and startup recovery are proven. Microsoft Agent Framework remains a secondary migration/interop candidate rather than a simultaneous production kernel.
 
-## M3 integrated slice
+### M3 — Memory, scheduler and resources
 Durable scoped memory, explicit user-memory consent, expiration/purge, APScheduler-backed persistent schedules, restart/pause/resume semantics, resource budgets, psutil observation and FIFO resource fairness are integrated.
 
-## M4 integrated slice
+### M4 — Model Gateway, tools and MCP
 Provider-neutral Model Gateway, no-LLM/OpenAI-compatible/Ollama adapters, privacy-aware routing, typed provider failures, guarded standardized tools, official MCP SDK v2 adapter and a live Ollama same-interface proof are integrated.
 
-## M5 integrated slice
-Native semantic local web UI hosted by pywebview + explicit EdgeChromium/WebView2, narrow validated backend bridge, centralized configurable Action Registry/Keymap, live textual status and deterministic focus are integrated. Exact-head Core CI run 137 passed Ubuntu, Windows and a packaged PyInstaller one-dir WebView2 UI Automation descendant + keyboard/focus proof. This diagnostic package is M5 evidence, not M11 release packaging. HUMAN_TESTED and NVDA_VERIFIED remain false.
+### M5 — Accessible Windows UI
+Native semantic local web UI hosted by pywebview + EdgeChromium/WebView2, narrow validated backend bridge, centralized configurable Action Registry/Keymap, live textual status and deterministic focus are integrated. Packaged WebView2 UI Automation descendant discovery and keyboard/focus proofs passed. Automated accessibility evidence does not equal human NVDA verification.
 
-## M6 integrated slice
-Versioned strict Pydantic agent definitions, Model Gateway natural-language drafting with schema validation, deterministic registry-backed compilation, fail-closed R0–R4 permission review, immutable SQLite v5 definition persistence, persisted high-impact approval requirements and atomic version activation are integrated. Exact-head Core CI run 142 passed Ubuntu and Windows after CI run 141 exposed and the branch repaired migration-lint defects. Agent configuration approval never bypasses the existing execution-time high-impact tool approval boundary.
+### M6 — Agent Builder and permissions
+Versioned strict Pydantic agent definitions, Model Gateway natural-language drafting with schema validation, deterministic registry-backed compilation, fail-closed R0–R4 permission review, immutable definition persistence, persisted high-impact approval requirements and atomic activation are integrated.
 
-## M7 integrated slice
-Durable Nika-owned team/member lineage, SQLite v6 persistence, typed handoff/result contracts, bounded fan-out through the existing `AgentRuntimePort`, persisted depth/size/concurrency quotas, fail-closed parent-to-child privilege attenuation, cancellation propagation, restart-safe member identity/resume evidence and deterministic evaluator aggregation are integrated. Exact-head Core CI run 150 passed dependency consistency, Ruff, compile and the complete pytest suite on Ubuntu and Windows after earlier executable runs exposed and the branch repaired lint and stale schema-regression defects. No second production orchestration kernel was added.
+### M7 — Multi-agent laboratory
+Durable team/member lineage, typed handoff/result contracts, bounded fan-out through the existing runtime port, persisted depth/size/concurrency quotas, fail-closed privilege attenuation, cancellation propagation, restart-safe member identity and deterministic evaluator aggregation are integrated.
 
-## M8 integrated slice
-Immutable experiment definitions bind prompt/strategy/config candidates to fixed replay/dataset references, explicit primary/guardrail metrics and an unchanged permission fingerprint. Deterministic champion/challenger evaluation, promotion-denial, deterministic selection and rollback are integrated. SQLite schema v7 durably stores experiment definitions, append-only metric evidence and lifecycle/promotion/rollback events. The repository rejects definition/evidence mutation, duplicate evidence, stale writers and illegal state jumps. Restart tests recreate a running experiment and continue to promotion, then recreate again and roll back. A fault-injection trigger proves lifecycle state and event evidence roll back together in one SQLite transaction. Exact-head Core CI run 159 passed dependency consistency, Ruff, compile and the complete pytest suite on Ubuntu and Windows. M8 exposes no production-source mutation path and does not widen permissions or bypass existing execution-time approvals.
+### M8 — Experiment engine
+Immutable experiment definitions bind strategy/config candidates to fixed replay/dataset references, metrics and unchanged permissions. Deterministic champion/challenger evaluation, promotion denial, promotion, rollback, append-only evidence, stale-writer protection and crash-safe lifecycle transitions are integrated.
+
+### M9 — Plugin SDK and real workspaces
+Versioned plugin/workspace compatibility, capability and risk contracts are integrated. Software Factory runs behind `CodingWorkerPort`; Accessibility Repair/Assistant follows semantic-first interaction with visual/coordinate fallback only after semantic inspection. Optional Playwright ARIA and Windows UIA adapters have live CI proofs.
+
+### M10 — Security, sandbox and reliability
+Traversal-safe workspace boundaries, exact network/process allowlists, bounded execution budgets, expiring single-use approval evidence and fail-closed authorization order are integrated. The project explicitly claims defense-in-depth policy rather than pretending to provide a complete OS-level sandbox.
+
+### M11 — Windows packaging
+PyInstaller one-dir/windowed packaging, local WebView assets, deterministic release manifest/checksums and packaged WebView2/UIA/keyboard/focus verification are integrated. The final user candidate runs without requiring Python. M11 packaging evidence is distinct from final human release acceptance.
+
+### M12 — Automated pre-human release gate
+Exact candidate `d7bdfd697819adf13ad7423726a004fd781d857d` passed Core CI 200 and M12 Pre-Human Release Gate run 1. Ubuntu and Windows passed complete verification plus focused recovery/safety matrices; Windows also built and verified the packaged candidate, release manifest, WebView2/UIA semantics and Action Registry keyboard/focus flow. Artifact identity and digest are recorded in `state/PROJECT_STATUS.md` and Issue #1. Machine-readable evidence deliberately records `human_tested=false`, `nvda_verified=false` and `production_release_ready=false`.
 
 ## Parallel-first execution model
-There is no source-development critical path that says later independent capabilities cannot be prepared while the current weighted milestone is being accepted. M9–M12 may advance concurrently when ownership and contracts allow it.
+Nika uses dependency-aware parallel development. Dependencies constrain integration order, not independent research, contract work, fixtures, mocks or isolated adapter implementation. The binding policy is `docs/PARALLEL_DEVELOPMENT_POLICY.md`.
 
-Rules:
-1. Branch independent lanes from the latest green `main` unless they genuinely depend on another unmerged lane.
-2. Prefer lane-owned modules/adapters and stable contracts to shared-file edits.
-3. Upstream dependency constraints govern merge order, not preparation/implementation against ports/mocks/fixtures.
-4. A blocked lane does not block unrelated lanes.
-5. Merge/integration remains dependency-aware and requires exact green evidence.
-6. HUMAN_TESTED and NVDA_VERIFIED remain separate human gates.
+At the current 98% pre-human release state, the M12 release-freeze exception applies: production feature expansion pauses because changing behavior would invalidate the exact packaged candidate already bound to human acceptance. Safe autonomous work is limited to evidence/status consistency, protocol clarification and concrete defect investigation until human Windows/NVDA results justify a new candidate.
 
 ## CI policy
-Coherent PR/main gates use the same verification harness on Ubuntu and Windows. Independent OS jobs run with fail-fast disabled so one platform does not hide evidence from the other. Stale runs for the same PR/ref may be canceled to save capacity. Windows/WebView2/package/accessibility-specific proofs may add focused jobs/artifacts. Do not build a release EXE on every source push.
+Coherent PR/main gates use the same verification harness on Ubuntu and Windows where applicable. Independent OS jobs run with fail-fast disabled so one platform does not hide evidence from the other. Windows/WebView2/package/accessibility-specific proofs add focused jobs/artifacts only where they provide real evidence. Do not build a release EXE on every source push.
 
 ## Packaging policy
 The base Windows product remains small and model-independent. Large browser/coding/speech/OCR/vision/model workers and their model files are optional components. Application updates must not require redownloading local AI models or user data.
+
+## Final blocker
+The only weighted blocker is human execution of `docs/M12_HUMAN_NVDA_ACCEPTANCE.md` against the exact M12 packaged candidate. If human testing finds a defect, create a new development candidate, fix the defect, rerun the full M12 automated gate, and repeat human acceptance on that same exact artifact. Only a human PASS may award HUMAN_TESTED, NVDA_VERIFIED and the final 2%.
