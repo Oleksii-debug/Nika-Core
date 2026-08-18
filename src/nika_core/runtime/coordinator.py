@@ -382,38 +382,52 @@ class TaskRuntimeCoordinator:
         thread_id: str,
         result: RuntimeResult,
     ) -> RuntimeResult:
-        if result.outcome in _RESUMABLE_OUTCOMES and result.resume_token:
-            self._sessions.record_result(
-                task_id=task_id,
-                runtime_id=runtime_id,
-                thread_id=thread_id,
-                result=result,
+        """Commit result cursor, task state and audit evidence as one local transaction.
+
+        The runtime may already have durably checkpointed its own execution result. Nika must
+        therefore never expose a partially finalized local product state. If session mutation,
+        task transition or audit serialization/write fails, the whole Nika transaction rolls
+        back and the previous recovery cursor/state remain available for explicit recovery.
+        """
+        with self._queue.store.connection() as conn:
+            if result.outcome in _RESUMABLE_OUTCOMES and result.resume_token:
+                self._sessions.record_result_with_connection(
+                    conn,
+                    task_id=task_id,
+                    runtime_id=runtime_id,
+                    thread_id=thread_id,
+                    result=result,
+                )
+            else:
+                self._sessions.delete_with_connection(conn, task_id)
+
+            self._queue.transition_with_connection(
+                conn,
+                task_id,
+                _OUTCOME_TO_STATE[result.outcome],
             )
 
-        self._queue.transition(task_id, _OUTCOME_TO_STATE[result.outcome])
-
-        if result.outcome not in _RESUMABLE_OUTCOMES or not result.resume_token:
-            self._sessions.delete(task_id)
-
-        for event in result.events:
-            self._append_runtime_event(task_id, event)
-        self._audit.append(
-            event_type="runtime.finished",
-            entity_type="task",
-            entity_id=task_id,
-            payload={
-                "runtime_id": runtime_id,
-                "thread_id": thread_id,
-                "outcome": result.outcome.value,
-                "resume_token": result.resume_token,
-                "error": result.error,
-                "error_code": result.error_code.value if result.error_code else None,
-            },
-        )
+            for event in result.events:
+                self._append_runtime_event_with_connection(conn, task_id, event)
+            self._audit.append_with_connection(
+                conn,
+                event_type="runtime.finished",
+                entity_type="task",
+                entity_id=task_id,
+                payload={
+                    "runtime_id": runtime_id,
+                    "thread_id": thread_id,
+                    "outcome": result.outcome.value,
+                    "resume_token": result.resume_token,
+                    "error": result.error,
+                    "error_code": result.error_code.value if result.error_code else None,
+                },
+            )
         return result
 
-    def _append_runtime_event(self, task_id: str, event: RuntimeEvent) -> None:
-        self._audit.append(
+    def _append_runtime_event_with_connection(self, conn, task_id: str, event: RuntimeEvent) -> None:
+        self._audit.append_with_connection(
+            conn,
             event_type=event.event_type,
             entity_type="task",
             entity_id=task_id,
