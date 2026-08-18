@@ -128,6 +128,29 @@ class IdempotencyLedger:
             raise KeyError(f"Unknown idempotency operation: {operation_key}")
         return record
 
+    def list_for_task(
+        self,
+        task_id: str,
+        *,
+        status: IdempotencyStatus | None = None,
+    ) -> tuple[IdempotencyRecord, ...]:
+        """Return a stable inventory of side-effect records owned by one Nika task."""
+        if not task_id.strip():
+            raise ValueError("task_id must not be empty")
+        query = "SELECT * FROM idempotency_records WHERE task_id = ?"
+        params: tuple[object, ...] = (task_id,)
+        if status is not None:
+            query += " AND status = ?"
+            params += (status.value,)
+        query += " ORDER BY created_at, operation_key"
+        with self._store.connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return tuple(self._from_row(row) for row in rows)
+
+    def list_uncertain_for_task(self, task_id: str) -> tuple[IdempotencyRecord, ...]:
+        """Return external operations that must be reconciled before automatic recovery."""
+        return self.list_for_task(task_id, status=IdempotencyStatus.UNCERTAIN)
+
     def _set_status(
         self,
         operation_key: str,
