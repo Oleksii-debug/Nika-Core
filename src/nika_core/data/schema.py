@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -129,5 +129,20 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
             updated_at TEXT NOT NULL,
             PRIMARY KEY(scope, owner_id)
         )""",
+    ),
+    5: (
+        """CREATE TABLE IF NOT EXISTS agent_definitions (
+            agent_id TEXT NOT NULL,
+            version INTEGER NOT NULL CHECK(version > 0),
+            definition_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('draft', 'active', 'retired')),
+            created_at TEXT NOT NULL,
+            activated_at TEXT,
+            PRIMARY KEY(agent_id, version)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_agent_definitions_latest "
+        "ON agent_definitions(agent_id, version DESC)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_definitions_one_active "
+        "ON agent_definitions(agent_id) WHERE status = 'active'",
     ),
 }
