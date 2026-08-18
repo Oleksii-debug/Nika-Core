@@ -61,14 +61,20 @@ class TaskRuntimeCoordinator:
         retry_policy: RetryPolicy | None = None,
     ) -> RuntimeResult:
         policy = retry_policy or RetryPolicy()
-        self._queue.transition(request.task_id, TaskState.RUNNING)
+        durable_bound = self._prepare_start(runtime, request)
         self._audit.append(
             event_type="runtime.started",
             entity_type="task",
             entity_id=request.task_id,
             payload={"runtime_id": runtime.runtime_id, "thread_id": request.thread_id},
         )
-        self._bind_active_session(runtime, request)
+        if durable_bound:
+            self._audit.append(
+                event_type="runtime.session_bound",
+                entity_type="task",
+                entity_id=request.task_id,
+                payload={"runtime_id": runtime.runtime_id, "thread_id": request.thread_id},
+            )
 
         result = await self._safe_run(runtime, request)
         retries_used = 0
@@ -150,12 +156,7 @@ class TaskRuntimeCoordinator:
         max_steps: int = 64,
         timeout_seconds: float | None = None,
     ) -> RuntimeResult:
-        """Resume durable non-approval work after process recreation.
-
-        Persisted approval waits are intentionally rejected here. Call
-        ``resume_saved_approval`` so a generic resume path can never accidentally become
-        a human authorization path.
-        """
+        """Resume durable non-approval work after process recreation."""
         record = self._sessions.get(task_id)
         if record is None:
             raise KeyError(f"No resumable runtime session for task: {task_id}")
@@ -164,9 +165,7 @@ class TaskRuntimeCoordinator:
                 f"Task {task_id} belongs to runtime {record.runtime_id}, not {runtime.runtime_id}"
             )
         if record.outcome == RuntimeOutcome.WAITING_APPROVAL:
-            raise ValueError(
-                "Persisted approval wait requires explicit resume_saved_approval()"
-            )
+            raise ValueError("Persisted approval wait requires explicit resume_saved_approval()")
 
         mode = self._prepare_saved_resume_state(task_id, record)
         self._audit.append(
@@ -203,13 +202,6 @@ class TaskRuntimeCoordinator:
         max_steps: int = 64,
         timeout_seconds: float | None = None,
     ) -> RuntimeResult:
-        """Explicitly continue a persisted human-approval wait.
-
-        ``approval_value`` is mandatory by API design. The coordinator does not infer an
-        approval decision from a generic resume request or from process startup. ``None``
-        is rejected so omission/empty UI state cannot become authorization accidentally;
-        explicit false/deny values remain valid decisions for runtimes that support them.
-        """
         if approval_value is None:
             raise ValueError("approval decision must be explicit and not None")
         record = self._sessions.get(task_id)
@@ -273,7 +265,6 @@ class TaskRuntimeCoordinator:
         runtime: AgentRuntimePort,
         request: RuntimeResumeRequest,
     ) -> RuntimeSessionRecord:
-        """Validate the durable approval cursor before any approval state transition."""
         if self._task_state(request.task_id) != TaskState.WAITING_APPROVAL:
             raise ValueError("Nika task is not in WAITING_APPROVAL state")
         record = self._sessions.get(request.task_id)
@@ -292,31 +283,33 @@ class TaskRuntimeCoordinator:
             raise ValueError("Approval resume token does not match persisted runtime session")
         return record
 
-    def _bind_active_session(self, runtime: AgentRuntimePort, request: RuntimeRequest) -> None:
-        """Persist a pre-run durable cursor when the runtime can provide one.
+    def _prepare_start(self, runtime: AgentRuntimePort, request: RuntimeRequest) -> bool:
+        """Start task state and durable routing cursor in one Nika SQLite transaction.
 
-        This record intentionally exists before awaiting the runtime. If the Python process
-        disappears after LangGraph has persisted a checkpoint but before it returns a result,
-        the next Nika process can still recover the thread from only the Nika task ID.
+        Durable runtimes may expose ``initial_resume_token``. In that case the READY->RUNNING
+        event and ACTIVE runtime-session pointer commit together, so process loss cannot leave
+        durable RUNNING work without its Nika recovery cursor. Existing cursors are never
+        overwritten by a fresh start; callers must use an explicit resume path.
         """
         token_factory = getattr(runtime, "initial_resume_token", None)
         if not callable(token_factory):
-            return
+            self._queue.transition(request.task_id, TaskState.RUNNING)
+            return False
         resume_token = token_factory(task_id=request.task_id, thread_id=request.thread_id)
         if not resume_token:
-            return
-        self._sessions.record_active(
-            task_id=request.task_id,
-            runtime_id=runtime.runtime_id,
-            thread_id=request.thread_id,
-            resume_token=str(resume_token),
-        )
-        self._audit.append(
-            event_type="runtime.session_bound",
-            entity_type="task",
-            entity_id=request.task_id,
-            payload={"runtime_id": runtime.runtime_id, "thread_id": request.thread_id},
-        )
+            self._queue.transition(request.task_id, TaskState.RUNNING)
+            return False
+
+        with self._queue.store.connection() as conn:
+            self._queue.transition_with_connection(conn, request.task_id, TaskState.RUNNING)
+            self._sessions.record_active_with_connection(
+                conn,
+                task_id=request.task_id,
+                runtime_id=runtime.runtime_id,
+                thread_id=request.thread_id,
+                resume_token=str(resume_token),
+            )
+        return True
 
     def _prepare_saved_resume_state(
         self,
