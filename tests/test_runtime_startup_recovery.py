@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -138,58 +139,62 @@ def test_missing_runtime_is_reported_instead_of_replayed(tmp_path: Path):
     assert candidate.disposition == RecoveryDisposition.MISSING_RUNTIME
 
 
-@pytest.mark.asyncio
-async def test_safe_startup_resume_recovers_only_clean_crash_sessions(tmp_path: Path):
-    store, queue, audit, sessions, ledger, _runtimes, recovery = _services(tmp_path)
-    safe_task_id = _running_task(queue)
-    blocked_task_id = _running_task(queue)
-    sessions.record_active(
-        task_id=safe_task_id,
-        runtime_id="recoverable",
-        thread_id="thread-safe",
-        resume_token="thread-safe",
-    )
-    sessions.record_active(
-        task_id=blocked_task_id,
-        runtime_id="recoverable",
-        thread_id="thread-blocked",
-        resume_token="thread-blocked",
-    )
-    ledger.reserve(
-        operation_key="publish:item:99",
-        task_id=blocked_task_id,
-        operation_type="publish",
-        input_fingerprint="sha256:item",
-    )
+def test_safe_startup_resume_recovers_only_clean_crash_sessions(tmp_path: Path):
+    async def scenario() -> None:
+        store, queue, audit, sessions, ledger, _runtimes, recovery = _services(tmp_path)
+        safe_task_id = _running_task(queue)
+        blocked_task_id = _running_task(queue)
+        sessions.record_active(
+            task_id=safe_task_id,
+            runtime_id="recoverable",
+            thread_id="thread-safe",
+            resume_token="thread-safe",
+        )
+        sessions.record_active(
+            task_id=blocked_task_id,
+            runtime_id="recoverable",
+            thread_id="thread-blocked",
+            resume_token="thread-blocked",
+        )
+        ledger.reserve(
+            operation_key="publish:item:99",
+            task_id=blocked_task_id,
+            operation_type="publish",
+            input_fingerprint="sha256:item",
+        )
 
-    executions = await recovery.resume_safe_crash_sessions(max_count=8)
+        executions = await recovery.resume_safe_crash_sessions(max_count=8)
 
-    assert len(executions) == 1
-    assert executions[0].candidate.task_id == safe_task_id
-    assert executions[0].succeeded
-    with store.connection() as conn:
-        safe_state = conn.execute(
-            "SELECT state FROM tasks WHERE task_id = ?", (safe_task_id,)
-        ).fetchone()["state"]
-        blocked_state = conn.execute(
-            "SELECT state FROM tasks WHERE task_id = ?", (blocked_task_id,)
-        ).fetchone()["state"]
-    assert safe_state == TaskState.COMPLETED.value
-    assert blocked_state == TaskState.RUNNING.value
-    assert sessions.get(safe_task_id) is None
-    assert sessions.get(blocked_task_id) is not None
-    event_types = [
-        event.event_type
-        for event in audit.list_for(entity_type="task", entity_id=safe_task_id)
-    ]
-    assert "runtime.recovery_auto_resume_requested" in event_types
-    assert "runtime.crash_recovery_started" in event_types
-    assert "runtime.finished" in event_types
+        assert len(executions) == 1
+        assert executions[0].candidate.task_id == safe_task_id
+        assert executions[0].succeeded
+        with store.connection() as conn:
+            safe_state = conn.execute(
+                "SELECT state FROM tasks WHERE task_id = ?", (safe_task_id,)
+            ).fetchone()["state"]
+            blocked_state = conn.execute(
+                "SELECT state FROM tasks WHERE task_id = ?", (blocked_task_id,)
+            ).fetchone()["state"]
+        assert safe_state == TaskState.COMPLETED.value
+        assert blocked_state == TaskState.RUNNING.value
+        assert sessions.get(safe_task_id) is None
+        assert sessions.get(blocked_task_id) is not None
+        event_types = [
+            event.event_type
+            for event in audit.list_for(entity_type="task", entity_id=safe_task_id)
+        ]
+        assert "runtime.recovery_auto_resume_requested" in event_types
+        assert "runtime.crash_recovery_started" in event_types
+        assert "runtime.finished" in event_types
+
+    asyncio.run(scenario())
 
 
-@pytest.mark.asyncio
-async def test_zero_auto_resume_limit_fails_closed(tmp_path: Path):
-    _store, _queue, _audit, _sessions, _ledger, _runtimes, recovery = _services(tmp_path)
+def test_zero_auto_resume_limit_fails_closed(tmp_path: Path):
+    async def scenario() -> None:
+        _store, _queue, _audit, _sessions, _ledger, _runtimes, recovery = _services(tmp_path)
 
-    with pytest.raises(ValueError, match="max_count"):
-        await recovery.resume_safe_crash_sessions(max_count=0)
+        with pytest.raises(ValueError, match="max_count"):
+            await recovery.resume_safe_crash_sessions(max_count=0)
+
+    asyncio.run(scenario())
