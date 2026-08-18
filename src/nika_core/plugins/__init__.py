@@ -4,6 +4,7 @@ from .sdk import (
     CapabilityDeclaration,
     PluginCompatibilityError,
     PluginManifest,
+    PluginRegistration,
     PluginRuntime,
     discover_plugin_entrypoints,
 )
@@ -14,6 +15,7 @@ __all__ = [
     "CapabilityDeclaration",
     "PluginCompatibilityError",
     "PluginManifest",
+    "PluginRegistration",
     "PluginRuntime",
     "discover_plugin_entrypoints",
 ]
