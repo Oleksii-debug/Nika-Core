@@ -174,3 +174,10 @@ def test_uncertain_side_effect_fails_closed_until_external_reconciliation(tmp_pa
 
     with pytest.raises(IdempotencyConflictError, match="reconciliation"):
         ledger.complete("publish:video:7", {"published": True})
+
+    reconciled = ledger.reconcile_completed(
+        "publish:video:7",
+        {"remote_id": "video-7"},
+    )
+    assert reconciled.status == IdempotencyStatus.COMPLETED
+    assert reconciled.result == {"remote_id": "video-7"}
