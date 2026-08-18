@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 from nika_core.runtime.contracts import AgentRuntimePort, RuntimeCapability
 
@@ -40,7 +40,7 @@ class RuntimeRegistry:
         if not candidates:
             names = ", ".join(sorted(item.value for item in required_set))
             raise LookupError(f"No runtime satisfies required capabilities: {names}")
-        return sorted(candidates, key=lambda runtime: runtime.runtime_id)[0]
+        return min(candidates, key=lambda runtime: runtime.runtime_id)
 
     def describe(self) -> tuple[RuntimeDescriptor, ...]:
         return tuple(
