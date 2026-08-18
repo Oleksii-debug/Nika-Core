@@ -16,8 +16,10 @@ from nika_core.runtime.contracts import (
     RuntimeResumeRequest,
 )
 from nika_core.runtime.retry import RetryPolicy
-from nika_core.runtime.session_store import RuntimeSessionRecord, RuntimeSessionStore
-
+from nika_core.runtime.session_store import (
+    RuntimeSessionRecord,
+    RuntimeSessionStore,
+)
 
 _OUTCOME_TO_STATE: dict[RuntimeOutcome, TaskState] = {
     RuntimeOutcome.COMPLETED: TaskState.COMPLETED,
@@ -354,7 +356,7 @@ class TaskRuntimeCoordinator:
     ) -> RuntimeResult:
         try:
             return await runtime.run(request)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - runtime adapter boundary normalizes failures
             return RuntimeResult(
                 outcome=RuntimeOutcome.FAILED,
                 error=str(exc),
@@ -368,7 +370,7 @@ class TaskRuntimeCoordinator:
     ) -> RuntimeResult:
         try:
             return await runtime.resume(request)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - runtime adapter boundary normalizes failures
             return RuntimeResult(
                 outcome=RuntimeOutcome.FAILED,
                 error=str(exc),
