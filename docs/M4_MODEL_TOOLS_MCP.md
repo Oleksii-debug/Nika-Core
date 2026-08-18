@@ -1,6 +1,6 @@
 # M4 — Model Gateway, standardized tools and MCP
 
-Status: IMPLEMENTED candidate on `dev/m4-model-tools-mcp`; no milestone credit until exact Ubuntu + Windows CI is green and integrated.
+Status: IMPLEMENTED candidate on `dev/m4-model-tools-mcp`; no milestone credit until exact Ubuntu + Windows CI plus the focused live-provider proof are green and the exact candidate is integrated.
 
 ## Reuse decision
 
@@ -27,6 +27,10 @@ Model and tool execution are bounded by deadlines and cancellation. Adapter fail
 
 API keys are runtime constructor inputs only. They are never included in request metadata, persisted configuration or audit payloads by this implementation.
 
+The deterministic test suite also drives `OpenAICompatibleProvider` through a real HTTPX request/response transport boundary using `MockTransport`. This is protocol/adapter evidence, not a substitute for the live-provider acceptance proof.
+
+For the live-provider gate, PR CI installs Ollama only on the focused M4 Ubuntu job, pulls `smollm2:135m-instruct-q5_K_M`, and runs `scripts/m4_ollama_proof.py` through the same `ModelGateway` and `OllamaProvider` contracts. The proof requires a non-empty response and the expected local-provider identity; it does not assert model prose.
+
 ## Standardized tools
 
 Tools have stable IDs, JSON-schema input metadata, risk class and deadline. `EXTERNAL_SIDE_EFFECT` and `HIGH_IMPACT` calls require explicit approval or an injected approval policy. Unknown tools, denials, timeouts and handler failures return normalized `ToolResult` failures.
@@ -35,14 +39,17 @@ Tools have stable IDs, JSON-schema input metadata, risk class and deadline. `EXT
 
 `MCPClientAdapter` uses the official SDK `Client` lifecycle. Tool discovery is translated to Nika `ToolSpec` and calls return Nika `ToolResult`. MCP tools default to `EXTERNAL_SIDE_EFFECT` risk because a remote server's declaration alone is not sufficient evidence that a tool is harmless. Product code can later assign narrower risk only through trusted connector policy.
 
-## Acceptance evidence still required
+The acceptance suite constructs a real official `MCPServer` in process, discovers its generated schema through `Client.list_tools()`, then invokes it through `Client.call_tool()`. This is the official SDK's in-memory transport, so the proof traverses MCP protocol handling without starting a subprocess or network listener. Risky MCP calls also fail closed at the adapter boundary when the `ToolCall` lacks explicit approval, preventing direct adapter use from bypassing the product approval policy.
+
+## Acceptance evidence required
 
 Before M4 receives its 8% weight:
 
 1. shared verification must pass on the exact candidate SHA on Ubuntu and Windows;
 2. mock/no-LLM semantic scenario must pass through `ModelGateway`;
-3. at least one real provider must run through the same Nika interface; the intended low-risk real proof is local Ollama/OpenAI-compatible HTTP;
+3. a live local Ollama model must run through the same Nika interface in the focused M4 CI job;
 4. provider failure, timeout and cancellation must map correctly;
-5. MCP discovery/call must be proven against the official SDK with an in-process or controlled test server;
-6. no secrets may appear in Git or audit evidence;
-7. exact green SHA must be merged before M4 weight is credited.
+5. MCP discovery/call must pass against the official SDK in-process server/client path;
+6. unapproved risky MCP calls must fail closed without invoking the server tool;
+7. no secrets may appear in Git or audit evidence;
+8. exact green SHA must be merged before M4 weight is credited.
