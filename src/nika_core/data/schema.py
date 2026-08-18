@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -195,5 +195,39 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
             FOREIGN KEY(team_id) REFERENCES multi_agent_teams(team_id)
         )""",
         "CREATE INDEX IF NOT EXISTS idx_multi_agent_result_team ON multi_agent_results(team_id, member_id)",
+    ),
+    7: (
+        """CREATE TABLE IF NOT EXISTS experiments (
+            experiment_id TEXT PRIMARY KEY,
+            definition_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('draft', 'running', 'completed', 'promoted', 'rolled_back')),
+            selected_candidate_id TEXT,
+            previous_champion_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS experiment_observations (
+            observation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            experiment_id TEXT NOT NULL,
+            candidate_id TEXT NOT NULL,
+            replay_id TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            value REAL NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(experiment_id) REFERENCES experiments(experiment_id),
+            UNIQUE(experiment_id, candidate_id, replay_id, metric)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_experiment_observations_run ON experiment_observations(experiment_id, observation_id)",
+        """CREATE TABLE IF NOT EXISTS experiment_events (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            experiment_id TEXT NOT NULL,
+            previous_status TEXT,
+            new_status TEXT NOT NULL,
+            selected_candidate_id TEXT,
+            previous_champion_id TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(experiment_id) REFERENCES experiments(experiment_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_experiment_events_run ON experiment_events(experiment_id, event_id)",
     ),
 }

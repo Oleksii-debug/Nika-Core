@@ -10,7 +10,11 @@ from nika_core.experiments.contracts import (
     StrategyRef,
 )
 from nika_core.experiments.engine import ExperimentEngine
-from nika_core.experiments.repository import ExperimentRepository, InMemoryExperimentRepository
+from nika_core.experiments.repository import (
+    ExperimentRepository,
+    InMemoryExperimentRepository,
+    SQLiteExperimentRepository,
+)
 
 __all__ = [
     "ArtifactKind",
@@ -24,5 +28,6 @@ __all__ = [
     "MetricRule",
     "PromotionPolicy",
     "ReplayCase",
+    "SQLiteExperimentRepository",
     "StrategyRef",
 ]

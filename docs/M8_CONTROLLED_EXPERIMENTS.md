@@ -1,51 +1,65 @@
 # M8 Controlled self-learning and experiment engine
 
-Status: IMPLEMENTED candidate on `dev-b/m8-controlled-experiments`; no M8 product-weight credit until exact acceptance evidence is green and integrated.
+Status: full M8 candidate on `dev-b/m8-controlled-experiments`; no product-weight credit until exact Ubuntu + Windows acceptance evidence is green and the PR is integrated.
 
 ## Reuse decision
 
-- REUSE the already integrated Nika runtime/model/memory/resource contracts; M8 does not add a second orchestration or model gateway.
-- REUSE Python deterministic arithmetic/statistics and typed dataclasses for baseline evaluation logic.
-- REUSE the canonical SQLite persistence layer once an isolated storage-interface migration is accepted; this branch deliberately does not edit M1-M4 storage implementation.
-- ADAPT DSPy later only for experiments that have an explicit dataset and metric. DSPy's official evaluation/optimizer model is compatible with Nika's metric-driven experiment boundary, but DSPy is not required for deterministic champion/challenger bookkeeping.
-- CUSTOM (thin): immutable experiment identity, replay evidence, permission-fingerprint equality, promotion/guardrail policy, rollback evidence and repository port because these are Nika-specific product/safety semantics.
+- REUSE the already integrated Nika runtime/model/memory/scheduler/resource contracts; M8 does not add another orchestration or model gateway.
+- REUSE Python deterministic arithmetic/statistics and canonical SQLite transactions for baseline evaluation and durable evidence.
+- ADAPT DSPy only for later experiments with an explicit dataset and metric where its optimizer/evaluator model materially reduces optimization glue. It is not required for deterministic champion/challenger bookkeeping.
+- ADAPT Gymnasium only for controlled simulation/RL environments that actually need its reset/step environment contract; it is not a mandatory M8 dependency.
+- CUSTOM (thin): immutable experiment identity, replay evidence, permission-fingerprint equality, promotion/guardrail policy, rollback evidence and the Nika repository port because these are product/safety semantics.
+
+No new broad learning dependency is added merely to claim self-learning. The baseline engine is deterministic and dependency-light.
 
 ## Safety boundary
 
 Experiment candidates are restricted to versioned prompt/strategy/config artifacts. There is no production-source mutation API in M8. Every challenger must carry the same permission fingerprint as the champion; a candidate that changes the permission boundary is rejected before the experiment can exist.
 
-M8 does not authorize tool calls, external writes, financial actions, legal actions or destructive actions. Existing R4 execution-time approval remains authoritative.
+M8 does not authorize tool calls, external writes, financial actions, legal actions or destructive actions. Existing R4 execution-time approval remains authoritative. Trading/gambling learning remains backtest/paper/demo/simulation-only unless a separate future R4 connector and human gate are explicitly approved.
 
 ## Deterministic evaluation
 
-Each observation is bound to candidate + declared replay + declared metric. Duplicate observations for the same candidate/replay/metric fail closed. Completion requires minimum replay coverage for the primary metric and every guardrail for every candidate.
+Each observation is bound to candidate + declared replay + declared metric. Duplicate observations for the same candidate/replay/metric fail closed. Metric values must be finite. Completion requires full replay coverage for the primary metric and every guardrail for every candidate.
 
 Promotion requires:
 1. the challenger meets the configured minimum primary-metric improvement over the champion;
 2. every guardrail stays within its maximum permitted regression;
-3. replay coverage satisfies the policy.
+3. the fixed replay set is fully covered.
 
-If multiple challengers qualify, selection is deterministic by primary score then candidate ID. If none qualifies, the champion remains selected and the experiment completes without promotion.
+If multiple challengers qualify, selection is deterministic by primary score and then candidate ID. If none qualifies, the champion remains selected and the experiment completes without promotion. Rollback is legal only after a recorded promotion and restores the recorded previous champion identity.
 
-Rollback is possible only after a recorded promotion and restores the recorded previous champion identity.
+## Durable SQLite persistence
 
-## Repository boundary and persistence blocker
+Schema migration v7 adds three authoritative M8 tables:
 
-`ExperimentRepository` is a stable port. `InMemoryExperimentRepository` is a deterministic development/test adapter only. Durable SQLite persistence is intentionally not faked in this branch because the canonical ordered migration registry belongs to the shared M1 storage surface. A separate isolated interface change is required for M8 schema v7 tables before durable persistence can be called IMPLEMENTED.
+- `experiments` stores immutable canonical definition JSON plus current lifecycle/promotion state;
+- `experiment_observations` stores append-only candidate/replay/metric evidence with a unique evidence key;
+- `experiment_events` stores append-only lifecycle/promotion/rollback evidence.
 
-Until that storage-interface change is accepted, M8 is IMPLEMENTED for contracts/evaluation/promotion/rollback but PREPARED rather than complete for crash-safe persistence.
+`SQLiteExperimentRepository` implements the stable `ExperimentRepository` port. Definitions cannot change after creation. Recorded observations cannot be removed or changed. A stale writer that would drop evidence fails closed. Repository saves acquire an immediate SQLite write transaction so current evidence is re-read under the writer lock before append/state mutation.
+
+Lifecycle updates and their event evidence are one local transaction. Fault-injection tests deliberately abort event insertion after the experiment status update and verify that SQLite rolls the whole transition back. Restart tests recreate the store/repository/engine from the same database, continue a partially recorded run, promote a challenger, recreate the process again and roll back to the recorded champion.
+
+Allowed persisted lifecycle transitions are deliberately narrow:
+
+`draft -> running -> completed|promoted -> rolled_back (promotion only)`
+
+Illegal direct state jumps fail closed even if a caller bypasses `ExperimentEngine` and calls the repository port directly.
 
 ## Acceptance gate
 
 Before M8 receives its 10% roadmap weight:
 
 1. exact candidate passes dependency consistency, Ruff, compile and full pytest;
-2. Ubuntu and Windows shared verification are green;
-3. durable repository adapter uses accepted ordered schema migration and survives process recreation;
-4. replay coverage, duplicate evidence, unknown candidate/replay/metric and permission-change tests pass;
-5. promotion threshold and guardrail-denial tests pass;
-6. rollback after process recreation passes against durable persistence;
-7. no experiment path can silently widen permissions or rewrite production source;
-8. exact SHA/CI evidence is recorded before integration.
+2. Ubuntu and Windows shared verification are green on the exact same head;
+3. schema v7 migration passes old-database upgrade regression tests;
+4. durable repository survives process recreation without losing definition, replay evidence or promotion state;
+5. fault-injected transition/event failure rolls back atomically;
+6. duplicate, unknown and stale-writer evidence paths fail closed;
+7. permission-fingerprint drift and definition/evidence mutation are rejected;
+8. promotion threshold, guardrail denial and rollback tests pass;
+9. no M8 path can rewrite production source or silently widen permissions;
+10. exact SHA/CI evidence is recorded before integration.
 
-`PACKAGED`, `HUMAN_TESTED` and `NVDA_VERIFIED` are separate later gates and are not claimed here.
+`PACKAGED`, `HUMAN_TESTED` and `NVDA_VERIFIED` are separate later gates and are not claimed by M8.
