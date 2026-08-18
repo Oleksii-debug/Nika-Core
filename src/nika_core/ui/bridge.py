@@ -107,3 +107,15 @@ class UIActionBridge:
         except KeyError as exc:
             return {"ok": False, "message": str(exc)}
         return {"ok": True, "message": "Default shortcut restored."}
+
+    def export_keymap(self) -> dict[str, Any]:
+        return {"ok": True, "data": self._keymap.export_json(), "message": "Shortcut map exported."}
+
+    def import_keymap(self, data: str) -> dict[str, Any]:
+        if not isinstance(data, str):
+            return {"ok": False, "message": "Shortcut map must be JSON text."}
+        try:
+            self._keymap.import_json(data)
+        except (KeyError, TypeError, ValueError) as exc:
+            return {"ok": False, "message": str(exc)}
+        return {"ok": True, "message": "Shortcut map imported."}
