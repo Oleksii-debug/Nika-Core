@@ -5,8 +5,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from nika_core.tools import ToolRisk
-
-from .catalog import PluginRequirement, WorkspaceCapabilityGrant, WorkspaceManifest
+from nika_core.workspaces.catalog import PluginRequirement, WorkspaceCapabilityGrant, WorkspaceManifest
 
 
 SOFTWARE_FACTORY_MANIFEST = WorkspaceManifest(
