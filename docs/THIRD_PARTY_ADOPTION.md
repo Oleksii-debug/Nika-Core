@@ -18,8 +18,10 @@ Canonical rule: before implementing a new subsystem, inspect current official do
 - KEEP AS SECONDARY CANDIDATE — Microsoft Agent Framework. Its Python core/workflow surface is strong, but the current local SQLite path is less direct for Nika's first desktop durability proof.
 - CUSTOM (thin) — Nika runtime contracts, normalized events/results, capability registry, task/audit coordinator and selection boundary. These prevent any framework type from becoming a Nika domain dependency.
 - CUSTOM (thin) — Nika `RetryPolicy`. Retry decisions encode Nika side-effect/idempotency safety and audit semantics, so they must remain framework-neutral. Retries are disabled by default, opt into exact typed failure classes, and require a durable resume token unless an explicit caller accepts fresh replay risk.
+- CUSTOM (thin) — Nika `RuntimeSessionStore`. LangGraph owns checkpoint bytes and thread state, while Nika must durably map its product `task_id` to the selected runtime, `thread_id` and opaque resume token so UI/workspace code can recover after process recreation without leaking framework identifiers.
+- CUSTOM (thin) — Nika `IdempotencyLedger`. Providers differ in native idempotency/reconciliation semantics, so Nika needs one framework-neutral fail-closed record for stable operation keys, input fingerprints and UNCERTAIN outcomes. Provider-native idempotency remains preferred and adapters must reconcile ambiguous external outcomes rather than blindly replaying them.
 
-The dated comparison and executable proof design are in `docs/RUNTIME_SELECTION.md`. Do not run several orchestration kernels in production simultaneously without measured benefit. Re-run the selection gate if upstream stability, persistence or provider support materially changes.
+The dated comparison and executable proof design are in `docs/RUNTIME_SELECTION.md`. Restart/session and side-effect policy is in `docs/RUNTIME_RECOVERY_AND_SIDE_EFFECTS.md`. Do not run several orchestration kernels in production simultaneously without measured benefit. Re-run the selection gate if upstream stability, persistence or provider support materially changes.
 
 Deep Agents, LiteLLM, MCP Python SDK, APScheduler and DSPy remain candidates for their planned milestones and must be re-verified immediately before adoption.
 
