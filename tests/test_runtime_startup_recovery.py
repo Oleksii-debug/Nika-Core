@@ -140,7 +140,7 @@ def test_missing_runtime_is_reported_instead_of_replayed(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_safe_startup_resume_recovers_only_clean_crash_sessions(tmp_path: Path):
-    store, queue, audit, sessions, ledger, runtimes, recovery = _services(tmp_path)
+    store, queue, audit, sessions, ledger, _runtimes, recovery = _services(tmp_path)
     safe_task_id = _running_task(queue)
     blocked_task_id = _running_task(queue)
     sessions.record_active(
@@ -187,13 +187,9 @@ async def test_safe_startup_resume_recovers_only_clean_crash_sessions(tmp_path: 
     assert "runtime.finished" in event_types
 
 
-def test_zero_auto_resume_limit_fails_closed(tmp_path: Path):
+@pytest.mark.asyncio
+async def test_zero_auto_resume_limit_fails_closed(tmp_path: Path):
     _store, _queue, _audit, _sessions, _ledger, _runtimes, recovery = _services(tmp_path)
 
     with pytest.raises(ValueError, match="max_count"):
-        # coroutine validates before any recovery side effect; close it after advancing once
-        coroutine = recovery.resume_safe_crash_sessions(max_count=0)
-        try:
-            coroutine.send(None)
-        finally:
-            coroutine.close()
+        await recovery.resume_safe_crash_sessions(max_count=0)
