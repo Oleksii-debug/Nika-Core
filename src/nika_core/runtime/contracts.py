@@ -24,6 +24,16 @@ class RuntimeOutcome(StrEnum):
     FAILED = "failed"
 
 
+class RuntimeErrorCode(StrEnum):
+    """Framework-neutral failure classes used by retry/safety policy."""
+
+    TIMEOUT = "timeout"
+    TRANSIENT = "transient"
+    INVALID_RESUME = "invalid_resume"
+    DUPLICATE_ACTIVE = "duplicate_active"
+    INTERNAL = "internal"
+
+
 class RuntimeResumeMode(StrEnum):
     CONTINUE = "continue"
     APPROVAL = "approval"
@@ -39,6 +49,7 @@ class RuntimeRequest:
     thread_id: str
     payload: Mapping[str, Any] = field(default_factory=dict)
     max_steps: int = 64
+    timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if not self.task_id.strip():
@@ -47,6 +58,8 @@ class RuntimeRequest:
             raise ValueError("thread_id must not be empty")
         if self.max_steps < 1:
             raise ValueError("max_steps must be positive")
+        if self.timeout_seconds is not None and self.timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive when provided")
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,12 +70,15 @@ class RuntimeResumeRequest:
     mode: RuntimeResumeMode = RuntimeResumeMode.CONTINUE
     value: Any = None
     max_steps: int = 64
+    timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if not self.task_id.strip() or not self.thread_id.strip() or not self.resume_token.strip():
             raise ValueError("resume identifiers must not be empty")
         if self.max_steps < 1:
             raise ValueError("max_steps must be positive")
+        if self.timeout_seconds is not None and self.timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive when provided")
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,12 +101,15 @@ class RuntimeResult:
     output: Mapping[str, Any] = field(default_factory=dict)
     resume_token: str | None = None
     error: str | None = None
+    error_code: RuntimeErrorCode | None = None
 
     def __post_init__(self) -> None:
         if self.outcome == RuntimeOutcome.WAITING_APPROVAL and not self.resume_token:
             raise ValueError("waiting approval requires a resume token")
         if self.outcome == RuntimeOutcome.FAILED and not self.error:
             raise ValueError("failed outcome requires an error")
+        if self.outcome != RuntimeOutcome.FAILED and self.error_code is not None:
+            raise ValueError("error_code is only valid for failed outcomes")
 
 
 @runtime_checkable
