@@ -5,8 +5,8 @@ from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
 from nika_core.tools import ToolRisk
-from .catalog import PluginRequirement, WorkspaceCapabilityGrant, WorkspaceManifest
 
+from .catalog import PluginRequirement, WorkspaceCapabilityGrant, WorkspaceManifest
 
 ACCESSIBILITY_REPAIR_MANIFEST = WorkspaceManifest(
     workspace_id="accessibility.repair",
