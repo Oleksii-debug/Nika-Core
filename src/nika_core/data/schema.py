@@ -135,6 +135,8 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
             agent_id TEXT NOT NULL,
             version INTEGER NOT NULL CHECK(version > 0),
             definition_json TEXT NOT NULL,
+            required_approvals_json TEXT NOT NULL,
+            highest_risk INTEGER NOT NULL CHECK(highest_risk BETWEEN 0 AND 4),
             status TEXT NOT NULL CHECK(status IN ('draft', 'active', 'retired')),
             created_at TEXT NOT NULL,
             activated_at TEXT,
