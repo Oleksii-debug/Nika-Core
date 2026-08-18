@@ -15,7 +15,7 @@ M5 remains an ADAPT/REUSE-first slice around a narrow Nika-owned accessibility c
 
 ## Fresh upstream check
 
-Current pywebview documentation confirms that `js_api` methods are asynchronous Promise-returning calls and that `pywebviewready` is the supported DOM event for knowing that `window.pywebview.api` exists. Therefore visible DOM is not sufficient proof that Action Registry/keymap data has already completed its asynchronous bridge round trip.
+Current pywebview documentation confirms that `js_api` methods are asynchronous Promise-returning calls and that `pywebviewready` is the supported **window** DOM event for knowing that `window.pywebview.api` exists. Current pywebview architecture guidance also discourages `file://` application URLs because of platform limitations; a local filesystem path is the supported route for local static content and lets pywebview handle local serving. Therefore visible DOM is not sufficient proof that Action Registry/keymap data has completed its asynchronous bridge round trip, and the packaged shell must not rely on a file URI.
 
 Current Vite documentation continues to provide official React/TypeScript integration and production static bundling. React Aria continues to target WAI-ARIA-aligned keyboard and screen-reader behavior. Neither is adopted merely for popularity: the present native shell is simpler and already exposes semantic controls; React/Vite/React Aria remain the preferred scale-up path once M5 host accessibility is green and UI complexity warrants a component build system.
 
@@ -23,19 +23,22 @@ Current Vite documentation continues to provide official React/TypeScript integr
 
 Draft PR #11 is not a merge source for M5 as-is. Its UI candidate contains a hard-coded `Escape` application action and does not route all application shortcuts through the canonical Action Registry/Keymap. M5 therefore proceeds on the independent `dev/m5-accessible-ui` branch from current green main.
 
-## Packaged gate defect and repair
+## Packaged gate defects and repair
 
 Core CI run 129 proved that the packaged WebView2 accessibility descendants were discoverable, but the first keyboard/focus step failed: `Alt+1` left focus on `Створити завдання` instead of moving to the `Завдання` heading.
 
-Root cause: the packaged DOM/UIA tree can become visible before the asynchronous `list_actions()` bridge call has finished. The page announced readiness before awaiting that call, so the hotkey test could run while the in-memory action list was still empty.
+The first repair made Action Registry/keymap readiness explicit and made the packaged proof wait for it. Core CI run 133 then exposed the deeper startup defect: the explicit ready status never appeared. Review against current upstream documentation found two incorrect assumptions in the shell: the listener was attached to `document` even though pywebview specifies the `pywebviewready` event on `window`, and the shell forced a discouraged `file://` URL.
 
 Repair:
-- `pywebviewready` now awaits `refreshKeymap()` before setting explicit Nika-ready state;
+- the shell now passes the packaged local HTML path to pywebview rather than constructing a `file://` URI;
+- bridge initialization listens on `window.addEventListener("pywebviewready", ...)` exactly as upstream documents;
+- initialization is idempotent and also starts immediately if `window.pywebview.api` already exists when the bundled script runs;
+- `pywebviewready` initialization awaits `refreshKeymap()` before setting explicit Nika-ready state;
 - keyboard dispatch is disabled until Action Registry/keymap loading is complete;
 - failure to load the bridge/keymap is announced fail-closed rather than silently pretending readiness;
 - focus restoration uses a dedicated DOM helper and verifies the target element exists;
 - packaged UIA proof waits for the explicit `Nika Core готова до роботи.` descendant before sending application hotkeys;
-- regression tests lock the readiness-before-hotkey ordering.
+- regression tests lock supported local hosting, the window event target, immediate already-ready recovery and readiness-before-hotkey ordering.
 
 ## Acceptance truth
 
