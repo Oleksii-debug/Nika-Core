@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator, Callable, Mapping
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -85,6 +86,7 @@ class LangGraphRuntime:
         {
             RuntimeCapability.DURABLE_RESUME,
             RuntimeCapability.HUMAN_APPROVAL,
+            RuntimeCapability.CANCELLATION,
             RuntimeCapability.PARALLELISM,
         }
     )
@@ -99,14 +101,16 @@ class LangGraphRuntime:
             raise TypeError("graph must provide an async ainvoke method")
         self._graph = graph
         self._resume_command_factory = resume_command_factory or _default_resume_command
+        self._active: dict[tuple[str, str], asyncio.Task[Any]] = {}
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
         config = self._config(request.thread_id, request.max_steps)
-        try:
-            raw = await self._graph.ainvoke(dict(request.payload), config=config)
-        except Exception as exc:
-            return RuntimeResult(outcome=RuntimeOutcome.FAILED, error=str(exc))
-        return self._normalize(raw, thread_id=request.thread_id)
+        return await self._execute(
+            task_id=request.task_id,
+            thread_id=request.thread_id,
+            graph_input=dict(request.payload),
+            config=config,
+        )
 
     async def resume(self, request: RuntimeResumeRequest) -> RuntimeResult:
         if request.resume_token != request.thread_id:
@@ -121,15 +125,51 @@ class LangGraphRuntime:
             if request.mode == RuntimeResumeMode.CONTINUE
             else self._resume_command_factory(request.value)
         )
-        try:
-            raw = await self._graph.ainvoke(graph_input, config=config)
-        except Exception as exc:
-            return RuntimeResult(outcome=RuntimeOutcome.FAILED, error=str(exc))
-        return self._normalize(raw, thread_id=request.thread_id)
+        return await self._execute(
+            task_id=request.task_id,
+            thread_id=request.thread_id,
+            graph_input=graph_input,
+            config=config,
+        )
 
     async def cancel(self, *, task_id: str, thread_id: str) -> bool:
-        # Cancellation is intentionally not advertised until a real behavior proof exists.
-        return False
+        key = (task_id, thread_id)
+        active = self._active.get(key)
+        if active is None or active.done():
+            return False
+        active.cancel()
+        with suppress(asyncio.CancelledError):
+            await active
+        return True
+
+    async def _execute(
+        self,
+        *,
+        task_id: str,
+        thread_id: str,
+        graph_input: Any,
+        config: Mapping[str, Any],
+    ) -> RuntimeResult:
+        key = (task_id, thread_id)
+        existing = self._active.get(key)
+        if existing is not None and not existing.done():
+            return RuntimeResult(
+                outcome=RuntimeOutcome.FAILED,
+                error="runtime execution is already active for task/thread",
+            )
+
+        invocation = asyncio.create_task(self._graph.ainvoke(graph_input, config=config))
+        self._active[key] = invocation
+        try:
+            raw = await invocation
+        except asyncio.CancelledError:
+            return RuntimeResult(outcome=RuntimeOutcome.CANCELLED)
+        except Exception as exc:
+            return RuntimeResult(outcome=RuntimeOutcome.FAILED, error=str(exc))
+        finally:
+            if self._active.get(key) is invocation:
+                self._active.pop(key, None)
+        return self._normalize(raw, thread_id=thread_id)
 
     @staticmethod
     def _config(thread_id: str, max_steps: int) -> dict[str, Any]:
