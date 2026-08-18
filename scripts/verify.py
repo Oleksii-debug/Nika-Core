@@ -17,7 +17,7 @@ def main() -> int:
     python = sys.executable
     steps: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("Dependency consistency", (python, "-m", "pip", "check")),
-        ("Ruff", (python, "-m", "ruff", "check", "src", "tests", "scripts")),
+        ("Ruff", ("ruff", "check", "src", "tests", "scripts")),
         ("Compile", (python, "-m", "compileall", "-q", "src", "tests", "scripts")),
         ("Tests", (python, "-m", "pytest")),
     )
