@@ -17,17 +17,19 @@ from nika_core.runtime.contracts import (
     RuntimeResumeRequest,
 )
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
-from nika_core.runtime.recovery import RecoveryDisposition, RuntimeRecoveryService
-from nika_core.runtime.registry import RuntimeRegistry
 from nika_core.runtime.session_store import RuntimeSessionStore
 
 
-class _DurableCompletingRuntime:
+class _DurableRuntime:
     runtime_id = "atomic-proof"
     capabilities = frozenset({RuntimeCapability.DURABLE_RESUME})
 
-    def __init__(self) -> None:
+    def __init__(self, result: RuntimeResult | None = None) -> None:
         self.run_calls = 0
+        self.result = result or RuntimeResult(
+            outcome=RuntimeOutcome.COMPLETED,
+            output={"ok": True},
+        )
 
     @staticmethod
     def initial_resume_token(*, task_id: str, thread_id: str) -> str:
@@ -36,7 +38,7 @@ class _DurableCompletingRuntime:
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
         self.run_calls += 1
-        return RuntimeResult(outcome=RuntimeOutcome.COMPLETED, output={"ok": True})
+        return self.result
 
     async def resume(self, request: RuntimeResumeRequest) -> RuntimeResult:
         return RuntimeResult(outcome=RuntimeOutcome.COMPLETED, output={"resumed": True})
@@ -66,8 +68,31 @@ class _FailAfterCursorInsert(RuntimeSessionStore):
 
 
 class _FailSessionDelete(RuntimeSessionStore):
-    def delete(self, task_id: str) -> None:
+    def delete_with_connection(self, conn: sqlite3.Connection, task_id: str) -> None:
+        super().delete_with_connection(conn, task_id)
         raise RuntimeError("injected session-delete failure")
+
+
+class _FailFinishedAudit(AuditLog):
+    def append_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        event_type: str,
+        entity_type: str,
+        entity_id: str,
+        payload: dict[str, object] | None = None,
+    ) -> int:
+        event_id = super().append_with_connection(
+            conn,
+            event_type=event_type,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            payload=payload,
+        )
+        if event_type == "runtime.finished":
+            raise RuntimeError("injected final audit failure")
+        return event_id
 
 
 def _ready_task(tmp_path):
@@ -87,7 +112,7 @@ def _state(store: SQLiteStore, task_id: str) -> TaskState:
 
 def test_injected_durable_start_failure_rolls_back_task_and_cursor(tmp_path) -> None:
     store, queue, task_id = _ready_task(tmp_path)
-    runtime = _DurableCompletingRuntime()
+    runtime = _DurableRuntime()
     sessions = _FailAfterCursorInsert(store)
     coordinator = TaskRuntimeCoordinator(queue, AuditLog(store), session_store=sessions)
 
@@ -108,7 +133,7 @@ def test_fresh_start_cannot_overwrite_existing_recovery_cursor(tmp_path) -> None
         thread_id="thread-original",
         resume_token="thread-original",
     )
-    runtime = _DurableCompletingRuntime()
+    runtime = _DurableRuntime()
     coordinator = TaskRuntimeCoordinator(queue, AuditLog(store), session_store=sessions)
 
     with pytest.raises(ValueError, match="already owns a persisted runtime session"):
@@ -122,9 +147,9 @@ def test_fresh_start_cannot_overwrite_existing_recovery_cursor(tmp_path) -> None
     assert runtime.run_calls == 0
 
 
-def test_terminal_task_left_with_session_pointer_is_never_auto_reopened(tmp_path) -> None:
+def test_terminal_session_delete_failure_rolls_back_entire_local_finalization(tmp_path) -> None:
     store, queue, task_id = _ready_task(tmp_path)
-    runtime = _DurableCompletingRuntime()
+    runtime = _DurableRuntime()
     sessions = _FailSessionDelete(store)
     coordinator = TaskRuntimeCoordinator(queue, AuditLog(store), session_store=sessions)
 
@@ -132,20 +157,50 @@ def test_terminal_task_left_with_session_pointer_is_never_auto_reopened(tmp_path
         asyncio.run(coordinator.start(runtime, RuntimeRequest(task_id, "thread-finish-window")))
 
     assert runtime.run_calls == 1
-    assert _state(store, task_id) == TaskState.COMPLETED
+    assert _state(store, task_id) == TaskState.RUNNING
     persisted = RuntimeSessionStore(store).get(task_id)
     assert persisted is not None
     assert persisted.is_active
+    assert persisted.thread_id == "thread-finish-window"
 
-    registry = RuntimeRegistry()
-    registry.register(runtime)
-    recovery = RuntimeRecoveryService(
-        queue=TaskQueue(store),
-        audit=AuditLog(store),
-        runtimes=registry,
-        sessions=RuntimeSessionStore(store),
+
+def test_terminal_audit_failure_rolls_back_state_and_session_delete(tmp_path) -> None:
+    store, queue, task_id = _ready_task(tmp_path)
+    runtime = _DurableRuntime()
+    coordinator = TaskRuntimeCoordinator(queue, _FailFinishedAudit(store))
+
+    with pytest.raises(RuntimeError, match="final audit failure"):
+        asyncio.run(coordinator.start(runtime, RuntimeRequest(task_id, "thread-audit-terminal")))
+
+    assert _state(store, task_id) == TaskState.RUNNING
+    persisted = RuntimeSessionStore(store).get(task_id)
+    assert persisted is not None
+    assert persisted.is_active
+    event_types = [
+        event.event_type for event in AuditLog(store).list_for(entity_type="task", entity_id=task_id)
+    ]
+    assert "runtime.finished" not in event_types
+
+
+def test_resumable_audit_failure_rolls_back_wait_state_and_new_resume_cursor(tmp_path) -> None:
+    store, queue, task_id = _ready_task(tmp_path)
+    runtime = _DurableRuntime(
+        RuntimeResult(
+            outcome=RuntimeOutcome.WAITING_APPROVAL,
+            resume_token="checkpoint-after-prompt",
+        )
     )
-    candidate = recovery.inspect()[0]
-    assert candidate.task_id == task_id
-    assert candidate.disposition == RecoveryDisposition.INCONSISTENT_STATE
-    assert _state(store, task_id) == TaskState.COMPLETED
+    coordinator = TaskRuntimeCoordinator(queue, _FailFinishedAudit(store))
+
+    with pytest.raises(RuntimeError, match="final audit failure"):
+        asyncio.run(coordinator.start(runtime, RuntimeRequest(task_id, "thread-audit-resumable")))
+
+    assert _state(store, task_id) == TaskState.RUNNING
+    persisted = RuntimeSessionStore(store).get(task_id)
+    assert persisted is not None
+    assert persisted.is_active
+    assert persisted.resume_token == "thread-audit-resumable"
+    event_types = [
+        event.event_type for event in AuditLog(store).list_for(entity_type="task", entity_id=task_id)
+    ]
+    assert "runtime.finished" not in event_types
