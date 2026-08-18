@@ -39,7 +39,7 @@ jobs:
         run: python scripts/m11_release.py --version 0.0.2
       - name: Verify packaged WebView2 UI Automation and keyboard focus
         shell: pwsh
-        run: ./scripts/m5_uia_proof.ps1 -ExePath ./dist/NikaCore/NikaCore.exe
+        run: ./scripts/m5_uia_proof.ps1 -ExePath ./dist/NikaCore/NikaCore.exe -WindowTitle 'Nika Core 0.0.2'
       - name: Create distributable ZIP
         shell: pwsh
         run: Compress-Archive -Path ./dist/NikaCore/* -DestinationPath ./dist/NikaCore-0.0.2-windows-x64.zip -Force
