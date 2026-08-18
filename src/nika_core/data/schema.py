@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -90,5 +90,44 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
             FOREIGN KEY(task_id) REFERENCES tasks(task_id)
         )""",
         "CREATE INDEX IF NOT EXISTS idx_idempotency_task ON idempotency_records(task_id, status)",
+    ),
+    4: (
+        """CREATE TABLE IF NOT EXISTS memory_records (
+            scope TEXT NOT NULL,
+            owner_id TEXT NOT NULL,
+            namespace TEXT NOT NULL,
+            memory_key TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            user_approved INTEGER NOT NULL CHECK(user_approved IN (0, 1)),
+            expires_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(scope, owner_id, namespace, memory_key)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_memory_expiry ON memory_records(expires_at)",
+        "CREATE INDEX IF NOT EXISTS idx_memory_scope ON memory_records(scope, owner_id, namespace)",
+        """CREATE TABLE IF NOT EXISTS scheduled_jobs (
+            job_id TEXT PRIMARY KEY,
+            action_id TEXT NOT NULL,
+            trigger_kind TEXT NOT NULL,
+            trigger_json TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+            coalesce INTEGER NOT NULL CHECK(coalesce IN (0, 1)),
+            max_instances INTEGER NOT NULL CHECK(max_instances > 0),
+            misfire_grace_seconds INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_enabled ON scheduled_jobs(enabled)",
+        """CREATE TABLE IF NOT EXISTS resource_budgets (
+            scope TEXT NOT NULL,
+            owner_id TEXT NOT NULL,
+            max_concurrent INTEGER NOT NULL CHECK(max_concurrent > 0),
+            max_cpu_percent REAL,
+            max_memory_percent REAL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(scope, owner_id)
+        )""",
     ),
 }
