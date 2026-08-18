@@ -98,9 +98,9 @@ def create_team(store: MultiAgentStore, *, max_parallel: int = 2) -> tuple[ToolG
     return root_grants
 
 
-def test_schema_v6_and_restart_safe_lineage(tmp_path: Path) -> None:
+def test_schema_v7_and_restart_safe_lineage(tmp_path: Path) -> None:
     sqlite, store = make_store(tmp_path)
-    assert sqlite.schema_version() == 6
+    assert sqlite.schema_version() == 7
     create_team(store)
     child = store.spawn_child(
         team_id="team-1",
