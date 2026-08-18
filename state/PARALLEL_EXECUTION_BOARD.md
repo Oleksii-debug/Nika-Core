@@ -22,16 +22,17 @@ A lane may be marked only with these evidence states:
 Ownership: `src/nika_core/memory`, `src/nika_core/scheduler`, `src/nika_core/resources`, migrations/tests.
 Goal: restart-safe scoped memory and schedules with deterministic retention/expiration, cancellation and resource budgets/fairness.
 Integration dependency: M0–M2 integrated — satisfied.
-Branch: `dev/m3-memory-scheduler-resources` from main `58a5fbf708493b64cb76ed6541928e2f17ae6bc8`.
-Current state: IMPLEMENTED / CI NOT YET PROVEN.
-Prepared implementation baseline before status-only commits: `ac57ec1524ba8e4efec944e3ef3acd12ee865e81`.
-Evidence prepared: migration v4, durable scoped memory, user-consent gate, expiration, APScheduler rehydration/pause-resume, persisted resource budgets, psutil observation, FIFO resource fairness and tests.
+Branch: `dev/m3-memory-scheduler-resources`.
+Current state: IMPLEMENTED / GREEN / INTEGRATED.
+Exact green head: `c9c7e105838d9af8a65341fd28f4591aee0d851c`.
+Acceptance evidence: Core CI run 98 passed shared verification on Ubuntu and Windows; PR #8 merged as `3b3718c214850c0211d18f520b5892c2cf47403c`.
+Integrated evidence: migration v4, durable scoped memory, user-consent gate, expiration, APScheduler rehydration/pause-resume, persisted resource budgets, psutil observation, FIFO resource fairness and regression tests.
 
 ### L2 — M4 Model Gateway, tools and MCP
 Ownership: `src/nika_core/model_gateway`, `src/nika_core/tools`, provider/tool adapter tests.
 Goal: provider-neutral local/cloud/no-LLM gateway, standardized tool calls, cancellation/timeouts/audit, MCP boundary.
-Integration dependency: stable kernel/runtime contracts; source work can proceed now.
-Current state: PREPARED FOR IMPLEMENTATION.
+Integration dependency: stable kernel/runtime contracts; M0–M3 are now integrated.
+Current state: PREPARED FOR IMPLEMENTATION / NEXT WEIGHTED MILESTONE.
 
 ### L3 — M5 accessible Windows UI
 Ownership: `ui/`, Windows WebView host adapter, accessibility contracts/tests.
