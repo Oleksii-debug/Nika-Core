@@ -50,6 +50,22 @@ try {
         throw "WebView2 UIA descendants were not discoverable. Missing: $($missing -join ', '). Seen: $preview"
     }
 
+    function Wait-DescendantName([string]$Expected, [int]$Attempts = 40) {
+        $condition = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::NameProperty,
+            $Expected
+        )
+        for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+            Start-Sleep -Milliseconds 250
+            if ($process.HasExited) {
+                throw "Nika Core exited while waiting for '$Expected'. Exit code: $($process.ExitCode)"
+            }
+            $element = $window.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
+            if ($null -ne $element) { return $element }
+        }
+        throw "Expected UI Automation descendant '$Expected' did not appear."
+    }
+
     function Wait-FocusName([string]$Expected) {
         for ($attempt = 0; $attempt -lt 20; $attempt++) {
             Start-Sleep -Milliseconds 250
@@ -61,12 +77,12 @@ try {
         throw "Expected keyboard focus '$Expected', got '$actualName'."
     }
 
-    $startCondition = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::NameProperty,
-        'Створити завдання'
-    )
-    $startControl = $window.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $startCondition)
-    if ($null -eq $startControl) { throw 'Focusable start control was not found.' }
+    # The DOM can be visible in UIA before the asynchronous pywebview JS API call
+    # has returned the Action Registry/keymap. Wait for the application's explicit
+    # ready status so this gate tests keyboard behavior rather than an initialization race.
+    Wait-DescendantName 'Nika Core готова до роботи.' | Out-Null
+
+    $startControl = Wait-DescendantName 'Створити завдання'
     $startControl.SetFocus()
     Wait-FocusName 'Створити завдання'
 
@@ -75,7 +91,7 @@ try {
     [System.Windows.Forms.SendKeys]::SendWait('^+p')
     Wait-FocusName 'Що має зробити Nika?'
 
-    Write-Host 'WebView2 UI Automation descendants and keyboard/focus flow verified successfully.'
+    Write-Host 'WebView2 UI Automation descendants, bridge readiness, and keyboard/focus flow verified successfully.'
     Write-Host (($names | Select-Object -Unique | Select-Object -First 40) -join ' | ')
 }
 finally {
