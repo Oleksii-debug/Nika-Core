@@ -72,7 +72,7 @@ def _state(store: SQLiteStore, task_id: str) -> TaskState:
     return TaskState(row["state"])
 
 
-def test_runtime_session_survives_coordinator_recreation_and_resumes_by_task_id(tmp_path) -> None:
+def test_saved_approval_requires_explicit_authorization_api(tmp_path) -> None:
     store, queue, task_id = _ready(tmp_path)
     runtime = _RestartApprovalRuntime()
     first = TaskRuntimeCoordinator(queue, AuditLog(store))
@@ -87,7 +87,15 @@ def test_runtime_session_survives_coordinator_recreation_and_resumes_by_task_id(
     assert persisted.runtime_id == runtime.runtime_id
 
     recreated = TaskRuntimeCoordinator(TaskQueue(store), AuditLog(store))
-    completed = asyncio.run(recreated.resume_saved(runtime, task_id=task_id, value=True))
+    with pytest.raises(ValueError, match="explicit resume_saved_approval"):
+        asyncio.run(recreated.resume_saved(runtime, task_id=task_id, value=True))
+
+    assert _state(store, task_id) == TaskState.WAITING_APPROVAL
+    assert recreated.sessions.get(task_id) is not None
+
+    completed = asyncio.run(
+        recreated.resume_saved_approval(runtime, task_id=task_id, approval_value=True)
+    )
     assert completed.outcome == RuntimeOutcome.COMPLETED
     assert completed.output == {"approved": True}
     assert _state(store, task_id) == TaskState.COMPLETED
@@ -97,7 +105,22 @@ def test_runtime_session_survives_coordinator_recreation_and_resumes_by_task_id(
         event.event_type
         for event in AuditLog(store).list_for(entity_type="task", entity_id=task_id)
     ]
-    assert "runtime.saved_resume_started" in event_types
+    assert "runtime.saved_approval_resumed" in event_types
+
+
+def test_saved_approval_api_rejects_non_approval_session(tmp_path) -> None:
+    store, queue, task_id = _ready(tmp_path)
+    runtime = _PausedRuntime()
+    first = TaskRuntimeCoordinator(queue, AuditLog(store))
+    asyncio.run(first.start(runtime, RuntimeRequest(task_id, "thread-paused-approval-check")))
+
+    recreated = TaskRuntimeCoordinator(TaskQueue(store), AuditLog(store))
+    with pytest.raises(ValueError, match="not waiting for human approval"):
+        asyncio.run(
+            recreated.resume_saved_approval(runtime, task_id=task_id, approval_value=True)
+        )
+    assert _state(store, task_id) == TaskState.PAUSED
+    assert recreated.sessions.get(task_id) is not None
 
 
 def test_paused_runtime_can_resume_after_process_recreation(tmp_path) -> None:
