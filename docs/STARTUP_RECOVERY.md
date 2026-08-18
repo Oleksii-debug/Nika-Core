@@ -65,15 +65,17 @@ This service is a reusable application-level primitive. A future GUI/startup pol
 
 ## Explicit approval boundary
 
-Persisted approval waits now have a deliberately separate continuation API.
+Approval continuation now has one fail-closed rule across both public coordinator entry points.
 
 - `TaskRuntimeCoordinator.resume_saved()` is for non-approval durable continuation only.
 - If the persisted outcome is `WAITING_APPROVAL`, generic `resume_saved()` fails closed and leaves both the task state and persisted session untouched.
-- `TaskRuntimeCoordinator.resume_saved_approval()` is the only task-ID-based API that may resume a persisted approval wait. It requires an explicit `approval_value` argument and verifies that both the persisted runtime outcome and the Nika task state are actually waiting for approval before invoking the runtime.
-- The approval decision is never inferred from startup, from the presence of a resume token, from a generic resume command, or from a default value.
-- The explicit approval continuation is separately audit-logged as `runtime.saved_approval_resumed`.
+- `TaskRuntimeCoordinator.resume_saved_approval()` is the task-ID-based API for persisted approval waits. It requires an explicit non-`None` `approval_value` and verifies that the persisted runtime outcome and Nika task state are actually waiting for approval before invoking the runtime. Explicit false/deny values remain valid; absence of a decision is not authorization.
+- The older request-oriented `TaskRuntimeCoordinator.resume_approval()` is hardened to the same boundary. Before any state transition it requires: APPROVAL mode, an explicit non-`None` decision, Nika `WAITING_APPROVAL` state, a persisted `WAITING_APPROVAL` session, matching runtime ownership, matching thread ID and matching resume token.
+- A future GUI/plugin/workspace therefore cannot bypass persisted approval ownership by constructing a fresh `RuntimeResumeRequest` with an arbitrary token/thread.
+- The approval decision is never inferred from startup, from the presence of a resume token, from a generic resume command, or from a default/empty value.
+- Approval continuation audit events record the fact of continuation, not the human decision value.
 
-This separation is intentional defense in depth for future GUI/plugin/workspace callers: accidentally wiring a generic “Continue” button to a waiting approval must raise an error rather than silently act as authorization.
+This is defense in depth for future GUI/plugin/workspace callers: accidentally wiring a generic “Continue” button or stale approval object to a waiting approval must fail rather than silently act as authorization.
 
 ## External side-effect rule
 
@@ -93,9 +95,11 @@ Only provider reconciliation or a known completed record can remove this ambigui
 - bounded automatic recovery resuming only the safe crash candidate and leaving the blocked task untouched;
 - invalid automatic recovery limits failing before a side effect.
 
-`tests/test_runtime_persistence.py` additionally prepares approval-boundary proofs:
+`tests/test_runtime_persistence.py` and `tests/test_runtime_coordinator.py` additionally prepare approval-boundary proofs:
 - generic task-ID resume rejects a persisted approval wait without consuming its session;
 - explicit persisted approval continuation completes only through `resume_saved_approval()` with a caller-supplied decision;
-- the explicit approval API rejects sessions that are not actually waiting for approval.
+- missing/`None` decisions fail closed while explicit false/deny remains a real decision;
+- the explicit approval API rejects sessions that are not actually waiting for approval;
+- direct request-oriented approval rejects wrong task state, mismatched persisted resume token and non-approval mode without changing the protected task/session.
 
 These tests are PREPARED, not PASSED, until an executable runner actually runs them.
