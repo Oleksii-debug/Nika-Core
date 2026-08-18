@@ -6,14 +6,19 @@ from dataclasses import dataclass
 from nika_core.multi_agent.contracts import (
     AgentHandoff,
     ChildRequest,
+    EvaluationScore,
     HandoffKind,
     MemberState,
     TeamMember,
     aggregate_scores,
-    EvaluationScore,
 )
 from nika_core.multi_agent.store import MultiAgentStore
-from nika_core.runtime.contracts import AgentRuntimePort, RuntimeOutcome, RuntimeRequest, RuntimeResult
+from nika_core.runtime.contracts import (
+    AgentRuntimePort,
+    RuntimeOutcome,
+    RuntimeRequest,
+    RuntimeResult,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +107,7 @@ class MultiAgentSupervisor:
                         state=MemberState.CANCELLED,
                     )
                     raise
-                except Exception as exc:  # runtime boundary must contain worker failure
+                except RuntimeError as exc:
                     self._store.set_member_state(
                         team_id=team_id,
                         member_id=member.member_id,
