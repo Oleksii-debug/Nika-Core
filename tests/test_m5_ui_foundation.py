@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -62,11 +63,26 @@ def test_bridge_dispatch_and_keymap_conflict_are_fail_closed(tmp_path: Path) -> 
     assert "conflict" in conflict["message"].lower()
 
 
+def test_keymap_export_import_and_clear_round_trip(tmp_path: Path) -> None:
+    bridge = build_bridge(tmp_path)
+    assert bridge.set_binding("nav.workspaces", None)["ok"] is True
+    exported = bridge.export_keymap()
+    payload = json.loads(exported["data"])
+    assert payload["bindings"]["nav.workspaces"] is None
+    payload["bindings"]["nav.workspaces"] = "Alt+4"
+    imported = bridge.import_keymap(json.dumps(payload))
+    assert imported["ok"] is True
+    actions = {item["action_id"]: item for item in bridge.list_actions()}
+    assert actions["nav.workspaces"]["binding"] == "Alt+4"
+    assert bridge.import_keymap("not-json")["ok"] is False
+
+
 def test_list_actions_exposes_resolved_bindings_without_handlers(tmp_path: Path) -> None:
     bridge = build_bridge(tmp_path)
     actions = {item["action_id"]: item for item in bridge.list_actions()}
     assert actions["task.create"]["binding"] == "Ctrl+N"
     assert actions["task.create"]["may_be_unbound"] is False
+    assert actions["nav.workspaces"]["binding"] == "Alt+4"
     assert "handler" not in actions["task.create"]
 
 
@@ -78,9 +94,20 @@ def test_local_html_has_required_semantics_and_registered_action_ids(tmp_path: P
     assert 'role="status"' in html
     assert 'aria-live="polite"' in html
     assert '<label for="command-input">' in html
+    assert '<label for="keymap-json">' in html
     assert '<caption>Комбінації клавіш Nika Core</caption>' in html
+    assert 'id="workspaces-heading"' in html
     registered = {item["action_id"] for item in bridge.list_actions()}
-    for action_id in ("nav.tasks", "nav.agents", "nav.logs", "task.create", "task.pause", "task.resume", "agent.stop"):
+    for action_id in (
+        "nav.tasks",
+        "nav.agents",
+        "nav.logs",
+        "nav.workspaces",
+        "task.create",
+        "task.pause",
+        "task.resume",
+        "agent.stop",
+    ):
         assert action_id in registered
         assert f'data-action-id="{action_id}"' in html
 
@@ -108,9 +135,11 @@ def test_shell_forces_edgechromium_and_local_file(monkeypatch, tmp_path: Path) -
     assert calls["kwargs"]["js_api"] is bridge
 
 
-def test_javascript_preserves_standard_edit_shortcuts_and_uses_pywebviewready() -> None:
+def test_javascript_preserves_edit_shortcuts_and_wires_keymap_transfer() -> None:
     script = index_path().with_name("app.js").read_text(encoding="utf-8")
     assert 'new Set(["a", "c", "x", "v", "z", "y"])' in script
     assert 'document.addEventListener("pywebviewready"' in script
     assert "event.preventDefault()" in script
     assert "globalThis.pywebview.api.set_binding" in script
+    assert "globalThis.pywebview.api.export_keymap" in script
+    assert "globalThis.pywebview.api.import_keymap" in script
