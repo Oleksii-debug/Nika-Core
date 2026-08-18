@@ -11,16 +11,17 @@ Development mode: ACTIVE DEVELOPMENT
 - M2 durable runtime package is IMPLEMENTED/PREPARED on `dev/m2-runtime-selection` / PR #3 but not INTEGRATED; its 11% weight is not credited until real framework tests execute and are green.
 
 ## Current milestone
-M1 integration remains externally blocked by GitHub Actions account billing/spending runner allocation. Safe dependent M2 work may continue, but no unchecked M3+ functional backlog is allowed. While the runner blocker persists, cycles prioritize M1/M2 source review, testability, documentation and reuse research.
+M1 integration remains externally blocked by GitHub Actions account billing/spending runner allocation. Safe M2 review/testability work continues, but no unchecked M3+ functional backlog is allowed while M1/M2 executable evidence is unavailable.
 
 ## Exact branches
 - Last proven green `main`: `df48f70b738f9227cad1df08ce3d7f40115b5f08`.
 - M1 PR #2 current head: `58f5d49c10389216e0f26c28747a820faf9325c3`.
-- M2 PR #3 source head before this status commit: `0cd6e50575a8985c3a0025a41924ac9f268f7133`.
+- M2 PR #3 branch: `dev/m2-runtime-selection`; the previous source head was `b7b4dc8daee2f9050d2d8f1f3e68508db6bfb786`. This cycle added crash-consistency review/status commits; refresh PR metadata for the final exact head before any merge/test claim.
 - PR #3 still targets an older M1 base commit and must be rebased/retargeted only after M1 is executable-CI green and integrated.
+- Governance PR #4 (`dev/parallel-development-policy`) is open and mergeable, but remains separate from M1/M2 integration evidence.
 
 ## M1 candidate
-PR #2 includes typed/versioned configuration, persisted Agent/Workspace registries, Audit Log, workspace discovery contract, central Action Registry and persisted remappable Keymap. The latest M1 batch also normalizes key modifier order/aliases and unifies verification through `scripts/verify.py`. M2 extends the database migration chain without changing the M1 product contract.
+PR #2 includes typed/versioned configuration, persisted Agent/Workspace registries, Audit Log, workspace discovery contract, central Action Registry and persisted remappable Keymap. The latest M1 batch also normalizes key modifier order/aliases and unifies verification through `scripts/verify.py`.
 
 ## M2 implemented/prepared capabilities
 - LangGraph selected as primary orchestration runtime behind framework-neutral `AgentRuntimePort`; Microsoft Agent Framework remains secondary adapter/migration candidate.
@@ -28,22 +29,26 @@ PR #2 includes typed/versioned configuration, persisted Agent/Workspace registri
 - Real LangGraph/SQLite proof suites are prepared for restart without repeated completed side effects, approval interruption across recreation, corrupt-checkpoint fail-closed behavior, real Nika coordinator persistence mapping and bounded active cancellation.
 - Active invocations are tracked by exact `(task_id, thread_id)` and duplicate concurrent execution is rejected.
 - Runtime requests support positive wall-clock deadlines, typed failures and fail-closed explicit retry policy with bounded backoff.
-- `RuntimeSessionStore` durably maps Nika task -> runtime/thread/resume token and prebinds an ACTIVE pointer before durable execution so abrupt process loss does not orphan checkpoints from the Nika task.
+- `RuntimeSessionStore` durably maps Nika task -> runtime/thread/resume token and prebinds an ACTIVE pointer before durable execution is expected to become recoverable.
 - `IdempotencyLedger` provides framework-neutral stable operation keys, input fingerprints and fail-closed reconciliation for external side effects.
 - `RuntimeRecoveryService` inventories persisted sessions after process recreation and separates safe crash continuation from approval/manual/reconciliation/error cases.
+- Approval continuation APIs require explicit decisions and persisted cursor ownership before transitioning work back to RUNNING.
 
-## Current cycle — approval authorization hardening
-Manual M2 source review found a real defense-in-depth gap. The new task-ID-based `resume_saved_approval()` path was fail-closed, but the older public request-oriented `resume_approval()` only checked that the request mode was APPROVAL. A future GUI/plugin/workspace could therefore call that lower-level public method with a stale/wrong thread or token and rely on the task transition rather than proving ownership of the persisted approval session.
+## Current cycle — crash-consistency source review
+A focused manual review of the M2 persistence boundaries found a real pre-integration defect in the current `TaskRuntimeCoordinator.start()` ordering.
 
-This cycle closes that bypass before any M3+ work:
-- direct `resume_approval()` now requires an explicit non-`None` decision, Nika `WAITING_APPROVAL` state and a persisted `WAITING_APPROVAL` session;
-- runtime ID, thread ID and resume token must all match the persisted session before the task can transition to RUNNING;
-- `resume_saved_approval()` also rejects `None`, while explicit false/deny remains valid so omission cannot masquerade as authorization;
-- regression tests were added for wrong persisted token, wrong task state, implicit/None decision and explicit deny;
-- the crash-recovery helper was simplified to remove a duplicated READY transition branch without changing its state-machine contract;
-- `docs/STARTUP_RECOVERY.md` now documents the same approval boundary for both public continuation APIs.
+Current durable-start order is task `READY -> RUNNING`, audit append, then runtime-session cursor binding. If the whole process disappears after the task transition but before the session row is committed, Nika can be left with stale `RUNNING` durable work that has no Nika-owned runtime/thread cursor for startup recovery. `RuntimeRecoveryService` inventories runtime sessions, so this state is not safely recoverable from task ID alone.
 
-This is a prepared safety fix, not integration evidence. The changed tests have not executed in hosted CI.
+The defect and required remediation are now canonical in `docs/M2_CRASH_CONSISTENCY_REVIEW.md`.
+
+Required M2 fix before integration:
+- make durable start crash-consistent, preferably by persisting the task transition and initial durable session pointer in one SQLite transaction rather than merely reversing two independent writes;
+- reject a fresh start when a persisted runtime cursor already exists instead of overwriting recovery state;
+- add deterministic fault-injection tests for transaction rollback and process-loss windows;
+- prove `_finish()` crash windows classify fail-closed and never reopen terminal work;
+- keep existing approval/idempotency recovery tests green.
+
+This review reduces integration risk but is not executable evidence and does not increase product progress.
 
 ## Reuse-first digital worker architecture already recorded
 - ADAPT Microsoft UFO² as first Windows computer-use proof candidate rather than rebuilding a full Windows AgentOS.
@@ -55,20 +60,21 @@ This is a prepared safety fix, not integration evidence. The changed tests have 
 - Heavy coding/browser/vision/model workers remain optional adapters/components rather than mandatory Nika Core dependencies.
 
 ## Infrastructure blocker
-Most recent canonical M1 evidence remains a GitHub Actions job that failed before checkout/dependency/test steps (`steps = null`), with previously captured GitHub annotation identifying account payment failure or Actions spending-limit configuration. This is infrastructure evidence, not code-test evidence.
+The latest canonical M1 workflow run remains GitHub Actions run `32108101409` (`Core CI`, run 69), conclusion `failure`. Its only job (`core`, job `95621584797`) has `steps = null`, confirming that checkout/install/Ruff/compile/pytest did not execute. This remains infrastructure evidence, not code-test evidence.
 
-No explicit duplicate rerun was requested in this cycle. Branch pushes may still create automatic PR workflow attempts, but no result is treated as test evidence unless checkout/install/Ruff/compile/pytest actually execute.
+This cycle inspected that evidence but did not request another duplicate rerun.
 
 ## Test truth
-- New approval-safety code, regression tests and documentation are committed on M2.
 - M1/M2 executable tests remain unproven in hosted CI.
-- No product percentage is credited for prepared/unexecuted tests or documentation.
+- New crash-consistency review defines additional required fault-injection tests; they are not yet implemented or executed.
+- No product percentage is credited for prepared/unexecuted tests, documentation or source review.
 
 ## Truth state
 - M0: INTEGRATED / green CI.
 - M1: IMPLEMENTED, not INTEGRATED, not PACKAGED, not HUMAN_TESTED.
-- M2: IMPLEMENTED/PREPARED across durable runtime, recovery, explicit approval boundary, cancellation, timeout/retry and side-effect safety; not INTEGRATED; not PACKAGED; not HUMAN_TESTED.
+- M2: IMPLEMENTED/PREPARED across durable runtime, recovery, explicit approval boundary, cancellation, timeout/retry and side-effect safety; a crash-consistency start-order defect is OPEN; not INTEGRATED; not PACKAGED; not HUMAN_TESTED.
 - Digital worker reuse architecture: RESEARCHED/DOCUMENTED, not IMPLEMENTED.
+- Parallel-development governance: PREPARED on PR #4, not yet integrated into `main`.
 
 ## Packaging policy
 No EXE in this cycle. Build Windows standalone only at milestone/user-test/release gates. Heavy coding/browser/vision/model workers should remain separable optional components instead of inflating mandatory Nika Core.
@@ -77,9 +83,10 @@ No EXE in this cycle. Build Windows standalone only at milestone/user-test/relea
 Real NVDA usability is never marked VERIFIED by automation.
 
 ## Next large coherent batch
-1. Respect the duplicate infrastructure-probe interval; re-check Actions only when the interval/configuration warrants it.
-2. As soon as runners execute: run/fix/merge PR #2 only if M1 Ruff/compile/pytest are genuinely green.
-3. Retarget/rebase PR #3 onto green main, execute `.[dev,agent]` Ruff/compile/pytest and fix all real API/runtime/migration failures.
-4. Execute the full real LangGraph/SQLite durability suite together: startup recovery, pre-result process loss, no-repeat completed work, explicit approval recreation and authorization checks, corrupt checkpoint fail-closed, cancellation, timeout/retry and persisted sessions.
-5. Only after M2 is executable-green begin M3 as one coherent implementation package.
-6. When the roadmap reaches Computer Interaction/Software Factory implementation, run bounded proof branches for Playwright, UFO² and OpenHands before accepting them as dependencies.
+1. Respect the duplicate infrastructure-probe interval; do not burn repeated Actions runs on the same account-level failure.
+2. Before M2 integration, implement the durable-start atomic persistence boundary plus fault-injection tests from `docs/M2_CRASH_CONSISTENCY_REVIEW.md` on the M2 branch.
+3. As soon as runners execute: run/fix/merge PR #2 only if M1 Ruff/compile/pytest are genuinely green.
+4. Retarget/rebase PR #3 onto green main, execute `.[dev,agent]` Ruff/compile/pytest and fix all real API/runtime/migration failures.
+5. Execute the complete LangGraph/SQLite durability suite plus new crash-consistency fault-injection cases; integrate M2 only if green.
+6. Only after M2 is executable-green begin M3 production implementation. Independent future lanes may continue research/contracts only where they do not create unchecked functional backlog.
+7. At the later Computer Interaction/Software Factory implementation gates, run bounded Playwright/UFO²/OpenHands proof branches before accepting them as dependencies.
