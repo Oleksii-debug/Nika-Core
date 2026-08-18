@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Protocol, runtime_checkable
 
 from nika_core.tools import ToolRisk
@@ -44,6 +44,13 @@ SOFTWARE_FACTORY_MANIFEST = WorkspaceManifest(
 )
 
 
+def _normalize_relative_path(value: str) -> PurePosixPath:
+    normalized = PurePosixPath(value.replace("\\", "/"))
+    if normalized.is_absolute() or ".." in normalized.parts:
+        raise ValueError("path must stay inside the repository")
+    return normalized
+
+
 @dataclass(frozen=True, slots=True)
 class CodingRequest:
     repository_root: Path
@@ -57,10 +64,8 @@ class CodingRequest:
             raise ValueError("goal must not be empty")
         if not self.allowed_paths:
             raise ValueError("at least one allowed path is required")
-        if any(Path(path).is_absolute() for path in self.allowed_paths):
-            raise ValueError("allowed_paths must be repository-relative")
-        if any(".." in Path(path).parts for path in self.allowed_paths):
-            raise ValueError("allowed_paths must not traverse outside the repository")
+        for path in self.allowed_paths:
+            _normalize_relative_path(path)
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,3 +99,30 @@ class CodingWorkerPort(Protocol):
     async def execute(self, request: CodingRequest) -> CodingResult: ...
 
     async def cancel(self, task_id: str) -> None: ...
+
+
+class SoftwareFactoryService:
+    """Validate coding-worker evidence before it can leave an isolated workspace boundary."""
+
+    def __init__(self, worker: CodingWorkerPort) -> None:
+        self._worker = worker
+
+    async def execute(self, request: CodingRequest) -> CodingResult:
+        result = await self._worker.execute(request)
+        self._validate_result(request, result)
+        return result
+
+    async def cancel(self, task_id: str) -> None:
+        await self._worker.cancel(task_id)
+
+    @staticmethod
+    def _validate_result(request: CodingRequest, result: CodingResult) -> None:
+        allowed = tuple(_normalize_relative_path(path) for path in request.allowed_paths)
+        for changed_path in result.changed_paths:
+            candidate = _normalize_relative_path(changed_path)
+            if not any(candidate == root or root in candidate.parents for root in allowed):
+                raise ValueError(f"coding worker changed path outside allowed scope: {changed_path}")
+        if request.test_commands and not result.test_evidence:
+            raise ValueError("coding worker returned no test evidence for required verification")
+        if result.changed_paths and result.patch_ref is None and result.commit_sha is None:
+            raise ValueError("coding worker changes require patch_ref or commit_sha evidence")
