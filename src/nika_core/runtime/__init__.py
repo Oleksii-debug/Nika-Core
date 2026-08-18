@@ -22,6 +22,12 @@ from nika_core.runtime.langgraph_runtime import (
     LangGraphSqliteHandle,
     open_langgraph_sqlite,
 )
+from nika_core.runtime.recovery import (
+    RecoveryCandidate,
+    RecoveryDisposition,
+    RecoveryExecution,
+    RuntimeRecoveryService,
+)
 from nika_core.runtime.reference import ReferenceRuntime
 from nika_core.runtime.registry import RuntimeRegistry
 from nika_core.runtime.retry import RetryPolicy
@@ -35,12 +41,16 @@ __all__ = [
     "IdempotencyStatus",
     "LangGraphRuntime",
     "LangGraphSqliteHandle",
+    "RecoveryCandidate",
+    "RecoveryDisposition",
+    "RecoveryExecution",
     "ReferenceRuntime",
     "RetryPolicy",
     "RuntimeCapability",
     "RuntimeErrorCode",
     "RuntimeEvent",
     "RuntimeOutcome",
+    "RuntimeRecoveryService",
     "RuntimeRegistry",
     "RuntimeRequest",
     "RuntimeResult",
