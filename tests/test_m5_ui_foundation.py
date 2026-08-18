@@ -112,7 +112,7 @@ def test_local_html_has_required_semantics_and_registered_action_ids(tmp_path: P
         assert f'data-action-id="{action_id}"' in html
 
 
-def test_shell_forces_edgechromium_and_local_file(monkeypatch, tmp_path: Path) -> None:
+def test_shell_forces_edgechromium_and_supported_local_path(monkeypatch, tmp_path: Path) -> None:
     bridge = build_bridge(tmp_path)
     calls: dict[str, object] = {}
     fake_window = object()
@@ -130,7 +130,10 @@ def test_shell_forces_edgechromium_and_local_file(monkeypatch, tmp_path: Path) -
     window = launch_windows_shell(bridge)
     assert window is fake_window
     assert calls["title"] == "Nika Core"
-    assert str(calls["url"]).startswith("file:")
+    local_url = str(calls["url"])
+    assert not local_url.startswith("file:")
+    assert Path(local_url).is_absolute()
+    assert Path(local_url).name == "index.html"
     assert calls["start"] == {"gui": "edgechromium"}
     assert calls["kwargs"]["js_api"] is bridge
 
@@ -138,7 +141,9 @@ def test_shell_forces_edgechromium_and_local_file(monkeypatch, tmp_path: Path) -
 def test_javascript_preserves_edit_shortcuts_and_wires_keymap_transfer() -> None:
     script = index_path().with_name("app.js").read_text(encoding="utf-8")
     assert 'new Set(["a", "c", "x", "v", "z", "y"])' in script
-    assert 'document.addEventListener("pywebviewready", async () =>' in script
+    assert 'window.addEventListener("pywebviewready"' in script
+    assert "if (globalThis.pywebview?.api)" in script
+    assert "async function initializeBridge()" in script
     assert "await refreshKeymap()" in script
     assert 'dataset.nikaReady = "true"' in script
     assert "if (!actionsReady) return;" in script
