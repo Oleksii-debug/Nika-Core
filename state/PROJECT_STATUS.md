@@ -18,7 +18,7 @@ Repository visibility observed this cycle: PUBLIC.
 - M9 Plugin SDK & real workspaces: GREEN / INTEGRATED, 8% / 8%.
 - M10 security/sandbox/reliability: GREEN / INTEGRATED, 5% / 5%.
 - M11 Windows packaging/distribution: GREEN / INTEGRATED / PACKAGED candidate evidence, 3% / 3%.
-- M12 full-system QA/NVDA/release: IMPLEMENTED foundation only / HUMAN GATE OPEN, 0% / 2%.
+- M12 full-system QA/NVDA/release: AUTOMATED PRE-HUMAN GATE GREEN / INTEGRATED; HUMAN GATE OPEN, 0% / 2%.
 - Overall proven final A–Z product progress: **98.0%**.
 
 ## Proven milestone evidence
@@ -34,6 +34,7 @@ Repository visibility observed this cycle: PUBLIC.
 - M9 semantic adapter exact green head `680a8a15dfb5a30a7c6eaba3860817c1cbda7ac5`; Core CI 193 SUCCESS on Ubuntu+Windows plus live Playwright and Windows UIA proofs; PR #24 merged as `e6af748fb655fda2719be93258b6c2a427287994`.
 - M10 exact green head `17826cc041caeaa1fe03f8dbe4ce5e50c7aecad5`; Core CI 167 SUCCESS on Ubuntu+Windows; PR #22 merged as `976cb9914966a67763742a28c229730417ee63c8`.
 - M11 exact green head `0f48c3c4889478f967e383d385576e9322e55c9b`; Core CI 196 SUCCESS; focused M11 Windows Release Candidate run 3 SUCCESS; PR #23 merged as `5d86d83f6ce99fa4c9bd6a0eaadef1a6b404283c`.
+- M12 automated pre-human exact green head `d7bdfd697819adf13ad7423726a004fd781d857d`; Core CI 200 SUCCESS; M12 Pre-Human Release Gate run 1 SUCCESS; PR #26 merged as `a278767de4435535cc54e5674ddc72d37051ba03`. This is automated evidence only and awards no human-only M12 credit.
 
 ## M9 integrated capability
 - Versioned plugin/workspace compatibility, capability and risk contracts with lazy explicit activation.
@@ -53,20 +54,33 @@ Repository visibility observed this cycle: PUBLIC.
 - Exact-head Core CI 196 passed the normal source/test gate.
 - M11 Windows Release Candidate run 3 passed source regressions, PyInstaller build, packaged WebView2/UIA descendant discovery, keyboard/focus flow, ZIP creation and artifact upload.
 - Produced artifact `NikaCore-0.0.2-windows-x64`, artifact id `9340673484`, size 20,846,262 bytes, workflow artifact digest `sha256:4611ba73baab2ecd37ce07d5596853edd6f4d6fa7559ff58d660d5f5aee5b12e`.
-- The earlier release run failed because the reused M5 UIA script hard-coded the diagnostic window title. The repair parameterized the expected title while preserving the original M5 default and all descendant/keyboard/focus assertions.
+- Earlier release failure was a test-harness mismatch: reused M5 UIA proof hard-coded the diagnostic window title. The repair parameterized the expected title while preserving all UIA/readiness/keyboard/focus assertions.
+
+## M12 automated pre-human evidence
+- Core CI 200 passed on exact M12 head `d7bdfd697819adf13ad7423726a004fd781d857d`.
+- M12 integrated Ubuntu job passed complete dependency/Ruff/compile/test verification: 152 tests, plus a focused 58-test cross-subsystem recovery/safety matrix and live Playwright semantic proof.
+- M12 integrated Windows job passed the same full verification/focused matrix and real Windows UIA semantic proof.
+- Dependent packaged Windows job passed exact candidate build, deterministic manifest verification, packaged WebView2/UIA discovery, Action Registry keyboard/focus flow and release-gate truth regressions.
+- Produced exact pre-human artifact `NikaCore-0.0.2-m12-prehuman-d7bdfd697819adf13ad7423726a004fd781d857d`, artifact id `9340947647`, size 20,846,871 bytes, workflow digest `sha256:ee0ec0b7506c6bc84b8052f1c1cdb80a33a6f0dea8eb6b221cee1860dc96d4c5`.
+- `docs/M12_HUMAN_NVDA_ACCEPTANCE.md` binds human testing to exact SHA/artifact identity and requires Windows/NVDA keyboard, semantic navigation, focus, readable status/error and restart checks.
+- Machine-readable automated evidence deliberately records `human_tested=false`, `nvda_verified=false`, `production_release_ready=false`.
 
 ## Truth state
 - M0–M11: IMPLEMENTED / GREEN / INTEGRATED.
-- Overall proven progress: 98.0%.
-- M11 has automated PACKAGED candidate evidence from the exact integrated source. It is not HUMAN_TESTED.
-- M12 remains the final 2% and requires full-system release/recovery/security evidence plus human accessibility acceptance.
+- M12 automated pre-human infrastructure/evidence: GREEN / INTEGRATED.
+- Overall proven progress remains 98.0%; the final 2% is intentionally human-gated.
+- Automated PACKAGED candidate evidence exists from the exact M12 candidate.
 - HUMAN_TESTED: false.
 - NVDA_VERIFIED: false; automation must never award this state.
+- PRODUCTION_RELEASE_READY: false until human acceptance passes on the exact candidate.
 - Repository metadata is PUBLIC despite user wording referring to a private repository.
 - Stale PR #4 and draft PR #11 remain uncredited.
 
 ## Current weighted milestone
-M12 — Full-system QA, human NVDA acceptance & v1.0 release.
+M12 — Human Windows/NVDA acceptance & final v1.0 release decision.
+
+## Blocker
+The only weighted acceptance blocker is now human execution of `docs/M12_HUMAN_NVDA_ACCEPTANCE.md` against the exact packaged candidate. This cannot be truthfully automated.
 
 ## Next LARGE coherent batch
-Run the largest safe automated M12 pre-human gate from latest green main: full-system import/startup and migration/recovery matrix, security/sandbox regressions, release-manifest integrity, packaged startup/WebView2/UIA/keyboard flow, plugin/workspace discovery, model mock/no-LLM path, scheduler/memory/runtime restart evidence and artifact provenance. Create a clear human NVDA acceptance protocol for the exact candidate, but do not mark HUMAN_TESTED or NVDA_VERIFIED until the user actually performs it. Final 2% remains uncredited until that human gate is satisfied.
+At the next executable engineering cycle, keep automated regressions green and avoid feature expansion that would invalidate the tested package. Once human Windows/NVDA results are available, fix any reported accessibility/functional defects on a new exact candidate, repeat the full M12 automated gate, then award HUMAN_TESTED/NVDA_VERIFIED and the final 2% only if the human protocol passes that same exact artifact.
