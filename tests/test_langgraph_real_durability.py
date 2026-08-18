@@ -72,6 +72,19 @@ def _build_approval_graph(*, side_effect_file: Path, checkpointer):
     return builder.compile(checkpointer=checkpointer)
 
 
+def _build_cancellable_graph(*, started: asyncio.Event, release: asyncio.Event, checkpointer):
+    async def wait_for_release(state: _RuntimeState) -> _RuntimeState:
+        started.set()
+        await release.wait()
+        return {"result": "released"}
+
+    builder = StateGraph(_RuntimeState)
+    builder.add_node("wait", wait_for_release)
+    builder.add_edge(START, "wait")
+    builder.add_edge("wait", END)
+    return builder.compile(checkpointer=checkpointer)
+
+
 def test_completed_step_is_not_repeated_after_process_object_recreation(tmp_path) -> None:
     async def scenario() -> None:
         database = tmp_path / "runtime.sqlite"
@@ -156,6 +169,32 @@ def test_approval_interrupt_survives_checkpointer_and_runtime_recreation(tmp_pat
             assert resumed.output["approved"] is True
             assert resumed.output["result"] == "approved"
             assert _line_count(side_effect) == 1
+
+    asyncio.run(scenario())
+
+
+def test_real_langgraph_active_run_can_be_cancelled(tmp_path) -> None:
+    async def scenario() -> None:
+        database = tmp_path / "cancel.sqlite"
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async with open_langgraph_sqlite(database) as handle:
+            graph = _build_cancellable_graph(
+                started=started,
+                release=release,
+                checkpointer=handle.checkpointer,
+            )
+            runtime = LangGraphRuntime(graph)
+            running = asyncio.create_task(
+                runtime.run(RuntimeRequest("task-cancel", "cancel-proof", max_steps=20))
+            )
+            await started.wait()
+
+            assert await runtime.cancel(task_id="task-cancel", thread_id="cancel-proof") is True
+            result = await running
+            assert result.outcome == RuntimeOutcome.CANCELLED
+            assert await runtime.cancel(task_id="task-cancel", thread_id="cancel-proof") is False
 
     asyncio.run(scenario())
 
