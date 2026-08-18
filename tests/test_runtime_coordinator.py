@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
@@ -156,12 +158,67 @@ def test_coordinator_rejects_non_approval_resume_without_state_change(tmp_path) 
         resume_token="thread-2",
         mode=RuntimeResumeMode.CONTINUE,
     )
-    try:
+    with pytest.raises(ValueError, match="APPROVAL"):
         asyncio.run(coordinator.resume_approval(_ApprovalRuntime(), request))
-    except ValueError as exc:
-        assert "APPROVAL" in str(exc)
-    else:
-        raise AssertionError("Expected ValueError")
+    assert _task_state(store, task_id) == TaskState.WAITING_APPROVAL
+
+
+def test_direct_approval_resume_requires_matching_persisted_cursor(tmp_path) -> None:
+    store, queue, task_id = _ready_task(tmp_path)
+    runtime = _ApprovalRuntime()
+    coordinator = TaskRuntimeCoordinator(queue, AuditLog(store))
+    asyncio.run(coordinator.start(runtime, RuntimeRequest(task_id, "thread-owner")))
+
+    bad = RuntimeResumeRequest(
+        task_id=task_id,
+        thread_id="thread-owner",
+        resume_token="wrong-token",
+        mode=RuntimeResumeMode.APPROVAL,
+        value=True,
+    )
+    with pytest.raises(ValueError, match="resume token"):
+        asyncio.run(coordinator.resume_approval(runtime, bad))
+
+    assert _task_state(store, task_id) == TaskState.WAITING_APPROVAL
+    persisted = coordinator.sessions.get(task_id)
+    assert persisted is not None
+    assert persisted.resume_token == "thread-owner"
+
+
+def test_direct_approval_resume_requires_waiting_approval_task_state(tmp_path) -> None:
+    store, queue, task_id = _ready_task(tmp_path)
+    runtime = _ApprovalRuntime()
+    coordinator = TaskRuntimeCoordinator(queue, AuditLog(store))
+    asyncio.run(coordinator.start(runtime, RuntimeRequest(task_id, "thread-state")))
+    queue.transition(task_id, TaskState.CANCELLED)
+
+    request = RuntimeResumeRequest(
+        task_id=task_id,
+        thread_id="thread-state",
+        resume_token="thread-state",
+        mode=RuntimeResumeMode.APPROVAL,
+        value=True,
+    )
+    with pytest.raises(ValueError, match="WAITING_APPROVAL"):
+        asyncio.run(coordinator.resume_approval(runtime, request))
+    assert _task_state(store, task_id) == TaskState.CANCELLED
+
+
+def test_direct_approval_resume_rejects_implicit_none_decision(tmp_path) -> None:
+    store, queue, task_id = _ready_task(tmp_path)
+    runtime = _ApprovalRuntime()
+    coordinator = TaskRuntimeCoordinator(queue, AuditLog(store))
+    asyncio.run(coordinator.start(runtime, RuntimeRequest(task_id, "thread-none")))
+
+    request = RuntimeResumeRequest(
+        task_id=task_id,
+        thread_id="thread-none",
+        resume_token="thread-none",
+        mode=RuntimeResumeMode.APPROVAL,
+        value=None,
+    )
+    with pytest.raises(ValueError, match="explicit"):
+        asyncio.run(coordinator.resume_approval(runtime, request))
     assert _task_state(store, task_id) == TaskState.WAITING_APPROVAL
 
 
