@@ -27,6 +27,27 @@ The dated comparison and executable proof design are in `docs/RUNTIME_SELECTION.
 
 Deep Agents, LiteLLM, MCP Python SDK, APScheduler and DSPy remain candidates for their planned milestones and must be re-verified immediately before adoption.
 
+## Digital-worker / Computer Interaction audit — 2026-08-18
+Fresh official upstream audit is recorded in `docs/COMPUTER_INTERACTION_REUSE_AUDIT.md`.
+
+- ADAPT — Microsoft UFO² as the first Windows computer-use proof candidate. It already combines Windows UI Automation, application introspection, native APIs, visual fallback, hierarchical agents and MCP action servers. Do not build a full Windows AgentOS before proving whether UFO² can sit behind Nika's permission/audit contracts.
+- REUSE — Playwright as the deterministic browser control baseline. Prefer role/label/text/accessibility semantics and strict locators before visual/coordinate control.
+- ADAPT (optional) — Browser Use as a higher-level browser-agent adapter only if it measurably reduces glue code beyond Playwright. Keep its broad provider/tool dependency surface out of mandatory Nika Core.
+- REUSE FALLBACK — direct Windows UI Automation/pywinauto-style adapter if UFO² is too heavy or cannot be isolated safely.
+- CUSTOM (thin, future) — Nika capability-oriented Computer Interaction ports and normalized evidence/action results. Third-party UI classes must never leak into Agent Lab domain APIs.
+- VISION POLICY — screenshot/OCR/vision grounding is fallback for missing semantics, not the default primary control path.
+
+## Software Factory and offline-intelligence audit — 2026-08-18
+Fresh official upstream audit is recorded in `docs/SOFTWARE_FACTORY_AND_OFFLINE_INTELLIGENCE_REUSE.md`.
+
+- ADAPT — OpenHands Software Agent SDK / agent-server as the first coding-worker proof candidate. Use only the permissively licensed core/SDK surfaces unless a separate enterprise-license decision is made. Nika remains owner of project state, branch policy, safety, approvals and release gates.
+- ADAPT — Unified Planning as a future deterministic formal-planning candidate behind a Nika planner port for domains with explicit states/actions/preconditions/effects.
+- REUSE — ONNX Runtime for compact specialist neural-model inference; it is an inference engine, not a general reasoning brain.
+- REUSE PER MEASURED TASK — maintained classical ML libraries such as scikit-learn for classification/regression/clustering/ranking only where datasets and metrics justify the dependency.
+- CUSTOM (thin, future) — Nika `CodingWorkerPort` / `DeterministicPlannerPort` contracts so coding/planning implementations remain replaceable.
+
+Do not implement these future adapters while M1/M2 integration is unverified. The current CI blocker period is for source review, testability, documentation and reuse research, not for building an unchecked M3+ backlog.
+
 ## Windows UI
 ADAPT — pywebview + EdgeChromium/WebView2 with local HTML/CSS/JS. Reuse the Accessible Chess WebView2 accessibility-host lessons. React + TypeScript + Vite + React Aria Components remain the M5 frontend candidate subject to a fresh audit.
 
