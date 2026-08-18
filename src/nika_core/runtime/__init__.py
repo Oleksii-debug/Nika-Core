@@ -1,6 +1,7 @@
 from nika_core.runtime.contracts import (
     AgentRuntimePort,
     RuntimeCapability,
+    RuntimeErrorCode,
     RuntimeEvent,
     RuntimeOutcome,
     RuntimeRequest,
@@ -17,13 +18,16 @@ from nika_core.runtime.langgraph_runtime import (
 )
 from nika_core.runtime.reference import ReferenceRuntime
 from nika_core.runtime.registry import RuntimeRegistry
+from nika_core.runtime.retry import RetryPolicy
 
 __all__ = [
     "AgentRuntimePort",
     "LangGraphRuntime",
     "LangGraphSqliteHandle",
     "ReferenceRuntime",
+    "RetryPolicy",
     "RuntimeCapability",
+    "RuntimeErrorCode",
     "RuntimeEvent",
     "RuntimeOutcome",
     "RuntimeRegistry",
