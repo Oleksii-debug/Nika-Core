@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ from nika_core.plugins import (
     CapabilityDeclaration,
     PluginCompatibilityError,
     PluginManifest,
+    PluginRegistration,
     PluginRuntime,
 )
 from nika_core.tools import ToolRisk
@@ -14,9 +16,12 @@ from nika_core.workspaces import (
     ACCESSIBILITY_REPAIR_MANIFEST,
     SOFTWARE_FACTORY_MANIFEST,
     AccessibilityEvidence,
+    AccessibilityRepairService,
     CapabilityGap,
     CodingRequest,
+    CodingResult,
     PluginRequirement,
+    SoftwareFactoryService,
     WorkspaceCatalog,
     WorkspaceCompatibilityError,
     WorkspaceManifest,
@@ -82,6 +87,15 @@ class _Adapter:
         self.closed = True
 
 
+class _EntryPoint:
+    def __init__(self, name: str, loaded: object) -> None:
+        self.name = name
+        self._loaded = loaded
+
+    def load(self) -> object:
+        return self._loaded
+
+
 def test_plugin_runtime_checks_api_and_runtime_manifest() -> None:
     manifest = _coding_manifest()
     runtime = PluginRuntime()
@@ -95,6 +109,39 @@ def test_plugin_runtime_checks_api_and_runtime_manifest() -> None:
     incompatible = manifest.model_copy(update={"plugin_api_min": 2, "plugin_api_max": 2})
     with pytest.raises(PluginCompatibilityError):
         PluginRuntime().register(incompatible, lambda: _Adapter(incompatible))
+
+
+def test_entrypoint_registration_is_lazy_until_activation() -> None:
+    manifest = _coding_manifest()
+    calls = 0
+
+    def factory() -> _Adapter:
+        nonlocal calls
+        calls += 1
+        return _Adapter(manifest)
+
+    registration = PluginRegistration(manifest=manifest, factory=factory)
+    runtime = PluginRuntime()
+    runtime.register_entrypoint(_EntryPoint("coding-worker", registration))  # type: ignore[arg-type]
+    assert calls == 0
+    runtime.activate("coding.worker")
+    assert calls == 1
+
+    with pytest.raises(TypeError, match="PluginRegistration"):
+        PluginRuntime().register_entrypoint(  # type: ignore[arg-type]
+            _EntryPoint("coding-worker", factory)
+        )
+
+
+def test_plugin_activation_closes_manifest_mismatch() -> None:
+    manifest = _coding_manifest()
+    wrong = manifest.model_copy(update={"version": "2.0.0"})
+    adapter = _Adapter(wrong)
+    runtime = PluginRuntime()
+    runtime.register(manifest, lambda: adapter)
+    with pytest.raises(PluginCompatibilityError, match="differs"):
+        runtime.activate("coding.worker")
+    assert adapter.closed is True
 
 
 def test_plugin_manifest_rejects_duplicate_capabilities() -> None:
@@ -188,12 +235,53 @@ def test_coding_request_is_isolated_and_capability_gap_requires_evidence(tmp_pat
         test_commands=("python scripts/verify.py",),
     )
     assert request.network_allowed is False
-    with pytest.raises(ValueError, match="repository-relative"):
+    with pytest.raises(ValueError, match="inside the repository"):
         CodingRequest(tmp_path, "bad", (str(tmp_path.resolve()),))
-    with pytest.raises(ValueError, match="traverse"):
+    with pytest.raises(ValueError, match="inside the repository"):
         CodingRequest(tmp_path, "bad", ("../outside",))
     with pytest.raises(ValueError, match="attempted methods"):
         CapabilityGap("task-1", "browser.special", "DOM unavailable", ())
+
+
+def test_software_factory_rejects_worker_scope_escape_or_missing_evidence(tmp_path: Path) -> None:
+    class Worker:
+        def __init__(self, result: CodingResult) -> None:
+            self.result = result
+
+        async def execute(self, request: CodingRequest) -> CodingResult:
+            return self.result
+
+        async def cancel(self, task_id: str) -> None:
+            return None
+
+    request = CodingRequest(
+        repository_root=tmp_path,
+        goal="Implement safely",
+        allowed_paths=("src",),
+        test_commands=("pytest",),
+    )
+    valid = CodingResult(
+        changed_paths=("src/nika_core/new.py",),
+        test_evidence=("pytest passed",),
+        patch_ref="artifact://patch-1",
+    )
+    assert asyncio.run(SoftwareFactoryService(Worker(valid)).execute(request)) == valid
+
+    escaped = valid.__class__(
+        changed_paths=("tests/escape.py",),
+        test_evidence=("pytest passed",),
+        patch_ref="artifact://patch-2",
+    )
+    with pytest.raises(ValueError, match="outside allowed scope"):
+        asyncio.run(SoftwareFactoryService(Worker(escaped)).execute(request))
+
+    missing_tests = valid.__class__(
+        changed_paths=("src/nika_core/new.py",),
+        test_evidence=(),
+        patch_ref="artifact://patch-3",
+    )
+    with pytest.raises(ValueError, match="no test evidence"):
+        asyncio.run(SoftwareFactoryService(Worker(missing_tests)).execute(request))
 
 
 def test_visual_fallback_cannot_claim_perfect_semantic_confidence() -> None:
@@ -211,3 +299,46 @@ def test_visual_fallback_cannot_claim_perfect_semantic_confidence() -> None:
         accessible_controls=("button:Submit",),
     )
     assert evidence.confidence == 1.0
+
+
+def test_accessibility_repair_calls_semantics_before_visual_fallback() -> None:
+    events: list[str] = []
+
+    class Semantic:
+        async def inspect_browser(self, target: str) -> AccessibilityEvidence:
+            events.append("dom")
+            return AccessibilityEvidence(
+                target=target,
+                method=EvidenceMethod.DOM,
+                summary="No semantic controls exposed",
+                accessible_controls=(),
+            )
+
+        async def inspect_windows(self, target: str) -> AccessibilityEvidence:
+            events.append("uia")
+            return AccessibilityEvidence(
+                target=target,
+                method=EvidenceMethod.UIA,
+                summary="Named control exposed",
+                accessible_controls=("button:Open",),
+            )
+
+    class Fallback:
+        async def inspect_visual(self, target: str) -> AccessibilityEvidence:
+            events.append("vision")
+            return AccessibilityEvidence(
+                target=target,
+                method=EvidenceMethod.VISION,
+                summary="Visual fallback candidate",
+                confidence=0.7,
+            )
+
+    service = AccessibilityRepairService(Semantic(), Fallback())
+    browser = asyncio.run(service.inspect_browser("page"))
+    assert browser.method is EvidenceMethod.VISION
+    assert events == ["dom", "vision"]
+
+    events.clear()
+    windows = asyncio.run(service.inspect_windows("window"))
+    assert windows.method is EvidenceMethod.UIA
+    assert events == ["uia"]
