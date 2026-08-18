@@ -1,3 +1,8 @@
+from .accessibility_repair import (
+    ACCESSIBILITY_REPAIR_MANIFEST,
+    AccessibilityEvidence,
+    AccessibilityInteractionPort,
+)
 from .catalog import (
     PluginRequirement,
     WorkspaceCatalog,
@@ -6,16 +11,11 @@ from .catalog import (
     WorkspaceResolver,
 )
 from .software_factory import (
+    SOFTWARE_FACTORY_MANIFEST,
     CapabilityGap,
     CodingRequest,
     CodingResult,
     CodingWorkerPort,
-    SOFTWARE_FACTORY_MANIFEST,
-)
-from .accessibility_repair import (
-    ACCESSIBILITY_REPAIR_MANIFEST,
-    AccessibilityEvidence,
-    AccessibilityInteractionPort,
 )
 
 __all__ = [
