@@ -16,6 +16,8 @@ class UIActionBridge:
 
     JavaScript can only invoke registered Nika action IDs or explicit keymap methods.
     No arbitrary Python object, filesystem, shell, or provider object is exposed.
+    Handler implementations must translate internal failures into typed/user-safe
+    ValueError or TypeError failures; unexpected programmer errors are not hidden here.
     """
 
     def __init__(
@@ -62,12 +64,6 @@ class UIActionBridge:
                 request_id=command.request_id,
                 status="rejected",
                 message=str(exc),
-            ).model_dump()
-        except Exception:
-            return UIResult(
-                request_id=command.request_id,
-                status="failed",
-                message="The action failed. See the application log for details.",
             ).model_dump()
 
         if isinstance(outcome, UIResult):
