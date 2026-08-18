@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 import tempfile
+from pathlib import Path
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.action_registry import Keymap
