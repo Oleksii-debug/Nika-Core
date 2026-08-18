@@ -135,6 +135,20 @@ def test_action_registry_rejects_duplicate_ids_and_default_shortcuts() -> None:
         registry.register(ActionDefinition("task.other", "Other", "Tasks", "ctrl + n"))
 
 
+def test_action_registry_normalizes_modifier_order_and_aliases() -> None:
+    registry = ActionRegistry()
+    registry.register(ActionDefinition("agent.stop", "Stop", "Agents", "Ctrl+Shift+S"))
+    with pytest.raises(ValueError):
+        registry.register(ActionDefinition("agent.other", "Other", "Agents", "shift+control+s"))
+
+
+def test_action_registry_rejects_ambiguous_or_duplicate_modifier_bindings() -> None:
+    with pytest.raises(ValueError):
+        ActionDefinition("task.bad", "Bad", "Tasks", "Ctrl+A+B")
+    with pytest.raises(ValueError):
+        ActionDefinition("task.bad", "Bad", "Tasks", "Ctrl+Control+N")
+
+
 def test_keymap_remap_clear_restore_and_persist(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
@@ -163,3 +177,12 @@ def test_keymap_conflicts_and_import_are_atomic(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         keymap.import_json(bad)
     assert keymap.export_json() == original
+
+
+def test_keymap_detects_equivalent_reordered_shortcut(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    actions = build_default_action_registry()
+    keymap = Keymap(store, actions)
+    with pytest.raises(ValueError):
+        keymap.set_binding("task.pause", "shift+ctrl+s")
