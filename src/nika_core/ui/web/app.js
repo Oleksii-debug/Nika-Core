@@ -4,6 +4,7 @@
   const statusNode = document.getElementById("app-status");
   const activityLog = document.getElementById("activity-log");
   const keymapBody = document.getElementById("keymap-body");
+  const keymapJson = document.getElementById("keymap-json");
   const commandInput = document.getElementById("command-input");
   let actions = [];
 
@@ -37,7 +38,7 @@
     if (event.altKey) parts.push("alt");
     if (event.shiftKey) parts.push("shift");
     if (event.metaKey) parts.push("win");
-    const key = event.key.length === 1 ? event.key.toLowerCase() : event.key.toLowerCase();
+    const key = event.key.toLowerCase();
     if (["control", "alt", "shift", "meta"].includes(key)) return null;
     parts.push(key);
     return parts.join("+");
@@ -91,7 +92,7 @@
       const controlCell = document.createElement("td");
       const save = document.createElement("button");
       save.type = "button";
-      save.textContent = "Зберегти";
+      save.textContent = action.may_be_unbound ? "Зберегти / очистити" : "Зберегти";
       save.addEventListener("click", async () => {
         const response = await globalThis.pywebview.api.set_binding(action.action_id, input.value.trim() || null);
         announce(response.message, !response.ok);
@@ -111,6 +112,22 @@
       keymapBody.appendChild(row);
     }
   }
+
+  document.getElementById("keymap-export").addEventListener("click", async () => {
+    const response = await globalThis.pywebview.api.export_keymap();
+    announce(response.message, !response.ok);
+    if (response.ok) {
+      keymapJson.value = response.data;
+      keymapJson.focus();
+    }
+  });
+
+  document.getElementById("keymap-import").addEventListener("click", async () => {
+    const response = await globalThis.pywebview.api.import_keymap(keymapJson.value);
+    announce(response.message, !response.ok);
+    if (response.ok) await refreshKeymap();
+    else keymapJson.focus();
+  });
 
   document.addEventListener("click", (event) => {
     const trigger = event.target.closest?.("[data-action-id]");
