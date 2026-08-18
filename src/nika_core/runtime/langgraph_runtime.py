@@ -104,6 +104,17 @@ class LangGraphRuntime:
         self._resume_command_factory = resume_command_factory or _default_resume_command
         self._active: dict[tuple[str, str], asyncio.Task[Any]] = {}
 
+    @staticmethod
+    def initial_resume_token(*, task_id: str, thread_id: str) -> str:
+        """Return the durable cursor Nika can persist before awaiting execution.
+
+        LangGraph checkpoint lookup is keyed by ``thread_id``. Persisting it before the
+        invocation starts closes the process-loss window where LangGraph may already have
+        durable checkpoints but Nika has not yet received a RuntimeResult.
+        """
+        del task_id
+        return thread_id
+
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
         config = self._config(request.thread_id, request.max_steps)
         return await self._execute(
