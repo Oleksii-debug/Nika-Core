@@ -115,7 +115,7 @@ def test_repository_versions_and_activation_are_fail_closed(tmp_path: Path) -> N
     with pytest.raises(ValueError, match="expected 3"):
         repository.save_draft(second_compiled)
 
-    assert store.schema_version() == 6
+    assert store.schema_version() == 7
 
 
 def test_activation_rejects_definition_mutation(tmp_path: Path) -> None:
