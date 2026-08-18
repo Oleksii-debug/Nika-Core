@@ -98,6 +98,22 @@ class IdempotencyLedger:
         """Mark an interrupted side effect as unsafe to replay without reconciliation."""
         return self._set_status(operation_key, IdempotencyStatus.UNCERTAIN, None)
 
+    def reconcile_completed(
+        self,
+        operation_key: str,
+        result: Mapping[str, Any] | None = None,
+    ) -> IdempotencyRecord:
+        """Close an UNCERTAIN record only after an external system proves completion."""
+        current = self.require(operation_key)
+        if current.status != IdempotencyStatus.UNCERTAIN:
+            raise IdempotencyConflictError("only uncertain operations require reconciliation")
+        return self._set_status(
+            operation_key,
+            IdempotencyStatus.COMPLETED,
+            result,
+            allow_uncertain_completion=True,
+        )
+
     def get(self, operation_key: str) -> IdempotencyRecord | None:
         with self._store.connection() as conn:
             row = conn.execute(
@@ -117,11 +133,17 @@ class IdempotencyLedger:
         operation_key: str,
         status: IdempotencyStatus,
         result: Mapping[str, Any] | None,
+        *,
+        allow_uncertain_completion: bool = False,
     ) -> IdempotencyRecord:
         current = self.require(operation_key)
         if current.status == IdempotencyStatus.COMPLETED and status != IdempotencyStatus.COMPLETED:
             raise IdempotencyConflictError("completed operation cannot be reopened")
-        if current.status == IdempotencyStatus.UNCERTAIN and status == IdempotencyStatus.COMPLETED:
+        if (
+            current.status == IdempotencyStatus.UNCERTAIN
+            and status == IdempotencyStatus.COMPLETED
+            and not allow_uncertain_completion
+        ):
             raise IdempotencyConflictError(
                 "uncertain operation requires external reconciliation before completion"
             )
