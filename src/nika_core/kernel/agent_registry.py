@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
+
+from nika_core.data.sqlite import SQLiteStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,21 +23,52 @@ class AgentDefinition:
 
 
 class AgentRegistry:
-    def __init__(self) -> None:
+    def __init__(self, store: SQLiteStore | None = None) -> None:
+        self._store = store
         self._agents: dict[str, AgentDefinition] = {}
 
     @property
     def count(self) -> int:
-        return len(self._agents)
+        if self._store is None:
+            return len(self._agents)
+        with self._store.connection() as conn:
+            row = conn.execute("SELECT COUNT(DISTINCT agent_id) AS count FROM agents").fetchone()
+        return int(row["count"])
 
     def register(self, definition: AgentDefinition) -> None:
-        current = self._agents.get(definition.agent_id)
+        current = self._latest(definition.agent_id)
         if current is not None and definition.version <= current.version:
             raise ValueError("agent version must increase")
-        self._agents[definition.agent_id] = definition
+        if self._store is None:
+            self._agents[definition.agent_id] = definition
+            return
+        with self._store.connection() as conn:
+            conn.execute(
+                "INSERT INTO agents(agent_id, version, name, goal, created_at) VALUES (?, ?, ?, ?, ?)",
+                (
+                    definition.agent_id,
+                    definition.version,
+                    definition.name,
+                    definition.goal,
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
 
     def get(self, agent_id: str) -> AgentDefinition:
-        try:
-            return self._agents[agent_id]
-        except KeyError as exc:
-            raise KeyError(f"Unknown agent: {agent_id}") from exc
+        current = self._latest(agent_id)
+        if current is None:
+            raise KeyError(f"Unknown agent: {agent_id}")
+        return current
+
+    def _latest(self, agent_id: str) -> AgentDefinition | None:
+        if self._store is None:
+            return self._agents.get(agent_id)
+        with self._store.connection() as conn:
+            row = conn.execute(
+                "SELECT agent_id, name, version, goal FROM agents "
+                "WHERE agent_id = ? ORDER BY version DESC LIMIT 1",
+                (agent_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return AgentDefinition(row["agent_id"], row["name"], int(row["version"]), row["goal"])

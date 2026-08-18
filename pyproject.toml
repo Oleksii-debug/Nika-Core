@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nika-core"
-version = "0.0.1"
+version = "0.0.2"
 description = "Accessible Windows-first modular multi-agent platform"
 requires-python = ">=3.12,<3.14"
 dependencies = [
@@ -23,9 +23,7 @@ agent = [
   "mcp>=2,<3",
   "httpx>=0.28,<1",
 ]
-gui = [
-  "pywebview>=6.2.1,<7",
-]
+gui = ["pywebview>=6.2.1,<7"]
 learning = ["dspy>=3,<4", "scikit-learn>=1.7,<2"]
 dev = ["pytest>=8,<9", "ruff>=0.12,<1", "pytest-cov>=6,<8"]
 qa = ["pip-audit>=2,<3", "pyinstaller>=6,<7"]
