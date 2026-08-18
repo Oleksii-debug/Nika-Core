@@ -54,6 +54,26 @@ class _ExplodingRuntime(_ApprovalRuntime):
         raise RuntimeError("boom")
 
 
+class _CancellableRuntime(_ApprovalRuntime):
+    runtime_id = "cancellable"
+    capabilities = frozenset({RuntimeCapability.CANCELLATION})
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancel_requested = asyncio.Event()
+
+    async def run(self, request: RuntimeRequest) -> RuntimeResult:
+        self.started.set()
+        await self.cancel_requested.wait()
+        return RuntimeResult(outcome=RuntimeOutcome.CANCELLED)
+
+    async def cancel(self, *, task_id: str, thread_id: str) -> bool:
+        if not self.started.is_set() or self.cancel_requested.is_set():
+            return False
+        self.cancel_requested.set()
+        return True
+
+
 def _ready_task(tmp_path):
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
@@ -143,3 +163,39 @@ def test_coordinator_rejects_non_approval_resume_without_state_change(tmp_path) 
     else:
         raise AssertionError("Expected ValueError")
     assert _task_state(store, task_id) == TaskState.WAITING_APPROVAL
+
+
+def test_coordinator_cancellation_finishes_task_and_records_audit(tmp_path) -> None:
+    async def scenario() -> None:
+        store, queue, task_id = _ready_task(tmp_path)
+        audit = AuditLog(store)
+        coordinator = TaskRuntimeCoordinator(queue, audit)
+        runtime = _CancellableRuntime()
+
+        start_task = asyncio.create_task(
+            coordinator.start(runtime, RuntimeRequest(task_id, "thread-cancel"))
+        )
+        await runtime.started.wait()
+        assert _task_state(store, task_id) == TaskState.RUNNING
+
+        accepted = await coordinator.cancel(
+            runtime,
+            task_id=task_id,
+            thread_id="thread-cancel",
+        )
+        assert accepted is True
+
+        result = await start_task
+        assert result.outcome == RuntimeOutcome.CANCELLED
+        assert _task_state(store, task_id) == TaskState.CANCELLED
+
+        events = audit.list_for(entity_type="task", entity_id=task_id)
+        types = [event.event_type for event in events]
+        assert types == [
+            "runtime.started",
+            "runtime.cancel_requested",
+            "runtime.finished",
+        ]
+        assert events[-1].payload["outcome"] == RuntimeOutcome.CANCELLED.value
+
+    asyncio.run(scenario())
