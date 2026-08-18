@@ -13,6 +13,7 @@ def build_default_action_registry() -> ActionRegistry:
         ActionDefinition("nav.tasks", "Open tasks", "Navigation", "Alt+1"),
         ActionDefinition("nav.agents", "Open agents", "Navigation", "Alt+2"),
         ActionDefinition("nav.logs", "Open logs", "Navigation", "Alt+3"),
+        ActionDefinition("nav.workspaces", "Open workspaces", "Navigation", "Alt+4"),
         ActionDefinition("command.focus", "Open command search", "Navigation", "Ctrl+Shift+P"),
     ):
         registry.register(action)
