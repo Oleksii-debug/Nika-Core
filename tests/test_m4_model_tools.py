@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable
+from typing import Any
 
+import httpx
 import pytest
+from mcp.server import MCPServer
 
+from nika_core.mcp_boundary import MCPClientAdapter, MCPServerConfig
 from nika_core.model_gateway.contracts import (
     ModelErrorCode,
     ModelGatewayError,
@@ -14,7 +19,10 @@ from nika_core.model_gateway.contracts import (
     ProviderKind,
 )
 from nika_core.model_gateway.gateway import ModelGateway
-from nika_core.model_gateway.providers import DeterministicMockProvider
+from nika_core.model_gateway.providers import (
+    DeterministicMockProvider,
+    OpenAICompatibleProvider,
+)
 from nika_core.tools import ToolCall, ToolExecutor, ToolRisk, ToolSpec
 
 
@@ -37,6 +45,117 @@ def test_mock_scenario_runs_through_gateway() -> None:
     assert response.text == "mock: hello"
     assert response.provider_id == "mock"
     assert response.provider_kind is ProviderKind.NO_LLM
+
+
+def test_openai_compatible_provider_runs_same_gateway_contract() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        body = http_request.read().decode("utf-8")
+        seen["authorization"] = http_request.headers.get("authorization")
+        seen["body"] = body
+        return httpx.Response(
+            200,
+            json={
+                "model": "controlled-model",
+                "choices": [{"message": {"content": "provider: hello"}}],
+                "usage": {
+                    "prompt_tokens": 2,
+                    "completion_tokens": 2,
+                    "total_tokens": 4,
+                },
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    def client_factory(**kwargs: Any) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=transport, **kwargs)
+
+    gateway = ModelGateway()
+    gateway.register(
+        OpenAICompatibleProvider(
+            provider_id="controlled-http",
+            base_url="https://provider.invalid/v1",
+            kind=ProviderKind.CLOUD,
+            default_model="controlled-model",
+            api_key="runtime-only-test-key",
+            supports_private_data=True,
+            client_factory=client_factory,
+        ),
+        default=True,
+    )
+
+    response = asyncio.run(
+        gateway.complete(
+            request(provider_kind=ProviderKind.CLOUD, privacy=PrivacyClass.PRIVATE)
+        )
+    )
+
+    assert response.text == "provider: hello"
+    assert response.provider_id == "controlled-http"
+    assert response.provider_kind is ProviderKind.CLOUD
+    assert response.usage.total_tokens == 4
+    assert seen["authorization"] == "Bearer runtime-only-test-key"
+    assert "hello" in str(seen["body"])
+
+
+def test_http_provider_failure_maps_to_typed_gateway_error() -> None:
+    transport = httpx.MockTransport(lambda _request: httpx.Response(429, json={"error": "busy"}))
+
+    def client_factory(**kwargs: Any) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=transport, **kwargs)
+
+    gateway = ModelGateway()
+    gateway.register(
+        OpenAICompatibleProvider(
+            provider_id="rate-limited",
+            base_url="https://provider.invalid/v1",
+            kind=ProviderKind.CLOUD,
+            default_model="controlled-model",
+            client_factory=client_factory,
+        ),
+        default=True,
+    )
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        asyncio.run(gateway.complete(request(provider_kind=ProviderKind.CLOUD)))
+
+    assert exc_info.value.code is ModelErrorCode.RATE_LIMITED
+    assert exc_info.value.retryable is True
+
+
+def test_gateway_timeout_is_typed() -> None:
+    class SlowProvider(DeterministicMockProvider):
+        async def complete(self, model_request: ModelRequest):  # type: ignore[no-untyped-def]
+            await asyncio.sleep(0.05)
+            return await super().complete(model_request)
+
+    gateway = ModelGateway()
+    gateway.register(SlowProvider(), default=True)
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        asyncio.run(gateway.complete(request(timeout_seconds=0.001)))
+
+    assert exc_info.value.code is ModelErrorCode.TIMEOUT
+
+
+def test_gateway_cancellation_propagates() -> None:
+    class SlowProvider(DeterministicMockProvider):
+        async def complete(self, model_request: ModelRequest):  # type: ignore[no-untyped-def]
+            await asyncio.sleep(60)
+            return await super().complete(model_request)
+
+    async def scenario() -> None:
+        gateway = ModelGateway()
+        gateway.register(SlowProvider(), default=True)
+        task = asyncio.create_task(gateway.complete(request()))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
 
 
 def test_gateway_requires_explicit_route_with_multiple_providers() -> None:
@@ -134,3 +253,34 @@ def test_tool_timeout_is_normalized() -> None:
 
     assert not result.ok
     assert result.error == "tool timed out"
+
+
+def test_mcp_official_sdk_in_process_discovery_and_call() -> None:
+    server = MCPServer("nika-m4-test")
+
+    @server.tool()
+    async def add(left: int, right: int) -> dict[str, int]:
+        """Add two integers."""
+        return {"sum": left + right}
+
+    adapter = MCPClientAdapter(MCPServerConfig(server_id="test", target=server))
+
+    specs = asyncio.run(adapter.list_tools())
+    assert len(specs) == 1
+    assert specs[0].tool_id == "mcp:test:add"
+    assert specs[0].risk is ToolRisk.EXTERNAL_SIDE_EFFECT
+    assert specs[0].input_schema["type"] == "object"
+
+    result = asyncio.run(
+        adapter.call(
+            ToolCall(
+                call_id="mcp-call-1",
+                tool_id="mcp:test:add",
+                arguments={"left": 2, "right": 3},
+                approved=True,
+            )
+        )
+    )
+
+    assert result.ok
+    assert result.output == {"sum": 5}
