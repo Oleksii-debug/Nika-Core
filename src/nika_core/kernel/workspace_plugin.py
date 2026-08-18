@@ -3,7 +3,6 @@ from __future__ import annotations
 from importlib.metadata import EntryPoint, entry_points
 from typing import Protocol, runtime_checkable
 
-
 WORKSPACE_ENTRYPOINT_GROUP = "nika_core.workspaces"
 
 
