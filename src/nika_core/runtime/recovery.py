@@ -142,7 +142,7 @@ class RuntimeRecoveryService:
                     timeout_seconds=timeout_seconds,
                 )
                 executions.append(RecoveryExecution(candidate=candidate, result=result))
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - isolate one failed startup recovery item
                 self._audit.append(
                     event_type="runtime.recovery_auto_resume_failed",
                     entity_type="task",
