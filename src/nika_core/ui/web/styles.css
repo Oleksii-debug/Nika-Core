@@ -1,0 +1,13 @@
+* { box-sizing: border-box; }
+body { font-family: system-ui, sans-serif; margin: 0; line-height: 1.5; }
+header, nav, main { max-width: 70rem; margin: 0 auto; padding: 1rem; }
+nav { display: flex; flex-wrap: wrap; gap: .5rem; }
+main { display: grid; gap: 1.5rem; }
+section { border: 1px solid currentColor; border-radius: .5rem; padding: 1rem; }
+textarea { width: 100%; font: inherit; }
+button { min-height: 2.75rem; padding: .5rem .75rem; font: inherit; }
+button:focus-visible, textarea:focus-visible, a:focus-visible { outline: .2rem solid currentColor; outline-offset: .2rem; }
+.actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .75rem; }
+.skip-link { position: absolute; left: .5rem; top: -4rem; padding: .5rem; background: Canvas; color: CanvasText; }
+.skip-link:focus { top: .5rem; }
+#activity-log { padding-inline-start: 1.5rem; }
