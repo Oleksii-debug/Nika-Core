@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Awaitable, Callable, Protocol
+from typing import Protocol
 
 from nika_core.kernel.audit import AuditLog
 
