@@ -5,6 +5,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
+Add-Type -AssemblyName System.Windows.Forms
 
 $requiredNames = @('Nika Core', 'Що має зробити Nika?', 'Створити завдання', 'Клавіатура')
 $process = Start-Process -FilePath $ExePath -PassThru
@@ -49,7 +50,25 @@ try {
         throw "WebView2 UIA descendants were not discoverable. Missing: $($missing -join ', '). Seen: $preview"
     }
 
-    Write-Host 'WebView2 UI Automation descendants discovered successfully.'
+    function Wait-FocusName([string]$Expected) {
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            Start-Sleep -Milliseconds 250
+            $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+            if ($null -ne $focused -and $focused.Current.Name -eq $Expected) { return }
+        }
+        $actual = [System.Windows.Automation.AutomationElement]::FocusedElement
+        $actualName = if ($null -eq $actual) { '<none>' } else { $actual.Current.Name }
+        throw "Expected keyboard focus '$Expected', got '$actualName'."
+    }
+
+    $window.SetFocus()
+    Start-Sleep -Milliseconds 300
+    [System.Windows.Forms.SendKeys]::SendWait('%1')
+    Wait-FocusName 'Завдання'
+    [System.Windows.Forms.SendKeys]::SendWait('^+p')
+    Wait-FocusName 'Що має зробити Nika?'
+
+    Write-Host 'WebView2 UI Automation descendants and keyboard/focus flow verified successfully.'
     Write-Host (($names | Select-Object -Unique | Select-Object -First 40) -join ' | ')
 }
 finally {
