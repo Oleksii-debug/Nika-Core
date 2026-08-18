@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Protocol, runtime_checkable
 
 from nika_core.tools import ToolRisk
@@ -45,9 +45,17 @@ SOFTWARE_FACTORY_MANIFEST = WorkspaceManifest(
 
 
 def _normalize_relative_path(value: str) -> PurePosixPath:
-    normalized = PurePosixPath(value.replace("\\", "/"))
-    if normalized.is_absolute() or ".." in normalized.parts:
-        raise ValueError("path must stay inside the repository")
+    stripped = value.strip()
+    windows_path = PureWindowsPath(stripped)
+    normalized = PurePosixPath(stripped.replace("\\", "/"))
+    if (
+        not stripped
+        or normalized == PurePosixPath(".")
+        or windows_path.drive
+        or normalized.is_absolute()
+        or ".." in normalized.parts
+    ):
+        raise ValueError("path must stay inside a bounded repository-relative scope")
     return normalized
 
 
