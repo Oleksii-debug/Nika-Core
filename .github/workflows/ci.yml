@@ -32,3 +32,35 @@ jobs:
         run: python -m pip install -e ".[dev,agent]"
       - name: Verify source, dependencies and tests
         run: python scripts/verify.py
+
+  m4-live-ollama-proof:
+    name: M4 live Ollama provider proof
+    if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'dev/m4-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install Nika M4 dependencies
+        run: python -m pip install -e ".[agent]"
+      - name: Install Ollama
+        run: curl -fsSL https://ollama.com/install.sh | sh
+      - name: Start Ollama and pull compact test model
+        run: |
+          ollama serve > /tmp/ollama.log 2>&1 &
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:11434/api/version > /dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              cat /tmp/ollama.log
+              exit 1
+            fi
+            sleep 1
+          done
+          ollama pull smollm2:135m-instruct-q5_K_M
+      - name: Run Nika ModelGateway against live Ollama
+        run: python scripts/m4_ollama_proof.py
