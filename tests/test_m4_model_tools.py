@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable
 from typing import Any
 
 import httpx
@@ -14,6 +13,7 @@ from nika_core.model_gateway.contracts import (
     ModelGatewayError,
     ModelMessage,
     ModelRequest,
+    ModelResponse,
     PrivacyClass,
     ProviderCapabilities,
     ProviderKind,
@@ -101,7 +101,9 @@ def test_openai_compatible_provider_runs_same_gateway_contract() -> None:
 
 
 def test_http_provider_failure_maps_to_typed_gateway_error() -> None:
-    transport = httpx.MockTransport(lambda _request: httpx.Response(429, json={"error": "busy"}))
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(429, json={"error": "busy"})
+    )
 
     def client_factory(**kwargs: Any) -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=transport, **kwargs)
@@ -127,7 +129,7 @@ def test_http_provider_failure_maps_to_typed_gateway_error() -> None:
 
 def test_gateway_timeout_is_typed() -> None:
     class SlowProvider(DeterministicMockProvider):
-        async def complete(self, model_request: ModelRequest):  # type: ignore[no-untyped-def]
+        async def complete(self, model_request: ModelRequest) -> ModelResponse:
             await asyncio.sleep(0.05)
             return await super().complete(model_request)
 
@@ -142,7 +144,7 @@ def test_gateway_timeout_is_typed() -> None:
 
 def test_gateway_cancellation_propagates() -> None:
     class SlowProvider(DeterministicMockProvider):
-        async def complete(self, model_request: ModelRequest):  # type: ignore[no-untyped-def]
+        async def complete(self, model_request: ModelRequest) -> ModelResponse:
             await asyncio.sleep(60)
             return await super().complete(model_request)
 
