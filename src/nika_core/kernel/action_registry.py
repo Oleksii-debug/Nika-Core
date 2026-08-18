@@ -7,6 +7,19 @@ from datetime import UTC, datetime
 from nika_core.data.sqlite import SQLiteStore
 
 
+_MODIFIER_ALIASES = {
+    "alt": "alt",
+    "ctrl": "ctrl",
+    "control": "ctrl",
+    "shift": "shift",
+    "win": "win",
+    "windows": "win",
+    "meta": "win",
+    "super": "win",
+}
+_MODIFIER_ORDER = {"ctrl": 0, "alt": 1, "shift": 2, "win": 3}
+
+
 @dataclass(frozen=True, slots=True)
 class ActionDefinition:
     action_id: str
@@ -23,6 +36,8 @@ class ActionDefinition:
             raise ValueError("action metadata must not be empty")
         if self.default_binding is None and not self.may_be_unbound:
             raise ValueError("required action must have a default binding")
+        if self.default_binding is not None:
+            _binding_key(self.default_binding)
 
 
 class ActionRegistry:
@@ -79,6 +94,8 @@ class Keymap:
         cleaned = _clean_binding(binding)
         if cleaned is None and not action.may_be_unbound:
             raise ValueError(f"action {action_id} may not be unbound")
+        if cleaned is not None:
+            _binding_key(cleaned)
         conflict = self.conflict(action_id, cleaned)
         if conflict is not None:
             raise ValueError(f"shortcut conflict with {conflict}")
@@ -129,6 +146,8 @@ class Keymap:
             cleaned = _clean_binding(binding)
             if cleaned is None and not action.may_be_unbound:
                 raise ValueError(f"action {action_id} may not be unbound")
+            if cleaned is not None:
+                _binding_key(cleaned)
             proposed[action_id] = cleaned
         seen: dict[tuple[str, str], str] = {}
         for action in self._actions.all():
@@ -161,4 +180,21 @@ def _binding_key(binding: str) -> str:
     cleaned = _clean_binding(binding)
     if cleaned is None:
         raise ValueError("binding must not be empty")
-    return cleaned.casefold()
+
+    modifiers: set[str] = set()
+    primary_keys: list[str] = []
+    for raw_part in cleaned.split("+"):
+        part = raw_part.casefold()
+        modifier = _MODIFIER_ALIASES.get(part)
+        if modifier is None:
+            primary_keys.append(part)
+            continue
+        if modifier in modifiers:
+            raise ValueError(f"duplicate shortcut modifier: {raw_part}")
+        modifiers.add(modifier)
+
+    if len(primary_keys) != 1:
+        raise ValueError("shortcut must contain exactly one primary key")
+
+    ordered_modifiers = sorted(modifiers, key=_MODIFIER_ORDER.__getitem__)
+    return "+".join((*ordered_modifiers, primary_keys[0]))
