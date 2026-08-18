@@ -131,35 +131,57 @@ class RuntimeSessionStore:
         thread_id: str,
         result: RuntimeResult,
     ) -> None:
+        with self._store.connection() as conn:
+            self.record_result_with_connection(
+                conn,
+                task_id=task_id,
+                runtime_id=runtime_id,
+                thread_id=thread_id,
+                result=result,
+            )
+
+    def record_result_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        task_id: str,
+        runtime_id: str,
+        thread_id: str,
+        result: RuntimeResult,
+    ) -> None:
+        """Persist the resumable result cursor in a caller-owned transaction."""
         if result.outcome not in _RESUMABLE_OUTCOMES or not result.resume_token:
-            self.delete(task_id)
+            self.delete_with_connection(conn, task_id)
             return
 
         now = datetime.now(UTC).isoformat()
-        with self._store.connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO runtime_sessions(
-                    task_id, runtime_id, thread_id, resume_token, outcome, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(task_id) DO UPDATE SET
-                    runtime_id = excluded.runtime_id,
-                    thread_id = excluded.thread_id,
-                    resume_token = excluded.resume_token,
-                    outcome = excluded.outcome,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    task_id,
-                    runtime_id,
-                    thread_id,
-                    result.resume_token,
-                    result.outcome.value,
-                    now,
-                ),
+        conn.execute(
+            """
+            INSERT INTO runtime_sessions(
+                task_id, runtime_id, thread_id, resume_token, outcome, updated_at
             )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(task_id) DO UPDATE SET
+                runtime_id = excluded.runtime_id,
+                thread_id = excluded.thread_id,
+                resume_token = excluded.resume_token,
+                outcome = excluded.outcome,
+                updated_at = excluded.updated_at
+            """,
+            (
+                task_id,
+                runtime_id,
+                thread_id,
+                result.resume_token,
+                result.outcome.value,
+                now,
+            ),
+        )
 
     def delete(self, task_id: str) -> None:
         with self._store.connection() as conn:
-            conn.execute("DELETE FROM runtime_sessions WHERE task_id = ?", (task_id,))
+            self.delete_with_connection(conn, task_id)
+
+    def delete_with_connection(self, conn: sqlite3.Connection, task_id: str) -> None:
+        """Delete a recovery cursor inside a caller-owned transaction."""
+        conn.execute("DELETE FROM runtime_sessions WHERE task_id = ?", (task_id,))
