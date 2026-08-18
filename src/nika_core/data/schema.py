@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -65,5 +65,30 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "CREATE INDEX IF NOT EXISTS idx_agents_latest ON agents(agent_id, version DESC)",
         "CREATE INDEX IF NOT EXISTS idx_workspaces_latest ON workspaces(workspace_id, version DESC)",
         "CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_events(entity_type, entity_id, event_id)",
+    ),
+    3: (
+        """CREATE TABLE IF NOT EXISTS runtime_sessions (
+            task_id TEXT PRIMARY KEY,
+            runtime_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            resume_token TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(task_id) REFERENCES tasks(task_id),
+            UNIQUE(runtime_id, thread_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_runtime_sessions_outcome ON runtime_sessions(outcome)",
+        """CREATE TABLE IF NOT EXISTS idempotency_records (
+            operation_key TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            operation_type TEXT NOT NULL,
+            input_fingerprint TEXT NOT NULL,
+            status TEXT NOT NULL,
+            result_json TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(task_id) REFERENCES tasks(task_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_idempotency_task ON idempotency_records(task_id, status)",
     ),
 }
