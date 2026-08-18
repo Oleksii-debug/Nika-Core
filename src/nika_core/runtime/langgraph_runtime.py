@@ -191,7 +191,7 @@ class LangGraphRuntime:
             )
         except asyncio.CancelledError:
             return RuntimeResult(outcome=RuntimeOutcome.CANCELLED)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - framework boundary normalizes unknown failures
             return RuntimeResult(
                 outcome=RuntimeOutcome.FAILED,
                 error=str(exc),
