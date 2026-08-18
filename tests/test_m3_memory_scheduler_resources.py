@@ -111,6 +111,7 @@ def test_expired_memory_is_not_returned_and_can_be_purged(tmp_path: Path) -> Non
 
 def test_memory_rejects_naive_expiry_datetime(tmp_path: Path) -> None:
     memory = MemoryService(_store(tmp_path))
+    naive_expiry = datetime(2030, 1, 1, tzinfo=UTC).replace(tzinfo=None)
     with pytest.raises(ValueError):
         memory.put(
             scope=MemoryScope.TASK,
@@ -118,7 +119,7 @@ def test_memory_rejects_naive_expiry_datetime(tmp_path: Path) -> None:
             namespace="scratch",
             key="bad",
             value=True,
-            expires_at=datetime(2030, 1, 1),
+            expires_at=naive_expiry,
         )
 
 
