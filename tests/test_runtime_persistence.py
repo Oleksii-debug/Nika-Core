@@ -108,6 +108,27 @@ def test_saved_approval_requires_explicit_authorization_api(tmp_path) -> None:
     assert "runtime.saved_approval_resumed" in event_types
 
 
+def test_saved_approval_rejects_none_but_accepts_explicit_deny(tmp_path) -> None:
+    store, queue, task_id = _ready(tmp_path)
+    runtime = _RestartApprovalRuntime()
+    coordinator = TaskRuntimeCoordinator(queue, AuditLog(store))
+    asyncio.run(coordinator.start(runtime, RuntimeRequest(task_id, "thread-decision")))
+
+    with pytest.raises(ValueError, match="explicit"):
+        asyncio.run(
+            coordinator.resume_saved_approval(runtime, task_id=task_id, approval_value=None)
+        )
+    assert _state(store, task_id) == TaskState.WAITING_APPROVAL
+    assert coordinator.sessions.get(task_id) is not None
+
+    completed = asyncio.run(
+        coordinator.resume_saved_approval(runtime, task_id=task_id, approval_value=False)
+    )
+    assert completed.outcome == RuntimeOutcome.COMPLETED
+    assert completed.output == {"approved": False}
+    assert _state(store, task_id) == TaskState.COMPLETED
+
+
 def test_saved_approval_api_rejects_non_approval_session(tmp_path) -> None:
     store, queue, task_id = _ready(tmp_path)
     runtime = _PausedRuntime()
