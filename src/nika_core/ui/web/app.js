@@ -8,6 +8,7 @@
   const commandInput = document.getElementById("command-input");
   let actions = [];
   let actionsReady = false;
+  let bridgeInitializationStarted = false;
 
   const reservedEditingKeys = new Set(["a", "c", "x", "v", "z", "y"]);
 
@@ -130,6 +131,24 @@
     return true;
   }
 
+  async function initializeBridge() {
+    if (bridgeInitializationStarted) return;
+    bridgeInitializationStarted = true;
+    announce("Завантаження команд Nika Core…");
+    try {
+      const ready = await refreshKeymap();
+      if (!ready) throw new Error("Action Registry bridge unavailable");
+      document.documentElement.dataset.nikaReady = "true";
+      announce("Nika Core готова до роботи.");
+    } catch (error) {
+      actionsReady = false;
+      bridgeInitializationStarted = false;
+      document.documentElement.dataset.nikaReady = "false";
+      announce("Не вдалося завантажити команди Nika Core.", true);
+      appendLog(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   document.getElementById("keymap-export").addEventListener("click", async () => {
     const response = await globalThis.pywebview.api.export_keymap();
     announce(response.message, !response.ok);
@@ -165,18 +184,12 @@
     void dispatch(action.action_id, event.target instanceof HTMLElement ? event.target : null);
   });
 
-  document.addEventListener("pywebviewready", async () => {
-    announce("Завантаження команд Nika Core…");
-    try {
-      const ready = await refreshKeymap();
-      if (!ready) throw new Error("Action Registry bridge unavailable");
-      document.documentElement.dataset.nikaReady = "true";
-      announce("Nika Core готова до роботи.");
-    } catch (error) {
-      actionsReady = false;
-      document.documentElement.dataset.nikaReady = "false";
-      announce("Не вдалося завантажити команди Nika Core.", true);
-      appendLog(error instanceof Error ? error.message : String(error));
-    }
+  // pywebview documents this event on window. The immediate check makes startup
+  // idempotent if the bridge was injected before this bundled script executed.
+  window.addEventListener("pywebviewready", () => {
+    void initializeBridge();
   });
+  if (globalThis.pywebview?.api) {
+    void initializeBridge();
+  }
 })();
