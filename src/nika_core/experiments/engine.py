@@ -109,7 +109,6 @@ class ExperimentEngine:
 
     def _validate_coverage(self, snapshot: ExperimentSnapshot) -> None:
         required_replays = {item.replay_id for item in snapshot.definition.replays}
-        required_count = snapshot.definition.policy.minimum_replays
         candidate_ids = (
             snapshot.definition.champion.candidate_id,
             *(item.candidate_id for item in snapshot.definition.challengers),
@@ -125,13 +124,11 @@ class ExperimentEngine:
                     for item in snapshot.observations
                     if item.candidate_id == candidate_id and item.metric == metric
                 }
-                if len(covered) < required_count:
+                if covered != required_replays:
                     raise ValueError(
-                        f"insufficient replay coverage for {candidate_id}/{metric}: "
-                        f"{len(covered)} < {required_count}"
+                        f"incomplete replay coverage for {candidate_id}/{metric}: "
+                        f"expected {len(required_replays)}, got {len(covered)}"
                     )
-                if not covered.issubset(required_replays):
-                    raise ValueError("observation coverage escaped the declared replay set")
 
     def _guardrails_pass(
         self, snapshot: ExperimentSnapshot, champion_id: str, candidate_id: str
