@@ -142,9 +142,7 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
             activated_at TEXT,
             PRIMARY KEY(agent_id, version)
         )""",
-        "CREATE INDEX IF NOT EXISTS idx_agent_definitions_latest "
-        "ON agent_definitions(agent_id, version DESC)",
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_definitions_one_active "
-        "ON agent_definitions(agent_id) WHERE status = 'active'",
+        "CREATE INDEX IF NOT EXISTS idx_agent_definitions_latest ON agent_definitions(agent_id, version DESC)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_definitions_one_active ON agent_definitions(agent_id) WHERE status = 'active'",
     ),
 }
