@@ -8,10 +8,10 @@ Progress is acceptance-gate weighted, not commit-count based. Regressions may re
 | M0 Research, reuse audit, governance & bootstrap | 6% | final architecture, adoption map, repo rules, status, CI | GREEN / INTEGRATED |
 | M1 Kernel foundation | 10% | typed config, persisted registries, SQLite migrations, task state, audit/events, workspace/plugin contract, Action Registry/keymap | GREEN / INTEGRATED |
 | M2 Durable agent runtime | 11% | AgentRuntimePort, runtime selection, run loop, cancellation, retries, approvals, durable checkpoint/resume | GREEN / INTEGRATED |
-| M3 Memory, scheduler & resource control | 9% | memory namespaces, SchedulerPort/APScheduler adapter, resource budgets, queue fairness | PARALLEL LANE / NO CREDIT YET |
-| M4 Model Gateway, tools & MCP | 8% | mock/no-LLM, Ollama, cloud/OpenAI-compatible, provider adapter, MCP tool layer | PARALLEL LANE / NO CREDIT YET |
-| M5 Accessible web-style Windows GUI | 11% | local frontend + pywebview/WebView2 shell, keyboard/NVDA semantics, shortcut editor, logs/tasks/agents/workspaces | PARALLEL LANE / NO CREDIT YET |
-| M6 Agent Builder & permissions | 8% | natural-language draft -> schema -> permission review -> versioned activation | PARALLEL LANE / NO CREDIT YET |
+| M3 Memory, scheduler & resource control | 9% | memory namespaces, SchedulerPort/APScheduler adapter, resource budgets, queue fairness | GREEN / INTEGRATED |
+| M4 Model Gateway, tools & MCP | 8% | mock/no-LLM, Ollama, cloud/OpenAI-compatible, provider adapter, MCP tool layer | GREEN / INTEGRATED |
+| M5 Accessible web-style Windows GUI | 11% | local frontend + pywebview/WebView2 shell, keyboard/NVDA semantics, shortcut editor, logs/tasks/agents/workspaces | GREEN / INTEGRATED |
+| M6 Agent Builder & permissions | 8% | natural-language draft -> schema -> permission review -> versioned activation | NEXT WEIGHTED MILESTONE / NO CREDIT YET |
 | M7 Multi-agent laboratory | 9% | supervisor/subagents, teams, typed handoffs, parallel fan-out, quotas, evaluator | PARALLEL LANE / NO CREDIT YET |
 | M8 Self-learning & experiment engine | 10% | metrics, replay, prompt/strategy versions, champion/challenger, rollback, optional DSPy | PARALLEL LANE / NO CREDIT YET |
 | M9 Plugin SDK & real workspaces | 8% | stable plugin/workspace API and real independent workspaces | PARALLEL LANE / NO CREDIT YET |
@@ -22,7 +22,7 @@ Progress is acceptance-gate weighted, not commit-count based. Regressions may re
 Total: 100%.
 
 ## Current proven progress
-M0 + M1 + M2 are GREEN / INTEGRATED. Overall proven final A–Z product progress is therefore **27.0%**. M3–M12 can contain prepared or implemented work, but they receive no weighted credit until their own acceptance evidence is green and integrated.
+M0 + M1 + M2 + M3 + M4 + M5 are GREEN / INTEGRATED. Overall proven final A–Z product progress is therefore **55.0%**. M6–M12 can contain prepared or implemented work, but they receive no weighted credit until their own acceptance evidence is green and integrated.
 
 Canonical detailed truth is `state/PROJECT_STATUS.md`; parallel lane ownership/evidence states are in `state/PARALLEL_EXECUTION_BOARD.md`.
 
@@ -35,11 +35,20 @@ Typed settings; ordered backward migrations; persisted Agent/Workspace registrie
 ## M2 integrated slice
 LangGraph is the implemented primary runtime behind framework-neutral `AgentRuntimePort`; async SQLite durability, Nika task-to-runtime recovery mapping, explicit approval, cancellation, bounded retry, idempotency/reconciliation and crash-consistency proofs are integrated. Microsoft Agent Framework remains a secondary migration/interop candidate rather than a simultaneous production kernel.
 
+## M3 integrated slice
+Durable scoped memory, explicit user-memory consent, expiration/purge, APScheduler-backed persistent schedules, restart/pause/resume semantics, resource budgets, psutil observation and FIFO resource fairness are integrated.
+
+## M4 integrated slice
+Provider-neutral Model Gateway, no-LLM/OpenAI-compatible/Ollama adapters, privacy-aware routing, typed provider failures, guarded standardized tools, official MCP SDK v2 adapter and a live Ollama same-interface proof are integrated.
+
+## M5 integrated slice
+Native semantic local web UI hosted by pywebview + explicit EdgeChromium/WebView2, narrow validated backend bridge, centralized configurable Action Registry/Keymap, live textual status and deterministic focus are integrated. Exact-head Core CI run 137 passed Ubuntu, Windows and a packaged PyInstaller one-dir WebView2 UI Automation descendant + keyboard/focus proof. This diagnostic package is M5 evidence, not M11 release packaging. HUMAN_TESTED and NVDA_VERIFIED remain false.
+
 ## Parallel-first execution model
-There is no longer a source-development critical path that says “finish M3 before touching M4”. M3–M12 may advance concurrently when ownership and contracts allow it.
+There is no source-development critical path that says later independent capabilities cannot be prepared while the current weighted milestone is being accepted. M6–M12 may advance concurrently when ownership and contracts allow it.
 
 Rules:
-1. Branch independent lanes from the latest green `main`.
+1. Branch independent lanes from the latest green `main` unless they genuinely depend on another unmerged lane.
 2. Prefer lane-owned modules/adapters and stable contracts to shared-file edits.
 3. Upstream dependency constraints govern merge order, not preparation/implementation against ports/mocks/fixtures.
 4. A blocked lane does not block unrelated lanes.
