@@ -58,7 +58,7 @@ def default_windows_plan(project_root: Path) -> WindowsBuildPlan:
     root = project_root.resolve()
     build_root = root / "build" / "m11"
     return WindowsBuildPlan(
-        entrypoint=root / "src" / "nika_core" / "__main__.py",
+        entrypoint=root / "scripts" / "nika_windows.py",
         web_assets=root / "src" / "nika_core" / "ui" / "web",
         dist_dir=root / "dist",
         work_dir=build_root / "work",
