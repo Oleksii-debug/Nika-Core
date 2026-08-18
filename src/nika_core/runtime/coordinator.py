@@ -16,6 +16,7 @@ from nika_core.runtime.contracts import (
     RuntimeResumeRequest,
 )
 from nika_core.runtime.retry import RetryPolicy
+from nika_core.runtime.session_store import RuntimeSessionStore
 
 
 _OUTCOME_TO_STATE: dict[RuntimeOutcome, TaskState] = {
@@ -26,13 +27,31 @@ _OUTCOME_TO_STATE: dict[RuntimeOutcome, TaskState] = {
     RuntimeOutcome.FAILED: TaskState.FAILED,
 }
 
+_RESUMABLE_OUTCOMES = frozenset(
+    {
+        RuntimeOutcome.WAITING_APPROVAL,
+        RuntimeOutcome.PAUSED,
+        RuntimeOutcome.FAILED,
+    }
+)
+
 
 class TaskRuntimeCoordinator:
     """Map framework-neutral runtime results into Nika task state and audit history."""
 
-    def __init__(self, queue: TaskQueue, audit: AuditLog) -> None:
+    def __init__(
+        self,
+        queue: TaskQueue,
+        audit: AuditLog,
+        session_store: RuntimeSessionStore | None = None,
+    ) -> None:
         self._queue = queue
         self._audit = audit
+        self._sessions = session_store or RuntimeSessionStore(queue.store)
+
+    @property
+    def sessions(self) -> RuntimeSessionStore:
+        return self._sessions
 
     async def start(
         self,
@@ -118,6 +137,63 @@ class TaskRuntimeCoordinator:
         result = await self._safe_resume(runtime, request)
         return self._finish(runtime.runtime_id, request.task_id, request.thread_id, result)
 
+    async def resume_saved(
+        self,
+        runtime: AgentRuntimePort,
+        *,
+        task_id: str,
+        value=None,
+        max_steps: int = 64,
+        timeout_seconds: float | None = None,
+    ) -> RuntimeResult:
+        """Resume a durable task after process recreation using only its Nika task ID."""
+        record = self._sessions.get(task_id)
+        if record is None:
+            raise KeyError(f"No resumable runtime session for task: {task_id}")
+        if record.runtime_id != runtime.runtime_id:
+            raise ValueError(
+                f"Task {task_id} belongs to runtime {record.runtime_id}, not {runtime.runtime_id}"
+            )
+
+        if record.outcome == RuntimeOutcome.WAITING_APPROVAL:
+            mode = RuntimeResumeMode.APPROVAL
+            self._queue.transition(task_id, TaskState.RUNNING)
+        elif record.outcome == RuntimeOutcome.PAUSED:
+            mode = RuntimeResumeMode.CONTINUE
+            self._queue.transition(task_id, TaskState.READY)
+            self._queue.transition(task_id, TaskState.RUNNING)
+        elif record.outcome == RuntimeOutcome.FAILED:
+            mode = RuntimeResumeMode.CONTINUE
+            self._queue.transition(task_id, TaskState.READY)
+            self._queue.transition(task_id, TaskState.RUNNING)
+        else:
+            raise ValueError(f"Stored runtime outcome is not resumable: {record.outcome}")
+
+        self._audit.append(
+            event_type="runtime.saved_resume_started",
+            entity_type="task",
+            entity_id=task_id,
+            payload={
+                "runtime_id": runtime.runtime_id,
+                "thread_id": record.thread_id,
+                "stored_outcome": record.outcome.value,
+                "mode": mode.value,
+            },
+        )
+        result = await self._safe_resume(
+            runtime,
+            RuntimeResumeRequest(
+                task_id=task_id,
+                thread_id=record.thread_id,
+                resume_token=record.resume_token,
+                mode=mode,
+                value=value,
+                max_steps=max_steps,
+                timeout_seconds=timeout_seconds,
+            ),
+        )
+        return self._finish(runtime.runtime_id, task_id, record.thread_id, result)
+
     async def cancel(
         self,
         runtime: AgentRuntimePort,
@@ -176,7 +252,19 @@ class TaskRuntimeCoordinator:
         thread_id: str,
         result: RuntimeResult,
     ) -> RuntimeResult:
+        if result.outcome in _RESUMABLE_OUTCOMES and result.resume_token:
+            self._sessions.record_result(
+                task_id=task_id,
+                runtime_id=runtime_id,
+                thread_id=thread_id,
+                result=result,
+            )
+
         self._queue.transition(task_id, _OUTCOME_TO_STATE[result.outcome])
+
+        if result.outcome not in _RESUMABLE_OUTCOMES or not result.resume_token:
+            self._sessions.delete(task_id)
+
         for event in result.events:
             self._append_runtime_event(task_id, event)
         self._audit.append(
