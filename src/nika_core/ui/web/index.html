@@ -17,6 +17,7 @@
     <button type="button" data-action-id="nav.tasks" data-focus-target="tasks-heading">Завдання</button>
     <button type="button" data-action-id="nav.agents" data-focus-target="agents-heading">Агенти</button>
     <button type="button" data-action-id="nav.logs" data-focus-target="logs-heading">Журнал</button>
+    <button type="button" data-action-id="nav.workspaces" data-focus-target="workspaces-heading">Робочі простори</button>
     <a href="#keyboard-heading">Клавіатура</a>
   </nav>
 
@@ -43,6 +44,11 @@
       <p id="agents-empty">Список агентів буде доступний через backend adapter.</p>
     </section>
 
+    <section aria-labelledby="workspaces-heading">
+      <h2 id="workspaces-heading" tabindex="-1">Робочі простори</h2>
+      <p id="workspaces-empty">Список робочих просторів буде доступний через backend adapter.</p>
+    </section>
+
     <section aria-labelledby="logs-heading">
       <h2 id="logs-heading" tabindex="-1">Журнал активності</h2>
       <ol id="activity-log" aria-label="Журнал активності"></ol>
@@ -50,7 +56,7 @@
 
     <section aria-labelledby="keyboard-heading">
       <h2 id="keyboard-heading" tabindex="-1">Клавіатура</h2>
-      <p>Комбінації Nika можна змінювати. Стандартні клавіші редагування в полях вводу не перехоплюються.</p>
+      <p>Комбінації Nika можна змінювати, очищати, відновлювати, експортувати та імпортувати. Стандартні клавіші редагування в полях вводу не перехоплюються.</p>
       <table>
         <caption>Комбінації клавіш Nika Core</caption>
         <thead>
@@ -58,6 +64,14 @@
         </thead>
         <tbody id="keymap-body"></tbody>
       </table>
+      <h3 id="keymap-transfer-heading">Експорт та імпорт</h3>
+      <label for="keymap-json">JSON карти клавіш</label>
+      <textarea id="keymap-json" rows="8" aria-describedby="keymap-transfer-help"></textarea>
+      <p id="keymap-transfer-help">Експорт заповнює поле поточною картою. Імпорт перевіряє формат, відомі дії та конфлікти перед збереженням.</p>
+      <div class="actions">
+        <button type="button" id="keymap-export">Експортувати</button>
+        <button type="button" id="keymap-import">Імпортувати</button>
+      </div>
     </section>
   </main>
 
