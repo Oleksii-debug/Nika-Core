@@ -13,9 +13,11 @@ Canonical rule: before implementing a new subsystem, inspect current official do
 - ADAPT — LangGraph as the primary durable orchestration runtime behind Nika `AgentRuntimePort`.
 - REUSE — `langgraph-checkpoint-sqlite` with `AsyncSqliteSaver` for the first local durable checkpoint adapter/proof because Nika's runtime contract invokes graphs asynchronously.
 - REUSE — `aiosqlite` as the SQLite driver required by the official LangGraph async SQLite saver.
+- REUSE — Python `asyncio` task cancellation and `wait_for()` for bounded in-process cancellation/deadlines at the Nika adapter boundary; no extra retry/timeout framework is needed.
 - SECURITY ADAPTATION — force strict MsgPack deserialization at the Nika checkpointer construction boundary. This follows current upstream security guidance and is not user-disableable.
 - KEEP AS SECONDARY CANDIDATE — Microsoft Agent Framework. Its Python core/workflow surface is strong, but the current local SQLite path is less direct for Nika's first desktop durability proof.
 - CUSTOM (thin) — Nika runtime contracts, normalized events/results, capability registry, task/audit coordinator and selection boundary. These prevent any framework type from becoming a Nika domain dependency.
+- CUSTOM (thin) — Nika `RetryPolicy`. Retry decisions encode Nika side-effect/idempotency safety and audit semantics, so they must remain framework-neutral. Retries are disabled by default, opt into exact typed failure classes, and require a durable resume token unless an explicit caller accepts fresh replay risk.
 
 The dated comparison and executable proof design are in `docs/RUNTIME_SELECTION.md`. Do not run several orchestration kernels in production simultaneously without measured benefit. Re-run the selection gate if upstream stability, persistence or provider support materially changes.
 
