@@ -17,9 +17,9 @@ Repository visibility observed this cycle: PUBLIC.
 - M8 self-learning & experiment engine: GREEN / INTEGRATED, 10% / 10%.
 - M9 Plugin SDK & real workspaces: GREEN / INTEGRATED, 8% / 8%.
 - M10 security/sandbox/reliability: GREEN / INTEGRATED, 5% / 5%.
-- M11 Windows packaging/distribution: IMPLEMENTED candidate / NOT GREEN / NOT INTEGRATED, 0% / 3%.
-- M12 full-system QA/NVDA/release: IMPLEMENTED foundation only / NOT GREEN / NOT INTEGRATED, 0% / 2%.
-- Overall proven final A–Z product progress: **95.0%**.
+- M11 Windows packaging/distribution: GREEN / INTEGRATED / PACKAGED candidate evidence, 3% / 3%.
+- M12 full-system QA/NVDA/release: IMPLEMENTED foundation only / HUMAN GATE OPEN, 0% / 2%.
+- Overall proven final A–Z product progress: **98.0%**.
 
 ## Proven milestone evidence
 - M1 exact green head `67df93c355e813dfc297bd1111df40d3c4ad6175`; Core CI 74; merged as `b40ee58ce9c585efe7dad8ebfa23490e842c753a`.
@@ -31,43 +31,42 @@ Repository visibility observed this cycle: PUBLIC.
 - M7 exact green head `4feb976faa97949bacc321bcbce792d01359a58c`; Core CI 150 Ubuntu+Windows; PR #17 merged as `5a01692c1372375f040cd38558e33204b082d5a5`.
 - M8 exact green head `d8f14ac097f2eb664b7f893543db359fb6245e6c`; Core CI 159 Ubuntu+Windows; PR #19 merged as `a8fd7b6c094489cebb79a4221e4124b5cfbad8f6`.
 - M9 foundation exact green head `ef4bafc02d4517b3718f07e5f61b7e4e22072c25`; Core CI 188 SUCCESS; PR #21 merged as `e8967b97ec9772cb2af0b3b781468553708d4015`.
-- M9 real semantic adapter exact green head `680a8a15dfb5a30a7c6eaba3860817c1cbda7ac5`; Core CI 193 SUCCESS on Ubuntu+Windows plus live Playwright ARIA snapshot and real Windows UIA proof; PR #24 merged as `e6af748fb655fda2719be93258b6c2a427287994`.
-- M10 exact green head `17826cc041caeaa1fe03f8dbe4ce5e50c7aecad5`; Core CI 167 SUCCESS on Ubuntu+Windows; PR #22 merged as `976cb9914966a67763742a28c229730417ee63c8` and its security policy remains present in current main.
+- M9 semantic adapter exact green head `680a8a15dfb5a30a7c6eaba3860817c1cbda7ac5`; Core CI 193 SUCCESS on Ubuntu+Windows plus live Playwright and Windows UIA proofs; PR #24 merged as `e6af748fb655fda2719be93258b6c2a427287994`.
+- M10 exact green head `17826cc041caeaa1fe03f8dbe4ce5e50c7aecad5`; Core CI 167 SUCCESS on Ubuntu+Windows; PR #22 merged as `976cb9914966a67763742a28c229730417ee63c8`.
+- M11 exact green head `0f48c3c4889478f967e383d385576e9322e55c9b`; Core CI 196 SUCCESS; focused M11 Windows Release Candidate run 3 SUCCESS; PR #23 merged as `5d86d83f6ce99fa4c9bd6a0eaadef1a6b404283c`.
 
 ## M9 integrated capability
-- Versioned plugin manifests with API compatibility ranges, capability/risk declarations and fail-closed activation checks.
-- Lazy `importlib.metadata` entry-point discovery under the Nika plugin boundary; discovery does not eagerly instantiate adapters.
-- Versioned workspace manifests with required plugin/API/capability contracts, workspace risk ceilings and traversal-safe paths.
-- Software Factory proof workspace with framework-neutral `CodingWorkerPort`, repository-relative allowed paths, network disabled by default, worker-result path/evidence validation and capability-gap evidence. OpenHands remains an adapter candidate rather than a vendored runtime.
-- Accessibility Repair/Assistant proof workspace with semantic-before-vision policy and provenance.
-- Real Playwright browser semantic adapter using `aria_snapshot()` behind the Nika interaction boundary.
-- Real pywinauto/UIA Windows semantic adapter scoped to a target process.
-- Focused live CI proves Chromium accessibility-tree extraction and Windows UI Automation semantic inspection through Nika adapters.
-- Browser/Windows interaction dependencies remain optional components rather than mandatory core bloat.
+- Versioned plugin/workspace compatibility, capability and risk contracts with lazy explicit activation.
+- Software Factory workspace behind `CodingWorkerPort` with repository-relative scope, default network denial and independent result/evidence validation.
+- Accessibility Repair/Assistant semantic-first workflow with provenance and visual/coordinate fallback only after semantic inspection.
+- Real optional Playwright ARIA snapshot adapter and pywinauto/UIA Windows adapter proven in live CI.
 
 ## M10 integrated capability
-- Canonical workspace sandbox policy with traversal-safe writable roots, network host allowlists and executable allowlists.
-- Bounded write/network/process budgets.
-- Immutable exact-action intents and SHA-256 fingerprints for approval evidence.
-- Expiring, timezone-aware, single-use approval evidence; HIGH_IMPACT requires exact-action approval.
-- Fail-closed authorization ordering: tool grant -> sandbox boundary -> approval -> resource reservation.
-- This is defense in depth and does not falsely claim a complete OS-level sandbox.
+- Traversal-safe workspace write boundaries, exact network/process allowlists, bounded execution budgets and exact-action approval fingerprints.
+- Expiring, timezone-aware, single-use approval evidence and fail-closed authorization order.
+- Defense-in-depth policy only; no false claim of a complete OS-level sandbox.
 
-## Current M11 acceptance work
-PR #23 `agent/m11-m12-release-foundation` is open and draft. Previous exact head `2b6d53dfcdd1bcd89541f3cc5c5369f83a248073` passed Core CI 190 but M11 Windows Release Candidate run 1 failed only at the packaged UIA window-discovery step after source regressions and PyInstaller build succeeded. Root cause: the reused M5 proof hard-coded the diagnostic title `Nika Core M5 Proof`, while the real product launcher uses `Nika Core 0.0.2`.
-
-The branch has been repaired without weakening the accessibility gate: `scripts/m5_uia_proof.ps1` now accepts an explicit window title with the original M5 title as the default, and the M11 workflow passes `Nika Core 0.0.2`. Current candidate head: `0f48c3c4889478f967e383d385576e9322e55c9b`. Core CI and the focused M11 Windows Release Candidate workflow are pending on that exact head. No M11 credit until both are green and the candidate is integrated.
+## M11 integrated/package evidence
+- Reused PyInstaller 6.x `onedir`/`windowed` packaging and the integrated pywebview/WebView2 shell.
+- Product Windows launcher uses the central Action Registry/Keymap and bundled local web assets.
+- Deterministic release manifest inventories files with sizes and SHA-256; verification fails on missing/unexpected/modified files and release-root escaping symlinks.
+- Exact-head Core CI 196 passed the normal source/test gate.
+- M11 Windows Release Candidate run 3 passed source regressions, PyInstaller build, packaged WebView2/UIA descendant discovery, keyboard/focus flow, ZIP creation and artifact upload.
+- Produced artifact `NikaCore-0.0.2-windows-x64`, artifact id `9340673484`, size 20,846,262 bytes, workflow artifact digest `sha256:4611ba73baab2ecd37ce07d5596853edd6f4d6fa7559ff58d660d5f5aee5b12e`.
+- The earlier release run failed because the reused M5 UIA script hard-coded the diagnostic window title. The repair parameterized the expected title while preserving the original M5 default and all descendant/keyboard/focus assertions.
 
 ## Truth state
-- M0–M10: IMPLEMENTED / GREEN / INTEGRATED.
-- Overall proven progress: 95.0%.
-- M11: IMPLEMENTED candidate, not GREEN/INTEGRATED/PACKAGED yet.
-- M12: foundation only; final credit requires full-system/recovery/security evidence plus human accessibility acceptance.
-- PACKAGED (release): false until exact M11 artifact workflow is green and integrated.
+- M0–M11: IMPLEMENTED / GREEN / INTEGRATED.
+- Overall proven progress: 98.0%.
+- M11 has automated PACKAGED candidate evidence from the exact integrated source. It is not HUMAN_TESTED.
+- M12 remains the final 2% and requires full-system release/recovery/security evidence plus human accessibility acceptance.
 - HUMAN_TESTED: false.
 - NVDA_VERIFIED: false; automation must never award this state.
 - Repository metadata is PUBLIC despite user wording referring to a private repository.
 - Stale PR #4 and draft PR #11 remain uncredited.
 
+## Current weighted milestone
+M12 — Full-system QA, human NVDA acceptance & v1.0 release.
+
 ## Next LARGE coherent batch
-Finish M11 on PR #23 using the exact repaired candidate: inspect executable Core CI and the Windows release workflow, repair any real defect without weakening WebView2/UIA/keyboard/integrity gates, require ZIP+manifest artifact production, then merge only on green evidence. After M11 integration, run the M12 full-system recovery/security/release matrix and prepare the user-facing human NVDA acceptance protocol. Do not award HUMAN_TESTED or NVDA_VERIFIED automatically.
+Run the largest safe automated M12 pre-human gate from latest green main: full-system import/startup and migration/recovery matrix, security/sandbox regressions, release-manifest integrity, packaged startup/WebView2/UIA/keyboard flow, plugin/workspace discovery, model mock/no-LLM path, scheduler/memory/runtime restart evidence and artifact provenance. Create a clear human NVDA acceptance protocol for the exact candidate, but do not mark HUMAN_TESTED or NVDA_VERIFIED until the user actually performs it. Final 2% remains uncredited until that human gate is satisfied.
