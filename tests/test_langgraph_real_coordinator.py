@@ -104,12 +104,13 @@ def test_real_langgraph_approval_maps_to_persistent_nika_task_and_audit(tmp_path
         event_types = [event.event_type for event in events]
         assert event_types == [
             "runtime.started",
+            "runtime.session_bound",
             "runtime.approval_requested",
             "runtime.finished",
             "runtime.approval_resumed",
             "runtime.finished",
         ]
-        assert events[2].payload["outcome"] == RuntimeOutcome.WAITING_APPROVAL.value
+        assert events[3].payload["outcome"] == RuntimeOutcome.WAITING_APPROVAL.value
         assert events[-1].payload["outcome"] == RuntimeOutcome.COMPLETED.value
 
     asyncio.run(scenario())
