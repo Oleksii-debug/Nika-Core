@@ -12,8 +12,8 @@ Progress is acceptance-gate weighted, not commit-count based. Regressions may re
 | M4 Model Gateway, tools & MCP | 8% | mock/no-LLM, Ollama, cloud/OpenAI-compatible, provider adapter, MCP tool layer | GREEN / INTEGRATED |
 | M5 Accessible web-style Windows GUI | 11% | local frontend + pywebview/WebView2 shell, keyboard/NVDA semantics, shortcut editor, logs/tasks/agents/workspaces | GREEN / INTEGRATED |
 | M6 Agent Builder & permissions | 8% | natural-language draft -> schema -> permission review -> versioned activation | GREEN / INTEGRATED |
-| M7 Multi-agent laboratory | 9% | supervisor/subagents, teams, typed handoffs, parallel fan-out, quotas, evaluator | NEXT WEIGHTED MILESTONE / NO CREDIT YET |
-| M8 Self-learning & experiment engine | 10% | metrics, replay, prompt/strategy versions, champion/challenger, rollback, optional DSPy | PARALLEL LANE / NO CREDIT YET |
+| M7 Multi-agent laboratory | 9% | supervisor/subagents, teams, typed handoffs, parallel fan-out, quotas, evaluator | GREEN / INTEGRATED |
+| M8 Self-learning & experiment engine | 10% | metrics, replay, prompt/strategy versions, champion/challenger, rollback, optional DSPy | NEXT WEIGHTED MILESTONE / NO CREDIT YET |
 | M9 Plugin SDK & real workspaces | 8% | stable plugin/workspace API and real independent workspaces | PARALLEL LANE / NO CREDIT YET |
 | M10 Security, sandbox & reliability | 5% | sandbox, secrets, backup/restore, corruption/crash recovery, threat hardening | PARALLEL LANE / NO CREDIT YET |
 | M11 Windows packaging & distribution | 3% | standalone EXE/ZIP, local assets, manifest/checksums/licenses, no-Python execution | PARALLEL LANE / NO CREDIT YET |
@@ -22,7 +22,7 @@ Progress is acceptance-gate weighted, not commit-count based. Regressions may re
 Total: 100%.
 
 ## Current proven progress
-M0 + M1 + M2 + M3 + M4 + M5 + M6 are GREEN / INTEGRATED. Overall proven final A–Z product progress is therefore **63.0%**. M7–M12 can contain prepared or implemented work, but they receive no weighted credit until their own acceptance evidence is green and integrated.
+M0 + M1 + M2 + M3 + M4 + M5 + M6 + M7 are GREEN / INTEGRATED. Overall proven final A–Z product progress is therefore **72.0%**. M8–M12 can contain prepared or implemented work, but they receive no weighted credit until their own acceptance evidence is green and integrated.
 
 Canonical detailed truth is `state/PROJECT_STATUS.md`; parallel lane ownership/evidence states are in `state/PARALLEL_EXECUTION_BOARD.md`.
 
@@ -47,8 +47,11 @@ Native semantic local web UI hosted by pywebview + explicit EdgeChromium/WebView
 ## M6 integrated slice
 Versioned strict Pydantic agent definitions, Model Gateway natural-language drafting with schema validation, deterministic registry-backed compilation, fail-closed R0–R4 permission review, immutable SQLite v5 definition persistence, persisted high-impact approval requirements and atomic version activation are integrated. Exact-head Core CI run 142 passed Ubuntu and Windows after CI run 141 exposed and the branch repaired migration-lint defects. Agent configuration approval never bypasses the existing execution-time high-impact tool approval boundary.
 
+## M7 integrated slice
+Durable Nika-owned team/member lineage, SQLite v6 persistence, typed handoff/result contracts, bounded fan-out through the existing `AgentRuntimePort`, persisted depth/size/concurrency quotas, fail-closed parent-to-child privilege attenuation, cancellation propagation, restart-safe member identity/resume evidence and deterministic evaluator aggregation are integrated. Exact-head Core CI run 150 passed dependency consistency, Ruff, compile and the complete pytest suite on Ubuntu and Windows after earlier executable runs exposed and the branch repaired lint and stale schema-regression defects. No second production orchestration kernel was added.
+
 ## Parallel-first execution model
-There is no source-development critical path that says later independent capabilities cannot be prepared while the current weighted milestone is being accepted. M7–M12 may advance concurrently when ownership and contracts allow it.
+There is no source-development critical path that says later independent capabilities cannot be prepared while the current weighted milestone is being accepted. M8–M12 may advance concurrently when ownership and contracts allow it.
 
 Rules:
 1. Branch independent lanes from the latest green `main` unless they genuinely depend on another unmerged lane.
