@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -31,14 +32,7 @@ class RuntimeSessionRecord:
 
 
 class RuntimeSessionStore:
-    """Nika-owned pointer from a task to framework-persisted resumable state.
-
-    An ACTIVE record is written before a durable runtime starts. This preserves the
-    task -> runtime/thread pointer if the whole Nika process disappears before the
-    runtime can return a normal RuntimeResult. LangGraph checkpoint bytes remain
-    owned by LangGraph; this table stores only Nika product identity and the opaque
-    token needed to address the durable runtime state again.
-    """
+    """Nika-owned pointer from a task to framework-persisted resumable state."""
 
     def __init__(self, store: SQLiteStore) -> None:
         self._store = store
@@ -88,26 +82,46 @@ class RuntimeSessionStore:
         thread_id: str,
         resume_token: str,
     ) -> None:
-        """Persist the durable routing pointer before runtime execution begins."""
+        """Persist a new durable routing pointer; never overwrite recovery state."""
+        with self._store.connection() as conn:
+            self.record_active_with_connection(
+                conn,
+                task_id=task_id,
+                runtime_id=runtime_id,
+                thread_id=thread_id,
+                resume_token=resume_token,
+            )
+
+    def record_active_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        task_id: str,
+        runtime_id: str,
+        thread_id: str,
+        resume_token: str,
+    ) -> None:
+        """Insert ACTIVE cursor inside a caller-owned transaction.
+
+        A duplicate task/session is a recovery fact, not something a fresh start may replace.
+        SQLite uniqueness therefore deliberately raises instead of using an UPSERT.
+        """
         if not resume_token.strip():
             raise ValueError("active runtime resume token must not be empty")
         now = datetime.now(UTC).isoformat()
-        with self._store.connection() as conn:
+        try:
             conn.execute(
                 """
                 INSERT INTO runtime_sessions(
                     task_id, runtime_id, thread_id, resume_token, outcome, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(task_id) DO UPDATE SET
-                    runtime_id = excluded.runtime_id,
-                    thread_id = excluded.thread_id,
-                    resume_token = excluded.resume_token,
-                    outcome = excluded.outcome,
-                    updated_at = excluded.updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (task_id, runtime_id, thread_id, resume_token, _ACTIVE_MARKER, now),
             )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(
+                f"Task {task_id} already owns a persisted runtime session; resume it explicitly"
+            ) from exc
 
     def record_result(
         self,
