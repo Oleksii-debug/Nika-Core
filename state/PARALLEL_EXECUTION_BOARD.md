@@ -31,20 +31,24 @@ Integrated evidence: migration v4, durable scoped memory, user-consent gate, exp
 ### L2 — M4 Model Gateway, tools and MCP
 Ownership: `src/nika_core/model_gateway`, `src/nika_core/tools`, provider/tool adapter tests.
 Goal: provider-neutral local/cloud/no-LLM gateway, standardized tool calls, cancellation/timeouts/audit, MCP boundary.
-Integration dependency: stable kernel/runtime contracts; M0–M3 are now integrated.
-Current state: PREPARED FOR IMPLEMENTATION / NEXT WEIGHTED MILESTONE.
+Integration dependency: M0–M3 integrated — satisfied.
+Branch: `dev/m4-model-tools-mcp`.
+Current state: IMPLEMENTED / GREEN / INTEGRATED.
+Exact green head: `14368c60fa8c8351e6a8776263d3d90b3e5dfb0e`.
+Acceptance evidence: Core CI run 112 passed shared Ubuntu + Windows verification and the focused live Ollama provider proof; PR #10 merged as `af449172064a696250399ff645ef01eb17ac6c84`.
+Integrated evidence: stable model/provider contracts, deterministic no-LLM + OpenAI-compatible + Ollama adapters, typed timeout/cancellation/provider errors, guarded tool execution, official MCP SDK v2 discovery/call adapter, in-process MCP proof and fail-closed risky-call approval regression.
 
 ### L3 — M5 accessible Windows UI
 Ownership: `ui/`, Windows WebView host adapter, accessibility contracts/tests.
 Goal: keyboard-first Tasks/Agents/Workspaces/Logs/Settings shell with Action Registry/Keymap integration and explicit accessible names/status text.
-Integration dependency: backend APIs may be mocked; real NVDA acceptance remains human-only.
-Current state: PREPARED FOR IMPLEMENTATION.
+Integration dependency: M0–M4 backend foundation is now integrated; UI can bind to stable ports/contracts.
+Current state: PREPARED / NEXT WEIGHTED MILESTONE. Draft PR #11 contains downstream M5–M8 foundation work but is not credited until independently reviewed, proven and integrated.
 
 ### L4 — M6 Agent Builder and permissions
 Ownership: `src/nika_core/builder`, agent-definition compiler/validation, permission/risk models.
 Goal: transform a natural-language agent request into a deterministic versioned definition with tools, schedule, model, budgets and safety boundaries.
-Integration dependency: model/tool execution may be mocked behind ports.
-Current state: PREPARED FOR IMPLEMENTATION.
+Integration dependency: model/tool execution may be mocked behind ports; M4 is now available as integrated provider/tool infrastructure.
+Current state: PREPARED FOR IMPLEMENTATION; draft PR #11 may contain reusable candidate work but has no integration credit.
 
 ### L5 — M7 multi-agent laboratory
 Ownership: `src/nika_core/multi_agent`, supervisor/child contracts, typed messages and quota tests.
@@ -56,7 +60,7 @@ Current state: PREPARED FOR IMPLEMENTATION.
 Ownership: `src/nika_core/experiments`, strategy/eval/replay models and migrations/tests.
 Goal: experiment/run/metric/dataset records, replay evaluation, champion/challenger promotion and rollback without silent production-source rewriting.
 Integration dependency: can implement deterministic engine against ports before all production tools exist.
-Current state: PREPARED FOR IMPLEMENTATION.
+Current state: PREPARED FOR IMPLEMENTATION; draft PR #11 may contain candidate experiment work but has no integration credit.
 
 ### L7 — M9 plugin/workspace SDK and real workspaces
 Ownership: `src/nika_core/plugins`, `src/nika_core/workspaces`, SDK manifests/contracts and compatibility tests.
