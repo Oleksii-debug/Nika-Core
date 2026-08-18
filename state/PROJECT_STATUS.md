@@ -11,15 +11,15 @@ Development mode: ACTIVE DEVELOPMENT
 - M2 durable runtime package is IMPLEMENTED/PREPARED on `dev/m2-runtime-selection` / PR #3 but not INTEGRATED; its 11% weight is not credited until real framework tests execute and are green.
 
 ## Current milestone
-M1 integration is still externally blocked by GitHub Actions account billing/spending runner allocation. Safe M2 work continues on the dependent branch without bypassing the M1 merge gate.
+M1 integration remains externally blocked by GitHub Actions account billing/spending runner allocation. Safe dependent M2 work continues without bypassing the M1 merge gate.
 
 ## M1 candidate
 PR #2 head: `9f73aa4b4a560bd66410295ccc75303e1a037e70`.
-Includes typed/versioned configuration, SQLite migration v1→v2, persisted Agent/Workspace registries, Audit Log, workspace discovery contract, central Action Registry and persisted remappable Keymap.
+Includes typed/versioned configuration, persisted Agent/Workspace registries, Audit Log, workspace discovery contract, central Action Registry and persisted remappable Keymap. M2 extends the database migration chain from schema v2 to v3 without changing the M1 product contract.
 
 ## M2 current branch
 PR #3: `dev/m2-runtime-selection` -> `dev/m1-foundation`.
-Latest head after the retry/deadline package is recorded by PR metadata/status comments. PR remains intentionally dependent on M1 and must not be merged to main before PR #2 is independently green and integrated.
+PR remains intentionally dependent on M1 and must not be merged to main before PR #2 is independently green and integrated.
 
 ## M2 implemented/prepared capabilities
 - LangGraph selected as primary orchestration runtime behind framework-neutral `AgentRuntimePort`; Microsoft Agent Framework remains secondary adapter/migration candidate.
@@ -27,38 +27,45 @@ Latest head after the retry/deadline package is recorded by PR metadata/status c
 - Real LangGraph/SQLite proof suites are prepared for restart without repeated completed side effects, approval interruption across recreation, corrupt-checkpoint fail-closed behavior, real Nika coordinator persistence mapping and bounded active cancellation.
 - Active invocations are tracked by exact `(task_id, thread_id)` and duplicate concurrent execution is rejected.
 - Cancellation is truthful bounded in-process cancellation; Nika does not claim resume from the middle of an interrupted node.
+- Runtime requests support positive wall-clock deadlines, typed TIMEOUT/TRANSIENT/INVALID_RESUME/DUPLICATE_ACTIVE/INTERNAL failures and fail-closed explicit retry policy with bounded backoff.
 
-## M2 retry/deadline package — current cycle
-A new framework-neutral bounded execution slice is implemented:
-- `RuntimeRequest` and `RuntimeResumeRequest` accept optional positive `timeout_seconds` in addition to `max_steps`.
-- `RuntimeErrorCode` distinguishes TIMEOUT, TRANSIENT, INVALID_RESUME, DUPLICATE_ACTIVE and INTERNAL failures.
-- LangGraph invocation deadlines use `asyncio.wait_for()` on the exact active task and return typed FAILED/TIMEOUT, not fabricated user cancellation.
-- timeout/internal LangGraph failures retain the stable thread ID as a resume token, but timeout is not automatically retried.
-- Nika-owned `RetryPolicy` is fail-closed: retries disabled by default; exact retryable error codes must be opted in; durable resume token is required unless an explicit caller allows fresh replay; exponential backoff is bounded.
-- `TaskRuntimeCoordinator` maps a safe retry through RUNNING -> RETRYING -> RUNNING, audits `runtime.retry_scheduled` and `runtime.retry_started`, and resumes through the exact returned token instead of blindly replaying original input.
-- untyped/internal failures are not automatically retried.
-- documentation: `docs/RUNTIME_RETRY_TIMEOUT.md`; reuse record updated in `docs/THIRD_PARTY_ADOPTION.md`.
+## M2 persisted recovery + side-effect safety package — current cycle
+Official LangGraph docs were re-checked before code. They confirm that `thread_id` is the durable pointer used to load/resume checkpoint state, the same thread must be reused on resume, and side effects around interrupts/re-execution must be idempotent or protected by stable idempotency semantics.
 
-## Prepared tests for this cycle
-`tests/test_runtime_retry_timeout.py` prepares deterministic proofs that:
-1. non-positive deadlines fail before execution;
-2. a slow graph becomes typed TIMEOUT rather than CANCELLED;
-3. an explicitly TRANSIENT durable failure retries by resume token and completes;
-4. a transient failure without a resume token is not replayed by default;
-5. exponential retry backoff is bounded.
+Implemented on PR #3:
+- SQLite schema v3 with `runtime_sessions` and `idempotency_records` migrations.
+- `RuntimeSessionStore` keeps Nika-owned task -> runtime/thread/resume-token mapping separate from LangGraph checkpoint bytes.
+- `TaskRuntimeCoordinator` now records resumable WAITING_APPROVAL/PAUSED/FAILED results before exposing the resumable task state and removes active pointers after terminal completion/cancellation/non-resumable failure.
+- `resume_saved()` reconstructs the framework-neutral resume request using only Nika `task_id`, validates runtime ownership, and supports process recreation for approval, paused and resumable failed tasks.
+- wrong runtime ownership fails before task-state mutation.
+- `IdempotencyLedger` reserves stable operation keys with input fingerprints, deduplicates exact repeats, rejects key reuse for different input, records COMPLETED/UNCERTAIN, and requires an explicit reconciliation path before an uncertain external side effect can be closed as completed.
+- external provider-native idempotency remains preferred; Nika's ledger is the cross-provider fail-closed safety record, not a claim of universal exactly-once delivery.
+- documentation: `docs/RUNTIME_RECOVERY_AND_SIDE_EFFECTS.md`; reuse classifications updated in `docs/THIRD_PARTY_ADOPTION.md`.
+
+## Prepared tests in this batch
+`tests/test_runtime_persistence.py` prepares proofs that:
+1. approval state survives complete coordinator recreation and resumes using only `task_id`;
+2. PAUSED state resumes after recreation;
+3. a different runtime cannot consume another runtime's stored session;
+4. exact same idempotency key/input deduplicates;
+5. same key with changed input is rejected;
+6. UNCERTAIN external side effect cannot pass through normal completion;
+7. an explicitly externally reconciled uncertain result can be closed.
+
+Existing migration proof now expects schema v3 and verifies both new tables are created when upgrading an older database.
 
 ## Current infrastructure blocker
-Latest Actions runs for both M1 and current M2 still fail before runner execution. Jobs return `steps = null`; no Ruff/compile/pytest step is executed. Previously captured GitHub annotation identified account payment failure or Actions spending-limit configuration. This is infrastructure evidence, not code-test evidence.
+Re-checked Actions at the beginning of this cycle. PR #2 run `32073570804` is still a completed failure with job `95521808540` returning `steps = null`; no runner executed Ruff, compile or pytest. Previously captured GitHub annotation identified account payment failure or Actions spending-limit configuration. This remains infrastructure evidence, not code-test evidence.
 
 ## Test truth
-- Source/tests/docs for the retry/deadline package are committed.
-- GitHub Actions on the current M2 head again failed with `steps = null` before any test command ran.
-- Therefore no newly prepared test is claimed as passed, and M1/M2 percentage credit remains zero.
+- Source/tests/docs for this persisted recovery/idempotency package are committed.
+- No test in this new package is claimed as PASSED because hosted CI still cannot allocate a runner.
+- M1/M2 percentage credit remains zero until executable evidence exists.
 
 ## Truth state
 - M0: INTEGRATED / green CI.
 - M1: IMPLEMENTED, not INTEGRATED, not PACKAGED, not HUMAN_TESTED.
-- M2: runtime selection, async durability, restart/approval/corruption proofs, cancellation, typed timeout and safe explicit retry policy IMPLEMENTED/PREPARED; not INTEGRATED; not PACKAGED; not HUMAN_TESTED.
+- M2: runtime selection, async durability, restart/approval/corruption proofs, cancellation, deadline/retry, Nika-owned persisted resume mapping and external side-effect idempotency safety IMPLEMENTED/PREPARED; not INTEGRATED; not PACKAGED; not HUMAN_TESTED.
 
 ## Packaging policy
 No EXE in this cycle. Build Windows standalone only at milestone/user-test/release gates.
@@ -69,7 +76,7 @@ Real NVDA usability is never marked VERIFIED by automation.
 ## Next large coherent batch
 1. Re-check Actions infrastructure first.
 2. As soon as runners execute: run/fix/merge PR #2 only if M1 Ruff/compile/pytest are genuinely green.
-3. Retarget/rebase PR #3 onto green main, execute `.[dev,agent]` Ruff/compile/pytest and fix any real API/runtime failures.
-4. Execute all real restart/no-repeat, approval recreation, corruption fail-closed, cancellation and retry/deadline proofs.
-5. Only after executable M2 evidence is green, close M2 and move into M3 memory/scheduler/resource control.
-6. Award M1/M2 weighted progress only from closed acceptance-gate evidence.
+3. Retarget/rebase PR #3 onto green main, execute `.[dev,agent]` Ruff/compile/pytest and fix all real API/runtime/migration failures.
+4. Execute real LangGraph/SQLite restart/no-repeat, approval recreation, corrupt-checkpoint fail-closed, cancellation, timeout/retry and persisted-session proofs together.
+5. Add tool-adapter integration of the idempotency ledger only together with the first real side-effecting tool/MCP boundary; do not invent fake exactly-once guarantees in M2.
+6. Only after executable M2 evidence is green, close M2 and move into M3 memory/scheduler/resource control.
