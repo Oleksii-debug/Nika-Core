@@ -235,10 +235,9 @@ def test_coding_request_is_isolated_and_capability_gap_requires_evidence(tmp_pat
         test_commands=("python scripts/verify.py",),
     )
     assert request.network_allowed is False
-    with pytest.raises(ValueError, match="inside the repository"):
-        CodingRequest(tmp_path, "bad", (str(tmp_path.resolve()),))
-    with pytest.raises(ValueError, match="inside the repository"):
-        CodingRequest(tmp_path, "bad", ("../outside",))
+    for invalid_path in (str(tmp_path.resolve()), "../outside", "C:\\outside\\file.py", "", "."):
+        with pytest.raises(ValueError, match="bounded repository-relative scope"):
+            CodingRequest(tmp_path, "bad", (invalid_path,))
     with pytest.raises(ValueError, match="attempted methods"):
         CapabilityGap("task-1", "browser.special", "DOM unavailable", ())
 
@@ -275,13 +274,28 @@ def test_software_factory_rejects_worker_scope_escape_or_missing_evidence(tmp_pa
     with pytest.raises(ValueError, match="outside allowed scope"):
         asyncio.run(SoftwareFactoryService(Worker(escaped)).execute(request))
 
+    windows_escaped = valid.__class__(
+        changed_paths=("C:\\outside\\escape.py",),
+        test_evidence=("pytest passed",),
+        patch_ref="artifact://patch-3",
+    )
+    with pytest.raises(ValueError, match="bounded repository-relative scope"):
+        asyncio.run(SoftwareFactoryService(Worker(windows_escaped)).execute(request))
+
     missing_tests = valid.__class__(
         changed_paths=("src/nika_core/new.py",),
         test_evidence=(),
-        patch_ref="artifact://patch-3",
+        patch_ref="artifact://patch-4",
     )
     with pytest.raises(ValueError, match="no test evidence"):
         asyncio.run(SoftwareFactoryService(Worker(missing_tests)).execute(request))
+
+    missing_patch = valid.__class__(
+        changed_paths=("src/nika_core/new.py",),
+        test_evidence=("pytest passed",),
+    )
+    with pytest.raises(ValueError, match="patch_ref or commit_sha"):
+        asyncio.run(SoftwareFactoryService(Worker(missing_patch)).execute(request))
 
 
 def test_visual_fallback_cannot_claim_perfect_semantic_confidence() -> None:
