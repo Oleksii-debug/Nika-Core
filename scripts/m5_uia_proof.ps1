@@ -1,5 +1,6 @@
 param(
-    [Parameter(Mandatory=$true)][string]$ExePath
+    [Parameter(Mandatory=$true)][string]$ExePath,
+    [string]$WindowTitle = 'Nika Core M5 Proof'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,11 +20,11 @@ try {
         }
         $condition = New-Object System.Windows.Automation.PropertyCondition(
             [System.Windows.Automation.AutomationElement]::NameProperty,
-            'Nika Core M5 Proof'
+            $WindowTitle
         )
         $window = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $condition)
     }
-    if ($null -eq $window) { throw 'Nika Core top-level window not found in UI Automation tree.' }
+    if ($null -eq $window) { throw "Nika Core top-level window '$WindowTitle' not found in UI Automation tree." }
 
     $names = @()
     $missing = $requiredNames
