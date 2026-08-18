@@ -65,6 +65,13 @@ Repository visibility observed this cycle: PUBLIC.
 - `docs/M12_HUMAN_NVDA_ACCEPTANCE.md` binds human testing to exact SHA/artifact identity and requires Windows/NVDA keyboard, semantic navigation, focus, readable status/error and restart checks.
 - Machine-readable automated evidence deliberately records `human_tested=false`, `nvda_verified=false`, `production_release_ready=false`.
 
+## Canonical documentation integrity repair — this cycle
+- The cycle detected that `docs/ROADMAP.md` was stale at 82% / M9-next while `state/PROJECT_STATUS.md` and Issue #1 already correctly reported 98% and the M12 human-only blocker.
+- The cycle also detected that `AGENTS.md` required `docs/PARALLEL_DEVELOPMENT_POLICY.md` even though that file was absent from `main`.
+- Docs-only PR #28 restored a current parallel-first policy with an explicit M12 pre-human release-freeze rule and synchronized the roadmap to the proven 98% state without changing production source, package inputs or runtime behavior.
+- PR #28 exact head `230d7cbe54f4707dab05a42eac474686527eb79c`; Core CI #205 SUCCESS on Ubuntu and Windows; merged as `940399a3a17344f38cf29cac0f789fb3084b359d`.
+- This maintenance work awards no new weighted progress and does not invalidate the exact M12 packaged candidate.
+
 ## Truth state
 - M0–M11: IMPLEMENTED / GREEN / INTEGRATED.
 - M12 automated pre-human infrastructure/evidence: GREEN / INTEGRATED.
@@ -83,4 +90,4 @@ M12 — Human Windows/NVDA acceptance & final v1.0 release decision.
 The only weighted acceptance blocker is now human execution of `docs/M12_HUMAN_NVDA_ACCEPTANCE.md` against the exact packaged candidate. This cannot be truthfully automated.
 
 ## Next LARGE coherent batch
-At the next executable engineering cycle, keep automated regressions green and avoid feature expansion that would invalidate the tested package. Once human Windows/NVDA results are available, fix any reported accessibility/functional defects on a new exact candidate, repeat the full M12 automated gate, then award HUMAN_TESTED/NVDA_VERIFIED and the final 2% only if the human protocol passes that same exact artifact.
+Keep automated regressions green and preserve the M12 pre-human release freeze. Do not expand production features in a way that invalidates the tested package. Once human Windows/NVDA results are available, fix any reported accessibility/functional defects on a new exact candidate, repeat the full M12 automated gate, then award HUMAN_TESTED/NVDA_VERIFIED and the final 2% only if the human protocol passes that same exact artifact.
