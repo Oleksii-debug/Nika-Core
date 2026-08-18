@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from math import isfinite
 
 
 class ExperimentStatus(StrEnum):
@@ -58,6 +59,8 @@ class MetricObservation:
     def __post_init__(self) -> None:
         if not self.candidate_id.strip() or not self.replay_id.strip() or not self.metric.strip():
             raise ValueError("metric observation identifiers must not be empty")
+        if not isfinite(float(self.value)):
+            raise ValueError("metric observation must be finite")
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,8 +72,8 @@ class MetricRule:
     def __post_init__(self) -> None:
         if not self.metric.strip():
             raise ValueError("metric must not be empty")
-        if self.max_regression < 0:
-            raise ValueError("max_regression must be non-negative")
+        if not isfinite(float(self.max_regression)) or self.max_regression < 0:
+            raise ValueError("max_regression must be finite and non-negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,8 +86,8 @@ class PromotionPolicy:
     def __post_init__(self) -> None:
         if not self.primary_metric.strip():
             raise ValueError("primary_metric must not be empty")
-        if self.minimum_improvement < 0:
-            raise ValueError("minimum_improvement must be non-negative")
+        if not isfinite(float(self.minimum_improvement)) or self.minimum_improvement < 0:
+            raise ValueError("minimum_improvement must be finite and non-negative")
         if self.minimum_replays < 1:
             raise ValueError("minimum_replays must be at least 1")
         names = [rule.metric for rule in self.guardrails]
@@ -109,6 +112,8 @@ class ExperimentDefinition:
             raise ValueError("at least one challenger is required")
         if not self.replays:
             raise ValueError("at least one replay is required")
+        if len(self.replays) < self.policy.minimum_replays:
+            raise ValueError("declared replay set is smaller than minimum_replays")
         candidates = (self.champion, *self.challengers)
         ids = [candidate.candidate_id for candidate in candidates]
         if len(ids) != len(set(ids)):
