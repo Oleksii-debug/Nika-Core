@@ -5,7 +5,6 @@ from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
 from nika_core.tools import ToolRisk
-
 from .catalog import PluginRequirement, WorkspaceCapabilityGrant, WorkspaceManifest
 
 
