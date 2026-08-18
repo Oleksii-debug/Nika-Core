@@ -1,74 +1,45 @@
 # M2 crash-consistency boundary review
 
 Updated: 2026-08-18.
-Status: source-review evidence only; no integration credit.
+Status: IMPLEMENTED/PREPARED on M2 branch; executable CI evidence still required, so no integration credit.
 
 ## Purpose
+Review persistence boundaries in the prepared M2 durable runtime and eliminate process-loss windows that could create unrecoverable or unsafe state before M2 integration.
 
-Review every persistence boundary in the prepared M2 durable runtime while hosted CI is blocked. The goal is to find process-loss windows that could produce an unrecoverable or unsafe product state before M2 is allowed to integrate.
+## Finding 1 — durable start crash window
+The previous `TaskRuntimeCoordinator.start()` committed `READY -> RUNNING` before committing the Nika task -> runtime/thread cursor. A process loss between those writes could leave stale RUNNING durable work with no Nika-owned recovery pointer.
 
-## Finding 1 — start ordering has an unsafe recovery window
+### Remediation implemented
+The M2 branch now uses one caller-owned SQLite transaction for durable runtime start:
+1. validate and persist the task `READY -> RUNNING` transition and task event;
+2. insert the initial ACTIVE runtime-session cursor in the same transaction;
+3. commit both together or roll both back together.
 
-Current `TaskRuntimeCoordinator.start()` performs these durable product operations in this order:
+`TaskQueue.transition_with_connection()` and `RuntimeSessionStore.record_active_with_connection()` are intentionally small transaction-aware primitives. They preserve the normal public APIs while allowing this Nika-owned atomic product boundary.
 
-1. transition Nika task from `READY` to `RUNNING`;
-2. append `runtime.started` audit event;
-3. bind the Nika `RuntimeSessionStore` task -> runtime/thread/resume-token pointer;
-4. await the runtime invocation.
+Fresh `start()` no longer UPSERTs an existing runtime cursor. A task that already owns persisted recovery state fails closed and must use an explicit resume path. This prevents a new invocation from destroying crash-recovery ownership.
 
-For durable runtimes such as LangGraph, step 3 is the product cursor that lets a recreated Nika process locate the framework-owned checkpoint/thread.
+Audit rows are evidence, not recovery truth: recovery decisions depend on task/session/idempotency state. Audit append failure therefore cannot be used as authority to reopen or replay work.
 
-If the process disappears after step 1 but before step 3, the database can contain a stale `RUNNING` task with no `runtime_sessions` row. `RuntimeRecoveryService` inventories persisted runtime sessions, so this task has no durable cursor to classify or resume. This violates the intended durable-runtime gate even if LangGraph itself would later have been capable of checkpointing.
+## Finding 2 — result finalization remains conservative
+For terminal outcomes `_finish()` transitions the task before deleting the runtime-session pointer. A failure between those operations may leave a terminal task plus stale session, but startup recovery must classify that pair as inconsistent and never reopen the terminal task automatically.
 
-### Required remediation before M2 integration
+For resumable outcomes the runtime result is persisted before task-state transition; mismatched pairs likewise fail closed during startup classification.
 
-Do not merely hide this window with a startup heuristic. The start boundary must become fail-closed and crash-consistent.
+## Fault-injection proofs prepared
+`tests/test_runtime_crash_consistency.py` now prepares deterministic checks for:
+- injected failure immediately after ACTIVE cursor insertion rolls back both the task transition and cursor, and the runtime is never invoked;
+- a fresh start cannot overwrite an existing recovery cursor and the attempted READY -> RUNNING transition is rolled back;
+- injected terminal session-delete failure leaves the task terminal while startup recovery classifies the stale pointer as `INCONSISTENT_STATE`, never `AUTO_RESUME_CRASH`.
 
-Preferred design:
+Existing crash/recovery, approval and idempotency suites remain part of the same executable gate.
 
-- add a small Nika-owned transaction boundary that can persist the task state transition and the initial durable session pointer in one SQLite transaction when the runtime exposes an initial durable cursor;
-- keep audit append either in the same transaction where practical or make recovery truth depend on task/session state, never on the audit row;
-- reject a new `start()` when the task already owns a persisted runtime session; callers must use an explicit resume path instead of overwriting recovery state;
-- non-durable runtimes may continue without a durable session row, but the capability difference must be explicit and must not be represented as durable recovery.
+## Remaining executable gate
+Before PR #3 may be integrated, the exact rebased SHA must actually execute and pass:
+1. Ruff and compile checks;
+2. full `.[dev,agent]` pytest;
+3. real LangGraph + async SQLite restart/resume/corrupt-checkpoint/cancellation proofs;
+4. the new atomic-start and finalization fault-injection proofs;
+5. approval/idempotency/startup-recovery regression suites.
 
-A simple reorder (session first, task second) is safer than the current order but still leaves a stale-session window if the process dies before the task transition. The integration-quality fix should therefore prefer a shared transaction over two independently committed writes.
-
-## Finding 2 — result finalization is conservative but needs fault-injection proof
-
-Current `_finish()` records resumable session state before transitioning a task to `WAITING_APPROVAL`, `PAUSED` or `FAILED`. For terminal/non-resumable outcomes it transitions the task before deleting the session pointer.
-
-These orderings are generally fail-closed: a crash between the two operations tends to leave an inconsistent task/session pair that startup recovery will refuse to auto-resume rather than blindly replaying work. However, this statement must be proved with fault injection on the exact implementation, not accepted from source inspection alone.
-
-Required proof cases:
-
-- crash after storing resumable result but before task-state transition -> startup classification is `INCONSISTENT_STATE`, never auto-resume;
-- crash after terminal task transition but before session deletion -> terminal task is never reopened;
-- failure while deleting a terminal session cannot make a completed/cancelled task automatically resumable;
-- failure while appending runtime audit does not change recovery truth.
-
-## Finding 3 — approval boundary is correctly fail-closed in current source
-
-Both approval continuation APIs now require explicit non-`None` user input and a matching persisted approval cursor. Direct approval continuation validates task state, stored outcome, runtime ID, thread ID and resume token before transitioning to `RUNNING`.
-
-This remains PREPARED rather than proven until the regression suite actually executes.
-
-## Finding 4 — side-effect recovery is conservative
-
-`RuntimeRecoveryService` checks the Nika `IdempotencyLedger` before automatic crash continuation. `PENDING` or `UNCERTAIN` external operations produce `RECONCILE_SIDE_EFFECTS`, preventing blind replay.
-
-This is the correct product boundary: framework checkpoints do not replace provider reconciliation or stable idempotency keys for external actions.
-
-## Required executable M2 gate extension
-
-Before PR #3 may be called executable-green, add and run deterministic fault-injection tests for the product persistence boundary in addition to the existing LangGraph/SQLite tests:
-
-1. atomic durable start: no observable state may contain `RUNNING` durable work without its Nika runtime-session cursor;
-2. duplicate start with an existing persisted cursor fails closed and does not overwrite that cursor;
-3. injected failure during durable-start transaction rolls back both task and session state;
-4. injected process-loss states around `_finish()` classify conservatively on next startup;
-5. approval and idempotency recovery tests remain green;
-6. exact PR SHA passes Ruff, compile and full `.[dev,agent]` pytest.
-
-## Integration consequence
-
-M2 remains IMPLEMENTED/PREPARED but not INTEGRATED. This review adds a real pre-integration defect to the M2 gate. Do not begin unchecked M3+ production implementation until the runner is restored and this boundary is fixed and executable-green.
+M2 remains IMPLEMENTED/PREPARED, not INTEGRATED, until that evidence exists.
