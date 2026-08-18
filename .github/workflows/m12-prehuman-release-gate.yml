@@ -1,0 +1,134 @@
+name: M12 Pre-Human Release Gate
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "scripts/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - ".github/workflows/m12-prehuman-release-gate.yml"
+      - "docs/M12_HUMAN_NVDA_ACCEPTANCE.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: m12-prehuman-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integrated-ubuntu:
+    name: M12 integrated system proof (Ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install core, runtime and browser proof dependencies
+        run: python -m pip install -e ".[dev,agent,browser]"
+      - name: Run complete source, dependency and test verification
+        run: python scripts/verify.py
+      - name: Re-run focused cross-subsystem recovery and safety matrix
+        run: >-
+          python -m pytest -q
+          tests/test_runtime_crash_consistency.py
+          tests/test_runtime_startup_recovery.py
+          tests/test_m3_memory_scheduler_resources.py
+          tests/test_m4_model_tools.py
+          tests/test_plugin_workspace_sdk.py
+          tests/test_security_policy.py
+          tests/test_m11_m12_release.py
+      - name: Install Chromium
+        run: python -m playwright install --with-deps chromium
+      - name: Re-prove browser semantic interaction on the exact candidate
+        run: python scripts/m9_browser_adapter_proof.py
+
+  integrated-windows:
+    name: M12 integrated system proof (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install core, runtime and Windows interaction proof dependencies
+        run: python -m pip install -e ".[dev,agent,windows-interaction]"
+      - name: Run complete source, dependency and test verification
+        run: python scripts/verify.py
+      - name: Re-run focused cross-subsystem recovery and safety matrix
+        run: >-
+          python -m pytest -q
+          tests/test_runtime_crash_consistency.py
+          tests/test_runtime_startup_recovery.py
+          tests/test_m3_memory_scheduler_resources.py
+          tests/test_m4_model_tools.py
+          tests/test_plugin_workspace_sdk.py
+          tests/test_security_policy.py
+          tests/test_m11_m12_release.py
+      - name: Re-prove Windows semantic interaction on the exact candidate
+        run: python scripts/m9_windows_uia_proof.py
+
+  packaged-windows:
+    name: M12 packaged release proof (Windows)
+    needs: [integrated-ubuntu, integrated-windows]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install GUI, packaging and QA dependencies
+        run: python -m pip install -e ".[gui,qa,dev]"
+      - name: Build exact Windows release candidate and verify manifest
+        run: python scripts/m11_release.py --version 0.0.2
+      - name: Verify packaged WebView2 UI Automation and keyboard focus
+        shell: pwsh
+        run: ./scripts/m5_uia_proof.ps1 -ExePath ./dist/NikaCore/NikaCore.exe -WindowTitle 'Nika Core 0.0.2'
+      - name: Run release-gate truth regressions
+        run: python -m pytest tests/test_m11_m12_release.py -q
+      - name: Create distributable ZIP
+        shell: pwsh
+        run: Compress-Archive -Path ./dist/NikaCore/* -DestinationPath ./dist/NikaCore-0.0.2-windows-x64.zip -Force
+      - name: Record automated pre-human evidence
+        shell: pwsh
+        run: |
+          $evidence = [ordered]@{
+            schema_version = 1
+            commit_sha = '${{ github.event.pull_request.head.sha || github.sha }}'
+            core_ci_equivalent = $true
+            full_test_suite = $true
+            runtime_restart_recovery = $true
+            memory_scheduler_resource_regressions = $true
+            model_mock_nollm_regressions = $true
+            plugin_workspace_regressions = $true
+            security_sandbox_regressions = $true
+            integrated_ubuntu = $true
+            integrated_windows = $true
+            browser_semantic_proof = $true
+            windows_uia_semantic_proof = $true
+            windows_package_built = $true
+            manifest_verified = $true
+            packaged_uia_keyboard_focus = $true
+            human_tested = $false
+            nvda_verified = $false
+            production_release_ready = $false
+          }
+          $evidence | ConvertTo-Json | Set-Content -Encoding UTF8 ./dist/m12-prehuman-evidence.json
+      - name: Upload exact pre-human candidate evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: NikaCore-0.0.2-m12-prehuman-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            dist/NikaCore-0.0.2-windows-x64.zip
+            dist/NikaCore/release-manifest.json
+            dist/m12-prehuman-evidence.json
+          if-no-files-found: error
