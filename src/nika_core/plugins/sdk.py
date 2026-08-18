@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import importlib.metadata
 from collections.abc import Callable, Mapping
-from typing import Annotated, Any, Literal, Protocol, runtime_checkable
+from dataclasses import dataclass
+from typing import Annotated, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -75,6 +76,14 @@ class PluginAdapter(Protocol):
 PluginFactory = Callable[[], PluginAdapter]
 
 
+@dataclass(frozen=True, slots=True)
+class PluginRegistration:
+    """Static entry-point payload: manifest metadata plus a lazy adapter factory."""
+
+    manifest: PluginManifest
+    factory: PluginFactory
+
+
 def discover_plugin_entrypoints() -> tuple[importlib.metadata.EntryPoint, ...]:
     """Discover package entry points without loading arbitrary plugin code."""
     return tuple(importlib.metadata.entry_points(group=PLUGIN_ENTRYPOINT_GROUP))
@@ -95,19 +104,17 @@ class PluginRuntime:
         self._factories[manifest.plugin_id] = (manifest, factory)
 
     def register_entrypoint(self, entrypoint: importlib.metadata.EntryPoint) -> PluginManifest:
-        """Load only an explicitly selected entry point and register its factory."""
-        loaded: Any = entrypoint.load()
-        if not callable(loaded):
-            raise TypeError(f"plugin entry point is not callable: {entrypoint.name}")
-        factory = loaded
-        adapter = factory()
-        if not isinstance(adapter, PluginAdapter):
-            raise TypeError(f"plugin adapter does not satisfy PluginAdapter: {entrypoint.name}")
-        manifest = adapter.manifest
-        adapter.close()
+        """Load an explicitly selected static registration without constructing its adapter."""
+        loaded = entrypoint.load()
+        if not isinstance(loaded, PluginRegistration):
+            raise TypeError(
+                "plugin entry point must expose PluginRegistration so registration cannot execute "
+                "adapter construction"
+            )
+        manifest = loaded.manifest
         if manifest.entrypoint_name != entrypoint.name:
             raise PluginCompatibilityError("manifest entrypoint_name does not match package entry point")
-        self.register(manifest, factory)
+        self.register(manifest, loaded.factory)
         return manifest
 
     def manifests(self) -> Mapping[str, PluginManifest]:
@@ -122,7 +129,13 @@ class PluginRuntime:
             raise KeyError(f"unknown plugin: {plugin_id}") from exc
         manifest.assert_compatible(self._core_api)
         adapter = factory()
+        if not isinstance(adapter, PluginAdapter):
+            close = getattr(adapter, "close", None)
+            if callable(close):
+                close()
+            raise TypeError(f"plugin adapter does not satisfy PluginAdapter: {plugin_id}")
         if adapter.manifest != manifest:
+            adapter.close()
             raise PluginCompatibilityError("runtime plugin manifest differs from registered manifest")
         self._active[plugin_id] = adapter
         return adapter
