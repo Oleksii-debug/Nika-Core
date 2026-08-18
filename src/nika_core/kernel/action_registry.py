@@ -6,7 +6,6 @@ from datetime import UTC, datetime
 
 from nika_core.data.sqlite import SQLiteStore
 
-
 _MODIFIER_ALIASES = {
     "alt": "alt",
     "ctrl": "ctrl",
@@ -68,9 +67,12 @@ class ActionRegistry:
     def find_by_binding(self, binding: str, scope: str) -> ActionDefinition | None:
         wanted = _binding_key(binding)
         for action in self._actions.values():
-            if action.scope == scope and action.default_binding is not None:
-                if _binding_key(action.default_binding) == wanted:
-                    return action
+            if (
+                action.scope == scope
+                and action.default_binding is not None
+                and _binding_key(action.default_binding) == wanted
+            ):
+                return action
         return None
 
 
@@ -137,7 +139,7 @@ class Keymap:
             raise ValueError("unsupported keymap format version")
         bindings = raw.get("bindings")
         if not isinstance(bindings, dict):
-            raise ValueError("keymap bindings must be an object")
+            raise TypeError("keymap bindings must be an object")
         proposed: dict[str, str | None] = {}
         for action_id, binding in bindings.items():
             action = self._actions.get(action_id)
