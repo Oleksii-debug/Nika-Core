@@ -73,8 +73,15 @@ def test_replay_coverage_and_duplicate_observations_fail_closed() -> None:
     engine.record("exp-1", observation)
     with pytest.raises(ValueError, match="duplicate"):
         engine.record("exp-1", observation)
-    with pytest.raises(ValueError, match="insufficient replay coverage"):
+    with pytest.raises(ValueError, match="incomplete replay coverage"):
         engine.complete("exp-1")
+
+
+def test_non_finite_metric_evidence_is_rejected() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        MetricObservation("champion", "r1", "quality", float("nan"))
+    with pytest.raises(ValueError, match="finite"):
+        MetricObservation("champion", "r1", "quality", float("inf"))
 
 
 def test_best_eligible_challenger_is_promoted_deterministically() -> None:
