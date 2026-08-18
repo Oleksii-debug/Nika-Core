@@ -74,17 +74,18 @@ def test_repository_versions_and_activation_are_fail_closed(tmp_path: Path) -> N
     )
     compiled = _compiler(dangerous).compile(definition)
 
-    repository.save_draft(definition)
+    repository.save_draft(compiled)
+    persisted = repository.get(definition.agent_id, definition.version)
+    assert persisted is not None
+    assert persisted.required_human_approvals == ("release.publish",)
+    assert persisted.highest_risk == RiskTier.R4_HIGH_IMPACT
+
     with pytest.raises(PermissionError, match="explicit human approval"):
-        repository.activate(
-            definition,
-            required_human_approvals=compiled.required_human_approvals,
-        )
+        repository.activate(definition)
     assert repository.active(definition.agent_id) is None
 
     repository.activate(
         definition,
-        required_human_approvals=compiled.required_human_approvals,
         approved_tool_ids=frozenset({"release.publish"}),
     )
     active = repository.active(definition.agent_id)
@@ -92,15 +93,27 @@ def test_repository_versions_and_activation_are_fail_closed(tmp_path: Path) -> N
     assert active.definition == definition
     assert active.status == "active"
 
-    second = definition.model_copy(update={"version": 2, "goal": "Collect and compare evidence"})
-    repository.save_draft(second)
+    safe = ToolSpec("web.read", "Read a page", ToolRisk.READ_ONLY)
+    second = definition.model_copy(
+        update={
+            "version": 2,
+            "goal": "Collect and compare evidence",
+            "tool_grants": (ToolGrant(tool_id="web.read", max_risk=RiskTier.R0_READ_ONLY),),
+        }
+    )
+    second_compiled = _compiler(safe).compile(second)
+    repository.save_draft(second_compiled)
     repository.activate(second)
-    assert repository.active(definition.agent_id).definition.version == 2  # type: ignore[union-attr]
-    assert repository.get(definition.agent_id, 1).status == "retired"  # type: ignore[union-attr]
+    current = repository.active(definition.agent_id)
+    assert current is not None
+    assert current.definition.version == 2
+    retired = repository.get(definition.agent_id, 1)
+    assert retired is not None
+    assert retired.status == "retired"
     assert repository.next_version(definition.agent_id) == 3
 
     with pytest.raises(ValueError, match="expected 3"):
-        repository.save_draft(second)
+        repository.save_draft(second_compiled)
 
     assert store.schema_version() == 5
 
@@ -110,7 +123,7 @@ def test_activation_rejects_definition_mutation(tmp_path: Path) -> None:
     store.initialize()
     repository = AgentDefinitionRepository(store)
     definition = _definition()
-    repository.save_draft(definition)
+    repository.save_draft(_compiler().compile(definition))
 
     altered = definition.model_copy(update={"goal": "Changed after review"})
     with pytest.raises(ValueError, match="differs from persisted"):
