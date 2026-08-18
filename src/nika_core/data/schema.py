@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -144,5 +144,56 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         )""",
         "CREATE INDEX IF NOT EXISTS idx_agent_definitions_latest ON agent_definitions(agent_id, version DESC)",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_definitions_one_active ON agent_definitions(agent_id) WHERE status = 'active'",
+    ),
+    6: (
+        """CREATE TABLE IF NOT EXISTS multi_agent_teams (
+            team_id TEXT PRIMARY KEY,
+            root_member_id TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('active', 'cancelled', 'completed', 'failed')),
+            quota_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS multi_agent_members (
+            team_id TEXT NOT NULL,
+            member_id TEXT NOT NULL,
+            parent_id TEXT,
+            depth INTEGER NOT NULL CHECK(depth >= 0),
+            agent_id TEXT NOT NULL,
+            agent_version INTEGER NOT NULL CHECK(agent_version > 0),
+            thread_id TEXT NOT NULL,
+            tool_grants_json TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('spawned', 'running', 'waiting_approval', 'completed', 'failed', 'cancelled')),
+            resume_token TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(team_id, member_id),
+            FOREIGN KEY(team_id) REFERENCES multi_agent_teams(team_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_multi_agent_parent ON multi_agent_members(team_id, parent_id)",
+        "CREATE INDEX IF NOT EXISTS idx_multi_agent_state ON multi_agent_members(team_id, state)",
+        """CREATE TABLE IF NOT EXISTS multi_agent_handoffs (
+            handoff_id TEXT PRIMARY KEY,
+            team_id TEXT NOT NULL,
+            sender_id TEXT NOT NULL,
+            recipient_id TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK(kind IN ('task', 'result', 'status', 'error')),
+            correlation_id TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(team_id) REFERENCES multi_agent_teams(team_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_multi_agent_handoff_team ON multi_agent_handoffs(team_id, created_at)",
+        """CREATE TABLE IF NOT EXISTS multi_agent_results (
+            result_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            team_id TEXT NOT NULL,
+            member_id TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(team_id) REFERENCES multi_agent_teams(team_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_multi_agent_result_team ON multi_agent_results(team_id, member_id)",
     ),
 }
