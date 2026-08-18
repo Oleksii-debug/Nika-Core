@@ -5,46 +5,60 @@ Canonical repository: Oleksii-debug/Nika-Core
 Development mode: ACTIVE DEVELOPMENT
 
 ## Weighted progress
-- M0 research/reuse/governance/bootstrap: GREEN 100% of its 6% weight.
-- Overall proven final A–Z product remains **6.0%**.
-- M1 foundation candidate is IMPLEMENTED on `dev/m1-foundation` / PR #2 but not INTEGRATED; its 10% product weight is not credited until executable CI is green.
-- M2 durable runtime package is IMPLEMENTED/PREPARED on `dev/m2-runtime-selection` / PR #3 but not INTEGRATED; its 11% weight is not credited until real tests execute and are green.
+- M0 research/reuse/governance/bootstrap: GREEN / INTEGRATED, 100% of its 6% weight.
+- M1 kernel foundation: GREEN / INTEGRATED, 100% of its 10% weight.
+- Overall proven final A–Z product progress is now **16.0%**.
+- M2 durable runtime package is IMPLEMENTED/PREPARED on `dev/m2-runtime-selection` / PR #3 but not yet INTEGRATED; its 11% product weight is not credited until the exact reconciled M2 SHA passes executable CI and is merged.
 
 ## Current milestone
-M1 integration remains externally blocked by GitHub Actions account billing/spending runner allocation. Safe M2 correctness/testability work continues; no unchecked M3+ functional backlog is allowed while M1/M2 executable evidence is unavailable.
+M2 integration is now the active gate. The previous GitHub Actions runner-allocation blocker is no longer current: hosted CI is executing normally again.
 
-## Exact branches
-- Last proven green `main`: `df48f70b738f9227cad1df08ce3d7f40115b5f08`.
-- M1 PR #2 head: `58f5d49c10389216e0f26c28747a820faf9325c3`.
-- M2 PR #3 implementation/doc head before this status-only commit: `a20ef032b50facefbb7904190a4a60cef3b61f0d`.
-- PR #3 still targets `dev/m1-foundation` and must be rebased/retargeted only after M1 is executable-CI green and integrated.
-- Governance PR #4 remains separate PREPARED work and carries no integration credit.
+## Proven M1 evidence
+- PR #2 exact green head: `67df93c355e813dfc297bd1111df40d3c4ad6175`.
+- GitHub Actions `Core CI` run `32133041861` (run 74) completed `success` on that exact head.
+- Its job executed checkout, Python setup, dependency installation and `python scripts/verify.py`; the verification step completed successfully.
+- PR #2 was merged into `main` as `b40ee58ce9c585efe7dad8ebfa23490e842c753a`.
+- M1 therefore earns its full 10% acceptance-gate weight.
 
-## M1 candidate
-PR #2 includes typed/versioned configuration, persisted Agent/Workspace registries, Audit Log, workspace discovery contract, central Action Registry and persisted remappable Keymap. Latest M1 work normalizes modifier aliases/order and unifies verification through `scripts/verify.py`.
+## M1 integrated capability
+Typed/versioned configuration; ordered SQLite migrations; persisted Agent/Workspace registries; Audit Log; workspace discovery contract; central Action Registry; persisted remappable Keymap with conflict/clear/restore/import/export; normalized modifier aliases/order; shared `scripts/verify.py` harness.
 
 ## M2 implemented/prepared capabilities
-- LangGraph selected behind framework-neutral `AgentRuntimePort`; Microsoft Agent Framework remains secondary migration/interop candidate.
+- LangGraph selected behind framework-neutral `AgentRuntimePort`; Microsoft Agent Framework remains a secondary migration/interop candidate.
 - Async local durability uses `AsyncSqliteSaver` + `aiosqlite`; strict checkpoint deserialization is forced.
-- Runtime/session persistence, restart recovery, approval boundaries, cancellation, deadline/retry safety and external side-effect idempotency/reconciliation are prepared.
+- Runtime/session persistence, restart recovery, explicit approval boundaries, cancellation, timeout/retry safety and external side-effect idempotency/reconciliation are prepared.
 - `RuntimeRecoveryService` separates safe crash continuation from approval/manual/reconciliation/error states and never blindly replays unresolved side effects.
+- Durable start commits Nika `READY -> RUNNING` plus its initial task→runtime recovery cursor atomically.
 
-## Current cycle — atomic durable-start crash-consistency fix
-The previously open M2 start-order defect is now IMPLEMENTED/PREPARED in source.
+## Current cycle — atomic local runtime finalization
+A second crash-consistency boundary was found and IMPLEMENTED/PREPARED.
+
+Previously `_finish()` mutated the runtime-session cursor, task state and audit log in separate SQLite transactions. A late session or audit failure could therefore expose a partially finalized Nika state.
 
 Changes:
-- `TaskQueue.transition_with_connection()` allows a validated state transition to participate in a caller-owned SQLite transaction.
-- `RuntimeSessionStore.record_active_with_connection()` inserts a new ACTIVE recovery cursor in that same transaction.
-- `TaskRuntimeCoordinator.start()` now commits durable task `READY -> RUNNING` plus the initial runtime-session cursor atomically when the runtime exposes an initial durable token.
-- fresh start over an existing runtime cursor fails closed instead of overwriting crash-recovery ownership.
-- non-durable runtimes retain the ordinary task transition path and are not represented as durable.
+- `AuditLog.append_with_connection()` supports audit evidence inside a caller-owned SQLite transaction.
+- `RuntimeSessionStore.record_result_with_connection()` and `delete_with_connection()` support transaction-owned finalization.
+- `TaskRuntimeCoordinator._finish()` now commits the Nika runtime-session mutation, task transition, runtime events and final `runtime.finished` audit evidence in one local SQLite transaction.
+- If session mutation, task transition, event serialization/write or final audit write fails, the complete Nika finalization rolls back and the previous ACTIVE recovery cursor/task state remain available for explicit recovery.
 
-Fault-injection tests were added in `tests/test_runtime_crash_consistency.py` for:
-1. failure after cursor insertion: task transition and cursor both roll back; runtime is never called;
-2. duplicate existing cursor: fresh start fails and task remains READY while original cursor is preserved;
-3. terminal result followed by session-delete failure: task remains terminal and startup recovery classifies the stale session as `INCONSISTENT_STATE`, never auto-resume.
+Prepared fault-injection coverage in `tests/test_runtime_crash_consistency.py` now includes:
+1. durable-start failure rolls back both task transition and initial cursor;
+2. a fresh start cannot overwrite an existing recovery cursor;
+3. terminal session-delete failure rolls back the whole local finalization;
+4. terminal final-audit failure rolls back task terminalization and cursor deletion;
+5. resumable WAITING_APPROVAL final-audit failure rolls back the wait-state/new checkpoint cursor and preserves the previous ACTIVE recovery cursor.
 
-This closes the source-level defect identified in `docs/M2_CRASH_CONSISTENCY_REVIEW.md`, but it remains PREPARED rather than proven until executable CI runs.
+These M2 tests are committed but are **not yet claimed PASSED** until the reconciled M2 branch executes its full hosted suite.
+
+## M2 synchronization with green M1
+The M2 branch has been updated with the green M1 behavior that changed after its historical base:
+- proven Action Registry/keymap normalization and regression tests;
+- proven workspace entry-point import form;
+- shared `scripts/verify.py` harness and README verification instructions;
+- M2 CI installs `.[dev,agent]` and then runs the same full verification harness;
+- M2 schema-v3 tests retain runtime/idempotency migration expectations while incorporating the green M1 shortcut tests.
+
+A non-force merge ancestry reconciliation with current `main` is the next repository operation before the exact M2 CI gate.
 
 ## Reuse-first digital-worker architecture already recorded
 - ADAPT Microsoft UFO² as first Windows computer-use proof candidate.
@@ -54,20 +68,18 @@ This closes the source-level defect identified in `docs/M2_CRASH_CONSISTENCY_REV
 - ADAPT Unified Planning for explicit deterministic planning domains.
 - REUSE ONNX Runtime for compact specialist inference.
 
-## Infrastructure blocker
-Latest canonical M1 workflow remains GitHub Actions run `32108101409` (`Core CI`, run 69), conclusion `failure`; its job had `steps = null`, so checkout/install/Ruff/compile/pytest did not execute. This remains infrastructure evidence, not code-test evidence.
-
-No duplicate runner probe was requested in this cycle under the configured probe-spacing rule.
+## Infrastructure state
+The previous billing/spending/runner-allocation blocker is RESOLVED for current work. CI run 74 executed normally and passed. Do not continue treating old pre-step failures as the current blocker.
 
 ## Test truth
-- New crash-consistency tests are committed but NOT claimed PASSED.
-- M1/M2 hosted executable tests remain unproven.
-- No product percentage is credited for prepared/unexecuted tests or source review.
+- M1 exact candidate SHA `67df93c...`: hosted verification PASSED and is integrated.
+- M2 finalization/crash-consistency additions: committed/prepared, NOT YET PASSED on the final reconciled M2 SHA.
+- No M2 percentage is credited until its exact integrated candidate is green.
 
 ## Truth state
-- M0: INTEGRATED / green CI.
-- M1: IMPLEMENTED; not INTEGRATED; not PACKAGED; not HUMAN_TESTED.
-- M2: IMPLEMENTED/PREPARED including atomic durable start; not INTEGRATED; not PACKAGED; not HUMAN_TESTED.
+- M0: INTEGRATED / GREEN.
+- M1: IMPLEMENTED / INTEGRATED / GREEN; not PACKAGED; not HUMAN_TESTED.
+- M2: IMPLEMENTED/PREPARED including atomic durable start and atomic local finalization; not INTEGRATED; not PACKAGED; not HUMAN_TESTED.
 - Digital-worker reuse architecture: RESEARCHED/DOCUMENTED, not IMPLEMENTED.
 - Parallel-development governance: PREPARED on PR #4, not integrated.
 
@@ -78,9 +90,8 @@ No EXE this cycle. Windows standalone is built only at milestone/user-test/relea
 Real NVDA usability is never marked VERIFIED by automation.
 
 ## Next large coherent batch
-1. Respect the duplicate GitHub Actions infrastructure-probe interval.
-2. Perform another source-level consistency review around resumable `_finish()` and audit-failure boundaries without expanding into M3+ production code.
-3. As soon as runners execute: run/fix/merge PR #2 only on genuine green M1 Ruff/compile/pytest evidence.
-4. Rebase/retarget PR #3 onto green main and execute `.[dev,agent]` Ruff/compile/pytest.
-5. Execute the complete LangGraph/SQLite durability suite plus new atomic-start/finalization fault-injection tests, approval, cancellation, timeout/retry, idempotency and startup recovery.
-6. Integrate M2 only if the exact rebased SHA is green; only then begin M3 production implementation.
+1. Reconcile `dev/m2-runtime-selection` with green `main` without force-push and preserve all reviewed M2 work.
+2. Execute the exact reconciled M2 SHA with `.[dev,agent]` through dependency check, Ruff, compile and the complete pytest suite.
+3. Fix any real failures found by CI; specifically require the LangGraph/SQLite durability, crash recovery, approvals, cancellation, timeout/retry, idempotency, startup recovery and new atomic finalization fault-injection tests to pass.
+4. Merge PR #3 only on genuine green evidence for the exact head SHA.
+5. Only after M2 integration may M3 production implementation begin; independent future lanes remain limited to bounded research/contracts until then.
