@@ -34,6 +34,9 @@ def main() -> None:
             "nav.tasks": lambda _payload: focus_result("tasks-heading", "Завдання відкрито."),
             "nav.agents": lambda _payload: focus_result("agents-heading", "Агенти відкрито."),
             "nav.logs": lambda _payload: focus_result("logs-heading", "Журнал відкрито."),
+            "nav.workspaces": lambda _payload: focus_result(
+                "workspaces-heading", "Робочі простори відкрито."
+            ),
             "command.focus": lambda _payload: focus_result("command-input", "Командне поле активне."),
         },
     )
