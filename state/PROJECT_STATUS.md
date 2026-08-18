@@ -3,86 +3,65 @@
 Updated: 2026-08-18
 Canonical repository: Oleksii-debug/Nika-Core
 Development mode: ACTIVE DEVELOPMENT / PARALLEL-FIRST
+Repository visibility observed this cycle: PUBLIC.
 
 ## Weighted progress
 - M0 research/reuse/governance/bootstrap: GREEN / INTEGRATED, 100% of its 6% weight.
 - M1 kernel foundation: GREEN / INTEGRATED, 100% of its 10% weight.
 - M2 durable agent runtime: GREEN / INTEGRATED, 100% of its 11% weight.
-- Overall proven final A–Z product progress is **27.0%**.
+- M3 memory/scheduler/resource control: IMPLEMENTED on development branch; no weight credited until exact green CI + merge.
+- Overall proven final A–Z product progress remains **27.0%**.
 
-No later milestone receives product-weight credit until its own acceptance gate passes, even when multiple later lanes are being implemented simultaneously.
+## Proven foundation
+- M1 exact green head `67df93c355e813dfc297bd1111df40d3c4ad6175`; Core CI run 74 success; merged as `b40ee58ce9c585efe7dad8ebfa23490e842c753a`.
+- M2 exact green head `c890a5eadbea01afe92617f440ca83005c3b5f0c`; Core CI run 85 success; merged as `7c13b070d7b3c99c41e8cafaea855c9214322abe`.
+- Current `main` observed at cycle start: `58a5fbf708493b64cb76ed6541928e2f17ae6bc8`, the merged full reuse-first architecture audit.
 
-## Proven M1 evidence
-- PR #2 exact green head: `67df93c355e813dfc297bd1111df40d3c4ad6175`.
-- GitHub Actions `Core CI` run 74 completed `success` on that exact head.
-- PR #2 merged into `main` as `b40ee58ce9c585efe7dad8ebfa23490e842c753a`.
+## M3 current implementation
+Branch: `dev/m3-memory-scheduler-resources`.
+Implementation baseline before status-only synchronization: `ac57ec1524ba8e4efec944e3ef3acd12ee865e81`.
+State: IMPLEMENTED / CI NOT YET PROVEN / NOT INTEGRATED / NOT PACKAGED / NOT HUMAN_TESTED.
 
-## Proven M2 evidence
-- PR #3 exact green head: `c890a5eadbea01afe92617f440ca83005c3b5f0c`.
-- GitHub Actions `Core CI` run 85 completed `success` on that exact head.
-- The job executed checkout, Python setup, `.[dev,agent]` dependency installation and `python scripts/verify.py`.
-- PR #3 merged into `main` as `7c13b070d7b3c99c41e8cafaea855c9214322abe`.
-- M2 therefore earns its full 11% acceptance-gate weight.
+Implemented coherent slice:
+- schema migration v4 for memory records, scheduled-job definitions and resource budgets;
+- versioned Nika memory scopes: task, agent, workspace and user-approved long-term memory;
+- explicit fail-closed approval requirement for user long-term memory;
+- deterministic expiration/purge and scope isolation;
+- `SchedulerPort` plus APScheduler 3.11 adapter using date/interval/cron triggers;
+- SQLite-authoritative serializable schedule definitions with runtime rehydration after restart;
+- persisted pause/resume semantics and stable action-ID dispatch rather than persisted Python callables;
+- resource budget persistence, replaceable `ResourceObserverPort`, psutil adapter and deterministic FIFO admission;
+- CPU/RAM pressure limits, concurrency limits and waiting-request cancellation;
+- regression/acceptance tests covering migration, restart, expiration, approval, scheduling and resource fairness;
+- reuse/evidence document `docs/M3_MEMORY_SCHEDULER_RESOURCES.md`.
 
-## M2 integrated capability
-- Framework-neutral `AgentRuntimePort`; LangGraph is the primary implemented runtime while Microsoft Agent Framework remains a migration/interop candidate.
-- Async local durability through LangGraph `AsyncSqliteSaver` + `aiosqlite` with strict checkpoint deserialization.
-- Persisted Nika task→runtime session routing and restart recovery.
-- Explicit human-approval resume boundary; ordinary continuation cannot silently grant approval.
-- Cancellation, execution timeout and bounded retry policy.
-- Persistent idempotency/reconciliation ledger for potentially duplicated external side effects.
-- Startup recovery classifies safe crash continuation separately from approval, manual resume, unresolved side effects, missing runtime and inconsistent state.
-- Durable start commits `READY -> RUNNING` plus the initial recovery cursor atomically.
-- Runtime finalization commits session mutation/deletion, task state transition, normalized runtime events and final audit evidence atomically.
+## M3 reuse gate
+- REUSE/ADAPT APScheduler 3.11.x; Nika does not implement trigger/scheduling machinery.
+- REUSE psutil 7.x for OS CPU/memory observation.
+- REUSE SQLite for authoritative product state.
+- CUSTOM (thin) only for Nika scope/consent/retention, stable schedule identity/action mapping, budgets and FIFO fairness.
+- Qdrant/vector memory remains deferred until measured semantic-retrieval evidence justifies it.
 
-## CI repair history
-The old private-repository runner/minute blocker is RESOLVED and must not be treated as current. After the repository became public, executable CI exposed real source/test defects; those were repaired without weakening checks. M1 and M2 then passed exact green gates.
+## M3 unverified / next gate
+No M3 test is claimed passed yet on the branch until GitHub Actions executes the exact PR head on Ubuntu and Windows. Required next sequence:
+1. open/update M3 PR;
+2. execute shared `python scripts/verify.py` through Core CI on both operating systems;
+3. repair real failures without weakening checks;
+4. merge only the exact green head;
+5. only then award M3's 9% milestone weight.
 
-## Parallel-development governance
-- PR #4 `Parallel Development Policy` is MERGED and is no longer merely prepared.
-- `docs/PARALLEL_DEVELOPMENT_POLICY.md` is binding repository governance.
-- Development scans the entire M3–M12 backlog and normally advances 5–10 independent large lanes.
-- Dependencies constrain integration order, not isolated implementation, research, fixtures, mocks, tests or prototypes.
-- Unrelated work must branch from the latest green `main`; unrelated branches must not be stacked.
-- See `state/PARALLEL_EXECUTION_BOARD.md` for lane ownership and evidence states.
-
-## Public-repository hardening now in flight
-- secret/credential/session/cookie/private-state ignore patterns are being strengthened;
-- current-tree searches for common secret names have not identified an actual credential value;
-- public visibility means secret hygiene is now a permanent gate, including history-aware scanning when the appropriate scanner is added.
-
-## Reuse-first digital-worker architecture already recorded
-- ADAPT Microsoft UFO² as first Windows computer-use proof candidate.
-- REUSE Playwright as deterministic semantic browser baseline.
-- ADAPT Browser Use only if it measurably improves on that baseline.
-- ADAPT OpenHands SDK/agent-server as first Software Factory coding-worker proof candidate.
-- ADAPT Unified Planning for explicit deterministic planning domains.
-- REUSE ONNX Runtime for compact specialist inference.
+## Governance consistency issue discovered this cycle
+Repository metadata is currently PUBLIC despite older user wording referring to a private repository.
+PR #4 `Governance: parallel-first development across independent Nika workstreams` is currently OPEN, not merged, and GitHub reports it non-mergeable. `docs/PARALLEL_DEVELOPMENT_POLICY.md` is absent from current `main`, so older status text claiming PR #4 was merged was incorrect. The active parallel-first rules are nevertheless present in `AGENTS.md`, `docs/MASTER_SPEC.md`, `docs/ROADMAP.md` and `state/PARALLEL_EXECUTION_BOARD.md`. PR #4 requires separate cleanup/reconciliation and is not counted as integrated evidence.
 
 ## Truth state
-- M0: IMPLEMENTED / INTEGRATED / GREEN; not PACKAGED; not HUMAN_TESTED.
-- M1: IMPLEMENTED / INTEGRATED / GREEN; not PACKAGED; not HUMAN_TESTED.
-- M2: IMPLEMENTED / INTEGRATED / GREEN; not PACKAGED; not HUMAN_TESTED.
-- M3–M12: parallel source lanes may be PREPARED/IMPLEMENTED/GREEN independently; none is credited INTEGRATED until its own gate.
-- Parallel-development governance: INTEGRATED through PR #4.
-- Digital-worker reuse architecture: RESEARCHED/DOCUMENTED; production adapters remain milestone-gated.
+- M0: IMPLEMENTED / GREEN / INTEGRATED; not PACKAGED; not HUMAN_TESTED.
+- M1: IMPLEMENTED / GREEN / INTEGRATED; not PACKAGED; not HUMAN_TESTED.
+- M2: IMPLEMENTED / GREEN / INTEGRATED; not PACKAGED; not HUMAN_TESTED.
+- M3: IMPLEMENTED on `dev/m3-memory-scheduler-resources`; not yet GREEN or INTEGRATED.
+- M4–M12: PREPARED/parallel lanes only unless separately evidenced.
 - No Windows standalone package yet.
 - No human NVDA verification yet.
 
-## Parallel CI acceleration
-The CI control-plane change under review runs the same verification harness independently on Ubuntu and Windows with fail-fast disabled, so one operating-system failure does not hide evidence from the other. Stale runs for the same PR/ref are cancelled to avoid wasting runner capacity.
-
-## Active development wave
-Ten lanes are opened conceptually in `state/PARALLEL_EXECUTION_BOARD.md`:
-1. M3 durable memory/scheduler/resource control;
-2. M4 Model Gateway/tools/MCP;
-3. M5 accessible Windows UI;
-4. M6 Agent Builder/permissions;
-5. M7 multi-agent laboratory;
-6. M8 controlled learning/experiments;
-7. M9 plugin/workspace SDK;
-8. M10 security/sandbox/reliability;
-9. M11 Windows packaging/distribution;
-10. M12 continuous full-system QA/accessibility/release gates.
-
-The immediate execution rule is not “finish M3, then start M4”. Each cycle advances independent large slices from as many of these lanes as can be safely isolated, while merge order and product-credit rules remain strict.
+## Next LARGE coherent batch
+Priority is to close the M3 acceptance gate on the current coherent slice: inspect exact CI, fix source/test/migration/restart defects, merge only green, then update M3 credit. Independent M4–M12 work may continue only where it does not interfere with this gate.
