@@ -39,16 +39,22 @@ Acceptance evidence: Core CI run 112 passed shared Ubuntu + Windows verification
 Integrated evidence: stable model/provider contracts, deterministic no-LLM + OpenAI-compatible + Ollama adapters, typed timeout/cancellation/provider errors, guarded tool execution, official MCP SDK v2 discovery/call adapter, in-process MCP proof and fail-closed risky-call approval regression.
 
 ### L3 — M5 accessible Windows UI
-Ownership: `ui/`, Windows WebView host adapter, accessibility contracts/tests.
-Goal: keyboard-first Tasks/Agents/Workspaces/Logs/Settings shell with Action Registry/Keymap integration and explicit accessible names/status text.
-Integration dependency: M0–M4 backend foundation is now integrated; UI can bind to stable ports/contracts.
-Current state: PREPARED / NEXT WEIGHTED MILESTONE. Draft PR #11 contains downstream M5–M8 foundation work but is not credited until independently reviewed, proven and integrated.
+Ownership: `src/nika_core/ui`, Windows WebView host adapter, accessibility contracts/tests.
+Goal: keyboard-first Tasks/Agents/Workspaces/Logs/Keyboard shell with Action Registry/Keymap integration and explicit accessible names/status/focus semantics.
+Integration dependency: M0–M4 integrated — satisfied.
+Branch: `dev/m5-accessible-ui`.
+Current state: IMPLEMENTED / GREEN / INTEGRATED.
+Exact green head: `9b536af11aaa30e72c5d3562e8b2beede7e5b5b2`.
+Acceptance evidence: Core CI run 137 passed shared Ubuntu verification, shared Windows verification, and packaged PyInstaller one-dir WebView2 UI Automation + keyboard/focus proof; PR #13 merged as `6b9c023d62b30500bec50a1d9484a78cfb6aafbd`.
+Integrated evidence: pywebview + explicit EdgeChromium/WebView2 shell, supported local-path hosting, narrow validated bridge, centralized configurable Action Registry/Keymap, semantic HTML/live status, deterministic focus targets, packaged UIA descendant discovery, `Alt+1` navigation focus and `Ctrl+Shift+P` command focus proof.
+Human truth: diagnostic packaged proof does not equal release PACKAGED; HUMAN_TESTED=false; NVDA_VERIFIED=false.
 
 ### L4 — M6 Agent Builder and permissions
 Ownership: `src/nika_core/builder`, agent-definition compiler/validation, permission/risk models.
 Goal: transform a natural-language agent request into a deterministic versioned definition with tools, schedule, model, budgets and safety boundaries.
-Integration dependency: model/tool execution may be mocked behind ports; M4 is now available as integrated provider/tool infrastructure.
-Current state: PREPARED FOR IMPLEMENTATION; draft PR #11 may contain reusable candidate work but has no integration credit.
+Integration dependency: M2 runtime + M4 model/tool contracts are integrated — satisfied.
+Current state: PREPARED / NEXT WEIGHTED MILESTONE; draft PR #11 may contain reusable candidate work but has no integration credit.
+Next batch: audit PR #11 M6 candidate, then implement versioned specs, structured drafting, fail-closed tool/permission compilation, R0–R4 review, persistence/versioning/audit and acceptance tests.
 
 ### L5 — M7 multi-agent laboratory
 Ownership: `src/nika_core/multi_agent`, supervisor/child contracts, typed messages and quota tests.
@@ -78,7 +84,7 @@ Current state: PREPARED FOR IMPLEMENTATION.
 Ownership: `packaging/`, build workflow/specs, release metadata and smoke-test harness.
 Goal: reproducible standalone Windows candidate without bundling heavy optional models/workers.
 Integration dependency: packaging prototypes may proceed now; release credit waits for integrated feature set.
-Current state: PREPARED FOR IMPLEMENTATION.
+Current state: PREPARED FOR IMPLEMENTATION. M5 produced a diagnostic one-dir package only for accessibility acceptance; it is not M11 release credit.
 
 ### L10 — M12 full-system QA/accessibility/release gate
 Ownership: `qa/`, cross-lane integration fixtures, Windows/NVDA manual protocol, recovery/security regression matrix.
