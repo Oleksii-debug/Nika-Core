@@ -19,8 +19,9 @@ class MediaResourceCoordinator:
     """Thin DEV05 binding over the canonical ResourceManager.
 
     Heavy media-model work uses a shared machine-level owner so only one heavy resident may be
-    granted at once by default. Batch A itself only establishes the contract; ASR/OCR adapters
-    consume it in later batches.
+    granted at once by default. A denied request is removed from the manager's FIFO queue before
+    returning a retryable media error, so callers can explicitly retry without leaving a stale
+    reservation behind.
     """
 
     def __init__(self, manager: ResourceManager) -> None:
@@ -41,6 +42,11 @@ class MediaResourceCoordinator:
             request_id=claim.claim_id,
         )
         if not decision.granted:
+            self._manager.cancel_waiting(
+                scope=scope,
+                owner_id=owner_id,
+                request_id=claim.claim_id,
+            )
             raise MediaError(
                 MediaErrorCode.RESOURCE_BLOCKED,
                 f"media resource claim blocked: {decision.reason}",
