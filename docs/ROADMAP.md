@@ -1,87 +1,118 @@
-# Nika Core — A–Z roadmap and weighted progress model
+# Nika Core — roadmap and progress truth
 
-Baseline created: 2026-08-17. Current status synchronized: 2026-08-18.
-Progress is acceptance-gate weighted, not commit-count based. Regressions may reduce progress. Source work may proceed in parallel; product credit is awarded only after the relevant exact acceptance gate is green and integrated.
+Baseline created: 2026-08-17. Scope reconciled: 2026-08-19.
 
-| Stage | Weight | Goal | Current truth |
+Progress is acceptance-gate based, not commit-count based. Regressions may reduce readiness. **Historical Core milestone credit and the expanded Full Product Vision are separate measurements.** See `docs/FULL_PRODUCT_VISION_2026-08-19.md`.
+
+## Track A — Core foundation milestone history
+
+The original M0–M12 roadmap measured the reusable Nika Core control plane. Its historical evidence remains useful and is not erased by the expanded product scope.
+
+| Stage | Historical weight | Goal | Historical evidence truth |
 |---|---:|---|---|
-| M0 Research, reuse audit, governance & bootstrap | 6% | final architecture, adoption map, repo rules, status, CI | GREEN / INTEGRATED |
-| M1 Kernel foundation | 10% | typed config, persisted registries, SQLite migrations, task state, audit/events, workspace/plugin contract, Action Registry/keymap | GREEN / INTEGRATED |
-| M2 Durable agent runtime | 11% | AgentRuntimePort, runtime selection, run loop, cancellation, retries, approvals, durable checkpoint/resume | GREEN / INTEGRATED |
-| M3 Memory, scheduler & resource control | 9% | memory namespaces, SchedulerPort/APScheduler adapter, resource budgets, queue fairness | GREEN / INTEGRATED |
-| M4 Model Gateway, tools & MCP | 8% | mock/no-LLM, Ollama, cloud/OpenAI-compatible, provider adapter, MCP tool layer | GREEN / INTEGRATED |
-| M5 Accessible web-style Windows GUI | 11% | local frontend + pywebview/WebView2 shell, keyboard/NVDA semantics, shortcut editor, logs/tasks/agents/workspaces | GREEN / INTEGRATED |
-| M6 Agent Builder & permissions | 8% | natural-language draft -> schema -> permission review -> versioned activation | GREEN / INTEGRATED |
-| M7 Multi-agent laboratory | 9% | supervisor/subagents, teams, typed handoffs, parallel fan-out, quotas, evaluator | GREEN / INTEGRATED |
-| M8 Self-learning & experiment engine | 10% | metrics, replay, prompt/strategy versions, champion/challenger, rollback, optional DSPy | GREEN / INTEGRATED |
-| M9 Plugin SDK & real workspaces | 8% | stable plugin/workspace API and real independent workspaces | GREEN / INTEGRATED |
-| M10 Security, sandbox & reliability | 5% | sandbox, secrets, backup/restore, corruption/crash recovery, threat hardening | GREEN / INTEGRATED |
-| M11 Windows packaging & distribution | 3% | standalone EXE/ZIP, local assets, manifest/checksums/licenses, no-Python execution | GREEN / INTEGRATED / PACKAGED candidate evidence |
-| M12 Full-system QA, NVDA acceptance & v1.0 | 2% | full P0 gates, recovery drill, human NVDA acceptance, production release | AUTOMATED PRE-HUMAN GATE GREEN / INTEGRATED; HUMAN GATE OPEN |
+| M0 Research/reuse/governance/bootstrap | 6% | architecture, adoption map, repo rules, CI | GREEN / INTEGRATED |
+| M1 Kernel foundation | 10% | config, registries, SQLite migrations, task state, audit, workspace/plugin contract, keymap | GREEN / INTEGRATED |
+| M2 Durable agent runtime | 11% | AgentRuntimePort, cancellation, retries, approvals, durable checkpoint/resume | GREEN / INTEGRATED |
+| M3 Memory/scheduler/resources | 9% | memory namespaces, scheduler, resource budgets/fairness | GREEN / INTEGRATED |
+| M4 Model Gateway/tools/MCP | 8% | mock/no-LLM provider, Ollama, cloud/OpenAI-compatible, tools/MCP | GREEN / INTEGRATED for that historical scope |
+| M5 Accessible Windows GUI foundation | 11% | WebView2 shell, semantic UI, keyboard/focus/keymap | GREEN / INTEGRATED for foundation scope |
+| M6 Agent Builder/permissions | 8% | validated agent configs, permission review/activation | GREEN / INTEGRATED |
+| M7 Multi-agent laboratory foundation | 9% | teams, handoffs, bounded fan-out, evaluator | GREEN / INTEGRATED |
+| M8 Experiment/self-learning engine foundation | 10% | versioned experiments, metrics, champion/challenger, rollback | GREEN / INTEGRATED |
+| M9 Plugin/workspace + interaction adapter foundation | 8% | plugin contracts, Software Factory boundary, semantic adapters | GREEN / INTEGRATED for foundation scope |
+| M10 Security/reliability foundation | 5% | restrictions, approvals, backup/recovery/threat hardening | GREEN / INTEGRATED for foundation scope |
+| M11 Windows packaging/distribution foundation | 3% | standalone Windows package, manifest/checksums/licenses | GREEN / INTEGRATED foundation; candidate lineage can be invalidated by later product changes |
+| M12 Pre-human full-system gate | 2% | automated release gate + human Windows/NVDA acceptance | historical automated gate existed; current human candidate status must follow live integrated product truth |
 
-Total: 100%.
+The old statement “98% final A–Z product progress” is now reclassified as **98% historical Core roadmap credit before Full Product Vision reconciliation**. It must not be presented as 98% completion of the final Nika product.
 
-## Current proven progress
-M0–M11 and the automated pre-human portion of M12 are GREEN / INTEGRATED. The final human-only M12 credit remains intentionally unawarded. Overall proven final A–Z product progress is therefore **98.0%**.
+## Current Core readiness truth
 
-- HUMAN_TESTED: false.
-- NVDA_VERIFIED: false.
-- PRODUCTION_RELEASE_READY: false.
-- The final 2% may be awarded only after the exact packaged candidate passes the human Windows/NVDA protocol in `docs/M12_HUMAN_NVDA_ACCEPTANCE.md`.
+The historical Core is real and substantial: durable runtime, memory/scheduler/resources, provider-neutral ModelGateway, tools/MCP, accessible Windows shell, Agent Builder, multi-agent execution, experiment engine, plugin/workspace boundaries, security/recovery and Windows packaging all exist and have prior green evidence.
 
-Canonical detailed truth is `state/PROJECT_STATUS.md`; parallel lane ownership/evidence states are in `state/PARALLEL_EXECUTION_BOARD.md`.
+However, a 2026-08-19 audit proved that accessible-looking task controls in the packaged Windows UI were not fully wired to the real backend. The repair is being handled as a separate large product-journey change and invalidates the old artifact as a final human candidate until the repaired integrated product passes the complete release gate.
+
+Therefore:
+- historical Core evidence remains recorded;
+- current packaged-candidate readiness must be re-earned on the final integrated repair;
+- HUMAN_TESTED remains false;
+- NVDA_VERIFIED remains false;
+- PRODUCTION_RELEASE_READY remains false.
+
+## Track B — Full Product Vision roadmap
+
+No numeric Full Product Vision percentage is assigned yet. First define and close the real capability gates; only then may weights be adopted. This prevents another misleading “almost finished” number when user-visible journeys or major workspaces are still absent.
+
+### F1 — Real Windows command/task product journey
+Goal: the packaged user can create/inspect/pause/resume/stop real tasks, see real agents/workspaces/state/errors, restart and continue where applicable, entirely through the accessible final window.
+
+Current work: active Windows backend/UI repair and complete Product Journey gate.
+
+### F2 — Multi-mode intelligence platform
+Goal: one Nika system supports:
+1. Deterministic Brain with **no model**;
+2. Embedded Brain using Microsoft Foundry Local as the primary Windows implementation;
+3. external local model servers such as Ollama;
+4. cloud/API models.
+
+Required evidence includes the deterministic planning/tool/approval gate, Foundry Local adapter contract tests, official Windows SDK dependency proof, then a real physical-Windows embedded-model inference proof. llama.cpp and ONNX Runtime GenAI remain measured fallback candidates rather than mandatory dependencies.
+
+### F3 — Capability Escalation / Toolsmith + Software Factory
+Goal: when a durable task lacks a capability, Nika can find/reuse/adapt/build/test/register a safe capability and resume the original task from checkpoint. The code path remains isolated and cannot silently rewrite production main or expand permissions.
+
+### F4 — Universal Research Engine + Corpus/Knowledge
+Goal: reusable source management, incremental crawling/change tracking, HTTP/API/browser/document extraction, deterministic filtering, optional model analysis, evidence/confidence, dedup, structured cards, review state, local corpus indexing and accessible reports. GrantScanner becomes one profile over this shared engine rather than a one-off crawler.
+
+### F5 — Computer Interaction and Accessibility Repair as real product capabilities
+Goal: semantic-first browser/Windows control, deterministic accessible explanations, robust fallback hierarchy, permission-aware actions and real packaged Product Journey proof. Automated UIA/Playwright evidence supplements but never replaces human NVDA testing.
+
+### F6 — Model Engineering Lab and resource-aware local AI
+Goal: benchmark embedded/Ollama/cloud/specialist models on versioned datasets; track quality/latency/RAM/CPU/GPU; manage model artifacts/licenses/checksums; support power/resource profiles and promote only measured winners.
+
+### F7 — AI Trader real workspace
+Goal: historical no-lookahead replay, odds/event snapshots, virtual bank, singles/combinations/portfolio exposure, time waves, versioned strategies, risk/drawdown metrics, held-out replay, live/prematch paper trading, deterministic/statistical learning plus optional model-assisted analysis, restart-safe sessions and accessible reports.
+
+Financial autonomy uses explicit user-configured authorization profiles plus Nika risk/approval policy. Agents cannot silently widen permissions or budgets.
+
+### F8 — Real workspace creation from the Nika command center
+Goal: the user can describe a new workspace/agent/capability in natural language; Nika routes it through Agent Builder/Software Factory/Toolsmith, creates it behind stable contracts, tests it, exposes it through the final accessible UI and preserves compatibility with existing workspaces.
+
+Telegram is deliberately **not** an active planned workspace. If it is ever requested again, it is treated as a new optional workspace under F8 rather than a built-in roadmap requirement.
+
+### F9 — Full Product integration/release
+Goal: all capabilities claimed for a chosen release are integrated on one exact head, complete Core/Windows/security/accessibility/product-journey gates pass, a fresh candidate is built, and only that exact candidate enters the human Windows/NVDA protocol.
+
+## Product Journey rule
+
+Every user-facing capability must prove this complete chain:
+
+`packaged Windows UI -> semantic action/command -> validated bridge/API -> real Nika service/runtime -> persisted state/result -> accessible visible feedback -> restart/resume where relevant`.
+
+A subsystem with backend tests but no usable final-window path is not complete.
 
 ## Reuse-first implementation map
-The current A–Z component audit is `docs/REUSE_CATALOG_2026-08-18.md`. Every lane uses **REUSE -> ADAPT -> CUSTOM (thin)** by default. Do not build generic schedulers, browser engines, Windows automation stacks, coding agents, model-provider gateways, OCR/speech engines, vector databases, retry engines, resource monitors or packaging systems from scratch when a maintained compatible component satisfies the requirement.
 
-## Integrated milestone summary
+Binding reuse sources now include:
+- `docs/REUSE_CATALOG_2026-08-18.md` for the broad component inventory;
+- `docs/INTELLIGENCE_REUSE_2026-08-19.md` for the newer Deterministic/Embedded Brain decisions;
+- `docs/FULL_PRODUCT_VISION_2026-08-19.md` for end-state scope.
 
-### M1 — Kernel foundation
-Typed settings; ordered backward migrations; persisted Agent/Workspace registries; generic audit log; stable workspace plugin discovery contract; central Action Registry and persisted remappable Keymap with conflict/clear/restore/import/export behavior are integrated.
+Every lane uses **REUSE -> ADAPT -> CUSTOM (thin)**. Do not rebuild generic schedulers, planners, inference engines, browser engines, Windows automation stacks, coding workers, OCR/speech engines, vector databases, retry engines, resource monitors or packaging systems when maintained compatible components satisfy the requirement.
 
-### M2 — Durable runtime
-LangGraph is integrated behind framework-neutral `AgentRuntimePort`; local durable resume/crash recovery, explicit approval, cancellation, bounded retry, side-effect idempotency/reconciliation and startup recovery are proven. Microsoft Agent Framework remains a secondary migration/interop candidate rather than a simultaneous production kernel.
+## Parallel development
 
-### M3 — Memory, scheduler and resources
-Durable scoped memory, explicit user-memory consent, expiration/purge, APScheduler-backed persistent schedules, restart/pause/resume semantics, resource budgets, psutil observation and FIFO resource fairness are integrated.
+Source work is dependency-aware parallel-first. Independent research/adapters/tests may proceed on separate branches while integration follows actual dependencies. A blocked lane does not idle unrelated lanes. Shared contracts require an explicit compatibility decision.
 
-### M4 — Model Gateway, tools and MCP
-Provider-neutral Model Gateway, no-LLM/OpenAI-compatible/Ollama adapters, privacy-aware routing, typed provider failures, guarded standardized tools, official MCP SDK v2 adapter and a live Ollama same-interface proof are integrated.
+Manual Deep Research developer chats may be real implementation lanes. When the user starts these manual developer/auditor pairs, scheduled workers should be paused or reassigned to complementary integration QA, release/package verification, regression hunting and cross-lane evidence rather than duplicating the same source ownership.
 
-### M5 — Accessible Windows UI
-Native semantic local web UI hosted by pywebview + EdgeChromium/WebView2, narrow validated backend bridge, centralized configurable Action Registry/Keymap, live textual status and deterministic focus are integrated. Packaged WebView2 UI Automation descendant discovery and keyboard/focus proofs passed. Automated accessibility evidence does not equal human NVDA verification.
+## CI/release policy
 
-### M6 — Agent Builder and permissions
-Versioned strict Pydantic agent definitions, Model Gateway natural-language drafting with schema validation, deterministic registry-backed compilation, fail-closed R0–R4 permission review, immutable definition persistence, persisted high-impact approval requirements and atomic activation are integrated.
+Coherent PR/main gates run the shared verification harness on Ubuntu and Windows where applicable. Focused Windows/WebView2/package/security/embedded-model proofs are added when they provide material evidence. Do not rebuild the Windows EXE or download large models on every source push.
 
-### M7 — Multi-agent laboratory
-Durable team/member lineage, typed handoff/result contracts, bounded fan-out through the existing runtime port, persisted depth/size/concurrency quotas, fail-closed privilege attenuation, cancellation propagation, restart-safe member identity and deterministic evaluator aggregation are integrated.
+Base Nika Core remains model-independent and comparatively small. Models and heavyweight workers are optional components; updating the application must not require re-downloading unchanged local models or user data.
 
-### M8 — Experiment engine
-Immutable experiment definitions bind strategy/config candidates to fixed replay/dataset references, metrics and unchanged permissions. Deterministic champion/challenger evaluation, promotion denial, promotion, rollback, append-only evidence, stale-writer protection and crash-safe lifecycle transitions are integrated.
+## Human truth
 
-### M9 — Plugin SDK and real workspaces
-Versioned plugin/workspace compatibility, capability and risk contracts are integrated. Software Factory runs behind `CodingWorkerPort`; Accessibility Repair/Assistant follows semantic-first interaction with visual/coordinate fallback only after semantic inspection. Optional Playwright ARIA and Windows UIA adapters have live CI proofs.
-
-### M10 — Security, sandbox and reliability
-Traversal-safe workspace boundaries, exact network/process allowlists, bounded execution budgets, expiring single-use approval evidence and fail-closed authorization order are integrated. The project explicitly claims defense-in-depth policy rather than pretending to provide a complete OS-level sandbox.
-
-### M11 — Windows packaging
-PyInstaller one-dir/windowed packaging, local WebView assets, deterministic release manifest/checksums and packaged WebView2/UIA/keyboard/focus verification are integrated. The final user candidate runs without requiring Python. M11 packaging evidence is distinct from final human release acceptance.
-
-### M12 — Automated pre-human release gate
-Exact candidate `d7bdfd697819adf13ad7423726a004fd781d857d` passed Core CI 200 and M12 Pre-Human Release Gate run 1. Ubuntu and Windows passed complete verification plus focused recovery/safety matrices; Windows also built and verified the packaged candidate, release manifest, WebView2/UIA semantics and Action Registry keyboard/focus flow. Artifact identity and digest are recorded in `state/PROJECT_STATUS.md` and Issue #1. Machine-readable evidence deliberately records `human_tested=false`, `nvda_verified=false` and `production_release_ready=false`.
-
-## Parallel-first execution model
-Nika uses dependency-aware parallel development. Dependencies constrain integration order, not independent research, contract work, fixtures, mocks or isolated adapter implementation. The binding policy is `docs/PARALLEL_DEVELOPMENT_POLICY.md`.
-
-At the current 98% pre-human release state, the M12 release-freeze exception applies: production feature expansion pauses because changing behavior would invalidate the exact packaged candidate already bound to human acceptance. Safe autonomous work is limited to evidence/status consistency, protocol clarification and concrete defect investigation until human Windows/NVDA results justify a new candidate.
-
-## CI policy
-Coherent PR/main gates use the same verification harness on Ubuntu and Windows where applicable. Independent OS jobs run with fail-fast disabled so one platform does not hide evidence from the other. Windows/WebView2/package/accessibility-specific proofs add focused jobs/artifacts only where they provide real evidence. Do not build a release EXE on every source push.
-
-## Packaging policy
-The base Windows product remains small and model-independent. Large browser/coding/speech/OCR/vision/model workers and their model files are optional components. Application updates must not require redownloading local AI models or user data.
-
-## Final blocker
-The only weighted blocker is human execution of `docs/M12_HUMAN_NVDA_ACCEPTANCE.md` against the exact M12 packaged candidate. If human testing finds a defect, create a new development candidate, fix the defect, rerun the full M12 automated gate, and repeat human acceptance on that same exact artifact. Only a human PASS may award HUMAN_TESTED, NVDA_VERIFIED and the final 2%.
+- HUMAN_TESTED: false until the designated person executes the exact manual protocol.
+- NVDA_VERIFIED: false until the exact packaged candidate passes the real Windows/NVDA protocol.
+- Automated semantic/UIA tests never award those states.
