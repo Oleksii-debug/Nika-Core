@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 from pydantic import ValidationError
+import pytest
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.media.contracts import (
@@ -82,7 +82,13 @@ def _transcript(*, version_id: str = "version-1") -> Transcript:
         method=TranscriptMethod.PLATFORM_SUBTITLE,
         language="uk",
         segments=(
-            Segment(segment_id="s1", start_ms=1000, end_ms=2400, text="Перша репліка", confidence=0.9),
+            Segment(
+                segment_id="s1",
+                start_ms=1000,
+                end_ms=2400,
+                text="Перша репліка",
+                confidence=0.9,
+            ),
             Segment(segment_id="s2", start_ms=2500, end_ms=4000, text="Друга репліка"),
         ),
     )
@@ -109,14 +115,24 @@ def _model(*, engine_id: str = "tesseract") -> ModelDescriptor:
     )
 
 
-def _ocr(*, version_id: str = "version-1", engine_id: str = "tesseract", model_id: str | None = None) -> OCRDocument:
+def _ocr(
+    *,
+    version_id: str = "version-1",
+    engine_id: str = "tesseract",
+    model_id: str | None = None,
+) -> OCRDocument:
     return OCRDocument(
         document_id="ocr-1",
         version_id=version_id,
         engine_id=engine_id,
         model_id=model_id,
         pages=(
-            OCRPage(page_number=1, text="Перша сторінка", confidence=0.8, source_sha256=_SHA_B),
+            OCRPage(
+                page_number=1,
+                text="Перша сторінка",
+                confidence=0.8,
+                source_sha256=_SHA_B,
+            ),
             OCRPage(page_number=2, text="Друга сторінка", source_sha256=_SHA_C),
         ),
     )
@@ -172,7 +188,10 @@ def _repository(tmp_path: Path) -> MediaRepository:
     return MediaRepository(store)
 
 
-def _persist_base(repository: MediaRepository, artifact: StructuredMediaArtifact | None = None) -> StructuredMediaArtifact:
+def _persist_base(
+    repository: MediaRepository,
+    artifact: StructuredMediaArtifact | None = None,
+) -> StructuredMediaArtifact:
     current = artifact or _artifact()
     repository.put_source(current.source)
     repository.put_version(current.version)
