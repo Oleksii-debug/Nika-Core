@@ -10,8 +10,11 @@ from nika_core.media.contracts import (
     OptionalComponent,
     ProcessingJob,
     ProcessingState,
+    ProvenanceChain,
+    StructuredMediaArtifact,
     TextRevision,
 )
+from nika_core.media.privacy import redact_mapping, redact_text
 
 
 class MediaRepository:
@@ -19,6 +22,7 @@ class MediaRepository:
         self._store = store
 
     def put_source(self, source: MediaSource) -> None:
+        safe_source = source.model_copy(update={"locator": redact_text(source.locator)})
         with self._store.connection() as conn:
             conn.execute(
                 """INSERT INTO media_sources(source_id, source_json, created_at, updated_at)
@@ -28,9 +32,9 @@ class MediaRepository:
                     updated_at = excluded.updated_at
                 """,
                 (
-                    source.source_id,
-                    source.model_dump_json(),
-                    source.created_at.isoformat(),
+                    safe_source.source_id,
+                    safe_source.model_dump_json(),
+                    safe_source.created_at.isoformat(),
                     datetime.now(UTC).isoformat(),
                 ),
             )
@@ -47,11 +51,19 @@ class MediaRepository:
 
     def put_version(self, version: MediaVersion) -> None:
         with self._store.connection() as conn:
+            existing = conn.execute(
+                "SELECT version_json FROM media_versions WHERE version_id = ?",
+                (version.version_id,),
+            ).fetchone()
+            if existing is not None:
+                current = MediaVersion.model_validate_json(existing["version_json"])
+                if current != version:
+                    raise ValueError("media versions are immutable once registered")
+                return
             conn.execute(
                 """INSERT INTO media_versions(
                     version_id, source_id, version_json, observed_at
                 ) VALUES (?, ?, ?, ?)
-                ON CONFLICT(version_id) DO UPDATE SET version_json = excluded.version_json
                 """,
                 (
                     version.version_id,
@@ -106,6 +118,14 @@ class MediaRepository:
         return tuple(MediaAsset.model_validate_json(row["asset_json"]) for row in rows)
 
     def put_job(self, job: ProcessingJob) -> None:
+        safe_job = job.model_copy(
+            update={
+                "checkpoint_json": redact_mapping(job.checkpoint_json),
+                "last_error_message": (
+                    redact_text(job.last_error_message) if job.last_error_message is not None else None
+                ),
+            }
+        )
         with self._store.connection() as conn:
             conn.execute(
                 """INSERT INTO media_processing_jobs(
@@ -119,13 +139,13 @@ class MediaRepository:
                     updated_at = excluded.updated_at
                 """,
                 (
-                    job.job_id,
-                    job.source_id,
-                    job.version_id,
-                    job.stage,
-                    job.state.value,
-                    job.model_dump_json(),
-                    job.updated_at.isoformat(),
+                    safe_job.job_id,
+                    safe_job.source_id,
+                    safe_job.version_id,
+                    safe_job.stage,
+                    safe_job.state.value,
+                    safe_job.model_dump_json(),
+                    safe_job.updated_at.isoformat(),
                 ),
             )
 
@@ -195,6 +215,55 @@ class MediaRepository:
             return None
         return OptionalComponent.model_validate_json(row["component_json"])
 
+    def put_artifact(self, artifact: StructuredMediaArtifact) -> None:
+        if any(revision.artifact_id != artifact.artifact_id for revision in artifact.revisions):
+            raise ValueError("artifact revisions must belong to the structured media artifact")
+        safe_events = tuple(
+            event.model_copy(update={"details": redact_mapping(event.details)})
+            for event in artifact.provenance.events
+        )
+        safe_source = artifact.source.model_copy(
+            update={"locator": redact_text(artifact.source.locator)}
+        )
+        safe_artifact = artifact.model_copy(
+            update={
+                "source": safe_source,
+                "provenance": ProvenanceChain(events=safe_events),
+            }
+        )
+        with self._store.connection() as conn:
+            existing = conn.execute(
+                "SELECT artifact_json FROM media_structured_artifacts WHERE artifact_id = ?",
+                (artifact.artifact_id,),
+            ).fetchone()
+            if existing is not None:
+                current = StructuredMediaArtifact.model_validate_json(existing["artifact_json"])
+                if current != safe_artifact:
+                    raise ValueError("structured media artifacts are immutable once registered")
+                return
+            conn.execute(
+                """INSERT INTO media_structured_artifacts(
+                    artifact_id, version_id, artifact_json, created_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    safe_artifact.artifact_id,
+                    safe_artifact.version_id,
+                    safe_artifact.model_dump_json(),
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+
+    def get_artifact(self, artifact_id: str) -> StructuredMediaArtifact:
+        with self._store.connection() as conn:
+            row = conn.execute(
+                "SELECT artifact_json FROM media_structured_artifacts WHERE artifact_id = ?",
+                (artifact_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown structured media artifact: {artifact_id}")
+        return StructuredMediaArtifact.model_validate_json(row["artifact_json"])
+
     def append_revision(self, revision: TextRevision) -> None:
         with self._store.connection() as conn:
             row = conn.execute(
@@ -204,6 +273,18 @@ class MediaRepository:
             expected = int(row["ordinal"] + 1) if row["ordinal"] is not None else 0
             if revision.ordinal != expected:
                 raise ValueError(f"revision ordinal must be {expected}")
+            if revision.parent_revision_id is not None:
+                parent = conn.execute(
+                    """SELECT artifact_id, ordinal FROM media_text_revisions
+                    WHERE revision_id = ?""",
+                    (revision.parent_revision_id,),
+                ).fetchone()
+                if parent is None:
+                    raise ValueError("parent revision does not exist")
+                if parent["artifact_id"] != revision.artifact_id or int(parent["ordinal"]) != expected - 1:
+                    raise ValueError("parent revision must be the previous revision of this artifact")
+            elif expected != 0:
+                raise ValueError("non-initial revision requires parent_revision_id")
             conn.execute(
                 """INSERT INTO media_text_revisions(
                     revision_id, artifact_id, ordinal, parent_revision_id, revision_json, created_at
