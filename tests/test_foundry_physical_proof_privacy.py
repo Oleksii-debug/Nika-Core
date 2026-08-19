@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from scripts.prove_foundry_local import _model_evidence_for_report
 from nika_core.model_gateway.foundry_local import FoundryModelEvidence
+from scripts.prove_foundry_local import _model_evidence_for_report
 
 
 def test_physical_proof_model_metadata_does_not_export_absolute_cache_path() -> None:
