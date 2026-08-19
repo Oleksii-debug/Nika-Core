@@ -241,10 +241,10 @@ class ActionIntent:
                 self.executable,
                 self.approval_required,
             ),
-            ensure_ascii=False,
+            ensure_ascii=True,
             separators=(",", ":"),
         )
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        return hashlib.sha256(payload.encode("ascii")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
