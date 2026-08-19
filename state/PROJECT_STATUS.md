@@ -71,8 +71,15 @@ Repository visibility observed this cycle: **PUBLIC**.
 - `m12-prehuman-evidence.json` inside the artifact still binds the package to commit `d7bdfd697819adf13ad7423726a004fd781d857d` and records `human_tested=false`, `nvda_verified=false`, `production_release_ready=false`.
 - The embedded release manifest still identifies product `NikaCore` version `0.0.2`.
 - Exact status-only head `03e76cbd12eb8cd44560832391f6428c068d01fb` passed Core CI #211 successfully.
-- PR #31 was merged only after that exact-head green gate; merge commit `ce4a42e98d5b64ce92ceae72c8dd5678e763f722` is the current `main` baseline at the start of this cycle.
+- PR #31 was merged only after that exact-head green gate; merge commit `ce4a42e98d5b64ce92ceae72c8dd5678e763f722`.
 - No production source, package input, runtime behavior or packaged candidate was changed. This is evidence reconciliation only and awards **0%** additional weighted credit.
+
+## PR #32 integration reconciliation
+- Status-only PR #32 exact head `253af039c897aa0825e95feb68a8fdbef63aad89` passed Core CI #213 successfully.
+- PR #32 was merged as `73aecba0021551187f9dbeeef34becd0e2f24811`; that merge is the `main` baseline at the start of this cycle.
+- Open PR queue was empty when this cycle refreshed GitHub state.
+- The exact M12 human-bound artifact, production source, package inputs and runtime behavior remain unchanged.
+- This reconciliation awards **0%** additional weighted credit; HUMAN_TESTED and NVDA_VERIFIED remain false.
 
 ## Current weighted milestone
 M12 — Human Windows/NVDA acceptance and final v1.0 release decision.
