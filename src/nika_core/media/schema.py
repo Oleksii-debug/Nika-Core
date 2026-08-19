@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from nika_core.data.sqlite import SQLiteStore
 
-MEDIA_SCHEMA_VERSION = 2
+MEDIA_SCHEMA_VERSION = 3
 
 _MEDIA_MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -82,6 +82,19 @@ _MEDIA_MIGRATIONS: dict[int, tuple[str, ...]] = {
             FOREIGN KEY(job_id) REFERENCES media_processing_jobs(job_id)
         )""",
         "CREATE INDEX IF NOT EXISTS idx_media_transcription_job_state ON media_transcription_chunks(job_id, state, ordinal)",
+    ),
+    3: (
+        """CREATE TABLE IF NOT EXISTS media_ocr_pages (
+            page_id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL,
+            ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+            state TEXT NOT NULL CHECK(state IN ('pending','running','completed','failed','cancelled')),
+            page_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(job_id, ordinal),
+            FOREIGN KEY(job_id) REFERENCES media_processing_jobs(job_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_media_ocr_job_state ON media_ocr_pages(job_id, state, ordinal)",
     ),
 }
 
