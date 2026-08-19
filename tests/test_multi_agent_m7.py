@@ -40,6 +40,7 @@ class FakeRuntime(AgentRuntimePort):
         self.active = 0
         self.max_active = 0
         self.cancelled: list[tuple[str, str]] = []
+        self.resumed: list[RuntimeResumeRequest] = []
 
     @property
     def runtime_id(self) -> str:
@@ -55,6 +56,11 @@ class FakeRuntime(AgentRuntimePort):
                 RuntimeCapability.SUBAGENTS,
             }
         )
+
+    @staticmethod
+    def initial_resume_token(*, task_id: str, thread_id: str) -> str:
+        del task_id
+        return thread_id
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
         member_id = str(request.payload["member_id"])
@@ -72,6 +78,7 @@ class FakeRuntime(AgentRuntimePort):
             self.active -= 1
 
     async def resume(self, request: RuntimeResumeRequest) -> RuntimeResult:
+        self.resumed.append(request)
         return RuntimeResult(outcome=RuntimeOutcome.COMPLETED, output={"resumed": request.task_id})
 
     async def cancel(self, *, task_id: str, thread_id: str) -> bool:
@@ -173,9 +180,9 @@ def create_team(store: MultiAgentStore, *, max_parallel: int = 2) -> tuple[ToolG
     return root_grants
 
 
-def test_schema_v7_and_restart_safe_lineage(tmp_path: Path) -> None:
+def test_schema_v8_and_restart_safe_lineage(tmp_path: Path) -> None:
     sqlite, store = make_store(tmp_path)
-    assert sqlite.schema_version() == 7
+    assert sqlite.schema_version() == 8
     create_team(store)
     child = store.spawn_child(
         team_id="team-1",
