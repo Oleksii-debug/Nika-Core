@@ -92,22 +92,33 @@ jobs:
           cache: pip
       - name: Install GUI, packaging and QA dependencies
         run: python -m pip install -e ".[gui,qa,dev]"
+      - name: Resolve canonical project version
+        id: release
+        shell: pwsh
+        run: |
+          $version = python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"
+          if (-not $version) { throw 'Could not resolve [project].version from pyproject.toml' }
+          "version=$version" >> $env:GITHUB_OUTPUT
       - name: Build exact Windows release candidate, notices and manifest
-        run: python scripts/m11_release.py --version 0.0.2
+        run: >-
+          python scripts/m11_release.py
+          --source-sha '${{ github.event.pull_request.head.sha || github.sha }}'
       - name: Verify packaged WebView2 UI Automation and keyboard focus
         shell: pwsh
-        run: ./scripts/m5_uia_proof.ps1 -ExePath ./dist/NikaCore/NikaCore.exe -WindowTitle 'Nika Core 0.0.2'
+        run: ./scripts/m5_uia_proof.ps1 -ExePath ./dist/NikaCore/NikaCore.exe -WindowTitle 'Nika Core ${{ steps.release.outputs.version }}'
       - name: Run release-gate truth regressions
         run: python -m pytest tests/test_m11_m12_release.py -q
       - name: Create distributable ZIP
         shell: pwsh
-        run: Compress-Archive -Path ./dist/NikaCore/* -DestinationPath ./dist/NikaCore-0.0.2-windows-x64.zip -Force
+        run: Compress-Archive -Path ./dist/NikaCore/* -DestinationPath ./dist/NikaCore-${{ steps.release.outputs.version }}-windows-x64.zip -Force
       - name: Record automated pre-human evidence
         shell: pwsh
         run: |
           $evidence = [ordered]@{
-            schema_version = 2
+            schema_version = 3
+            product_version = '${{ steps.release.outputs.version }}'
             commit_sha = '${{ github.event.pull_request.head.sha || github.sha }}'
+            release_manifest_source_sha_bound = $true
             core_ci_equivalent = $true
             full_test_suite = $true
             runtime_restart_recovery = $true
@@ -134,9 +145,9 @@ jobs:
       - name: Upload exact pre-human candidate evidence
         uses: actions/upload-artifact@v4
         with:
-          name: NikaCore-0.0.2-m12-prehuman-${{ github.event.pull_request.head.sha || github.sha }}
+          name: NikaCore-${{ steps.release.outputs.version }}-m12-prehuman-${{ github.event.pull_request.head.sha || github.sha }}
           path: |
-            dist/NikaCore-0.0.2-windows-x64.zip
+            dist/NikaCore-${{ steps.release.outputs.version }}-windows-x64.zip
             dist/NikaCore/release-manifest.json
             dist/NikaCore/THIRD_PARTY_NOTICES.txt
             dist/m12-prehuman-evidence.json

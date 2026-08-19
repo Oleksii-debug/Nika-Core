@@ -70,6 +70,33 @@ class ModelRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelDownloadAuthorization:
+    """Explicit product-level intent to acquire one exact optional model.
+
+    This object is deliberately separate from ModelRequest so ordinary inference
+    can never gain model-download permission merely by selecting a model name.
+    The license reference is evidence supplied/reviewed by the product layer;
+    it is not inferred from the provider SDK license.
+    """
+
+    provider_id: str
+    model: str
+    license_reference: str
+
+    def __post_init__(self) -> None:
+        if not self.provider_id.strip():
+            raise ValueError("provider_id must not be empty")
+        if self.provider_id != self.provider_id.strip():
+            raise ValueError("provider_id must not contain surrounding whitespace")
+        if not self.model.strip():
+            raise ValueError("model must not be empty")
+        if self.model != self.model.strip():
+            raise ValueError("model must not contain surrounding whitespace")
+        if not self.license_reference.strip():
+            raise ValueError("license_reference must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
 class ModelUsage:
     input_tokens: int | None = None
     output_tokens: int | None = None
@@ -94,7 +121,10 @@ class ProviderCapabilities:
     supports_private_data: bool
     supports_tools: bool = False
     supports_streaming: bool = False
-    supports_hard_cancellation: bool = True
+    # Fail closed. A provider may opt in only after the adapter/upstream path has
+    # evidence that cancelling/timing out the caller also stops the underlying
+    # inference, not merely the local coroutine or HTTP socket.
+    supports_hard_cancellation: bool = False
 
 
 class ModelGatewayError(RuntimeError):

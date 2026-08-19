@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import pytest
+
 from nika_core.packaging.notices import verify_third_party_notices
-from nika_core.packaging.release import build_release_manifest, verify_release_manifest
+from nika_core.packaging.release import (
+    build_release_manifest,
+    verify_release_manifest,
+    write_release_manifest,
+)
 from nika_core.packaging.windows import default_windows_plan
 from nika_core.qa.release_gate import ReleaseGateEvidence, evaluate_release_gate
+from scripts.m11_release import project_version, resolve_release_version, resolve_source_sha
+
+SOURCE_SHA = "0123456789abcdef0123456789abcdef01234567"
 
 
 def test_release_manifest_is_deterministic_and_detects_tampering(tmp_path: Path) -> None:
@@ -16,22 +26,87 @@ def test_release_manifest_is_deterministic_and_detects_tampering(tmp_path: Path)
     assets.mkdir(parents=True)
     (assets / "index.html").write_text("<main>Nika</main>", encoding="utf-8")
 
-    first = build_release_manifest(bundle, product="NikaCore", version="1.0.0")
-    second = build_release_manifest(bundle, product="NikaCore", version="1.0.0")
+    first = build_release_manifest(
+        bundle,
+        product="NikaCore",
+        version="1.0.0",
+        source_sha=SOURCE_SHA,
+    )
+    second = build_release_manifest(
+        bundle,
+        product="NikaCore",
+        version="1.0.0",
+        source_sha=SOURCE_SHA,
+    )
     assert first == second
+    assert first.manifest_version == 2
+    assert first.source_sha == SOURCE_SHA
     assert verify_release_manifest(bundle, first) == ()
 
     (assets / "index.html").write_text("tampered", encoding="utf-8")
     assert verify_release_manifest(bundle, first) == ("size:nika_core/ui/web/index.html",)
 
 
+def test_written_release_manifest_records_source_identity(tmp_path: Path) -> None:
+    bundle = tmp_path / "NikaCore"
+    bundle.mkdir()
+    (bundle / "NikaCore.exe").write_bytes(b"binary")
+    manifest = build_release_manifest(
+        bundle,
+        product="NikaCore",
+        version="1.2.3",
+        source_sha=SOURCE_SHA,
+    )
+    target = write_release_manifest(bundle, manifest)
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["manifest_version"] == 2
+    assert payload["product"] == "NikaCore"
+    assert payload["version"] == "1.2.3"
+    assert payload["source_sha"] == SOURCE_SHA
+
+
 def test_release_manifest_detects_unexpected_file(tmp_path: Path) -> None:
     bundle = tmp_path / "NikaCore"
     bundle.mkdir()
     (bundle / "NikaCore.exe").write_bytes(b"binary")
-    manifest = build_release_manifest(bundle, product="NikaCore", version="1.0.0")
+    manifest = build_release_manifest(
+        bundle,
+        product="NikaCore",
+        version="1.0.0",
+        source_sha=SOURCE_SHA,
+    )
     (bundle / "unexpected.dll").write_bytes(b"extra")
     assert verify_release_manifest(bundle, manifest) == ("unexpected:unexpected.dll",)
+
+
+def test_release_version_comes_from_pyproject_and_mismatch_fails_closed(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "nika-core"\nversion = "9.8.7"\n',
+        encoding="utf-8",
+    )
+    assert project_version(tmp_path) == "9.8.7"
+    assert resolve_release_version(tmp_path, None) == "9.8.7"
+    assert resolve_release_version(tmp_path, "9.8.7") == "9.8.7"
+    with pytest.raises(ValueError, match="does not match pyproject version"):
+        resolve_release_version(tmp_path, "0.0.2")
+
+
+def test_release_source_sha_requires_exact_full_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NIKA_SOURCE_SHA", raising=False)
+    monkeypatch.delenv("GITHUB_SHA", raising=False)
+    assert resolve_source_sha(SOURCE_SHA.upper()) == SOURCE_SHA
+    with pytest.raises(ValueError, match="exact 40-character source SHA"):
+        resolve_source_sha("deadbeef")
+    with pytest.raises(ValueError, match="exact 40-character source SHA"):
+        resolve_source_sha(None)
+
+
+def test_release_source_sha_can_come_from_explicit_release_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NIKA_SOURCE_SHA", SOURCE_SHA)
+    monkeypatch.setenv("GITHUB_SHA", "f" * 40)
+    assert resolve_source_sha(None) == SOURCE_SHA
 
 
 def test_third_party_notice_verification_fails_closed(tmp_path: Path) -> None:

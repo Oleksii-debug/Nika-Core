@@ -162,7 +162,12 @@ class ModelGateway:
     def _can_fallback(
         *, error: ModelGatewayError, index: int, providers: tuple[ModelProvider, ...]
     ) -> bool:
-        return error.retryable and index + 1 < len(providers)
+        if not error.retryable or index + 1 >= len(providers):
+            return False
+        return not (
+            error.code is ModelErrorCode.TIMEOUT
+            and not providers[index].capabilities.supports_hard_cancellation
+        )
 
     def _audit_failure(
         self, request: ModelRequest, provider_id: str, error: ModelGatewayError

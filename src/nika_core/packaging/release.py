@@ -17,8 +17,9 @@ class ReleaseFile:
 class ReleaseManifest:
     product: str
     version: str
+    source_sha: str
     files: tuple[ReleaseFile, ...]
-    manifest_version: int = 1
+    manifest_version: int = 2
 
 
 def _sha256(path: Path) -> str:
@@ -46,7 +47,13 @@ def _safe_files(bundle_dir: Path) -> tuple[Path, ...]:
     return tuple(sorted(files, key=lambda item: item.relative_to(root).as_posix()))
 
 
-def build_release_manifest(bundle_dir: Path, *, product: str, version: str) -> ReleaseManifest:
+def build_release_manifest(
+    bundle_dir: Path,
+    *,
+    product: str,
+    version: str,
+    source_sha: str,
+) -> ReleaseManifest:
     root = bundle_dir.resolve(strict=True)
     entries = tuple(
         ReleaseFile(
@@ -59,7 +66,12 @@ def build_release_manifest(bundle_dir: Path, *, product: str, version: str) -> R
     )
     if not entries:
         raise ValueError("release bundle is empty")
-    return ReleaseManifest(product=product, version=version, files=entries)
+    return ReleaseManifest(
+        product=product,
+        version=version,
+        source_sha=source_sha,
+        files=entries,
+    )
 
 
 def write_release_manifest(bundle_dir: Path, manifest: ReleaseManifest) -> Path:
@@ -68,6 +80,7 @@ def write_release_manifest(bundle_dir: Path, manifest: ReleaseManifest) -> Path:
         "manifest_version": manifest.manifest_version,
         "product": manifest.product,
         "version": manifest.version,
+        "source_sha": manifest.source_sha,
         "files": [asdict(item) for item in manifest.files],
     }
     target.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")

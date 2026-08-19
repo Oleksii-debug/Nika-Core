@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
+from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.multi_agent.contracts import (
     AgentHandoff,
     ChildRequest,
@@ -11,6 +12,7 @@ from nika_core.multi_agent.contracts import (
     MemberState,
     TeamMember,
     aggregate_scores,
+    attenuate_grants,
 )
 from nika_core.multi_agent.store import MultiAgentStore
 from nika_core.runtime.contracts import (
@@ -29,11 +31,18 @@ class ChildExecution:
 
 
 class MultiAgentSupervisor:
-    """Bounded runtime-neutral supervisor over the existing AgentRuntimePort."""
+    """Bounded runtime-neutral supervisor over activated Nika agent definitions."""
 
-    def __init__(self, *, runtime: AgentRuntimePort, store: MultiAgentStore) -> None:
+    def __init__(
+        self,
+        *,
+        runtime: AgentRuntimePort,
+        store: MultiAgentStore,
+        definitions: AgentDefinitionRepository,
+    ) -> None:
         self._runtime = runtime
         self._store = store
+        self._definitions = definitions
 
     async def fan_out(
         self,
@@ -45,6 +54,10 @@ class MultiAgentSupervisor:
         quota = self._store.quota(team_id)
         if len(requests) > quota.max_children_per_parent:
             raise RuntimeError("fan-out exceeds children-per-parent quota")
+
+        parent = self._store.member(team_id, parent_id)
+        self._definitions.require_active(parent.agent_id, parent.agent_version)
+        self._validate_child_requests(requests)
 
         members = tuple(
             self._store.spawn_child(
@@ -107,7 +120,7 @@ class MultiAgentSupervisor:
                         state=MemberState.CANCELLED,
                     )
                     raise
-                except RuntimeError as exc:
+                except Exception as exc:  # noqa: BLE001 - isolate one worker from the team.
                     self._store.set_member_state(
                         team_id=team_id,
                         member_id=member.member_id,
@@ -164,6 +177,25 @@ class MultiAgentSupervisor:
     @staticmethod
     def aggregate_evaluations(scores: tuple[EvaluationScore, ...]) -> dict[str, float]:
         return aggregate_scores(scores)
+
+    def _validate_child_requests(self, requests: tuple[ChildRequest, ...]) -> None:
+        seen_member_ids: set[str] = set()
+        seen_thread_ids: set[str] = set()
+        for request in requests:
+            if request.member_id in seen_member_ids:
+                raise ValueError(f"duplicate child member_id: {request.member_id}")
+            if request.thread_id in seen_thread_ids:
+                raise ValueError(f"duplicate child thread_id: {request.thread_id}")
+            seen_member_ids.add(request.member_id)
+            seen_thread_ids.add(request.thread_id)
+
+            stored = self._definitions.require_active(request.agent_id, request.agent_version)
+            try:
+                attenuate_grants(stored.definition.tool_grants, request.requested_grants)
+            except PermissionError as exc:
+                raise PermissionError(
+                    f"child request exceeds activated definition {request.agent_id}:{request.agent_version}: {exc}"
+                ) from exc
 
     @staticmethod
     def _state_for_result(result: RuntimeResult) -> MemberState:

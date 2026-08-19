@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from nika_core.builder.spec import ToolGrant
+from nika_core.builder.compiler import AgentCompiler
+from nika_core.builder.repository import AgentDefinitionRepository
+from nika_core.builder.spec import AgentDefinition, ToolGrant
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.multi_agent import (
     ChildRequest,
@@ -23,11 +25,18 @@ from nika_core.runtime.contracts import (
     RuntimeResult,
     RuntimeResumeRequest,
 )
+from nika_core.tools import ToolRisk, ToolSpec
 
 
 class FakeRuntime(AgentRuntimePort):
-    def __init__(self, *, fail_member: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        fail_member: str | None = None,
+        failure_type: type[Exception] = RuntimeError,
+    ) -> None:
         self.fail_member = fail_member
+        self.failure_type = failure_type
         self.active = 0
         self.max_active = 0
         self.cancelled: list[tuple[str, str]] = []
@@ -54,7 +63,7 @@ class FakeRuntime(AgentRuntimePort):
         try:
             await asyncio.sleep(0.01)
             if member_id == self.fail_member:
-                raise RuntimeError("isolated worker failure")
+                raise self.failure_type("isolated worker failure")
             return RuntimeResult(
                 outcome=RuntimeOutcome.COMPLETED,
                 output={"member_id": member_id, "ok": True},
@@ -76,9 +85,75 @@ def make_store(tmp_path: Path) -> tuple[SQLiteStore, MultiAgentStore]:
     return sqlite, MultiAgentStore(sqlite)
 
 
+def _compiler() -> AgentCompiler:
+    return AgentCompiler(
+        tools=(
+            ToolSpec("web.read", "Read web content", ToolRisk.READ_ONLY),
+            ToolSpec("file.read", "Read workspace files", ToolRisk.READ_ONLY),
+        ),
+        model_profiles={"test"},
+    )
+
+
+def _definition(
+    *,
+    agent_id: str,
+    version: int = 1,
+    grants: tuple[ToolGrant, ...] = (),
+    enabled: bool = True,
+) -> AgentDefinition:
+    return AgentDefinition(
+        agent_id=agent_id,
+        version=version,
+        name=agent_id,
+        goal="Complete the assigned team task.",
+        instructions="Use only the declared capabilities and return structured evidence.",
+        model_profile="test",
+        tool_grants=grants,
+        enabled=enabled,
+    )
+
+
+def _save_and_activate(
+    repository: AgentDefinitionRepository,
+    definition: AgentDefinition,
+) -> AgentDefinition:
+    repository.save_draft(_compiler().compile(definition))
+    repository.activate(definition)
+    return definition
+
+
+def _definitions(
+    sqlite: SQLiteStore,
+    *,
+    worker_grants: tuple[ToolGrant, ...] | None = None,
+) -> AgentDefinitionRepository:
+    repository = AgentDefinitionRepository(sqlite)
+    root_grants = (
+        ToolGrant(tool_id="web.read", max_risk=0, scopes=("example.com", "docs.example.com")),
+        ToolGrant(tool_id="file.read", max_risk=0, scopes=("workspace",)),
+    )
+    _save_and_activate(
+        repository,
+        _definition(agent_id="supervisor", grants=root_grants),
+    )
+    _save_and_activate(
+        repository,
+        _definition(
+            agent_id="worker",
+            grants=(
+                ToolGrant(tool_id="web.read", max_risk=0, scopes=("example.com",)),
+            )
+            if worker_grants is None
+            else worker_grants,
+        ),
+    )
+    return repository
+
+
 def create_team(store: MultiAgentStore, *, max_parallel: int = 2) -> tuple[ToolGrant, ...]:
     root_grants = (
-        ToolGrant(tool_id="web.read", max_risk=1, scopes=("example.com", "docs.example.com")),
+        ToolGrant(tool_id="web.read", max_risk=0, scopes=("example.com", "docs.example.com")),
         ToolGrant(tool_id="file.read", max_risk=0, scopes=("workspace",)),
     )
     store.create_team(
@@ -190,10 +265,11 @@ def test_privilege_escalation_and_quotas_fail_closed(tmp_path: Path) -> None:
 
 
 def test_bounded_fanout_contains_worker_failure(tmp_path: Path) -> None:
-    _, store = make_store(tmp_path)
+    sqlite, store = make_store(tmp_path)
     create_team(store, max_parallel=2)
+    definitions = _definitions(sqlite)
     runtime = FakeRuntime(fail_member="child-2")
-    supervisor = MultiAgentSupervisor(runtime=runtime, store=store)
+    supervisor = MultiAgentSupervisor(runtime=runtime, store=store, definitions=definitions)
     requests = tuple(
         ChildRequest(
             member_id=f"child-{index}",
@@ -221,8 +297,141 @@ def test_bounded_fanout_contains_worker_failure(tmp_path: Path) -> None:
     assert states["child-3"] == MemberState.COMPLETED
 
 
+def test_non_runtimeerror_worker_failure_is_isolated(tmp_path: Path) -> None:
+    sqlite, store = make_store(tmp_path)
+    create_team(store)
+    definitions = _definitions(sqlite)
+    runtime = FakeRuntime(fail_member="child-0", failure_type=ValueError)
+    supervisor = MultiAgentSupervisor(runtime=runtime, store=store, definitions=definitions)
+
+    executions = asyncio.run(
+        supervisor.fan_out(
+            team_id="team-1",
+            parent_id="root",
+            requests=(
+                ChildRequest(
+                    member_id="child-0",
+                    agent_id="worker",
+                    agent_version=1,
+                    thread_id="thread-0",
+                    requested_grants=(
+                        ToolGrant(tool_id="web.read", max_risk=0, scopes=("example.com",)),
+                    ),
+                ),
+            ),
+        )
+    )
+
+    assert executions[0].exception == "ValueError"
+    assert store.member("team-1", "child-0").state == MemberState.FAILED
+
+
+def test_fanout_rejects_non_active_child_definition_before_spawning(tmp_path: Path) -> None:
+    sqlite, store = make_store(tmp_path)
+    create_team(store)
+    definitions = AgentDefinitionRepository(sqlite)
+    _save_and_activate(definitions, _definition(agent_id="supervisor", grants=create_team_grants()))
+    draft = _definition(
+        agent_id="worker",
+        grants=(ToolGrant(tool_id="web.read", max_risk=0, scopes=("example.com",)),),
+    )
+    definitions.save_draft(_compiler().compile(draft))
+    supervisor = MultiAgentSupervisor(runtime=FakeRuntime(), store=store, definitions=definitions)
+
+    with pytest.raises(PermissionError, match="not active"):
+        asyncio.run(
+            supervisor.fan_out(
+                team_id="team-1",
+                parent_id="root",
+                requests=(
+                    ChildRequest(
+                        member_id="child",
+                        agent_id="worker",
+                        agent_version=1,
+                        thread_id="thread-child",
+                        requested_grants=(
+                            ToolGrant(
+                                tool_id="web.read",
+                                max_risk=0,
+                                scopes=("example.com",),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        )
+    assert [member.member_id for member in store.members("team-1")] == ["root"]
+
+
+def create_team_grants() -> tuple[ToolGrant, ...]:
+    return (
+        ToolGrant(tool_id="web.read", max_risk=0, scopes=("example.com", "docs.example.com")),
+        ToolGrant(tool_id="file.read", max_risk=0, scopes=("workspace",)),
+    )
+
+
+def test_fanout_rejects_grants_not_declared_by_child_definition(tmp_path: Path) -> None:
+    sqlite, store = make_store(tmp_path)
+    create_team(store)
+    definitions = _definitions(
+        sqlite,
+        worker_grants=(ToolGrant(tool_id="file.read", max_risk=0, scopes=("workspace",)),),
+    )
+    supervisor = MultiAgentSupervisor(runtime=FakeRuntime(), store=store, definitions=definitions)
+
+    with pytest.raises(PermissionError, match="activated definition"):
+        asyncio.run(
+            supervisor.fan_out(
+                team_id="team-1",
+                parent_id="root",
+                requests=(
+                    ChildRequest(
+                        member_id="child",
+                        agent_id="worker",
+                        agent_version=1,
+                        thread_id="thread-child",
+                        requested_grants=(
+                            ToolGrant(
+                                tool_id="web.read",
+                                max_risk=0,
+                                scopes=("example.com",),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        )
+    assert [member.member_id for member in store.members("team-1")] == ["root"]
+
+
+def test_duplicate_fanout_identity_fails_before_partial_spawn(tmp_path: Path) -> None:
+    sqlite, store = make_store(tmp_path)
+    create_team(store)
+    definitions = _definitions(sqlite)
+    supervisor = MultiAgentSupervisor(runtime=FakeRuntime(), store=store, definitions=definitions)
+    duplicate = ChildRequest(
+        member_id="child",
+        agent_id="worker",
+        agent_version=1,
+        thread_id="thread-child",
+        requested_grants=(
+            ToolGrant(tool_id="web.read", max_risk=0, scopes=("example.com",)),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="duplicate child member_id"):
+        asyncio.run(
+            supervisor.fan_out(
+                team_id="team-1",
+                parent_id="root",
+                requests=(duplicate, duplicate),
+            )
+        )
+    assert [member.member_id for member in store.members("team-1")] == ["root"]
+
+
 def test_cancel_propagates_to_recoverable_children(tmp_path: Path) -> None:
-    _, store = make_store(tmp_path)
+    sqlite, store = make_store(tmp_path)
     create_team(store)
     for index in range(2):
         store.spawn_child(
@@ -241,7 +450,11 @@ def test_cancel_propagates_to_recoverable_children(tmp_path: Path) -> None:
         )
 
     runtime = FakeRuntime()
-    supervisor = MultiAgentSupervisor(runtime=runtime, store=store)
+    supervisor = MultiAgentSupervisor(
+        runtime=runtime,
+        store=store,
+        definitions=AgentDefinitionRepository(sqlite),
+    )
     members = asyncio.run(supervisor.cancel_team("team-1"))
 
     assert {task_id for task_id, _ in runtime.cancelled} == {

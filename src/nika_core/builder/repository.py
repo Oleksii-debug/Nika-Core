@@ -87,6 +87,8 @@ class AgentDefinitionRepository:
         *,
         approved_tool_ids: frozenset[str] = frozenset(),
     ) -> None:
+        if not definition.enabled:
+            raise ValueError("disabled agent definition cannot be activated")
         now = datetime.now(UTC).isoformat()
         with self._store.connection() as conn:
             row = conn.execute(
@@ -140,6 +142,21 @@ class AgentDefinitionRepository:
                 (agent_id,),
             ).fetchone()
         return self._decode(row) if row is not None else None
+
+    def require_active(self, agent_id: str, version: int) -> StoredAgentDefinition:
+        """Return the exact active definition or fail closed.
+
+        Multi-agent execution must never be able to name an arbitrary draft, retired,
+        disabled or nonexistent Agent Builder document and have it treated as runnable.
+        """
+        stored = self.get(agent_id, version)
+        if stored is None:
+            raise KeyError(f"unknown agent definition: {agent_id}:{version}")
+        if stored.status != "active":
+            raise PermissionError(f"agent definition is not active: {agent_id}:{version}")
+        if not stored.definition.enabled:
+            raise PermissionError(f"agent definition is disabled: {agent_id}:{version}")
+        return stored
 
     def get(self, agent_id: str, version: int) -> StoredAgentDefinition | None:
         with self._store.connection() as conn:
