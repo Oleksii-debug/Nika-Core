@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -229,5 +229,62 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
             FOREIGN KEY(experiment_id) REFERENCES experiments(experiment_id)
         )""",
         "CREATE INDEX IF NOT EXISTS idx_experiment_events_run ON experiment_events(experiment_id, event_id)",
+    ),
+    8: (
+        """CREATE TABLE IF NOT EXISTS research_workspaces (
+            workspace_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS research_sources (
+            source_id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK(kind IN ('local_file')),
+            locator TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(workspace_id) REFERENCES research_workspaces(workspace_id),
+            UNIQUE(workspace_id, kind, locator)
+        )""",
+        """CREATE TABLE IF NOT EXISTS corpus_documents (
+            document_id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            normalized_sha256 TEXT NOT NULL,
+            title TEXT NOT NULL,
+            media_type TEXT NOT NULL,
+            normalized_text TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(workspace_id) REFERENCES research_workspaces(workspace_id),
+            UNIQUE(workspace_id, normalized_sha256)
+        )""",
+        """CREATE TABLE IF NOT EXISTS corpus_origins (
+            document_id TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            locator TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            PRIMARY KEY(document_id, source_id, locator),
+            FOREIGN KEY(document_id) REFERENCES corpus_documents(document_id),
+            FOREIGN KEY(source_id) REFERENCES research_sources(source_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS corpus_chunks (
+            chunk_id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL,
+            ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+            text TEXT NOT NULL,
+            FOREIGN KEY(document_id) REFERENCES corpus_documents(document_id),
+            UNIQUE(document_id, ordinal)
+        )""",
+        """CREATE VIRTUAL TABLE IF NOT EXISTS corpus_fts USING fts5(
+            document_id UNINDEXED,
+            workspace_id UNINDEXED,
+            title,
+            body,
+            tokenize='unicode61 remove_diacritics 2'
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_research_sources_workspace ON research_sources(workspace_id, source_id)",
+        "CREATE INDEX IF NOT EXISTS idx_corpus_documents_workspace ON corpus_documents(workspace_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_corpus_origins_source ON corpus_origins(source_id, observed_at)",
+        "CREATE INDEX IF NOT EXISTS idx_corpus_chunks_document ON corpus_chunks(document_id, ordinal)",
     ),
 }
