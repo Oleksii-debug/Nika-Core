@@ -37,7 +37,6 @@ from nika_core.media.presenter import render_accessible_media_text
 from nika_core.media.repository import MediaRepository
 from nika_core.media.schema import initialize_media_schema
 
-
 _SHA_A = "a" * 64
 _SHA_B = "b" * 64
 _SHA_C = "c" * 64
