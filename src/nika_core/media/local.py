@@ -5,7 +5,13 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from nika_core.media.contracts import AssetKind, MediaAsset, MediaSource, MediaSourceKind, MediaVersion
+from nika_core.media.contracts import (
+    AssetKind,
+    MediaAsset,
+    MediaSource,
+    MediaSourceKind,
+    MediaVersion,
+)
 from nika_core.media.hashing import resolve_bounded_path, sha256_file, sha256_json
 
 
