@@ -9,6 +9,7 @@ import signal
 import subprocess
 import threading
 import time
+from typing import Self
 
 from nika_core.toolsmith import contracts as toolsmith_contracts
 from nika_core.toolsmith.workspace_security import (
@@ -133,7 +134,7 @@ class _WindowsJob:
         kernel32.CloseHandle(ctypes.c_void_p(self._handle))
         self._handle = None
 
-    def __enter__(self) -> _WindowsJob:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
@@ -291,8 +292,7 @@ def _git(
         env=dict(environment),
         shell=False,
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
