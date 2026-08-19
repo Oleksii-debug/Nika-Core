@@ -11,6 +11,24 @@ from nika_core.media.errors import MediaError, MediaErrorCode
 from nika_core.media.transcription import TranscriptionRequest, TranscriptionResult
 
 
+def _require_local_path(path: Path, *, label: str, directory: bool = False) -> Path:
+    try:
+        resolved = path.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise MediaError(
+            MediaErrorCode.COMPONENT_MISSING,
+            f"{label} is missing; acquire/approve the model explicitly before transcription",
+        ) from exc
+    valid = resolved.is_dir() if directory else resolved.is_file()
+    if not valid:
+        expected = "directory" if directory else "file"
+        raise MediaError(
+            MediaErrorCode.COMPONENT_MISSING,
+            f"{label} must be an existing local {expected}",
+        )
+    return resolved
+
+
 class FasterWhisperTranscriber:
     """Optional local-only faster-whisper adapter. Model acquisition stays external."""
 
@@ -22,10 +40,11 @@ class FasterWhisperTranscriber:
         device: str = "cpu",
         compute_type: str = "int8",
     ) -> None:
-        resolved = model_path.resolve(strict=True)
-        if not resolved.is_dir():
-            raise ValueError("faster-whisper model_path must be a local directory")
-        self._model_path = resolved
+        self._model_path = _require_local_path(
+            model_path,
+            label="faster-whisper model directory",
+            directory=True,
+        )
         self._model_descriptor = model
         try:
             version = importlib.metadata.version("faster-whisper")
@@ -103,9 +122,11 @@ class SherpaOnnxWhisperTranscriber:
         language: str = "auto",
         num_threads: int = 2,
     ) -> None:
-        paths = (encoder.resolve(strict=True), decoder.resolve(strict=True), tokens.resolve(strict=True))
-        if not all(path.is_file() for path in paths):
-            raise ValueError("sherpa-onnx model files must exist locally")
+        paths = (
+            _require_local_path(encoder, label="sherpa-onnx encoder"),
+            _require_local_path(decoder, label="sherpa-onnx decoder"),
+            _require_local_path(tokens, label="sherpa-onnx tokens"),
+        )
         try:
             version = importlib.metadata.version("sherpa-onnx")
         except importlib.metadata.PackageNotFoundError as exc:
