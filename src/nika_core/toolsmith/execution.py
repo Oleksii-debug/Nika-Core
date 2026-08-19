@@ -251,6 +251,13 @@ def run_typed_process(
         stdout_thread.join(timeout=5)
         stderr_thread.join(timeout=5)
 
+    forced_termination = timed_out or cancelled or overflow.is_set()
+    if forced_termination and returncode == 0:
+        # Closing a Windows kill-on-close Job Object can surface a native zero
+        # exit status even though Nika deliberately terminated the process tree.
+        # Never report an orchestrator-forced termination as process success.
+        returncode = 1
+
     isolation_class = (
         toolsmith_contracts.IsolationClass.PROCESS_CONTAINED
         if os.name == "nt"
