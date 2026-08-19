@@ -63,7 +63,7 @@ class ResearchRefreshService:
         next_index, changed, unchanged, failed = self._progress(task_id)
         return RefreshJobSummary(
             task_id=task_id,
-            state=task.state.value,
+            state=task.state.value.casefold(),
             processed=next_index,
             total=len(source_ids),
             changed=changed,
