@@ -17,6 +17,7 @@ REUSE -> ADAPT -> CUSTOM (thin). Nika owns contracts, permissions, product seman
 - First proof engine: Pyperplan through Unified Planning.
 - Non-goal: do not convert every open-ended natural-language task into a planning domain.
 - Security: plans call ordinary Nika tools; ToolExecutor permissions/approval remain authoritative.
+- Execution budget: Nika bounds planner wall time and rejects a returned plan whose step count exceeds the caller's explicit `max_steps` budget before any tool action is executed. Planning remains cancellable at the asyncio caller boundary; a timed-out worker thread is not falsely represented as a hard-killed native planner process.
 
 ### SQLite FTS5 / deterministic search — REUSE
 Use for local corpus/source search before semantic/vector retrieval. Preserve provenance and workspace scopes.
@@ -42,8 +43,9 @@ Use versioned metrics/champion-challenger evidence to select deterministic strat
 - Nika adapter: `FoundryLocalProvider` behind `ModelProvider` / ModelGateway.
 - Privacy: provider is LOCAL and can keep private/sensitive input on-device under Nika routing policy.
 - Model management: no silent model download. Models are optional components outside the base EXE and require explicit install/download intent, version/license/checksum/resource evidence.
+- Resource policy: Microsoft positions Foundry Local as single-user on-device inference rather than a concurrent server stack, so Nika serializes in-process completions per provider instance instead of pretending it has server-style batching/queueing. The existing `ModelRequest.timeout_seconds` bounds time spent waiting for that slot plus the user-visible inference wait.
 - Hardware: Windows WinML package is preferred for actual Windows hardware; final acceptance requires a physical-Windows inference proof.
-- Cancellation truth: current official Python docs explicitly expose cancellation for model/EP downloads. They do not document a hard-cancel primitive for an active non-streaming inference. Nika must not claim hard inference cancellation until a focused proof or process-isolation design closes that gap.
+- Cancellation truth: current official Python docs explicitly expose cancellation for model/EP downloads. They do not document a hard-cancel primitive for an active non-streaming inference. Nika returns typed timeout/cancellation semantics at its async boundary but must not claim the underlying native inference thread was hard-killed until a focused proof or process-isolation design closes that gap.
 
 ### llama.cpp — FALLBACK / PROOF CANDIDATE
 - Role: alternative embedded generative backend where GGUF model availability, CPU/Vulkan portability, performance or packaging wins a measured Nika benchmark.
