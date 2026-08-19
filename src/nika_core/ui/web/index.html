@@ -26,6 +26,7 @@
       <h2 id="command-heading" tabindex="-1">Команда</h2>
       <label for="command-input">Що має зробити Nika?</label>
       <textarea id="command-input" rows="5"></textarea>
+      <p id="execution-mode">Поточний пакет запускає команди через безпечний детермінований режим без LLM.</p>
       <div class="actions">
         <button type="button" data-action-id="task.create">Створити завдання</button>
         <button type="button" data-action-id="task.pause">Призупинити</button>
@@ -36,17 +37,20 @@
 
     <section aria-labelledby="tasks-heading">
       <h2 id="tasks-heading" tabindex="-1">Завдання</h2>
-      <p id="tasks-empty">Список завдань буде доступний через backend adapter.</p>
+      <p id="tasks-empty">Завдань ще немає.</p>
+      <ol id="tasks-list" aria-label="Список завдань"></ol>
     </section>
 
     <section aria-labelledby="agents-heading">
       <h2 id="agents-heading" tabindex="-1">Агенти</h2>
-      <p id="agents-empty">Список агентів буде доступний через backend adapter.</p>
+      <p id="agents-empty">Агентів ще немає.</p>
+      <ul id="agents-list" aria-label="Список агентів"></ul>
     </section>
 
     <section aria-labelledby="workspaces-heading">
       <h2 id="workspaces-heading" tabindex="-1">Робочі простори</h2>
-      <p id="workspaces-empty">Список робочих просторів буде доступний через backend adapter.</p>
+      <p id="workspaces-empty">Робочих просторів ще немає.</p>
+      <ul id="workspaces-list" aria-label="Список робочих просторів"></ul>
     </section>
 
     <section aria-labelledby="logs-heading">

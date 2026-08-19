@@ -9,15 +9,15 @@ from nika_core.kernel.action_registry import ActionRegistry, Keymap
 from nika_core.ui.bridge_models import UIActionView, UICommand, UIResult
 
 ActionHandler = Callable[[Mapping[str, Any]], UIResult | str | None]
+StateProvider = Callable[[], Mapping[str, Any]]
 
 
 class UIActionBridge:
     """Narrow validated pywebview facade.
 
-    JavaScript can only invoke registered Nika action IDs or explicit keymap methods.
+    JavaScript can only invoke registered Nika action IDs, explicit keymap methods,
+    or a read-only product-state snapshot supplied by the desktop facade.
     No arbitrary Python object, filesystem, shell, or provider object is exposed.
-    Handler implementations must translate internal failures into typed/user-safe
-    ValueError or TypeError failures; unexpected programmer errors are not hidden here.
     """
 
     def __init__(
@@ -25,10 +25,12 @@ class UIActionBridge:
         actions: ActionRegistry,
         keymap: Keymap,
         handlers: Mapping[str, ActionHandler] | None = None,
+        state_provider: StateProvider | None = None,
     ) -> None:
         self._actions = actions
         self._keymap = keymap
         self._handlers = dict(handlers or {})
+        self._state_provider = state_provider
 
     def dispatch(self, raw: Mapping[str, Any]) -> dict[str, Any]:
         try:
@@ -59,7 +61,7 @@ class UIActionBridge:
 
         try:
             outcome = handler(command.payload)
-        except (TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError) as exc:
             return UIResult(
                 request_id=command.request_id,
                 status="rejected",
@@ -80,6 +82,15 @@ class UIActionBridge:
             status="completed",
             message="" if outcome is None else str(outcome),
         ).model_dump()
+
+    def get_state(self) -> dict[str, Any]:
+        if self._state_provider is None:
+            return {"ok": False, "message": "Desktop state provider is unavailable."}
+        try:
+            state = dict(self._state_provider())
+        except (KeyError, TypeError, ValueError) as exc:
+            return {"ok": False, "message": str(exc)}
+        return {"ok": True, "state": state}
 
     def list_actions(self) -> list[dict[str, Any]]:
         return [
