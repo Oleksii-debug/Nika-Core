@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,20 @@ from nika_core.model_gateway.contracts import (
     ProviderCapabilities,
     ProviderKind,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class FoundryModelEvidence:
+    model_id: str
+    alias: str
+    cached: bool
+    loaded: bool
+    path: str | None
+    context_length: int | None
+    input_modalities: str | None
+    output_modalities: str | None
+    capability_tags: str | None
+    supports_tool_calling: bool | None
 
 
 class FoundryLocalProvider:
@@ -103,6 +118,42 @@ class FoundryLocalProvider:
             latency_ms=(time.perf_counter() - started) * 1000,
         )
 
+    def inspect_model(self, model_alias: str | None = None) -> FoundryModelEvidence:
+        """Return read-only SDK metadata for release/hardware evidence collection."""
+        alias = model_alias or self._default_model
+        if not alias.strip():
+            raise ValueError("model_alias must not be empty")
+        manager = self._manager()
+        model = manager.catalog.get_model(alias)
+        if model is None:
+            raise ModelGatewayError(
+                ModelErrorCode.UNAVAILABLE,
+                f"Foundry Local model '{alias}' is not present in the catalog",
+                provider_id=self.capabilities.provider_id,
+                retryable=False,
+            )
+        cached = bool(model.is_cached)
+        path: str | None = None
+        if cached:
+            try:
+                path = str(model.get_path())
+            except Exception:  # noqa: BLE001 - metadata collection must not break inference use.
+                path = None
+        return FoundryModelEvidence(
+            model_id=str(model.id),
+            alias=str(model.alias),
+            cached=cached,
+            loaded=bool(model.is_loaded),
+            path=path,
+            context_length=self._optional_int(getattr(model, "context_length", None)),
+            input_modalities=self._optional_str(getattr(model, "input_modalities", None)),
+            output_modalities=self._optional_str(getattr(model, "output_modalities", None)),
+            capability_tags=self._optional_str(getattr(model, "capabilities", None)),
+            supports_tool_calling=self._optional_bool(
+                getattr(model, "supports_tool_calling", None)
+            ),
+        )
+
     def close(self) -> None:
         """Unload models loaded by the shared Foundry manager when supported."""
         manager = self._manager_instance
@@ -118,6 +169,13 @@ class FoundryLocalProvider:
         manager = self._manager()
         model_alias = request.model or self._default_model
         model = manager.catalog.get_model(model_alias)
+        if model is None:
+            raise ModelGatewayError(
+                ModelErrorCode.UNAVAILABLE,
+                f"Foundry Local model '{model_alias}' is not present in the catalog",
+                provider_id=self.capabilities.provider_id,
+                retryable=False,
+            )
 
         if not bool(model.is_cached):
             if not self._allow_download:
@@ -185,3 +243,27 @@ class FoundryLocalProvider:
             output_tokens=read("completion_tokens", "output_tokens"),
             total_tokens=read("total_tokens"),
         )
+
+    @staticmethod
+    def _optional_int(value: object) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _optional_str(value: object) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @staticmethod
+    def _optional_bool(value: object) -> bool | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        return bool(value)
