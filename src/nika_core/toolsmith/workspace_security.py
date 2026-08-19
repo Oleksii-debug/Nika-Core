@@ -7,7 +7,7 @@ from os import environ, name
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from stat import FILE_ATTRIBUTE_REPARSE_POINT, S_ISLNK
 
-from .contracts import IsolationClass
+from nika_core.toolsmith.contracts import IsolationClass
 
 
 _WINDOWS_RESERVED_BASENAMES = frozenset(
