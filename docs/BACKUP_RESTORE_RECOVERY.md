@@ -19,7 +19,9 @@ The failure family addressed here is broader than "copy a file":
 - a restore source can be valid but older than the current application schema;
 - the live database can change after a user/operator previews a restore;
 - restore can fail after the current database has already been changed;
-- the current database can be so corrupt that SQLite cannot even open its header;
+- the current database can be missing, newer than the running application, or so corrupt that
+  SQLite cannot even open its header;
+- recovery metadata can be malformed or attempt to escape the database directory;
 - the process can disappear between quarantining corrupt bytes and installing the staged
   known-good database.
 
@@ -71,7 +73,8 @@ schema versions, approvals or recovery outcomes are acceptable.
 8. write a strict sidecar manifest containing format, filename, SHA-256, size, schema version
    and timezone-aware creation time;
 9. flush temporary files and publish them with atomic same-directory replacement;
-10. append best-effort audit evidence to the live database.
+10. append best-effort audit evidence only when the live database itself passes read-only
+    integrity, foreign-key, migration-history and supported-schema checks.
 
 A backup database without its exact manifest is not accepted. An interrupted publication can
 therefore leave an unusable orphan, but never an artifact that verification mistakes for a
@@ -105,10 +108,17 @@ is derived from:
 - selected backup SHA-256;
 - exact resolved target path;
 - whether the current database exists;
-- exact SHA-256 of the current database after preview audit evidence is committed.
+- exact SHA-256 of the current database after any safe supported preview audit is committed.
 
-`restore()` requires that exact fingerprint. It verifies the backup again and recomputes the
-live fingerprint. Any unrelated database change after preview produces
+Preview/failure audit is itself fail-closed. Nika opens the target for audit writing only after
+a read-only integrity check, foreign-key check, contiguous migration-history check and
+supported-schema check all succeed. A missing, corrupt or future-schema target is therefore
+not opened through `AuditLog`; preview cannot create an empty database as a side effect and an
+older Nika build cannot modify a newer-schema database merely while deciding whether restore
+is safe.
+
+`restore()` requires the exact confirmation fingerprint. It verifies the backup again and
+recomputes the live fingerprint. Any unrelated database change after preview produces
 `RestorePlanStaleError` before live replacement begins.
 
 This is a low-level safety primitive, not a UI approval claim. Product UI must still explain
@@ -131,15 +141,25 @@ For a readable supported current database:
 The safety backup remains on disk after success. It is not silently deleted because it is the
 operator's direct rollback artifact for the state that existed immediately before restore.
 
+## Missing-current restore
+
+A deliberately missing target is treated as an empty restore destination, not as a database to
+initialize during preview. `prepare_restore()` leaves the path absent. Only after the exact
+confirmation is returned does `restore()` publish the fully staged and validated database. If
+that publication fails, a partially created target is removed rather than mistaken for valid
+Nika state.
+
 ## Unrecoverable-current restore
 
-A completely malformed current file may fail before SQLite can open its header. SQLite's
-transactional destination backup path cannot safely overwrite that case.
+A completely malformed current file may fail before SQLite can open its header. A database
+whose migration history is newer than this Nika build is also unsupported for ordinary write
+operations. SQLite's transactional destination backup path is therefore not used to overwrite
+these cases silently.
 
-Nika therefore refuses it by default. `allow_replace_unrecoverable_current=True` is a separate
+Nika refuses replacement by default. `allow_replace_unrecoverable_current=True` is a separate
 explicit recovery decision and uses a durable quarantine protocol:
 
-1. verify the exact corrupt-current hash still matches the preview;
+1. verify the exact current-file hash still matches the preview;
 2. prepare and validate the known-good staged current-schema database;
 3. write and flush a restore-in-progress marker containing only safe basenames and exact
    current/staged/backup hashes;
@@ -156,8 +176,9 @@ evidence, not a database Nika should reopen automatically.
 ## Crash/restart recovery
 
 A process loss may happen after the durable restore marker is written. On the next controlled
-startup, `recover_interrupted_restore()` reads that marker and validates its field set,
-basenames and SHA-256 values before acting.
+startup, `recover_interrupted_restore()` reads that marker and validates its exact field set,
+target filename, basenames and SHA-256 values before acting. Paths such as `../outside.db` are
+rejected instead of being resolved or followed.
 
 It then reconciles observable filesystem state:
 
@@ -173,7 +194,7 @@ sidecars when they exist.
 
 ## Deterministic fault coverage
 
-The AUTO01 test family covers:
+The AUTO01 test family covers 13 scenarios:
 
 - live WAL backup includes committed state while the writer connection remains open;
 - byte tampering is rejected before restore;
@@ -186,7 +207,12 @@ The AUTO01 test family covers:
 - corrupt current bytes require the explicit destructive-recovery flag and are quarantined;
 - simulated abrupt process loss between quarantine and stage installation is completed
   deterministically by a recreated recovery manager;
-- injected post-copy validation failure rolls the healthy database back from its safety backup.
+- injected post-copy validation failure rolls the healthy database back from its safety backup;
+- preview of a missing target does not create a database, while confirmed restore can create a
+  fully validated target;
+- preview/refusal of a future-schema target leaves its exact bytes unchanged;
+- a restore marker containing a parent-directory path escape is rejected without touching the
+  live database or the outside path.
 
 These are automated engineering proofs only.
 
