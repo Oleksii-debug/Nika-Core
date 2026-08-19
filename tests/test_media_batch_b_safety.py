@@ -1,24 +1,37 @@
 from __future__ import annotations
 
-import threading
 from pathlib import Path
 
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.media.contracts import (
+    MediaResourceClaim,
     MediaSource,
     MediaSourceKind,
     MediaVersion,
     ModelDescriptor,
     ProcessingJob,
+    ResourceClass,
 )
 from nika_core.media.errors import MediaError, MediaErrorCode
 from nika_core.media.repository import MediaRepository
+from nika_core.media.resources import MediaResourceCoordinator
 from nika_core.media.schema import initialize_media_schema
 from nika_core.media.transcribers import FasterWhisperTranscriber, SherpaOnnxWhisperTranscriber
 from nika_core.media.transcription import ChunkState, plan_chunks
 from nika_core.media.transcription_repository import TranscriptionChunkRepository
+from nika_core.resources.contracts import ResourceSnapshot
+from nika_core.resources.manager import ResourceManager
+
+
+class BusyObserver:
+    def snapshot(self) -> ResourceSnapshot:
+        return ResourceSnapshot(
+            cpu_percent=1,
+            memory_percent=1,
+            available_memory_bytes=8_000_000_000,
+        )
 
 
 def _build_job(tmp_path: Path) -> tuple[SQLiteStore, ProcessingJob]:
@@ -95,7 +108,25 @@ def test_sherpa_missing_model_files_are_typed_and_not_created(tmp_path: Path) ->
     assert not tokens.exists()
 
 
-def test_preexisting_cancel_event_remains_explicit() -> None:
-    event = threading.Event()
-    event.set()
-    assert event.is_set()
+def test_denied_heavy_model_claim_does_not_leave_stale_fifo_entry(tmp_path: Path) -> None:
+    store, _job = _build_job(tmp_path)
+    manager = ResourceManager(store, BusyObserver())
+    coordinator = MediaResourceCoordinator(manager)
+    first = MediaResourceClaim(
+        claim_id="first",
+        owner_id="job-1",
+        resource_class=ResourceClass.HEAVY_MODEL,
+        max_concurrent=1,
+    )
+    second = MediaResourceClaim(
+        claim_id="second",
+        owner_id="job-2",
+        resource_class=ResourceClass.HEAVY_MODEL,
+        max_concurrent=1,
+    )
+    lease = coordinator.request(first)
+    with pytest.raises(MediaError) as caught:
+        coordinator.request(second)
+    assert caught.value.code == MediaErrorCode.RESOURCE_BLOCKED
+    assert manager.queued(scope="media_heavy_model", owner_id="local_machine") == ()
+    assert coordinator.release(lease)
