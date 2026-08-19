@@ -167,6 +167,7 @@ class ResearchEvidence:
     source_kind: SourceKind
     locator: str
     observed_at: str
+    freshness: FreshnessState | None = None
 
 
 @dataclass(frozen=True, slots=True)
