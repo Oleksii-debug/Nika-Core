@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import json
 
-from nika_core.data.sqlite import SQLiteStore
-
 from .accounting import AccountSnapshot
 from .orders import SimulatedFill
+from ..data.sqlite import SQLiteStore
 
 
 _TRADER_SCHEMA_VERSION = 1
@@ -98,7 +97,7 @@ class TradingStateRepository:
             return None
         value = json.loads(str(row["payload"]))
         if not isinstance(value, dict):
-            raise RuntimeError("invalid durable trading account payload")
+            raise TypeError("invalid durable trading account payload")
         return value
 
 
