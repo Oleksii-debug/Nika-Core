@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from nika_core.security import (
-    ApprovalEvidence,
+    ApprovalAuthority,
     ApprovalLedger,
     ExecutionBudgetLedger,
     authorize_action,
@@ -93,6 +93,10 @@ def _bindings() -> tuple[CapabilityToolBinding, ...]:
             max_risk=ToolRisk.LOCAL_WRITE,
         ),
     )
+
+
+def _authority() -> ApprovalAuthority:
+    return ApprovalAuthority(issuer_id="toolsmith-bridge-test", secret=b"t" * 32)
 
 
 def test_bridge_reuses_canonical_toolsmith_paths_and_m10_policy(tmp_path: Path) -> None:
@@ -270,6 +274,7 @@ def test_network_allowlist_and_budget_are_enforced_by_m10(tmp_path: Path) -> Non
 
 
 def test_external_side_effect_binding_cannot_bypass_approval(tmp_path: Path) -> None:
+    authority = _authority()
     envelope = build_toolsmith_security_envelope(
         _job(tmp_path, isolation=IsolationClass.OS_SANDBOXED),
         bindings=(
@@ -281,6 +286,7 @@ def test_external_side_effect_binding_cannot_bypass_approval(tmp_path: Path) -> 
         ),
         budget=_budget(),
         require_untrusted_execution=True,
+        approval_verifier=authority.verifier(),
     )
     intent = envelope.intent(
         permission="network.approved",
@@ -298,7 +304,10 @@ def test_external_side_effect_binding_cannot_bypass_approval(tmp_path: Path) -> 
         )
 
 
-def test_high_impact_binding_still_requires_exact_m10_approval(tmp_path: Path) -> None:
+def test_high_impact_binding_still_requires_trusted_exact_m10_approval(
+    tmp_path: Path,
+) -> None:
+    authority = _authority()
     envelope = build_toolsmith_security_envelope(
         _job(tmp_path, isolation=IsolationClass.OS_SANDBOXED),
         bindings=(
@@ -310,6 +319,7 @@ def test_high_impact_binding_still_requires_exact_m10_approval(tmp_path: Path) -
         ),
         budget=_budget(),
         require_untrusted_execution=True,
+        approval_verifier=authority.verifier(),
     )
     intent = envelope.intent(
         permission="release.high_impact",
@@ -327,12 +337,8 @@ def test_high_impact_binding_still_requires_exact_m10_approval(tmp_path: Path) -
             now=now,
         )
 
-    approval = ApprovalEvidence(
-        approval_id="approval-release-1",
-        action_fingerprint=intent.approval_fingerprint,
-        approved_at=now - timedelta(minutes=1),
-        expires_at=now + timedelta(minutes=4),
-    )
+    request = authority.request(intent, reason="publish exact named release", now=now)
+    approval = authority.approve(request.request_id, now=now)
     result = authorize_action(
         intent,
         envelope.security_policy,
