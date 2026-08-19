@@ -644,15 +644,50 @@ class SQLiteRecoveryManager:
     def _audit_if_possible(
         self, event_type: str, payload: dict[str, object]
     ) -> None:
+        target = self._store.path.resolve()
+        if not self._audit_target_is_safe(target):
+            return
         try:
             self._audit.append(
                 event_type=event_type,
                 entity_type="database",
-                entity_id=str(self._store.path.resolve()),
+                entity_id=str(target),
                 payload=payload,
             )
         except (sqlite3.DatabaseError, OSError):
             return
+
+    @staticmethod
+    def _audit_target_is_safe(target: Path) -> bool:
+        if not target.is_file():
+            return False
+        try:
+            conn = sqlite3.connect(
+                f"{target.as_uri()}?mode=ro",
+                uri=True,
+                timeout=1.0,
+            )
+            try:
+                integrity = tuple(
+                    str(row[0]) for row in conn.execute("PRAGMA integrity_check")
+                )
+                if integrity != ("ok",):
+                    return False
+                if conn.execute("PRAGMA foreign_key_check").fetchall():
+                    return False
+                versions = tuple(
+                    int(row[0])
+                    for row in conn.execute(
+                        "SELECT version FROM schema_migrations ORDER BY version"
+                    )
+                )
+            finally:
+                conn.close()
+        except (sqlite3.DatabaseError, OSError, ValueError):
+            return False
+        return bool(versions) and versions == tuple(
+            range(1, versions[-1] + 1)
+        ) and versions[-1] <= SCHEMA_VERSION
 
     def _ensure_no_interrupted_restore(self) -> None:
         if self._restore_marker_path(self._store.path.resolve()).exists():
