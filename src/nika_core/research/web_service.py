@@ -108,7 +108,10 @@ class HttpResearchService:
             task_id=task_id,
         )
 
-    def _pending_failed_snapshot(self, source_id: str) -> tuple[BlobArtifact, str, str, str | None, str | None, int | None] | None:
+    def _pending_failed_snapshot(
+        self,
+        source_id: str,
+    ) -> tuple[BlobArtifact, str, str, str | None, str | None, int | None] | None:
         """Return the latest fetched artifact whose extraction is still failed.
 
         NetworkResearchRepository intentionally owns the canonical SQLite store. This
@@ -116,7 +119,7 @@ class HttpResearchService:
         parser can be retried without another external fetch. A future repository API
         can replace this narrow query without changing service behavior.
         """
-        store = self._network._store  # noqa: SLF001 - same-subsystem recovery read
+        store = self._network._store
         with store.connection() as conn:
             row = conn.execute(
                 """SELECT s.artifact_id, s.raw_sha256, s.media_type, s.etag,
@@ -241,7 +244,9 @@ class HttpResearchService:
         status = extracted.status
         if status is ExtractionStatus.EXTRACTED and not normalized:
             status = ExtractionStatus.EMPTY
-        normalized_sha256 = hashlib.sha256(normalized.encode()).hexdigest() if normalized else None
+        normalized_sha256 = (
+            hashlib.sha256(normalized.encode()).hexdigest() if normalized else None
+        )
         extraction = self._repository.record_extraction(
             artifact_id=artifact.artifact_id,
             extractor=extracted.extractor,
