@@ -60,7 +60,7 @@ def trailing_mean(
     result: list[FeaturePoint] = []
     for index, point in enumerate(points):
         start = max(0, index - window + 1)
-        values = [p.value for p in points[start : index + 1] if p.value is not None]
+        values = [candidate.value for candidate in points[start : index + 1] if candidate.value]
         mean = None if not values else sum(values, Decimal("0")) / Decimal(len(values))
         result.append(FeaturePoint(mean, point.available_at))
     return tuple(result)
