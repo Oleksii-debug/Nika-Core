@@ -36,45 +36,29 @@ def select_subtitle_track(
     active = policy or SubtitlePolicy()
     if active.force_transcription:
         return None
-    candidates = [
-        track
-        for track in tracks
-        if active.allow_translated or track.kind != SubtitleKind.TRANSLATED
-    ]
-    if not candidates:
-        return None
     preferred = tuple(_normalize_language(item) for item in active.preferred_languages)
-
-    def rank(track: SubtitleTrack) -> tuple[int, int, str, str]:
-        language = _normalize_language(track.language)
-        base = language.split("-", 1)[0]
-        kind_rank = {
-            SubtitleKind.MANUAL: 0,
-            SubtitleKind.AUTOMATIC: 2,
-            SubtitleKind.TRANSLATED: 4,
-        }[track.kind]
-        language_rank = 100
-        for index, wanted in enumerate(preferred):
-            wanted_base = wanted.split("-", 1)[0]
-            if language == wanted:
-                language_rank = index * 10
-                break
-            if base == wanted_base:
-                language_rank = index * 10 + 1
-                break
-        if language_rank == 100:
-            language_rank = 90
-        return (kind_rank + language_rank, 0 if track.is_default else 1, language, track.track_id)
-
-    ranked = sorted(candidates, key=rank)
-    best = ranked[0]
-    best_language = _normalize_language(best.language)
-    if not any(
-        best_language == wanted or best_language.split("-", 1)[0] == wanted.split("-", 1)[0]
-        for wanted in preferred
-    ):
+    if not preferred:
         return None
-    return best
+    ordered = sorted(tracks, key=lambda item: (not item.is_default, item.track_id))
+    kinds = [SubtitleKind.MANUAL, SubtitleKind.AUTOMATIC]
+    if active.allow_translated:
+        kinds.append(SubtitleKind.TRANSLATED)
+
+    for kind in kinds:
+        same_kind = [track for track in ordered if track.kind == kind]
+        for exact in (True, False):
+            for wanted in preferred:
+                wanted_base = wanted.split("-", 1)[0]
+                matches = []
+                for track in same_kind:
+                    language = _normalize_language(track.language)
+                    if exact and language == wanted:
+                        matches.append(track)
+                    elif not exact and language != wanted and language.split("-", 1)[0] == wanted_base:
+                        matches.append(track)
+                if matches:
+                    return matches[0]
+    return None
 
 
 def normalize_subtitle_file(
