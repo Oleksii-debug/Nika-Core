@@ -12,7 +12,7 @@ from nika_core.media.transcription import TranscriptionRequest, TranscriptionRes
 
 
 class FasterWhisperTranscriber:
-    """Optional local-only faster-whisper adapter. Model acquisition is deliberately external."""
+    """Optional local-only faster-whisper adapter. Model acquisition stays external."""
 
     def __init__(
         self,
@@ -27,14 +27,12 @@ class FasterWhisperTranscriber:
             raise ValueError("faster-whisper model_path must be a local directory")
         self._model_path = resolved
         self._model_descriptor = model
-        self._device = device
-        self._compute_type = compute_type
         try:
             version = importlib.metadata.version("faster-whisper")
         except importlib.metadata.PackageNotFoundError as exc:
             raise MediaError(
                 MediaErrorCode.COMPONENT_MISSING,
-                "faster-whisper is not installed; install/approve the optional component explicitly",
+                "faster-whisper is not installed; approve/install it explicitly",
             ) from exc
         self._engine = EngineDescriptor(
             engine_id="faster-whisper",
@@ -48,8 +46,8 @@ class FasterWhisperTranscriber:
         module = importlib.import_module("faster_whisper")
         self._runtime = module.WhisperModel(
             str(self._model_path),
-            device=self._device,
-            compute_type=self._compute_type,
+            device=device,
+            compute_type=compute_type,
             local_files_only=True,
         )
 
@@ -75,17 +73,16 @@ class FasterWhisperTranscriber:
         segments = tuple(
             Segment(
                 segment_id=f"{request.chunk_id}:{index:06d}",
-                start_ms=max(0, round(float(item.start) * 1000)),
-                end_ms=max(0, round(float(item.end) * 1000)),
+                start_ms=request.offset_ms + max(0, round(float(item.start) * 1000)),
+                end_ms=request.offset_ms + max(0, round(float(item.end) * 1000)),
                 text=str(item.text).strip(),
             )
             for index, item in enumerate(raw_segments)
             if str(item.text).strip()
         )
-        language = request.language or getattr(info, "language", None)
         return TranscriptionResult(
             chunk_id=request.chunk_id,
-            language=language,
+            language=request.language or getattr(info, "language", None),
             segments=segments,
             engine=self.engine,
             model=self.model,
@@ -94,7 +91,7 @@ class FasterWhisperTranscriber:
 
 
 class SherpaOnnxWhisperTranscriber:
-    """Optional local sherpa-onnx Whisper adapter with explicit model-file descriptors."""
+    """Optional local sherpa-onnx Whisper adapter using explicit local model files."""
 
     def __init__(
         self,
@@ -106,17 +103,15 @@ class SherpaOnnxWhisperTranscriber:
         language: str = "auto",
         num_threads: int = 2,
     ) -> None:
-        self._encoder = encoder.resolve(strict=True)
-        self._decoder = decoder.resolve(strict=True)
-        self._tokens = tokens.resolve(strict=True)
-        if not all(path.is_file() for path in (self._encoder, self._decoder, self._tokens)):
+        paths = (encoder.resolve(strict=True), decoder.resolve(strict=True), tokens.resolve(strict=True))
+        if not all(path.is_file() for path in paths):
             raise ValueError("sherpa-onnx model files must exist locally")
         try:
             version = importlib.metadata.version("sherpa-onnx")
         except importlib.metadata.PackageNotFoundError as exc:
             raise MediaError(
                 MediaErrorCode.COMPONENT_MISSING,
-                "sherpa-onnx is not installed; install/approve the optional component explicitly",
+                "sherpa-onnx is not installed; approve/install it explicitly",
             ) from exc
         self._engine = EngineDescriptor(
             engine_id="sherpa-onnx",
@@ -130,9 +125,9 @@ class SherpaOnnxWhisperTranscriber:
         self._model_descriptor = model
         module = importlib.import_module("sherpa_onnx")
         self._recognizer = module.OfflineRecognizer.from_whisper(
-            encoder=str(self._encoder),
-            decoder=str(self._decoder),
-            tokens=str(self._tokens),
+            encoder=str(paths[0]),
+            decoder=str(paths[1]),
+            tokens=str(paths[2]),
             language=language,
             task="transcribe",
             num_threads=num_threads,
@@ -150,25 +145,28 @@ class SherpaOnnxWhisperTranscriber:
         try:
             import numpy as np
         except ImportError as exc:
-            raise MediaError(MediaErrorCode.COMPONENT_MISSING, "numpy is required by sherpa-onnx adapter") from exc
+            raise MediaError(
+                MediaErrorCode.COMPONENT_MISSING,
+                "numpy is required by the sherpa-onnx adapter",
+            ) from exc
         audio = request.audio_path.resolve(strict=True)
         started = time.monotonic()
         with wave.open(str(audio), "rb") as handle:
             if handle.getnchannels() != 1 or handle.getsampwidth() != 2:
                 raise ValueError("sherpa-onnx adapter requires normalized mono PCM16 WAV")
             sample_rate = handle.getframerate()
-            samples = np.frombuffer(handle.readframes(handle.getnframes()), dtype=np.int16).astype(np.float32) / 32768.0
+            raw = handle.readframes(handle.getnframes())
+        samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
         stream = self._recognizer.create_stream()
         stream.accept_waveform(sample_rate, samples)
         self._recognizer.decode_stream(stream)
-        result = stream.result
-        text = str(getattr(result, "text", "")).strip()
+        text = str(getattr(stream.result, "text", "")).strip()
         duration_ms = round(len(samples) / sample_rate * 1000) if sample_rate else 0
         segments = (
             Segment(
                 segment_id=f"{request.chunk_id}:000000",
-                start_ms=0,
-                end_ms=duration_ms,
+                start_ms=request.offset_ms,
+                end_ms=request.offset_ms + duration_ms,
                 text=text,
             ),
         ) if text else ()
