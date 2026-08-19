@@ -45,6 +45,7 @@ class TranscriptionChunk(FrozenModel):
 class TranscriptionRequest(FrozenModel):
     chunk_id: str
     audio_path: Path
+    offset_ms: int = Field(default=0, ge=0)
     language: str | None = None
     prompt: str | None = Field(default=None, max_length=2000)
 
@@ -80,7 +81,12 @@ class ChunkPlanPolicy:
             raise ValueError("overlap_ms must be non-negative and less than half chunk_ms")
 
 
-def plan_chunks(*, job_id: str, duration_ms: int, policy: ChunkPlanPolicy | None = None) -> tuple[TranscriptionChunk, ...]:
+def plan_chunks(
+    *,
+    job_id: str,
+    duration_ms: int,
+    policy: ChunkPlanPolicy | None = None,
+) -> tuple[TranscriptionChunk, ...]:
     if duration_ms < 0:
         raise ValueError("duration_ms must be non-negative")
     if duration_ms == 0:
