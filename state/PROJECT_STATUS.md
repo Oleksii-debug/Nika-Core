@@ -3,94 +3,55 @@
 Updated: 2026-08-19
 Canonical repository: `Oleksii-debug/Nika-Core`
 Development mode: M12 PRE-HUMAN RELEASE FREEZE
-Repository visibility observed this cycle: **PUBLIC**.
 
-## Weighted progress
+## Proven progress
+- M0–M10: GREEN / INTEGRATED.
+- M11 Windows packaging/distribution: GREEN / INTEGRATED / PACKAGED candidate evidence.
+- M12 automated pre-human QA/release gate: GREEN / INTEGRATED; HUMAN GATE OPEN.
+- Overall acceptance-gate proven progress: **98.0%**.
 
-| Milestone | Evidence state | Credit |
-|---|---|---:|
-| M0 research/reuse/governance/bootstrap | GREEN / INTEGRATED | 6% / 6% |
-| M1 kernel foundation | GREEN / INTEGRATED | 10% / 10% |
-| M2 durable agent runtime | GREEN / INTEGRATED | 11% / 11% |
-| M3 memory/scheduler/resource control | GREEN / INTEGRATED | 9% / 9% |
-| M4 model gateway/tools/MCP | GREEN / INTEGRATED | 8% / 8% |
-| M5 accessible Windows GUI | GREEN / INTEGRATED | 11% / 11% |
-| M6 Agent Builder & permissions | GREEN / INTEGRATED | 8% / 8% |
-| M7 multi-agent laboratory | GREEN / INTEGRATED | 9% / 9% |
-| M8 self-learning & experiment engine | GREEN / INTEGRATED | 10% / 10% |
-| M9 Plugin SDK & real workspaces | GREEN / INTEGRATED | 8% / 8% |
-| M10 security/sandbox/reliability | GREEN / INTEGRATED | 5% / 5% |
-| M11 Windows packaging/distribution | GREEN / INTEGRATED / PACKAGED candidate evidence | 3% / 3% |
-| M12 full-system QA/NVDA/release | AUTOMATED PRE-HUMAN GATE GREEN / INTEGRATED; HUMAN GATE OPEN | 0% / 2% |
+## Current exact human-test candidate
+The previous artifact `NikaCore-0.0.2-m12-prehuman-d7bdfd697819adf13ad7423726a004fd781d857d` is **SUPERSEDED** and must not be used for human acceptance. A release audit found that its bundle lacked complete third-party license/notices evidence required by the repository release gate.
 
-**Overall acceptance-gate proven progress: 98.0%.**
+Current candidate:
+- exact source head: `843d81b300fdfd031568e981cef600fbd0f8defa`;
+- repair PR: #38, merged as `8065cc3fedb63f9c07e1773acf2332b5709560da`;
+- Core CI #225: SUCCESS on Ubuntu + Windows;
+- M11 Windows Release Candidate run #7: SUCCESS;
+- M12 Pre-Human Release Gate run #5: SUCCESS;
+- artifact: `NikaCore-0.0.2-m12-prehuman-843d81b300fdfd031568e981cef600fbd0f8defa`;
+- artifact id: `9355471771`;
+- artifact size: `20,903,072` bytes;
+- workflow artifact digest: `sha256:64c99f62bdde1eafe89074893e3c3ef97adbdba1d815c77e4286193d0376146c`;
+- artifact expiry observed: 2026-11-17.
 
-## Exact milestone evidence
-- M1 green head `67df93c355e813dfc297bd1111df40d3c4ad6175`; Core CI 74; merge `b40ee58ce9c585efe7dad8ebfa23490e842c753a`.
-- M2 green head `c890a5eadbea01afe92617f440ca83005c3b5f0c`; Core CI 85; merge `7c13b070d7b3c99c41e8cafaea855c9214322abe`.
-- M3 green head `c9c7e105838d9af8a65341fd28f4591aee0d851c`; Core CI 98 Ubuntu+Windows; PR #8 merge `3b3718c214850c0211d18f520b5892c2cf47403c`.
-- M4 green head `14368c60fa8c8351e6a8776263d3d90b3e5dfb0e`; Core CI 112 Ubuntu+Windows+live Ollama; PR #10 merge `af449172064a696250399ff645ef01eb17ac6c84`.
-- M5 green head `9b536af11aaa30e72c5d3562e8b2beede7e5b5b2`; Core CI 137 Ubuntu+Windows+packaged WebView2/UIA proof; PR #13 merge `6b9c023d62b30500bec50a1d9484a78cfb6aafbd`.
-- M6 green head `b2f5939dae432f2bb0b819b3c70adf8c9d0dafe4`; Core CI 142 Ubuntu+Windows; PR #15 merge `088da78b45be390fe0aab0c6d1c84c5a8f5d9d53`.
-- M7 green head `4feb976faa97949bacc321bcbce792d01359a58c`; Core CI 150 Ubuntu+Windows; PR #17 merge `5a01692c1372375f040cd38558e33204b082d5a5`.
-- M8 green head `d8f14ac097f2eb664b7f893543db359fb6245e6c`; Core CI 159 Ubuntu+Windows; PR #19 merge `a8fd7b6c094489cebb79a4221e4124b5cfbad8f6`.
-- M9 foundation green head `ef4bafc02d4517b3718f07e5f61b7e4e22072c25`; Core CI 188; PR #21 merge `e8967b97ec9772cb2af0b3b781468553708d4015`.
-- M9 semantic-adapter green head `680a8a15dfb5a30a7c6eaba3860817c1cbda7ac5`; Core CI 193 Ubuntu+Windows plus live Playwright ARIA and Windows UIA proofs; PR #24 merge `e6af748fb655fda2719be93258b6c2a427287994`.
-- M10 green head `17826cc041caeaa1fe03f8dbe4ce5e50c7aecad5`; Core CI 167 Ubuntu+Windows; PR #22 merge `976cb9914966a67763742a28c229730417ee63c8`.
-- M11 green head `0f48c3c4889478f967e383d385576e9322e55c9b`; Core CI 196; Windows Release Candidate run 3; PR #23 merge `5d86d83f6ce99fa4c9bd6a0eaadef1a6b404283c`.
-- M12 automated pre-human green head `d7bdfd697819adf13ad7423726a004fd781d857d`; Core CI 200; M12 Pre-Human Release Gate run 1; PR #26 merge `a278767de4435535cc54e5674ddc72d37051ba03`.
+## What the repaired release gate proves
+- standalone PyInstaller one-dir Windows package is built;
+- package launches through the existing pywebview/WebView2 shell without requiring a user-installed Python runtime;
+- bundled local UI assets are included;
+- deterministic release manifest records file size + SHA-256 and detects missing/unexpected/modified files;
+- `THIRD_PARTY_NOTICES.txt` is generated from the exact Windows build environment before manifest generation;
+- Python runtime license plus the declared/license-file evidence for the packaged runtime dependency closure are included;
+- notice generation fails closed if a required runtime distribution or license evidence is missing;
+- the notice file is itself covered by the release manifest SHA-256;
+- M11 artifact exposes ZIP + manifest + notices;
+- complete M12 Ubuntu and Windows system proofs passed;
+- packaged Windows WebView2/UIA descendant discovery and Action Registry keyboard/focus proof passed;
+- machine-readable M12 evidence schema v2 records `third_party_notices_verified=true` only after the release build succeeds.
 
-## M12 exact human candidate
-- Artifact: `NikaCore-0.0.2-m12-prehuman-d7bdfd697819adf13ad7423726a004fd781d857d`.
-- Artifact id: `9340947647`.
-- Size: `20,846,871` bytes.
-- Workflow digest: `sha256:ee0ec0b7506c6bc84b8052f1c1cdb80a33a6f0dea8eb6b221cee1860dc96d4c5`.
-- Automated Ubuntu evidence: complete verification, 152 tests, focused 58-test recovery/safety matrix, live Playwright semantic proof.
-- Automated Windows evidence: complete verification, same focused matrix, real Windows UIA semantic proof.
-- Packaged Windows evidence: PyInstaller build, deterministic manifest verification, WebView2/UIA discovery, Action Registry keyboard/focus proof and release-gate truth regressions.
-- Human protocol: `docs/M12_HUMAN_NVDA_ACCEPTANCE.md`.
+## Defect found and repaired this cycle
+Release audit downloaded and inspected the prior human-bound artifact. Its inner Windows ZIP contained pywebview, Python.NET, clr-loader and other runtime components, but the only discoverable package license file was Pydantic's. This contradicted the repository release gate requiring manifest/checksums/license/security evidence.
+
+Repair #38 added deterministic third-party notice generation and verification, integrated the notices into manifest integrity, added fail-closed release-gate tests, and exposed notices in M11/M12 artifacts. The first repair candidate correctly failed because the notice verifier normalized `Python runtime` incorrectly. That verifier defect was repaired without weakening the gate, and the runtime dependency closure was expanded based on actual PyInstaller/Windows build evidence. Exact repaired head `843d81b300fdfd031568e981cef600fbd0f8defa` then passed all three required gates.
 
 ## Release truth
-- M0–M11: IMPLEMENTED / GREEN / INTEGRATED.
-- M12 automated pre-human infrastructure/evidence: GREEN / INTEGRATED.
-- Automated PACKAGED candidate: yes.
 - HUMAN_TESTED: **false**.
-- NVDA_VERIFIED: **false**; automation must never award this state.
-- PRODUCTION_RELEASE_READY: **false** until the exact candidate passes the human protocol.
+- NVDA_VERIFIED: **false**.
+- PRODUCTION_RELEASE_READY: **false**.
+- Automation must never set HUMAN_TESTED or NVDA_VERIFIED.
+- The only weighted blocker is human Windows/NVDA execution of `docs/M12_HUMAN_NVDA_ACCEPTANCE.md` against the **current exact candidate above**.
 
-## M12 freeze maintenance
-- Re-read the binding architecture, roadmap, reuse, UI, large-batch, autonomous-development, acceptance and parallel-development policies plus Issue #1, open PRs and current repository metadata before acting.
-- Confirmed the tested M12 exact candidate remains the human-bound candidate; no production source, package input or runtime behavior was changed.
-- Repository metadata still reports **PUBLIC**, despite user wording that calls it private.
-- Old PR #4 was closed **without merge** as obsolete/superseded. PR #11 was already closed without merge and remains superseded/uncredited.
-- This maintenance awards **0%** additional weighted credit and does not invalidate M12 acceptance evidence.
+## Release-freeze rule
+Do not expand production features or rebuild the candidate merely to keep automation busy. If human testing reports a concrete defect, create one new coherent repair candidate, rerun Core CI + Windows package proof + the complete M12 pre-human gate, and bind the next human test only to that exact new artifact.
 
-## M12 artifact integrity re-verification
-- GitHub artifact id `9340947647` was fetched successfully again from the canonical repository.
-- Downloaded ZIP size is exactly `20,846,871` bytes and SHA-256 is exactly `ee0ec0b7506c6bc84b8052f1c1cdb80a33a6f0dea8eb6b221cee1860dc96d4c5`, matching the recorded workflow digest.
-- `m12-prehuman-evidence.json` inside the artifact still binds the package to commit `d7bdfd697819adf13ad7423726a004fd781d857d` and records `human_tested=false`, `nvda_verified=false`, `production_release_ready=false`.
-- The embedded release manifest still identifies product `NikaCore` version `0.0.2`.
-- Exact status-only head `03e76cbd12eb8cd44560832391f6428c068d01fb` passed Core CI #211 successfully.
-- PR #31 was merged only after that exact-head green gate; merge commit `ce4a42e98d5b64ce92ceae72c8dd5678e763f722`.
-- No production source, package input, runtime behavior or packaged candidate was changed. This is evidence reconciliation only and awards **0%** additional weighted credit.
-
-## PR #32 integration reconciliation
-- Status-only PR #32 exact head `253af039c897aa0825e95feb68a8fdbef63aad89` passed Core CI #213 successfully.
-- PR #32 was merged as `73aecba0021551187f9dbeeef34becd0e2f24811`.
-- The exact M12 human-bound artifact, production source, package inputs and runtime behavior remain unchanged.
-- This reconciliation awards **0%** additional weighted credit; HUMAN_TESTED and NVDA_VERIFIED remain false.
-
-## PR #33 integration reconciliation
-- Status-only PR #33 exact head `469a06ab9c5254b173af022c17a71cc45865e34b` passed Core CI #215 successfully.
-- PR #33 was merged as `514b3a72c8ead2d2134762f62e3a7422ce9168a1`; that merge is the `main` baseline at the start of this cycle.
-- The exact M12 human-bound artifact, production source, package inputs and runtime behavior remain unchanged.
-- This reconciliation awards **0%** additional weighted credit; HUMAN_TESTED, NVDA_VERIFIED and PRODUCTION_RELEASE_READY remain false.
-
-## Current weighted milestone
-M12 — Human Windows/NVDA acceptance and final v1.0 release decision.
-
-## Blocker
-The only weighted blocker is human execution of `docs/M12_HUMAN_NVDA_ACCEPTANCE.md` against the exact packaged candidate. This cannot be truthfully automated.
-
-## Next LARGE coherent batch
-Preserve the exact M12 pre-human candidate and keep automated regressions green. Do not expand production features during the freeze. Once human Windows/NVDA results exist, fix any concrete accessibility/functional defects on a new development candidate, rerun the complete M12 automated gate, and award HUMAN_TESTED/NVDA_VERIFIED plus the final 2% only if that same exact artifact passes the human protocol.
+Do not create status-only PR chains whose sole purpose is recording that a previous status-only PR merged.
