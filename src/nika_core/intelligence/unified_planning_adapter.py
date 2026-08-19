@@ -93,6 +93,6 @@ class UnifiedPlanningAdapter:
 
     @staticmethod
     def _shortcuts() -> Any:
-        import unified_planning.shortcuts as shortcuts
+        from unified_planning import shortcuts
 
         return shortcuts
