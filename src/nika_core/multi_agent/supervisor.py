@@ -264,7 +264,7 @@ class MultiAgentSupervisor:
             return None
         token_factory = getattr(self._runtime, "initial_resume_token", None)
         if not callable(token_factory):
-            raise RuntimeError(
+            raise TypeError(
                 "durable runtime must expose initial_resume_token for crash-safe team execution"
             )
         token = token_factory(
