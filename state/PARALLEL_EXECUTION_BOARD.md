@@ -1,8 +1,8 @@
 # PARALLEL EXECUTION BOARD — Nika Core
 
-Updated: 2026-08-19
-Mode: M12 PRE-HUMAN RELEASE FREEZE
-Canonical progress evidence: merged PR + exact green CI + milestone acceptance evidence.
+Updated: 2026-08-19.
+Mode: **ACTIVE DEVELOPMENT — Product Journey repair + Full Product Vision expansion**.
+Canonical evidence: live GitHub code + exact executable checks + integration. Historical artifacts never override newer defect evidence.
 
 ## Evidence states
 - PREPARED — scope/contracts/reuse decision ready.
@@ -11,100 +11,137 @@ Canonical progress evidence: merged PR + exact green CI + milestone acceptance e
 - INTEGRATED — exact green candidate merged into `main`.
 - PACKAGED — installable Windows artifact built and checked.
 - HUMAN_TESTED — a person completed the specified manual protocol.
-- NVDA_VERIFIED — human NVDA test passed; automation may never award this state.
+- NVDA_VERIFIED — the human NVDA protocol passed; automation may never award this state.
 
 ## Current product truth
-Overall acceptance-gate proven progress: **98.0%**.
 
-M0–M11 are GREEN / INTEGRATED. M11 additionally has automated PACKAGED candidate evidence. M12 automated pre-human QA is GREEN / INTEGRATED, but the final human Windows/NVDA gate is still open.
+The old **98%** number is retained only as historical credit for the original scoped Core roadmap. It is **not** a Full Product Vision completion percentage.
 
-Human truth:
-- HUMAN_TESTED: false.
-- NVDA_VERIFIED: false.
-- PRODUCTION_RELEASE_READY: false.
+Current practical truth:
+- the reusable Core foundation is substantial and historically well-tested;
+- a concrete Product Journey defect invalidated the old Windows package as a current human candidate;
+- no Windows ZIP is currently approved for the user's NVDA test;
+- HUMAN_TESTED: false;
+- NVDA_VERIFIED: false;
+- PRODUCTION_RELEASE_READY: false;
+- Full Product Vision percentage: deliberately **not assigned yet**.
 
-Exact M12 human-bound candidate:
-- candidate head: `d7bdfd697819adf13ad7423726a004fd781d857d`;
-- Core CI 200: SUCCESS;
-- M12 Pre-Human Release Gate run 1: SUCCESS;
-- artifact: `NikaCore-0.0.2-m12-prehuman-d7bdfd697819adf13ad7423726a004fd781d857d`;
-- artifact id: `9340947647`;
-- digest: `sha256:ee0ec0b7506c6bc84b8052f1c1cdb80a33a6f0dea8eb6b221cee1860dc96d4c5`.
+Starting `main` for current independent lanes: `8065cc3fedb63f9c07e1773acf2332b5709560da`.
 
-## Integrated lanes
+## Active lane ownership
 
-### L1 — M3 durable memory, scheduler, resource control
-Current state: IMPLEMENTED / GREEN / INTEGRATED.
-Exact green head: `c9c7e105838d9af8a65341fd28f4591aee0d851c`; Core CI 98; PR #8 merged as `3b3718c214850c0211d18f520b5892c2cf47403c`.
+### L-WIN — Real Windows Product Journey
+Owner scope: final Windows UI/backend lifecycle only.
+PR #37 — `fix/windows-desktop-functional-backend`.
+Latest inspected head: `a56a9193fd9e7ae30ae8acac997609f38db6fef9`.
 
-### L2 — M4 Model Gateway, tools and MCP
-Current state: IMPLEMENTED / GREEN / INTEGRATED.
-Exact green head: `14368c60fa8c8351e6a8776263d3d90b3e5dfb0e`; Core CI 112; PR #10 merged as `af449172064a696250399ff645ef01eb17ac6c84`.
+Implemented:
+- real task creation through Nika backend/runtime;
+- real persisted Tasks/Agents/Workspaces state in the UI;
+- pause/resume/stop wiring;
+- removal of placeholder-only state surfaces;
+- backend/bridge lifecycle tests;
+- compatibility with already-integrated Windows release license/notices repair.
 
-### L3 — M5 accessible Windows UI
-Current state: IMPLEMENTED / GREEN / INTEGRATED.
-Exact green head: `9b536af11aaa30e72c5d3562e8b2beede7e5b5b2`; Core CI 137; PR #13 merged as `6b9c023d62b30500bec50a1d9484a78cfb6aafbd`.
-Automated packaged WebView2/UIA evidence exists, but HUMAN_TESTED=false and NVDA_VERIFIED=false.
+Evidence inspected:
+- Core CI: SUCCESS;
+- Windows release-candidate build: SUCCESS;
+- complete M12 pre-human gate: CANCELLED.
 
-### L4 — M6 Agent Builder and permissions
-Current state: IMPLEMENTED / GREEN / INTEGRATED.
-Exact green head: `b2f5939dae432f2bb0b819b3c70adf8c9d0dafe4`; Core CI 142; PR #15 merged as `088da78b45be390fe0aab0c6d1c84c5a8f5d9d53`.
+State: **IMPLEMENTED / PARTIALLY GREEN / NOT INTEGRATED**.
+Blocker: complete non-cancelled full-system gate on the exact final head. Do not promote an intermediate ZIP.
 
-### L5 — M7 multi-agent laboratory
-Current state: IMPLEMENTED / GREEN / INTEGRATED.
-Exact green head: `4feb976faa97949bacc321bcbce792d01359a58c`; Core CI 150; PR #17 merged as `5a01692c1372375f040cd38558e33204b082d5a5`.
+Owned files currently include the Windows launcher, task/agent registry lifecycle surfaces, DesktopBackend/bridge/web UI and its dedicated tests. Other lanes must not collide with those files without an explicit compatibility decision.
 
-### L6 — M8 controlled learning and experiments
-Current state: IMPLEMENTED / GREEN / INTEGRATED.
-Exact green head: `d8f14ac097f2eb664b7f893543db359fb6245e6c`; Core CI 159; PR #19 merged as `a8fd7b6c094489cebb79a4221e4124b5cfbad8f6`.
-Safety truth: no production-source mutation path and no silent permission widening.
+### L-INT — Deterministic Brain + Embedded Brain
+Owner scope: model-free planning/execution, embedded-model adapter architecture, intelligence reuse contracts and directly coupled tests/docs.
+PR #40 — `feat/embedded-intelligence-foundry-local`.
 
-### L7 — M9 Plugin SDK and real workspaces
-Current state: IMPLEMENTED / GREEN / INTEGRATED.
-Foundation exact green head: `ef4bafc02d4517b3718f07e5f61b7e4e22072c25`; Core CI 188; PR #21 merged as `e8967b97ec9772cb2af0b3b781468553708d4015`.
-Semantic-adapter exact green head: `680a8a15dfb5a30a7c6eaba3860817c1cbda7ac5`; Core CI 193 Ubuntu+Windows plus live Playwright ARIA and Windows UIA proofs; PR #24 merged as `e6af748fb655fda2719be93258b6c2a427287994`.
-Integrated evidence: versioned plugin/workspace compatibility and risk declarations, lazy explicit activation, Software Factory behind `CodingWorkerPort`, semantic-first Accessibility Repair/Assistant, optional Playwright and Windows UIA adapters.
+Implemented on branch:
+- first-class **Deterministic Brain** that uses no language model;
+- Nika-owned world-state/goal/action/plan contracts;
+- Unified Planning/Pyperplan adapter for explicit planning domains;
+- execution through existing guarded ToolExecutor so planner-selected actions preserve approval/security rules;
+- Microsoft **Foundry Local** in-process provider behind existing ModelGateway;
+- explicit/fail-closed model download policy;
+- optional Windows WinML SDK dependency and separate cross-platform SDK path;
+- fake-SDK Foundry provider contract tests without downloading a large model;
+- deterministic planning/execution/impossible-goal/replanning/high-impact-approval tests;
+- Windows CI proof that the selected official Foundry SDK package resolves/imports;
+- expanded Full Product Vision, current intelligence reuse decisions, Product Journey/Toolsmith gates and current scope docs.
 
-### L8 — M10 security/sandbox/reliability
-Current state: IMPLEMENTED / GREEN / INTEGRATED.
-Exact green head: `17826cc041caeaa1fe03f8dbe4ce5e50c7aecad5`; Core CI 167 Ubuntu+Windows; PR #22 merged as `976cb9914966a67763742a28c229730417ee63c8`.
-Integrated evidence: traversal-safe workspace boundaries, exact network/process allowlists, bounded execution budgets, exact-action fingerprints, expiring single-use approvals and fail-closed authorization order.
+State: **IMPLEMENTED / FINAL CI REQUIRED / NOT INTEGRATED** until the latest exact head completes all required checks.
+Remaining after code-level integration: real physical-Windows Foundry model inference benchmark/proof before calling the embedded model hardware-proven.
 
-### L9 — M11 Windows packaging/distribution
-Current state: IMPLEMENTED / GREEN / INTEGRATED / PACKAGED candidate evidence.
-Exact green head: `0f48c3c4889478f967e383d385576e9322e55c9b`; Core CI 196; M11 Windows Release Candidate run 3; PR #23 merged as `5d86d83f6ce99fa4c9bd6a0eaadef1a6b404283c`.
-Artifact: `NikaCore-0.0.2-windows-x64`, id `9340673484`, digest `sha256:4611ba73baab2ecd37ce07d5596853edd6f4d6fa7559ff58d660d5f5aee5b12e`.
+Collision decision: this lane was created from the same current `main` and intentionally does not modify PR #37's eight owned product/UI files, so both lanes may advance in parallel.
 
-### L10 — M12 full-system QA/accessibility/release gate
-Current state: AUTOMATED PRE-HUMAN GATE GREEN / INTEGRATED; HUMAN GATE OPEN.
-Exact automated green head: `d7bdfd697819adf13ad7423726a004fd781d857d`; Core CI 200; M12 Pre-Human Release Gate run 1; PR #26 merged as `a278767de4435535cc54e5674ddc72d37051ba03`.
-Exact pre-human artifact is recorded above.
+## Prepared next Full Product Vision lanes
 
-## Release-freeze operating rule
-Normal feature expansion is paused while human acceptance is bound to the exact M12 artifact. Automation must not mutate production source merely to keep hourly workers busy.
+These lanes are real end-state product work. They do not receive progress credit merely because architecture is documented.
 
-Safe autonomous work during the freeze is limited to:
-1. artifact/evidence integrity checks;
-2. canonical status/evidence consistency;
-3. closing stale/superseded coordination artifacts;
-4. protocol clarification;
-5. investigation of concrete human-reported defects;
-6. preparing one coherent repair candidate only after a real defect is demonstrated.
+### L-TOOL — Capability Escalation / Toolsmith
+Goal: active task proves a missing capability -> reuse search -> bounded Software Factory/CodingWorker request if necessary -> isolated implementation/test -> permission-aware registration -> original task resumes from checkpoint.
+Prerequisites: stable current Software Factory/CodingWorker boundary and task/checkpoint contracts.
+Must not self-modify production main or self-expand permissions.
 
-Do **not** create status-only PR chains whose sole purpose is to record that the previous status-only PR merged. One coherent reconciliation PR is sufficient; if no new evidence or defect exists, record no new PR.
+### L-RESEARCH — Universal Research + Corpus/Knowledge
+Goal: one reusable engine for sources, incremental freshness/change state, HTTP/API/browser/document extraction, deterministic pre-filter, evidence/confidence, dedup, structured cards, review, scheduled deltas and accessible reports; plus provenance-scoped local corpus/FTS before optional semantic retrieval.
+GrantScanner/Product Search/etc. become profiles rather than duplicate crawlers.
+
+### L-MODEL — Model Engineering Lab + local resource profiles
+Goal: benchmark Foundry/Ollama/cloud/specialist models on versioned tasks; measure quality/latency/RAM/CPU/GPU; manage model license/checksum/artifacts; add normal/battery/night/low-memory/heavy-worker resource profiles where measured.
+
+### L-TRADER — AI Trader real workspace
+Goal: no-lookahead replay, chronological odds/event snapshots, virtual bank, singles/combinations/portfolio exposure, time waves, versioned strategies, risk/drawdown, held-out validation, paper/live-prematch simulation, restart-safe sessions and accessible reports.
+Generic M8 Experiment Engine is foundation only; it does not mean AI Trader itself exists.
+
+### L-CMD — Command center + workspace creation Product Journeys
+Goal: user can give a natural-language command in final accessible Windows UI, create/configure agents/workspaces/tasks, route through real services, see durable accessible results, and request a missing capability through Toolsmith.
+
+### L-RELEASE — Combined release/integration
+Goal: after required product lanes merge, rebuild one exact Windows candidate containing all required repairs; run Core, security/recovery, Product Journey, WebView2/UIA/keyboard/focus/package/license/checksum gates; only then hand the exact artifact to the human NVDA protocol.
+
+## Removed active scope
+
+**Telegram is removed from active Nika Core development.** Historical Telegram/Telethon/TDLib material is archival reference only. Scheduled/manual workers must not spend development time on Telegram unless the user explicitly introduces it as a new future workspace.
+
+## Parallel collaboration model
+
+### Scheduled workers — normal mode
+Five scheduled workers may run simultaneously when manual Deep Research coding lanes are not active. They should own large non-overlapping vertical areas rather than microtasks.
+
+### Manual Deep Research developer/auditor mode
+When the user starts manual Deep Research developer chats, those chats are **real coding lanes**, not research-only roles. Each may take a large subsystem, read live GitHub, implement code, trigger tests and drive one coherent branch toward integration. A paired auditor independently inspects live code/evidence and returns defects.
+
+During manual Deep Research coding periods, scheduled workers should be **paused or reassigned** to complementary low-collision duties such as:
+- cross-lane Integration QA;
+- release/package proof;
+- regression/security/accessibility auditing;
+- dependency/license/evidence consistency;
+- stale-conflict detection and merge readiness.
+
+They should not simultaneously edit the same subsystem just to maximize agent count.
 
 ## Collision policy
-1. Source-development lanes branch from latest green `main` unless a real dependency requires otherwise.
-2. Do not stack unrelated branches.
-3. Shared contracts require explicit compatibility decisions and targeted tests.
-4. A blocked lane does not justify weakening another lane's gate.
-5. Release-freeze rules override normal feature-parallelism while the exact human candidate is pending.
+1. Separate branch for each independent lane.
+2. Branch from latest compatible green `main` unless a real dependency requires otherwise.
+3. Do not stack unrelated branches.
+4. Shared-contract edits require explicit compatibility decision and targeted tests.
+5. If another lane owns overlapping files, audit/research another independent surface rather than create competing edits.
+6. A blocked lane does not block independent lanes.
+7. Acceptance credit requires exact green evidence + integration, not implementation alone.
 
-## CI policy
-- Coherent PR/main gates use the shared verification harness on Ubuntu and Windows where applicable.
-- Focused Windows/WebView2/package/security jobs run only when they add material evidence.
-- Never weaken checks to obtain green.
-- Avoid rerunning expensive identical gates without new code/evidence.
+## Large-batch policy
+A development run is not one file/function/test. Each lane should advance the largest safe coherent slice: reuse check -> contract -> implementation -> persistence/recovery -> errors -> tests -> accessibility/security impact -> docs/evidence -> CI/integration. Stop only at a real subsystem boundary, required external proof, blocker or safety approval boundary.
 
-## Reporting policy
-Every meaningful development report records exact starting `main` SHA, lane/branch, changes, REUSE/ADAPT/CUSTOM decision, tests, exact green head, PR/merge, proven A–Z progress, blockers, unverified work and HUMAN_TESTED/NVDA_VERIFIED truth.
+## CI/release policy
+- Shared verification runs on Ubuntu + Windows where applicable.
+- Focused WebView2/UIA/package/security/model-hardware proofs run only when they add real evidence.
+- Never weaken a gate to get green.
+- Do not repeatedly download large models or rebuild release EXEs on every development push.
+- An integrated behavior change invalidates any older human-candidate artifact until a fresh combined exact candidate passes the complete release gate.
+
+## Human truth
+- HUMAN_TESTED remains false until the user actually performs the exact protocol.
+- NVDA_VERIFIED remains false until the user actually completes the Windows/NVDA acceptance.
+- Automated accessibility evidence never promotes either state.
