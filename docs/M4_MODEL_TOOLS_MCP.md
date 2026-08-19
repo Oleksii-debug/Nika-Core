@@ -27,7 +27,7 @@ Model and tool execution are bounded by deadlines and cancellation. Adapter fail
 - `OpenAICompatibleProvider` for compatible HTTP providers;
 - `OllamaProvider` using native `http://localhost:11434/api/chat` by default.
 
-The dedicated Ollama adapter sends `stream: false` so one Nika request produces one bounded response envelope. It sends `think: false` by default for models that accept the boolean switch, keeping reasoning traces out of the shared response contract. Ollama also documents thinking levels (`low`, `medium`, `high`, and for supported models `max`); the adapter accepts and validates those levels so models such as GPT-OSS can be used without leaking Ollama-specific wire types into Nika contracts. The `message.thinking` field is intentionally not copied into `ModelResponse`. Temperature is translated to Ollama's native `options` object. Native `prompt_eval_count` and `eval_count` are normalized to Nika `ModelUsage`.
+The dedicated Ollama adapter sends `stream: false` so one Nika request produces one bounded response envelope. It sends `think: false` by default for models that accept the boolean switch, keeping reasoning traces out of the shared response contract. Current official Ollama chat/thinking documentation defines string levels `low`, `medium` and `high` for supported models such as GPT-OSS; the adapter accepts only those documented levels rather than guessing additional values. The `message.thinking` field is intentionally not copied into `ModelResponse`. Temperature is translated to Ollama's native `options` object. Native `prompt_eval_count` and `eval_count` are normalized to Nika `ModelUsage`.
 
 Ollama is local and may receive private/sensitive data under Nika's local routing policy. It does **not** currently claim hard server-side cancellation because the adopted native API path does not provide a separately proven hard-cancel guarantee for an active generation.
 
@@ -51,7 +51,7 @@ The acceptance suite constructs a real official `MCPServer` in process, discover
 
 1. shared verification passes on the exact candidate SHA on Ubuntu and Windows;
 2. mock/no-LLM semantic scenario continues through `ModelGateway`;
-3. native Ollama request contract proves `/api/chat`, `stream: false`, default `think: false`, validated thinking levels, model override and usage normalization;
+3. native Ollama request contract proves `/api/chat`, `stream: false`, default `think: false`, documented `low`/`medium`/`high` thinking levels, model override and usage normalization;
 4. provider failures, timeout and cancellation map correctly;
 5. the shared capability contract, generic HTTP providers and Ollama fail closed on hard-cancellation claims unless evidence explicitly opts a provider in;
 6. explicit fallback still works for retryable failures, but timeout fallback remains blocked when hard cancellation is unproven;
