@@ -49,6 +49,18 @@ class DocumentLimits:
             raise ValueError("document limits must be positive and bounded")
 
 
+_DOCUMENT_PACKAGES = {
+    ".pdf": "pypdf",
+    ".docx": "python-docx",
+    ".xlsx": "openpyxl",
+}
+_DOCUMENT_MEDIA_SUFFIXES = {
+    "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+}
+
+
 def _check_archive_member_name(name: str) -> None:
     path = PurePosixPath(name.replace("\\", "/"))
     if path.is_absolute() or ".." in path.parts:
@@ -203,16 +215,25 @@ def _extract_xlsx(path: Path, *, limits: DocumentLimits) -> ExtractedDocument:
     )
 
 
-def document_extractor_identity(path: Path | str) -> tuple[str, str]:
+def _document_suffix(path: Path | str, media_type: str | None) -> str:
+    if media_type is not None:
+        suffix = _DOCUMENT_MEDIA_SUFFIXES.get(media_type.casefold())
+        if suffix is None:
+            raise DocumentIngestionError(f"unsupported document media type: {media_type}")
+        return suffix
     suffix = Path(path).suffix.casefold()
-    packages = {
-        ".pdf": "pypdf",
-        ".docx": "python-docx",
-        ".xlsx": "openpyxl",
-    }
-    package = packages.get(suffix)
-    if package is None:
+    if suffix not in _DOCUMENT_PACKAGES:
         raise DocumentIngestionError(f"unsupported document format: {suffix or '<none>'}")
+    return suffix
+
+
+def document_extractor_identity(
+    path: Path | str,
+    *,
+    media_type: str | None = None,
+) -> tuple[str, str]:
+    suffix = _document_suffix(path, media_type)
+    package = _DOCUMENT_PACKAGES[suffix]
     return package, version(package)
 
 
@@ -220,6 +241,7 @@ def extract_document_file(
     path: Path | str,
     *,
     limits: DocumentLimits | None = None,
+    media_type: str | None = None,
 ) -> ExtractedDocument:
     candidate = Path(path)
     active_limits = limits or DocumentLimits()
@@ -227,11 +249,9 @@ def extract_document_file(
         raise DocumentIngestionError("document source is not a regular file")
     if candidate.stat().st_size > active_limits.max_source_bytes:
         raise DocumentTooLargeError("document source exceeds byte limit")
-    suffix = candidate.suffix.casefold()
+    suffix = _document_suffix(candidate, media_type)
     if suffix == ".pdf":
         return _extract_pdf(candidate, limits=active_limits)
     if suffix == ".docx":
         return _extract_docx(candidate, limits=active_limits)
-    if suffix == ".xlsx":
-        return _extract_xlsx(candidate, limits=active_limits)
-    raise DocumentIngestionError(f"unsupported document format: {suffix or '<none>'}")
+    return _extract_xlsx(candidate, limits=active_limits)
