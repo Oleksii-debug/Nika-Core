@@ -44,31 +44,38 @@ Implemented scope:
 - deterministic backend/bridge lifecycle tests;
 - compatibility merge with the already-integrated release-license/notices repair.
 
-Latest exact-head evidence inspected this cycle:
+Latest exact-head evidence inspected during this development wave:
 - Core CI #228: SUCCESS;
 - M11 Windows Release Candidate #8: SUCCESS;
 - M12 Pre-Human Release Gate #6: CANCELLED.
 
-Conclusion: implementation is substantial and partially green, but the complete required release gate is not green. **Do not merge/promote or give the user a ZIP from this lane yet.**
+Conclusion: implementation is substantial and partially green, but the complete required release gate is not green. **Do not promote a ZIP from this lane without newer exact-head full-system evidence.**
 
 ## Active lane B — Deterministic Brain + Embedded Brain
 
 PR #40: `feat/embedded-intelligence-foundry-local`.
-Lane started independently from `main` and does not overlap PR #37's eight source/test files.
+Lane started independently from the recorded `main` baseline and does not overlap PR #37's eight product/UI/test files.
 
-Implemented in the lane so far:
+Implemented in the lane:
 - `FoundryLocalProvider` behind the existing ModelGateway contract using the official Microsoft Foundry Local Python SDK path;
 - model download defaults to disabled/fail-closed so ordinary inference cannot silently download large model files;
 - optional Windows `foundry-local-sdk-winml` dependency plus cross-platform SDK alternative;
 - a first-class model-free `DeterministicBrain` with Nika-owned explicit world-state/goal/action contracts;
 - Unified Planning/Pyperplan adapter behind the Nika planner contract;
 - deterministic plans execute through existing guarded ToolExecutor, preserving approval boundaries;
-- tests for model-free multi-step plan/execution, impossible goal, re-planning after state change, and high-impact approval denial;
-- Foundry Local contract tests using a fake manager/model so base CI does not download a real model;
-- Windows CI dependency proof for the official Foundry Local SDK package;
-- updated master/full-product/reuse/acceptance roadmap documents.
+- deterministic planning has explicit wall-time and maximum-step budgets; an oversized plan is rejected before executing a tool;
+- ModelGateway has explicit ordered fallback provider IDs, a single total deadline, privacy prevalidation of the complete route, and fallback only after eligible retryable failures;
+- provider capabilities record whether hard cancellation is proven. A timeout from a provider without proven hard cancellation is non-retryable and cannot trigger concurrent fallback;
+- Foundry Local in-process inference is serialized. If an async timeout/cancellation occurs while native non-streaming inference continues, the Foundry slot remains reserved until that worker actually exits;
+- Foundry model metadata can be inspected read-only for exact model/cache/hardware evidence without silently loading or downloading the model;
+- `scripts/prove_foundry_local.py` prepares a physical-Windows evidence record with SDK version, platform, model identity, explicit human-reviewed model-license reference, inference result and optional deterministic model-cache tree checksum. Model download remains opt-in only;
+- deterministic tests cover no-model multi-step execution, impossible goal, re-planning, high-impact approval denial, plan/time budgets, explicit fallback safety, sensitive-route rejection, non-cancellable timeout behavior, Foundry serialization, timeout/native-worker slot retention, model metadata and missing-model errors;
+- Windows CI contains a dependency/import proof for the official Foundry Local SDK package;
+- master/full-product/reuse/acceptance documents are reconciled to the expanded intelligence architecture.
 
-Evidence state at the time this status text was written: **IMPLEMENTED / CI RUNNING OR PENDING; not yet GREEN, not yet INTEGRATED**. A real physical-Windows Foundry model inference proof remains a later focused acceptance requirement; SDK import/mock tests do not count as that proof.
+Evidence boundary: this lane is **IMPLEMENTED but requires fresh exact-head CI after the latest coherent changes before it may be called GREEN or INTEGRATED**. Earlier green runs on older PR #40 heads do not prove the latest head.
+
+A real physical-Windows Foundry model inference has **not** been executed by automation here. SDK import, fake-manager tests and the physical-proof script are preparation/evidence infrastructure only. The exact model license remains a per-model human/release review item rather than being inferred from the MIT SDK license.
 
 ## Expanded Full Product Vision
 
@@ -104,14 +111,14 @@ Report instead:
 
 ## Current blockers
 
-1. PR #37 needs a complete non-cancelled M12 full-system gate on the exact final combined head before integration/promotion.
-2. PR #40 needs final Ubuntu+Windows Core CI plus its Foundry SDK dependency proof; any failures must be fixed on the same coherent lane.
-3. Even after Foundry adapter integration, a real physical-Windows embedded-model inference proof is still required before describing Foundry Local as hardware-proven.
+1. PR #37 requires complete current exact-head full-system evidence before integration/promotion if no newer live result supersedes the recorded cancelled M12 run.
+2. PR #40 requires fresh exact-head Ubuntu+Windows Core CI, the Foundry SDK dependency proof and applicable M12 full-system gate after the latest timeout/fallback/evidence changes.
+3. Even after Foundry adapter integration, a real physical-Windows embedded-model inference with exact model/version/license/resource evidence is still required before describing Foundry Local as hardware-proven.
 4. HUMAN_TESTED/NVDA_VERIFIED remain human-only.
 
 ## Next large coherent batches
 
 - finish exact-head CI and integration for the independent deterministic/embedded intelligence lane;
-- finish/re-run the complete Product Journey repair gate and integrate only if fully green;
+- finish/re-run the complete Product Journey repair gate and integrate only if fully green/current-main-compatible;
 - after both are safely integrated, produce one fresh combined Windows candidate rather than promoting an intermediate ZIP;
-- then advance the next Full Product Vision lanes: Toolsmith/Capability Escalation, Universal Research/Corpus and command-center product journeys.
+- then allow reserved manual lanes to advance Toolsmith/Capability Escalation, Universal Research/Corpus and other Full Product Vision work without AUTO02 source overlap.
