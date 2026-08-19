@@ -73,10 +73,10 @@ def _record_pair(
         )
 
 
-def test_schema_v7_durable_restart_promotion_and_rollback(tmp_path: Path) -> None:
+def test_schema_v8_durable_restart_promotion_and_rollback(tmp_path: Path) -> None:
     path = tmp_path / "nika.db"
     store, _, first = _engine(path)
-    assert store.schema_version() == 7
+    assert store.schema_version() == 8
     first.create(_definition())
     first.start("exp-durable")
     _record_pair(first, "champion", (0.70, 0.70), (0.95, 0.95))
