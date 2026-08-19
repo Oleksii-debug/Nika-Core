@@ -46,9 +46,26 @@ jobs:
           assert m.version('yt-dlp') == '2026.6.9';
           assert m.version('pysubs2') == '1.8.1';
           print('yt-dlp', m.version('yt-dlp'), 'pysubs2', m.version('pysubs2'))"
-      - name: Compile and lint media foundation
+      - name: Compile media foundation
         run: >-
-          python -m compileall -q src/nika_core/media tests/test_media_*.py &&
-          python -m ruff check src/nika_core/media tests/test_media_*.py
+          python -m compileall -q
+          src/nika_core/media
+          tests/test_media_adversarial.py
+          tests/test_media_batch_a.py
+          tests/test_media_persistence_privacy.py
+          tests/test_media_process_files.py
+      - name: Lint media foundation
+        run: >-
+          python -m ruff check
+          src/nika_core/media
+          tests/test_media_adversarial.py
+          tests/test_media_batch_a.py
+          tests/test_media_persistence_privacy.py
+          tests/test_media_process_files.py
       - name: Run focused DEV05 Batch A tests
-        run: python -m pytest -q tests/test_media_*.py
+        run: >-
+          python -m pytest -q
+          tests/test_media_adversarial.py
+          tests/test_media_batch_a.py
+          tests/test_media_persistence_privacy.py
+          tests/test_media_process_files.py
