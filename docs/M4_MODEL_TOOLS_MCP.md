@@ -19,7 +19,7 @@ The gateway supports explicit provider IDs or provider-kind defaults (`no_llm`, 
 
 Model and tool execution are bounded by deadlines and cancellation. Adapter failures become typed/normalized Nika outcomes. Audit records contain provider/tool identifiers, risk class, model/usage/latency and error class, but do not record prompts, tool arguments, API keys or raw provider responses.
 
-`supports_hard_cancellation` means the underlying inference is proven stopped, not merely that the Python caller or HTTP socket was cancelled. Generic HTTP providers therefore default this capability to `False`. An adapter may opt in only when its upstream/provider path has separate evidence for hard server-side cancellation. This prevents ModelGateway from launching a fallback inference after a timeout when the first inference may still be consuming resources.
+`supports_hard_cancellation` means the underlying inference is proven stopped, not merely that the Python caller or HTTP socket was cancelled. The shared `ProviderCapabilities` contract itself defaults this field to `False`, so a newly added adapter cannot accidentally inherit hard-cancellation credit. Generic HTTP providers also default it to `False`. An adapter may opt in only when its upstream/provider path has separate evidence for hard server-side cancellation. This prevents ModelGateway from launching a fallback inference after a timeout when the first inference may still be consuming resources.
 
 ## Providers
 
@@ -27,7 +27,7 @@ Model and tool execution are bounded by deadlines and cancellation. Adapter fail
 - `OpenAICompatibleProvider` for compatible HTTP providers;
 - `OllamaProvider` using native `http://localhost:11434/api/chat` by default.
 
-The dedicated Ollama adapter sends `stream: false` so one Nika request produces one bounded response envelope. It sends `think: false` by default for thinking-capable models, keeping reasoning traces out of the shared response contract; this behavior can be explicitly changed at adapter construction when a future product surface intentionally supports reasoning output. Temperature is translated to Ollama's native `options` object. Native `prompt_eval_count` and `eval_count` are normalized to Nika `ModelUsage`.
+The dedicated Ollama adapter sends `stream: false` so one Nika request produces one bounded response envelope. It sends `think: false` by default for models that accept the boolean switch, keeping reasoning traces out of the shared response contract. Ollama also documents thinking levels (`low`, `medium`, `high`, and for supported models `max`); the adapter accepts and validates those levels so models such as GPT-OSS can be used without leaking Ollama-specific wire types into Nika contracts. The `message.thinking` field is intentionally not copied into `ModelResponse`. Temperature is translated to Ollama's native `options` object. Native `prompt_eval_count` and `eval_count` are normalized to Nika `ModelUsage`.
 
 Ollama is local and may receive private/sensitive data under Nika's local routing policy. It does **not** currently claim hard server-side cancellation because the adopted native API path does not provide a separately proven hard-cancel guarantee for an active generation.
 
@@ -51,9 +51,9 @@ The acceptance suite constructs a real official `MCPServer` in process, discover
 
 1. shared verification passes on the exact candidate SHA on Ubuntu and Windows;
 2. mock/no-LLM semantic scenario continues through `ModelGateway`;
-3. native Ollama request contract proves `/api/chat`, `stream: false`, default `think: false`, model override and usage normalization;
+3. native Ollama request contract proves `/api/chat`, `stream: false`, default `think: false`, validated thinking levels, model override and usage normalization;
 4. provider failures, timeout and cancellation map correctly;
-5. generic HTTP and Ollama providers do not claim hard server-side cancellation without evidence;
+5. the shared capability contract, generic HTTP providers and Ollama fail closed on hard-cancellation claims unless evidence explicitly opts a provider in;
 6. explicit fallback still works for retryable failures, but timeout fallback remains blocked when hard cancellation is unproven;
 7. no secrets or prompt content appear in Git/audit evidence;
 8. exact green SHA is current-main-compatible before merge.
