@@ -130,3 +130,21 @@ def test_unicode_and_control_characters_remain_deterministic_exact_input() -> No
 
     assert first.approval_fingerprint == second.approval_fingerprint
     assert first.approval_fingerprint != changed.approval_fingerprint
+
+
+def test_lone_surrogate_is_ascii_escaped_before_hashing() -> None:
+    surrogate = ActionIntent(
+        action_id="surrogate",
+        tool_id="tool.read",
+        risk=ToolRisk.READ_ONLY,
+        target="target-\ud800",
+    )
+    changed = ActionIntent(
+        action_id="surrogate",
+        tool_id="tool.read",
+        risk=ToolRisk.READ_ONLY,
+        target="target-\ud801",
+    )
+
+    assert len(surrogate.approval_fingerprint) == 64
+    assert surrogate.approval_fingerprint != changed.approval_fingerprint
