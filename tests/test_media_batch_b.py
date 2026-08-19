@@ -157,14 +157,14 @@ def build_store(tmp_path: Path) -> tuple[SQLiteStore, MediaRepository, Processin
 
 def test_media_schema_batch_b_migration_is_applied(tmp_path: Path) -> None:
     store, _repo, _job = build_store(tmp_path)
-    assert MEDIA_SCHEMA_VERSION == 2
+    assert MEDIA_SCHEMA_VERSION >= 2
     with store.connection() as conn:
         row = conn.execute("SELECT MAX(version) AS version FROM media_schema_migrations").fetchone()
         table = conn.execute(
             "SELECT name FROM sqlite_master "
             "WHERE type='table' AND name='media_transcription_chunks'"
         ).fetchone()
-    assert int(row["version"]) == 2
+    assert int(row["version"]) == MEDIA_SCHEMA_VERSION
     assert table["name"] == "media_transcription_chunks"
 
 
