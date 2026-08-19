@@ -20,6 +20,12 @@ from .software_factory import (
     CodingWorkerPort,
     SoftwareFactoryService,
 )
+from .toolsmith_bridge import (
+    CapabilityToolBinding,
+    DownstreamBudgetLimits,
+    ToolsmithSecurityEnvelope,
+    build_toolsmith_security_envelope,
+)
 
 __all__ = [
     "ACCESSIBILITY_REPAIR_MANIFEST",
@@ -29,13 +35,17 @@ __all__ = [
     "AccessibilityInteractionPort",
     "AccessibilityRepairService",
     "CapabilityGap",
+    "CapabilityToolBinding",
     "CodingRequest",
     "CodingResult",
     "CodingWorkerPort",
+    "DownstreamBudgetLimits",
     "PluginRequirement",
     "SoftwareFactoryService",
+    "ToolsmithSecurityEnvelope",
     "WorkspaceCatalog",
     "WorkspaceCompatibilityError",
     "WorkspaceManifest",
     "WorkspaceResolver",
+    "build_toolsmith_security_envelope",
 ]
