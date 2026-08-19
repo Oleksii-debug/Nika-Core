@@ -120,7 +120,7 @@ class MultiAgentSupervisor:
                         state=MemberState.CANCELLED,
                     )
                     raise
-                except RuntimeError as exc:
+                except Exception as exc:  # noqa: BLE001 - isolate one worker from the team.
                     self._store.set_member_state(
                         team_id=team_id,
                         member_id=member.member_id,
