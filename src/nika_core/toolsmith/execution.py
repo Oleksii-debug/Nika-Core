@@ -171,6 +171,7 @@ def run_typed_process(
 
     limit = resource_budget.max_output_bytes
     output = {"stdout": bytearray(), "stderr": bytearray()}
+    total_output = 0
     overflow = threading.Event()
     output_lock = threading.Lock()
 
@@ -195,13 +196,16 @@ def run_typed_process(
             job.assign(int(process._handle))  # type: ignore[attr-defined]
 
         def drain(stream_name: str, stream: collections.abc.Iterator[bytes]) -> None:
+            nonlocal total_output
             for chunk in stream:
                 with output_lock:
-                    remaining = limit - len(output[stream_name])
+                    remaining = limit - total_output
                     if remaining <= 0:
                         overflow.set()
                         return
-                    output[stream_name].extend(chunk[:remaining])
+                    accepted = chunk[:remaining]
+                    output[stream_name].extend(accepted)
+                    total_output += len(accepted)
                     if len(chunk) > remaining:
                         overflow.set()
                         return
@@ -313,9 +317,23 @@ def prepare_private_git_workspace(
         raise WorkspaceSecurityError("production repository must expose trusted Git metadata")
 
     plan.private_git_dir.parent.mkdir(parents=True, exist_ok=True)
+    _git(
+        (git_executable, "check-ref-format", "--branch", plan.branch_name),
+        cwd=plan.private_git_dir.parent,
+        environment=plan.environment,
+    )
+
+    null_hooks = "NUL" if os.name == "nt" else "/dev/null"
     clone_argv = (
         git_executable,
-        *plan.config_args,
+        "-c",
+        "credential.helper=",
+        "-c",
+        f"core.hooksPath={null_hooks}",
+        "-c",
+        "protocol.file.allow=always",
+        "-c",
+        "protocol.ext.allow=never",
         "clone",
         "--bare",
         "--no-hardlinks",
@@ -377,7 +395,7 @@ def prepare_private_git_workspace(
         raise WorkspaceSecurityError("unable to prove job branch collision state")
 
     plan.worktree_root.mkdir(parents=False, exist_ok=False)
-    checkout = _git(
+    _git(
         (
             *git_prefix,
             "--work-tree",
@@ -391,7 +409,6 @@ def prepare_private_git_workspace(
         cwd=plan.private_git_dir.parent,
         environment=plan.environment,
     )
-    del checkout
     if (plan.worktree_root / ".git").exists():
         raise WorkspaceSecurityError("worker-visible worktree unexpectedly contains .git metadata")
 
