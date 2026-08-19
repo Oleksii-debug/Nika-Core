@@ -26,8 +26,21 @@ from nika_core.media.contracts import (
     Transcript,
     TranscriptMethod,
 )
+from nika_core.media.delivery import MediaDeliveryCoordinator
 from nika_core.media.errors import MediaError, MediaErrorCode
+from nika_core.media.handoff import (
+    CorpusMediaHandoffV1,
+    CorpusMediaProvenanceRefV1,
+    CorpusMediaRevisionV1,
+    CorpusMediaTextBlockV1,
+    MediaTextSourceKind,
+    OCRInputRequestV1,
+    OCRRequestReason,
+    build_corpus_media_handoff,
+    validate_artifact_for_handoff,
+)
 from nika_core.media.models import Page
+from nika_core.media.presenter import render_accessible_media_text
 from nika_core.media.repository import MediaRepository
 from nika_core.media.schema import MEDIA_SCHEMA_VERSION, initialize_media_schema
 
@@ -35,18 +48,26 @@ __all__ = [
     "MEDIA_SCHEMA_VERSION",
     "AssetKind",
     "ComponentState",
+    "CorpusMediaHandoffV1",
+    "CorpusMediaProvenanceRefV1",
+    "CorpusMediaRevisionV1",
+    "CorpusMediaTextBlockV1",
     "EngineDescriptor",
     "MediaAsset",
+    "MediaDeliveryCoordinator",
     "MediaError",
     "MediaErrorCode",
     "MediaRepository",
     "MediaResourceClaim",
     "MediaSource",
     "MediaSourceKind",
+    "MediaTextSourceKind",
     "MediaVersion",
     "ModelDescriptor",
     "OCRDocument",
+    "OCRInputRequestV1",
     "OCRPage",
+    "OCRRequestReason",
     "OptionalComponent",
     "OptionalComponentRegistry",
     "Page",
@@ -63,5 +84,8 @@ __all__ = [
     "TextRevision",
     "Transcript",
     "TranscriptMethod",
+    "build_corpus_media_handoff",
     "initialize_media_schema",
+    "render_accessible_media_text",
+    "validate_artifact_for_handoff",
 ]

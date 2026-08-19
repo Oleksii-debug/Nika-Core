@@ -56,6 +56,7 @@ jobs:
           tests/test_media_batch_b_retry.py
           tests/test_media_batch_b_safety.py
           tests/test_media_batch_c.py
+          tests/test_media_batch_d.py
           tests/test_media_persistence_privacy.py
           tests/test_media_process_files.py
       - name: Lint media foundation
@@ -68,6 +69,7 @@ jobs:
           tests/test_media_batch_b_retry.py
           tests/test_media_batch_b_safety.py
           tests/test_media_batch_c.py
+          tests/test_media_batch_d.py
           tests/test_media_persistence_privacy.py
           tests/test_media_process_files.py
       - name: Run focused DEV05 media tests
@@ -79,5 +81,6 @@ jobs:
           tests/test_media_batch_b_retry.py
           tests/test_media_batch_b_safety.py
           tests/test_media_batch_c.py
+          tests/test_media_batch_d.py
           tests/test_media_persistence_privacy.py
           tests/test_media_process_files.py
