@@ -1,6 +1,6 @@
 # PROJECT STATUS — Nika Core
 
-Updated: 2026-08-18
+Updated: 2026-08-19
 Canonical repository: `Oleksii-debug/Nika-Core`
 Development mode: M12 PRE-HUMAN RELEASE FREEZE
 Repository visibility observed this cycle: **PUBLIC**.
@@ -58,19 +58,20 @@ Repository visibility observed this cycle: **PUBLIC**.
 - NVDA_VERIFIED: **false**; automation must never award this state.
 - PRODUCTION_RELEASE_READY: **false** until the exact candidate passes the human protocol.
 
-## M12 freeze maintenance — current cycle
+## M12 freeze maintenance
 - Re-read the binding architecture, roadmap, reuse, UI, large-batch, autonomous-development, acceptance and parallel-development policies plus Issue #1, open PRs and current repository metadata before acting.
-- Confirmed the tested M12 exact candidate remains the human-bound candidate; no production source, package input or runtime behavior was changed in this cycle.
+- Confirmed the tested M12 exact candidate remains the human-bound candidate; no production source, package input or runtime behavior was changed.
 - Repository metadata still reports **PUBLIC**, despite user wording that calls it private.
-- Found that old PR #4 was still open although its governance branch predates integrated M2 runtime selection and is superseded by the current `docs/PARALLEL_DEVELOPMENT_POLICY.md`. PR #4 was therefore closed **without merge** as obsolete. This removes a misleading non-mergeable branch from the active queue without changing product behavior.
-- PR #11 was already closed without merge and remains superseded/uncredited.
+- Old PR #4 was closed **without merge** as obsolete/superseded. PR #11 was already closed without merge and remains superseded/uncredited.
 - This maintenance awards **0%** additional weighted credit and does not invalidate M12 acceptance evidence.
 
-## M12 artifact integrity re-verification — latest cycle
+## M12 artifact integrity re-verification
 - GitHub artifact id `9340947647` was fetched successfully again from the canonical repository.
 - Downloaded ZIP size is exactly `20,846,871` bytes and SHA-256 is exactly `ee0ec0b7506c6bc84b8052f1c1cdb80a33a6f0dea8eb6b221cee1860dc96d4c5`, matching the recorded workflow digest.
 - `m12-prehuman-evidence.json` inside the artifact still binds the package to commit `d7bdfd697819adf13ad7423726a004fd781d857d` and records `human_tested=false`, `nvda_verified=false`, `production_release_ready=false`.
 - The embedded release manifest still identifies product `NikaCore` version `0.0.2`.
+- Exact status-only head `03e76cbd12eb8cd44560832391f6428c068d01fb` passed Core CI #211 successfully.
+- PR #31 was merged only after that exact-head green gate; merge commit `ce4a42e98d5b64ce92ceae72c8dd5678e763f722` is the current `main` baseline at the start of this cycle.
 - No production source, package input, runtime behavior or packaged candidate was changed. This is evidence reconciliation only and awards **0%** additional weighted credit.
 
 ## Current weighted milestone
