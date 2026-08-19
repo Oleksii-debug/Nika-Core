@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -341,5 +341,56 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "CREATE INDEX IF NOT EXISTS idx_corpus_documents_workspace ON corpus_documents(workspace_id, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_corpus_origins_source ON corpus_origins(source_id, observed_at)",
         "CREATE INDEX IF NOT EXISTS idx_corpus_chunks_document ON corpus_chunks(document_id, ordinal)",
+    ),
+    10: (
+        """CREATE TABLE IF NOT EXISTS corpus_artifacts (
+            artifact_id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            raw_sha256 TEXT NOT NULL,
+            byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+            media_type TEXT NOT NULL,
+            original_name TEXT NOT NULL,
+            storage_relpath TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(workspace_id) REFERENCES research_workspaces(workspace_id),
+            UNIQUE(workspace_id, raw_sha256),
+            UNIQUE(workspace_id, storage_relpath)
+        )""",
+        """CREATE TABLE IF NOT EXISTS corpus_artifact_origins (
+            artifact_id TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            locator TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            PRIMARY KEY(artifact_id, source_id, locator),
+            FOREIGN KEY(artifact_id) REFERENCES corpus_artifacts(artifact_id),
+            FOREIGN KEY(source_id) REFERENCES research_sources(source_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS corpus_extractions (
+            extraction_id TEXT PRIMARY KEY,
+            artifact_id TEXT NOT NULL,
+            extractor TEXT NOT NULL,
+            extractor_version TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('extracted','ocr_needed','empty','failed')),
+            normalized_text_sha256 TEXT,
+            detail TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(artifact_id) REFERENCES corpus_artifacts(artifact_id),
+            UNIQUE(artifact_id, extractor, extractor_version),
+            UNIQUE(extraction_id, artifact_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS corpus_document_artifacts (
+            document_id TEXT NOT NULL,
+            artifact_id TEXT NOT NULL,
+            extraction_id TEXT NOT NULL,
+            PRIMARY KEY(document_id, artifact_id, extraction_id),
+            FOREIGN KEY(document_id) REFERENCES corpus_documents(document_id),
+            FOREIGN KEY(artifact_id) REFERENCES corpus_artifacts(artifact_id),
+            FOREIGN KEY(extraction_id, artifact_id)
+                REFERENCES corpus_extractions(extraction_id, artifact_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_corpus_artifacts_workspace ON corpus_artifacts(workspace_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_corpus_artifact_origins_source ON corpus_artifact_origins(source_id, observed_at)",
+        "CREATE INDEX IF NOT EXISTS idx_corpus_extractions_artifact ON corpus_extractions(artifact_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_corpus_document_artifacts_doc ON corpus_document_artifacts(document_id)",
     ),
 }
