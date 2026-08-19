@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from nika_core.packaging.notices import verify_third_party_notices
 from nika_core.packaging.release import build_release_manifest, verify_release_manifest
 from nika_core.packaging.windows import default_windows_plan
 from nika_core.qa.release_gate import ReleaseGateEvidence, evaluate_release_gate
@@ -33,6 +34,16 @@ def test_release_manifest_detects_unexpected_file(tmp_path: Path) -> None:
     assert verify_release_manifest(bundle, manifest) == ("unexpected:unexpected.dll",)
 
 
+def test_third_party_notice_verification_fails_closed(tmp_path: Path) -> None:
+    assert verify_third_party_notices(tmp_path) == ("missing:THIRD_PARTY_NOTICES.txt",)
+
+    notices = tmp_path / "THIRD_PARTY_NOTICES.txt"
+    notices.write_text("Python runtime\n", encoding="utf-8")
+    findings = verify_third_party_notices(tmp_path)
+    assert "notices:pywebview" in findings
+    assert "notices:pythonnet" in findings
+
+
 def test_windows_plan_is_onedir_windowed_and_bundles_web_assets(tmp_path: Path) -> None:
     (tmp_path / "scripts").mkdir()
     (tmp_path / "scripts" / "nika_windows.py").write_text("pass\n", encoding="utf-8")
@@ -54,6 +65,7 @@ def test_release_gate_never_self_claims_human_nvda_verification() -> None:
         windows_package_built=True,
         package_smoke_passed=True,
         manifest_verified=True,
+        third_party_notices_verified=True,
         recovery_drill_passed=True,
         packaged_uia_passed=True,
     )
@@ -62,6 +74,20 @@ def test_release_gate_never_self_claims_human_nvda_verification() -> None:
     assert result.production_release_ready is False
     assert result.stage == "PACKAGED"
     assert "NVDA verification by a human tester is missing" in result.blockers
+
+
+def test_release_gate_requires_third_party_notices() -> None:
+    incomplete = ReleaseGateEvidence(
+        core_ci_green=True,
+        windows_package_built=True,
+        package_smoke_passed=True,
+        manifest_verified=True,
+        recovery_drill_passed=True,
+        packaged_uia_passed=True,
+    )
+    result = evaluate_release_gate(incomplete)
+    assert result.release_candidate_ready is False
+    assert "Third-party release notices/license evidence is missing" in result.blockers
 
 
 def test_release_gate_requires_human_test_before_nvda_verified() -> None:
@@ -77,6 +103,7 @@ def test_release_gate_allows_final_release_only_with_complete_evidence() -> None
         windows_package_built=True,
         package_smoke_passed=True,
         manifest_verified=True,
+        third_party_notices_verified=True,
         recovery_drill_passed=True,
         packaged_uia_passed=True,
         human_tested=True,

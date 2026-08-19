@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from nika_core.packaging.notices import build_third_party_notices, verify_third_party_notices
 from nika_core.packaging.release import (
     build_release_manifest,
     verify_release_manifest,
@@ -16,6 +17,12 @@ def build(project_root: Path, version: str) -> Path:
 
     plan = default_windows_plan(project_root)
     PyInstaller.__main__.run(list(plan.pyinstaller_args()))
+
+    build_third_party_notices(plan.bundle_dir)
+    notice_findings = verify_third_party_notices(plan.bundle_dir)
+    if notice_findings:
+        raise RuntimeError(f"third-party notice verification failed: {notice_findings}")
+
     manifest = build_release_manifest(plan.bundle_dir, product="NikaCore", version=version)
     write_release_manifest(plan.bundle_dir, manifest)
     findings = verify_release_manifest(plan.bundle_dir, manifest)
