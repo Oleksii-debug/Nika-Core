@@ -1,0 +1,182 @@
+from __future__ import annotations
+
+import importlib
+import importlib.metadata
+import time
+import wave
+from pathlib import Path
+
+from nika_core.media.contracts import EngineDescriptor, ModelDescriptor, Segment
+from nika_core.media.errors import MediaError, MediaErrorCode
+from nika_core.media.transcription import TranscriptionRequest, TranscriptionResult
+
+
+class FasterWhisperTranscriber:
+    """Optional local-only faster-whisper adapter. Model acquisition is deliberately external."""
+
+    def __init__(
+        self,
+        *,
+        model_path: Path,
+        model: ModelDescriptor,
+        device: str = "cpu",
+        compute_type: str = "int8",
+    ) -> None:
+        resolved = model_path.resolve(strict=True)
+        if not resolved.is_dir():
+            raise ValueError("faster-whisper model_path must be a local directory")
+        self._model_path = resolved
+        self._model_descriptor = model
+        self._device = device
+        self._compute_type = compute_type
+        try:
+            version = importlib.metadata.version("faster-whisper")
+        except importlib.metadata.PackageNotFoundError as exc:
+            raise MediaError(
+                MediaErrorCode.COMPONENT_MISSING,
+                "faster-whisper is not installed; install/approve the optional component explicitly",
+            ) from exc
+        self._engine = EngineDescriptor(
+            engine_id="faster-whisper",
+            name="faster-whisper",
+            version=version,
+            license_id="MIT",
+            source_reference="https://github.com/SYSTRAN/faster-whisper",
+        )
+        if model.engine_id != self._engine.engine_id:
+            raise ValueError("model descriptor must belong to faster-whisper")
+        module = importlib.import_module("faster_whisper")
+        self._runtime = module.WhisperModel(
+            str(self._model_path),
+            device=self._device,
+            compute_type=self._compute_type,
+            local_files_only=True,
+        )
+
+    @property
+    def engine(self) -> EngineDescriptor:
+        return self._engine
+
+    @property
+    def model(self) -> ModelDescriptor:
+        return self._model_descriptor
+
+    def transcribe(self, request: TranscriptionRequest) -> TranscriptionResult:
+        audio = request.audio_path.resolve(strict=True)
+        started = time.monotonic()
+        raw_segments, info = self._runtime.transcribe(
+            str(audio),
+            language=request.language,
+            task="transcribe",
+            condition_on_previous_text=False,
+            vad_filter=False,
+            word_timestamps=False,
+        )
+        segments = tuple(
+            Segment(
+                segment_id=f"{request.chunk_id}:{index:06d}",
+                start_ms=max(0, round(float(item.start) * 1000)),
+                end_ms=max(0, round(float(item.end) * 1000)),
+                text=str(item.text).strip(),
+            )
+            for index, item in enumerate(raw_segments)
+            if str(item.text).strip()
+        )
+        language = request.language or getattr(info, "language", None)
+        return TranscriptionResult(
+            chunk_id=request.chunk_id,
+            language=language,
+            segments=segments,
+            engine=self.engine,
+            model=self.model,
+            elapsed_seconds=time.monotonic() - started,
+        )
+
+
+class SherpaOnnxWhisperTranscriber:
+    """Optional local sherpa-onnx Whisper adapter with explicit model-file descriptors."""
+
+    def __init__(
+        self,
+        *,
+        encoder: Path,
+        decoder: Path,
+        tokens: Path,
+        model: ModelDescriptor,
+        language: str = "auto",
+        num_threads: int = 2,
+    ) -> None:
+        self._encoder = encoder.resolve(strict=True)
+        self._decoder = decoder.resolve(strict=True)
+        self._tokens = tokens.resolve(strict=True)
+        if not all(path.is_file() for path in (self._encoder, self._decoder, self._tokens)):
+            raise ValueError("sherpa-onnx model files must exist locally")
+        try:
+            version = importlib.metadata.version("sherpa-onnx")
+        except importlib.metadata.PackageNotFoundError as exc:
+            raise MediaError(
+                MediaErrorCode.COMPONENT_MISSING,
+                "sherpa-onnx is not installed; install/approve the optional component explicitly",
+            ) from exc
+        self._engine = EngineDescriptor(
+            engine_id="sherpa-onnx",
+            name="sherpa-onnx",
+            version=version,
+            license_id="Apache-2.0",
+            source_reference="https://github.com/k2-fsa/sherpa-onnx",
+        )
+        if model.engine_id != self._engine.engine_id:
+            raise ValueError("model descriptor must belong to sherpa-onnx")
+        self._model_descriptor = model
+        module = importlib.import_module("sherpa_onnx")
+        self._recognizer = module.OfflineRecognizer.from_whisper(
+            encoder=str(self._encoder),
+            decoder=str(self._decoder),
+            tokens=str(self._tokens),
+            language=language,
+            task="transcribe",
+            num_threads=num_threads,
+        )
+
+    @property
+    def engine(self) -> EngineDescriptor:
+        return self._engine
+
+    @property
+    def model(self) -> ModelDescriptor:
+        return self._model_descriptor
+
+    def transcribe(self, request: TranscriptionRequest) -> TranscriptionResult:
+        try:
+            import numpy as np
+        except ImportError as exc:
+            raise MediaError(MediaErrorCode.COMPONENT_MISSING, "numpy is required by sherpa-onnx adapter") from exc
+        audio = request.audio_path.resolve(strict=True)
+        started = time.monotonic()
+        with wave.open(str(audio), "rb") as handle:
+            if handle.getnchannels() != 1 or handle.getsampwidth() != 2:
+                raise ValueError("sherpa-onnx adapter requires normalized mono PCM16 WAV")
+            sample_rate = handle.getframerate()
+            samples = np.frombuffer(handle.readframes(handle.getnframes()), dtype=np.int16).astype(np.float32) / 32768.0
+        stream = self._recognizer.create_stream()
+        stream.accept_waveform(sample_rate, samples)
+        self._recognizer.decode_stream(stream)
+        result = stream.result
+        text = str(getattr(result, "text", "")).strip()
+        duration_ms = round(len(samples) / sample_rate * 1000) if sample_rate else 0
+        segments = (
+            Segment(
+                segment_id=f"{request.chunk_id}:000000",
+                start_ms=0,
+                end_ms=duration_ms,
+                text=text,
+            ),
+        ) if text else ()
+        return TranscriptionResult(
+            chunk_id=request.chunk_id,
+            language=request.language,
+            segments=segments,
+            engine=self.engine,
+            model=self.model,
+            elapsed_seconds=time.monotonic() - started,
+        )
