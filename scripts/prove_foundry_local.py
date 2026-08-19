@@ -10,7 +10,12 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from nika_core.model_gateway.contracts import ModelMessage, ModelRequest, PrivacyClass
+from nika_core.model_gateway.contracts import (
+    ModelDownloadAuthorization,
+    ModelMessage,
+    ModelRequest,
+    PrivacyClass,
+)
 from nika_core.model_gateway.foundry_local import FoundryLocalProvider
 
 
@@ -48,14 +53,11 @@ def _tree_sha256(root: Path) -> dict[str, object]:
 
 
 async def _run(args: argparse.Namespace) -> dict[str, object]:
-    provider = FoundryLocalProvider(
-        default_model=args.model,
-        allow_download=args.allow_download,
-    )
+    provider = FoundryLocalProvider(default_model=args.model)
     package_name, package_version = _installed_foundry_package()
     before = provider.inspect_model()
     evidence: dict[str, object] = {
-        "schema": "nika-foundry-local-physical-proof-v1",
+        "schema": "nika-foundry-local-physical-proof-v2",
         "platform": {
             "system": platform.system(),
             "release": platform.release(),
@@ -67,10 +69,21 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         "sdk": {"package": package_name, "version": package_version},
         "model_license_review": args.model_license,
         "model_before": asdict(before),
-        "download_was_explicitly_allowed": bool(args.allow_download),
+        "explicit_model_download_action_executed": False,
         "physical_inference_executed": False,
     }
     try:
+        if args.allow_download and not before.cached:
+            download_evidence = await provider.download_model(
+                ModelDownloadAuthorization(
+                    provider_id="foundry-local",
+                    model=args.model,
+                    license_reference=args.model_license,
+                )
+            )
+            evidence["explicit_model_download_action_executed"] = True
+            evidence["model_after_download"] = asdict(download_evidence)
+
         response = await provider.complete(
             ModelRequest(
                 request_id="foundry-physical-proof",
@@ -105,7 +118,8 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Run a real Foundry Local inference and emit machine-readable physical-Windows "
-            "evidence. The script never downloads a model unless --allow-download is supplied."
+            "evidence. Inference never downloads a model. --allow-download executes a separate "
+            "explicit model-management action bound to --model and --model-license first."
         )
     )
     parser.add_argument("--model", required=True, help="Exact Foundry Local model alias")
@@ -123,7 +137,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--allow-download",
         action="store_true",
-        help="Explicitly permit the SDK to download the selected model if it is not cached",
+        help=(
+            "Run the separate explicit model download action for this exact model/license if it "
+            "is not already cached"
+        ),
     )
     parser.add_argument(
         "--hash-model-cache",

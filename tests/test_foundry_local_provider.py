@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from nika_core.model_gateway.contracts import (
+    ModelDownloadAuthorization,
     ModelErrorCode,
     ModelGatewayError,
     ModelMessage,
@@ -37,6 +38,7 @@ class FakeFoundryModel:
         self.capabilities = "chat,completion"
         self.supports_tool_calling = False
         self.downloaded = False
+        self.download_cancel_event: threading.Event | None = None
         self.unloaded = False
         self.last_messages: list[dict[str, str]] = []
         self.settings = SimpleNamespace(temperature=None)
@@ -46,7 +48,8 @@ class FakeFoundryModel:
         self.max_active_completions = 0
         self.completion_count = 0
 
-    def download(self) -> None:
+    def download(self, *, cancel_event: threading.Event | None = None) -> None:
+        self.download_cancel_event = cancel_event
         self.downloaded = True
         self.is_cached = True
 
@@ -129,6 +132,16 @@ def request(**overrides: object) -> ModelRequest:
     return ModelRequest(**values)  # type: ignore[arg-type]
 
 
+def authorization(**overrides: object) -> ModelDownloadAuthorization:
+    values: dict[str, object] = {
+        "provider_id": "foundry-local",
+        "model": "test-model",
+        "license_reference": "MODEL-LICENSE-REVIEW-123",
+    }
+    values.update(overrides)
+    return ModelDownloadAuthorization(**values)  # type: ignore[arg-type]
+
+
 def test_foundry_local_runs_through_existing_gateway_without_cloud() -> None:
     model = FakeFoundryModel()
     manager = FakeManager(model)
@@ -151,7 +164,7 @@ def test_foundry_local_runs_through_existing_gateway_without_cloud() -> None:
     assert provider.capabilities.supports_hard_cancellation is False
 
 
-def test_foundry_local_does_not_download_model_without_explicit_permission() -> None:
+def test_foundry_local_inference_never_downloads_uncached_model() -> None:
     model = FakeFoundryModel(cached=False)
     provider = FoundryLocalProvider(
         default_model="test-model",
@@ -164,22 +177,53 @@ def test_foundry_local_does_not_download_model_without_explicit_permission() -> 
         asyncio.run(gateway.complete(request()))
 
     assert exc_info.value.code is ModelErrorCode.UNAVAILABLE
+    assert "explicit model download action" in str(exc_info.value)
     assert model.downloaded is False
+    assert model.is_loaded is False
 
 
-def test_foundry_local_can_download_when_explicitly_enabled() -> None:
+def test_legacy_provider_download_flag_is_rejected_fail_closed() -> None:
+    with pytest.raises(ValueError, match="download_model"):
+        FoundryLocalProvider(default_model="test-model", allow_download=True)
+
+
+def test_explicit_download_action_requires_exact_authorization_then_allows_inference() -> None:
     model = FakeFoundryModel(cached=False)
     provider = FoundryLocalProvider(
         default_model="test-model",
-        allow_download=True,
+        manager_factory=lambda: FakeManager(model),
+    )
+    cancel_event = threading.Event()
+
+    evidence = asyncio.run(
+        provider.download_model(authorization(), cancel_event=cancel_event)
+    )
+    response = asyncio.run(provider.complete(request()))
+
+    assert evidence.alias == "test-model"
+    assert evidence.cached is True
+    assert model.downloaded is True
+    assert model.download_cancel_event is cancel_event
+    assert response.text == "embedded: hello"
+    assert model.is_loaded is True
+
+
+def test_download_authorization_rejects_missing_license_reference() -> None:
+    with pytest.raises(ValueError, match="license_reference"):
+        authorization(license_reference=" ")
+
+
+def test_foundry_download_rejects_authorization_for_other_provider() -> None:
+    model = FakeFoundryModel(cached=False)
+    provider = FoundryLocalProvider(
+        default_model="test-model",
         manager_factory=lambda: FakeManager(model),
     )
 
-    response = asyncio.run(provider.complete(request()))
+    with pytest.raises(ValueError, match="provider"):
+        asyncio.run(provider.download_model(authorization(provider_id="other-local")))
 
-    assert response.text == "embedded: hello"
-    assert model.downloaded is True
-    assert model.is_loaded is True
+    assert model.downloaded is False
 
 
 def test_foundry_local_honors_request_model_override_and_unloads() -> None:
@@ -196,6 +240,20 @@ def test_foundry_local_honors_request_model_override_and_unloads() -> None:
     assert manager.catalog.requested_aliases == ["larger-model"]
     assert response.model == "larger-model"
     assert model.unloaded is True
+
+
+def test_request_model_override_cannot_grant_download_permission() -> None:
+    model = FakeFoundryModel(cached=False)
+    provider = FoundryLocalProvider(
+        default_model="small-model",
+        manager_factory=lambda: FakeManager(model),
+    )
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        asyncio.run(provider.complete(request(model="large-network-model")))
+
+    assert exc_info.value.code is ModelErrorCode.UNAVAILABLE
+    assert model.downloaded is False
 
 
 def test_foundry_local_maps_request_timeout_to_nonretryable_gateway_error() -> None:
@@ -296,3 +354,7 @@ def test_foundry_local_missing_catalog_model_is_typed_unavailable() -> None:
     with pytest.raises(ModelGatewayError) as completion_error:
         asyncio.run(provider.complete(request(model="missing-model")))
     assert completion_error.value.code is ModelErrorCode.UNAVAILABLE
+
+    with pytest.raises(ModelGatewayError) as download_error:
+        asyncio.run(provider.download_model(authorization(model="missing-model")))
+    assert download_error.value.code is ModelErrorCode.UNAVAILABLE
