@@ -44,6 +44,7 @@ class FakeFoundryModel:
         self._counter_lock = threading.Lock()
         self.active_completions = 0
         self.max_active_completions = 0
+        self.completion_count = 0
 
     def download(self) -> None:
         self.downloaded = True
@@ -68,6 +69,7 @@ class FakeFoundryModel:
             def complete_chat(self, messages: list[dict[str, str]]) -> object:
                 with model._counter_lock:
                     model.active_completions += 1
+                    model.completion_count += 1
                     model.max_active_completions = max(
                         model.max_active_completions, model.active_completions
                     )
@@ -146,6 +148,7 @@ def test_foundry_local_runs_through_existing_gateway_without_cloud() -> None:
     assert response.usage.total_tokens == 5
     assert model.settings.temperature == 0.25
     assert model.last_messages == [{"role": "user", "content": "hello"}]
+    assert provider.capabilities.supports_hard_cancellation is False
 
 
 def test_foundry_local_does_not_download_model_without_explicit_permission() -> None:
@@ -195,7 +198,7 @@ def test_foundry_local_honors_request_model_override_and_unloads() -> None:
     assert model.unloaded is True
 
 
-def test_foundry_local_maps_request_timeout_to_typed_gateway_error() -> None:
+def test_foundry_local_maps_request_timeout_to_nonretryable_gateway_error() -> None:
     model = FakeFoundryModel(completion_delay=0.05)
     provider = FoundryLocalProvider(
         default_model="test-model",
@@ -207,7 +210,7 @@ def test_foundry_local_maps_request_timeout_to_typed_gateway_error() -> None:
 
     assert exc_info.value.code is ModelErrorCode.TIMEOUT
     assert exc_info.value.provider_id == "foundry-local"
-    assert exc_info.value.retryable is True
+    assert exc_info.value.retryable is False
 
 
 def test_foundry_local_serializes_in_process_inference() -> None:
@@ -225,6 +228,35 @@ def test_foundry_local_serializes_in_process_inference() -> None:
 
     asyncio.run(run_parallel())
 
+    assert model.max_active_completions == 1
+
+
+def test_timed_out_native_inference_keeps_slot_until_worker_finishes() -> None:
+    model = FakeFoundryModel(completion_delay=0.05)
+    provider = FoundryLocalProvider(
+        default_model="test-model",
+        manager_factory=lambda: FakeManager(model),
+    )
+
+    async def scenario() -> None:
+        with pytest.raises(ModelGatewayError) as first_error:
+            await provider.complete(request(request_id="first", timeout_seconds=0.01))
+        assert first_error.value.code is ModelErrorCode.TIMEOUT
+        assert model.active_completions == 1
+
+        with pytest.raises(ModelGatewayError) as second_error:
+            await provider.complete(request(request_id="second", timeout_seconds=0.01))
+        assert second_error.value.code is ModelErrorCode.TIMEOUT
+        assert model.completion_count == 1
+        assert model.max_active_completions == 1
+
+        await asyncio.sleep(0.06)
+        response = await provider.complete(request(request_id="third", timeout_seconds=1.0))
+        assert response.request_id == "third"
+
+    asyncio.run(scenario())
+
+    assert model.completion_count == 2
     assert model.max_active_completions == 1
 
 
