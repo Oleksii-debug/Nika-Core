@@ -817,7 +817,8 @@ class SQLiteRecoveryManager:
 
     @staticmethod
     def _fsync_file(path: Path) -> None:
-        with path.open("rb") as handle:
+        with path.open("r+b") as handle:
+            handle.flush()
             os.fsync(handle.fileno())
 
     @staticmethod
