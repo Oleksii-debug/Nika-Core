@@ -46,6 +46,7 @@ class ModelRequest:
     model: str | None = None
     provider_id: str | None = None
     provider_kind: ProviderKind | None = None
+    fallback_provider_ids: tuple[str, ...] = ()
     privacy: PrivacyClass = PrivacyClass.PRIVATE
     timeout_seconds: float = 60.0
     temperature: float | None = None
@@ -56,6 +57,12 @@ class ModelRequest:
             raise ValueError("request_id must not be empty")
         if not self.messages:
             raise ValueError("at least one message is required")
+        if any(not provider_id.strip() for provider_id in self.fallback_provider_ids):
+            raise ValueError("fallback provider IDs must not be empty")
+        if len(set(self.fallback_provider_ids)) != len(self.fallback_provider_ids):
+            raise ValueError("fallback provider IDs must be unique")
+        if self.provider_id is not None and self.provider_id in self.fallback_provider_ids:
+            raise ValueError("primary provider cannot also be a fallback provider")
         if self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be greater than zero")
         if self.temperature is not None and not 0 <= self.temperature <= 2:
@@ -87,6 +94,7 @@ class ProviderCapabilities:
     supports_private_data: bool
     supports_tools: bool = False
     supports_streaming: bool = False
+    supports_hard_cancellation: bool = True
 
 
 class ModelGatewayError(RuntimeError):

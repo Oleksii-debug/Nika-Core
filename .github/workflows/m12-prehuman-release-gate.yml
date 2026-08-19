@@ -29,8 +29,8 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install core, runtime and browser proof dependencies
-        run: python -m pip install -e ".[dev,agent,browser]"
+      - name: Install core, runtime, planning and browser proof dependencies
+        run: python -m pip install -e ".[dev,agent,planning,browser]"
       - name: Run complete source, dependency and test verification
         run: python scripts/verify.py
       - name: Re-run focused cross-subsystem recovery and safety matrix
@@ -40,6 +40,8 @@ jobs:
           tests/test_runtime_startup_recovery.py
           tests/test_m3_memory_scheduler_resources.py
           tests/test_m4_model_tools.py
+          tests/test_deterministic_brain.py
+          tests/test_foundry_local_provider.py
           tests/test_plugin_workspace_sdk.py
           tests/test_security_policy.py
           tests/test_m11_m12_release.py
@@ -58,8 +60,8 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install core, runtime and Windows interaction proof dependencies
-        run: python -m pip install -e ".[dev,agent,windows-interaction]"
+      - name: Install core, runtime, planning and Windows interaction proof dependencies
+        run: python -m pip install -e ".[dev,agent,planning,windows-interaction]"
       - name: Run complete source, dependency and test verification
         run: python scripts/verify.py
       - name: Re-run focused cross-subsystem recovery and safety matrix
@@ -69,6 +71,8 @@ jobs:
           tests/test_runtime_startup_recovery.py
           tests/test_m3_memory_scheduler_resources.py
           tests/test_m4_model_tools.py
+          tests/test_deterministic_brain.py
+          tests/test_foundry_local_provider.py
           tests/test_plugin_workspace_sdk.py
           tests/test_security_policy.py
           tests/test_m11_m12_release.py
@@ -109,6 +113,8 @@ jobs:
             runtime_restart_recovery = $true
             memory_scheduler_resource_regressions = $true
             model_mock_nollm_regressions = $true
+            deterministic_brain_regressions = $true
+            foundry_local_adapter_regressions = $true
             plugin_workspace_regressions = $true
             security_sandbox_regressions = $true
             integrated_ubuntu = $true
@@ -119,6 +125,7 @@ jobs:
             manifest_verified = $true
             third_party_notices_verified = $true
             packaged_uia_keyboard_focus = $true
+            physical_windows_foundry_inference_proven = $false
             human_tested = $false
             nvda_verified = $false
             production_release_ready = $false

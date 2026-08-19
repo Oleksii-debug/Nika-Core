@@ -197,6 +197,174 @@ def test_sensitive_data_fails_closed_for_untrusted_provider() -> None:
     assert exc_info.value.code is ModelErrorCode.INVALID_REQUEST
 
 
+def test_gateway_uses_explicit_fallback_after_retryable_failure() -> None:
+    calls: list[str] = []
+
+    class BusyProvider(DeterministicMockProvider):
+        async def complete(self, model_request: ModelRequest) -> ModelResponse:
+            calls.append("primary")
+            raise ModelGatewayError(
+                ModelErrorCode.UNAVAILABLE,
+                "temporarily unavailable",
+                provider_id=self.capabilities.provider_id,
+                retryable=True,
+            )
+
+    class FallbackProvider(DeterministicMockProvider):
+        async def complete(self, model_request: ModelRequest) -> ModelResponse:
+            calls.append("fallback")
+            return await super().complete(model_request)
+
+    gateway = ModelGateway()
+    gateway.register(BusyProvider(provider_id="primary"))
+    gateway.register(FallbackProvider(provider_id="fallback"))
+
+    response = asyncio.run(
+        gateway.complete(
+            request(
+                provider_kind=None,
+                provider_id="primary",
+                fallback_provider_ids=("fallback",),
+            )
+        )
+    )
+
+    assert response.provider_id == "fallback"
+    assert calls == ["primary", "fallback"]
+
+
+def test_gateway_does_not_fallback_after_non_retryable_failure() -> None:
+    fallback_called = False
+
+    class RejectedProvider(DeterministicMockProvider):
+        async def complete(self, model_request: ModelRequest) -> ModelResponse:
+            raise ModelGatewayError(
+                ModelErrorCode.AUTHENTICATION,
+                "credentials rejected",
+                provider_id=self.capabilities.provider_id,
+                retryable=False,
+            )
+
+    class FallbackProvider(DeterministicMockProvider):
+        async def complete(self, model_request: ModelRequest) -> ModelResponse:
+            nonlocal fallback_called
+            fallback_called = True
+            return await super().complete(model_request)
+
+    gateway = ModelGateway()
+    gateway.register(RejectedProvider(provider_id="primary"))
+    gateway.register(FallbackProvider(provider_id="fallback"))
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        asyncio.run(
+            gateway.complete(
+                request(
+                    provider_kind=None,
+                    provider_id="primary",
+                    fallback_provider_ids=("fallback",),
+                )
+            )
+        )
+
+    assert exc_info.value.code is ModelErrorCode.AUTHENTICATION
+    assert fallback_called is False
+
+
+def test_gateway_does_not_fallback_after_timeout_without_hard_cancellation() -> None:
+    fallback_called = False
+
+    class NonCancellableProvider(DeterministicMockProvider):
+        @property
+        def capabilities(self) -> ProviderCapabilities:
+            return ProviderCapabilities(
+                provider_id="non-cancellable",
+                kind=ProviderKind.LOCAL,
+                supports_private_data=True,
+                supports_hard_cancellation=False,
+            )
+
+        async def complete(self, model_request: ModelRequest) -> ModelResponse:
+            await asyncio.sleep(0.05)
+            return await super().complete(model_request)
+
+    class FallbackProvider(DeterministicMockProvider):
+        async def complete(self, model_request: ModelRequest) -> ModelResponse:
+            nonlocal fallback_called
+            fallback_called = True
+            return await super().complete(model_request)
+
+    gateway = ModelGateway()
+    gateway.register(NonCancellableProvider(provider_id="non-cancellable"))
+    gateway.register(FallbackProvider(provider_id="fallback"))
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        asyncio.run(
+            gateway.complete(
+                request(
+                    provider_kind=None,
+                    provider_id="non-cancellable",
+                    fallback_provider_ids=("fallback",),
+                    timeout_seconds=0.001,
+                )
+            )
+        )
+
+    assert exc_info.value.code is ModelErrorCode.TIMEOUT
+    assert exc_info.value.retryable is False
+    assert fallback_called is False
+
+
+def test_sensitive_fallback_route_is_rejected_before_primary_execution() -> None:
+    primary_called = False
+
+    class PrimaryProvider(DeterministicMockProvider):
+        async def complete(self, model_request: ModelRequest) -> ModelResponse:
+            nonlocal primary_called
+            primary_called = True
+            return await super().complete(model_request)
+
+    class UnsafeCloudProvider(DeterministicMockProvider):
+        @property
+        def capabilities(self) -> ProviderCapabilities:
+            return ProviderCapabilities(
+                provider_id="unsafe-cloud",
+                kind=ProviderKind.CLOUD,
+                supports_private_data=False,
+            )
+
+    gateway = ModelGateway()
+    gateway.register(PrimaryProvider(provider_id="primary"))
+    gateway.register(UnsafeCloudProvider(provider_id="unsafe-cloud"))
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        asyncio.run(
+            gateway.complete(
+                request(
+                    provider_kind=None,
+                    provider_id="primary",
+                    fallback_provider_ids=("unsafe-cloud",),
+                    privacy=PrivacyClass.SENSITIVE,
+                )
+            )
+        )
+
+    assert exc_info.value.code is ModelErrorCode.INVALID_REQUEST
+    assert exc_info.value.provider_id == "unsafe-cloud"
+    assert primary_called is False
+
+
+def test_model_request_rejects_invalid_fallback_routes() -> None:
+    with pytest.raises(ValueError, match="unique"):
+        request(fallback_provider_ids=("same", "same"))
+
+    with pytest.raises(ValueError, match="primary provider"):
+        request(
+            provider_kind=None,
+            provider_id="same",
+            fallback_provider_ids=("same",),
+        )
+
+
 def test_dangerous_tool_requires_approval() -> None:
     called = False
 

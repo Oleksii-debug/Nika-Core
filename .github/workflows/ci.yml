@@ -28,10 +28,29 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install core and agent test dependencies
-        run: python -m pip install -e ".[dev,agent]"
+      - name: Install core, agent and deterministic planning test dependencies
+        run: python -m pip install -e ".[dev,agent,planning]"
       - name: Verify source, dependencies and tests
         run: python scripts/verify.py
+
+  embedded-foundry-sdk-proof:
+    name: Embedded Foundry Local SDK dependency proof
+    if: github.event_name == 'pull_request' && github.head_ref == 'feat/embedded-intelligence-foundry-local'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install Windows embedded intelligence component
+        run: python -m pip install -e ".[embedded-ai]"
+      - name: Verify Microsoft Foundry Local Python SDK surface is importable
+        run: >-
+          python -c "from foundry_local_sdk import Configuration, FoundryLocalManager;
+          c=Configuration(app_name='NikaCoreCI');
+          print(type(c).__name__, FoundryLocalManager.__name__)"
 
   m4-live-ollama-proof:
     name: M4 live Ollama provider proof

@@ -1,28 +1,21 @@
-# Software Factory and offline intelligence reuse audit
+# Software Factory and local intelligence reuse audit
 
-Updated: 2026-08-18.
-Status: architecture/reuse decision only. No integration or milestone credit is claimed while M1/M2 executable CI is blocked.
+Updated: 2026-08-19.
+Status: binding reuse/adoption direction. Implementation credit still requires exact executable gates.
 
 ## Software Factory objective
-The user should be able to state an end product such as “build an accessible chess application” and let Nika coordinate planning, reuse research, implementation, testing, accessibility review and release work. Nika should not spend months recreating a coding-agent runtime that already exists.
+The user should be able to state an end product such as “build an accessible chess application” and let Nika coordinate planning, reuse research, implementation, testing, accessibility review and release work. Nika should not recreate a complete coding-agent runtime that already exists.
 
 ## OpenHands — ADAPT as the first Software Factory coding-worker candidate
 Official SDK: https://docs.openhands.dev/sdk
 Official repository/license: https://github.com/OpenHands/OpenHands
 
-Fresh upstream facts checked on 2026-08-18:
-- OpenHands exposes a Python/REST Software Agent SDK rather than only a hosted chat UI;
-- its SDK is intended for one-off coding tasks, maintenance and large multi-agent refactors/rewrites;
-- ready-made tools include shell execution, file editing, browsing and MCP integration;
-- an Agent Server can run agents behind a REST interface;
-- core OpenHands and agent-server are MIT-licensed, while the `enterprise/` directory has separate licensing.
-
 Nika decision:
 - do not build a complete coding-agent shell/editor/tool runtime from scratch before a practical OpenHands proof;
-- integrate only the MIT-licensed core/SDK/agent-server surface unless a separate licensed enterprise decision is made;
+- integrate only compatible permissively licensed surfaces unless a separate licensing decision is made;
 - Nika owns project state, roles, safety, branch policy, approval, acceptance gates and release truth;
-- OpenHands is a replaceable implementation of a future `CodingWorkerPort`, not the owner of Nika projects;
-- production modifications must happen in an isolated workspace/worktree/branch and return a patch/commit/evidence for review;
+- OpenHands is a replaceable implementation of `CodingWorkerPort`, not the owner of Nika projects;
+- production modifications happen in an isolated workspace/worktree/branch and return patch/commit/test evidence;
 - prefer official SDK/API/server integration; never automate the OpenHands web UI as a hidden workaround.
 
 Required proof before adoption:
@@ -38,18 +31,21 @@ Required proof before adoption:
 
 ## Software Factory role model
 Nika coordinates roles, not necessarily separate heavyweight agents for every task:
-- product planner: final goal -> acceptance criteria and staged plan;
-- reuse researcher: maintained libraries, licenses, current APIs and risks;
-- architect: boundaries and migration/extension strategy;
-- coding worker: OpenHands candidate or another provider behind `CodingWorkerPort`;
-- test/reviewer: independent tests, regression and security review;
-- accessibility reviewer: keyboard/NVDA/semantic requirements;
-- release worker: package only tested exact SHA.
+- product planner;
+- reuse researcher;
+- architect;
+- coding worker;
+- independent test/reviewer;
+- accessibility reviewer;
+- release worker.
 
-A single capable worker may perform several roles when that is more efficient. Multi-agent fan-out must be justified by measured benefit.
+A single capable worker may perform several roles when that is more efficient. Multi-agent fan-out must be justified by useful independence rather than agent count.
+
+## Capability Escalation / Toolsmith
+Software Factory is also the implementation arm of Nika's Toolsmith loop. A running agent that proves it lacks a capability may request a bounded capability addition. Nika first searches its existing Tool Registry/plugins and maintained upstream solutions; only then may a CodingWorker adapt/create the missing capability in isolation. The candidate must pass tests/security/compatibility gates, be registered/versioned normally, and allow the original task to resume from checkpoint. No direct production-main rewrite and no self-granted permission expansion are allowed.
 
 ## Nika-owned Software Factory contracts
-Do not leak OpenHands-specific objects into the domain. Future stable contracts should describe:
+Do not leak OpenHands-specific objects into the domain. Stable contracts describe:
 - repository/workspace identity and allowed paths;
 - requested goal and acceptance criteria;
 - branch/worktree isolation policy;
@@ -60,10 +56,23 @@ Do not leak OpenHands-specific objects into the domain. Future stable contracts 
 - risk classification and approval requirements;
 - provenance: worker implementation, model/provider, versions and source baseline.
 
-## Offline/minimal intelligence objective
-Nika must remain useful when no cloud API and no large local language model are available. This mode is explicitly **not** general conversational intelligence. It is deterministic/specialized autonomy for known tasks.
+# Deterministic Brain — no LLM/model required
 
-### Unified Planning — ADAPT as a formal planner candidate
+Nika must remain substantially useful when **no cloud API, no Ollama and no embedded language model exist**. This is not a mock chat provider. It is a first-class model-free agent capability for explicit/structured domains.
+
+The stack combines:
+1. deterministic state machines and workflow templates;
+2. explicit facts/goals/actions/preconditions/effects;
+3. formal automated planning;
+4. the existing Nika Tool Registry/ToolExecutor;
+5. full-text/search/ranking/dedup/provenance over approved knowledge;
+6. classical statistics/ML for measured tasks;
+7. durable memory/checkpoint/recovery;
+8. experiment metrics and bounded strategy selection.
+
+This can autonomously run many known procedures, search/filter/deduplicate, plan tool sequences, execute file/API workflows, produce reports, recover after interruption, operate replay/backtest loops and select measured strategies without a language model. It is not represented as open-ended GPT-level semantic reasoning.
+
+## Unified Planning — ADAPT / IMPLEMENTATION CANDIDATE
 Official docs: https://unified-planning.readthedocs.io/en/stable/
 Official project: https://github.com/aiplan4eu/unified-planning
 License: Apache-2.0.
@@ -72,55 +81,65 @@ Why useful:
 - planner-independent problem modeling;
 - automatic selection/invocation of compatible planning engines;
 - plan generation and validation;
-- classical/numeric/temporal planning support through available engines.
+- classical/numeric/temporal planning support.
 
 Nika decision:
-- evaluate behind a future `DeterministicPlannerPort` for domains where actions, preconditions, effects and goals can be modeled explicitly;
-- do not force natural-language tasks into formal planning when the domain model is unknown;
-- plans remain subject to Nika permission and action validation.
+- keep Nika-owned `WorldState`, goal, action and planner contracts;
+- adapt Unified Planning behind those contracts;
+- use a small compatible engine such as Pyperplan for the first Boolean-fact proof;
+- do not force unknown open-ended natural-language tasks into formal planning;
+- every planned external action still passes Nika ToolExecutor permissions/approval.
 
-Candidate proof:
-- model a small deterministic workflow with explicit preconditions/effects;
-- solve and validate a plan without an LLM;
+Required proof:
+- plan and execute a useful multi-step tool workflow without ModelGateway;
 - reject an impossible goal cleanly;
-- re-plan after a simulated action failure/state change;
-- prove the same Nika task contract can choose deterministic planner or LLM planner without changing task persistence.
+- re-plan after state change without repeating completed work;
+- prove a high-impact planned tool remains blocked without normal approval.
 
-### ONNX Runtime — REUSE for compact specialist neural models
-Official Python API: https://onnxruntime.ai/docs/api/python/api_summary.html
+# Embedded Brain — real local generative model without Ollama/API
 
-Role:
-- run local ONNX/ORT inference models behind specialist ports;
-- suitable for classification, ranking, compact vision/audio or other task-specific inference where a trained model exists;
-- keeps model execution separate from Nika orchestration.
+## Microsoft Foundry Local — ADAPT as primary Windows embedded provider
+Official repository: https://github.com/microsoft/Foundry-Local
+Official Windows guidance: https://learn.microsoft.com/en-us/windows/ai/foundry-local/get-started
 
-Non-goal:
-ONNX Runtime is an inference engine, not a reasoning agent. Installing it does not create a general “brain”. Every model must have a declared task, provenance, input/output contract, resource budget and evaluation evidence.
+Fresh upstream decision, 2026-08-19:
+- Microsoft provides an official Python SDK that can discover/download/cache/load/unload models and run chat inference through the local native core;
+- embedded application scenarios can use the SDK directly in-process; a separate local web server is optional, not required;
+- `foundry-local-sdk-winml` is the preferred Windows package and adds Windows ML hardware acceleration; do not install it alongside the mutually exclusive standard SDK in the same environment;
+- model files and their licenses are separate from the SDK and must be audited per adopted model.
 
-### Classical machine learning — REUSE only per measured task
-Use maintained libraries such as scikit-learn for classification, clustering, ranking/regression or anomaly detection when a dataset and metric justify them. Do not add a large generic ML dependency to core merely to claim that Nika contains AI.
+Nika integration rules:
+- `FoundryLocalProvider` sits behind the existing ModelGateway `ModelProvider` contract;
+- provider kind is LOCAL and sensitive/private requests may remain local;
+- model download is disabled by default and requires explicit product permission so an agent cannot silently fetch gigabytes;
+- installed models are optional components outside the base Windows package;
+- Foundry SDK objects do not leak into Nika domain contracts;
+- fake-SDK contract tests are not enough for final acceptance: a physical Windows hardware inference proof is required before production credit;
+- the current official Python docs explicitly document cancellation for model/EP downloads, but not hard cancellation of an active inference call; Nika must record this limitation and must not claim a cancellation guarantee that upstream does not provide. Process isolation or another measured hard-cancel strategy may be added if the product gate requires it.
 
-## Minimal intelligence stack
-When no LLM is configured, Nika may combine:
-1. deterministic state machines and workflow templates;
-2. rules and validated action schemas;
-3. full-text/search/ranking over approved local knowledge;
-4. formal planning for domains with explicit state/action models;
-5. specialist classifiers/regressors/ONNX models;
-6. experiment metrics and bounded strategy selection.
+## llama.cpp — KEEP AS EMBEDDED FALLBACK CANDIDATE
+Use when GGUF portability, CPU/Vulkan/other Windows execution paths, model availability or packaging benchmarks beat Foundry Local for a concrete Nika use case. Prefer a maintained binding/native adapter behind ModelGateway; do not vendor the entire project into Nika.
 
-This mode can route tasks, execute known procedures, classify information, compare candidates, plan in modeled domains and learn measured preferences. It must clearly refuse or escalate open-ended semantic reasoning beyond its evidence/capability.
+## ONNX Runtime GenAI — KEEP AS LOWER-LEVEL FALLBACK CANDIDATE
+Use for direct generative ONNX inference only when its current API and Windows performance provide a measured reason to bypass Foundry Local's higher-level model management. It remains optional because its generative API is evolving.
 
-## What we explicitly avoid building from scratch
-- a full coding-agent terminal/editor/sandbox stack before OpenHands proof;
-- a general Windows AgentOS before UFO² proof;
-- an agent browser layer before Playwright/Browser Use proof;
-- a custom formal-planning engine before Unified Planning proof;
-- a custom neural inference runtime instead of ONNX Runtime;
-- a giant mandatory “AI bundle” that makes core packaging depend on every optional model/provider.
+## ONNX Runtime — REUSE for compact specialist neural models
+Use for classification, ranking, compact vision/audio and other task-specific inference where a trained model exists. ONNX Runtime is an inference engine, not a general reasoning agent.
+
+## Classical machine learning — REUSE only per measured task
+Use maintained libraries such as scikit-learn for classification, clustering, ranking/regression or anomaly detection when a dataset and metric justify them. Do not add generic ML merely to claim that Nika contains AI.
+
+## Model selection hierarchy
+Nika's end-state intelligence choices are independent and replaceable:
+1. Deterministic Brain — zero model;
+2. Embedded Brain — Foundry Local primary, measured alternatives available;
+3. external local server — Ollama/OpenAI-compatible local service;
+4. cloud/API — allowed providers through ModelGateway.
+
+Routing uses privacy, capability, latency/resource and user-policy constraints. No provider becomes the product architecture.
 
 ## Packaging consequence
-OpenHands, browser automation, vision models, transcription models and other heavyweight capabilities should be optional components/adapters. `Nika Core` remains a small control plane; models, sandboxes and specialist workers can be installed separately. This reduces download size, dependency conflicts and update risk.
+Foundry model files, llama.cpp/other engines, OpenHands, browser automation, vision models, transcription models and other heavyweight capabilities stay optional components. Nika Core remains a small control plane. Program updates should not force re-downloading models or user data.
 
-## Next implementation rule
-Do not implement these future adapters while M1/M2 remain unverified. When executable CI is restored, integrate M1 and M2 first. Then each candidate above receives a bounded proof branch and measurable adoption gate before becoming a dependency.
+## Product Journey consequence
+An intelligence adapter is not a finished user capability until it is reachable from the final packaged Windows product through a real task/agent path, produces accessible status/errors, preserves relevant state, and passes the Product Journey gate in `docs/ACCEPTANCE_GATES.md`.
