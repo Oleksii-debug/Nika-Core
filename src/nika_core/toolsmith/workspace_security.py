@@ -7,7 +7,6 @@ import stat
 
 from nika_core.toolsmith import contracts as toolsmith_contracts
 
-
 _WINDOWS_RESERVED_BASENAMES = frozenset(
     {
         "con",
