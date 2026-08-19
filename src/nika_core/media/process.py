@@ -61,6 +61,7 @@ class SafeProcessRunner:
         cwd: Path,
         timeout_seconds: float,
         env: dict[str, str] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> ProcessResult:
         normalized = tuple(str(part) for part in argv)
         self._validate_argv(normalized)
@@ -97,6 +98,13 @@ class SafeProcessRunner:
         deadline = started + timeout_seconds
         failure: MediaError | None = None
         while process.poll() is None:
+            if cancel_event is not None and cancel_event.is_set():
+                failure = MediaError(
+                    MediaErrorCode.PROCESS_CANCELLED,
+                    "media subprocess was cancelled",
+                )
+                self._terminate_tree(process)
+                break
             if stdout_reader.exceeded or stderr_reader.exceeded:
                 failure = MediaError(
                     MediaErrorCode.OUTPUT_LIMIT,
