@@ -62,14 +62,17 @@ class TranscriptionChunkRepository:
         chunks = self.list_for_job(job_id)
         resumable: list[TranscriptionChunk] = []
         for chunk in chunks:
-            if chunk.state == ChunkState.COMPLETED:
+            if chunk.state in {ChunkState.COMPLETED, ChunkState.CANCELLED}:
                 continue
             if chunk.state == ChunkState.RUNNING:
                 chunk = chunk.model_copy(
                     update={
                         "state": ChunkState.PENDING,
                         "error_code": "restart_reconciliation_required",
-                        "error_message": "Chunk was running during restart and must be replayed from its durable boundary.",
+                        "error_message": (
+                            "Chunk was running during restart and must be replayed "
+                            "from its durable boundary."
+                        ),
                     }
                 )
                 self.put(chunk)
