@@ -9,6 +9,16 @@ on:
       - "pyproject.toml"
       - ".github/workflows/m12-prehuman-release-gate.yml"
       - "docs/M12_HUMAN_NVDA_ACCEPTANCE.md"
+  push:
+    branches:
+      - "main"
+    paths:
+      - "src/**"
+      - "scripts/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - ".github/workflows/m12-prehuman-release-gate.yml"
+      - "docs/M12_HUMAN_NVDA_ACCEPTANCE.md"
   workflow_dispatch:
 
 permissions:
