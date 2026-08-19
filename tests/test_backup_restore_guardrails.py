@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -58,11 +59,12 @@ def test_preview_does_not_modify_newer_schema_database(tmp_path: Path) -> None:
 
     target = tmp_path / "future.db"
     _initialize(target)
-    with sqlite3.connect(target) as conn:
+    with closing(sqlite3.connect(target)) as conn:
         conn.execute(
             "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
             (SCHEMA_VERSION + 1, datetime.now(UTC).isoformat()),
         )
+        conn.commit()
     before_sha = _sha256(target)
 
     manager = SQLiteRecoveryManager(SQLiteStore(target))
