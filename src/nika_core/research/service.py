@@ -3,13 +3,15 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from nika_core.research.blobs import ContentAddressedBlobStore
+from nika_core.research.blobs import BlobStoreError, ContentAddressedBlobStore
 from nika_core.research.documents import (
+    DocumentIngestionError,
     DocumentLimits,
     document_extractor_identity,
     extract_document_file,
 )
 from nika_core.research.local import (
+    LocalIngestionError,
     UnsupportedLocalFormatError,
     extract_local_file,
     is_document_format,
@@ -183,7 +185,7 @@ class LocalCorpusService:
                         document_limits=document_limits,
                     )
                 )
-            except Exception as exc:
+            except (BlobStoreError, DocumentIngestionError, LocalIngestionError) as exc:
                 failures.append(
                     FolderIngestFailure(
                         locator=str(candidate),
