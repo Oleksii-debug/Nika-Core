@@ -172,7 +172,7 @@ def test_not_active_cancel_releases_reservation_and_allows_later_explicit_retry(
 
 def test_cancel_exception_becomes_uncertain_and_blocks_startup_auto_resume(tmp_path) -> None:
     runtime = _CancelRuntime(cancel_results=[RuntimeError("transport lost after cancel")])
-    store, queue, coordinator, runtime, task_id = _active(tmp_path, runtime=runtime)
+    store, _, coordinator, runtime, task_id = _active(tmp_path, runtime=runtime)
 
     with pytest.raises(RuntimeError, match="transport lost"):
         asyncio.run(coordinator.cancel(runtime, task_id=task_id, thread_id="thread-cancel"))
