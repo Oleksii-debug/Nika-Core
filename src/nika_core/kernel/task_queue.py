@@ -69,6 +69,28 @@ class TaskQueue:
             )
         return TaskRecord(task_id, workspace_id, agent_id, TaskState.CREATED, payload)
 
+    def get(self, task_id: str) -> TaskRecord:
+        with self.store.connection() as conn:
+            row = conn.execute(
+                "SELECT task_id, workspace_id, agent_id, state, payload_json "
+                "FROM tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown task: {task_id}")
+        return self._record_from_row(row)
+
+    def list_recent(self, *, limit: int = 50) -> tuple[TaskRecord, ...]:
+        if limit < 1 or limit > 500:
+            raise ValueError("limit must be between 1 and 500")
+        with self.store.connection() as conn:
+            rows = conn.execute(
+                "SELECT task_id, workspace_id, agent_id, state, payload_json "
+                "FROM tasks ORDER BY updated_at DESC, created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return tuple(self._record_from_row(row) for row in rows)
+
     def transition(self, task_id: str, target: TaskState) -> TaskState:
         with self.store.connection() as conn:
             return self.transition_with_connection(conn, task_id, target)
@@ -106,3 +128,13 @@ class TaskQueue:
             (task_id, current.value, target.value, now),
         )
         return target
+
+    @staticmethod
+    def _record_from_row(row: sqlite3.Row) -> TaskRecord:
+        return TaskRecord(
+            task_id=row["task_id"],
+            workspace_id=row["workspace_id"],
+            agent_id=row["agent_id"],
+            state=TaskState(row["state"]),
+            payload=json.loads(row["payload_json"]),
+        )
