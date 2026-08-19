@@ -305,7 +305,7 @@ class TaskRuntimeCoordinator:
 
         try:
             accepted = await runtime.cancel(task_id=task_id, thread_id=thread_id)
-        except Exception as exc:  # noqa: BLE001 - external cancellation boundary becomes UNCERTAIN
+        except Exception as exc:
             with self._queue.store.connection() as conn:
                 self._idempotency.mark_uncertain_with_connection(conn, operation_key)
                 self._audit.append_with_connection(
