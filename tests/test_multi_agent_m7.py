@@ -8,6 +8,7 @@ import pytest
 from nika_core.builder.compiler import AgentCompiler
 from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.builder.spec import AgentDefinition, ToolGrant
+from nika_core.data.schema import SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.multi_agent import (
     ChildRequest,
@@ -180,9 +181,9 @@ def create_team(store: MultiAgentStore, *, max_parallel: int = 2) -> tuple[ToolG
     return root_grants
 
 
-def test_schema_v8_and_restart_safe_lineage(tmp_path: Path) -> None:
+def test_current_schema_and_restart_safe_lineage(tmp_path: Path) -> None:
     sqlite, store = make_store(tmp_path)
-    assert sqlite.schema_version() == 8
+    assert sqlite.schema_version() == SCHEMA_VERSION
     create_team(store)
     child = store.spawn_child(
         team_id="team-1",
