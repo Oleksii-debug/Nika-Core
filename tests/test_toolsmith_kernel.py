@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from nika_core.data.schema import MIGRATIONS, SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.checkpoint import CheckpointService
 from nika_core.toolsmith import (
@@ -147,7 +148,8 @@ def test_process_policy_rejects_generic_shell() -> None:
 
 def test_migration_8_is_ordered_and_creates_toolsmith_tables(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    assert store.schema_version() == 8
+    assert 8 in MIGRATIONS
+    assert store.schema_version() == SCHEMA_VERSION
     with store.connection() as conn:
         names = {
             row["name"]
