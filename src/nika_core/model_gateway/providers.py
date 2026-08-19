@@ -146,11 +146,12 @@ class OpenAICompatibleProvider:
 class OllamaProvider:
     """Native Ollama `/api/chat` adapter behind Nika's stable provider contract.
 
-    Ordinary Nika requests intentionally disable Ollama streaming and thinking.
-    This keeps one deterministic response envelope and avoids exposing a model's
-    reasoning trace through the shared response contract. Client cancellation
-    is not represented as hard server-side inference cancellation because the
-    native Ollama API does not provide that guarantee.
+    Ordinary Nika requests intentionally disable Ollama streaming. Thinking is
+    disabled by default for models that support a boolean switch; callers may
+    explicitly select an Ollama thinking level for models such as GPT-OSS. The
+    reasoning trace is still not copied into Nika's shared response contract.
+    Client cancellation is not represented as hard server-side inference
+    cancellation because the native Ollama API does not provide that guarantee.
     """
 
     def __init__(
@@ -158,7 +159,7 @@ class OllamaProvider:
         *,
         default_model: str,
         base_url: str = "http://localhost:11434",
-        think: bool = False,
+        think: bool | str = False,
         client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient,
     ) -> None:
         if not default_model.strip():
@@ -173,7 +174,7 @@ class OllamaProvider:
         )
         self._default_model = default_model
         self._base_url = base_url.rstrip("/")
-        self._think = think
+        self._think = _normalize_ollama_think(think)
         self._client_factory = client_factory
 
     @property
@@ -265,6 +266,17 @@ def _classify_http_status(status: int) -> tuple[ModelErrorCode, bool]:
     if status >= 500:
         return ModelErrorCode.UNAVAILABLE, True
     return ModelErrorCode.PROVIDER_ERROR, False
+
+
+def _normalize_ollama_think(value: bool | str) -> bool | str:
+    if isinstance(value, bool):
+        return value
+    if not isinstance(value, str):
+        raise TypeError("think must be a boolean or an Ollama thinking level")
+    level = value.strip().lower()
+    if level not in {"low", "medium", "high", "max"}:
+        raise ValueError("think level must be one of: low, medium, high, max")
+    return level
 
 
 def _optional_int(value: object) -> int | None:
