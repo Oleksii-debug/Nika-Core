@@ -18,7 +18,7 @@ from nika_core.model_gateway.contracts import (
     ModelResponse,
     PrivacyClass,
 )
-from nika_core.model_gateway.foundry_local import FoundryLocalProvider
+from nika_core.model_gateway.foundry_local import FoundryLocalProvider, FoundryModelEvidence
 from nika_core.model_gateway.gateway import ModelGateway
 
 
@@ -101,6 +101,14 @@ def _response_evidence(response: ModelResponse) -> dict[str, object]:
     }
 
 
+def _model_evidence_for_report(model: FoundryModelEvidence) -> dict[str, object]:
+    """Serialize model metadata without exporting a user-specific cache path."""
+    report = asdict(model)
+    path = report.pop("path", None)
+    report["cache_path_available"] = path is not None
+    return report
+
+
 def _model_resource_policy(args: argparse.Namespace) -> ModelResourcePolicy | None:
     min_available_memory_bytes: int | None = None
     if args.min_available_memory_gb is not None:
@@ -169,7 +177,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         "sdk": {"package": package_name, "version": package_version},
         "model_license_review": args.model_license,
         "expected_model_id": args.model_id,
-        "model_before": asdict(before),
+        "model_before": _model_evidence_for_report(before),
         "resource_policy": asdict(resource_policy) if resource_policy is not None else None,
         "resources_before": resources_before,
         "model_gateway_path_used": False,
@@ -192,7 +200,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 timeout_seconds=args.download_timeout,
             )
             evidence["explicit_model_download_action_executed"] = True
-            evidence["model_after_download"] = asdict(download_evidence)
+            evidence["model_after_download"] = _model_evidence_for_report(download_evidence)
 
         first_response = await gateway.complete(
             ModelRequest(
@@ -206,7 +214,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         )
         resources_after_first = _resource_snapshot()
         after_first = provider.inspect_model()
-        evidence["model_after_first_inference"] = asdict(after_first)
+        evidence["model_after_first_inference"] = _model_evidence_for_report(after_first)
         evidence["first_inference"] = _response_evidence(first_response)
         evidence["resources_after_first_inference"] = resources_after_first
         evidence["first_inference_resource_delta"] = _resource_delta(
@@ -218,7 +226,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         provider.close()
         first_close_completed = True
         after_unload = provider.inspect_model()
-        evidence["model_after_unload"] = asdict(after_unload)
+        evidence["model_after_unload"] = _model_evidence_for_report(after_unload)
         if after_unload.loaded:
             raise RuntimeError("Foundry model remained loaded after provider-owned unload")
 
@@ -242,7 +250,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         provider.close()
         final_close_completed = True
         final_model = provider.inspect_model()
-        evidence["model_final"] = asdict(final_model)
+        evidence["model_final"] = _model_evidence_for_report(final_model)
         if final_model.loaded:
             raise RuntimeError("Foundry model remained loaded after final provider close")
         evidence["unload_reload_proof_executed"] = True
