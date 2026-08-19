@@ -6,6 +6,7 @@ from nika_core.kernel.action_registry import Keymap
 from nika_core.kernel.agent_registry import AgentRegistry
 from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.default_actions import build_default_action_registry
+from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.workspace_registry import WorkspaceRegistry
 from nika_core.ui.bridge import UIActionBridge
 from nika_core.ui.bridge_models import UIResult
@@ -29,7 +30,7 @@ def main() -> None:
     actions = build_default_action_registry()
     keymap = Keymap(store, actions)
     backend = DesktopBackend(
-        queue=__import__("nika_core.kernel.task_queue", fromlist=["TaskQueue"]).TaskQueue(store),
+        queue=TaskQueue(store),
         agents=AgentRegistry(store),
         workspaces=WorkspaceRegistry(store),
         audit=AuditLog(store),
