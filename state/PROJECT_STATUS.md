@@ -82,7 +82,13 @@ Repository visibility observed this cycle: **PUBLIC**.
 
 ## PR #33 integration reconciliation
 - Status-only PR #33 exact head `469a06ab9c5254b173af022c17a71cc45865e34b` passed Core CI #215 successfully.
-- PR #33 was merged as `514b3a72c8ead2d2134762f62e3a7422ce9168a1`; that merge is the `main` baseline at the start of this cycle.
+- PR #33 was merged as `514b3a72c8ead2d2134762f62e3a7422ce9168a1`; that merge was the `main` baseline before PR #34.
+- The exact M12 human-bound artifact, production source, package inputs and runtime behavior remain unchanged.
+- This reconciliation awards **0%** additional weighted credit; HUMAN_TESTED, NVDA_VERIFIED and PRODUCTION_RELEASE_READY remain false.
+
+## PR #34 integration reconciliation
+- Status-only PR #34 exact head `7f94cbc5a276233cbc4500e7a54be30ea52980d5` passed Core CI #217 successfully.
+- PR #34 was merged as `44620ba068b67f2c529fc5cc8aabf65a4d94a41c`; that merge is the `main` baseline at the start of this cycle.
 - The exact M12 human-bound artifact, production source, package inputs and runtime behavior remain unchanged.
 - This reconciliation awards **0%** additional weighted credit; HUMAN_TESTED, NVDA_VERIFIED and PRODUCTION_RELEASE_READY remain false.
 
