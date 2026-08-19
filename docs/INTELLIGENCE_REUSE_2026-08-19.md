@@ -33,11 +33,12 @@ Use versioned metrics/champion-challenger evidence to select deterministic strat
 
 ## B. Embedded Brain — local generative model without Ollama/API
 
-### Microsoft Foundry Local 1.2.3 — PRIMARY ADAPT candidate/integration
+### Microsoft Foundry Local 1.2.x — PRIMARY ADAPT candidate/integration
 - Official repository: `microsoft/Foundry-Local`.
 - SDK license: MIT; each downloadable model has its own license and must be audited separately.
-- Windows package: `foundry-local-sdk-winml>=1.2.3,<2`.
-- Cross-platform package where needed: `foundry-local-sdk>=1.2.3,<2`.
+- Windows package policy: `foundry-local-sdk-winml>=1.2.3,<2`.
+- Cross-platform package policy where needed: `foundry-local-sdk>=1.2.3,<2`.
+- Exact SDK truth is evidence, not a stale prose pin: every physical/release proof records the actually installed package/version. The 2026-08-19 AUTO02 Windows resolver installed `foundry-local-sdk-winml==1.2.4`; Nika therefore does not describe 1.2.3 as the immutable current patch level.
 - The two SDK package variants are mutually exclusive in one Python environment.
 - Use the official Python SDK directly for embedded/in-process inference; the optional local web service is not required for normal Nika embedding.
 - Nika adapter: `FoundryLocalProvider` behind `ModelProvider` / ModelGateway.
@@ -45,7 +46,7 @@ Use versioned metrics/champion-challenger evidence to select deterministic strat
 - Model management: no silent model download. Models are optional components outside the base EXE and require explicit install/download intent, model identity, separately reviewed license, checksum/resource evidence where required.
 - Artifact identity: the public Python SDK's exact selected model/variant `id` is the provider artifact identity Nika can safely pin. Physical/release proof requires that exact ID in addition to the human-reviewed license reference. Nika does not depend on private SDK internals to invent model-license/version truth.
 - Acquisition timeout/cancellation: explicit model download has its own total timeout. Timeout or caller cancellation signals the SDK's documented download cancellation event. The shared provider slot stays occupied until the native worker actually exits.
-- Resource policy: Microsoft positions Foundry Local as single-user on-device inference rather than a concurrent server stack, so Nika serializes in-process completions per provider instance instead of pretending it has server-style batching/queueing. `ModelRequest.timeout_seconds` bounds the caller-visible wait. Optional Nika `ModelResourcePolicy` preflights CPU, memory percentage and minimum available memory through the existing resource-observer port before native inference starts.
+- Resource policy: Microsoft positions Foundry Local as single-user on-device inference rather than a concurrent server stack, so Nika serializes in-process completions per provider instance instead of pretending it has server-style batching/queueing. `ModelRequest.timeout_seconds` bounds the caller-visible wait. Optional Nika `ModelResourcePolicy` preflights CPU, memory percentage and minimum available memory through the existing resource-observer port before native inference starts. Importing the embedded provider must not require the concrete `psutil` observer; that adapter remains an optional runtime component.
 - Lifecycle ownership: Foundry's manager is process-wide. A Nika provider instance tracks only models it loaded and unloads only those; it does not unload a model that was already loaded by another consumer. `close()` fails closed while timed-out/cancelled native work still owns the provider slot.
 - Fallback safety: provider capabilities explicitly record whether hard cancellation is proven. ModelGateway does not launch a fallback after a timeout from a provider such as current Foundry Local whose active native inference cannot be proven stopped. Retryable non-timeout failures may still use an explicitly requested, privacy-prevalidated fallback route.
 - Hardware: Windows WinML package is preferred for actual Windows hardware; final acceptance requires a physical-Windows inference proof.
@@ -90,7 +91,7 @@ Use when broad provider normalization measurably reduces glue and its adopted pa
 
 - No large model is bundled into the mandatory Nika Core ZIP merely because its engine is supported.
 - Model artifacts have identity, source, license, checksum, size, task/capability declaration and resource requirements.
-- For current Foundry Python integration, the exact public model/variant ID + SDK package/version + reviewed model-license reference + optional cache-tree checksum/bytes are the reproducible evidence surfaces available without private-SDK coupling.
+- For current Foundry Python integration, the exact public model/variant ID + exact installed SDK package/version + reviewed model-license reference + optional cache-tree checksum/bytes are the reproducible evidence surfaces available without private-SDK coupling.
 - Program updates must not force re-downloading unchanged models.
 - Model Engineering Lab benchmarks candidates before defaults/promotions change.
 
