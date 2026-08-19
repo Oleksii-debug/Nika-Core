@@ -11,6 +11,7 @@ from nika_core.security import (
     ExecutionBudgetLedger,
     authorize_action,
 )
+from nika_core.tools import ToolRisk
 from nika_core.toolsmith import (
     AcceptanceCommand,
     AllowedPathPolicy,
@@ -23,7 +24,6 @@ from nika_core.toolsmith import (
     ResourceBudget,
     WorkspaceLease,
 )
-from nika_core.tools import ToolRisk
 from nika_core.workspaces import (
     CapabilityToolBinding,
     DownstreamBudgetLimits,

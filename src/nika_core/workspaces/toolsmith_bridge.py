@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from nika_core.security import ActionIntent, ExecutionBudget, SandboxPolicy, SecurityPolicy
-from nika_core.toolsmith import AllowedPathPolicy, CodingJob, IsolationClass, NetworkMode
 from nika_core.tools import ToolRisk
+from nika_core.toolsmith import AllowedPathPolicy, CodingJob, IsolationClass, NetworkMode
 
 _ISOLATION_RANK = {
     IsolationClass.POLICY_ONLY: 0,
