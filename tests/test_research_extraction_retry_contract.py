@@ -16,9 +16,9 @@ from nika_core.research import (
     ResearchWorkspace,
     SourceKind,
     SourceSpec,
+    web_service,
 )
 from nika_core.research.local import LocalIngestionError
-import nika_core.research.web_service as web_service
 
 
 def test_failed_extraction_retry_reuses_fetched_artifact(
