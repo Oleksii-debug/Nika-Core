@@ -270,6 +270,50 @@ def test_gateway_does_not_fallback_after_non_retryable_failure() -> None:
     assert fallback_called is False
 
 
+def test_gateway_does_not_fallback_after_timeout_without_hard_cancellation() -> None:
+    fallback_called = False
+
+    class NonCancellableProvider(DeterministicMockProvider):
+        @property
+        def capabilities(self) -> ProviderCapabilities:
+            return ProviderCapabilities(
+                provider_id="non-cancellable",
+                kind=ProviderKind.LOCAL,
+                supports_private_data=True,
+                supports_hard_cancellation=False,
+            )
+
+        async def complete(self, model_request: ModelRequest) -> ModelResponse:
+            await asyncio.sleep(0.05)
+            return await super().complete(model_request)
+
+    class FallbackProvider(DeterministicMockProvider):
+        async def complete(self, model_request: ModelRequest) -> ModelResponse:
+            nonlocal fallback_called
+            fallback_called = True
+            return await super().complete(model_request)
+
+    gateway = ModelGateway()
+    gateway.register(NonCancellableProvider(provider_id="non-cancellable"))
+    gateway.register(FallbackProvider(provider_id="fallback"))
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        asyncio.run(
+            gateway.complete(
+                request(
+                    provider_kind=None,
+                    provider_id="non-cancellable",
+                    fallback_provider_ids=("fallback",),
+                    timeout_seconds=0.001,
+                )
+            )
+        )
+
+    assert exc_info.value.code is ModelErrorCode.TIMEOUT
+    assert exc_info.value.retryable is False
+    assert fallback_called is False
+
+
 def test_sensitive_fallback_route_is_rejected_before_primary_execution() -> None:
     primary_called = False
 
