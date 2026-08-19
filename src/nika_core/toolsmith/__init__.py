@@ -38,6 +38,7 @@ from .reuse_search import (
 from .service import CapabilityEscalationService
 
 __all__ = [
+    "REUSE_SOURCE_ORDER",
     "AcceptanceCommand",
     "AllowedPathPolicy",
     "ArtifactEvidence",
@@ -58,7 +59,6 @@ __all__ = [
     "NetworkMode",
     "NetworkPolicy",
     "ProcessPolicy",
-    "REUSE_SOURCE_ORDER",
     "RecoveryState",
     "RepositorySnapshot",
     "ResourceBudget",
