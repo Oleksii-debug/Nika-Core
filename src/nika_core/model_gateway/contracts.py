@@ -94,6 +94,7 @@ class ProviderCapabilities:
     supports_private_data: bool
     supports_tools: bool = False
     supports_streaming: bool = False
+    supports_hard_cancellation: bool = True
 
 
 class ModelGatewayError(RuntimeError):
