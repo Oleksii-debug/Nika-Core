@@ -3,9 +3,13 @@ from __future__ import annotations
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.action_registry import Keymap
+from nika_core.kernel.agent_registry import AgentRegistry
+from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.default_actions import build_default_action_registry
+from nika_core.kernel.workspace_registry import WorkspaceRegistry
 from nika_core.ui.bridge import UIActionBridge
 from nika_core.ui.bridge_models import UIResult
+from nika_core.ui.desktop_backend import DesktopBackend
 from nika_core.ui.shell import launch_windows_shell
 
 
@@ -24,10 +28,20 @@ def main() -> None:
     store.initialize()
     actions = build_default_action_registry()
     keymap = Keymap(store, actions)
+    backend = DesktopBackend(
+        queue=__import__("nika_core.kernel.task_queue", fromlist=["TaskQueue"]).TaskQueue(store),
+        agents=AgentRegistry(store),
+        workspaces=WorkspaceRegistry(store),
+        audit=AuditLog(store),
+    )
     bridge = UIActionBridge(
         actions,
         keymap,
         handlers={
+            "task.create": backend.create_task,
+            "task.pause": backend.pause_task,
+            "task.resume": backend.resume_task,
+            "agent.stop": backend.stop_agent,
             "nav.tasks": lambda _payload: _focus("tasks-heading", "Завдання відкрито."),
             "nav.agents": lambda _payload: _focus("agents-heading", "Агенти відкрито."),
             "nav.logs": lambda _payload: _focus("logs-heading", "Журнал відкрито."),
@@ -36,6 +50,7 @@ def main() -> None:
             ),
             "command.focus": lambda _payload: _focus("command-input", "Командне поле активне."),
         },
+        state_provider=backend.snapshot,
     )
     launch_windows_shell(bridge, title=f"Nika Core {config.app_version}")
 
