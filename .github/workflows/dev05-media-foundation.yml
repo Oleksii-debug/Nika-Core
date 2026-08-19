@@ -52,6 +52,9 @@ jobs:
           src/nika_core/media
           tests/test_media_adversarial.py
           tests/test_media_batch_a.py
+          tests/test_media_batch_b.py
+          tests/test_media_batch_b_retry.py
+          tests/test_media_batch_b_safety.py
           tests/test_media_persistence_privacy.py
           tests/test_media_process_files.py
       - name: Lint media foundation
@@ -60,12 +63,18 @@ jobs:
           src/nika_core/media
           tests/test_media_adversarial.py
           tests/test_media_batch_a.py
+          tests/test_media_batch_b.py
+          tests/test_media_batch_b_retry.py
+          tests/test_media_batch_b_safety.py
           tests/test_media_persistence_privacy.py
           tests/test_media_process_files.py
-      - name: Run focused DEV05 Batch A tests
+      - name: Run focused DEV05 media tests
         run: >-
           python -m pytest -q
           tests/test_media_adversarial.py
           tests/test_media_batch_a.py
+          tests/test_media_batch_b.py
+          tests/test_media_batch_b_retry.py
+          tests/test_media_batch_b_safety.py
           tests/test_media_persistence_privacy.py
           tests/test_media_process_files.py
