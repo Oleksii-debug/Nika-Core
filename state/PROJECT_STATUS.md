@@ -66,6 +66,13 @@ Repository visibility observed this cycle: **PUBLIC**.
 - PR #11 was already closed without merge and remains superseded/uncredited.
 - This maintenance awards **0%** additional weighted credit and does not invalidate M12 acceptance evidence.
 
+## M12 artifact integrity re-verification — latest cycle
+- GitHub artifact id `9340947647` was fetched successfully again from the canonical repository.
+- Downloaded ZIP size is exactly `20,846,871` bytes and SHA-256 is exactly `ee0ec0b7506c6bc84b8052f1c1cdb80a33a6f0dea8eb6b221cee1860dc96d4c5`, matching the recorded workflow digest.
+- `m12-prehuman-evidence.json` inside the artifact still binds the package to commit `d7bdfd697819adf13ad7423726a004fd781d857d` and records `human_tested=false`, `nvda_verified=false`, `production_release_ready=false`.
+- The embedded release manifest still identifies product `NikaCore` version `0.0.2`.
+- No production source, package input, runtime behavior or packaged candidate was changed. This is evidence reconciliation only and awards **0%** additional weighted credit.
+
 ## Current weighted milestone
 M12 — Human Windows/NVDA acceptance and final v1.0 release decision.
 
