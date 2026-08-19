@@ -105,9 +105,12 @@ class FFmpegAudioExtractor:
             raise ValueError("normalized audio destination must use .wav")
         if (start_ms is None) != (end_ms is None):
             raise ValueError("start_ms and end_ms must be supplied together")
-        if start_ms is not None and end_ms is not None:
-            if start_ms < 0 or end_ms <= start_ms:
-                raise ValueError("clip bounds must satisfy 0 <= start_ms < end_ms")
+        if (
+            start_ms is not None
+            and end_ms is not None
+            and (start_ms < 0 or end_ms <= start_ms)
+        ):
+            raise ValueError("clip bounds must satisfy 0 <= start_ms < end_ms")
         partial = destination_path.with_suffix(destination_path.suffix + ".partial")
         if partial.exists():
             partial.unlink()
@@ -120,7 +123,9 @@ class FFmpegAudioExtractor:
             "-y",
         ]
         if start_ms is not None and end_ms is not None:
-            argv.extend(("-ss", f"{start_ms / 1000:.3f}", "-t", f"{(end_ms - start_ms) / 1000:.3f}"))
+            argv.extend(
+                ("-ss", f"{start_ms / 1000:.3f}", "-t", f"{(end_ms - start_ms) / 1000:.3f}")
+            )
         argv.extend(
             (
                 "-i",
