@@ -6,22 +6,33 @@ from importlib import metadata
 from pathlib import Path
 
 RUNTIME_DISTRIBUTIONS = (
-    "platformdirs",
-    "pydantic",
-    "pydantic-settings",
-    "pywebview",
-    "pythonnet",
-    "clr-loader",
-    "proxy-tools",
+    "annotated-types",
+    "bottle",
     "cffi",
+    "clr-loader",
+    "packaging",
+    "platformdirs",
+    "proxy-tools",
     "pycparser",
+    "pydantic",
+    "pydantic-core",
+    "pydantic-settings",
+    "pygments",
+    "python-dotenv",
+    "pythonnet",
+    "pywebview",
+    "rich",
+    "setuptools",
+    "tomli",
+    "typing-extensions",
+    "typing-inspection",
 )
 
 _LICENSE_NAMES = ("license", "licence", "copying", "notice")
 
 
 def _normalized_name(value: str) -> str:
-    return re.sub(r"[-_.]+", "", value).casefold()
+    return re.sub(r"[^a-z0-9]+", "", value.casefold())
 
 
 def _metadata_license(dist: metadata.Distribution) -> str:
@@ -67,7 +78,7 @@ def _python_license() -> tuple[str, str]:
 
 
 def build_third_party_notices(bundle_dir: Path) -> Path:
-    """Create deterministic third-party notices for the shipped Windows runtime."""
+    """Create deterministic third-party notices for the shipped Windows runtime closure."""
 
     sections: list[str] = [
         "Nika Core third-party notices",
