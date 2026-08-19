@@ -42,6 +42,7 @@ class OrderIntent:
     submitted_at: datetime
     submitted_slice: int
     limit_price: Decimal | None = None
+    expires_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if not self.intent_id.strip():
@@ -51,11 +52,17 @@ class OrderIntent:
         if self.submitted_slice < 0:
             raise TradingResearchError("submitted_slice must be non-negative")
         submitted_at = require_aware_utc(self.submitted_at, "submitted_at")
+        expires_at = (
+            require_aware_utc(self.expires_at, "expires_at") if self.expires_at is not None else None
+        )
+        if expires_at is not None and expires_at <= submitted_at:
+            raise TradingResearchError("expires_at must be later than submitted_at")
         if self.order_type is OrderType.LIMIT:
             if self.limit_price is None or self.limit_price <= 0:
                 raise TradingResearchError("limit orders require a positive limit_price")
         elif self.limit_price is not None:
             raise TradingResearchError("market orders cannot carry limit_price")
+        object.__setattr__(self, "expires_at", expires_at)
         object.__setattr__(self, "submitted_at", submitted_at)
 
 
