@@ -77,8 +77,9 @@ def test_timed_out_download_does_not_publish_cached_success_before_native_exit()
             await provider.download_model(authorization(), timeout_seconds=0.01)
         assert second_error.value.code is ModelErrorCode.TIMEOUT
 
-        await asyncio.sleep(0.06)
-        evidence = await provider.download_model(authorization(), timeout_seconds=0.1)
+        # The next bounded management action itself becomes the synchronization
+        # proof: it waits for native ownership instead of guessing a sleep duration.
+        evidence = await provider.download_model(authorization(), timeout_seconds=1.0)
         assert evidence.cached is True
         assert model.download_count == 1
 
