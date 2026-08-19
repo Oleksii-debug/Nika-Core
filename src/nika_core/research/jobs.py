@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from nika_core.kernel.checkpoint import CheckpointService
 from nika_core.kernel.task_queue import TaskQueue
-from nika_core.kernel.task_state import TaskState
+from nika_core.kernel.task_state import TaskState, can_transition
 from nika_core.research.models import RefreshDisposition, RefreshJobSummary
 from nika_core.research.network_repository import NetworkResearchRepository
 from nika_core.research.web_service import HttpResearchService
@@ -123,18 +123,18 @@ class ResearchRefreshService:
 
     def pause(self, task_id: str) -> RefreshJobSummary:
         task = self._tasks.get(task_id)
-        if task.state in {TaskState.READY, TaskState.RUNNING, TaskState.RETRYING}:
+        if can_transition(task.state, TaskState.PAUSED):
             self._tasks.transition(task_id, TaskState.PAUSED)
         return self.summary(task_id)
 
     def resume(self, task_id: str) -> RefreshJobSummary:
         task = self._tasks.get(task_id)
-        if task.state in {TaskState.PAUSED, TaskState.FAILED, TaskState.RETRYING}:
+        if can_transition(task.state, TaskState.READY):
             self._tasks.transition(task_id, TaskState.READY)
         return self.run(task_id)
 
     def cancel(self, task_id: str) -> RefreshJobSummary:
         task = self._tasks.get(task_id)
-        if task.state not in {TaskState.COMPLETED, TaskState.CANCELLED}:
+        if can_transition(task.state, TaskState.CANCELLED):
             self._tasks.transition(task_id, TaskState.CANCELLED)
         return self.summary(task_id)
