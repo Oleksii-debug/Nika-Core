@@ -484,6 +484,11 @@ class MultiAgentStore:
             ).fetchone()
             if row is None:
                 raise KeyError(f"unknown team: {team_id}")
+            current = TeamState(row["state"])
+            if current is TeamState.CANCELLED:
+                return self.members(team_id)
+            if current is not TeamState.ACTIVE:
+                raise RuntimeError(f"team cannot be cancelled from terminal state: {current.value}")
             conn.execute(
                 "UPDATE multi_agent_teams SET state = ?, updated_at = ? WHERE team_id = ?",
                 (TeamState.CANCELLED.value, now, team_id),
