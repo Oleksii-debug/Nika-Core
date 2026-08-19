@@ -37,8 +37,9 @@ class FoundryLocalProvider:
 
     Foundry Local is optimized for single-user on-device inference rather than
     server-style concurrent batching. Nika therefore serializes in-process
-    completions per provider instance and applies the ModelRequest timeout to
-    queueing plus inference without silently downloading a missing model.
+    completions per provider instance. The upstream non-streaming Python API
+    does not expose a proven hard-cancel primitive, so a timed-out native
+    inference keeps the provider slot until the worker actually exits.
     """
 
     def __init__(
@@ -56,6 +57,7 @@ class FoundryLocalProvider:
             provider_id="foundry-local",
             kind=ProviderKind.LOCAL,
             supports_private_data=True,
+            supports_hard_cancellation=False,
         )
         self._default_model = default_model
         self._app_name = app_name
@@ -71,18 +73,44 @@ class FoundryLocalProvider:
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         started = time.perf_counter()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + request.timeout_seconds
+        acquired = False
+        worker: asyncio.Task[tuple[str, str, ModelUsage]] | None = None
         try:
-            async with asyncio.timeout(request.timeout_seconds):
-                async with self._inference_lock:
-                    text, model_name, usage = await asyncio.to_thread(
-                        self._complete_sync, request
-                    )
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError
+            await asyncio.wait_for(self._inference_lock.acquire(), timeout=remaining)
+            acquired = True
+
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError
+            worker = asyncio.create_task(asyncio.to_thread(self._complete_sync, request))
+            try:
+                text, model_name, usage = await asyncio.wait_for(
+                    asyncio.shield(worker), timeout=remaining
+                )
+            except TimeoutError as exc:
+                self._release_slot_when_worker_finishes(worker)
+                acquired = False
+                raise ModelGatewayError(
+                    ModelErrorCode.TIMEOUT,
+                    "Foundry Local inference timed out; native inference may still be finishing",
+                    provider_id=self.capabilities.provider_id,
+                    retryable=False,
+                ) from exc
+            except asyncio.CancelledError:
+                self._release_slot_when_worker_finishes(worker)
+                acquired = False
+                raise
         except TimeoutError as exc:
             raise ModelGatewayError(
                 ModelErrorCode.TIMEOUT,
-                "Foundry Local inference timed out",
+                "Foundry Local inference slot timed out",
                 provider_id=self.capabilities.provider_id,
-                retryable=True,
+                retryable=False,
             ) from exc
         except ModelGatewayError:
             raise
@@ -107,6 +135,9 @@ class FoundryLocalProvider:
                 provider_id=self.capabilities.provider_id,
                 retryable=False,
             ) from exc
+        finally:
+            if acquired:
+                self._inference_lock.release()
 
         return ModelResponse(
             request_id=request.request_id,
@@ -164,6 +195,15 @@ class FoundryLocalProvider:
             return
         for model in tuple(catalog.get_loaded_models()):
             model.unload()
+
+    def _release_slot_when_worker_finishes(
+        self, worker: asyncio.Task[tuple[str, str, ModelUsage]]
+    ) -> None:
+        def release(_task: asyncio.Task[tuple[str, str, ModelUsage]]) -> None:
+            if self._inference_lock.locked():
+                self._inference_lock.release()
+
+        worker.add_done_callback(release)
 
     def _complete_sync(self, request: ModelRequest) -> tuple[str, str, ModelUsage]:
         manager = self._manager()
