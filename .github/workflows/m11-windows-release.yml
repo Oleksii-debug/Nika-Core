@@ -34,7 +34,7 @@ jobs:
         run: python -m pip install -e ".[gui,qa,dev]"
       - name: Run M11 M12 source regressions
         run: python -m pytest tests/test_m11_m12_release.py -q
-      - name: Build standalone one-dir Windows candidate and manifest
+      - name: Build standalone one-dir Windows candidate, notices and manifest
         shell: pwsh
         run: python scripts/m11_release.py --version 0.0.2
       - name: Verify packaged WebView2 UI Automation and keyboard focus
@@ -50,4 +50,5 @@ jobs:
           path: |
             dist/NikaCore-0.0.2-windows-x64.zip
             dist/NikaCore/release-manifest.json
+            dist/NikaCore/THIRD_PARTY_NOTICES.txt
           if-no-files-found: error
