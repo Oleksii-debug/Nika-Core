@@ -156,10 +156,13 @@ def _display_host(host: str, port: int, scheme: str) -> str:
 
 
 def _connect_url(logical_url: str, address: str) -> tuple[str, str, str]:
-    parts = urlsplit(logical_url)
+    try:
+        parts = urlsplit(logical_url)
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+    except ValueError as exc:
+        raise NetworkPolicyError("URL authority or port is malformed") from exc
     if parts.hostname is None:
         raise NetworkPolicyError("URL has no hostname")
-    port = parts.port or (443 if parts.scheme == "https" else 80)
     host_header = _display_host(parts.hostname, port, parts.scheme)
     address_host = f"[{address}]" if ":" in address else address
     netloc = address_host if port == (443 if parts.scheme == "https" else 80) else f"{address_host}:{port}"
@@ -186,7 +189,11 @@ class HttpxResearchFetcher:
         *,
         policy: HttpFetchPolicy,
     ) -> tuple[str, ...]:
-        parts = urlsplit(logical_url)
+        try:
+            parts = urlsplit(logical_url)
+            port = parts.port or (443 if parts.scheme == "https" else 80)
+        except ValueError as exc:
+            raise NetworkPolicyError("URL authority or port is malformed") from exc
         if parts.scheme not in {"http", "https"}:
             raise NetworkPolicyError("only HTTP(S) URLs are supported")
         if parts.scheme == "http" and not policy.allow_insecure_http:
@@ -199,7 +206,6 @@ class HttpxResearchFetcher:
         allowed_hosts = {_normalized_host(item) for item in policy.allowed_hosts}
         if allowed_hosts and host not in allowed_hosts:
             raise NetworkPolicyError("URL host is outside the approved host set")
-        port = parts.port or (443 if parts.scheme == "https" else 80)
         if port not in policy.allowed_ports:
             raise NetworkPolicyError("URL port is outside the approved port set")
 
@@ -281,7 +287,17 @@ class HttpxResearchFetcher:
         policy: HttpFetchPolicy | None = None,
     ) -> HttpFetchResult:
         active = policy or HttpFetchPolicy()
-        requested_url = urlunsplit((*urlsplit(url)[:4], ""))
+        try:
+            requested_url = urlunsplit((*urlsplit(url)[:4], ""))
+        except ValueError as exc:
+            return HttpFetchResult(
+                RefreshDisposition.BLOCKED,
+                url,
+                url,
+                None,
+                error_code="network_policy",
+                message=f"malformed URL: {exc}",
+            )
         current_url = requested_url
         headers = {
             "Accept": (
