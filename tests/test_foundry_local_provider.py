@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -18,7 +20,13 @@ from nika_core.model_gateway.gateway import ModelGateway
 
 
 class FakeFoundryModel:
-    def __init__(self, *, alias: str = "test-model", cached: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        alias: str = "test-model",
+        cached: bool = True,
+        completion_delay: float = 0.0,
+    ) -> None:
         self.alias = alias
         self.is_cached = cached
         self.is_loaded = False
@@ -26,6 +34,10 @@ class FakeFoundryModel:
         self.unloaded = False
         self.last_messages: list[dict[str, str]] = []
         self.settings = SimpleNamespace(temperature=None)
+        self.completion_delay = completion_delay
+        self._counter_lock = threading.Lock()
+        self.active_completions = 0
+        self.max_active_completions = 0
 
     def download(self) -> None:
         self.downloaded = True
@@ -45,19 +57,30 @@ class FakeFoundryModel:
             settings = model.settings
 
             def complete_chat(self, messages: list[dict[str, str]]) -> object:
-                model.last_messages = messages
-                return SimpleNamespace(
-                    choices=[
-                        SimpleNamespace(
-                            message=SimpleNamespace(content="embedded: hello")
-                        )
-                    ],
-                    usage=SimpleNamespace(
-                        prompt_tokens=3,
-                        completion_tokens=2,
-                        total_tokens=5,
-                    ),
-                )
+                with model._counter_lock:
+                    model.active_completions += 1
+                    model.max_active_completions = max(
+                        model.max_active_completions, model.active_completions
+                    )
+                try:
+                    if model.completion_delay:
+                        time.sleep(model.completion_delay)
+                    model.last_messages = messages
+                    return SimpleNamespace(
+                        choices=[
+                            SimpleNamespace(
+                                message=SimpleNamespace(content="embedded: hello")
+                            )
+                        ],
+                        usage=SimpleNamespace(
+                            prompt_tokens=3,
+                            completion_tokens=2,
+                            total_tokens=5,
+                        ),
+                    )
+                finally:
+                    with model._counter_lock:
+                        model.active_completions -= 1
 
         return Client()
 
@@ -158,3 +181,36 @@ def test_foundry_local_honors_request_model_override_and_unloads() -> None:
     assert manager.catalog.requested_aliases == ["larger-model"]
     assert response.model == "larger-model"
     assert model.unloaded is True
+
+
+def test_foundry_local_maps_request_timeout_to_typed_gateway_error() -> None:
+    model = FakeFoundryModel(completion_delay=0.05)
+    provider = FoundryLocalProvider(
+        default_model="test-model",
+        manager_factory=lambda: FakeManager(model),
+    )
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        asyncio.run(provider.complete(request(timeout_seconds=0.01)))
+
+    assert exc_info.value.code is ModelErrorCode.TIMEOUT
+    assert exc_info.value.provider_id == "foundry-local"
+    assert exc_info.value.retryable is True
+
+
+def test_foundry_local_serializes_in_process_inference() -> None:
+    model = FakeFoundryModel(completion_delay=0.03)
+    provider = FoundryLocalProvider(
+        default_model="test-model",
+        manager_factory=lambda: FakeManager(model),
+    )
+
+    async def run_parallel() -> None:
+        first = provider.complete(request(request_id="first", timeout_seconds=1.0))
+        second = provider.complete(request(request_id="second", timeout_seconds=1.0))
+        responses = await asyncio.gather(first, second)
+        assert [response.request_id for response in responses] == ["first", "second"]
+
+    asyncio.run(run_parallel())
+
+    assert model.max_active_completions == 1
