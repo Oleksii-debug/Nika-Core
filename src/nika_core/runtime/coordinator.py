@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 
 from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
-from nika_core.kernel.task_state import TaskState
+from nika_core.kernel.task_state import TaskState, can_transition
 from nika_core.runtime.contracts import (
     AgentRuntimePort,
     RuntimeErrorCode,
@@ -14,6 +16,11 @@ from nika_core.runtime.contracts import (
     RuntimeResult,
     RuntimeResumeMode,
     RuntimeResumeRequest,
+)
+from nika_core.runtime.idempotency import (
+    IdempotencyConflictError,
+    IdempotencyLedger,
+    IdempotencyStatus,
 )
 from nika_core.runtime.retry import RetryPolicy
 from nika_core.runtime.session_store import (
@@ -37,6 +44,8 @@ _RESUMABLE_OUTCOMES = frozenset(
     }
 )
 
+_CANCEL_OPERATION_TYPE = "runtime.cancel"
+
 
 class TaskRuntimeCoordinator:
     """Map framework-neutral runtime results into Nika task state and audit history."""
@@ -46,10 +55,12 @@ class TaskRuntimeCoordinator:
         queue: TaskQueue,
         audit: AuditLog,
         session_store: RuntimeSessionStore | None = None,
+        idempotency: IdempotencyLedger | None = None,
     ) -> None:
         self._queue = queue
         self._audit = audit
         self._sessions = session_store or RuntimeSessionStore(queue.store)
+        self._idempotency = idempotency or IdempotencyLedger(queue.store)
 
     @property
     def sessions(self) -> RuntimeSessionStore:
@@ -246,21 +257,128 @@ class TaskRuntimeCoordinator:
         task_id: str,
         thread_id: str,
     ) -> bool:
-        self._audit.append(
-            event_type="runtime.cancel_requested",
-            entity_type="task",
-            entity_id=task_id,
-            payload={"runtime_id": runtime.runtime_id, "thread_id": thread_id},
+        """Request cancellation without allowing a crash to resurrect the task.
+
+        Cancellation is an external side effect. Nika first commits a PENDING idempotency
+        reservation and audit event, then calls the runtime. If the process dies after that
+        durable intent but before local finalization, startup recovery sees the unresolved
+        operation and refuses automatic resume. An accepted cancellation is then finalized
+        atomically with the task state, runtime-session cursor and audit evidence.
+        """
+        operation_key = self._cancel_operation_key(
+            runtime_id=runtime.runtime_id,
+            task_id=task_id,
+            thread_id=thread_id,
         )
-        accepted = await runtime.cancel(task_id=task_id, thread_id=thread_id)
-        if not accepted:
-            self._audit.append(
-                event_type="runtime.cancel_not_active",
+        fingerprint = self._cancel_input_fingerprint(
+            runtime_id=runtime.runtime_id,
+            task_id=task_id,
+            thread_id=thread_id,
+        )
+
+        with self._queue.store.connection() as conn:
+            reservation, created = self._idempotency.reserve_with_connection(
+                conn,
+                operation_key=operation_key,
+                task_id=task_id,
+                operation_type=_CANCEL_OPERATION_TYPE,
+                input_fingerprint=fingerprint,
+            )
+            if not created:
+                if reservation.status == IdempotencyStatus.COMPLETED:
+                    return bool(reservation.result and reservation.result.get("accepted"))
+                raise IdempotencyConflictError(
+                    "runtime cancellation is already pending or uncertain; "
+                    "reconcile it before replay"
+                )
+            self._audit.append_with_connection(
+                conn,
+                event_type="runtime.cancel_requested",
                 entity_type="task",
                 entity_id=task_id,
-                payload={"runtime_id": runtime.runtime_id, "thread_id": thread_id},
+                payload={
+                    "runtime_id": runtime.runtime_id,
+                    "thread_id": thread_id,
+                    "operation_key": operation_key,
+                },
             )
-        return accepted
+
+        try:
+            accepted = await runtime.cancel(task_id=task_id, thread_id=thread_id)
+        except Exception as exc:  # noqa: BLE001 - external cancellation boundary becomes UNCERTAIN
+            with self._queue.store.connection() as conn:
+                self._idempotency.mark_uncertain_with_connection(conn, operation_key)
+                self._audit.append_with_connection(
+                    conn,
+                    event_type="runtime.cancel_uncertain",
+                    entity_type="task",
+                    entity_id=task_id,
+                    payload={
+                        "runtime_id": runtime.runtime_id,
+                        "thread_id": thread_id,
+                        "operation_key": operation_key,
+                        "error": str(exc),
+                    },
+                )
+            raise
+
+        if not accepted:
+            with self._queue.store.connection() as conn:
+                self._idempotency.release_pending_with_connection(conn, operation_key)
+                self._audit.append_with_connection(
+                    conn,
+                    event_type="runtime.cancel_not_active",
+                    entity_type="task",
+                    entity_id=task_id,
+                    payload={
+                        "runtime_id": runtime.runtime_id,
+                        "thread_id": thread_id,
+                        "operation_key": operation_key,
+                    },
+                )
+            return False
+
+        with self._queue.store.connection() as conn:
+            current = self._task_state_with_connection(conn, task_id)
+            state_changed = False
+            if current != TaskState.CANCELLED and can_transition(current, TaskState.CANCELLED):
+                self._queue.transition_with_connection(conn, task_id, TaskState.CANCELLED)
+                state_changed = True
+            elif current not in {
+                TaskState.CANCELLED,
+                TaskState.COMPLETED,
+                TaskState.FAILED,
+                TaskState.ARCHIVED,
+            }:
+                raise ValueError(
+                    f"Accepted runtime cancellation cannot be reconciled from task state {current.value}"
+                )
+
+            self._sessions.delete_with_connection(conn, task_id)
+            self._idempotency.complete_with_connection(
+                conn,
+                operation_key,
+                {
+                    "accepted": True,
+                    "task_state": (
+                        TaskState.CANCELLED.value if state_changed else current.value
+                    ),
+                },
+            )
+            self._audit.append_with_connection(
+                conn,
+                event_type="runtime.cancel_accepted",
+                entity_type="task",
+                entity_id=task_id,
+                payload={
+                    "runtime_id": runtime.runtime_id,
+                    "thread_id": thread_id,
+                    "operation_key": operation_key,
+                    "previous_task_state": current.value,
+                    "task_state_changed": state_changed,
+                },
+            )
+        return True
 
     def _require_approval_session(
         self,
@@ -344,7 +462,11 @@ class TaskRuntimeCoordinator:
 
     def _task_state(self, task_id: str) -> TaskState:
         with self._queue.store.connection() as conn:
-            row = conn.execute("SELECT state FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+            return self._task_state_with_connection(conn, task_id)
+
+    @staticmethod
+    def _task_state_with_connection(conn, task_id: str) -> TaskState:
+        row = conn.execute("SELECT state FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
         if row is None:
             raise KeyError(f"Unknown task: {task_id}")
         return TaskState(row["state"])
@@ -390,9 +512,18 @@ class TaskRuntimeCoordinator:
         therefore never expose a partially finalized local product state. If session mutation,
         task transition or audit serialization/write fails, the whole Nika transaction rolls
         back and the previous recovery cursor/state remain available for explicit recovery.
+
+        A previously committed CANCELLED task is authoritative human intent. If an in-flight
+        runtime coroutine races with accepted cancellation and reports a later outcome, Nika
+        records that observation but does not resurrect or overwrite the cancelled task.
         """
         with self._queue.store.connection() as conn:
-            if result.outcome in _RESUMABLE_OUTCOMES and result.resume_token:
+            current = self._task_state_with_connection(conn, task_id)
+            cancellation_won = current == TaskState.CANCELLED
+
+            if cancellation_won:
+                self._sessions.delete_with_connection(conn, task_id)
+            elif result.outcome in _RESUMABLE_OUTCOMES and result.resume_token:
                 self._sessions.record_result_with_connection(
                     conn,
                     task_id=task_id,
@@ -403,14 +534,27 @@ class TaskRuntimeCoordinator:
             else:
                 self._sessions.delete_with_connection(conn, task_id)
 
-            self._queue.transition_with_connection(
-                conn,
-                task_id,
-                _OUTCOME_TO_STATE[result.outcome],
-            )
+            if not cancellation_won:
+                self._queue.transition_with_connection(
+                    conn,
+                    task_id,
+                    _OUTCOME_TO_STATE[result.outcome],
+                )
 
             for event in result.events:
                 self._append_runtime_event_with_connection(conn, task_id, event)
+            if cancellation_won and result.outcome != RuntimeOutcome.CANCELLED:
+                self._audit.append_with_connection(
+                    conn,
+                    event_type="runtime.finished_after_cancel",
+                    entity_type="task",
+                    entity_id=task_id,
+                    payload={
+                        "runtime_id": runtime_id,
+                        "thread_id": thread_id,
+                        "runtime_outcome": result.outcome.value,
+                    },
+                )
             self._audit.append_with_connection(
                 conn,
                 event_type="runtime.finished",
@@ -419,11 +563,22 @@ class TaskRuntimeCoordinator:
                 payload={
                     "runtime_id": runtime_id,
                     "thread_id": thread_id,
-                    "outcome": result.outcome.value,
+                    "outcome": (
+                        RuntimeOutcome.CANCELLED.value
+                        if cancellation_won
+                        else result.outcome.value
+                    ),
+                    "runtime_reported_outcome": result.outcome.value,
                     "resume_token": result.resume_token,
                     "error": result.error,
                     "error_code": result.error_code.value if result.error_code else None,
                 },
+            )
+        if cancellation_won and result.outcome != RuntimeOutcome.CANCELLED:
+            return RuntimeResult(
+                outcome=RuntimeOutcome.CANCELLED,
+                events=result.events,
+                output=result.output,
             )
         return result
 
@@ -435,3 +590,28 @@ class TaskRuntimeCoordinator:
             entity_id=task_id,
             payload={"sequence": event.sequence, **dict(event.payload)},
         )
+
+    @staticmethod
+    def _cancel_operation_key(*, runtime_id: str, task_id: str, thread_id: str) -> str:
+        material = json.dumps(
+            {"runtime_id": runtime_id, "task_id": task_id, "thread_id": thread_id},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return f"runtime.cancel:{hashlib.sha256(material).hexdigest()}"
+
+    @staticmethod
+    def _cancel_input_fingerprint(*, runtime_id: str, task_id: str, thread_id: str) -> str:
+        material = json.dumps(
+            {
+                "operation": _CANCEL_OPERATION_TYPE,
+                "runtime_id": runtime_id,
+                "task_id": task_id,
+                "thread_id": thread_id,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(material).hexdigest()
