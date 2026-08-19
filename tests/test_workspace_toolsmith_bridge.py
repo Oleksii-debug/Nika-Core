@@ -36,6 +36,7 @@ def _job(
     *,
     isolation: IsolationClass = IsolationClass.POLICY_ONLY,
     network: NetworkPolicy | None = None,
+    process: ProcessPolicy | None = None,
 ) -> CodingJob:
     return CodingJob(
         job_id="job-bridge",
@@ -53,7 +54,7 @@ def _job(
             expires_at="2026-08-20T00:00:00+00:00",
         ),
         allowed_paths=AllowedPathPolicy(("src/nika_core/workspaces", "tests")),
-        process_policy=ProcessPolicy(("python", "ruff")),
+        process_policy=process or ProcessPolicy(("python", "ruff")),
         network_policy=network or NetworkPolicy(),
         resource_budget=ResourceBudget(
             timeout_seconds=120,
@@ -186,6 +187,34 @@ def test_os_sandboxed_lease_can_form_untrusted_execution_envelope(tmp_path: Path
         require_untrusted_execution=True,
     )
     assert envelope.untrusted_execution_ready is True
+
+
+def test_bridge_does_not_widen_exact_executable_path_to_basename(tmp_path: Path) -> None:
+    envelope = build_toolsmith_security_envelope(
+        _job(
+            tmp_path,
+            isolation=IsolationClass.OS_SANDBOXED,
+            process=ProcessPolicy(("C:\\trusted\\python.exe",)),
+        ),
+        bindings=_bindings(),
+        budget=_budget(),
+        require_untrusted_execution=True,
+    )
+    envelope.intent(
+        permission="tests.run",
+        action_id="trusted-python",
+        risk=ToolRisk.LOCAL_WRITE,
+        target="tests",
+        executable="C:\\TRUSTED\\python.exe",
+    )
+    with pytest.raises(PermissionError, match="exact Toolsmith process policy"):
+        envelope.intent(
+            permission="tests.run",
+            action_id="other-python",
+            risk=ToolRisk.LOCAL_WRITE,
+            target="tests",
+            executable="C:\\other\\python.exe",
+        )
 
 
 def test_network_allowlist_and_budget_are_enforced_by_m10(tmp_path: Path) -> None:

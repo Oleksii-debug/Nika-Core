@@ -94,6 +94,15 @@ class ToolsmithSecurityEnvelope:
             raise PermissionError("action risk exceeds the bound permission risk ceiling")
         if write_path is not None:
             self.resolve_write(write_path)
+        if executable is not None:
+            allowed_executables = {
+                item.strip().casefold()
+                for item in self.security_policy.sandbox.allowed_executables
+            }
+            if executable.strip().casefold() not in allowed_executables:
+                raise PermissionError(
+                    "executable is outside exact Toolsmith process policy"
+                )
         return ActionIntent(
             action_id=action_id,
             tool_id=binding.tool_id,
