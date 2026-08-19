@@ -40,6 +40,8 @@ _DOCUMENT_MEDIA_TYPES = {
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
+_TEXT_MEDIA_TYPE_SET = frozenset(_TEXT_MEDIA_TYPES.values())
+_DOCUMENT_MEDIA_TYPE_SET = frozenset(_DOCUMENT_MEDIA_TYPES.values())
 
 
 class _VisibleTextParser(HTMLParser):
@@ -98,6 +100,10 @@ def is_document_format(path: Path | str) -> bool:
     return Path(path).suffix.casefold() in _DOCUMENT_MEDIA_TYPES
 
 
+def is_document_media_type(media_type: str) -> bool:
+    return media_type.casefold() in _DOCUMENT_MEDIA_TYPE_SET
+
+
 def resolve_local_file(
     path: Path | str,
     *,
@@ -128,11 +134,11 @@ def resolve_local_folder(path: Path | str, *, allowed_root: Path | str) -> Path:
     return candidate
 
 
-def _decode_utf8(data: bytes, path: Path) -> str:
+def _decode_utf8(data: bytes, name: str) -> str:
     try:
         return data.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
-        raise LocalIngestionError(f"{path.name}: expected UTF-8 text") from exc
+        raise LocalIngestionError(f"{name}: expected UTF-8 text") from exc
 
 
 def _extract_json(text: str) -> str:
@@ -161,6 +167,31 @@ def _extract_html(text: str) -> str:
     return html.unescape("".join(parser.parts))
 
 
+def extract_text_payload(
+    payload: bytes,
+    *,
+    title: str,
+    media_type: str,
+) -> ExtractedDocument:
+    normalized_media_type = media_type.casefold()
+    if normalized_media_type not in _TEXT_MEDIA_TYPE_SET:
+        raise UnsupportedLocalFormatError(f"unsupported text media type: {media_type}")
+    text = _decode_utf8(payload, title)
+    if normalized_media_type == "text/html":
+        text = _extract_html(text)
+    elif normalized_media_type == "text/csv":
+        text = _extract_csv(text)
+    elif normalized_media_type == "application/json":
+        text = _extract_json(text)
+    return ExtractedDocument(
+        title=title,
+        text=text,
+        media_type=normalized_media_type,
+        extractor="nika-stdlib",
+        extractor_version="1",
+    )
+
+
 def extract_local_file(
     path: Path | str,
     *,
@@ -172,19 +203,8 @@ def extract_local_file(
     media_type = _TEXT_MEDIA_TYPES.get(suffix)
     if media_type is None:
         raise UnsupportedLocalFormatError(f"unsupported text format: {suffix or '<none>'}")
-
-    text = _decode_utf8(candidate.read_bytes(), candidate)
-    if suffix in {".html", ".htm"}:
-        text = _extract_html(text)
-    elif suffix == ".csv":
-        text = _extract_csv(text)
-    elif suffix == ".json":
-        text = _extract_json(text)
-
-    return ExtractedDocument(
+    return extract_text_payload(
+        candidate.read_bytes(),
         title=candidate.name,
-        text=text,
         media_type=media_type,
-        extractor="nika-stdlib",
-        extractor_version="1",
     )
