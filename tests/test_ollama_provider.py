@@ -13,6 +13,7 @@ from nika_core.model_gateway.contracts import (
     ModelMessage,
     ModelRequest,
     PrivacyClass,
+    ProviderCapabilities,
     ProviderKind,
 )
 from nika_core.model_gateway.gateway import ModelGateway
@@ -81,6 +82,57 @@ def test_ollama_uses_native_chat_api_without_streaming_or_thinking() -> None:
     assert response.usage.total_tokens == 10
 
 
+def test_ollama_supports_validated_native_thinking_levels() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.read())
+        return httpx.Response(
+            200,
+            json={
+                "model": "gpt-oss",
+                "message": {
+                    "role": "assistant",
+                    "thinking": "private reasoning not surfaced by Nika",
+                    "content": "answer",
+                },
+                "done": True,
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    def client_factory(**kwargs: Any) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=transport, **kwargs)
+
+    provider = OllamaProvider(
+        default_model="gpt-oss",
+        think="medium",
+        client_factory=client_factory,
+    )
+    response = asyncio.run(provider.complete(_request(model="gpt-oss")))
+
+    assert seen["body"] == {
+        "model": "gpt-oss",
+        "messages": [{"role": "user", "content": "hello"}],
+        "stream": False,
+        "think": "medium",
+        "options": {"temperature": 0},
+    }
+    assert response.text == "answer"
+
+
+@pytest.mark.parametrize("level", ["low", "medium", "high", "max", " LOW "])
+def test_ollama_accepts_documented_thinking_levels(level: str) -> None:
+    OllamaProvider(default_model="model", think=level)
+
+
+@pytest.mark.parametrize("level", ["", "off", "maximum", "turbo"])
+def test_ollama_rejects_unknown_thinking_levels(level: str) -> None:
+    with pytest.raises(ValueError, match="think level"):
+        OllamaProvider(default_model="model", think=level)
+
+
 def test_ollama_request_model_overrides_default() -> None:
     seen_model: list[str] = []
 
@@ -141,6 +193,16 @@ def test_ollama_invalid_native_schema_fails_closed() -> None:
 
     assert exc_info.value.code is ModelErrorCode.PROVIDER_ERROR
     assert exc_info.value.retryable is False
+
+
+def test_provider_capabilities_fail_closed_for_hard_cancellation_by_default() -> None:
+    capabilities = ProviderCapabilities(
+        provider_id="new-adapter",
+        kind=ProviderKind.LOCAL,
+        supports_private_data=True,
+    )
+
+    assert capabilities.supports_hard_cancellation is False
 
 
 def test_ollama_does_not_claim_hard_server_side_cancellation() -> None:
