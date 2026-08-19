@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from dataclasses import asdict
 from datetime import UTC, datetime
 
@@ -22,9 +21,15 @@ _ALLOWED_TRANSITIONS: dict[CandidateState, frozenset[CandidateState]] = {
     ),
     CandidateState.REUSE_SELECTED: frozenset({CandidateState.VERIFYING, CandidateState.REJECTED}),
     CandidateState.BUILD_REQUIRED: frozenset({CandidateState.BUILDING, CandidateState.BLOCKED}),
-    CandidateState.BUILDING: frozenset({CandidateState.BUILT, CandidateState.BLOCKED, CandidateState.QUARANTINED}),
-    CandidateState.BUILT: frozenset({CandidateState.VERIFYING, CandidateState.REJECTED, CandidateState.QUARANTINED}),
-    CandidateState.VERIFYING: frozenset({CandidateState.VERIFIED, CandidateState.REJECTED, CandidateState.QUARANTINED}),
+    CandidateState.BUILDING: frozenset(
+        {CandidateState.BUILT, CandidateState.BLOCKED, CandidateState.QUARANTINED}
+    ),
+    CandidateState.BUILT: frozenset(
+        {CandidateState.VERIFYING, CandidateState.REJECTED, CandidateState.QUARANTINED}
+    ),
+    CandidateState.VERIFYING: frozenset(
+        {CandidateState.VERIFIED, CandidateState.REJECTED, CandidateState.QUARANTINED}
+    ),
     CandidateState.VERIFIED: frozenset({CandidateState.REGISTERING, CandidateState.ROLLED_BACK}),
     CandidateState.REGISTERING: frozenset({CandidateState.REGISTERED, CandidateState.ROLLED_BACK}),
     CandidateState.REGISTERED: frozenset({CandidateState.ROLLED_BACK}),
@@ -59,16 +64,17 @@ class ToolsmithRepository:
     def create_escalation(self, gap: CapabilityGap) -> tuple[int, CandidateState]:
         with self._store.connection() as conn:
             existing = conn.execute(
-                "SELECT row_version, state FROM capability_escalations WHERE task_id = ? AND requested_capability = ?",
+                "SELECT row_version, state FROM capability_escalations "
+                "WHERE task_id = ? AND requested_capability = ?",
                 (gap.task_id, gap.requested_capability),
             ).fetchone()
             if existing is not None:
                 return int(existing["row_version"]), CandidateState(existing["state"])
             conn.execute(
                 "INSERT INTO capability_escalations("
-                "task_id, requested_capability, gap_kind, reason, attempted_methods_json, permission_ceiling_json, "
-                "state, row_version, pinned_version, pinned_digest, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, ?, ?)",
+                "task_id, requested_capability, gap_kind, reason, attempted_methods_json, "
+                "permission_ceiling_json, state, row_version, pinned_version, pinned_digest, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, ?, ?)",
                 (
                     gap.task_id,
                     gap.requested_capability,
@@ -93,7 +99,8 @@ class ToolsmithRepository:
     def get_escalation(self, *, task_id: str, capability_id: str) -> dict[str, object] | None:
         with self._store.connection() as conn:
             row = conn.execute(
-                "SELECT * FROM capability_escalations WHERE task_id = ? AND requested_capability = ?",
+                "SELECT * FROM capability_escalations "
+                "WHERE task_id = ? AND requested_capability = ?",
                 (task_id, capability_id),
             ).fetchone()
         return dict(row) if row is not None else None
@@ -109,7 +116,8 @@ class ToolsmithRepository:
     ) -> int:
         with self._store.connection() as conn:
             row = conn.execute(
-                "SELECT state, row_version FROM capability_escalations WHERE task_id = ? AND requested_capability = ?",
+                "SELECT state, row_version FROM capability_escalations "
+                "WHERE task_id = ? AND requested_capability = ?",
                 (task_id, capability_id),
             ).fetchone()
             if row is None:
@@ -117,12 +125,16 @@ class ToolsmithRepository:
             current = CandidateState(row["state"])
             version = int(row["row_version"])
             if version != expected_version:
-                raise StaleTransitionError(f"expected row version {expected_version}, found {version}")
+                raise StaleTransitionError(
+                    f"expected row version {expected_version}, found {version}"
+                )
             if target not in _ALLOWED_TRANSITIONS[current]:
-                raise InvalidTransitionError(f"invalid candidate transition {current.value} -> {target.value}")
+                raise InvalidTransitionError(
+                    f"invalid candidate transition {current.value} -> {target.value}"
+                )
             cursor = conn.execute(
-                "UPDATE capability_escalations SET state = ?, row_version = row_version + 1, updated_at = ? "
-                "WHERE task_id = ? AND requested_capability = ? AND row_version = ?",
+                "UPDATE capability_escalations SET state = ?, row_version = row_version + 1, "
+                "updated_at = ? WHERE task_id = ? AND requested_capability = ? AND row_version = ?",
                 (target.value, _now(), task_id, capability_id, expected_version),
             )
             if cursor.rowcount != 1:
@@ -151,8 +163,8 @@ class ToolsmithRepository:
         with self._store.connection() as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO capability_search_candidates("
-                "task_id, capability_id, version, source, digest, permissions_json, metadata_json, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "task_id, capability_id, version, source, digest, permissions_json, metadata_json, "
+                "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     task_id,
                     candidate.capability_id,
@@ -183,7 +195,8 @@ class ToolsmithRepository:
                 raise RuntimeError("capability version collision with a different digest")
             conn.execute(
                 "INSERT OR IGNORE INTO capability_registry("
-                "capability_id, version, digest, manifest_json, registered_at, active) VALUES (?, ?, ?, ?, ?, 1)",
+                "capability_id, version, digest, manifest_json, registered_at, active) "
+                "VALUES (?, ?, ?, ?, ?, 1)",
                 (
                     manifest.capability_id,
                     manifest.version,
@@ -193,8 +206,8 @@ class ToolsmithRepository:
                 ),
             )
             conn.execute(
-                "UPDATE capability_escalations SET pinned_version = ?, pinned_digest = ?, updated_at = ? "
-                "WHERE task_id = ? AND requested_capability = ?",
+                "UPDATE capability_escalations SET pinned_version = ?, pinned_digest = ?, "
+                "updated_at = ? WHERE task_id = ? AND requested_capability = ?",
                 (manifest.version, manifest.digest, _now(), task_id, manifest.capability_id),
             )
             self._audit.append_with_connection(
@@ -221,10 +234,12 @@ class ToolsmithRepository:
             raise RuntimeError("registered escalation is missing exact pinned capability identity")
         with self._store.connection() as conn:
             conn.execute(
-                "INSERT INTO capability_resume_bindings(task_id, capability_id, version, digest, status, updated_at) "
+                "INSERT INTO capability_resume_bindings("
+                "task_id, capability_id, version, digest, status, updated_at) "
                 "VALUES (?, ?, ?, ?, 'ready', ?) "
-                "ON CONFLICT(task_id, capability_id) DO UPDATE SET version=excluded.version, digest=excluded.digest, "
-                "status='ready', updated_at=excluded.updated_at",
+                "ON CONFLICT(task_id, capability_id) DO UPDATE SET "
+                "version=excluded.version, digest=excluded.digest, status='ready', "
+                "updated_at=excluded.updated_at",
                 (task_id, capability_id, version, digest, _now()),
             )
             self._audit.append_with_connection(
@@ -244,7 +259,8 @@ class ToolsmithRepository:
         with self._store.connection() as conn:
             if version and digest:
                 conn.execute(
-                    "UPDATE capability_registry SET active = 0 WHERE capability_id = ? AND version = ? AND digest = ?",
+                    "UPDATE capability_registry SET active = 0 "
+                    "WHERE capability_id = ? AND version = ? AND digest = ?",
                     (capability_id, version, digest),
                 )
             conn.execute(
@@ -270,7 +286,8 @@ class ToolsmithRepository:
         placeholders = ",".join("?" for _ in terminal)
         with self._store.connection() as conn:
             rows = conn.execute(
-                f"SELECT * FROM capability_escalations WHERE state NOT IN ({placeholders}) ORDER BY created_at",  # noqa: S608
+                f"SELECT * FROM capability_escalations WHERE state NOT IN ({placeholders}) "
+                "ORDER BY created_at",
                 terminal,
             ).fetchall()
         return tuple(dict(row) for row in rows)
