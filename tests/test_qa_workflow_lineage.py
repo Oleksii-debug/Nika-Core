@@ -13,6 +13,10 @@ CANDIDATE_ENV = "NIKA_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || g
 CHECKOUT_REF = "ref: ${{ env.NIKA_CANDIDATE_SHA }}"
 IDENTITY_ASSERTION = "python scripts/qa_assert_checkout_identity.py"
 MAIN_PUSH_TRIGGER = '  push:\n    branches:\n      - "main"'
+M12_UPSTREAM_WORKFLOW_PATHS = (
+    '      - ".github/workflows/ci.yml"',
+    '      - ".github/workflows/m11-windows-release.yml"',
+)
 
 
 def test_every_ci_checkout_is_bound_to_exact_candidate_sha() -> None:
@@ -57,3 +61,12 @@ def test_release_gates_run_automatically_on_main_push() -> None:
     for path in RELEASE_WORKFLOWS:
         text = path.read_text(encoding="utf-8")
         assert MAIN_PUSH_TRIGGER in text, path
+
+
+def test_m12_runs_when_upstream_release_workflows_change() -> None:
+    m12 = (ROOT / ".github" / "workflows" / "m12-prehuman-release-gate.yml").read_text(
+        encoding="utf-8"
+    )
+
+    for workflow_path in M12_UPSTREAM_WORKFLOW_PATHS:
+        assert m12.count(workflow_path) == 2, workflow_path
