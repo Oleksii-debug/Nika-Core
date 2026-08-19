@@ -11,6 +11,10 @@ dependencies = [
   "platformdirs>=4,<5",
   "pydantic>=2,<3",
   "pydantic-settings>=2,<3",
+  "pypdf>=6.14,<7",
+  "python-docx>=1.2,<2",
+  "openpyxl>=3.1.5,<4",
+  "defusedxml>=0.7.1,<1",
 ]
 
 [project.optional-dependencies]
