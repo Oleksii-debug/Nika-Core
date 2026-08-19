@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -40,7 +41,7 @@ def _insert_task(
 ) -> None:
     now = datetime.now(UTC).isoformat()
     payload = json.dumps({"value": value}, ensure_ascii=False, sort_keys=True)
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn:
         conn.execute(
             """
             INSERT INTO tasks(
@@ -58,19 +59,21 @@ def _insert_task(
                 now,
             ),
         )
+        conn.commit()
 
 
 def _set_task_value(path: Path, task_id: str, value: str) -> None:
     payload = json.dumps({"value": value}, ensure_ascii=False, sort_keys=True)
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn:
         conn.execute(
             "UPDATE tasks SET payload_json = ?, updated_at = ? WHERE task_id = ?",
             (payload, datetime.now(UTC).isoformat(), task_id),
         )
+        conn.commit()
 
 
 def _task_value(path: Path, task_id: str) -> str:
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn:
         row = conn.execute(
             "SELECT payload_json FROM tasks WHERE task_id = ?",
             (task_id,),
@@ -90,7 +93,7 @@ def _sha256(path: Path) -> str:
 
 def _create_version_one_database(path: Path) -> None:
     now = datetime.now(UTC).isoformat()
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn:
         conn.execute(
             "CREATE TABLE schema_migrations ("
             "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
@@ -101,6 +104,7 @@ def _create_version_one_database(path: Path) -> None:
             "INSERT INTO schema_migrations(version, applied_at) VALUES (1, ?)",
             (now,),
         )
+        conn.commit()
 
 
 def test_live_wal_backup_is_consistent_and_verifiable(tmp_path: Path) -> None:
@@ -161,7 +165,7 @@ def test_backup_rejects_foreign_key_corruption(tmp_path: Path) -> None:
     store = _initialize(database)
     manager = SQLiteRecoveryManager(store)
 
-    with sqlite3.connect(database) as conn:
+    with closing(sqlite3.connect(database)) as conn:
         conn.execute("PRAGMA foreign_keys = OFF")
         conn.execute(
             """
@@ -176,6 +180,7 @@ def test_backup_rejects_foreign_key_corruption(tmp_path: Path) -> None:
                 datetime.now(UTC).isoformat(),
             ),
         )
+        conn.commit()
 
     with pytest.raises(BackupVerificationError, match="foreign-key"):
         manager.create_backup(tmp_path / "bad-foreign-key.db")
@@ -186,8 +191,9 @@ def test_backup_rejects_migration_history_gap(tmp_path: Path) -> None:
     store = _initialize(database)
     manager = SQLiteRecoveryManager(store)
 
-    with sqlite3.connect(database) as conn:
+    with closing(sqlite3.connect(database)) as conn:
         conn.execute("DELETE FROM schema_migrations WHERE version = 4")
+        conn.commit()
 
     with pytest.raises(BackupVerificationError, match="not contiguous"):
         manager.create_backup(tmp_path / "gap.db")
