@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
-from hashlib import sha256
-from os import environ, name
-from pathlib import Path, PurePosixPath, PureWindowsPath
-from stat import FILE_ATTRIBUTE_REPARSE_POINT, S_ISLNK
+import collections.abc
+import dataclasses
+import hashlib
+import os
+import pathlib
+import stat
 
-from nika_core.toolsmith.contracts import IsolationClass
+import nika_core.toolsmith.contracts as toolsmith_contracts
 
 
 _WINDOWS_RESERVED_BASENAMES = frozenset(
@@ -65,7 +65,7 @@ class WorkspaceSecurityError(ValueError):
     """Raised when a workspace or process request cannot be proven policy-safe."""
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class WorkspacePathPolicy:
     allowed_roots: tuple[str, ...]
     reject_reparse_points: bool = True
@@ -82,16 +82,16 @@ class WorkspacePathPolicy:
         return any(candidate == root or root in candidate.parents for root in roots)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class SterileGitPlan:
-    repository_root: Path
-    private_git_dir: Path
-    worktree_root: Path
+    repository_root: pathlib.Path
+    private_git_dir: pathlib.Path
+    worktree_root: pathlib.Path
     branch_name: str
     base_sha: str
-    environment: Mapping[str, str]
+    environment: collections.abc.Mapping[str, str]
     config_args: tuple[str, ...]
-    isolation_class: IsolationClass = IsolationClass.POLICY_ONLY
+    isolation_class: toolsmith_contracts.IsolationClass = toolsmith_contracts.IsolationClass.POLICY_ONLY
 
     def __post_init__(self) -> None:
         if not self.branch_name.strip():
@@ -104,27 +104,27 @@ class SterileGitPlan:
             raise WorkspaceSecurityError("production .git metadata cannot be worker metadata")
         if self.private_git_dir == self.worktree_root / ".git":
             raise WorkspaceSecurityError("worker-visible .git metadata is forbidden")
-        if self.isolation_class is not IsolationClass.POLICY_ONLY:
+        if self.isolation_class is not toolsmith_contracts.IsolationClass.POLICY_ONLY:
             raise WorkspaceSecurityError(
                 "workspace plan is policy-only and must not overclaim isolation"
             )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class FileEvidence:
     path: str
     sha256: str
     size_bytes: int
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class TreeEvidence:
     files: tuple[FileEvidence, ...]
     digest: str
     total_bytes: int
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class ProductionIntegritySnapshot:
     base_sha: str
     tree_digest: str
@@ -148,16 +148,16 @@ def _windows_component_is_reserved(component: str) -> bool:
     return stem in _WINDOWS_RESERVED_BASENAMES
 
 
-def normalize_job_relative_path(value: str) -> PurePosixPath:
+def normalize_job_relative_path(value: str) -> pathlib.PurePosixPath:
     stripped = value.strip()
     if not stripped or stripped != value:
         raise WorkspaceSecurityError("path must be non-empty and must not have outer whitespace")
     if "\x00" in stripped:
         raise WorkspaceSecurityError("NUL is forbidden in paths")
 
-    windows = PureWindowsPath(stripped)
+    windows = pathlib.PureWindowsPath(stripped)
     normalized_text = stripped.replace("\\", "/")
-    posix = PurePosixPath(normalized_text)
+    posix = pathlib.PurePosixPath(normalized_text)
     parts = tuple(part for part in posix.parts if part not in {"", "."})
     lowered_parts = tuple(part.casefold() for part in parts)
 
@@ -172,16 +172,16 @@ def normalize_job_relative_path(value: str) -> PurePosixPath:
     if any(_windows_component_is_reserved(part) for part in parts):
         raise WorkspaceSecurityError("Windows reserved or trailing-dot/space path is forbidden")
 
-    return PurePosixPath(*parts)
+    return pathlib.PurePosixPath(*parts)
 
 
 def ensure_path_policy(
-    root: Path,
+    root: pathlib.Path,
     relative_path: str,
     policy: WorkspacePathPolicy,
     *,
     must_exist: bool = False,
-) -> Path:
+) -> pathlib.Path:
     normalized = normalize_job_relative_path(relative_path)
     if not policy.allows(normalized.as_posix()):
         raise WorkspaceSecurityError("path is outside the allowed workspace roots")
@@ -197,13 +197,13 @@ def ensure_path_policy(
         if not current.exists() and not current.is_symlink():
             continue
         file_stat = current.lstat()
-        if S_ISLNK(file_stat.st_mode):
+        if stat.S_ISLNK(file_stat.st_mode):
             raise WorkspaceSecurityError("symbolic links are forbidden in guarded workspace paths")
         attributes = getattr(file_stat, "st_file_attributes", 0)
         if (
             policy.reject_reparse_points
-            and FILE_ATTRIBUTE_REPARSE_POINT
-            and attributes & FILE_ATTRIBUTE_REPARSE_POINT
+            and stat.FILE_ATTRIBUTE_REPARSE_POINT
+            and attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
         ):
             raise WorkspaceSecurityError("Windows reparse points are forbidden in guarded paths")
 
@@ -215,15 +215,17 @@ def ensure_path_policy(
     return candidate
 
 
-def sterile_git_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
-    source_env = dict(environ if source is None else source)
+def sterile_git_environment(
+    source: collections.abc.Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    source_env = dict(os.environ if source is None else source)
     environment = {
         key: value
         for key, value in source_env.items()
         if key.upper() in _ALLOWED_ENVIRONMENT_VARIABLES
         and key.upper() not in _GIT_CREDENTIAL_VARIABLES
     }
-    null_device = "NUL" if name == "nt" else "/dev/null"
+    null_device = "NUL" if os.name == "nt" else "/dev/null"
     environment.update(
         {
             "GIT_CONFIG_NOSYSTEM": "1",
@@ -237,11 +239,11 @@ def sterile_git_environment(source: Mapping[str, str] | None = None) -> dict[str
 
 def make_sterile_git_plan(
     *,
-    repository_root: Path,
-    job_root: Path,
+    repository_root: pathlib.Path,
+    job_root: pathlib.Path,
     branch_name: str,
     base_sha: str,
-    source_environment: Mapping[str, str] | None = None,
+    source_environment: collections.abc.Mapping[str, str] | None = None,
 ) -> SterileGitPlan:
     repository_root = repository_root.resolve(strict=False)
     job_root = job_root.resolve(strict=False)
@@ -262,7 +264,7 @@ def make_sterile_git_plan(
         "-c",
         "credential.helper=",
         "-c",
-        "core.hooksPath=NUL" if name == "nt" else "core.hooksPath=/dev/null",
+        "core.hooksPath=NUL" if os.name == "nt" else "core.hooksPath=/dev/null",
         "-c",
         "protocol.file.allow=never",
         "-c",
@@ -280,13 +282,13 @@ def make_sterile_git_plan(
 
 
 def validate_typed_argv(
-    argv: Sequence[str],
-    allowed_executables: Iterable[str],
+    argv: collections.abc.Sequence[str],
+    allowed_executables: collections.abc.Iterable[str],
 ) -> tuple[str, ...]:
     if not argv or any(not argument or "\x00" in argument for argument in argv):
         raise WorkspaceSecurityError("argv must contain non-empty NUL-free arguments")
     executable = argv[0]
-    basename = PureWindowsPath(executable).name.casefold()
+    basename = pathlib.PureWindowsPath(executable).name.casefold()
     if basename in _SHELL_EXECUTABLES:
         raise WorkspaceSecurityError("generic shell entrypoints are forbidden")
 
@@ -298,8 +300,8 @@ def validate_typed_argv(
     return tuple(argv)
 
 
-def _hash_file(path: Path, *, max_file_bytes: int) -> tuple[str, int]:
-    digest = sha256()
+def _hash_file(path: pathlib.Path, *, max_file_bytes: int) -> tuple[str, int]:
+    digest = hashlib.sha256()
     size = 0
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -311,7 +313,7 @@ def _hash_file(path: Path, *, max_file_bytes: int) -> tuple[str, int]:
 
 
 def collect_tree_evidence(
-    root: Path,
+    root: pathlib.Path,
     *,
     max_files: int = 2000,
     max_file_bytes: int = 32 * 1024 * 1024,
@@ -328,8 +330,9 @@ def collect_tree_evidence(
         normalize_job_relative_path(relative)
         file_stat = path.lstat()
         attributes = getattr(file_stat, "st_file_attributes", 0)
-        if S_ISLNK(file_stat.st_mode) or (
-            FILE_ATTRIBUTE_REPARSE_POINT and attributes & FILE_ATTRIBUTE_REPARSE_POINT
+        if stat.S_ISLNK(file_stat.st_mode) or (
+            stat.FILE_ATTRIBUTE_REPARSE_POINT
+            and attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
         ):
             raise WorkspaceSecurityError("tree evidence refuses symlinks and reparse points")
         if path.is_dir():
@@ -344,7 +347,7 @@ def collect_tree_evidence(
             raise WorkspaceSecurityError("tree evidence total-byte limit exceeded")
         records.append(FileEvidence(relative, file_sha256, size_bytes))
 
-    tree_hasher = sha256()
+    tree_hasher = hashlib.sha256()
     for record in records:
         tree_hasher.update(record.path.encode("utf-8"))
         tree_hasher.update(b"\x00")
