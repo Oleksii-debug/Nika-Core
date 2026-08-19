@@ -178,28 +178,29 @@ def _extract_xlsx(path: Path, *, limits: DocumentLimits) -> ExtractedDocument:
     if not openpyxl_xml.DEFUSEDXML:
         raise DocumentSecurityError("openpyxl defusedxml protection is unavailable")
     try:
-        workbook = load_workbook(path, read_only=True, data_only=True, keep_links=False)
-        try:
-            parts: list[str] = []
-            total = 0
-            for sheet in workbook.worksheets:
-                header = f"[Sheet: {sheet.title}]"
-                parts.append(header)
-                total += len(header)
-                for row in sheet.iter_rows(values_only=True):
-                    cells = [_cell_text(value).strip() for value in row]
-                    if not any(cells):
-                        continue
-                    rendered = "\t".join(cells)
-                    total += len(rendered) + 1
-                    if total > limits.max_extracted_chars:
-                        raise DocumentTooLargeError(
-                            "XLSX extracted text exceeds character limit"
-                        )
-                    parts.append(rendered)
-            text = "\n".join(parts)
-        finally:
-            workbook.close()
+        with path.open("rb") as source:
+            workbook = load_workbook(source, read_only=True, data_only=True, keep_links=False)
+            try:
+                parts: list[str] = []
+                total = 0
+                for sheet in workbook.worksheets:
+                    header = f"[Sheet: {sheet.title}]"
+                    parts.append(header)
+                    total += len(header)
+                    for row in sheet.iter_rows(values_only=True):
+                        cells = [_cell_text(value).strip() for value in row]
+                        if not any(cells):
+                            continue
+                        rendered = "\t".join(cells)
+                        total += len(rendered) + 1
+                        if total > limits.max_extracted_chars:
+                            raise DocumentTooLargeError(
+                                "XLSX extracted text exceeds character limit"
+                            )
+                        parts.append(rendered)
+                text = "\n".join(parts)
+            finally:
+                workbook.close()
     except (DocumentIngestionError, DocumentSecurityError, DocumentTooLargeError):
         raise
     except Exception as exc:
