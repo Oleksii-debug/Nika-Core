@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import collections.abc
 import hashlib
 import os
 import stat
-from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -89,7 +89,7 @@ class SterileGitPlan:
     worktree_root: Path
     branch_name: str
     base_sha: str
-    environment: Mapping[str, str]
+    environment: collections.abc.Mapping[str, str]
     config_args: tuple[str, ...]
     isolation_class: IsolationClass = IsolationClass.POLICY_ONLY
 
@@ -212,7 +212,9 @@ def ensure_path_policy(
     return candidate
 
 
-def sterile_git_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
+def sterile_git_environment(
+    source: collections.abc.Mapping[str, str] | None = None,
+) -> dict[str, str]:
     source_env = dict(os.environ if source is None else source)
     environment = {
         key: value
@@ -238,7 +240,7 @@ def make_sterile_git_plan(
     job_root: Path,
     branch_name: str,
     base_sha: str,
-    source_environment: Mapping[str, str] | None = None,
+    source_environment: collections.abc.Mapping[str, str] | None = None,
 ) -> SterileGitPlan:
     repository_root = repository_root.resolve(strict=False)
     job_root = job_root.resolve(strict=False)
@@ -276,7 +278,10 @@ def make_sterile_git_plan(
     )
 
 
-def validate_typed_argv(argv: Sequence[str], allowed_executables: Iterable[str]) -> tuple[str, ...]:
+def validate_typed_argv(
+    argv: collections.abc.Sequence[str],
+    allowed_executables: collections.abc.Iterable[str],
+) -> tuple[str, ...]:
     if not argv or any(not argument or "\x00" in argument for argument in argv):
         raise WorkspaceSecurityError("argv must contain non-empty NUL-free arguments")
     executable = argv[0]
