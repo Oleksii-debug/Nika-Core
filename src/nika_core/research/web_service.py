@@ -26,6 +26,7 @@ from nika_core.research.local import (
     is_document_media_type,
 )
 from nika_core.research.models import (
+    BlobArtifact,
     ExtractionStatus,
     RefreshDisposition,
     RefreshResult,
@@ -107,6 +108,230 @@ class HttpResearchService:
             task_id=task_id,
         )
 
+    def _pending_failed_snapshot(self, source_id: str) -> tuple[BlobArtifact, str, str, str | None, str | None, int | None] | None:
+        """Return the latest fetched artifact whose extraction is still failed.
+
+        NetworkResearchRepository intentionally owns the canonical SQLite store. This
+        recovery read stays inside the Research subsystem and is read-only so a failed
+        parser can be retried without another external fetch. A future repository API
+        can replace this narrow query without changing service behavior.
+        """
+        store = self._network._store  # noqa: SLF001 - same-subsystem recovery read
+        with store.connection() as conn:
+            row = conn.execute(
+                """SELECT s.artifact_id, s.raw_sha256, s.media_type, s.etag,
+                    s.last_modified, s.observed_at, a.workspace_id, a.byte_size,
+                    a.storage_relpath, h.final_url, h.last_status_code, e.status
+                FROM research_http_snapshots s
+                JOIN corpus_artifacts a ON a.artifact_id=s.artifact_id
+                JOIN research_http_sources h ON h.source_id=s.source_id
+                LEFT JOIN corpus_extractions e ON e.extraction_id=s.extraction_id
+                WHERE s.source_id=?
+                ORDER BY s.observed_at DESC
+                LIMIT 1""",
+                (source_id,),
+            ).fetchone()
+        if row is None or row["status"] != ExtractionStatus.FAILED.value:
+            return None
+        artifact = BlobArtifact(
+            artifact_id=row["artifact_id"],
+            workspace_id=row["workspace_id"],
+            raw_sha256=row["raw_sha256"],
+            byte_size=row["byte_size"],
+            storage_relpath=row["storage_relpath"],
+        )
+        final_url = row["final_url"] or ""
+        return (
+            artifact,
+            row["media_type"],
+            final_url,
+            row["etag"],
+            row["last_modified"],
+            row["last_status_code"],
+        )
+
+    def _extract_artifact(
+        self,
+        *,
+        source: SourceSpec,
+        artifact: BlobArtifact,
+        media_type: str,
+        final_url: str,
+        etag: str | None,
+        last_modified: str | None,
+        status_code: int | None,
+        task_id: str | None,
+        attempts: int,
+        fetch_result: HttpFetchResult | None,
+    ) -> RefreshResult:
+        title = _source_title(final_url or source.locator)
+        extractor = "unknown"
+        extractor_version = "unknown"
+        try:
+            if is_document_media_type(media_type):
+                blob_path = self._blobs.resolve(artifact)
+                extractor, extractor_version = document_extractor_identity(
+                    blob_path,
+                    media_type=media_type,
+                )
+                extracted = extract_document_file(
+                    blob_path,
+                    limits=self._document_limits,
+                    media_type=media_type,
+                )
+                extracted = replace(extracted, title=title)
+            else:
+                extractor, extractor_version = "nika-stdlib", "1"
+                blob_path = self._blobs.resolve(artifact)
+                extracted = extract_text_payload(
+                    blob_path.read_bytes(),
+                    title=title,
+                    media_type=media_type,
+                )
+        except (DocumentIngestionError, LocalIngestionError, BlobStoreError, ValueError) as exc:
+            extraction = self._repository.record_extraction(
+                artifact_id=artifact.artifact_id,
+                extractor=extractor,
+                extractor_version=extractor_version,
+                status=ExtractionStatus.FAILED,
+                normalized_text_sha256=None,
+                detail=f"{type(exc).__name__}: {exc}"[:1000],
+            )
+            snapshot_id = self._network.record_snapshot(
+                source_id=source.source_id,
+                artifact_id=artifact.artifact_id,
+                raw_sha256=artifact.raw_sha256,
+                media_type=media_type,
+                etag=etag,
+                last_modified=last_modified,
+                extraction_id=extraction.extraction_id,
+                document_id=None,
+            )
+            if fetch_result is not None:
+                self._record_fetch_attempt(
+                    source_id=source.source_id,
+                    attempt_number=attempts,
+                    result=fetch_result,
+                    disposition=RefreshDisposition.FAILED,
+                    task_id=task_id,
+                    error_code="extraction_failed",
+                    message=f"{type(exc).__name__}: {exc}"[:1000],
+                )
+            self._network.finalize_source(
+                source.source_id,
+                disposition=RefreshDisposition.FAILED,
+                final_url=final_url,
+                status_code=status_code,
+                etag=etag,
+                last_modified=last_modified,
+                error_code="extraction_failed",
+                error_message=f"{type(exc).__name__}: {exc}"[:1000],
+            )
+            return RefreshResult(
+                source_id=source.source_id,
+                disposition=RefreshDisposition.FAILED,
+                attempts=attempts,
+                status_code=status_code,
+                snapshot_id=snapshot_id,
+                error_code="extraction_failed",
+                message=str(exc)[:1000],
+            )
+
+        normalized = normalize_text(extracted.text)
+        status = extracted.status
+        if status is ExtractionStatus.EXTRACTED and not normalized:
+            status = ExtractionStatus.EMPTY
+        normalized_sha256 = hashlib.sha256(normalized.encode()).hexdigest() if normalized else None
+        extraction = self._repository.record_extraction(
+            artifact_id=artifact.artifact_id,
+            extractor=extracted.extractor,
+            extractor_version=extracted.extractor_version,
+            status=status,
+            normalized_text_sha256=normalized_sha256,
+        )
+
+        corpus = None
+        disposition = RefreshDisposition.CHANGED
+        if status is ExtractionStatus.EXTRACTED:
+            corpus = self._repository.ingest_document(source, extracted)
+            self._repository.link_document_artifact(
+                document_id=corpus.document.document_id,
+                artifact_id=artifact.artifact_id,
+                extraction_id=extraction.extraction_id,
+            )
+        elif media_type == "text/html":
+            blob_path = self._blobs.resolve(artifact)
+            if b"<script" in blob_path.read_bytes().lower():
+                disposition = RefreshDisposition.DYNAMIC_REQUIRED
+
+        snapshot_id = self._network.record_snapshot(
+            source_id=source.source_id,
+            artifact_id=artifact.artifact_id,
+            raw_sha256=artifact.raw_sha256,
+            media_type=media_type,
+            etag=etag,
+            last_modified=last_modified,
+            extraction_id=extraction.extraction_id,
+            document_id=corpus.document.document_id if corpus is not None else None,
+        )
+        if corpus is not None:
+            self._network.link_document_origin(
+                document_id=corpus.document.document_id,
+                source_id=source.source_id,
+                snapshot_id=snapshot_id,
+                locator=final_url or source.locator,
+            )
+        if fetch_result is not None:
+            self._record_fetch_attempt(
+                source_id=source.source_id,
+                attempt_number=attempts,
+                result=fetch_result,
+                disposition=disposition,
+                task_id=task_id,
+                error_code=(
+                    "dynamic_required"
+                    if disposition is RefreshDisposition.DYNAMIC_REQUIRED
+                    else None
+                ),
+                message=(
+                    "static HTML yielded no indexable text; dynamic rendering is required"
+                    if disposition is RefreshDisposition.DYNAMIC_REQUIRED
+                    else ""
+                ),
+            )
+        self._network.finalize_source(
+            source.source_id,
+            disposition=disposition,
+            final_url=final_url,
+            status_code=status_code,
+            etag=etag,
+            last_modified=last_modified,
+            current_raw_sha256=artifact.raw_sha256,
+            error_code=(
+                "dynamic_required"
+                if disposition is RefreshDisposition.DYNAMIC_REQUIRED
+                else None
+            ),
+            error_message=(
+                "static HTML yielded no indexable text; dynamic rendering is required"
+                if disposition is RefreshDisposition.DYNAMIC_REQUIRED
+                else ""
+            ),
+        )
+        return RefreshResult(
+            source_id=source.source_id,
+            disposition=disposition,
+            attempts=attempts,
+            status_code=status_code,
+            snapshot_id=snapshot_id,
+            document_id=corpus.document.document_id if corpus is not None else None,
+            error_code=(
+                "dynamic_required"
+                if disposition is RefreshDisposition.DYNAMIC_REQUIRED
+                else None
+            ),
+        )
+
     def refresh_source(
         self,
         source_id: str,
@@ -114,6 +339,30 @@ class HttpResearchService:
         task_id: str | None = None,
     ) -> RefreshResult:
         state = self._network.get_source(source_id)
+        source = SourceSpec(
+            source_id=state.source_id,
+            workspace_id=state.workspace_id,
+            kind=SourceKind.HTTP,
+            locator=state.url,
+        )
+
+        if state.last_error_code == "extraction_failed":
+            pending = self._pending_failed_snapshot(source_id)
+            if pending is not None:
+                artifact, media_type, final_url, etag, last_modified, status_code = pending
+                return self._extract_artifact(
+                    source=source,
+                    artifact=artifact,
+                    media_type=media_type,
+                    final_url=final_url or state.final_url or state.url,
+                    etag=etag,
+                    last_modified=last_modified,
+                    status_code=status_code,
+                    task_id=task_id,
+                    attempts=0,
+                    fetch_result=None,
+                )
+
         validators = HttpValidators(etag=state.etag, last_modified=state.last_modified)
         result: HttpFetchResult | None = None
         attempts = 0
@@ -167,12 +416,6 @@ class HttpResearchService:
 
         if result.body is None or result.media_type is None:
             raise RuntimeError("successful HTTP fetch omitted body or media type")
-        source = SourceSpec(
-            source_id=state.source_id,
-            workspace_id=state.workspace_id,
-            kind=SourceKind.HTTP,
-            locator=state.url,
-        )
         artifact = self._blobs.put_bytes(
             state.workspace_id,
             result.body,
@@ -209,152 +452,15 @@ class HttpResearchService:
                 status_code=result.status_code,
             )
 
-        extractor = "unknown"
-        extractor_version = "unknown"
-        try:
-            if is_document_media_type(result.media_type):
-                blob_path = self._blobs.resolve(artifact)
-                extractor, extractor_version = document_extractor_identity(
-                    blob_path,
-                    media_type=result.media_type,
-                )
-                extracted = extract_document_file(
-                    blob_path,
-                    limits=self._document_limits,
-                    media_type=result.media_type,
-                )
-                extracted = replace(extracted, title=title)
-            else:
-                extractor, extractor_version = "nika-stdlib", "1"
-                extracted = extract_text_payload(
-                    result.body,
-                    title=title,
-                    media_type=result.media_type,
-                )
-        except (DocumentIngestionError, LocalIngestionError, BlobStoreError, ValueError) as exc:
-            extraction = self._repository.record_extraction(
-                artifact_id=artifact.artifact_id,
-                extractor=extractor,
-                extractor_version=extractor_version,
-                status=ExtractionStatus.FAILED,
-                normalized_text_sha256=None,
-                detail=f"{type(exc).__name__}: {exc}"[:1000],
-            )
-            snapshot_id = self._network.record_snapshot(
-                source_id=source_id,
-                artifact_id=artifact.artifact_id,
-                raw_sha256=artifact.raw_sha256,
-                media_type=result.media_type,
-                etag=result.etag,
-                last_modified=result.last_modified,
-                extraction_id=extraction.extraction_id,
-                document_id=None,
-            )
-            self._record_fetch_attempt(
-                source_id=source_id,
-                attempt_number=attempts,
-                result=result,
-                disposition=RefreshDisposition.FAILED,
-                task_id=task_id,
-                error_code="extraction_failed",
-                message=f"{type(exc).__name__}: {exc}"[:1000],
-            )
-            self._network.finalize_source(
-                source_id,
-                disposition=RefreshDisposition.FAILED,
-                final_url=result.final_url,
-                status_code=result.status_code,
-                etag=result.etag,
-                last_modified=result.last_modified,
-                error_code="extraction_failed",
-                error_message=f"{type(exc).__name__}: {exc}"[:1000],
-            )
-            return RefreshResult(
-                source_id=source_id,
-                disposition=RefreshDisposition.FAILED,
-                attempts=attempts,
-                status_code=result.status_code,
-                snapshot_id=snapshot_id,
-                error_code="extraction_failed",
-                message=str(exc)[:1000],
-            )
-
-        normalized = normalize_text(extracted.text)
-        status = extracted.status
-        if status is ExtractionStatus.EXTRACTED and not normalized:
-            status = ExtractionStatus.EMPTY
-        normalized_sha256 = hashlib.sha256(normalized.encode()).hexdigest() if normalized else None
-        extraction = self._repository.record_extraction(
-            artifact_id=artifact.artifact_id,
-            extractor=extracted.extractor,
-            extractor_version=extracted.extractor_version,
-            status=status,
-            normalized_text_sha256=normalized_sha256,
-        )
-
-        corpus = None
-        disposition = RefreshDisposition.CHANGED
-        if status is ExtractionStatus.EXTRACTED:
-            corpus = self._repository.ingest_document(source, extracted)
-            self._repository.link_document_artifact(
-                document_id=corpus.document.document_id,
-                artifact_id=artifact.artifact_id,
-                extraction_id=extraction.extraction_id,
-            )
-        elif result.media_type == "text/html" and b"<script" in result.body.lower():
-            disposition = RefreshDisposition.DYNAMIC_REQUIRED
-
-        snapshot_id = self._network.record_snapshot(
-            source_id=source_id,
-            artifact_id=artifact.artifact_id,
-            raw_sha256=artifact.raw_sha256,
+        return self._extract_artifact(
+            source=source,
+            artifact=artifact,
             media_type=result.media_type,
-            etag=result.etag,
-            last_modified=result.last_modified,
-            extraction_id=extraction.extraction_id,
-            document_id=corpus.document.document_id if corpus is not None else None,
-        )
-        if corpus is not None:
-            self._network.link_document_origin(
-                document_id=corpus.document.document_id,
-                source_id=source_id,
-                snapshot_id=snapshot_id,
-                locator=result.final_url,
-            )
-        self._record_fetch_attempt(
-            source_id=source_id,
-            attempt_number=attempts,
-            result=result,
-            disposition=disposition,
-            task_id=task_id,
-            error_code="dynamic_required" if disposition is RefreshDisposition.DYNAMIC_REQUIRED else None,
-            message=(
-                "static HTML yielded no indexable text; dynamic rendering is required"
-                if disposition is RefreshDisposition.DYNAMIC_REQUIRED
-                else ""
-            ),
-        )
-        self._network.finalize_source(
-            source_id,
-            disposition=disposition,
             final_url=result.final_url,
-            status_code=result.status_code,
             etag=result.etag,
             last_modified=result.last_modified,
-            current_raw_sha256=artifact.raw_sha256,
-            error_code="dynamic_required" if disposition is RefreshDisposition.DYNAMIC_REQUIRED else None,
-            error_message=(
-                "static HTML yielded no indexable text; dynamic rendering is required"
-                if disposition is RefreshDisposition.DYNAMIC_REQUIRED
-                else ""
-            ),
-        )
-        return RefreshResult(
-            source_id=source_id,
-            disposition=disposition,
-            attempts=attempts,
             status_code=result.status_code,
-            snapshot_id=snapshot_id,
-            document_id=corpus.document.document_id if corpus is not None else None,
-            error_code="dynamic_required" if disposition is RefreshDisposition.DYNAMIC_REQUIRED else None,
+            task_id=task_id,
+            attempts=attempts,
+            fetch_result=result,
         )
