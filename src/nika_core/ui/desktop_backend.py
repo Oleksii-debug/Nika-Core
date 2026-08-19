@@ -106,9 +106,7 @@ class DesktopBackend:
         record = self._latest_controllable()
         if record is None:
             raise ValueError("Немає активного завдання агента для зупинки.")
-        if record.state == TaskState.CREATED:
-            self._queue.transition(record.task_id, TaskState.CANCELLED)
-        elif record.state in {
+        if record.state == TaskState.CREATED or record.state in {
             TaskState.READY,
             TaskState.RUNNING,
             TaskState.WAITING_TOOL,
