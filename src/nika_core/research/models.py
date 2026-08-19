@@ -13,6 +13,13 @@ class IngestDisposition(StrEnum):
     DEDUPLICATED = "deduplicated"
 
 
+class ExtractionStatus(StrEnum):
+    EXTRACTED = "extracted"
+    OCR_NEEDED = "ocr_needed"
+    EMPTY = "empty"
+    FAILED = "failed"
+
+
 @dataclass(frozen=True, slots=True)
 class ResearchWorkspace:
     workspace_id: str
@@ -32,6 +39,9 @@ class ExtractedDocument:
     title: str
     text: str
     media_type: str
+    status: ExtractionStatus = ExtractionStatus.EXTRACTED
+    extractor: str = "nika-stdlib"
+    extractor_version: str = "1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,11 +55,38 @@ class CorpusDocument:
 
 
 @dataclass(frozen=True, slots=True)
+class BlobArtifact:
+    artifact_id: str
+    workspace_id: str
+    raw_sha256: str
+    byte_size: int
+    storage_relpath: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExtractionRecord:
+    extraction_id: str
+    artifact_id: str
+    extractor: str
+    extractor_version: str
+    status: ExtractionStatus
+    normalized_text_sha256: str | None
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
 class IngestResult:
     disposition: IngestDisposition
     document: CorpusDocument
     source_id: str
     origin_locator: str
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactIngestResult:
+    artifact: BlobArtifact
+    extraction: ExtractionRecord
+    corpus: IngestResult | None
 
 
 @dataclass(frozen=True, slots=True)
