@@ -5,9 +5,11 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 from nika_core.model_gateway.contracts import (
+    ModelDownloadAuthorization,
     ModelErrorCode,
     ModelGatewayError,
     ModelRequest,
@@ -40,6 +42,11 @@ class FoundryLocalProvider:
     completions per provider instance. The upstream non-streaming Python API
     does not expose a proven hard-cancel primitive, so a timed-out native
     inference keeps the provider slot until the worker actually exits.
+
+    Model acquisition is a separate explicit product action. ``complete()``
+    never downloads a model, even when a caller selects a different model in
+    the request. This prevents ordinary inference from silently turning into a
+    network/download operation.
     """
 
     def __init__(
@@ -53,6 +60,11 @@ class FoundryLocalProvider:
     ) -> None:
         if not default_model.strip():
             raise ValueError("default_model must not be empty")
+        if allow_download:
+            raise ValueError(
+                "allow_download on FoundryLocalProvider is no longer supported; "
+                "use download_model() with ModelDownloadAuthorization"
+            )
         self._capabilities = ProviderCapabilities(
             provider_id="foundry-local",
             kind=ProviderKind.LOCAL,
@@ -62,10 +74,10 @@ class FoundryLocalProvider:
         self._default_model = default_model
         self._app_name = app_name
         self._model_cache_dir = Path(model_cache_dir) if model_cache_dir is not None else None
-        self._allow_download = allow_download
         self._manager_factory = manager_factory
         self._manager_instance: Any | None = None
         self._inference_lock = asyncio.Lock()
+        self._model_management_lock = asyncio.Lock()
 
     @property
     def capabilities(self) -> ProviderCapabilities:
@@ -149,6 +161,61 @@ class FoundryLocalProvider:
             latency_ms=(time.perf_counter() - started) * 1000,
         )
 
+    async def download_model(
+        self,
+        authorization: ModelDownloadAuthorization,
+        *,
+        cancel_event: Event | None = None,
+    ) -> FoundryModelEvidence:
+        """Explicitly acquire one exact Foundry model and return cache evidence.
+
+        The caller must provide a product-level authorization that binds the
+        provider, model alias and a separately reviewed model-license reference.
+        Download is never inferred from ``ModelRequest``. Foundry's documented
+        download cancellation event is passed through when supplied.
+        """
+        if authorization.provider_id != self.capabilities.provider_id:
+            raise ValueError(
+                "download authorization provider does not match Foundry Local provider"
+            )
+        if authorization.model != authorization.model.strip():
+            raise ValueError("authorized model must not contain surrounding whitespace")
+
+        async with self._model_management_lock:
+            manager = self._manager()
+            model = manager.catalog.get_model(authorization.model)
+            if model is None:
+                raise ModelGatewayError(
+                    ModelErrorCode.UNAVAILABLE,
+                    f"Foundry Local model '{authorization.model}' is not present in the catalog",
+                    provider_id=self.capabilities.provider_id,
+                    retryable=False,
+                )
+            if not bool(model.is_cached):
+                try:
+                    await asyncio.to_thread(model.download, cancel_event=cancel_event)
+                except asyncio.CancelledError:
+                    if cancel_event is not None:
+                        cancel_event.set()
+                    raise
+                except Exception as exc:
+                    raise ModelGatewayError(
+                        ModelErrorCode.PROVIDER_ERROR,
+                        f"Foundry Local model '{authorization.model}' download failed",
+                        provider_id=self.capabilities.provider_id,
+                        retryable=False,
+                    ) from exc
+
+            evidence = self.inspect_model(authorization.model)
+            if not evidence.cached:
+                raise ModelGatewayError(
+                    ModelErrorCode.PROVIDER_ERROR,
+                    f"Foundry Local model '{authorization.model}' download did not produce cache evidence",
+                    provider_id=self.capabilities.provider_id,
+                    retryable=False,
+                )
+            return evidence
+
     def inspect_model(self, model_alias: str | None = None) -> FoundryModelEvidence:
         """Return read-only SDK metadata for release/hardware evidence collection."""
         alias = model_alias or self._default_model
@@ -218,17 +285,15 @@ class FoundryLocalProvider:
             )
 
         if not bool(model.is_cached):
-            if not self._allow_download:
-                raise ModelGatewayError(
-                    ModelErrorCode.UNAVAILABLE,
-                    (
-                        f"Foundry Local model '{model_alias}' is not cached; "
-                        "explicit model download permission is required"
-                    ),
-                    provider_id=self.capabilities.provider_id,
-                    retryable=False,
-                )
-            model.download()
+            raise ModelGatewayError(
+                ModelErrorCode.UNAVAILABLE,
+                (
+                    f"Foundry Local model '{model_alias}' is not cached; "
+                    "use the explicit model download action before inference"
+                ),
+                provider_id=self.capabilities.provider_id,
+                retryable=False,
+            )
 
         if not bool(model.is_loaded):
             model.load()
