@@ -27,9 +27,15 @@ class FakeFoundryModel:
         cached: bool = True,
         completion_delay: float = 0.0,
     ) -> None:
+        self.id = "test-model-id"
         self.alias = alias
         self.is_cached = cached
         self.is_loaded = False
+        self.context_length = 4096
+        self.input_modalities = "text"
+        self.output_modalities = "text"
+        self.capabilities = "chat,completion"
+        self.supports_tool_calling = False
         self.downloaded = False
         self.unloaded = False
         self.last_messages: list[dict[str, str]] = []
@@ -42,6 +48,9 @@ class FakeFoundryModel:
     def download(self) -> None:
         self.downloaded = True
         self.is_cached = True
+
+    def get_path(self) -> str:
+        return "C:/Nika Test Models/test-model"
 
     def load(self) -> None:
         self.is_loaded = True
@@ -86,21 +95,24 @@ class FakeFoundryModel:
 
 
 class FakeCatalog:
-    def __init__(self, model: FakeFoundryModel) -> None:
+    def __init__(self, model: FakeFoundryModel | None) -> None:
         self.model = model
         self.requested_aliases: list[str] = []
 
-    def get_model(self, alias: str) -> FakeFoundryModel:
+    def get_model(self, alias: str) -> FakeFoundryModel | None:
         self.requested_aliases.append(alias)
-        self.model.alias = alias
+        if self.model is not None:
+            self.model.alias = alias
         return self.model
 
     def get_loaded_models(self) -> list[FakeFoundryModel]:
+        if self.model is None:
+            return []
         return [self.model] if self.model.is_loaded else []
 
 
 class FakeManager:
-    def __init__(self, model: FakeFoundryModel) -> None:
+    def __init__(self, model: FakeFoundryModel | None) -> None:
         self.catalog = FakeCatalog(model)
 
 
@@ -214,3 +226,41 @@ def test_foundry_local_serializes_in_process_inference() -> None:
     asyncio.run(run_parallel())
 
     assert model.max_active_completions == 1
+
+
+def test_foundry_local_inspect_model_returns_read_only_sdk_evidence() -> None:
+    model = FakeFoundryModel()
+    provider = FoundryLocalProvider(
+        default_model="test-model",
+        manager_factory=lambda: FakeManager(model),
+    )
+
+    evidence = provider.inspect_model()
+
+    assert evidence.model_id == "test-model-id"
+    assert evidence.alias == "test-model"
+    assert evidence.cached is True
+    assert evidence.loaded is False
+    assert evidence.path == "C:/Nika Test Models/test-model"
+    assert evidence.context_length == 4096
+    assert evidence.input_modalities == "text"
+    assert evidence.output_modalities == "text"
+    assert evidence.capability_tags == "chat,completion"
+    assert evidence.supports_tool_calling is False
+    assert model.downloaded is False
+    assert model.is_loaded is False
+
+
+def test_foundry_local_missing_catalog_model_is_typed_unavailable() -> None:
+    provider = FoundryLocalProvider(
+        default_model="missing-model",
+        manager_factory=lambda: FakeManager(None),
+    )
+
+    with pytest.raises(ModelGatewayError) as inspect_error:
+        provider.inspect_model()
+    assert inspect_error.value.code is ModelErrorCode.UNAVAILABLE
+
+    with pytest.raises(ModelGatewayError) as completion_error:
+        asyncio.run(provider.complete(request(model="missing-model")))
+    assert completion_error.value.code is ModelErrorCode.UNAVAILABLE
