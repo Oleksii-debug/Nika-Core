@@ -86,8 +86,12 @@ class ModelDownloadAuthorization:
     def __post_init__(self) -> None:
         if not self.provider_id.strip():
             raise ValueError("provider_id must not be empty")
+        if self.provider_id != self.provider_id.strip():
+            raise ValueError("provider_id must not contain surrounding whitespace")
         if not self.model.strip():
             raise ValueError("model must not be empty")
+        if self.model != self.model.strip():
+            raise ValueError("model must not contain surrounding whitespace")
         if not self.license_reference.strip():
             raise ValueError("license_reference must not be empty")
 
