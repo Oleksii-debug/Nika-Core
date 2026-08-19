@@ -179,6 +179,7 @@ class TranscriptionCoordinator:
             method=TranscriptMethod.OFFLINE_ASR,
             language=language,
             segments=merge_completed_chunks(completed_chunks),
+            created_at=job.updated_at,
         )
         return BatchTranscriptionResult(
             transcript=transcript,
