@@ -53,6 +53,7 @@ jobs:
           tests/test_media_adversarial.py
           tests/test_media_batch_a.py
           tests/test_media_batch_b.py
+          tests/test_media_batch_b_retry.py
           tests/test_media_batch_b_safety.py
           tests/test_media_persistence_privacy.py
           tests/test_media_process_files.py
@@ -63,6 +64,7 @@ jobs:
           tests/test_media_adversarial.py
           tests/test_media_batch_a.py
           tests/test_media_batch_b.py
+          tests/test_media_batch_b_retry.py
           tests/test_media_batch_b_safety.py
           tests/test_media_persistence_privacy.py
           tests/test_media_process_files.py
@@ -72,6 +74,7 @@ jobs:
           tests/test_media_adversarial.py
           tests/test_media_batch_a.py
           tests/test_media_batch_b.py
+          tests/test_media_batch_b_retry.py
           tests/test_media_batch_b_safety.py
           tests/test_media_persistence_privacy.py
           tests/test_media_process_files.py
