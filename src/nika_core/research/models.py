@@ -90,6 +90,20 @@ class ArtifactIngestResult:
 
 
 @dataclass(frozen=True, slots=True)
+class FolderIngestFailure:
+    locator: str
+    error_type: str
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
+class FolderIngestResult:
+    imported: tuple[ArtifactIngestResult, ...]
+    failures: tuple[FolderIngestFailure, ...]
+    skipped_unsupported: int
+
+
+@dataclass(frozen=True, slots=True)
 class SearchHit:
     document_id: str
     title: str
