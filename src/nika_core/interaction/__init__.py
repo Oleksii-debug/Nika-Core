@@ -18,6 +18,14 @@ from .domain import (
     UnsupportedInteractionError,
     WindowIdentity,
 )
+from .orchestration import (
+    InteractionAdapter,
+    InteractionReplayBlockedError,
+    InteractionRequest,
+    InteractionRisk,
+    InteractionUncertainError,
+    SemanticInteractionCoordinator,
+)
 from .resolver import resolve_strict, validate_snapshot
 
 __all__ = [
@@ -28,10 +36,16 @@ __all__ = [
     "ControlNode",
     "FallbackReason",
     "InteractionAction",
+    "InteractionAdapter",
     "InteractionEvidence",
+    "InteractionReplayBlockedError",
+    "InteractionRequest",
     "InteractionResult",
+    "InteractionRisk",
     "InteractionTarget",
+    "InteractionUncertainError",
     "PermissionBlockedError",
+    "SemanticInteractionCoordinator",
     "SemanticSnapshot",
     "StaleSnapshotError",
     "TargetNotFoundError",
