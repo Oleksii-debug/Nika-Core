@@ -42,7 +42,11 @@ jobs:
 
   embedded-foundry-sdk-proof:
     name: Embedded Foundry Local SDK dependency proof
-    if: github.event_name == 'pull_request' && github.head_ref == 'feat/embedded-intelligence-foundry-local'
+    if: >-
+      github.event_name == 'pull_request' &&
+      (github.head_ref == 'feat/embedded-intelligence-foundry-local' ||
+       startsWith(github.head_ref, 'fix/auto02-') ||
+       startsWith(github.head_ref, 'feat/auto02-'))
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -62,6 +66,8 @@ jobs:
           python -c "from foundry_local_sdk import Configuration, FoundryLocalManager;
           c=Configuration(app_name='NikaCoreCI');
           print(type(c).__name__, FoundryLocalManager.__name__)"
+      - name: Verify physical-proof collector is import-safe without running a model
+        run: python scripts/prove_foundry_local.py --help
 
   m4-live-ollama-proof:
     name: M4 live Ollama provider proof

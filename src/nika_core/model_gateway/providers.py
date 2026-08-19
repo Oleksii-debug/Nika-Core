@@ -117,15 +117,19 @@ class OpenAICompatibleProvider:
             ) from exc
 
         try:
-            text = str(body["choices"][0]["message"]["content"])
+            raw_text = body["choices"][0]["message"]["content"]
+            if not isinstance(raw_text, str):
+                raise TypeError("message content must be text")
             model = str(body.get("model") or request.model or self._default_model)
             raw_usage = body.get("usage") or {}
+            if not isinstance(raw_usage, dict):
+                raise TypeError("usage must be an object")
             usage = ModelUsage(
-                input_tokens=raw_usage.get("prompt_tokens"),
-                output_tokens=raw_usage.get("completion_tokens"),
-                total_tokens=raw_usage.get("total_tokens"),
+                input_tokens=_optional_int(raw_usage.get("prompt_tokens")),
+                output_tokens=_optional_int(raw_usage.get("completion_tokens")),
+                total_tokens=_optional_int(raw_usage.get("total_tokens")),
             )
-        except (KeyError, IndexError, TypeError, AttributeError) as exc:
+        except (KeyError, IndexError, TypeError, ValueError, AttributeError) as exc:
             raise ModelGatewayError(
                 ModelErrorCode.PROVIDER_ERROR,
                 "model provider returned an invalid response schema",
@@ -134,7 +138,7 @@ class OpenAICompatibleProvider:
 
         return ModelResponse(
             request_id=request.request_id,
-            text=text,
+            text=raw_text,
             provider_id=self.capabilities.provider_id,
             provider_kind=self.capabilities.kind,
             model=model,
