@@ -84,7 +84,7 @@ class ModelGateway:
                 )
                 self._audit_failure(request, capabilities.provider_id, error)
                 if self._can_fallback(error=error, index=index, providers=providers):
-                    self._audit_fallback(request, providers[index], providers[index + 1], error)
+                    self._audit_fallback(request, provider, providers[index + 1], error)
                     continue
                 raise error from exc
             except asyncio.CancelledError:
@@ -97,7 +97,7 @@ class ModelGateway:
             except ModelGatewayError as error:
                 self._audit_failure(request, capabilities.provider_id, error)
                 if self._can_fallback(error=error, index=index, providers=providers):
-                    self._audit_fallback(request, providers[index], providers[index + 1], error)
+                    self._audit_fallback(request, provider, providers[index + 1], error)
                     continue
                 raise
 
