@@ -121,8 +121,10 @@ class OpenAICompatibleProvider:
             if not isinstance(raw_text, str):
                 raise TypeError("message content must be text")
             model = str(body.get("model") or request.model or self._default_model)
-            raw_usage = body.get("usage") or {}
-            if not isinstance(raw_usage, dict):
+            raw_usage = body.get("usage")
+            if raw_usage is None:
+                raw_usage = {}
+            elif not isinstance(raw_usage, dict):
                 raise TypeError("usage must be an object")
             usage = ModelUsage(
                 input_tokens=_optional_int(raw_usage.get("prompt_tokens")),
