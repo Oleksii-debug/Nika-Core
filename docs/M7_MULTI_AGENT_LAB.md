@@ -28,7 +28,7 @@ The M7 layer does not replace M2 checkpoints. LangGraph remains execution/checkp
 ## Supervisor
 `MultiAgentSupervisor` uses the existing `AgentRuntimePort` for child execution and recovery. Fan-out is bounded with an asyncio semaphore derived from the persisted team quota. One worker exception is contained and recorded as that child's failure while sibling results remain valid. Runtime result states are normalized into durable M7 member states.
 
-Team cancellation first calls the runtime cancellation port for recoverable members, then marks the team and unfinished members cancelled in Nika persistence. A late runtime completion cannot overwrite an already-cancelled team/member. Typed TASK and RESULT/ERROR handoffs are recorded around execution, with terminal result/state/handoff evidence committed atomically.
+Team cancellation first verifies that the team is still active, then calls the runtime cancellation port for recoverable members and marks the team/unfinished members cancelled in Nika persistence. A late runtime completion cannot overwrite an already-cancelled team/member. A completed or failed team is terminal and cannot later be reclassified as cancelled; that rejection occurs before runtime cancellation side effects. Repeating cancellation of an already-cancelled team is idempotent. Typed TASK and RESULT/ERROR handoffs are recorded around execution, with terminal result/state/handoff evidence committed atomically.
 
 Team completion is **explicit**, not automatic after each fan-out wave. Auto-closing after one wave would make legal later/nested fan-out impossible. `finalize_team()` fails while any child is `spawned`, `running` or `waiting_approval`. Once all children are terminal, a team with at least one completed child is `completed` even if another child failed (failure containment); a team with failures and no completed child is `failed`; an all-cancelled active team becomes `cancelled`.
 
@@ -45,7 +45,8 @@ Before the durable lifecycle successor is integrated:
 6. injected result-handoff failure rolls back result/state atomically;
 7. late runtime completion after team cancellation cannot resurrect work;
 8. mixed success/failure and all-failure team finalization policies are deterministic;
-9. activated-definition/grant/quota/cancellation/evaluator regressions remain green;
-10. exact branch/SHA and CI evidence are recorded before merge.
+9. completed/failed teams reject later cancellation before runtime side effects;
+10. activated-definition/grant/quota/cancellation/evaluator regressions remain green;
+11. exact branch/SHA and CI evidence are recorded before merge.
 
 `PACKAGED`, `HUMAN_TESTED` and `NVDA_VERIFIED` are separate later gates and are not claimed by this M7 successor.
