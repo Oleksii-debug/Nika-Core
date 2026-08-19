@@ -76,10 +76,15 @@ Repository visibility observed this cycle: **PUBLIC**.
 
 ## PR #32 integration reconciliation
 - Status-only PR #32 exact head `253af039c897aa0825e95feb68a8fdbef63aad89` passed Core CI #213 successfully.
-- PR #32 was merged as `73aecba0021551187f9dbeeef34becd0e2f24811`; that merge is the `main` baseline at the start of this cycle.
-- Open PR queue was empty when this cycle refreshed GitHub state.
+- PR #32 was merged as `73aecba0021551187f9dbeeef34becd0e2f24811`.
 - The exact M12 human-bound artifact, production source, package inputs and runtime behavior remain unchanged.
 - This reconciliation awards **0%** additional weighted credit; HUMAN_TESTED and NVDA_VERIFIED remain false.
+
+## PR #33 integration reconciliation
+- Status-only PR #33 exact head `469a06ab9c5254b173af022c17a71cc45865e34b` passed Core CI #215 successfully.
+- PR #33 was merged as `514b3a72c8ead2d2134762f62e3a7422ce9168a1`; that merge is the `main` baseline at the start of this cycle.
+- The exact M12 human-bound artifact, production source, package inputs and runtime behavior remain unchanged.
+- This reconciliation awards **0%** additional weighted credit; HUMAN_TESTED, NVDA_VERIFIED and PRODUCTION_RELEASE_READY remain false.
 
 ## Current weighted milestone
 M12 — Human Windows/NVDA acceptance and final v1.0 release decision.
