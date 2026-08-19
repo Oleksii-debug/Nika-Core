@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import ValidationError
 import pytest
+from pydantic import ValidationError
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.media.contracts import (
