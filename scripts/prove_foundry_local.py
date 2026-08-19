@@ -15,6 +15,7 @@ from nika_core.model_gateway.contracts import (
     ModelMessage,
     ModelRequest,
     ModelResourcePolicy,
+    ModelResponse,
     PrivacyClass,
 )
 from nika_core.model_gateway.foundry_local import FoundryLocalProvider
@@ -87,19 +88,16 @@ def _resource_delta(
     }
 
 
-def _response_evidence(response: object) -> dict[str, object]:
-    text = str(getattr(response, "text"))
-    usage = getattr(response, "usage")
-    provider_kind = getattr(response, "provider_kind")
+def _response_evidence(response: ModelResponse) -> dict[str, object]:
     return {
-        "provider_id": getattr(response, "provider_id"),
-        "provider_kind": provider_kind.value,
-        "model": getattr(response, "model"),
-        "text_nonempty": bool(text),
-        "text_length": len(text),
-        "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-        "usage": asdict(usage),
-        "latency_ms": getattr(response, "latency_ms"),
+        "provider_id": response.provider_id,
+        "provider_kind": response.provider_kind.value,
+        "model": response.model,
+        "text_nonempty": bool(response.text),
+        "text_length": len(response.text),
+        "text_sha256": hashlib.sha256(response.text.encode("utf-8")).hexdigest(),
+        "usage": asdict(response.usage),
+        "latency_ms": response.latency_ms,
     }
 
 
