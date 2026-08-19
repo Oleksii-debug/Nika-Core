@@ -54,7 +54,11 @@ jobs:
 
   m4-live-ollama-proof:
     name: M4 live Ollama provider proof
-    if: github.event_name == 'pull_request' && github.head_ref == 'dev/m4-model-tools-mcp'
+    if: >-
+      github.event_name == 'pull_request' &&
+      (github.head_ref == 'dev/m4-model-tools-mcp' ||
+       startsWith(github.head_ref, 'fix/auto02-') ||
+       startsWith(github.head_ref, 'feat/auto02-'))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
