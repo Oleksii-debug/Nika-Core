@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
@@ -8,7 +9,9 @@ from nika_core.intelligence.brain import DeterministicBrain
 from nika_core.intelligence.contracts import (
     DeterministicAction,
     DeterministicGoal,
+    DeterministicPlan,
     DeterministicPlanningError,
+    PlanStep,
     WorldState,
 )
 from nika_core.intelligence.unified_planning_adapter import UnifiedPlanningAdapter
@@ -139,3 +142,105 @@ def test_deterministic_brain_cannot_bypass_high_impact_tool_approval() -> None:
     assert result.error == "approval required"
     assert called is False
     assert "published" not in result.final_state.facts
+
+
+def test_deterministic_brain_rejects_plan_over_step_budget_before_execution() -> None:
+    called = False
+
+    class OversizedPlanner:
+        def plan(
+            self,
+            *,
+            state: WorldState,
+            goal: DeterministicGoal,
+            actions: tuple[DeterministicAction, ...],
+        ) -> DeterministicPlan:
+            del state, goal, actions
+            return DeterministicPlan(
+                steps=(PlanStep(action_id="advance"), PlanStep(action_id="advance"))
+            )
+
+    async def advance(_arguments: dict[str, object]) -> object:
+        nonlocal called
+        called = True
+        return "advanced"
+
+    tools = ToolExecutor()
+    tools.register(ToolSpec(tool_id="advance", description="advance"), advance)
+    brain = DeterministicBrain(planner=OversizedPlanner(), tools=tools)
+    action = DeterministicAction(
+        action_id="advance",
+        adds=frozenset({"done"}),
+        tool_id="advance",
+    )
+
+    result = asyncio.run(
+        brain.run(
+            run_id="bounded-plan",
+            state=WorldState(),
+            goal=DeterministicGoal(required=frozenset({"done"})),
+            actions=(action,),
+            max_steps=1,
+        )
+    )
+
+    assert not result.ok
+    assert result.error == "plan exceeds max_steps budget: 2 > 1"
+    assert result.completed_actions == ()
+    assert called is False
+
+
+def test_deterministic_brain_times_out_slow_planner() -> None:
+    class SlowPlanner:
+        def plan(
+            self,
+            *,
+            state: WorldState,
+            goal: DeterministicGoal,
+            actions: tuple[DeterministicAction, ...],
+        ) -> DeterministicPlan:
+            del state, goal, actions
+            time.sleep(0.05)
+            return DeterministicPlan(steps=())
+
+    brain = DeterministicBrain(planner=SlowPlanner(), tools=ToolExecutor())
+
+    with pytest.raises(DeterministicPlanningError, match="timed out"):
+        asyncio.run(
+            brain.run(
+                run_id="planner-timeout",
+                state=WorldState(),
+                goal=DeterministicGoal(),
+                actions=(),
+                planning_timeout_seconds=0.01,
+            )
+        )
+
+
+def test_deterministic_brain_rejects_invalid_budget_values() -> None:
+    brain = DeterministicBrain(
+        planner=UnifiedPlanningAdapter(engine_name="pyperplan"),
+        tools=ToolExecutor(),
+    )
+
+    with pytest.raises(ValueError, match="max_steps"):
+        asyncio.run(
+            brain.run(
+                run_id="invalid-budget",
+                state=WorldState(),
+                goal=DeterministicGoal(),
+                actions=(),
+                max_steps=0,
+            )
+        )
+
+    with pytest.raises(ValueError, match="planning_timeout_seconds"):
+        asyncio.run(
+            brain.run(
+                run_id="invalid-timeout",
+                state=WorldState(),
+                goal=DeterministicGoal(),
+                actions=(),
+                planning_timeout_seconds=0,
+            )
+        )
