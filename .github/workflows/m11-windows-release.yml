@@ -10,6 +10,7 @@ on:
       - "scripts/m11_release.py"
       - "scripts/m5_uia_proof.ps1"
       - "tests/test_m11_m12_release.py"
+      - "pyproject.toml"
       - ".github/workflows/m11-windows-release.yml"
   workflow_dispatch:
 
@@ -32,23 +33,32 @@ jobs:
           cache: pip
       - name: Install GUI, packaging and test dependencies
         run: python -m pip install -e ".[gui,qa,dev]"
+      - name: Resolve canonical project version
+        id: release
+        shell: pwsh
+        run: |
+          $version = python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"
+          if (-not $version) { throw 'Could not resolve [project].version from pyproject.toml' }
+          "version=$version" >> $env:GITHUB_OUTPUT
       - name: Run M11 M12 source regressions
         run: python -m pytest tests/test_m11_m12_release.py -q
       - name: Build standalone one-dir Windows candidate, notices and manifest
         shell: pwsh
-        run: python scripts/m11_release.py --version 0.0.2
+        run: >-
+          python scripts/m11_release.py
+          --source-sha '${{ github.event.pull_request.head.sha || github.sha }}'
       - name: Verify packaged WebView2 UI Automation and keyboard focus
         shell: pwsh
-        run: ./scripts/m5_uia_proof.ps1 -ExePath ./dist/NikaCore/NikaCore.exe -WindowTitle 'Nika Core 0.0.2'
+        run: ./scripts/m5_uia_proof.ps1 -ExePath ./dist/NikaCore/NikaCore.exe -WindowTitle 'Nika Core ${{ steps.release.outputs.version }}'
       - name: Create distributable ZIP
         shell: pwsh
-        run: Compress-Archive -Path ./dist/NikaCore/* -DestinationPath ./dist/NikaCore-0.0.2-windows-x64.zip -Force
+        run: Compress-Archive -Path ./dist/NikaCore/* -DestinationPath ./dist/NikaCore-${{ steps.release.outputs.version }}-windows-x64.zip -Force
       - name: Upload M11 release candidate
         uses: actions/upload-artifact@v4
         with:
-          name: NikaCore-0.0.2-windows-x64
+          name: NikaCore-${{ steps.release.outputs.version }}-windows-x64-${{ github.event.pull_request.head.sha || github.sha }}
           path: |
-            dist/NikaCore-0.0.2-windows-x64.zip
+            dist/NikaCore-${{ steps.release.outputs.version }}-windows-x64.zip
             dist/NikaCore/release-manifest.json
             dist/NikaCore/THIRD_PARTY_NOTICES.txt
           if-no-files-found: error
