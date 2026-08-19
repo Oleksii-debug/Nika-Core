@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from nika_core.data.schema import SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.agent_registry import AgentDefinition, AgentRegistry
 from nika_core.kernel.checkpoint import CheckpointService
@@ -33,7 +34,7 @@ def test_registry_requires_increasing_version() -> None:
 def test_queue_checkpoint_round_trip(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
-    assert store.schema_version() == 7
+    assert store.schema_version() == SCHEMA_VERSION
     queue = TaskQueue(store)
     task = queue.create(workspace_id="lab", agent_id="a1", payload={"x": 1})
     queue.transition(task.task_id, TaskState.READY)
