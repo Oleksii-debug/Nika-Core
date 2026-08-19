@@ -28,6 +28,7 @@ class DocumentTooLargeError(DocumentIngestionError):
 
 @dataclass(frozen=True, slots=True)
 class DocumentLimits:
+    max_source_bytes: int = 64 * 1024 * 1024
     max_pages: int = 500
     max_extracted_chars: int = 10_000_000
     max_zip_members: int = 2048
@@ -37,6 +38,7 @@ class DocumentLimits:
 
     def __post_init__(self) -> None:
         values = (
+            self.max_source_bytes,
             self.max_pages,
             self.max_extracted_chars,
             self.max_zip_members,
@@ -221,6 +223,10 @@ def extract_document_file(
 ) -> ExtractedDocument:
     candidate = Path(path)
     active_limits = limits or DocumentLimits()
+    if not candidate.is_file():
+        raise DocumentIngestionError("document source is not a regular file")
+    if candidate.stat().st_size > active_limits.max_source_bytes:
+        raise DocumentTooLargeError("document source exceeds byte limit")
     suffix = candidate.suffix.casefold()
     if suffix == ".pdf":
         return _extract_pdf(candidate, limits=active_limits)
