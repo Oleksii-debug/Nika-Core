@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 
+from ..data.sqlite import SQLiteStore
 from .accounting import AccountSnapshot
 from .orders import SimulatedFill
-from ..data.sqlite import SQLiteStore
 
 
 _TRADER_SCHEMA_VERSION = 1
