@@ -22,12 +22,14 @@ M8 does not authorize tool calls, external writes, financial actions, legal acti
 
 Each observation is bound to candidate + declared replay + declared metric. Duplicate observations for the same candidate/replay/metric fail closed. Metric values must be finite. Completion requires full replay coverage for the primary metric and every guardrail for every candidate.
 
+The primary metric declares its optimization direction. `primary_higher_is_better=True` preserves the original quality/accuracy behavior; `False` supports latency, cost, loss, error-rate and other metrics where a lower value is better. `minimum_improvement` is interpreted in the beneficial direction, so the configured threshold always means “at least this much better than champion” rather than assuming numeric increase.
+
 Promotion requires:
-1. the challenger meets the configured minimum primary-metric improvement over the champion;
+1. the challenger meets the configured minimum primary-metric improvement over the champion in the declared beneficial direction;
 2. every guardrail stays within its maximum permitted regression;
 3. the fixed replay set is fully covered.
 
-If multiple challengers qualify, selection is deterministic by primary score and then candidate ID. If none qualifies, the champion remains selected and the experiment completes without promotion. Rollback is legal only after a recorded promotion and restores the recorded previous champion identity.
+If multiple challengers qualify, selection is deterministic by beneficial primary score and then candidate ID. If none qualifies, the champion remains selected and the experiment completes without promotion. Rollback is legal only after a recorded promotion and restores the recorded previous champion identity.
 
 ## Durable SQLite persistence
 
@@ -38,6 +40,8 @@ Schema migration v7 adds three authoritative M8 tables:
 - `experiment_events` stores append-only lifecycle/promotion/rollback evidence.
 
 `SQLiteExperimentRepository` implements the stable `ExperimentRepository` port. Definitions cannot change after creation. Recorded observations cannot be removed or changed. A stale writer that would drop evidence fails closed. Repository saves acquire an immediate SQLite write transaction so current evidence is re-read under the writer lock before append/state mutation.
+
+Primary metric direction is persisted inside the existing immutable definition JSON, so this correctness repair does not require a schema migration. Definitions written before the direction field existed decode as `primary_higher_is_better=True`, preserving the historical M8 behavior and allowing old SQLite experiments to continue through normal lifecycle transitions.
 
 Lifecycle updates and their event evidence are one local transaction. Fault-injection tests deliberately abort event insertion after the experiment status update and verify that SQLite rolls the whole transition back. Restart tests recreate the store/repository/engine from the same database, continue a partially recorded run, promote a challenger, recreate the process again and roll back to the recorded champion.
 
@@ -58,7 +62,7 @@ Before M8 receives its 10% roadmap weight:
 5. fault-injected transition/event failure rolls back atomically;
 6. duplicate, unknown and stale-writer evidence paths fail closed;
 7. permission-fingerprint drift and definition/evidence mutation are rejected;
-8. promotion threshold, guardrail denial and rollback tests pass;
+8. promotion threshold, metric direction, guardrail denial and rollback tests pass;
 9. no M8 path can rewrite production source or silently widen permissions;
 10. exact SHA/CI evidence is recorded before integration.
 
