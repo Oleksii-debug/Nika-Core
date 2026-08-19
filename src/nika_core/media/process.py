@@ -106,10 +106,7 @@ class SafeProcessRunner:
                 self._terminate_tree(process)
                 break
             if stdout_reader.exceeded or stderr_reader.exceeded:
-                failure = MediaError(
-                    MediaErrorCode.OUTPUT_LIMIT,
-                    "media subprocess exceeded the configured output limit",
-                )
+                failure = self._output_limit_error()
                 self._terminate_tree(process)
                 break
             if time.monotonic() >= deadline:
@@ -131,6 +128,8 @@ class SafeProcessRunner:
         stdout_reader.join(timeout=2)
         stderr_reader.join(timeout=2)
         elapsed = time.monotonic() - started
+        if failure is None and (stdout_reader.exceeded or stderr_reader.exceeded):
+            failure = self._output_limit_error()
         if failure is not None:
             raise failure
 
@@ -149,6 +148,13 @@ class SafeProcessRunner:
                 retryable=False,
             )
         return result
+
+    @staticmethod
+    def _output_limit_error() -> MediaError:
+        return MediaError(
+            MediaErrorCode.OUTPUT_LIMIT,
+            "media subprocess exceeded the configured output limit",
+        )
 
     @staticmethod
     def _validate_argv(argv: tuple[str, ...]) -> None:
