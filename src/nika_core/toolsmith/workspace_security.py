@@ -3,9 +3,9 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Iterable, Mapping, Sequence
 
 from .contracts import IsolationClass
 
@@ -57,9 +57,6 @@ _ALLOWED_ENVIRONMENT_VARIABLES = frozenset(
         "TEMP",
         "TMP",
         "TMPDIR",
-        "HOME",
-        "USERPROFILE",
-        "LOCALAPPDATA",
     }
 )
 
@@ -108,7 +105,9 @@ class SterileGitPlan:
         if self.private_git_dir == self.worktree_root / ".git":
             raise WorkspaceSecurityError("worker-visible .git metadata is forbidden")
         if self.isolation_class is not IsolationClass.POLICY_ONLY:
-            raise WorkspaceSecurityError("workspace plan is policy-only and must not overclaim isolation")
+            raise WorkspaceSecurityError(
+                "workspace plan is policy-only and must not overclaim isolation"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,9 +220,11 @@ def sterile_git_environment(source: Mapping[str, str] | None = None) -> dict[str
         if key.upper() in _ALLOWED_ENVIRONMENT_VARIABLES
         and key.upper() not in _GIT_CREDENTIAL_VARIABLES
     }
+    null_device = "NUL" if os.name == "nt" else "/dev/null"
     environment.update(
         {
             "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": null_device,
             "GIT_TERMINAL_PROMPT": "0",
             "GCM_INTERACTIVE": "never",
         }
