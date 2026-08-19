@@ -24,6 +24,7 @@ class ModelErrorCode(StrEnum):
     CANCELLED = "cancelled"
     AUTHENTICATION = "authentication"
     RATE_LIMITED = "rate_limited"
+    RESOURCE_LIMIT = "resource_limit"
     PROVIDER_ERROR = "provider_error"
 
 
@@ -71,17 +72,20 @@ class ModelRequest:
 
 @dataclass(frozen=True, slots=True)
 class ModelDownloadAuthorization:
-    """Explicit product-level intent to acquire one exact optional model.
+    """Explicit product-level intent to acquire one optional model artifact.
 
     This object is deliberately separate from ModelRequest so ordinary inference
     can never gain model-download permission merely by selecting a model name.
-    The license reference is evidence supplied/reviewed by the product layer;
-    it is not inferred from the provider SDK license.
+    ``expected_model_id`` can pin an immutable provider artifact/variant identity
+    in addition to the logical model alias. The license reference is evidence
+    supplied/reviewed by the product layer; it is not inferred from the provider
+    SDK license.
     """
 
     provider_id: str
     model: str
     license_reference: str
+    expected_model_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.provider_id.strip():
@@ -94,6 +98,37 @@ class ModelDownloadAuthorization:
             raise ValueError("model must not contain surrounding whitespace")
         if not self.license_reference.strip():
             raise ValueError("license_reference must not be empty")
+        if self.license_reference != self.license_reference.strip():
+            raise ValueError("license_reference must not contain surrounding whitespace")
+        if self.expected_model_id is not None:
+            if not self.expected_model_id.strip():
+                raise ValueError("expected_model_id must not be empty")
+            if self.expected_model_id != self.expected_model_id.strip():
+                raise ValueError("expected_model_id must not contain surrounding whitespace")
+
+
+@dataclass(frozen=True, slots=True)
+class ModelResourcePolicy:
+    """Fail-closed preflight budget for an in-process model operation.
+
+    This is intentionally provider-neutral product policy. It consumes the
+    existing ResourceObserverPort snapshot rather than introducing another
+    system-monitor dependency or persistence schema.
+    """
+
+    max_cpu_percent: float | None = None
+    max_memory_percent: float | None = None
+    min_available_memory_bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("max_cpu_percent", self.max_cpu_percent),
+            ("max_memory_percent", self.max_memory_percent),
+        ):
+            if value is not None and not 0 < value <= 100:
+                raise ValueError(f"{name} must be in the range (0, 100]")
+        if self.min_available_memory_bytes is not None and self.min_available_memory_bytes <= 0:
+            raise ValueError("min_available_memory_bytes must be greater than zero")
 
 
 @dataclass(frozen=True, slots=True)

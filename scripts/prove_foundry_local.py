@@ -14,9 +14,12 @@ from nika_core.model_gateway.contracts import (
     ModelDownloadAuthorization,
     ModelMessage,
     ModelRequest,
+    ModelResourcePolicy,
+    ModelResponse,
     PrivacyClass,
 )
-from nika_core.model_gateway.foundry_local import FoundryLocalProvider
+from nika_core.model_gateway.foundry_local import FoundryLocalProvider, FoundryModelEvidence
+from nika_core.model_gateway.gateway import ModelGateway
 
 
 def _installed_foundry_package() -> tuple[str, str]:
@@ -52,12 +55,117 @@ def _tree_sha256(root: Path) -> dict[str, object]:
     }
 
 
+def _resource_snapshot() -> dict[str, object]:
+    try:
+        import psutil
+    except ImportError as exc:
+        raise RuntimeError(
+            "physical Foundry proof requires psutil resource evidence; install Nika's 'agent' "
+            "optional component together with 'embedded-ai'"
+        ) from exc
+
+    process = psutil.Process()
+    memory = psutil.virtual_memory()
+    cpu_times = process.cpu_times()
+    return {
+        "system_cpu_percent": float(psutil.cpu_percent(interval=None)),
+        "system_memory_percent": float(memory.percent),
+        "system_available_memory_bytes": int(memory.available),
+        "system_total_memory_bytes": int(memory.total),
+        "process_rss_bytes": int(process.memory_info().rss),
+        "process_cpu_seconds": float(cpu_times.user + cpu_times.system),
+    }
+
+
+def _resource_delta(
+    before: dict[str, object], after: dict[str, object]
+) -> dict[str, float | int]:
+    return {
+        "process_rss_bytes_delta": int(after["process_rss_bytes"])
+        - int(before["process_rss_bytes"]),
+        "process_cpu_seconds_delta": float(after["process_cpu_seconds"])
+        - float(before["process_cpu_seconds"]),
+    }
+
+
+def _response_evidence(response: ModelResponse) -> dict[str, object]:
+    return {
+        "provider_id": response.provider_id,
+        "provider_kind": response.provider_kind.value,
+        "model": response.model,
+        "text_nonempty": bool(response.text),
+        "text_length": len(response.text),
+        "text_sha256": hashlib.sha256(response.text.encode("utf-8")).hexdigest(),
+        "usage": asdict(response.usage),
+        "latency_ms": response.latency_ms,
+    }
+
+
+def _model_evidence_for_report(model: FoundryModelEvidence) -> dict[str, object]:
+    """Serialize model metadata without exporting a user-specific cache path."""
+    report = asdict(model)
+    path = report.pop("path", None)
+    report["cache_path_available"] = path is not None
+    return report
+
+
+def _model_resource_policy(args: argparse.Namespace) -> ModelResourcePolicy | None:
+    min_available_memory_bytes: int | None = None
+    if args.min_available_memory_gb is not None:
+        min_available_memory_bytes = int(args.min_available_memory_gb * 1024**3)
+    if (
+        args.max_cpu_percent is None
+        and args.max_memory_percent is None
+        and min_available_memory_bytes is None
+    ):
+        return None
+    return ModelResourcePolicy(
+        max_cpu_percent=args.max_cpu_percent,
+        max_memory_percent=args.max_memory_percent,
+        min_available_memory_bytes=min_available_memory_bytes,
+    )
+
+
 async def _run(args: argparse.Namespace) -> dict[str, object]:
-    provider = FoundryLocalProvider(default_model=args.model)
+    if platform.system() != "Windows":
+        raise RuntimeError("physical Foundry acceptance proof must run on Windows")
+
     package_name, package_version = _installed_foundry_package()
+    if package_name != "foundry-local-sdk-winml":
+        raise RuntimeError(
+            "physical Windows proof requires the adopted foundry-local-sdk-winml package"
+        )
+
+    resource_policy = _model_resource_policy(args)
+    resource_observer = None
+    if resource_policy is not None:
+        try:
+            from nika_core.resources.psutil_adapter import PsutilResourceObserver
+        except ImportError as exc:
+            raise RuntimeError(
+                "configured model resource policy requires Nika's 'agent' optional component"
+            ) from exc
+        resource_observer = PsutilResourceObserver()
+
+    provider = FoundryLocalProvider(
+        default_model=args.model,
+        expected_model_id=args.model_id,
+        resource_policy=resource_policy,
+        resource_observer=resource_observer,
+    )
+    gateway = ModelGateway()
+    gateway.register(provider)
+
     before = provider.inspect_model()
+    if before.loaded:
+        raise RuntimeError(
+            "selected model is already loaded by another Foundry consumer; unload it first so "
+            "Nika can prove lifecycle ownership without disrupting another process consumer"
+        )
+
+    resources_before = _resource_snapshot()
     evidence: dict[str, object] = {
-        "schema": "nika-foundry-local-physical-proof-v2",
+        "schema": "nika-foundry-local-physical-proof-v3",
         "platform": {
             "system": platform.system(),
             "release": platform.release(),
@@ -68,10 +176,18 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         },
         "sdk": {"package": package_name, "version": package_version},
         "model_license_review": args.model_license,
-        "model_before": asdict(before),
+        "expected_model_id": args.model_id,
+        "model_before": _model_evidence_for_report(before),
+        "resource_policy": asdict(resource_policy) if resource_policy is not None else None,
+        "resources_before": resources_before,
+        "model_gateway_path_used": False,
         "explicit_model_download_action_executed": False,
         "physical_inference_executed": False,
+        "unload_reload_proof_executed": False,
     }
+
+    first_close_completed = False
+    final_close_completed = False
     try:
         if args.allow_download and not before.cached:
             download_evidence = await provider.download_model(
@@ -79,14 +195,16 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                     provider_id="foundry-local",
                     model=args.model,
                     license_reference=args.model_license,
-                )
+                    expected_model_id=args.model_id,
+                ),
+                timeout_seconds=args.download_timeout,
             )
             evidence["explicit_model_download_action_executed"] = True
-            evidence["model_after_download"] = asdict(download_evidence)
+            evidence["model_after_download"] = _model_evidence_for_report(download_evidence)
 
-        response = await provider.complete(
+        first_response = await gateway.complete(
             ModelRequest(
-                request_id="foundry-physical-proof",
+                request_id="foundry-physical-proof-first",
                 messages=(ModelMessage(role="user", content=args.prompt),),
                 provider_id="foundry-local",
                 privacy=PrivacyClass.SENSITIVE,
@@ -94,35 +212,85 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 temperature=0.0,
             )
         )
-        after = provider.inspect_model()
-        evidence["model_after"] = asdict(after)
-        evidence["inference"] = {
-            "provider_id": response.provider_id,
-            "provider_kind": response.provider_kind.value,
-            "model": response.model,
-            "text": response.text,
-            "usage": asdict(response.usage),
-            "latency_ms": response.latency_ms,
-        }
+        resources_after_first = _resource_snapshot()
+        after_first = provider.inspect_model()
+        evidence["model_after_first_inference"] = _model_evidence_for_report(after_first)
+        evidence["first_inference"] = _response_evidence(first_response)
+        evidence["resources_after_first_inference"] = resources_after_first
+        evidence["first_inference_resource_delta"] = _resource_delta(
+            resources_before, resources_after_first
+        )
+        evidence["model_gateway_path_used"] = True
         evidence["physical_inference_executed"] = True
+
+        provider.close()
+        first_close_completed = True
+        after_unload = provider.inspect_model()
+        evidence["model_after_unload"] = _model_evidence_for_report(after_unload)
+        if after_unload.loaded:
+            raise RuntimeError("Foundry model remained loaded after provider-owned unload")
+
+        reload_response = await gateway.complete(
+            ModelRequest(
+                request_id="foundry-physical-proof-reload",
+                messages=(ModelMessage(role="user", content=args.prompt),),
+                provider_id="foundry-local",
+                privacy=PrivacyClass.SENSITIVE,
+                timeout_seconds=args.timeout,
+                temperature=0.0,
+            )
+        )
+        resources_after_reload = _resource_snapshot()
+        evidence["reload_inference"] = _response_evidence(reload_response)
+        evidence["resources_after_reload_inference"] = resources_after_reload
+        evidence["reload_resource_delta_from_start"] = _resource_delta(
+            resources_before, resources_after_reload
+        )
+
+        provider.close()
+        final_close_completed = True
+        final_model = provider.inspect_model()
+        evidence["model_final"] = _model_evidence_for_report(final_model)
+        if final_model.loaded:
+            raise RuntimeError("Foundry model remained loaded after final provider close")
+        evidence["unload_reload_proof_executed"] = True
+
         if args.hash_model_cache:
-            if after.path is None:
+            if final_model.path is None:
                 raise ValueError("cached model path is unavailable; cannot hash model cache")
-            evidence["model_cache_digest"] = _tree_sha256(Path(after.path))
+            evidence["model_cache_digest"] = _tree_sha256(Path(final_model.path))
         return evidence
     finally:
-        provider.close()
+        original_failure_active = sys.exc_info()[0] is not None
+        if not final_close_completed:
+            try:
+                provider.close()
+            except RuntimeError:
+                # A timed-out/cancelled native worker still owns the slot. Do not race an unload.
+                # Preserve the original proof failure; otherwise cleanup failure is itself fatal.
+                if not original_failure_active:
+                    raise
+            except Exception:
+                if not original_failure_active:
+                    raise
+        if final_close_completed and not first_close_completed:
+            raise RuntimeError("Foundry lifecycle proof did not complete its first unload")
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run a real Foundry Local inference and emit machine-readable physical-Windows "
-            "evidence. Inference never downloads a model. --allow-download executes a separate "
-            "explicit model-management action bound to --model and --model-license first."
+            "Run a real Foundry Local inference through Nika ModelGateway and emit "
+            "machine-readable physical-Windows evidence. Inference never downloads a model. "
+            "--allow-download executes a separate explicit model-management action first."
         )
     )
     parser.add_argument("--model", required=True, help="Exact Foundry Local model alias")
+    parser.add_argument(
+        "--model-id",
+        required=True,
+        help="Exact public Foundry selected variant ID; fails closed if the alias resolves elsewhere",
+    )
     parser.add_argument(
         "--model-license",
         required=True,
@@ -131,22 +299,26 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--prompt",
         default="Reply with exactly: NIKA_FOUNDRY_LOCAL_OK",
-        help="Deterministic proof prompt",
+        help="Deterministic proof prompt; raw prompt/response text is not written to evidence",
     )
     parser.add_argument("--timeout", type=float, default=120.0)
+    parser.add_argument("--download-timeout", type=float, default=1800.0)
     parser.add_argument(
         "--allow-download",
         action="store_true",
         help=(
-            "Run the separate explicit model download action for this exact model/license if it "
-            "is not already cached"
+            "Run the separate explicit model download action for this exact alias/ID/license if "
+            "the model is not already cached"
         ),
     )
     parser.add_argument(
         "--hash-model-cache",
         action="store_true",
-        help="Hash every cached model file after successful inference; may take substantial time",
+        help="Hash every cached model file after successful lifecycle proof; may take substantial time",
     )
+    parser.add_argument("--max-cpu-percent", type=float)
+    parser.add_argument("--max-memory-percent", type=float)
+    parser.add_argument("--min-available-memory-gb", type=float)
     parser.add_argument(
         "--output",
         type=Path,
@@ -159,6 +331,10 @@ def main() -> int:
     args = _parse_args()
     if args.timeout <= 0:
         raise ValueError("--timeout must be greater than zero")
+    if args.download_timeout <= 0:
+        raise ValueError("--download-timeout must be greater than zero")
+    if args.min_available_memory_gb is not None and args.min_available_memory_gb <= 0:
+        raise ValueError("--min-available-memory-gb must be greater than zero")
     evidence = asyncio.run(_run(args))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
