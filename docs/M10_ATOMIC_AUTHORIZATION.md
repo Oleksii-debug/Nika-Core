@@ -1,16 +1,21 @@
-# M10 atomic authorization ledger
+# M10 atomic authorization and exact approval identity
 
 Updated: 2026-08-19.
 
-Status: stacked implementation candidate. Depends on PR #60 target-scope hardening. `HUMAN_TESTED=false`; `NVDA_VERIFIED=false`.
+Status: implementation candidate on top of integrated PR #60. `HUMAN_TESTED=false`; `NVDA_VERIFIED=false`.
 
-## Problem
+## Problems
 
 M10 keeps two mutable authorization resources: a one-time `ApprovalLedger` for exact human evidence and an `ExecutionBudgetLedger` for write/network/process ceilings.
 
-Previously `authorize_action()` consumed approval first and reserved budget second. If the action had valid approval but no remaining budget, authorization failed after the one-time approval had already been spent. Reversing the two calls would merely invert the bug: a missing or invalid approval could consume budget even though no action was authorized.
+Previously `authorize_action()` consumed approval first and reserved budget second. If a valid high-impact action had no remaining budget, authorization failed after the one-time approval had already been spent. Reversing the two calls would merely invert the bug: a missing or invalid approval could consume budget even though no action was authorized.
 
-The correct downstream invariant is that approval evidence and budget reservation commit together or neither commits.
+A second audit finding affected the meaning of "exact" approval itself. `ActionIntent.approval_fingerprint` previously concatenated fields with the control character `U+001F` and replaced optional `None` values with empty strings. Two different field tuples could therefore serialize to the same pre-hash payload: a separator embedded inside one field could shift the apparent field boundary, and `None` could alias `""`. The `approval_required` flag was also absent from the fingerprint.
+
+The downstream invariants are therefore:
+
+1. approval evidence and budget reservation commit together or neither commits;
+2. every semantically distinct `ActionIntent` field tuple has an unambiguous canonical representation before SHA-256 hashing.
 
 ## REUSE / ADAPT / CUSTOM
 
@@ -18,20 +23,23 @@ REUSE:
 
 - Python standard-library `threading.RLock`, including its context-manager protocol;
 - `dataclasses.field(default_factory=..., init=False, repr=False, compare=False)` for per-ledger synchronization state that does not become part of the public constructor, representation or equality contract;
-- existing M10 `ActionIntent`, exact approval fingerprint, security policy and resource-budget models.
+- Python standard-library `json.dumps()` for framed structured serialization of the fingerprint tuple;
+- existing SHA-256 digest, `ActionIntent`, security policy and resource-budget models.
 
 ADAPT:
 
 - existing ledger operations are split internally into non-mutating validation and non-failing commit phases while their public `consume()` / `reserve()` behavior remains compatible;
-- `authorize_action()` acquires approval then budget locks in one fixed order, validates both resources without mutation, and only then commits both.
+- `authorize_action()` acquires approval then budget locks in one fixed order, validates both resources without mutation, and only then commits both;
+- the fingerprint hashes a versioned JSON array using compact separators rather than an unescaped delimiter string. Optional values stay JSON `null` rather than collapsing to empty strings, numeric and Boolean fields keep their types, and `approval_required` is included.
 
 CUSTOM thin:
 
-- one in-process atomic authorization critical section spanning the two existing ledgers.
+- one in-process atomic authorization critical section spanning the two existing ledgers;
+- the versioned `nika-action-intent-v1` field schema that defines Nika's exact approval identity.
 
 No dependency, database or cross-process transaction framework is introduced.
 
-## Invariants
+## Atomic ledger invariants
 
 For a policy-valid action:
 
@@ -50,23 +58,44 @@ Consequences:
 - a budget loser keeps its exact one-time approval and can be retried if a legitimate fresh budget becomes available;
 - successful authorization still consumes approval exactly once and reserves budget exactly once.
 
+## Exact fingerprint invariants
+
+The SHA-256 input is a JSON array containing, in a fixed order:
+
+1. schema tag `nika-action-intent-v1`;
+2. `action_id`;
+3. `tool_id`;
+4. risk value;
+5. target;
+6. `write_path` including `null` when absent;
+7. numeric `write_bytes`;
+8. `network_host` including `null` when absent;
+9. `executable` including `null` when absent;
+10. Boolean `approval_required`.
+
+JSON string escaping frames embedded control characters instead of treating them as field boundaries. The schema tag makes future incompatible fingerprint layouts explicit rather than silently reinterpreting old evidence.
+
+Changing this fingerprint intentionally invalidates approval evidence produced against the ambiguous legacy serialization. That is a fail-closed security migration: human approval must match the current exact action contract.
+
 ## Scope boundary
 
-This provides **in-process thread safety only** for the in-memory M10 ledgers. It is not a durable transaction, a distributed lock or crash-recovery journal. A future durable authorization store must provide its own transactional semantics rather than assuming `RLock` survives process termination.
+The ledger change provides **in-process thread safety only** for the in-memory M10 ledgers. It is not a durable transaction, distributed lock or crash-recovery journal. A future durable authorization store must provide its own transactional semantics rather than assuming `RLock` survives process termination.
 
-The critical section protects only authorization accounting. It does not claim that the external side effect itself is atomic with the ledger commit. Adapters must still execute only after `authorize_action()` succeeds and must use their own idempotency/recovery strategy where an external operation can fail after authorization.
+The critical section protects authorization accounting only. It does not make the external side effect atomic with the ledger commit. Adapters must execute only after `authorize_action()` succeeds and still need idempotency/recovery appropriate to their external operation.
+
+The canonical fingerprint prevents structural serialization aliasing; it does not turn SHA-256 into an authentication mechanism. Authenticity and provenance of `ApprovalEvidence` remain separate concerns for the human-approval channel.
 
 ## Acceptance evidence
 
-The focused regressions must prove:
+Focused regressions must prove:
 
 1. budget rejection leaves one-time approval unconsumed;
-2. missing approval leaves all budget counters unchanged;
-3. mismatched approval leaves budget unchanged;
-4. two competing approved high-impact writes against one remaining byte produce exactly one success and one budget rejection;
-5. the losing concurrent action can still use its untouched approval with a legitimate fresh budget;
-6. a success commits budget and consumes approval once;
-7. existing direct `ApprovalLedger.consume()` and `ExecutionBudgetLedger.reserve()` semantics remain compatible;
-8. the complete repository suite remains green on Ubuntu and Windows after PR #60 is integrated.
-
-No integration or packaging credit is claimed for this stacked branch before its parent security slice is integrated and its own exact-head gates run.
+2. missing or mismatched approval leaves budget unchanged;
+3. two competing approved high-impact writes against one remaining byte produce exactly one success and one budget rejection;
+4. the budget loser retains its exact approval for a legitimate fresh budget;
+5. success commits budget and consumes approval once;
+6. the historical embedded-separator payload alias no longer produces equal fingerprints;
+7. absent optional values and explicit empty strings no longer alias;
+8. `approval_required` participates in exact identity;
+9. evidence generated for one formerly colliding action is rejected for the other;
+10. the complete repository suite remains green on Ubuntu and Windows with exact-head M12 pre-human packaging evidence before integration.
