@@ -6,6 +6,12 @@
   const keymapBody = document.getElementById("keymap-body");
   const keymapJson = document.getElementById("keymap-json");
   const commandInput = document.getElementById("command-input");
+  const tasksList = document.getElementById("tasks-list");
+  const agentsList = document.getElementById("agents-list");
+  const workspacesList = document.getElementById("workspaces-list");
+  const tasksEmpty = document.getElementById("tasks-empty");
+  const agentsEmpty = document.getElementById("agents-empty");
+  const workspacesEmpty = document.getElementById("workspaces-empty");
   let actions = [];
   let actionsReady = false;
   let bridgeInitializationStarted = false;
@@ -47,11 +53,7 @@
   }
 
   function normalizedBinding(binding) {
-    return String(binding || "")
-      .split("+")
-      .map((part) => part.trim().toLowerCase())
-      .filter(Boolean)
-      .join("+");
+    return String(binding || "").split("+").map((part) => part.trim().toLowerCase()).filter(Boolean).join("+");
   }
 
   function focusElementById(focusId) {
@@ -62,6 +64,30 @@
     return document.activeElement === element;
   }
 
+  function renderItems(list, emptyNode, items, formatter) {
+    list.replaceChildren();
+    emptyNode.hidden = items.length > 0;
+    for (const item of items) {
+      const row = document.createElement("li");
+      row.textContent = formatter(item);
+      list.appendChild(row);
+    }
+  }
+
+  async function refreshState() {
+    if (!globalThis.pywebview?.api?.get_state) return false;
+    const response = await globalThis.pywebview.api.get_state();
+    if (!response.ok) {
+      appendLog(response.message || "Не вдалося отримати стан програми.");
+      return false;
+    }
+    const state = response.state || {};
+    renderItems(tasksList, tasksEmpty, state.tasks || [], (item) => `${item.command || "Без назви"} — ${item.state}`);
+    renderItems(agentsList, agentsEmpty, state.agents || [], (item) => `${item.name} — ${item.goal}`);
+    renderItems(workspacesList, workspacesEmpty, state.workspaces || [], (item) => `${item.name} — ${item.description || "Без опису"}`);
+    return true;
+  }
+
   async function dispatch(actionId, trigger = null) {
     if (!globalThis.pywebview?.api?.dispatch) {
       announce("Міст Nika ще не готовий.", true);
@@ -69,19 +95,14 @@
     }
     const payload = {};
     if (actionId === "task.create") payload.command = commandInput.value.trim();
-    const result = await globalThis.pywebview.api.dispatch({
-      request_id: requestId(),
-      action_id: actionId,
-      payload,
-    });
-    announce(result.message || (result.status === "completed" ? "Виконано." : result.status), result.status === "failed");
+    const result = await globalThis.pywebview.api.dispatch({ request_id: requestId(), action_id: actionId, payload });
+    const failed = result.status === "failed" || result.status === "rejected";
+    announce(result.message || (result.status === "completed" ? "Виконано." : result.status), failed);
     appendLog(result.message);
+    await refreshState();
     const focusId = result.focus_id || trigger?.dataset?.focusTarget;
-    if (focusId) {
-      focusElementById(focusId);
-    } else {
-      trigger?.focus?.();
-    }
+    if (focusId) focusElementById(focusId);
+    else trigger?.focus?.();
   }
 
   async function refreshKeymap() {
@@ -96,7 +117,6 @@
       const labelCell = document.createElement("th");
       labelCell.scope = "row";
       labelCell.textContent = action.label;
-
       const bindingCell = document.createElement("td");
       const input = document.createElement("input");
       input.type = "text";
@@ -104,7 +124,6 @@
       input.dataset.actionId = action.action_id;
       input.setAttribute("aria-label", `Комбінація для ${action.label}`);
       bindingCell.appendChild(input);
-
       const controlCell = document.createElement("td");
       const save = document.createElement("button");
       save.type = "button";
@@ -138,6 +157,7 @@
     try {
       const ready = await refreshKeymap();
       if (!ready) throw new Error("Action Registry bridge unavailable");
+      await refreshState();
       document.documentElement.dataset.nikaReady = "true";
       announce("Nika Core готова до роботи.");
     } catch (error) {
@@ -172,9 +192,7 @@
   });
 
   document.addEventListener("keydown", (event) => {
-    if (isEditable(event.target) && event.ctrlKey && !event.altKey && !event.metaKey && reservedEditingKeys.has(event.key.toLowerCase())) {
-      return;
-    }
+    if (isEditable(event.target) && event.ctrlKey && !event.altKey && !event.metaKey && reservedEditingKeys.has(event.key.toLowerCase())) return;
     if (!actionsReady) return;
     const pressed = eventBinding(event);
     if (!pressed) return;
@@ -184,12 +202,6 @@
     void dispatch(action.action_id, event.target instanceof HTMLElement ? event.target : null);
   });
 
-  // pywebview documents this event on window. The immediate check makes startup
-  // idempotent if the bridge was injected before this bundled script executed.
-  window.addEventListener("pywebviewready", () => {
-    void initializeBridge();
-  });
-  if (globalThis.pywebview?.api) {
-    void initializeBridge();
-  }
+  window.addEventListener("pywebviewready", () => { void initializeBridge(); });
+  if (globalThis.pywebview?.api) void initializeBridge();
 })();
