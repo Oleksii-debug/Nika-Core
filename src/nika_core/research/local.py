@@ -27,8 +27,26 @@ class LocalFileTooLargeError(LocalIngestionError):
 
 
 class _VisibleTextParser(HTMLParser):
-    _BLOCKED = {"script", "style", "noscript", "template"}
-    _BREAKS = {"br", "p", "div", "li", "tr", "section", "article", "header", "footer", "h1", "h2", "h3", "h4", "h5", "h6"}
+    _BLOCKED = frozenset({"script", "style", "noscript", "template"})
+    _BREAKS = frozenset(
+        {
+            "br",
+            "p",
+            "div",
+            "li",
+            "tr",
+            "section",
+            "article",
+            "header",
+            "footer",
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "h5",
+            "h6",
+        }
+    )
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
