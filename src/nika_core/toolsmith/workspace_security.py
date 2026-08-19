@@ -5,7 +5,7 @@ import os
 import pathlib
 import stat
 
-import nika_core.toolsmith.contracts as toolsmith_contracts
+from nika_core.toolsmith import contracts as toolsmith_contracts
 
 
 _WINDOWS_RESERVED_BASENAMES = frozenset(
