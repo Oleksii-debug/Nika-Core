@@ -46,7 +46,7 @@ class ModelGateway:
                     ModelErrorCode.TIMEOUT,
                     "model request exceeded its deadline",
                     provider_id=capabilities.provider_id,
-                    retryable=True,
+                    retryable=False,
                 )
                 self._audit_failure(request, capabilities.provider_id, error)
                 raise error
@@ -75,11 +75,12 @@ class ModelGateway:
                     provider.complete(attempt_request), timeout=remaining
                 )
             except TimeoutError as exc:
+                retryable = capabilities.supports_hard_cancellation
                 error = ModelGatewayError(
                     ModelErrorCode.TIMEOUT,
                     "model request exceeded its deadline",
                     provider_id=capabilities.provider_id,
-                    retryable=True,
+                    retryable=retryable,
                 )
                 self._audit_failure(request, capabilities.provider_id, error)
                 if self._can_fallback(error=error, index=index, providers=providers):
