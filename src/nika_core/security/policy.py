@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -227,17 +228,21 @@ class ActionIntent:
 
     @property
     def approval_fingerprint(self) -> str:
-        payload = "\x1f".join(
+        payload = json.dumps(
             (
+                "nika-action-intent-v1",
                 self.action_id,
                 self.tool_id,
                 self.risk.value,
                 self.target,
-                self.write_path or "",
-                str(self.write_bytes),
-                self.network_host or "",
-                self.executable or "",
-            )
+                self.write_path,
+                self.write_bytes,
+                self.network_host,
+                self.executable,
+                self.approval_required,
+            ),
+            ensure_ascii=False,
+            separators=(",", ":"),
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
