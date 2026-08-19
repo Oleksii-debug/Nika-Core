@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import collections.abc
-import hashlib
-import os
-import stat
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from hashlib import sha256
+from os import environ, name
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from stat import FILE_ATTRIBUTE_REPARSE_POINT, S_ISLNK
 
 from .contracts import IsolationClass
 
@@ -89,7 +89,7 @@ class SterileGitPlan:
     worktree_root: Path
     branch_name: str
     base_sha: str
-    environment: collections.abc.Mapping[str, str]
+    environment: Mapping[str, str]
     config_args: tuple[str, ...]
     isolation_class: IsolationClass = IsolationClass.POLICY_ONLY
 
@@ -197,11 +197,14 @@ def ensure_path_policy(
         if not current.exists() and not current.is_symlink():
             continue
         file_stat = current.lstat()
-        if stat.S_ISLNK(file_stat.st_mode):
+        if S_ISLNK(file_stat.st_mode):
             raise WorkspaceSecurityError("symbolic links are forbidden in guarded workspace paths")
         attributes = getattr(file_stat, "st_file_attributes", 0)
-        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-        if policy.reject_reparse_points and reparse_flag and attributes & reparse_flag:
+        if (
+            policy.reject_reparse_points
+            and FILE_ATTRIBUTE_REPARSE_POINT
+            and attributes & FILE_ATTRIBUTE_REPARSE_POINT
+        ):
             raise WorkspaceSecurityError("Windows reparse points are forbidden in guarded paths")
 
     resolved_parent = candidate.parent.resolve(strict=False)
@@ -212,17 +215,15 @@ def ensure_path_policy(
     return candidate
 
 
-def sterile_git_environment(
-    source: collections.abc.Mapping[str, str] | None = None,
-) -> dict[str, str]:
-    source_env = dict(os.environ if source is None else source)
+def sterile_git_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
+    source_env = dict(environ if source is None else source)
     environment = {
         key: value
         for key, value in source_env.items()
         if key.upper() in _ALLOWED_ENVIRONMENT_VARIABLES
         and key.upper() not in _GIT_CREDENTIAL_VARIABLES
     }
-    null_device = "NUL" if os.name == "nt" else "/dev/null"
+    null_device = "NUL" if name == "nt" else "/dev/null"
     environment.update(
         {
             "GIT_CONFIG_NOSYSTEM": "1",
@@ -240,7 +241,7 @@ def make_sterile_git_plan(
     job_root: Path,
     branch_name: str,
     base_sha: str,
-    source_environment: collections.abc.Mapping[str, str] | None = None,
+    source_environment: Mapping[str, str] | None = None,
 ) -> SterileGitPlan:
     repository_root = repository_root.resolve(strict=False)
     job_root = job_root.resolve(strict=False)
@@ -261,7 +262,7 @@ def make_sterile_git_plan(
         "-c",
         "credential.helper=",
         "-c",
-        "core.hooksPath=NUL" if os.name == "nt" else "core.hooksPath=/dev/null",
+        "core.hooksPath=NUL" if name == "nt" else "core.hooksPath=/dev/null",
         "-c",
         "protocol.file.allow=never",
         "-c",
@@ -279,8 +280,8 @@ def make_sterile_git_plan(
 
 
 def validate_typed_argv(
-    argv: collections.abc.Sequence[str],
-    allowed_executables: collections.abc.Iterable[str],
+    argv: Sequence[str],
+    allowed_executables: Iterable[str],
 ) -> tuple[str, ...]:
     if not argv or any(not argument or "\x00" in argument for argument in argv):
         raise WorkspaceSecurityError("argv must contain non-empty NUL-free arguments")
@@ -298,7 +299,7 @@ def validate_typed_argv(
 
 
 def _hash_file(path: Path, *, max_file_bytes: int) -> tuple[str, int]:
-    digest = hashlib.sha256()
+    digest = sha256()
     size = 0
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -327,8 +328,9 @@ def collect_tree_evidence(
         normalize_job_relative_path(relative)
         file_stat = path.lstat()
         attributes = getattr(file_stat, "st_file_attributes", 0)
-        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-        if stat.S_ISLNK(file_stat.st_mode) or (reparse_flag and attributes & reparse_flag):
+        if S_ISLNK(file_stat.st_mode) or (
+            FILE_ATTRIBUTE_REPARSE_POINT and attributes & FILE_ATTRIBUTE_REPARSE_POINT
+        ):
             raise WorkspaceSecurityError("tree evidence refuses symlinks and reparse points")
         if path.is_dir():
             continue
@@ -336,13 +338,13 @@ def collect_tree_evidence(
             raise WorkspaceSecurityError("tree evidence refuses non-regular filesystem entries")
         if len(records) >= max_files:
             raise WorkspaceSecurityError("tree evidence file-count limit exceeded")
-        sha256, size_bytes = _hash_file(path, max_file_bytes=max_file_bytes)
+        file_sha256, size_bytes = _hash_file(path, max_file_bytes=max_file_bytes)
         total_bytes += size_bytes
         if total_bytes > max_total_bytes:
             raise WorkspaceSecurityError("tree evidence total-byte limit exceeded")
-        records.append(FileEvidence(relative, sha256, size_bytes))
+        records.append(FileEvidence(relative, file_sha256, size_bytes))
 
-    tree_hasher = hashlib.sha256()
+    tree_hasher = sha256()
     for record in records:
         tree_hasher.update(record.path.encode("utf-8"))
         tree_hasher.update(b"\x00")
