@@ -52,9 +52,12 @@ def select_subtitle_track(
                 matches = []
                 for track in same_kind:
                     language = _normalize_language(track.language)
-                    if exact and language == wanted:
-                        matches.append(track)
-                    elif not exact and language != wanted and language.split("-", 1)[0] == wanted_base:
+                    is_match = (exact and language == wanted) or (
+                        not exact
+                        and language != wanted
+                        and language.split("-", 1)[0] == wanted_base
+                    )
+                    if is_match:
                         matches.append(track)
                 if matches:
                     return matches[0]
