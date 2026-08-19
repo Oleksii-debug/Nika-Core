@@ -47,6 +47,7 @@ class MultiAgentSupervisor:
         self._runtime = runtime
         self._store = store
         self._definitions = definitions
+        self._recovering_teams: set[str] = set()
 
     async def fan_out(
         self,
@@ -107,27 +108,35 @@ class MultiAgentSupervisor:
         return tuple(await asyncio.gather(*(run_child(member) for member in members)))
 
     async def recover_team(self, team_id: str) -> tuple[ChildExecution, ...]:
-        """Recover spawned or in-flight child work without bypassing approval waits.
+        """Recover persisted child work once per team for this supervisor instance.
 
         WAITING_APPROVAL children remain untouched because resuming them requires an explicit
         human decision. SPAWNED children are safe to start from their persisted TASK handoff;
         RUNNING children resume only from the recovery cursor persisted before execution.
+        A duplicate concurrent recovery call on the same supervisor returns no work rather than
+        issuing a second runtime resume while the first recovery attempt is still active.
         """
-        if self._store.team_state(team_id) is not TeamState.ACTIVE:
-            raise RuntimeError("team is not active")
-        quota = self._store.quota(team_id)
-        candidates = tuple(
-            member
-            for member in self._store.recoverable_children(team_id)
-            if member.state in {MemberState.SPAWNED, MemberState.RUNNING}
-        )
-        semaphore = asyncio.Semaphore(quota.max_parallel)
+        if team_id in self._recovering_teams:
+            return ()
+        self._recovering_teams.add(team_id)
+        try:
+            if self._store.team_state(team_id) is not TeamState.ACTIVE:
+                raise RuntimeError("team is not active")
+            quota = self._store.quota(team_id)
+            candidates = tuple(
+                member
+                for member in self._store.recoverable_children(team_id)
+                if member.state in {MemberState.SPAWNED, MemberState.RUNNING}
+            )
+            semaphore = asyncio.Semaphore(quota.max_parallel)
 
-        async def recover_child(member: TeamMember) -> ChildExecution:
-            async with semaphore:
-                return await self._recover_child(member)
+            async def recover_child(member: TeamMember) -> ChildExecution:
+                async with semaphore:
+                    return await self._recover_child(member)
 
-        return tuple(await asyncio.gather(*(recover_child(member) for member in candidates)))
+            return tuple(await asyncio.gather(*(recover_child(member) for member in candidates)))
+        finally:
+            self._recovering_teams.discard(team_id)
 
     def finalize_team(self, team_id: str) -> TeamState:
         """Explicitly close a team once no further fan-out is planned."""
