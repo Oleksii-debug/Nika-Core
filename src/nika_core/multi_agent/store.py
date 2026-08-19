@@ -9,11 +9,27 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
 from nika_core.multi_agent.contracts import (
     AgentHandoff,
+    HandoffKind,
     MemberState,
     TeamMember,
     TeamQuota,
     TeamState,
     attenuate_grants,
+)
+
+_NONTERMINAL_MEMBER_STATES = frozenset(
+    {
+        MemberState.SPAWNED,
+        MemberState.RUNNING,
+        MemberState.WAITING_APPROVAL,
+    }
+)
+_TERMINAL_MEMBER_STATES = frozenset(
+    {
+        MemberState.COMPLETED,
+        MemberState.FAILED,
+        MemberState.CANCELLED,
+    }
 )
 
 
@@ -48,8 +64,8 @@ class MultiAgentStore:
         )
         with self._store.connection() as conn:
             conn.execute(
-                "INSERT INTO multi_agent_teams(team_id, root_member_id, state, quota_json, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO multi_agent_teams(team_id, root_member_id, state, quota_json, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     team_id,
                     root_member_id,
@@ -69,6 +85,16 @@ class MultiAgentStore:
             )
         return root
 
+    def team_state(self, team_id: str) -> TeamState:
+        with self._store.connection() as conn:
+            row = conn.execute(
+                "SELECT state FROM multi_agent_teams WHERE team_id = ?",
+                (team_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown team: {team_id}")
+        return TeamState(row["state"])
+
     def quota(self, team_id: str) -> TeamQuota:
         with self._store.connection() as conn:
             row = conn.execute(
@@ -81,12 +107,7 @@ class MultiAgentStore:
 
     def member(self, team_id: str, member_id: str) -> TeamMember:
         with self._store.connection() as conn:
-            row = conn.execute(
-                "SELECT team_id, member_id, parent_id, depth, agent_id, agent_version, thread_id, "
-                "tool_grants_json, state, resume_token FROM multi_agent_members "
-                "WHERE team_id = ? AND member_id = ?",
-                (team_id, member_id),
-            ).fetchone()
+            row = self._member_row(conn, team_id=team_id, member_id=member_id)
         if row is None:
             raise KeyError(f"unknown team member: {team_id}/{member_id}")
         return self._member_from_row(row)
@@ -111,6 +132,7 @@ class MultiAgentStore:
         agent_version: int,
         thread_id: str,
         requested_grants: tuple[ToolGrant, ...],
+        task_handoff: AgentHandoff | None = None,
     ) -> TeamMember:
         now = datetime.now(UTC).isoformat()
         with self._store.connection() as conn:
@@ -123,12 +145,7 @@ class MultiAgentStore:
             if team["state"] != TeamState.ACTIVE.value:
                 raise RuntimeError("team is not active")
             quota = TeamQuota(**json.loads(team["quota_json"]))
-            parent_row = conn.execute(
-                "SELECT team_id, member_id, parent_id, depth, agent_id, agent_version, thread_id, "
-                "tool_grants_json, state, resume_token FROM multi_agent_members "
-                "WHERE team_id = ? AND member_id = ?",
-                (team_id, parent_id),
-            ).fetchone()
+            parent_row = self._member_row(conn, team_id=team_id, member_id=parent_id)
             if parent_row is None:
                 raise KeyError(f"unknown parent: {parent_id}")
             parent = self._member_from_row(parent_row)
@@ -136,7 +153,8 @@ class MultiAgentStore:
                 raise RuntimeError("spawn depth quota exceeded")
             child_count = int(
                 conn.execute(
-                    "SELECT COUNT(*) FROM multi_agent_members WHERE team_id = ? AND parent_id = ?",
+                    "SELECT COUNT(*) FROM multi_agent_members "
+                    "WHERE team_id = ? AND parent_id = ?",
                     (team_id, parent_id),
                 ).fetchone()[0]
             )
@@ -162,6 +180,14 @@ class MultiAgentStore:
                 tool_grants=grants,
             )
             self._insert_member(conn, child, now)
+            if task_handoff is not None:
+                self._validate_task_handoff(
+                    task_handoff,
+                    team_id=team_id,
+                    parent_id=parent_id,
+                    child_id=child_id,
+                )
+                self._insert_handoff_with_connection(conn, task_handoff, now)
             self._audit.append_with_connection(
                 conn,
                 event_type="multi_agent.child_spawned",
@@ -170,6 +196,160 @@ class MultiAgentStore:
                 payload={"parent_id": parent_id, "child_id": child_id, "depth": child.depth},
             )
         return child
+
+    def task_payload(self, team_id: str, member_id: str) -> dict[str, object]:
+        with self._store.connection() as conn:
+            rows = conn.execute(
+                "SELECT payload_json FROM multi_agent_handoffs "
+                "WHERE team_id = ? AND recipient_id = ? AND kind = ? "
+                "ORDER BY created_at, handoff_id LIMIT 2",
+                (team_id, member_id, HandoffKind.TASK.value),
+            ).fetchall()
+        if not rows:
+            raise KeyError(f"no persisted task handoff for {team_id}/{member_id}")
+        if len(rows) > 1:
+            raise RuntimeError(f"ambiguous task handoff for {team_id}/{member_id}")
+        payload = json.loads(rows[0]["payload_json"])
+        if not isinstance(payload, dict):
+            raise TypeError("persisted task handoff payload must be an object")
+        return payload
+
+    def prepare_member_execution(
+        self,
+        *,
+        team_id: str,
+        member_id: str,
+        resume_token: str | None,
+    ) -> TeamMember:
+        """Commit RUNNING state and the pre-execution recovery cursor atomically."""
+        now = datetime.now(UTC).isoformat()
+        with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            team = conn.execute(
+                "SELECT state FROM multi_agent_teams WHERE team_id = ?",
+                (team_id,),
+            ).fetchone()
+            if team is None:
+                raise KeyError(f"unknown team: {team_id}")
+            if team["state"] != TeamState.ACTIVE.value:
+                raise RuntimeError("team is not active")
+            row = self._member_row(conn, team_id=team_id, member_id=member_id)
+            if row is None:
+                raise KeyError(f"unknown team member: {team_id}/{member_id}")
+            member = self._member_from_row(row)
+            if member.parent_id is None:
+                raise ValueError("team root is not a child execution")
+            if member.state is not MemberState.SPAWNED:
+                raise RuntimeError(
+                    f"child execution can start only from spawned state, got {member.state.value}"
+                )
+            conn.execute(
+                "UPDATE multi_agent_members SET state = ?, resume_token = ?, updated_at = ? "
+                "WHERE team_id = ? AND member_id = ?",
+                (MemberState.RUNNING.value, resume_token, now, team_id, member_id),
+            )
+            self._audit.append_with_connection(
+                conn,
+                event_type="multi_agent.child_execution_started",
+                entity_type="multi_agent_team",
+                entity_id=team_id,
+                payload={
+                    "member_id": member_id,
+                    "thread_id": member.thread_id,
+                    "resume_bound": resume_token is not None,
+                },
+            )
+        return self.member(team_id, member_id)
+
+    def finish_member_execution(
+        self,
+        *,
+        team_id: str,
+        member_id: str,
+        state: MemberState,
+        outcome: str,
+        payload: dict[str, object] | None = None,
+        error: str | None = None,
+        resume_token: str | None = None,
+        result_handoff: AgentHandoff | None = None,
+    ) -> TeamMember:
+        """Commit member state, result evidence and result/error handoff as one unit."""
+        if state is MemberState.SPAWNED:
+            raise ValueError("execution result cannot return to spawned state")
+        now = datetime.now(UTC).isoformat()
+        with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            team = conn.execute(
+                "SELECT state FROM multi_agent_teams WHERE team_id = ?",
+                (team_id,),
+            ).fetchone()
+            if team is None:
+                raise KeyError(f"unknown team: {team_id}")
+            row = self._member_row(conn, team_id=team_id, member_id=member_id)
+            if row is None:
+                raise KeyError(f"unknown team member: {team_id}/{member_id}")
+            member = self._member_from_row(row)
+
+            if team["state"] == TeamState.CANCELLED.value:
+                if member.state is not MemberState.CANCELLED:
+                    conn.execute(
+                        "UPDATE multi_agent_members SET state = ?, updated_at = ? "
+                        "WHERE team_id = ? AND member_id = ?",
+                        (MemberState.CANCELLED.value, now, team_id, member_id),
+                    )
+                return self._member_from_row(
+                    self._member_row(conn, team_id=team_id, member_id=member_id)
+                )
+            if team["state"] != TeamState.ACTIVE.value:
+                raise RuntimeError("team is not active")
+            if member.state in _TERMINAL_MEMBER_STATES:
+                raise RuntimeError(
+                    f"cannot overwrite terminal child state {member.state.value}"
+                )
+            if result_handoff is not None:
+                self._validate_result_handoff(
+                    result_handoff,
+                    team_id=team_id,
+                    member=member,
+                )
+
+            conn.execute(
+                "INSERT INTO multi_agent_results(team_id, member_id, outcome, payload_json, "
+                "error, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    team_id,
+                    member_id,
+                    outcome,
+                    json.dumps(
+                        payload or {},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    error,
+                    now,
+                ),
+            )
+            if result_handoff is not None:
+                self._insert_handoff_with_connection(conn, result_handoff, now)
+            conn.execute(
+                "UPDATE multi_agent_members SET state = ?, resume_token = ?, updated_at = ? "
+                "WHERE team_id = ? AND member_id = ?",
+                (state.value, resume_token, now, team_id, member_id),
+            )
+            self._audit.append_with_connection(
+                conn,
+                event_type="multi_agent.child_execution_finished",
+                entity_type="multi_agent_team",
+                entity_id=team_id,
+                payload={
+                    "member_id": member_id,
+                    "state": state.value,
+                    "outcome": outcome,
+                    "resumable": resume_token is not None,
+                },
+            )
+        return self.member(team_id, member_id)
 
     def set_member_state(
         self,
@@ -192,30 +372,7 @@ class MultiAgentStore:
     def record_handoff(self, handoff: AgentHandoff) -> None:
         now = datetime.now(UTC).isoformat()
         with self._store.connection() as conn:
-            participants = int(
-                conn.execute(
-                    "SELECT COUNT(*) FROM multi_agent_members WHERE team_id = ? "
-                    "AND member_id IN (?, ?)",
-                    (handoff.team_id, handoff.sender_id, handoff.recipient_id),
-                ).fetchone()[0]
-            )
-            expected = 1 if handoff.sender_id == handoff.recipient_id else 2
-            if participants != expected:
-                raise KeyError("handoff references a member outside the team")
-            conn.execute(
-                "INSERT INTO multi_agent_handoffs(handoff_id, team_id, sender_id, recipient_id, "
-                "kind, correlation_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    handoff.handoff_id,
-                    handoff.team_id,
-                    handoff.sender_id,
-                    handoff.recipient_id,
-                    handoff.kind.value,
-                    handoff.correlation_id,
-                    json.dumps(handoff.payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-                    now,
-                ),
-            )
+            self._insert_handoff_with_connection(conn, handoff, now)
 
     def record_result(
         self,
@@ -235,13 +392,18 @@ class MultiAgentStore:
             if exists is None:
                 raise KeyError(f"unknown team member: {team_id}/{member_id}")
             conn.execute(
-                "INSERT INTO multi_agent_results(team_id, member_id, outcome, payload_json, error, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO multi_agent_results(team_id, member_id, outcome, payload_json, "
+                "error, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     team_id,
                     member_id,
                     outcome,
-                    json.dumps(payload or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                    json.dumps(
+                        payload or {},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
                     error,
                     now,
                 ),
@@ -249,11 +411,69 @@ class MultiAgentStore:
 
     def recoverable_members(self, team_id: str) -> tuple[TeamMember, ...]:
         return tuple(
-            member
-            for member in self.members(team_id)
-            if member.state
-            in {MemberState.SPAWNED, MemberState.RUNNING, MemberState.WAITING_APPROVAL}
+            member for member in self.members(team_id) if member.state in _NONTERMINAL_MEMBER_STATES
         )
+
+    def recoverable_children(self, team_id: str) -> tuple[TeamMember, ...]:
+        return tuple(
+            member
+            for member in self.recoverable_members(team_id)
+            if member.parent_id is not None
+        )
+
+    def finalize_team(self, team_id: str) -> TeamState:
+        """Explicitly close a team only after all child executions are terminal."""
+        now = datetime.now(UTC).isoformat()
+        with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT state FROM multi_agent_teams WHERE team_id = ?",
+                (team_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown team: {team_id}")
+            current = TeamState(row["state"])
+            if current is not TeamState.ACTIVE:
+                return current
+            child_rows = conn.execute(
+                "SELECT state FROM multi_agent_members "
+                "WHERE team_id = ? AND parent_id IS NOT NULL",
+                (team_id,),
+            ).fetchall()
+            states = tuple(MemberState(item["state"]) for item in child_rows)
+            active = [state for state in states if state in _NONTERMINAL_MEMBER_STATES]
+            if active:
+                values = ", ".join(sorted({state.value for state in active}))
+                raise RuntimeError(f"team has nonterminal child executions: {values}")
+
+            completed = sum(state is MemberState.COMPLETED for state in states)
+            failed = sum(state is MemberState.FAILED for state in states)
+            cancelled = sum(state is MemberState.CANCELLED for state in states)
+            if completed:
+                final = TeamState.COMPLETED
+            elif failed:
+                final = TeamState.FAILED
+            elif cancelled:
+                final = TeamState.CANCELLED
+            else:
+                final = TeamState.COMPLETED
+            conn.execute(
+                "UPDATE multi_agent_teams SET state = ?, updated_at = ? WHERE team_id = ?",
+                (final.value, now, team_id),
+            )
+            self._audit.append_with_connection(
+                conn,
+                event_type="multi_agent.team_finalized",
+                entity_type="multi_agent_team",
+                entity_id=team_id,
+                payload={
+                    "state": final.value,
+                    "completed_children": completed,
+                    "failed_children": failed,
+                    "cancelled_children": cancelled,
+                },
+            )
+        return final
 
     def cancel_team(self, team_id: str) -> tuple[TeamMember, ...]:
         now = datetime.now(UTC).isoformat()
@@ -264,6 +484,11 @@ class MultiAgentStore:
             ).fetchone()
             if row is None:
                 raise KeyError(f"unknown team: {team_id}")
+            current = TeamState(row["state"])
+            if current is TeamState.CANCELLED:
+                return self.members(team_id)
+            if current is not TeamState.ACTIVE:
+                raise RuntimeError(f"team cannot be cancelled from terminal state: {current.value}")
             conn.execute(
                 "UPDATE multi_agent_teams SET state = ?, updated_at = ? WHERE team_id = ?",
                 (TeamState.CANCELLED.value, now, team_id),
@@ -296,6 +521,15 @@ class MultiAgentStore:
             separators=(",", ":"),
         )
 
+    @staticmethod
+    def _member_row(conn: object, *, team_id: str, member_id: str):
+        return conn.execute(
+            "SELECT team_id, member_id, parent_id, depth, agent_id, agent_version, thread_id, "
+            "tool_grants_json, state, resume_token FROM multi_agent_members "
+            "WHERE team_id = ? AND member_id = ?",
+            (team_id, member_id),
+        ).fetchone()
+
     def _insert_member(self, conn: object, member: TeamMember, now: str) -> None:
         conn.execute(
             "INSERT INTO multi_agent_members(team_id, member_id, parent_id, depth, agent_id, "
@@ -317,6 +551,71 @@ class MultiAgentStore:
             ),
         )
 
+    def _insert_handoff_with_connection(
+        self,
+        conn: object,
+        handoff: AgentHandoff,
+        now: str,
+    ) -> None:
+        participants = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM multi_agent_members WHERE team_id = ? "
+                "AND member_id IN (?, ?)",
+                (handoff.team_id, handoff.sender_id, handoff.recipient_id),
+            ).fetchone()[0]
+        )
+        expected = 1 if handoff.sender_id == handoff.recipient_id else 2
+        if participants != expected:
+            raise KeyError("handoff references a member outside the team")
+        conn.execute(
+            "INSERT INTO multi_agent_handoffs(handoff_id, team_id, sender_id, recipient_id, "
+            "kind, correlation_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                handoff.handoff_id,
+                handoff.team_id,
+                handoff.sender_id,
+                handoff.recipient_id,
+                handoff.kind.value,
+                handoff.correlation_id,
+                json.dumps(
+                    handoff.payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                now,
+            ),
+        )
+
+    @staticmethod
+    def _validate_task_handoff(
+        handoff: AgentHandoff,
+        *,
+        team_id: str,
+        parent_id: str,
+        child_id: str,
+    ) -> None:
+        if handoff.team_id != team_id:
+            raise ValueError("task handoff team does not match spawned child")
+        if handoff.sender_id != parent_id or handoff.recipient_id != child_id:
+            raise ValueError("task handoff participants do not match spawned child")
+        if handoff.kind is not HandoffKind.TASK:
+            raise ValueError("spawned child handoff must be TASK")
+
+    @staticmethod
+    def _validate_result_handoff(
+        handoff: AgentHandoff,
+        *,
+        team_id: str,
+        member: TeamMember,
+    ) -> None:
+        if handoff.team_id != team_id:
+            raise ValueError("result handoff team does not match member")
+        if handoff.sender_id != member.member_id or handoff.recipient_id != member.parent_id:
+            raise ValueError("result handoff participants do not match member lineage")
+        if handoff.kind not in {HandoffKind.RESULT, HandoffKind.ERROR}:
+            raise ValueError("execution completion handoff must be RESULT or ERROR")
+
     @staticmethod
     def _member_from_row(row: object) -> TeamMember:
         return TeamMember(
@@ -327,7 +626,9 @@ class MultiAgentStore:
             agent_id=row["agent_id"],
             agent_version=int(row["agent_version"]),
             thread_id=row["thread_id"],
-            tool_grants=tuple(ToolGrant.model_validate(item) for item in json.loads(row["tool_grants_json"])),
+            tool_grants=tuple(
+                ToolGrant.model_validate(item) for item in json.loads(row["tool_grants_json"])
+            ),
             state=MemberState(row["state"]),
             resume_token=row["resume_token"],
         )

@@ -11,15 +11,19 @@ from nika_core.multi_agent.contracts import (
     HandoffKind,
     MemberState,
     TeamMember,
+    TeamState,
     aggregate_scores,
     attenuate_grants,
 )
 from nika_core.multi_agent.store import MultiAgentStore
 from nika_core.runtime.contracts import (
     AgentRuntimePort,
+    RuntimeCapability,
     RuntimeOutcome,
     RuntimeRequest,
     RuntimeResult,
+    RuntimeResumeMode,
+    RuntimeResumeRequest,
 )
 
 
@@ -58,6 +62,14 @@ class MultiAgentSupervisor:
         parent = self._store.member(team_id, parent_id)
         self._definitions.require_active(parent.agent_id, parent.agent_version)
         self._validate_child_requests(requests)
+        resume_tokens = {
+            request.member_id: self._initial_resume_token(
+                team_id=team_id,
+                member_id=request.member_id,
+                thread_id=request.thread_id,
+            )
+            for request in requests
+        }
 
         members = tuple(
             self._store.spawn_child(
@@ -68,6 +80,15 @@ class MultiAgentSupervisor:
                 agent_version=request.agent_version,
                 thread_id=request.thread_id,
                 requested_grants=request.requested_grants,
+                task_handoff=AgentHandoff(
+                    team_id=team_id,
+                    sender_id=parent_id,
+                    recipient_id=request.member_id,
+                    kind=HandoffKind.TASK,
+                    payload=request.payload,
+                    handoff_id=f"task:{team_id}:{request.member_id}",
+                    correlation_id=f"team:{team_id}:{parent_id}:{request.member_id}",
+                ),
             )
             for request in requests
         )
@@ -77,99 +98,51 @@ class MultiAgentSupervisor:
         async def run_child(member: TeamMember) -> ChildExecution:
             request = by_id[member.member_id]
             async with semaphore:
-                self._store.set_member_state(
-                    team_id=team_id,
-                    member_id=member.member_id,
-                    state=MemberState.RUNNING,
+                return await self._run_new_child(
+                    member,
+                    request.payload,
+                    resume_token=resume_tokens[member.member_id],
                 )
-                self._store.record_handoff(
-                    AgentHandoff(
-                        team_id=team_id,
-                        sender_id=parent_id,
-                        recipient_id=member.member_id,
-                        kind=HandoffKind.TASK,
-                        payload=request.payload,
-                    )
-                )
-                try:
-                    result = await self._runtime.run(
-                        RuntimeRequest(
-                            task_id=f"team:{team_id}:{member.member_id}",
-                            thread_id=member.thread_id,
-                            payload={
-                                "team_id": team_id,
-                                "parent_id": parent_id,
-                                "member_id": member.member_id,
-                                "agent_id": member.agent_id,
-                                "agent_version": member.agent_version,
-                                "tool_grants": [
-                                    grant.model_dump(mode="json") for grant in member.tool_grants
-                                ],
-                                "handoff": request.payload,
-                            },
-                        )
-                    )
-                except asyncio.CancelledError:
-                    await self._runtime.cancel(
-                        task_id=f"team:{team_id}:{member.member_id}",
-                        thread_id=member.thread_id,
-                    )
-                    self._store.set_member_state(
-                        team_id=team_id,
-                        member_id=member.member_id,
-                        state=MemberState.CANCELLED,
-                    )
-                    raise
-                except Exception as exc:  # noqa: BLE001 - isolate one worker from the team.
-                    self._store.set_member_state(
-                        team_id=team_id,
-                        member_id=member.member_id,
-                        state=MemberState.FAILED,
-                    )
-                    self._store.record_result(
-                        team_id=team_id,
-                        member_id=member.member_id,
-                        outcome="exception",
-                        error=type(exc).__name__,
-                    )
-                    return ChildExecution(member=member, result=None, exception=type(exc).__name__)
-
-                state = self._state_for_result(result)
-                self._store.set_member_state(
-                    team_id=team_id,
-                    member_id=member.member_id,
-                    state=state,
-                    resume_token=result.resume_token,
-                )
-                self._store.record_result(
-                    team_id=team_id,
-                    member_id=member.member_id,
-                    outcome=result.outcome.value,
-                    payload=dict(result.output),
-                    error=result.error,
-                )
-                self._store.record_handoff(
-                    AgentHandoff(
-                        team_id=team_id,
-                        sender_id=member.member_id,
-                        recipient_id=parent_id,
-                        kind=(
-                            HandoffKind.ERROR
-                            if result.outcome == RuntimeOutcome.FAILED
-                            else HandoffKind.RESULT
-                        ),
-                        payload=dict(result.output),
-                    )
-                )
-                return ChildExecution(member=member, result=result)
 
         return tuple(await asyncio.gather(*(run_child(member) for member in members)))
 
+    async def recover_team(self, team_id: str) -> tuple[ChildExecution, ...]:
+        """Recover spawned or in-flight child work without bypassing approval waits.
+
+        WAITING_APPROVAL children remain untouched because resuming them requires an explicit
+        human decision. SPAWNED children are safe to start from their persisted TASK handoff;
+        RUNNING children resume only from the recovery cursor persisted before execution.
+        """
+        if self._store.team_state(team_id) is not TeamState.ACTIVE:
+            raise RuntimeError("team is not active")
+        quota = self._store.quota(team_id)
+        candidates = tuple(
+            member
+            for member in self._store.recoverable_children(team_id)
+            if member.state in {MemberState.SPAWNED, MemberState.RUNNING}
+        )
+        semaphore = asyncio.Semaphore(quota.max_parallel)
+
+        async def recover_child(member: TeamMember) -> ChildExecution:
+            async with semaphore:
+                return await self._recover_child(member)
+
+        return tuple(await asyncio.gather(*(recover_child(member) for member in candidates)))
+
+    def finalize_team(self, team_id: str) -> TeamState:
+        """Explicitly close a team once no further fan-out is planned."""
+        return self._store.finalize_team(team_id)
+
     async def cancel_team(self, team_id: str) -> tuple[TeamMember, ...]:
+        state = self._store.team_state(team_id)
+        if state is TeamState.CANCELLED:
+            return self._store.members(team_id)
+        if state is not TeamState.ACTIVE:
+            raise RuntimeError(f"team cannot be cancelled from terminal state: {state.value}")
         active = self._store.recoverable_members(team_id)
         for member in active:
             await self._runtime.cancel(
-                task_id=f"team:{team_id}:{member.member_id}",
+                task_id=self._task_id(team_id, member.member_id),
                 thread_id=member.thread_id,
             )
         return self._store.cancel_team(team_id)
@@ -177,6 +150,135 @@ class MultiAgentSupervisor:
     @staticmethod
     def aggregate_evaluations(scores: tuple[EvaluationScore, ...]) -> dict[str, float]:
         return aggregate_scores(scores)
+
+    async def _run_new_child(
+        self,
+        member: TeamMember,
+        handoff_payload: dict[str, object],
+        *,
+        resume_token: str | None,
+    ) -> ChildExecution:
+        prepared = self._store.prepare_member_execution(
+            team_id=member.team_id,
+            member_id=member.member_id,
+            resume_token=resume_token,
+        )
+        try:
+            result = await self._runtime.run(
+                RuntimeRequest(
+                    task_id=self._task_id(member.team_id, member.member_id),
+                    thread_id=member.thread_id,
+                    payload=self._runtime_payload(prepared, handoff_payload),
+                )
+            )
+        except asyncio.CancelledError:
+            await self._runtime.cancel(
+                task_id=self._task_id(member.team_id, member.member_id),
+                thread_id=member.thread_id,
+            )
+            self._store.set_member_state(
+                team_id=member.team_id,
+                member_id=member.member_id,
+                state=MemberState.CANCELLED,
+            )
+            raise
+        except Exception as exc:  # noqa: BLE001 - isolate one worker from the team.
+            return self._finish_exception(prepared, exc)
+        return self._finish_result(prepared, result)
+
+    async def _recover_child(self, member: TeamMember) -> ChildExecution:
+        try:
+            self._definitions.require_active(member.agent_id, member.agent_version)
+            if member.state is MemberState.SPAWNED:
+                payload = self._store.task_payload(member.team_id, member.member_id)
+                token = self._initial_resume_token(
+                    team_id=member.team_id,
+                    member_id=member.member_id,
+                    thread_id=member.thread_id,
+                )
+                return await self._run_new_child(member, payload, resume_token=token)
+            if member.state is not MemberState.RUNNING:
+                raise RuntimeError(f"member state is not auto-recoverable: {member.state.value}")
+            if not member.resume_token:
+                raise RuntimeError("running child has no durable resume token")
+            result = await self._runtime.resume(
+                RuntimeResumeRequest(
+                    task_id=self._task_id(member.team_id, member.member_id),
+                    thread_id=member.thread_id,
+                    resume_token=member.resume_token,
+                    mode=RuntimeResumeMode.CONTINUE,
+                )
+            )
+        except asyncio.CancelledError:
+            await self._runtime.cancel(
+                task_id=self._task_id(member.team_id, member.member_id),
+                thread_id=member.thread_id,
+            )
+            self._store.set_member_state(
+                team_id=member.team_id,
+                member_id=member.member_id,
+                state=MemberState.CANCELLED,
+            )
+            raise
+        except Exception as exc:  # noqa: BLE001 - recovery failure belongs to this child.
+            current = self._store.member(member.team_id, member.member_id)
+            return self._finish_exception(current, exc)
+        current = self._store.member(member.team_id, member.member_id)
+        return self._finish_result(current, result)
+
+    def _finish_exception(self, member: TeamMember, exc: Exception) -> ChildExecution:
+        error = type(exc).__name__
+        updated = self._store.finish_member_execution(
+            team_id=member.team_id,
+            member_id=member.member_id,
+            state=MemberState.FAILED,
+            outcome="exception",
+            error=error,
+            result_handoff=self._result_handoff(
+                member,
+                kind=HandoffKind.ERROR,
+                payload={"error": error},
+            ),
+        )
+        return ChildExecution(member=updated, result=None, exception=error)
+
+    def _finish_result(self, member: TeamMember, result: RuntimeResult) -> ChildExecution:
+        state = self._state_for_result(result)
+        kind = HandoffKind.ERROR if result.outcome is RuntimeOutcome.FAILED else HandoffKind.RESULT
+        payload = dict(result.output)
+        updated = self._store.finish_member_execution(
+            team_id=member.team_id,
+            member_id=member.member_id,
+            state=state,
+            resume_token=result.resume_token,
+            outcome=result.outcome.value,
+            payload=payload,
+            error=result.error,
+            result_handoff=self._result_handoff(member, kind=kind, payload=payload),
+        )
+        return ChildExecution(member=updated, result=result)
+
+    def _initial_resume_token(
+        self,
+        *,
+        team_id: str,
+        member_id: str,
+        thread_id: str,
+    ) -> str | None:
+        if RuntimeCapability.DURABLE_RESUME not in self._runtime.capabilities:
+            return None
+        token_factory = getattr(self._runtime, "initial_resume_token", None)
+        if not callable(token_factory):
+            raise TypeError(
+                "durable runtime must expose initial_resume_token for crash-safe team execution"
+            )
+        token = token_factory(
+            task_id=self._task_id(team_id, member_id),
+            thread_id=thread_id,
+        )
+        if not token:
+            raise RuntimeError("durable runtime returned an empty initial resume token")
+        return str(token)
 
     def _validate_child_requests(self, requests: tuple[ChildRequest, ...]) -> None:
         seen_member_ids: set[str] = set()
@@ -194,8 +296,46 @@ class MultiAgentSupervisor:
                 attenuate_grants(stored.definition.tool_grants, request.requested_grants)
             except PermissionError as exc:
                 raise PermissionError(
-                    f"child request exceeds activated definition {request.agent_id}:{request.agent_version}: {exc}"
+                    f"child request exceeds activated definition "
+                    f"{request.agent_id}:{request.agent_version}: {exc}"
                 ) from exc
+
+    @staticmethod
+    def _runtime_payload(
+        member: TeamMember,
+        handoff_payload: dict[str, object],
+    ) -> dict[str, object]:
+        return {
+            "team_id": member.team_id,
+            "parent_id": member.parent_id,
+            "member_id": member.member_id,
+            "agent_id": member.agent_id,
+            "agent_version": member.agent_version,
+            "tool_grants": [grant.model_dump(mode="json") for grant in member.tool_grants],
+            "handoff": handoff_payload,
+        }
+
+    @staticmethod
+    def _result_handoff(
+        member: TeamMember,
+        *,
+        kind: HandoffKind,
+        payload: dict[str, object],
+    ) -> AgentHandoff:
+        if member.parent_id is None:
+            raise ValueError("child result has no parent recipient")
+        return AgentHandoff(
+            team_id=member.team_id,
+            sender_id=member.member_id,
+            recipient_id=member.parent_id,
+            kind=kind,
+            payload=payload,
+            correlation_id=f"team:{member.team_id}:{member.parent_id}:{member.member_id}",
+        )
+
+    @staticmethod
+    def _task_id(team_id: str, member_id: str) -> str:
+        return f"team:{team_id}:{member_id}"
 
     @staticmethod
     def _state_for_result(result: RuntimeResult) -> MemberState:
