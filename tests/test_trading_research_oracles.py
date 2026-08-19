@@ -126,15 +126,18 @@ def _assert_risk_oracle(case: dict[str, object]) -> None:
         net_exposure=Decimal(0),
         positions=(),
     )
-    kwargs = dict(
-        snapshot=snapshot,
-        mark_price=Decimal(str(case["mark"])),
-        pending_signed_quantity=Decimal(str(case["pending"])),
-        approved_at=NOW,
-        approved_slice=0,
-        policy=ExecutionPolicy("oracle"),
-        risk_state=RiskState(peak_equity=Decimal(1000), session_start_equity=Decimal(1000)),
-    )
+    kwargs = {
+        "snapshot": snapshot,
+        "mark_price": Decimal(str(case["mark"])),
+        "pending_signed_quantity": Decimal(str(case["pending"])),
+        "approved_at": NOW,
+        "approved_slice": 0,
+        "policy": ExecutionPolicy("oracle"),
+        "risk_state": RiskState(
+            peak_equity=Decimal(1000),
+            session_start_equity=Decimal(1000),
+        ),
+    }
     outcome = str(case["outcome"])
     if outcome.startswith("allow"):
         approved = engine.approve(intent, **kwargs)
