@@ -9,6 +9,7 @@ from nika_core.builder.compiler import AgentCompiler, RiskTier
 from nika_core.builder.drafting import AgentDraftService
 from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.builder.spec import AgentDefinition, ToolGrant
+from nika_core.data.schema import SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.model_gateway.contracts import ModelResponse, ModelUsage, ProviderKind
 from nika_core.tools import ToolRisk, ToolSpec
@@ -115,7 +116,7 @@ def test_repository_versions_and_activation_are_fail_closed(tmp_path: Path) -> N
     with pytest.raises(ValueError, match="expected 3"):
         repository.save_draft(second_compiled)
 
-    assert store.schema_version() == 8
+    assert store.schema_version() == SCHEMA_VERSION
 
 
 def test_activation_rejects_definition_mutation(tmp_path: Path) -> None:
