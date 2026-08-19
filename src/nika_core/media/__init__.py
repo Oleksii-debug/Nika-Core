@@ -27,6 +27,7 @@ from nika_core.media.contracts import (
     TranscriptMethod,
 )
 from nika_core.media.errors import MediaError, MediaErrorCode
+from nika_core.media.models import Page
 from nika_core.media.repository import MediaRepository
 from nika_core.media.schema import MEDIA_SCHEMA_VERSION, initialize_media_schema
 
@@ -48,6 +49,7 @@ __all__ = [
     "OCRPage",
     "OptionalComponent",
     "OptionalComponentRegistry",
+    "Page",
     "ProcessingJob",
     "ProcessingState",
     "Probe",
