@@ -3,9 +3,100 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from nika_core.tools import ToolRisk
+
+_WINDOWS_RESERVED_DEVICE_NAMES = frozenset(
+    {
+        "con",
+        "prn",
+        "aux",
+        "nul",
+        *(f"com{index}" for index in range(1, 10)),
+        *(f"lpt{index}" for index in range(1, 10)),
+        "com¹",
+        "com²",
+        "com³",
+        "lpt¹",
+        "lpt²",
+        "lpt³",
+    }
+)
+_WINDOWS_INVALID_COMPONENT_CHARS = frozenset('<>:"|?*')
+
+
+def _validate_windows_component(component: str, *, label: str) -> None:
+    if not component:
+        raise ValueError(f"{label} contains an empty path component")
+    if component != component.rstrip(" ."):
+        raise ValueError(f"{label} contains a trailing Windows space or period")
+    if any(char in _WINDOWS_INVALID_COMPONENT_CHARS for char in component):
+        raise ValueError(f"{label} contains a Windows-reserved character")
+    if any(ord(char) < 32 for char in component):
+        raise ValueError(f"{label} contains a Windows control character")
+    device_stem = component.split(".", 1)[0].casefold()
+    if device_stem in _WINDOWS_RESERVED_DEVICE_NAMES:
+        raise ValueError(f"{label} contains a Windows-reserved device name")
+
+
+def _normalize_workspace_relative(value: str, *, label: str) -> PurePosixPath:
+    stripped = value.strip()
+    windows_path = PureWindowsPath(stripped)
+    normalized = PurePosixPath(stripped.replace("\\", "/"))
+    if (
+        not stripped
+        or normalized == PurePosixPath(".")
+        or windows_path.drive
+        or windows_path.root
+        or normalized.is_absolute()
+        or ".." in normalized.parts
+    ):
+        raise ValueError(f"{label} must stay inside a workspace-relative scope")
+    for component in normalized.parts:
+        _validate_windows_component(component, label=label)
+        if component.casefold() == ".git":
+            raise ValueError(f"{label} cannot target .git metadata")
+    return normalized
+
+
+def _executable_scope(value: str) -> tuple[str, str, str]:
+    """Return (scope kind, normalized identity, case-folded basename)."""
+    stripped = value.strip()
+    if not stripped:
+        raise ValueError("process executable must not be empty")
+
+    windows_path = PureWindowsPath(stripped)
+    posix_path = PurePosixPath(stripped)
+    path_scoped = bool(
+        windows_path.drive
+        or windows_path.root
+        or posix_path.is_absolute()
+        or "/" in stripped
+        or "\\" in stripped
+    )
+    if not path_scoped:
+        _validate_windows_component(stripped, label="process executable")
+        normalized_name = stripped.casefold()
+        return ("name", normalized_name, normalized_name)
+
+    if windows_path.drive or "\\" in stripped or stripped.startswith("//"):
+        if not windows_path.is_absolute():
+            raise ValueError("Windows executable path scope must be absolute")
+        for component in windows_path.parts[1:]:
+            _validate_windows_component(component, label="process executable")
+        return (
+            "windows-path",
+            windows_path.as_posix().casefold(),
+            windows_path.name.casefold(),
+        )
+
+    if not posix_path.is_absolute():
+        raise ValueError("POSIX executable path scope must be absolute")
+    basename = posix_path.name
+    if not basename:
+        raise ValueError("process executable path must identify a file")
+    return ("posix-path", posix_path.as_posix(), basename.casefold())
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,15 +109,20 @@ class SandboxPolicy:
     def __post_init__(self) -> None:
         root = self.workspace_root.resolve()
         object.__setattr__(self, "workspace_root", root)
-        for relative in self.writable_roots:
-            path = Path(relative)
-            if path.is_absolute() or ".." in path.parts:
-                raise ValueError("writable roots must be workspace-relative")
+        normalized_roots = tuple(
+            _normalize_workspace_relative(relative, label="writable root").as_posix()
+            for relative in self.writable_roots
+        )
+        object.__setattr__(self, "writable_roots", normalized_roots)
+        for executable in self.allowed_executables:
+            _executable_scope(executable)
 
     def resolve_write(self, relative_path: str) -> Path:
-        candidate_path = Path(relative_path)
-        if candidate_path.is_absolute() or ".." in candidate_path.parts:
-            raise PermissionError("write path must be workspace-relative")
+        try:
+            normalized = _normalize_workspace_relative(relative_path, label="write path")
+        except ValueError as exc:
+            raise PermissionError(str(exc)) from exc
+        candidate_path = Path(*normalized.parts)
         candidate = (self.workspace_root / candidate_path).resolve()
         if candidate != self.workspace_root and self.workspace_root not in candidate.parents:
             raise PermissionError("write path escapes workspace")
@@ -44,10 +140,22 @@ class SandboxPolicy:
             raise PermissionError("network host is not allowed")
 
     def authorize_executable(self, executable: str) -> None:
-        name = Path(executable).name.casefold()
-        allowed = {Path(item).name.casefold() for item in self.allowed_executables}
-        if not name or name not in allowed:
-            raise PermissionError("process executable is not allowed")
+        try:
+            requested_kind, requested_identity, requested_name = _executable_scope(executable)
+        except ValueError as exc:
+            raise PermissionError("process executable is not allowed") from exc
+
+        for allowed_executable in self.allowed_executables:
+            allowed_kind, allowed_identity, _ = _executable_scope(allowed_executable)
+            if allowed_kind == "name" and requested_name == allowed_identity:
+                return
+            if (
+                allowed_kind != "name"
+                and requested_kind == allowed_kind
+                and requested_identity == allowed_identity
+            ):
+                return
+        raise PermissionError("process executable is not allowed")
 
 
 @dataclass(frozen=True, slots=True)
