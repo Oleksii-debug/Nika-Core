@@ -12,9 +12,9 @@ from nika_core.media.contracts import (
     OCRDocument,
     OCRPage,
     OptionalComponent,
+    Probe,
     ProcessingJob,
     ProcessingState,
-    Probe,
     ProvenanceChain,
     ProvenanceEvent,
     ResourceClass,
@@ -32,10 +32,10 @@ from nika_core.media.repository import MediaRepository
 from nika_core.media.schema import MEDIA_SCHEMA_VERSION, initialize_media_schema
 
 __all__ = [
+    "MEDIA_SCHEMA_VERSION",
     "AssetKind",
     "ComponentState",
     "EngineDescriptor",
-    "MEDIA_SCHEMA_VERSION",
     "MediaAsset",
     "MediaError",
     "MediaErrorCode",
@@ -50,9 +50,9 @@ __all__ = [
     "OptionalComponent",
     "OptionalComponentRegistry",
     "Page",
+    "Probe",
     "ProcessingJob",
     "ProcessingState",
-    "Probe",
     "ProvenanceChain",
     "ProvenanceEvent",
     "ResourceClass",
