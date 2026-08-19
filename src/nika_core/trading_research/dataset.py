@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime
 from decimal import Decimal
 from hashlib import sha256
@@ -54,18 +54,21 @@ def _jsonable(value: object) -> object:
         return str(value)
     if hasattr(value, "value") and isinstance(getattr(value, "value"), str):
         return getattr(value, "value")
-    if isinstance(value, dict):
+    if is_dataclass(value) and not isinstance(value, type):
+        return {field.name: _jsonable(getattr(value, field.name)) for field in fields(value)}
+    if hasattr(value, "items"):
+        items = getattr(value, "items")()
         return {
-            str(k): _jsonable(v)
-            for k, v in sorted(value.items(), key=lambda item: str(item[0]))
+            str(key): _jsonable(item)
+            for key, item in sorted(items, key=lambda pair: str(pair[0]))
         }
     if isinstance(value, (list, tuple)):
-        return [_jsonable(v) for v in value]
+        return [_jsonable(item) for item in value]
     return value
 
 
 def canonical_event_bytes(event: MarketEvent) -> bytes:
-    payload = {"type": type(event).__name__, "value": _jsonable(asdict(event))}
+    payload = {"type": type(event).__name__, "value": _jsonable(event)}
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
         "utf-8"
     )
@@ -78,7 +81,7 @@ def semantic_event_bytes(event: MarketEvent) -> bytes:
         "venue": event.instrument.venue.venue_id,
         "event_at": event.time.event_at.isoformat(),
         "available_at": event.time.available_at.isoformat(),
-        "value": _jsonable(asdict(event)),
+        "value": _jsonable(event),
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
         "utf-8"
@@ -122,7 +125,9 @@ class Dataset:
 
 class TemporalView:
     __slots__ = ("_at", "_visible", "_trace_hash")
-    _FORBIDDEN = frozenset({"iloc", "loc", "index", "dataset", "events", "backing", "raw", "values"})
+    _FORBIDDEN = frozenset(
+        {"iloc", "loc", "index", "dataset", "events", "backing", "raw", "values"}
+    )
 
     def __init__(self, *_args: object, **_kwargs: object) -> None:
         raise TypeError("TemporalView instances are created only by Dataset.temporal_view()")
@@ -195,10 +200,20 @@ def _identity(event: MarketEvent) -> tuple[str, str, str, datetime, int]:
     )
 
 
+def _gap_key(event: MarketEvent) -> tuple[str, str, str]:
+    return (
+        type(event).__name__,
+        event.instrument.venue.venue_id,
+        event.instrument.instrument_id,
+    )
+
+
 def validate_events(events: Sequence[MarketEvent]) -> ValidationReport:
     seen: dict[tuple[str, str, str, datetime, int], tuple[int, bytes]] = {}
+    last_sequence: dict[tuple[str, str, str], tuple[int, int]] = {}
     duplicates: list[ValidationIssue] = []
     conflicts: list[ValidationIssue] = []
+    gaps: list[ValidationIssue] = []
     for index, event in enumerate(events):
         identity = _identity(event)
         encoded = semantic_event_bytes(event)
@@ -215,4 +230,18 @@ def validate_events(events: Sequence[MarketEvent]) -> ValidationReport:
                     "conflict", "same event identity has different payload", (prior[0], index)
                 )
             )
-    return ValidationReport(tuple(duplicates), tuple(conflicts), ())
+
+        if event.source_sequence > 0:
+            key = _gap_key(event)
+            previous = last_sequence.get(key)
+            if previous is not None and event.source_sequence > previous[1] + 1:
+                gaps.append(
+                    ValidationIssue(
+                        "sequence_gap",
+                        f"source sequence jumps from {previous[1]} to {event.source_sequence}",
+                        (previous[0], index),
+                    )
+                )
+            if previous is None or event.source_sequence > previous[1]:
+                last_sequence[key] = (index, event.source_sequence)
+    return ValidationReport(tuple(duplicates), tuple(conflicts), tuple(gaps))
