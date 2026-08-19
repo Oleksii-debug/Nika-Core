@@ -29,7 +29,6 @@ from nika_core.research import (
     SourceSpec,
 )
 
-
 PUBLIC_IP = "93.184.216.34"
 SECOND_PUBLIC_IP = "1.1.1.1"
 
