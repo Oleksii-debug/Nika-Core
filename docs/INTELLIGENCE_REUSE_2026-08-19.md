@@ -43,7 +43,8 @@ Use versioned metrics/champion-challenger evidence to select deterministic strat
 - Nika adapter: `FoundryLocalProvider` behind `ModelProvider` / ModelGateway.
 - Privacy: provider is LOCAL and can keep private/sensitive input on-device under Nika routing policy.
 - Model management: no silent model download. Models are optional components outside the base EXE and require explicit install/download intent, version/license/checksum/resource evidence.
-- Resource policy: Microsoft positions Foundry Local as single-user on-device inference rather than a concurrent server stack, so Nika serializes in-process completions per provider instance instead of pretending it has server-style batching/queueing. The existing `ModelRequest.timeout_seconds` bounds time spent waiting for that slot plus the user-visible inference wait.
+- Resource policy: Microsoft positions Foundry Local as single-user on-device inference rather than a concurrent server stack, so Nika serializes in-process completions per provider instance instead of pretending it has server-style batching/queueing. `ModelRequest.timeout_seconds` bounds the caller-visible wait. If native non-streaming inference survives an asyncio timeout/cancellation, the provider slot remains reserved until that native worker actually exits; a second Foundry inference is not started on top of it.
+- Fallback safety: provider capabilities explicitly record whether hard cancellation is proven. ModelGateway does not launch a fallback after a timeout from a provider such as current Foundry Local whose active native inference cannot be proven stopped. Retryable non-timeout failures may still use an explicitly requested, privacy-prevalidated fallback route.
 - Hardware: Windows WinML package is preferred for actual Windows hardware; final acceptance requires a physical-Windows inference proof.
 - Cancellation truth: current official Python docs explicitly expose cancellation for model/EP downloads. They do not document a hard-cancel primitive for an active non-streaming inference. Nika returns typed timeout/cancellation semantics at its async boundary but must not claim the underlying native inference thread was hard-killed until a focused proof or process-isolation design closes that gap.
 
@@ -72,7 +73,7 @@ Useful for LM Studio/other compatible local services without changing agent/runt
 ## D. Cloud/API intelligence
 
 ### Direct OpenAI-compatible/provider adapters — INTEGRATED FOUNDATION
-Keep privacy/cost/error normalization behind ModelGateway.
+Keep privacy/cost/error normalization behind ModelGateway. Fallback between providers is opt-in per request, ordered, privacy-prevalidated and deadline-bounded; there is no silent cloud escalation.
 
 ### LiteLLM — OPTIONAL ADAPT
 Use when broad provider normalization measurably reduces glue and its adopted package/license surface remains compatible. Do not make it the owner of Nika routing policy.
