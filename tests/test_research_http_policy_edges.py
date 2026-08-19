@@ -20,7 +20,6 @@ from nika_core.research import (
     SourceSpec,
 )
 
-
 PUBLIC_IP = "93.184.216.34"
 
 
