@@ -12,6 +12,14 @@ class BlobStoreError(RuntimeError):
     pass
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 class ContentAddressedBlobStore:
     """Workspace-namespaced, content-addressed raw artifact storage."""
 
@@ -63,6 +71,8 @@ class ContentAddressedBlobStore:
             if destination.exists():
                 if destination.stat().st_size != total:
                     raise BlobStoreError("existing content-addressed blob has unexpected size")
+                if _sha256_file(destination) != raw_sha256:
+                    raise BlobStoreError("existing content-addressed blob failed digest verification")
                 temp_path.unlink(missing_ok=True)
             else:
                 os.replace(temp_path, destination)
@@ -85,4 +95,10 @@ class ContentAddressedBlobStore:
         candidate = (self.root / artifact.storage_relpath).resolve()
         if not candidate.is_relative_to(self.root):
             raise BlobStoreError("artifact storage path escapes blob root")
+        if not candidate.is_file():
+            raise BlobStoreError("content-addressed blob is missing")
+        if candidate.stat().st_size != artifact.byte_size:
+            raise BlobStoreError("content-addressed blob size does not match metadata")
+        if _sha256_file(candidate) != artifact.raw_sha256:
+            raise BlobStoreError("content-addressed blob digest does not match metadata")
         return candidate
