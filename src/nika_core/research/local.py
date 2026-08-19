@@ -26,6 +26,22 @@ class LocalFileTooLargeError(LocalIngestionError):
     pass
 
 
+_TEXT_MEDIA_TYPES = {
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".html": "text/html",
+    ".htm": "text/html",
+    ".csv": "text/csv",
+    ".json": "application/json",
+}
+
+_DOCUMENT_MEDIA_TYPES = {
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+
+
 class _VisibleTextParser(HTMLParser):
     _BLOCKED = frozenset({"script", "style", "noscript", "template"})
     _BREAKS = frozenset(
@@ -70,6 +86,48 @@ class _VisibleTextParser(HTMLParser):
             self.parts.append(data)
 
 
+def local_media_type(path: Path | str) -> str:
+    suffix = Path(path).suffix.casefold()
+    media_type = _TEXT_MEDIA_TYPES.get(suffix) or _DOCUMENT_MEDIA_TYPES.get(suffix)
+    if media_type is None:
+        raise UnsupportedLocalFormatError(f"unsupported local format: {suffix or '<none>'}")
+    return media_type
+
+
+def is_document_format(path: Path | str) -> bool:
+    return Path(path).suffix.casefold() in _DOCUMENT_MEDIA_TYPES
+
+
+def resolve_local_file(
+    path: Path | str,
+    *,
+    allowed_root: Path | str,
+    max_bytes: int = 64 * 1024 * 1024,
+) -> Path:
+    if max_bytes < 1:
+        raise ValueError("max_bytes must be positive")
+    root = Path(allowed_root).resolve()
+    candidate = Path(path).resolve()
+    if not candidate.is_relative_to(root):
+        raise LocalPathPolicyError("local source escapes the allowed root")
+    if not candidate.is_file():
+        raise LocalIngestionError("local source is not a regular file")
+    size = candidate.stat().st_size
+    if size > max_bytes:
+        raise LocalFileTooLargeError(f"local source is {size} bytes; limit is {max_bytes}")
+    return candidate
+
+
+def resolve_local_folder(path: Path | str, *, allowed_root: Path | str) -> Path:
+    root = Path(allowed_root).resolve()
+    candidate = Path(path).resolve()
+    if not candidate.is_relative_to(root):
+        raise LocalPathPolicyError("local folder escapes the allowed root")
+    if not candidate.is_dir():
+        raise LocalIngestionError("local folder is not a directory")
+    return candidate
+
+
 def _decode_utf8(data: bytes, path: Path) -> str:
     try:
         return data.decode("utf-8-sig")
@@ -98,7 +156,7 @@ def _extract_html(text: str) -> str:
     try:
         parser.feed(text)
         parser.close()
-    except Exception as exc:  # HTMLParser may surface malformed entity/parser errors.
+    except Exception as exc:
         raise LocalIngestionError("malformed HTML") from exc
     return html.unescape("".join(parser.parts))
 
@@ -109,28 +167,11 @@ def extract_local_file(
     allowed_root: Path | str,
     max_bytes: int = 16 * 1024 * 1024,
 ) -> ExtractedDocument:
-    root = Path(allowed_root).resolve()
-    candidate = Path(path).resolve()
-    if not candidate.is_relative_to(root):
-        raise LocalPathPolicyError("local source escapes the allowed root")
-    if not candidate.is_file():
-        raise LocalIngestionError("local source is not a regular file")
-    size = candidate.stat().st_size
-    if size > max_bytes:
-        raise LocalFileTooLargeError(f"local source is {size} bytes; limit is {max_bytes}")
-
+    candidate = resolve_local_file(path, allowed_root=allowed_root, max_bytes=max_bytes)
     suffix = candidate.suffix.casefold()
-    media_types = {
-        ".txt": "text/plain",
-        ".md": "text/markdown",
-        ".html": "text/html",
-        ".htm": "text/html",
-        ".csv": "text/csv",
-        ".json": "application/json",
-    }
-    media_type = media_types.get(suffix)
+    media_type = _TEXT_MEDIA_TYPES.get(suffix)
     if media_type is None:
-        raise UnsupportedLocalFormatError(f"unsupported local format: {suffix or '<none>'}")
+        raise UnsupportedLocalFormatError(f"unsupported text format: {suffix or '<none>'}")
 
     text = _decode_utf8(candidate.read_bytes(), candidate)
     if suffix in {".html", ".htm"}:
@@ -140,4 +181,10 @@ def extract_local_file(
     elif suffix == ".json":
         text = _extract_json(text)
 
-    return ExtractedDocument(title=candidate.name, text=text, media_type=media_type)
+    return ExtractedDocument(
+        title=candidate.name,
+        text=text,
+        media_type=media_type,
+        extractor="nika-stdlib",
+        extractor_version="1",
+    )
