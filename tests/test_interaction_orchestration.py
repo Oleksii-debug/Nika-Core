@@ -20,7 +20,6 @@ from nika_core.interaction.orchestration import (
     InteractionReplayBlockedError,
     InteractionRequest,
     InteractionRisk,
-    InteractionUncertainError,
     SemanticInteractionCoordinator,
 )
 from nika_core.runtime.idempotency import IdempotencyStatus
