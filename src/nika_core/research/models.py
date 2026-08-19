@@ -6,6 +6,7 @@ from enum import StrEnum
 
 class SourceKind(StrEnum):
     LOCAL_FILE = "local_file"
+    HTTP = "http"
 
 
 class IngestDisposition(StrEnum):
@@ -18,6 +19,26 @@ class ExtractionStatus(StrEnum):
     OCR_NEEDED = "ocr_needed"
     EMPTY = "empty"
     FAILED = "failed"
+
+
+class RefreshDisposition(StrEnum):
+    CHANGED = "changed"
+    NOT_MODIFIED = "not_modified"
+    UNCHANGED = "unchanged"
+    DYNAMIC_REQUIRED = "dynamic_required"
+    REMOVED = "removed"
+    BLOCKED = "blocked"
+    UNSUPPORTED = "unsupported"
+    FAILED = "failed"
+
+
+class FreshnessState(StrEnum):
+    UNKNOWN = "unknown"
+    CURRENT = "current"
+    STALE = "stale"
+    REMOVED = "removed"
+    BLOCKED = "blocked"
+    ERROR = "error"
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,3 +130,71 @@ class SearchHit:
     title: str
     snippet: str
     rank: float
+
+
+@dataclass(frozen=True, slots=True)
+class HttpSourceState:
+    source_id: str
+    workspace_id: str
+    url: str
+    final_url: str | None
+    etag: str | None
+    last_modified: str | None
+    current_raw_sha256: str | None
+    freshness: FreshnessState
+    last_attempt_at: str | None
+    last_success_at: str | None
+    last_status_code: int | None
+    last_error_code: str | None
+    last_error_message: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class RefreshResult:
+    source_id: str
+    disposition: RefreshDisposition
+    attempts: int
+    status_code: int | None = None
+    snapshot_id: str | None = None
+    document_id: str | None = None
+    error_code: str | None = None
+    message: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchEvidence:
+    source_id: str
+    source_kind: SourceKind
+    locator: str
+    observed_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchResultItem:
+    ordinal: int
+    document_id: str
+    title: str
+    snippet: str
+    rank: float
+    why_matched: str
+    evidence: tuple[ResearchEvidence, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchResultSet:
+    result_set_id: str
+    workspace_id: str
+    query: str
+    items: tuple[ResearchResultItem, ...]
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class RefreshJobSummary:
+    task_id: str
+    state: str
+    processed: int
+    total: int
+    changed: int
+    unchanged: int
+    failed: int
