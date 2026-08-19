@@ -252,8 +252,14 @@ class NetworkResearchRepository:
                     etag, last_modified, extraction_id, document_id, observed_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(snapshot_id) DO UPDATE SET
-                    extraction_id=COALESCE(research_http_snapshots.extraction_id, excluded.extraction_id),
-                    document_id=COALESCE(research_http_snapshots.document_id, excluded.document_id)""",
+                    extraction_id=COALESCE(
+                        research_http_snapshots.extraction_id,
+                        excluded.extraction_id
+                    ),
+                    document_id=COALESCE(
+                        research_http_snapshots.document_id,
+                        excluded.document_id
+                    )""",
                 (
                     snapshot_id,
                     source_id,
@@ -302,8 +308,9 @@ class NetworkResearchRepository:
                 (document_id,),
             ).fetchall()
             http_rows = conn.execute(
-                """SELECT o.source_id, o.locator, o.observed_at
+                """SELECT o.source_id, o.locator, o.observed_at, s.freshness
                 FROM corpus_http_origins o
+                JOIN research_http_sources s ON s.source_id=o.source_id
                 WHERE o.document_id=? ORDER BY o.observed_at, o.source_id, o.locator""",
                 (document_id,),
             ).fetchall()
@@ -313,6 +320,7 @@ class NetworkResearchRepository:
                 source_kind=SourceKind.LOCAL_FILE,
                 locator=row["locator"],
                 observed_at=row["observed_at"],
+                freshness=None,
             )
             for row in local_rows
         ]
@@ -322,6 +330,7 @@ class NetworkResearchRepository:
                 source_kind=SourceKind.HTTP,
                 locator=row["locator"],
                 observed_at=row["observed_at"],
+                freshness=FreshnessState(row["freshness"]),
             )
             for row in http_rows
         )
@@ -346,6 +355,10 @@ class NetworkResearchRepository:
     ) -> ResearchResultSet:
         result_set_id = uuid4().hex
         created_at = _now()
+        prepared = [
+            (hit, self.evidence_for_document(hit.document_id))
+            for hit in hits
+        ]
         items: list[ResearchResultItem] = []
         with self._store.connection() as conn:
             conn.execute(
@@ -353,8 +366,7 @@ class NetworkResearchRepository:
                 VALUES (?, ?, ?, ?)""",
                 (result_set_id, workspace_id, query, created_at),
             )
-            for ordinal, hit in enumerate(hits):
-                evidence = self.evidence_for_document(hit.document_id)
+            for ordinal, (hit, evidence) in enumerate(prepared):
                 why_matched = f"Literal-token full-text match for: {query}"
                 evidence_json = json.dumps(
                     [
@@ -363,6 +375,9 @@ class NetworkResearchRepository:
                             "source_kind": item.source_kind.value,
                             "locator": item.locator,
                             "observed_at": item.observed_at,
+                            "freshness": (
+                                item.freshness.value if item.freshness is not None else None
+                            ),
                         }
                         for item in evidence
                     ],
@@ -426,6 +441,11 @@ class NetworkResearchRepository:
                     source_kind=SourceKind(item["source_kind"]),
                     locator=item["locator"],
                     observed_at=item["observed_at"],
+                    freshness=(
+                        FreshnessState(item["freshness"])
+                        if item.get("freshness") is not None
+                        else None
+                    ),
                 )
                 for item in raw_evidence
             )
