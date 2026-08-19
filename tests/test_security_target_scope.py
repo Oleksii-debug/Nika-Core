@@ -77,6 +77,7 @@ def test_backslash_paths_are_canonicalized_to_workspace_children(tmp_path: Path)
         ".",
         "worktrees/.git",
         "artifacts/NUL",
+        "artifacts/report ",
     ),
 )
 def test_invalid_writable_roots_fail_at_policy_construction(tmp_path: Path, root: str) -> None:
@@ -124,6 +125,8 @@ def test_windows_path_scoped_executable_is_exact_but_case_insensitive(tmp_path: 
         r"C:python.exe",
         "NUL.exe",
         "python?.exe",
+        "python.exe ",
+        " python.exe",
     ),
 )
 def test_ambiguous_or_reserved_executable_allowlist_entries_fail_closed(
@@ -133,9 +136,13 @@ def test_ambiguous_or_reserved_executable_allowlist_entries_fail_closed(
         _sandbox(tmp_path, allowed_executables=(executable,))
 
 
-def test_malformed_requested_executable_is_permission_failure(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "executable",
+    (r"bin\python.exe", "NUL.exe", "python.exe ", " python.exe"),
+)
+def test_malformed_requested_executable_is_permission_failure(
+    tmp_path: Path, executable: str
+) -> None:
     sandbox = _sandbox(tmp_path, allowed_executables=("python.exe",))
     with pytest.raises(PermissionError, match="process executable"):
-        sandbox.authorize_executable(r"bin\python.exe")
-    with pytest.raises(PermissionError, match="process executable"):
-        sandbox.authorize_executable("NUL.exe")
+        sandbox.authorize_executable(executable)
