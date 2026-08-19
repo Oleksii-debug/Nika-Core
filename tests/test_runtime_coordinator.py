@@ -251,8 +251,10 @@ def test_coordinator_cancellation_finishes_task_and_records_audit(tmp_path) -> N
         assert types == [
             "runtime.started",
             "runtime.cancel_requested",
+            "runtime.cancel_accepted",
             "runtime.finished",
         ]
+        assert events[-2].payload["task_state_changed"] is True
         assert events[-1].payload["outcome"] == RuntimeOutcome.CANCELLED.value
 
     asyncio.run(scenario())
