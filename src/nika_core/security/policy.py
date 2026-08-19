@@ -83,8 +83,13 @@ def _executable_scope(value: str) -> tuple[str, str, str]:
         return ("name", normalized_name, normalized_name)
 
     if windows_path.drive or "\\" in value or value.startswith("//"):
+        drive = windows_path.drive.casefold()
+        if drive.startswith("\\\\?\\") or drive.startswith("\\\\.\\"):
+            raise ValueError("Win32 device namespace executables are not allowed")
         if not windows_path.is_absolute():
             raise ValueError("Windows executable path scope must be absolute")
+        if not windows_path.name:
+            raise ValueError("process executable path must identify a file")
         for component in windows_path.parts[1:]:
             _validate_windows_component(component, label="process executable")
         return (
