@@ -8,6 +8,7 @@ from nika_core.intelligence.contracts import (
     DeterministicGoal,
     DeterministicPlan,
     DeterministicPlanner,
+    DeterministicPlanningError,
     WorldState,
 )
 from nika_core.tools import ToolCall, ToolExecutor
@@ -40,19 +41,38 @@ class DeterministicBrain:
         goal: DeterministicGoal,
         actions: tuple[DeterministicAction, ...],
         approved_action_ids: frozenset[str] = frozenset(),
+        max_steps: int = 100,
+        planning_timeout_seconds: float = 30.0,
     ) -> DeterministicBrainResult:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
+        if max_steps <= 0:
+            raise ValueError("max_steps must be greater than zero")
+        if planning_timeout_seconds <= 0:
+            raise ValueError("planning_timeout_seconds must be greater than zero")
         action_map = {action.action_id: action for action in actions}
         if len(action_map) != len(actions):
             raise ValueError("duplicate deterministic action_id")
 
-        plan = await asyncio.to_thread(
-            self._planner.plan,
-            state=state,
-            goal=goal,
-            actions=actions,
-        )
+        try:
+            async with asyncio.timeout(planning_timeout_seconds):
+                plan = await asyncio.to_thread(
+                    self._planner.plan,
+                    state=state,
+                    goal=goal,
+                    actions=actions,
+                )
+        except TimeoutError as exc:
+            raise DeterministicPlanningError("deterministic planner timed out") from exc
+
+        if len(plan.steps) > max_steps:
+            return DeterministicBrainResult(
+                plan=plan,
+                completed_actions=(),
+                final_state=state,
+                error=f"plan exceeds max_steps budget: {len(plan.steps)} > {max_steps}",
+            )
+
         facts = set(state.facts)
         completed: list[str] = []
 
