@@ -7,7 +7,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from nika_core.media.contracts import MediaSource, MediaSourceKind, MediaVersion, SubtitleKind, SubtitleTrack
+from nika_core.media.contracts import (
+    MediaSource,
+    MediaSourceKind,
+    MediaVersion,
+    SubtitleKind,
+    SubtitleTrack,
+)
 from nika_core.media.errors import MediaError, MediaErrorCode
 from nika_core.media.hashing import sha256_json
 from nika_core.media.privacy import redact_mapping
@@ -121,7 +127,10 @@ class YtDlpAdapter:
         metadata_sha = sha256_json(safe_metadata)
         version_basis = upstream_id or metadata_sha
         version = MediaVersion(
-            version_id=f"remote-version:{sha256_json({'source': source_id, 'v': version_basis})[:32]}",
+            version_id=(
+                "remote-version:"
+                f"{sha256_json({'source': source_id, 'v': version_basis})[:32]}"
+            ),
             source_id=source_id,
             metadata_sha256=metadata_sha,
             title=str(payload.get("title") or "")[:1000],
@@ -228,7 +237,7 @@ class YtDlpAdapter:
     @staticmethod
     def _validate_url(url: str) -> None:
         lowered = url.strip().lower()
-        if not (lowered.startswith("https://") or lowered.startswith("http://")):
+        if not lowered.startswith(("https://", "http://")):
             raise MediaError(MediaErrorCode.INVALID_SOURCE, "remote media URL must use HTTP(S)")
         if any(char in url for char in ("\x00", "\r", "\n")):
             raise MediaError(MediaErrorCode.INVALID_SOURCE, "remote media URL contains invalid characters")
@@ -239,7 +248,10 @@ class YtDlpAdapter:
         if "unsupported url" in message:
             return MediaError(MediaErrorCode.UNSUPPORTED_SOURCE, "media source is unsupported")
         if "sign in" in message or "login" in message or "cookies" in message:
-            return MediaError(MediaErrorCode.AUTH_REQUIRED, "media source requires explicit authentication")
+            return MediaError(
+                MediaErrorCode.AUTH_REQUIRED,
+                "media source requires explicit authentication",
+            )
         if error.code == MediaErrorCode.PROCESS_TIMEOUT:
             return error
         return MediaError(MediaErrorCode.PROCESS_FAILED, "yt-dlp metadata discovery failed")
