@@ -14,6 +14,9 @@ on:
 permissions:
   contents: read
 
+env:
+  NIKA_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
 concurrency:
   group: m12-prehuman-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -25,10 +28,14 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.NIKA_CANDIDATE_SHA }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
+      - name: Verify exact candidate checkout identity
+        run: python scripts/qa_assert_checkout_identity.py
       - name: Install core, runtime, planning and browser proof dependencies
         run: python -m pip install -e ".[dev,agent,planning,browser]"
       - name: Run complete source, dependency and test verification
@@ -38,13 +45,16 @@ jobs:
           python -m pytest -q
           tests/test_runtime_crash_consistency.py
           tests/test_runtime_startup_recovery.py
+          tests/test_runtime_cancel_safety.py
           tests/test_m3_memory_scheduler_resources.py
           tests/test_m4_model_tools.py
           tests/test_deterministic_brain.py
           tests/test_foundry_local_provider.py
           tests/test_plugin_workspace_sdk.py
+          tests/test_agent_lab_activation_boundary.py
           tests/test_security_policy.py
           tests/test_m11_m12_release.py
+          tests/test_qa_workflow_lineage.py
       - name: Install Chromium
         run: python -m playwright install --with-deps chromium
       - name: Re-prove browser semantic interaction on the exact candidate
@@ -56,10 +66,14 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.NIKA_CANDIDATE_SHA }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
+      - name: Verify exact candidate checkout identity
+        run: python scripts/qa_assert_checkout_identity.py
       - name: Install core, runtime, planning and Windows interaction proof dependencies
         run: python -m pip install -e ".[dev,agent,planning,windows-interaction]"
       - name: Run complete source, dependency and test verification
@@ -69,13 +83,16 @@ jobs:
           python -m pytest -q
           tests/test_runtime_crash_consistency.py
           tests/test_runtime_startup_recovery.py
+          tests/test_runtime_cancel_safety.py
           tests/test_m3_memory_scheduler_resources.py
           tests/test_m4_model_tools.py
           tests/test_deterministic_brain.py
           tests/test_foundry_local_provider.py
           tests/test_plugin_workspace_sdk.py
+          tests/test_agent_lab_activation_boundary.py
           tests/test_security_policy.py
           tests/test_m11_m12_release.py
+          tests/test_qa_workflow_lineage.py
       - name: Re-prove Windows semantic interaction on the exact candidate
         run: python scripts/m9_windows_uia_proof.py
 
@@ -86,10 +103,14 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.NIKA_CANDIDATE_SHA }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
+      - name: Verify exact candidate checkout identity
+        run: python scripts/qa_assert_checkout_identity.py
       - name: Install GUI, packaging and QA dependencies
         run: python -m pip install -e ".[gui,qa,dev]"
       - name: Resolve canonical project version
@@ -102,12 +123,12 @@ jobs:
       - name: Build exact Windows release candidate, notices and manifest
         run: >-
           python scripts/m11_release.py
-          --source-sha '${{ github.event.pull_request.head.sha || github.sha }}'
+          --source-sha '${{ env.NIKA_CANDIDATE_SHA }}'
       - name: Verify packaged WebView2 UI Automation and keyboard focus
         shell: pwsh
         run: ./scripts/m5_uia_proof.ps1 -ExePath ./dist/NikaCore/NikaCore.exe -WindowTitle 'Nika Core ${{ steps.release.outputs.version }}'
       - name: Run release-gate truth regressions
-        run: python -m pytest tests/test_m11_m12_release.py -q
+        run: python -m pytest tests/test_m11_m12_release.py tests/test_qa_workflow_lineage.py -q
       - name: Create distributable ZIP
         shell: pwsh
         run: Compress-Archive -Path ./dist/NikaCore/* -DestinationPath ./dist/NikaCore-${{ steps.release.outputs.version }}-windows-x64.zip -Force
@@ -117,8 +138,9 @@ jobs:
           $evidence = [ordered]@{
             schema_version = 3
             product_version = '${{ steps.release.outputs.version }}'
-            commit_sha = '${{ github.event.pull_request.head.sha || github.sha }}'
+            commit_sha = '${{ env.NIKA_CANDIDATE_SHA }}'
             release_manifest_source_sha_bound = $true
+            exact_checkout_sha_verified = $true
             core_ci_equivalent = $true
             full_test_suite = $true
             runtime_restart_recovery = $true
@@ -145,7 +167,7 @@ jobs:
       - name: Upload exact pre-human candidate evidence
         uses: actions/upload-artifact@v4
         with:
-          name: NikaCore-${{ steps.release.outputs.version }}-m12-prehuman-${{ github.event.pull_request.head.sha || github.sha }}
+          name: NikaCore-${{ steps.release.outputs.version }}-m12-prehuman-${{ env.NIKA_CANDIDATE_SHA }}
           path: |
             dist/NikaCore-${{ steps.release.outputs.version }}-windows-x64.zip
             dist/NikaCore/release-manifest.json

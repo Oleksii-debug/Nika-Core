@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+env:
+  NIKA_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
 concurrency:
   group: core-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -24,10 +27,14 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.NIKA_CANDIDATE_SHA }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
+      - name: Verify exact candidate checkout identity
+        run: python scripts/qa_assert_checkout_identity.py
       - name: Install core, agent and deterministic planning test dependencies
         run: python -m pip install -e ".[dev,agent,planning]"
       - name: Verify source, dependencies and tests
@@ -40,10 +47,14 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.NIKA_CANDIDATE_SHA }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
+      - name: Verify exact candidate checkout identity
+        run: python scripts/qa_assert_checkout_identity.py
       - name: Install Windows embedded intelligence component
         run: python -m pip install -e ".[embedded-ai]"
       - name: Verify Microsoft Foundry Local Python SDK surface is importable
@@ -63,10 +74,14 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.NIKA_CANDIDATE_SHA }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
+      - name: Verify exact candidate checkout identity
+        run: python scripts/qa_assert_checkout_identity.py
       - name: Install Nika M4 dependencies
         run: python -m pip install -e ".[agent]"
       - name: Install Ollama
@@ -95,10 +110,14 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.NIKA_CANDIDATE_SHA }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
+      - name: Verify exact candidate checkout identity
+        run: python scripts/qa_assert_checkout_identity.py
       - name: Install M5 GUI and packaging dependencies
         run: python -m pip install -e ".[gui,qa]"
       - name: Build diagnostic one-dir Windows candidate
@@ -119,10 +138,14 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.NIKA_CANDIDATE_SHA }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
+      - name: Verify exact candidate checkout identity
+        run: python scripts/qa_assert_checkout_identity.py
       - name: Install M9 browser adapter
         run: python -m pip install -e ".[browser]"
       - name: Install Chromium
@@ -137,10 +160,14 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.NIKA_CANDIDATE_SHA }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
+      - name: Verify exact candidate checkout identity
+        run: python scripts/qa_assert_checkout_identity.py
       - name: Install M9 Windows UIA adapter
         run: python -m pip install -e ".[windows-interaction]"
       - name: Prove UIA semantic tree through Nika adapter
