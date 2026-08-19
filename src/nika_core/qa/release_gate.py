@@ -9,6 +9,7 @@ class ReleaseGateEvidence:
     windows_package_built: bool = False
     package_smoke_passed: bool = False
     manifest_verified: bool = False
+    third_party_notices_verified: bool = False
     recovery_drill_passed: bool = False
     packaged_uia_passed: bool = False
     human_tested: bool = False
@@ -28,6 +29,7 @@ _AUTOMATED_REQUIREMENTS = (
     ("windows_package_built", "Windows release package has not been built"),
     ("package_smoke_passed", "Packaged application smoke proof is missing"),
     ("manifest_verified", "Release manifest integrity verification is missing"),
+    ("third_party_notices_verified", "Third-party release notices/license evidence is missing"),
     ("recovery_drill_passed", "Full-system recovery drill is missing"),
     ("packaged_uia_passed", "Packaged UI Automation proof is missing"),
 )
