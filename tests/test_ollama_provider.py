@@ -122,12 +122,12 @@ def test_ollama_supports_validated_native_thinking_levels() -> None:
     assert response.text == "answer"
 
 
-@pytest.mark.parametrize("level", ["low", "medium", "high", "max", " LOW "])
+@pytest.mark.parametrize("level", ["low", "medium", "high", " LOW "])
 def test_ollama_accepts_documented_thinking_levels(level: str) -> None:
     OllamaProvider(default_model="model", think=level)
 
 
-@pytest.mark.parametrize("level", ["", "off", "maximum", "turbo"])
+@pytest.mark.parametrize("level", ["", "off", "max", "maximum", "turbo"])
 def test_ollama_rejects_unknown_thinking_levels(level: str) -> None:
     with pytest.raises(ValueError, match="think level"):
         OllamaProvider(default_model="model", think=level)
