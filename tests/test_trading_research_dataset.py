@@ -3,7 +3,15 @@ from decimal import Decimal
 
 import pytest
 
-from nika_core.trading_research import Bar, Dataset, EventTime, Instrument, Provenance, Venue
+from nika_core.trading_research import (
+    Bar,
+    Dataset,
+    EventTime,
+    Instrument,
+    OddsSnapshot,
+    Provenance,
+    Venue,
+)
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 VENUE = Venue("xnas", "America/New_York")
@@ -51,3 +59,22 @@ def test_timezone_rules_normalize_to_utc_and_reject_naive() -> None:
 def test_invalid_iana_timezone_fails_closed() -> None:
     with pytest.raises(ValueError, match="IANA timezone"):
         Venue("bad", "Mars/Olympus")
+
+
+def test_source_sequence_gap_is_classified() -> None:
+    dataset = Dataset("d", "1", [make("100", 1), make("101", 3)], PROVENANCE)
+    assert len(dataset.validation.gaps) == 1
+    assert dataset.validation.gaps[0].code == "sequence_gap"
+
+
+def test_immutable_odds_snapshot_hashes_without_mutable_backing() -> None:
+    odds = OddsSnapshot(
+        INSTRUMENT,
+        EventTime(NOW, NOW, NOW),
+        {"home": Decimal("1.8"), "away": Decimal("2.1")},
+        1,
+    )
+    dataset = Dataset("odds", "1", [odds], PROVENANCE)
+    assert len(dataset.version.semantic_hash) == 64
+    with pytest.raises(TypeError):
+        odds.selections["home"] = Decimal("99")  # type: ignore[index]
