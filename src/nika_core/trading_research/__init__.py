@@ -50,7 +50,7 @@ from .orders import (
 from .persistence import TradingStateRepository
 from .replay import OrderUpdate, ReplayBook, ReplayPhase, SimulationExecutionEngine, TimeSlice
 from .risk import RiskEngine, RiskLimits, RiskRejected, RiskState
-from .strategy import DecisionContext, Strategy, StrategyDecision
+from .strategy import DecisionContext, OrderStrategy, Strategy, StrategyDecision
 
 __all__ = [
     "AccountSnapshot",
@@ -72,6 +72,7 @@ __all__ = [
     "OddsSnapshot",
     "OrderIntent",
     "OrderState",
+    "OrderStrategy",
     "OrderType",
     "OrderUpdate",
     "OutcomeSettlement",
