@@ -121,7 +121,10 @@ class ProviderCapabilities:
     supports_private_data: bool
     supports_tools: bool = False
     supports_streaming: bool = False
-    supports_hard_cancellation: bool = True
+    # Fail closed. A provider may opt in only after the adapter/upstream path has
+    # evidence that cancelling/timing out the caller also stops the underlying
+    # inference, not merely the local coroutine or HTTP socket.
+    supports_hard_cancellation: bool = False
 
 
 class ModelGatewayError(RuntimeError):
