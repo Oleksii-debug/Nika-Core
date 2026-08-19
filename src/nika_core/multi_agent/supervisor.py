@@ -134,6 +134,11 @@ class MultiAgentSupervisor:
         return self._store.finalize_team(team_id)
 
     async def cancel_team(self, team_id: str) -> tuple[TeamMember, ...]:
+        state = self._store.team_state(team_id)
+        if state is TeamState.CANCELLED:
+            return self._store.members(team_id)
+        if state is not TeamState.ACTIVE:
+            raise RuntimeError(f"team cannot be cancelled from terminal state: {state.value}")
         active = self._store.recoverable_members(team_id)
         for member in active:
             await self._runtime.cancel(
