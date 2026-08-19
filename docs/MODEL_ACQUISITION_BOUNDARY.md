@@ -21,6 +21,7 @@ This boundary exists for privacy, bandwidth/resource control, licensing and repr
 9. Large model files remain outside the mandatory base package. Packaging/distribution ownership remains with release engineering; this document defines only the intelligence-side authorization boundary.
 10. Physical-Windows inference proof remains distinct from adapter/unit/SDK-import evidence.
 11. Foundry's manager is process-wide. A `FoundryLocalProvider` unloads only models that the same provider instance loaded. It must not unload a model that was already loaded by another consumer, and it refuses to race `close()` against native work that still owns the provider slot.
+12. Exported physical-proof evidence must not contain absolute model-cache paths. Local paths remain process-local inputs for optional hashing; the report records only whether a usable path existed plus checksum/file-count/byte evidence when hashing is requested.
 
 ## Foundry Local adaptation
 
@@ -36,7 +37,7 @@ The public Python model surface does not provide a dependable model-license fiel
 
 The Foundry Local SDK package license and the selected model license are separate facts. Every physical/release proof records the SDK package/version, exact public model ID and a separately reviewed model-license reference. Optional cache-tree hashing adds deterministic artifact evidence after acquisition and also records file count and total bytes.
 
-`scripts/prove_foundry_local.py` is the controlled physical-Windows collector. It requires the Windows WinML SDK package, exact `--model`, exact `--model-id`, operator-supplied `--model-license`, and runs inference through the real `ModelGateway`. It records platform/resource evidence, performs an unload/reload inference cycle and does not write raw prompt/response text to the evidence file. `--allow-download` remains an explicit opt-in action; `--hash-model-cache` remains separately opt-in because hashing large model trees is expensive.
+`scripts/prove_foundry_local.py` is the controlled physical-Windows collector. It requires the Windows WinML SDK package, exact `--model`, exact `--model-id`, operator-supplied `--model-license`, and runs inference through the real `ModelGateway`. It records platform/resource evidence, performs an unload/reload inference cycle and does not write raw prompt/response text or absolute local model-cache paths to the evidence file. `--allow-download` remains an explicit opt-in action; `--hash-model-cache` remains separately opt-in because hashing large model trees is expensive.
 
 ## Compatibility
 
@@ -59,5 +60,6 @@ The focused regression family must prove at minimum:
 - configured model resource limits block before model load/inference;
 - provider shutdown unloads provider-owned models but never a preloaded model owned by another consumer;
 - provider shutdown fails closed while timed-out native work is still active;
+- physical-proof serialization omits absolute cache paths while preserving usable checksum metadata;
 - missing catalog models remain typed unavailable errors;
 - successor AUTO02 PRs run the Windows Foundry SDK import proof without downloading a large model.
