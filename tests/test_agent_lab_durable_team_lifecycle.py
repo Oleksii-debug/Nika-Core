@@ -376,3 +376,27 @@ def test_team_with_only_failed_children_finalizes_failed(tmp_path: Path) -> None
 
     assert supervisor.finalize_team("team-recovery") is TeamState.FAILED
     assert store.team_state("team-recovery") is TeamState.FAILED
+
+
+def test_finalized_team_cannot_be_reclassified_as_cancelled(tmp_path: Path) -> None:
+    sqlite = _sqlite(tmp_path / "terminal-cancel.db")
+    store = MultiAgentStore(sqlite)
+    _team(store)
+    definitions = _activate_definitions(sqlite)
+    runtime = DurableRecoveryRuntime()
+    supervisor = MultiAgentSupervisor(runtime=runtime, store=store, definitions=definitions)
+
+    asyncio.run(
+        supervisor.fan_out(
+            team_id="team-recovery",
+            parent_id="root",
+            requests=(_request(),),
+        )
+    )
+    assert supervisor.finalize_team("team-recovery") is TeamState.COMPLETED
+
+    with pytest.raises(RuntimeError, match="terminal state"):
+        asyncio.run(supervisor.cancel_team("team-recovery"))
+
+    assert runtime.cancelled == []
+    assert store.team_state("team-recovery") is TeamState.COMPLETED
