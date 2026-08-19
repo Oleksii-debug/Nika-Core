@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -229,5 +229,60 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
             FOREIGN KEY(experiment_id) REFERENCES experiments(experiment_id)
         )""",
         "CREATE INDEX IF NOT EXISTS idx_experiment_events_run ON experiment_events(experiment_id, event_id)",
+    ),
+    8: (
+        """CREATE TABLE IF NOT EXISTS capability_escalations (
+            task_id TEXT NOT NULL,
+            requested_capability TEXT NOT NULL,
+            gap_kind TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            attempted_methods_json TEXT NOT NULL,
+            permission_ceiling_json TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN (
+                'proposed','reuse_selected','build_required','building','built','verifying','verified',
+                'registering','registered','rejected','blocked','quarantined','rolled_back'
+            )),
+            row_version INTEGER NOT NULL CHECK(row_version >= 0),
+            pinned_version TEXT,
+            pinned_digest TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(task_id, requested_capability),
+            FOREIGN KEY(task_id) REFERENCES tasks(task_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_capability_escalation_state ON capability_escalations(state, updated_at)",
+        """CREATE TABLE IF NOT EXISTS capability_search_candidates (
+            candidate_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            capability_id TEXT NOT NULL,
+            version TEXT NOT NULL,
+            source TEXT NOT NULL,
+            digest TEXT NOT NULL,
+            permissions_json TEXT NOT NULL,
+            metadata_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(task_id, capability_id) REFERENCES capability_escalations(task_id, requested_capability),
+            UNIQUE(task_id, capability_id, version, source, digest)
+        )""",
+        """CREATE TABLE IF NOT EXISTS capability_registry (
+            capability_id TEXT NOT NULL,
+            version TEXT NOT NULL,
+            digest TEXT NOT NULL,
+            manifest_json TEXT NOT NULL,
+            registered_at TEXT NOT NULL,
+            active INTEGER NOT NULL CHECK(active IN (0, 1)),
+            PRIMARY KEY(capability_id, version)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_capability_registry_active ON capability_registry(capability_id, active, registered_at)",
+        """CREATE TABLE IF NOT EXISTS capability_resume_bindings (
+            task_id TEXT NOT NULL,
+            capability_id TEXT NOT NULL,
+            version TEXT NOT NULL,
+            digest TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('ready','consumed','blocked')),
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(task_id, capability_id),
+            FOREIGN KEY(task_id, capability_id) REFERENCES capability_escalations(task_id, requested_capability)
+        )""",
     ),
 }
