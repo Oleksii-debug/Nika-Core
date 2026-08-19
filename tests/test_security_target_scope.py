@@ -123,6 +123,10 @@ def test_windows_path_scoped_executable_is_exact_but_case_insensitive(tmp_path: 
         r"bin\python.exe",
         "./python",
         r"C:python.exe",
+        "C:\\",
+        r"\\server\share",
+        r"\\?\C:\Trusted\python.exe",
+        r"\\.\PhysicalDrive0",
         "NUL.exe",
         "python?.exe",
         "python.exe ",
@@ -138,7 +142,14 @@ def test_ambiguous_or_reserved_executable_allowlist_entries_fail_closed(
 
 @pytest.mark.parametrize(
     "executable",
-    (r"bin\python.exe", "NUL.exe", "python.exe ", " python.exe"),
+    (
+        r"bin\python.exe",
+        r"\\?\C:\Trusted\python.exe",
+        r"\\.\PhysicalDrive0",
+        "NUL.exe",
+        "python.exe ",
+        " python.exe",
+    ),
 )
 def test_malformed_requested_executable_is_permission_failure(
     tmp_path: Path, executable: str
