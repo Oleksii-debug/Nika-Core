@@ -50,6 +50,14 @@ _MEDIA_MIGRATIONS: dict[int, tuple[str, ...]] = {
             component_json TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )""",
+        """CREATE TABLE IF NOT EXISTS media_structured_artifacts (
+            artifact_id TEXT PRIMARY KEY,
+            version_id TEXT NOT NULL,
+            artifact_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(version_id) REFERENCES media_versions(version_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_media_artifacts_version ON media_structured_artifacts(version_id)",
         """CREATE TABLE IF NOT EXISTS media_text_revisions (
             revision_id TEXT PRIMARY KEY,
             artifact_id TEXT NOT NULL,
