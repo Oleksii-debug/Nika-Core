@@ -46,9 +46,9 @@ def select_subtitle_track(
 
     for kind in kinds:
         same_kind = [track for track in ordered if track.kind == kind]
-        for exact in (True, False):
-            for wanted in preferred:
-                wanted_base = wanted.split("-", 1)[0]
+        for wanted in preferred:
+            wanted_base = wanted.split("-", 1)[0]
+            for exact in (True, False):
                 matches = []
                 for track in same_kind:
                     language = _normalize_language(track.language)
