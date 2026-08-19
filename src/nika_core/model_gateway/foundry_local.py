@@ -172,14 +172,13 @@ class FoundryLocalProvider:
         The caller must provide a product-level authorization that binds the
         provider, model alias and a separately reviewed model-license reference.
         Download is never inferred from ``ModelRequest``. Foundry's documented
-        download cancellation event is passed through when supplied.
+        download cancellation event is always used, including when the caller
+        cancels this coroutine.
         """
         if authorization.provider_id != self.capabilities.provider_id:
             raise ValueError(
                 "download authorization provider does not match Foundry Local provider"
             )
-        if authorization.model != authorization.model.strip():
-            raise ValueError("authorized model must not contain surrounding whitespace")
 
         async with self._model_management_lock:
             manager = self._manager()
@@ -191,20 +190,37 @@ class FoundryLocalProvider:
                     provider_id=self.capabilities.provider_id,
                     retryable=False,
                 )
-            if not bool(model.is_cached):
+            if bool(model.is_cached):
+                return self.inspect_model(authorization.model)
+
+            effective_cancel_event = cancel_event or Event()
+            acquired = False
+            worker: asyncio.Task[None] | None = None
+            try:
+                await self._inference_lock.acquire()
+                acquired = True
+                worker = asyncio.create_task(
+                    asyncio.to_thread(model.download, cancel_event=effective_cancel_event)
+                )
                 try:
-                    await asyncio.to_thread(model.download, cancel_event=cancel_event)
+                    await asyncio.shield(worker)
                 except asyncio.CancelledError:
-                    if cancel_event is not None:
-                        cancel_event.set()
+                    effective_cancel_event.set()
+                    self._release_slot_when_worker_finishes(worker)
+                    acquired = False
                     raise
-                except Exception as exc:
-                    raise ModelGatewayError(
-                        ModelErrorCode.PROVIDER_ERROR,
-                        f"Foundry Local model '{authorization.model}' download failed",
-                        provider_id=self.capabilities.provider_id,
-                        retryable=False,
-                    ) from exc
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                raise ModelGatewayError(
+                    ModelErrorCode.PROVIDER_ERROR,
+                    f"Foundry Local model '{authorization.model}' download failed",
+                    provider_id=self.capabilities.provider_id,
+                    retryable=False,
+                ) from exc
+            finally:
+                if acquired:
+                    self._inference_lock.release()
 
             evidence = self.inspect_model(authorization.model)
             if not evidence.cached:
@@ -263,10 +279,8 @@ class FoundryLocalProvider:
         for model in tuple(catalog.get_loaded_models()):
             model.unload()
 
-    def _release_slot_when_worker_finishes(
-        self, worker: asyncio.Task[tuple[str, str, ModelUsage]]
-    ) -> None:
-        def release(_task: asyncio.Task[tuple[str, str, ModelUsage]]) -> None:
+    def _release_slot_when_worker_finishes(self, worker: asyncio.Task[Any]) -> None:
+        def release(_task: asyncio.Task[Any]) -> None:
             if self._inference_lock.locked():
                 self._inference_lock.release()
 
