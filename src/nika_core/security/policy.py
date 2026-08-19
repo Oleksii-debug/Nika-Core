@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from threading import RLock
+from typing import Protocol
 
 from nika_core.tools import ToolRisk
 
@@ -250,22 +251,36 @@ class ActionIntent:
 @dataclass(frozen=True, slots=True)
 class ApprovalEvidence:
     approval_id: str
+    request_id: str
+    issuer_id: str
     action_fingerprint: str
     approved_at: datetime
     expires_at: datetime
+    signature: str
 
     def __post_init__(self) -> None:
-        if not self.approval_id.strip() or not self.action_fingerprint.strip():
-            raise ValueError("approval identity must not be empty")
+        identity = (self.approval_id, self.request_id, self.issuer_id, self.action_fingerprint)
+        if any(not item.strip() for item in identity) or not self.signature.strip():
+            raise ValueError("approval identity, provenance and signature must not be empty")
         if self.approved_at.tzinfo is None or self.expires_at.tzinfo is None:
             raise ValueError("approval timestamps must be timezone-aware")
         if self.expires_at <= self.approved_at:
             raise ValueError("approval expiry must follow approval time")
 
 
+class ApprovalVerifier(Protocol):
+    def verify(
+        self,
+        intent: ActionIntent,
+        approval: ApprovalEvidence,
+        *,
+        now: datetime,
+    ) -> None: ...
+
+
 @dataclass(slots=True)
 class ApprovalLedger:
-    _used: set[str] = field(default_factory=set)
+    _used: set[tuple[str, str]] = field(default_factory=set)
     _lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
 
     def _validate_unlocked(
@@ -280,7 +295,8 @@ class ApprovalLedger:
         current = now or datetime.now(UTC)
         if current.tzinfo is None:
             raise ValueError("current time must be timezone-aware")
-        if approval.approval_id in self._used:
+        approval_key = (approval.issuer_id, approval.approval_id)
+        if approval_key in self._used:
             raise PermissionError("approval evidence was already used")
         if approval.action_fingerprint != intent.approval_fingerprint:
             raise PermissionError("approval does not match the exact action")
@@ -289,7 +305,7 @@ class ApprovalLedger:
         return approval
 
     def _mark_used_unlocked(self, approval: ApprovalEvidence) -> None:
-        self._used.add(approval.approval_id)
+        self._used.add((approval.issuer_id, approval.approval_id))
 
     def consume(
         self,
@@ -308,6 +324,7 @@ class SecurityPolicy:
     granted_tools: frozenset[str]
     sandbox: SandboxPolicy
     budget: ExecutionBudget
+    approval_verifier: ApprovalVerifier | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,11 +356,20 @@ def authorize_action(
         policy.sandbox.authorize_executable(intent.executable)
 
     requires_approval = intent.approval_required or intent.risk is ToolRisk.HIGH_IMPACT
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        raise ValueError("current time must be timezone-aware")
+
     with approvals._lock, budgets._lock:
         next_usage = budgets._next_usage_unlocked(intent)
         validated_approval: ApprovalEvidence | None = None
         if requires_approval:
-            validated_approval = approvals._validate_unlocked(intent, approval, now=now)
+            if policy.approval_verifier is None:
+                raise PermissionError("trusted approval verifier is required")
+            if approval is None:
+                raise PermissionError("explicit approval is required")
+            policy.approval_verifier.verify(intent, approval, now=current)
+            validated_approval = approvals._validate_unlocked(intent, approval, now=current)
 
         budgets._commit_usage_unlocked(next_usage)
         if validated_approval is not None:
