@@ -134,7 +134,7 @@ class SafeProcessRunner:
             raise failure
 
         result = ProcessResult(
-            argv=normalized,
+            argv=tuple(redact_text(part) for part in normalized),
             returncode=int(process.returncode or 0),
             stdout=bytes(stdout_reader.data),
             stderr=bytes(stderr_reader.data),
