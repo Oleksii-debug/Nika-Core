@@ -82,6 +82,7 @@ class PromotionPolicy:
     minimum_improvement: float = 0.0
     minimum_replays: int = 1
     guardrails: tuple[MetricRule, ...] = ()
+    primary_higher_is_better: bool = True
 
     def __post_init__(self) -> None:
         if not self.primary_metric.strip():

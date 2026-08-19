@@ -247,6 +247,7 @@ def _encode_definition(definition: ExperimentDefinition) -> str:
                 }
                 for item in definition.policy.guardrails
             ],
+            "primary_higher_is_better": definition.policy.primary_higher_is_better,
         },
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -289,6 +290,7 @@ def _decode_definition(raw: str) -> ExperimentDefinition:
                 )
                 for item in policy["guardrails"]
             ),
+            primary_higher_is_better=bool(policy.get("primary_higher_is_better", True)),
         ),
     )
 

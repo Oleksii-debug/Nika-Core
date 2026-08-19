@@ -68,21 +68,23 @@ class ExperimentEngine:
             raise ValueError("only running experiments can complete")
         self._validate_coverage(snapshot)
         champion_id = snapshot.definition.champion.candidate_id
-        primary = snapshot.definition.policy.primary_metric
+        policy = snapshot.definition.policy
+        primary = policy.primary_metric
         champion_score = self._mean(snapshot, champion_id, primary)
+        direction = 1.0 if policy.primary_higher_is_better else -1.0
         eligible: list[tuple[str, float]] = []
         for challenger in snapshot.definition.challengers:
             candidate_id = challenger.candidate_id
             score = self._mean(snapshot, candidate_id, primary)
-            improvement = score - champion_score
-            if improvement < snapshot.definition.policy.minimum_improvement:
+            improvement = (score - champion_score) * direction
+            if improvement < policy.minimum_improvement:
                 continue
             if self._guardrails_pass(snapshot, champion_id, candidate_id):
                 eligible.append((candidate_id, score))
         selected = champion_id
         status = ExperimentStatus.COMPLETED
         if eligible:
-            selected = max(eligible, key=lambda item: (item[1], item[0]))[0]
+            selected = max(eligible, key=lambda item: (direction * item[1], item[0]))[0]
             status = ExperimentStatus.PROMOTED
         updated = replace(
             snapshot,
