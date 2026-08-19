@@ -209,6 +209,8 @@ class HttpResearchService:
                 status_code=result.status_code,
             )
 
+        extractor = "unknown"
+        extractor_version = "unknown"
         try:
             if is_document_media_type(result.media_type):
                 blob_path = self._blobs.resolve(artifact)
@@ -232,8 +234,8 @@ class HttpResearchService:
         except (DocumentIngestionError, LocalIngestionError, BlobStoreError, ValueError) as exc:
             extraction = self._repository.record_extraction(
                 artifact_id=artifact.artifact_id,
-                extractor=locals().get("extractor", "unknown"),
-                extractor_version=locals().get("extractor_version", "unknown"),
+                extractor=extractor,
+                extractor_version=extractor_version,
                 status=ExtractionStatus.FAILED,
                 normalized_text_sha256=None,
                 detail=f"{type(exc).__name__}: {exc}"[:1000],
@@ -299,7 +301,7 @@ class HttpResearchService:
                 artifact_id=artifact.artifact_id,
                 extraction_id=extraction.extraction_id,
             )
-        elif result.media_type == "text/html" and b"<script" in result.body.casefold():
+        elif result.media_type == "text/html" and b"<script" in result.body.lower():
             disposition = RefreshDisposition.DYNAMIC_REQUIRED
 
         snapshot_id = self._network.record_snapshot(
