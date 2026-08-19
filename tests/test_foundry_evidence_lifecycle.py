@@ -281,12 +281,18 @@ def test_close_refuses_to_race_timed_out_native_inference() -> None:
         with pytest.raises(RuntimeError, match="native work is active"):
             provider.close()
 
-        await asyncio.sleep(0.06)
+        # Do not guess how quickly a platform will schedule the to_thread completion
+        # callback. A normal follow-up inference must wait for the retained slot,
+        # then prove the provider is reusable only after the native worker exits.
+        after_timeout = await provider.complete(
+            request(request_id="after-timeout", timeout_seconds=1.0)
+        )
+        assert after_timeout.text == "ready"
         provider.close()
 
     asyncio.run(scenario())
 
-    assert model.completion_count == 1
+    assert model.completion_count == 2
     assert model.unload_count == 1
 
 
@@ -309,7 +315,11 @@ def test_download_timeout_signals_cancel_and_retains_slot_until_worker_exits() -
         assert inference_error.value.code is ModelErrorCode.TIMEOUT
         assert model.completion_count == 0
 
-        await asyncio.sleep(0.06)
+        # A second management operation with a real deadline waits for the retained
+        # native-download ownership and can publish cached evidence only after exit.
+        cached = await provider.download_model(authorization(), timeout_seconds=1.0)
+        assert cached.cached is True
+
         response = await provider.complete(request(request_id="after-download"))
         assert response.text == "ready"
         provider.close()
