@@ -307,7 +307,7 @@ def test_durable_runtime_without_initial_cursor_fails_before_spawn(tmp_path: Pat
         definitions=definitions,
     )
 
-    with pytest.raises(RuntimeError, match="initial_resume_token"):
+    with pytest.raises(TypeError, match="initial_resume_token"):
         asyncio.run(
             supervisor.fan_out(
                 team_id="team-recovery",
