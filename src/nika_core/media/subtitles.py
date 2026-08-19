@@ -4,7 +4,13 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from nika_core.media.contracts import Segment, SubtitleKind, SubtitleTrack, Transcript, TranscriptMethod
+from nika_core.media.contracts import (
+    Segment,
+    SubtitleKind,
+    SubtitleTrack,
+    Transcript,
+    TranscriptMethod,
+)
 from nika_core.media.errors import MediaError, MediaErrorCode
 from nika_core.media.hashing import sha256_file, sha256_json
 
@@ -30,7 +36,11 @@ def select_subtitle_track(
     active = policy or SubtitlePolicy()
     if active.force_transcription:
         return None
-    candidates = [track for track in tracks if active.allow_translated or track.kind != SubtitleKind.TRANSLATED]
+    candidates = [
+        track
+        for track in tracks
+        if active.allow_translated or track.kind != SubtitleKind.TRANSLATED
+    ]
     if not candidates:
         return None
     preferred = tuple(_normalize_language(item) for item in active.preferred_languages)
@@ -86,7 +96,10 @@ def normalize_subtitle_file(
     try:
         subtitles = pysubs2.load(str(path), encoding="utf-8")
     except Exception as exc:
-        raise MediaError(MediaErrorCode.INVALID_SUBTITLE, "subtitle file could not be parsed") from exc
+        raise MediaError(
+            MediaErrorCode.INVALID_SUBTITLE,
+            "subtitle file could not be parsed",
+        ) from exc
 
     segments: list[Segment] = []
     malformed = 0
@@ -103,26 +116,43 @@ def normalize_subtitle_file(
             continue
         segments.append(
             Segment(
-                segment_id=f"subtitle:{ordinal}:{sha256_json({'s': start_ms, 'e': end_ms, 't': text})[:16]}",
+                segment_id=(
+                    "subtitle:"
+                    f"{ordinal}:{sha256_json({'s': start_ms, 'e': end_ms, 't': text})[:16]}"
+                ),
                 start_ms=start_ms,
                 end_ms=end_ms,
                 text=text,
             )
         )
     if not segments:
-        raise MediaError(MediaErrorCode.LOW_QUALITY_SUBTITLE, "subtitle track contains no usable text")
+        raise MediaError(
+            MediaErrorCode.LOW_QUALITY_SUBTITLE,
+            "subtitle track contains no usable text",
+        )
     total_events = max(1, len(subtitles))
     malformed_ratio = malformed / total_events
     if track.kind == SubtitleKind.AUTOMATIC:
         if len(segments) < active.automatic_min_segments:
-            raise MediaError(MediaErrorCode.LOW_QUALITY_SUBTITLE, "automatic subtitle has too few segments")
+            raise MediaError(
+                MediaErrorCode.LOW_QUALITY_SUBTITLE,
+                "automatic subtitle has too few segments",
+            )
         if malformed_ratio > active.automatic_max_malformed_ratio:
-            raise MediaError(MediaErrorCode.LOW_QUALITY_SUBTITLE, "automatic subtitle has too many malformed segments")
+            raise MediaError(
+                MediaErrorCode.LOW_QUALITY_SUBTITLE,
+                "automatic subtitle has too many malformed segments",
+            )
         if media_duration_seconds and media_duration_seconds > 0:
-            covered = max(segment.end_ms for segment in segments) - min(segment.start_ms for segment in segments)
+            covered = max(segment.end_ms for segment in segments) - min(
+                segment.start_ms for segment in segments
+            )
             coverage_ratio = covered / (media_duration_seconds * 1000)
             if coverage_ratio < active.automatic_min_coverage_ratio:
-                raise MediaError(MediaErrorCode.LOW_QUALITY_SUBTITLE, "automatic subtitle coverage is too low")
+                raise MediaError(
+                    MediaErrorCode.LOW_QUALITY_SUBTITLE,
+                    "automatic subtitle coverage is too low",
+                )
 
     source_sha = sha256_file(path)
     transcript_id = f"subtitle:{source_sha[:32]}"
