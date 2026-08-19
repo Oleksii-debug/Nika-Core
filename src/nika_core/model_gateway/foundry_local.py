@@ -18,7 +18,13 @@ from nika_core.model_gateway.contracts import (
 
 
 class FoundryLocalProvider:
-    """Embedded Foundry Local provider using Microsoft's in-process Python SDK."""
+    """Embedded Foundry Local provider using Microsoft's in-process Python SDK.
+
+    Foundry Local is optimized for single-user on-device inference rather than
+    server-style concurrent batching. Nika therefore serializes in-process
+    completions per provider instance and applies the ModelRequest timeout to
+    queueing plus inference without silently downloading a missing model.
+    """
 
     def __init__(
         self,
@@ -42,6 +48,7 @@ class FoundryLocalProvider:
         self._allow_download = allow_download
         self._manager_factory = manager_factory
         self._manager_instance: Any | None = None
+        self._inference_lock = asyncio.Lock()
 
     @property
     def capabilities(self) -> ProviderCapabilities:
@@ -50,7 +57,18 @@ class FoundryLocalProvider:
     async def complete(self, request: ModelRequest) -> ModelResponse:
         started = time.perf_counter()
         try:
-            text, model_name, usage = await asyncio.to_thread(self._complete_sync, request)
+            async with asyncio.timeout(request.timeout_seconds):
+                async with self._inference_lock:
+                    text, model_name, usage = await asyncio.to_thread(
+                        self._complete_sync, request
+                    )
+        except TimeoutError as exc:
+            raise ModelGatewayError(
+                ModelErrorCode.TIMEOUT,
+                "Foundry Local inference timed out",
+                provider_id=self.capabilities.provider_id,
+                retryable=True,
+            ) from exc
         except ModelGatewayError:
             raise
         except (ImportError, ModuleNotFoundError) as exc:
