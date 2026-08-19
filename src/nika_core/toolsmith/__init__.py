@@ -28,6 +28,13 @@ from .contracts import (
 )
 from .fake_worker import DeterministicCodingWorker
 from .repository import InvalidTransitionError, StaleTransitionError, ToolsmithRepository
+from .reuse_search import (
+    REUSE_SOURCE_ORDER,
+    ReuseMetadataSource,
+    ReuseSearchPipeline,
+    ReuseSearchResult,
+    StaticReuseMetadataSource,
+)
 from .service import CapabilityEscalationService
 
 __all__ = [
@@ -51,11 +58,16 @@ __all__ = [
     "NetworkMode",
     "NetworkPolicy",
     "ProcessPolicy",
+    "REUSE_SOURCE_ORDER",
     "RecoveryState",
     "RepositorySnapshot",
     "ResourceBudget",
     "ReuseCandidate",
+    "ReuseMetadataSource",
+    "ReuseSearchPipeline",
+    "ReuseSearchResult",
     "StaleTransitionError",
+    "StaticReuseMetadataSource",
     "TestEvidence",
     "ToolsmithRepository",
     "WorkerFailure",
