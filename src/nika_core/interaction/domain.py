@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Mapping, Tuple
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,8 +45,8 @@ class ControlNode:
     visible: bool = True
     focused: bool = False
     value: str | None = None
-    bounds: Tuple[int, int, int, int] | None = None
-    attributes: Tuple[Tuple[str, str], ...] = ()
+    bounds: tuple[int, int, int, int] | None = None
+    attributes: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +54,7 @@ class SemanticSnapshot:
     target: InteractionTarget
     generation: int
     revision: int
-    controls: Tuple[ControlNode, ...]
+    controls: tuple[ControlNode, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +66,7 @@ class ControlLocator:
     label: str | None = None
     text: str | None = None
     ancestor_node_id: str | None = None
-    attributes: Tuple[Tuple[str, str], ...] = ()
+    attributes: tuple[tuple[str, str], ...] = ()
 
 
 class InteractionAction(StrEnum):
@@ -92,7 +92,7 @@ class InteractionEvidence:
     matched_node_id: str | None
     focus_before: str | None
     focus_after: str | None
-    details: Tuple[Tuple[str, str], ...] = ()
+    details: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
