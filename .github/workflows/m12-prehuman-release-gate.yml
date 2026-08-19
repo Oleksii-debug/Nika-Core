@@ -7,6 +7,8 @@ on:
       - "scripts/**"
       - "tests/**"
       - "pyproject.toml"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/m11-windows-release.yml"
       - ".github/workflows/m12-prehuman-release-gate.yml"
       - "docs/M12_HUMAN_NVDA_ACCEPTANCE.md"
   push:
@@ -17,6 +19,8 @@ on:
       - "scripts/**"
       - "tests/**"
       - "pyproject.toml"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/m11-windows-release.yml"
       - ".github/workflows/m12-prehuman-release-gate.yml"
       - "docs/M12_HUMAN_NVDA_ACCEPTANCE.md"
   workflow_dispatch:
