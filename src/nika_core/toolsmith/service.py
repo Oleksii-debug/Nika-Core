@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Iterable
 
 from nika_core.kernel.checkpoint import CheckpointService
@@ -104,10 +103,7 @@ class CapabilityEscalationService:
         job: CodingJob,
         expected_version: int,
     ) -> tuple[int, CodingResult]:
-        if job.task_id != gap.task_id:
-            raise ValueError("coding job must retain the original task id")
-        if not job.permission_ceiling.issubset(gap.permission_ceiling):
-            raise PermissionError("coding job permissions exceed original task ceiling")
+        self._validate_job(gap, job)
         version = self._repository.transition(
             task_id=gap.task_id,
             capability_id=gap.requested_capability,
@@ -117,25 +113,40 @@ class CapabilityEscalationService:
         )
         prior = await self._worker.inspect(job.job_id)
         result = await self._worker.recover(job, prior) if prior is not None else await self._worker.execute(job)
-        self._validate_worker_result(job, result)
-        if result.failure is not None:
-            self._checkpoint_block(gap, result.failure.message)
+        return self._finish_build(gap=gap, job=job, row_version=version, result=result)
+
+    async def recover_build(
+        self,
+        *,
+        gap: CapabilityGap,
+        job: CodingJob,
+        expected_version: int,
+    ) -> tuple[int, CodingResult]:
+        """Resume an already-persisted BUILDING job without replaying the BUILDING transition."""
+
+        self._validate_job(gap, job)
+        row = self._repository.get_escalation(
+            task_id=gap.task_id, capability_id=gap.requested_capability
+        )
+        if row is None:
+            raise KeyError((gap.task_id, gap.requested_capability))
+        if int(row["row_version"]) != expected_version:
+            raise ValueError("recovery row version does not match durable escalation")
+        if CandidateState(str(row["state"])) is not CandidateState.BUILDING:
+            raise ValueError("recover_build requires durable BUILDING state")
+        recovery = await self._worker.inspect(job.job_id)
+        if recovery is None:
+            self._checkpoint_block(gap, "BUILDING state has no recoverable worker state")
             version = self._repository.transition(
                 task_id=gap.task_id,
                 capability_id=gap.requested_capability,
-                expected_version=version,
+                expected_version=expected_version,
                 target=CandidateState.BLOCKED,
-                evidence={"worker_failure": result.failure.kind.value, "message": result.failure.message},
+                evidence={"reason": "missing worker recovery state", "job_id": job.job_id},
             )
-            return version, result
-        version = self._repository.transition(
-            task_id=gap.task_id,
-            capability_id=gap.requested_capability,
-            expected_version=version,
-            target=CandidateState.BUILT,
-            evidence={"job_id": job.job_id, "changed_files": len(result.changed_files)},
-        )
-        return version, result
+            return version, CodingResult(job_id=job.job_id)
+        result = await self._worker.recover(job, recovery)
+        return self._finish_build(gap=gap, job=job, row_version=expected_version, result=result)
 
     def start_verification(self, *, gap: CapabilityGap, expected_version: int) -> int:
         return self._repository.transition(
@@ -223,7 +234,12 @@ class CapabilityEscalationService:
         if not version or not digest:
             raise RuntimeError("registered escalation lost exact pinned capability identity")
         self._repository.mark_resume_ready(task_id=task_id, capability_id=capability_id)
-        return {"task_id": task_id, "capability_id": capability_id, "version": str(version), "digest": str(digest)}
+        return {
+            "task_id": task_id,
+            "capability_id": capability_id,
+            "version": str(version),
+            "digest": str(digest),
+        }
 
     def _checkpoint_block(self, gap: CapabilityGap, reason: str) -> None:
         self._checkpoints.save(
@@ -237,6 +253,44 @@ class CapabilityEscalationService:
                 "permission_ceiling": sorted(gap.permission_ceiling),
             },
         )
+
+    @staticmethod
+    def _validate_job(gap: CapabilityGap, job: CodingJob) -> None:
+        if job.task_id != gap.task_id:
+            raise ValueError("coding job must retain the original task id")
+        if not job.permission_ceiling.issubset(gap.permission_ceiling):
+            raise PermissionError("coding job permissions exceed original task ceiling")
+
+    def _finish_build(
+        self,
+        *,
+        gap: CapabilityGap,
+        job: CodingJob,
+        row_version: int,
+        result: CodingResult,
+    ) -> tuple[int, CodingResult]:
+        self._validate_worker_result(job, result)
+        if result.failure is not None:
+            self._checkpoint_block(gap, result.failure.message)
+            version = self._repository.transition(
+                task_id=gap.task_id,
+                capability_id=gap.requested_capability,
+                expected_version=row_version,
+                target=CandidateState.BLOCKED,
+                evidence={
+                    "worker_failure": result.failure.kind.value,
+                    "message": result.failure.message,
+                },
+            )
+            return version, result
+        version = self._repository.transition(
+            task_id=gap.task_id,
+            capability_id=gap.requested_capability,
+            expected_version=row_version,
+            target=CandidateState.BUILT,
+            evidence={"job_id": job.job_id, "changed_files": len(result.changed_files)},
+        )
+        return version, result
 
     @staticmethod
     def _validate_worker_result(job: CodingJob, result: CodingResult) -> None:
