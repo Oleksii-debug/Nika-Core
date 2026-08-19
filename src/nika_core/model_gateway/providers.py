@@ -148,10 +148,11 @@ class OllamaProvider:
 
     Ordinary Nika requests intentionally disable Ollama streaming. Thinking is
     disabled by default for models that support a boolean switch; callers may
-    explicitly select an Ollama thinking level for models such as GPT-OSS. The
-    reasoning trace is still not copied into Nika's shared response contract.
-    Client cancellation is not represented as hard server-side inference
-    cancellation because the native Ollama API does not provide that guarantee.
+    explicitly select a documented Ollama thinking level for models such as
+    GPT-OSS. The reasoning trace is still not copied into Nika's shared
+    response contract. Client cancellation is not represented as hard
+    server-side inference cancellation because the native Ollama API does not
+    provide that guarantee.
     """
 
     def __init__(
@@ -274,8 +275,8 @@ def _normalize_ollama_think(value: bool | str) -> bool | str:
     if not isinstance(value, str):
         raise TypeError("think must be a boolean or an Ollama thinking level")
     level = value.strip().lower()
-    if level not in {"low", "medium", "high", "max"}:
-        raise ValueError("think level must be one of: low, medium, high, max")
+    if level not in {"low", "medium", "high"}:
+        raise ValueError("think level must be one of: low, medium, high")
     return level
 
 
