@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from math import isfinite
 from typing import Any
 from uuid import uuid4
 
@@ -102,6 +103,8 @@ class EvaluationScore:
             raise ValueError("evaluation identifiers must not be empty")
         if not self.metric.strip():
             raise ValueError("metric must not be empty")
+        if not isfinite(float(self.score)):
+            raise ValueError("evaluation score must be finite")
 
 
 def attenuate_grants(
@@ -123,6 +126,9 @@ def attenuate_grants(
 
 
 def aggregate_scores(scores: tuple[EvaluationScore, ...]) -> dict[str, float]:
+    metrics = {item.metric for item in scores}
+    if len(metrics) > 1:
+        raise ValueError("evaluation scores from multiple metrics must be aggregated separately")
     grouped: dict[str, list[float]] = {}
     for item in scores:
         grouped.setdefault(item.target_member_id, []).append(float(item.score))

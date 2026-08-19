@@ -27,7 +27,7 @@ The M7 layer does not replace M2 checkpoints. LangGraph remains execution/checkp
 Team cancellation first calls the runtime cancellation port for recoverable members, then atomically marks the team and unfinished members cancelled in Nika persistence. Typed task and result/error handoffs are recorded around execution.
 
 ## Evaluator
-Evaluator aggregation is deterministic arithmetic over typed `EvaluationScore` records. M7 does not use an LLM to decide whether a score exists or to invent a metric. More advanced learning/promotion policy belongs to M8.
+Evaluator aggregation is deterministic arithmetic over typed `EvaluationScore` records. Scores must be finite. One aggregate operation represents exactly one metric; attempting to combine records from different metrics fails closed instead of silently averaging unlike quantities such as quality and latency. M7 does not use an LLM to decide whether a score exists or to invent a metric. More advanced learning/promotion policy belongs to M8.
 
 ## Acceptance evidence required
 Before M7 can receive its 9% roadmap weight:
