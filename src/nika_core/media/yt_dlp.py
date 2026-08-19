@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import sys
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,7 +15,7 @@ from nika_core.media.contracts import (
 )
 from nika_core.media.errors import MediaError, MediaErrorCode
 from nika_core.media.hashing import sha256_json
-from nika_core.media.privacy import redact_mapping
+from nika_core.media.privacy import redact_mapping, redact_text
 from nika_core.media.process import SafeProcessRunner
 
 
@@ -115,7 +114,8 @@ class YtDlpAdapter:
                 "media duration exceeds the configured processing limit",
             )
         upstream_id = str(payload.get("id") or "").strip() or None
-        canonical_url = str(payload.get("webpage_url") or payload.get("original_url") or url)
+        raw_canonical_url = str(payload.get("webpage_url") or payload.get("original_url") or url)
+        canonical_url = redact_text(raw_canonical_url)
         source_id = f"remote:{sha256_json({'url': canonical_url})[:32]}"
         source = MediaSource(
             source_id=source_id,
@@ -202,20 +202,27 @@ class YtDlpAdapter:
             for language, candidates in sorted(catalog.items()):
                 if not isinstance(candidates, list):
                     continue
-                for candidate in candidates:
+                for candidate_index, candidate in enumerate(candidates):
                     if not isinstance(candidate, dict):
                         continue
                     ext = str(candidate.get("ext") or "vtt")
-                    url = candidate.get("url")
-                    if url is not None:
-                        url = str(url)
+                    raw_url = candidate.get("url")
+                    safe_url = redact_text(str(raw_url)) if raw_url is not None else None
+                    track_basis = {
+                        "field": field,
+                        "kind": kind.value,
+                        "language": str(language),
+                        "ext": ext,
+                        "name": str(candidate.get("name") or ""),
+                        "index": candidate_index,
+                    }
                     tracks.append(
                         SubtitleTrack(
-                            track_id=str(uuid.uuid4()),
+                            track_id=f"subtitle-track:{sha256_json(track_basis)[:32]}",
                             language=str(language),
                             kind=kind,
                             name=str(candidate.get("name") or ""),
-                            url=url,
+                            url=safe_url,
                             format=ext,
                             source_label=field,
                         )
