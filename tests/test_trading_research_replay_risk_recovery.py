@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -63,6 +64,27 @@ def _approved(*, submitted_slice: int = 0, approved_slice: int = 0) -> RiskAppro
         approved_slice,
         ExecutionPolicy("v1"),
     )
+
+
+def _fill(fill_id: str = "fill-1") -> SimulatedFill:
+    return SimulatedFill(
+        fill_id,
+        "approval-1",
+        "intent-1",
+        INSTRUMENT,
+        Side.BUY,
+        Decimal(2),
+        Decimal(100),
+        Decimal(1),
+        NOW,
+        1,
+    )
+
+
+def _snapshot(fill: SimulatedFill):
+    ledger = PortfolioLedger(Decimal(1000))
+    ledger.apply_fill(fill)
+    return ledger.snapshot({INSTRUMENT.instrument_id: Decimal(100)})
 
 
 def test_replay_phase_order_is_binding_and_deterministic() -> None:
@@ -193,21 +215,8 @@ def test_committed_fill_and_account_are_exactly_once_after_restart(tmp_path) -> 
     store.initialize()
     repo = TradingStateRepository(store)
     repo.initialize()
-    ledger = PortfolioLedger(Decimal(1000))
-    fill = SimulatedFill(
-        "fill-1",
-        "approval-1",
-        "intent-1",
-        INSTRUMENT,
-        Side.BUY,
-        Decimal(2),
-        Decimal(100),
-        Decimal(1),
-        NOW,
-        1,
-    )
-    ledger.apply_fill(fill)
-    snapshot = ledger.snapshot({INSTRUMENT.instrument_id: Decimal(100)})
+    fill = _fill()
+    snapshot = _snapshot(fill)
     assert repo.commit_fill_and_account(fill, snapshot) is True
 
     restarted = TradingStateRepository(SQLiteStore(tmp_path / "nika.db"))
@@ -219,6 +228,22 @@ def test_committed_fill_and_account_are_exactly_once_after_restart(tmp_path) -> 
     payload = restarted.account_payload()
     assert payload is not None
     assert payload["cash"] == "799"
+
+
+def test_failed_account_write_rolls_back_fill_insert_atomically(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    repo = TradingStateRepository(store)
+    repo.initialize()
+    with store.connection() as conn:
+        conn.execute("DROP TABLE trading_research_account_state")
+
+    fill = _fill("fill-rollback")
+    with pytest.raises(sqlite3.OperationalError):
+        repo.commit_fill_and_account(fill, _snapshot(fill))
+
+    assert repo.fill_count() == 0
+    assert repo.has_fill(fill.fill_id) is False
 
 
 def test_crash_before_commit_leaves_no_partial_fill_or_account_state(tmp_path) -> None:
