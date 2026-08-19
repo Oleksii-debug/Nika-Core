@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sys
 from importlib import metadata
 from pathlib import Path
@@ -17,6 +18,10 @@ RUNTIME_DISTRIBUTIONS = (
 )
 
 _LICENSE_NAMES = ("license", "licence", "copying", "notice")
+
+
+def _normalized_name(value: str) -> str:
+    return re.sub(r"[-_.]+", "", value).casefold()
 
 
 def _metadata_license(dist: metadata.Distribution) -> str:
@@ -105,10 +110,11 @@ def verify_third_party_notices(bundle_dir: Path) -> tuple[str, ...]:
     if not target.is_file():
         return ("missing:THIRD_PARTY_NOTICES.txt",)
     text = target.read_text(encoding="utf-8", errors="replace")
+    normalized_text = _normalized_name(text)
     findings: list[str] = []
-    if "Python runtime" not in text:
+    if "pythonruntime" not in normalized_text:
         findings.append("notices:python-runtime")
     for name in RUNTIME_DISTRIBUTIONS:
-        if name.casefold() not in text.casefold():
+        if _normalized_name(name) not in normalized_text:
             findings.append(f"notices:{name}")
     return tuple(findings)
