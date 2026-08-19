@@ -91,6 +91,11 @@ class TranscriptionCoordinator:
         for durable in self._chunks.list_for_job(job.job_id):
             if durable.state == ChunkState.COMPLETED:
                 continue
+            if durable.state == ChunkState.CANCELLED:
+                raise MediaError(
+                    MediaErrorCode.PROCESS_CANCELLED,
+                    "transcription has a durably cancelled chunk; explicit reset is required",
+                )
             if cancel_event is not None and cancel_event.is_set():
                 self._chunks.put(durable.model_copy(update={"state": ChunkState.CANCELLED}))
                 raise MediaError(MediaErrorCode.PROCESS_CANCELLED, "media transcription was cancelled")
@@ -146,11 +151,19 @@ class TranscriptionCoordinator:
             except Exception as exc:
                 current = self._chunks.get(durable.chunk_id)
                 if current.state != ChunkState.COMPLETED:
+                    cancelled = (
+                        isinstance(exc, MediaError)
+                        and exc.code == MediaErrorCode.PROCESS_CANCELLED
+                    )
                     self._chunks.put(
                         current.model_copy(
                             update={
-                                "state": ChunkState.FAILED,
-                                "error_code": getattr(getattr(exc, "code", None), "value", "transcription_failed"),
+                                "state": ChunkState.CANCELLED if cancelled else ChunkState.FAILED,
+                                "error_code": getattr(
+                                    getattr(exc, "code", None),
+                                    "value",
+                                    "transcription_failed",
+                                ),
                                 "error_message": str(exc)[:1000],
                             }
                         )
