@@ -43,8 +43,8 @@ def test_local_ingest_deduplicates_normalized_content_and_preserves_origins(
     root.mkdir()
     first = root / "first.txt"
     second = root / "second.txt"
-    first.write_text("Український\tтекст\r\nпро гранти", encoding="utf-8")
-    second.write_text("Український текст\nпро гранти\n", encoding="utf-8")
+    first.write_bytes("Український\tтекст\r\nпро гранти".encode("utf-8"))
+    second.write_bytes("Український текст\nпро гранти\n".encode("utf-8"))
     service = LocalCorpusService(repository, allowed_root=root)
 
     one = SourceSpec("s1", "ws", SourceKind.LOCAL_FILE, str(first))
