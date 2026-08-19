@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from nika_core.data.sqlite import SQLiteStore
 
-MEDIA_SCHEMA_VERSION = 1
+MEDIA_SCHEMA_VERSION = 2
 
 _MEDIA_MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -70,17 +70,24 @@ _MEDIA_MIGRATIONS: dict[int, tuple[str, ...]] = {
         )""",
         "CREATE INDEX IF NOT EXISTS idx_media_revisions_artifact ON media_text_revisions(artifact_id, ordinal)",
     ),
+    2: (
+        """CREATE TABLE IF NOT EXISTS media_transcription_chunks (
+            chunk_id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL,
+            ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+            state TEXT NOT NULL CHECK(state IN ('pending','running','completed','failed','cancelled')),
+            chunk_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(job_id, ordinal),
+            FOREIGN KEY(job_id) REFERENCES media_processing_jobs(job_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_media_transcription_job_state ON media_transcription_chunks(job_id, state, ordinal)",
+    ),
 }
 
 
 def initialize_media_schema(store: SQLiteStore) -> None:
-    """Apply DEV05-owned ordered migrations inside Nika's canonical SQLite database.
-
-    This deliberately uses the existing SQLiteStore transaction boundary and does not create
-    a second database. The sub-schema ledger avoids colliding with DEV01's currently open
-    global migration-9 lane; a later integration may fold these statements into the global
-    chain after that lane is merged.
-    """
+    """Apply DEV05-owned ordered migrations inside Nika's canonical SQLite database."""
     with store.connection() as conn:
         conn.execute(
             """CREATE TABLE IF NOT EXISTS media_schema_migrations (
