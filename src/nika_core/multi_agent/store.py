@@ -211,7 +211,7 @@ class MultiAgentStore:
             raise RuntimeError(f"ambiguous task handoff for {team_id}/{member_id}")
         payload = json.loads(rows[0]["payload_json"])
         if not isinstance(payload, dict):
-            raise RuntimeError("persisted task handoff payload must be an object")
+            raise TypeError("persisted task handoff payload must be an object")
         return payload
 
     def prepare_member_execution(
