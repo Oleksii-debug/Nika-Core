@@ -1,0 +1,56 @@
+"""Semantic-first computer interaction contracts."""
+
+from .domain import (
+    AmbiguousTargetError,
+    ApplicationIdentity,
+    BrowserContextIdentity,
+    ControlLocator,
+    ControlNode,
+    FallbackReason,
+    InteractionAction,
+    InteractionEvidence,
+    InteractionResult,
+    InteractionTarget,
+    PermissionBlockedError,
+    SemanticSnapshot,
+    StaleSnapshotError,
+    TargetNotFoundError,
+    UnsupportedInteractionError,
+    WindowIdentity,
+)
+from .orchestration import (
+    InteractionAdapter,
+    InteractionReplayBlockedError,
+    InteractionRequest,
+    InteractionRisk,
+    InteractionUncertainError,
+    SemanticInteractionCoordinator,
+)
+from .resolver import resolve_strict, validate_snapshot
+
+__all__ = [
+    "AmbiguousTargetError",
+    "ApplicationIdentity",
+    "BrowserContextIdentity",
+    "ControlLocator",
+    "ControlNode",
+    "FallbackReason",
+    "InteractionAction",
+    "InteractionAdapter",
+    "InteractionEvidence",
+    "InteractionReplayBlockedError",
+    "InteractionRequest",
+    "InteractionResult",
+    "InteractionRisk",
+    "InteractionTarget",
+    "InteractionUncertainError",
+    "PermissionBlockedError",
+    "SemanticInteractionCoordinator",
+    "SemanticSnapshot",
+    "StaleSnapshotError",
+    "TargetNotFoundError",
+    "UnsupportedInteractionError",
+    "WindowIdentity",
+    "resolve_strict",
+    "validate_snapshot",
+]
