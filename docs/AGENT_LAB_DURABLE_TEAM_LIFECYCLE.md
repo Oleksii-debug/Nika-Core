@@ -19,7 +19,7 @@ The integrated M7 baseline persisted team/member lineage and exposed `recoverabl
 2. restart discovery did not call the already-existing `AgentRuntimePort.resume`, so a persisted running child had no real recovery path;
 3. result row, member state and result/error handoff were separate commits, allowing process loss or a write failure to leave contradictory evidence.
 
-`TeamState` also had `completed` and `failed` values but no explicit safe finalization boundary.
+`TeamState` also had `completed` and `failed` values but no explicit safe finalization boundary. Baseline cancellation could subsequently rewrite a finalized `completed` or `failed` team to `cancelled`, violating terminal-state monotonicity and potentially emitting runtime cancellation side effects after work was already final.
 
 ## Reuse decision
 
@@ -67,7 +67,7 @@ Team completion is explicit because a successful fan-out wave does not prove tha
 - only cancelled children => team `cancelled`;
 - no child work => team `completed`.
 
-This preserves worker-failure containment while preventing an automatically completed team from blocking legitimate subsequent/nested fan-out.
+This preserves worker-failure containment while preventing an automatically completed team from blocking legitimate subsequent/nested fan-out. `completed` and `failed` are terminal classifications: `cancel_team()` rejects them before calling the runtime cancellation port, so final history cannot be rewritten as cancellation. Repeating cancellation of an already-cancelled team is idempotent.
 
 ## Regression evidence
 
@@ -77,7 +77,8 @@ This preserves worker-failure containment while preventing an automatically comp
 - approval wait surviving restart without auto-resume;
 - fail-before-spawn for a runtime that falsely advertises durable resume without an initial cursor;
 - explicit mixed-success/failure finalization;
-- all-failure finalization.
+- all-failure finalization;
+- finalized-team cancellation rejection before any runtime cancel side effect.
 
 `tests/test_agent_lab_team_atomicity.py` covers:
 - injected result-handoff write failure rolling back result/state;
