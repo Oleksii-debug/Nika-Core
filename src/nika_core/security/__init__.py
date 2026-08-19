@@ -1,7 +1,9 @@
+from .approval import ApprovalAuthority, ApprovalRequestView
 from .policy import (
     ActionIntent,
     ApprovalEvidence,
     ApprovalLedger,
+    ApprovalVerifier,
     ExecutionBudget,
     ExecutionBudgetLedger,
     SandboxPolicy,
@@ -12,8 +14,11 @@ from .policy import (
 
 __all__ = [
     "ActionIntent",
+    "ApprovalAuthority",
     "ApprovalEvidence",
     "ApprovalLedger",
+    "ApprovalRequestView",
+    "ApprovalVerifier",
     "ExecutionBudget",
     "ExecutionBudgetLedger",
     "SandboxPolicy",

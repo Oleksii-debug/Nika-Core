@@ -99,9 +99,12 @@ def test_evidence_for_formerly_colliding_action_is_rejected_for_other_action() -
     )
     evidence = ApprovalEvidence(
         approval_id="approval-framing",
+        request_id="request-framing",
+        issuer_id="test-forged",
         action_fingerprint=approved.approval_fingerprint,
         approved_at=_NOW - timedelta(minutes=1),
         expires_at=_NOW + timedelta(minutes=4),
+        signature="not-a-trusted-signature",
     )
 
     with pytest.raises(PermissionError, match="exact action"):

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Barrier
 
@@ -9,6 +9,7 @@ import pytest
 
 from nika_core.security import (
     ActionIntent,
+    ApprovalAuthority,
     ApprovalEvidence,
     ApprovalLedger,
     ExecutionBudget,
@@ -22,7 +23,16 @@ from nika_core.tools import ToolRisk
 _NOW = datetime(2026, 8, 19, 17, 0, tzinfo=UTC)
 
 
-def _policy(tmp_path: Path, *, max_write_bytes: int = 1) -> SecurityPolicy:
+def _authority() -> ApprovalAuthority:
+    return ApprovalAuthority(issuer_id="test-desktop", secret=b"a" * 32)
+
+
+def _policy(
+    tmp_path: Path,
+    authority: ApprovalAuthority,
+    *,
+    max_write_bytes: int = 1,
+) -> SecurityPolicy:
     return SecurityPolicy(
         granted_tools=frozenset({"danger.execute"}),
         sandbox=SandboxPolicy(
@@ -30,6 +40,7 @@ def _policy(tmp_path: Path, *, max_write_bytes: int = 1) -> SecurityPolicy:
             writable_roots=("artifacts",),
         ),
         budget=ExecutionBudget(max_write_bytes=max_write_bytes),
+        approval_verifier=authority.verifier(),
     )
 
 
@@ -44,19 +55,16 @@ def _intent(action_id: str) -> ActionIntent:
     )
 
 
-def _approval(intent: ActionIntent) -> ApprovalEvidence:
-    return ApprovalEvidence(
-        approval_id=f"approval-{intent.action_id}",
-        action_fingerprint=intent.approval_fingerprint,
-        approved_at=_NOW - timedelta(minutes=1),
-        expires_at=_NOW + timedelta(minutes=4),
-    )
+def _approval(authority: ApprovalAuthority, intent: ActionIntent) -> ApprovalEvidence:
+    request = authority.request(intent, reason="test explicit human approval", now=_NOW)
+    return authority.approve(request.request_id, now=_NOW)
 
 
 def test_budget_rejection_does_not_consume_one_time_approval(tmp_path: Path) -> None:
-    policy = _policy(tmp_path, max_write_bytes=0)
+    authority = _authority()
+    policy = _policy(tmp_path, authority, max_write_bytes=0)
     intent = _intent("budget-denied")
-    approval = _approval(intent)
+    approval = _approval(authority, intent)
     approvals = ApprovalLedger()
 
     with pytest.raises(PermissionError, match="write budget"):
@@ -75,7 +83,8 @@ def test_budget_rejection_does_not_consume_one_time_approval(tmp_path: Path) -> 
 
 
 def test_missing_approval_does_not_reserve_budget(tmp_path: Path) -> None:
-    policy = _policy(tmp_path)
+    authority = _authority()
+    policy = _policy(tmp_path, authority)
     intent = _intent("approval-missing")
     budgets = ExecutionBudgetLedger(policy.budget)
 
@@ -88,7 +97,8 @@ def test_missing_approval_does_not_reserve_budget(tmp_path: Path) -> None:
 
 
 def test_invalid_approval_does_not_reserve_budget(tmp_path: Path) -> None:
-    policy = _policy(tmp_path)
+    authority = _authority()
+    policy = _policy(tmp_path, authority)
     intent = _intent("approval-mismatch")
     other = _intent("other-action")
     budgets = ExecutionBudgetLedger(policy.budget)
@@ -99,7 +109,7 @@ def test_invalid_approval_does_not_reserve_budget(tmp_path: Path) -> None:
             policy,
             budgets,
             ApprovalLedger(),
-            approval=_approval(other),
+            approval=_approval(authority, other),
             now=_NOW,
         )
 
@@ -107,11 +117,12 @@ def test_invalid_approval_does_not_reserve_budget(tmp_path: Path) -> None:
 
 
 def test_budget_and_approval_commit_together_under_competing_threads(tmp_path: Path) -> None:
-    policy = _policy(tmp_path, max_write_bytes=1)
+    authority = _authority()
+    policy = _policy(tmp_path, authority, max_write_bytes=1)
     budgets = ExecutionBudgetLedger(policy.budget)
     approvals = ApprovalLedger()
     intents = (_intent("race-a"), _intent("race-b"))
-    evidence = {intent.action_id: _approval(intent) for intent in intents}
+    evidence = {intent.action_id: _approval(authority, intent) for intent in intents}
     barrier = Barrier(2)
 
     def attempt(intent: ActionIntent) -> tuple[str, bool, str | None]:
@@ -154,9 +165,10 @@ def test_budget_and_approval_commit_together_under_competing_threads(tmp_path: P
 
 
 def test_success_commits_budget_and_consumes_approval_once(tmp_path: Path) -> None:
-    policy = _policy(tmp_path)
+    authority = _authority()
+    policy = _policy(tmp_path, authority)
     intent = _intent("success")
-    approval = _approval(intent)
+    approval = _approval(authority, intent)
     budgets = ExecutionBudgetLedger(policy.budget)
     approvals = ApprovalLedger()
 
