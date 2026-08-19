@@ -111,9 +111,9 @@ class ModelDownloadAuthorization:
 class ModelResourcePolicy:
     """Fail-closed preflight budget for an in-process model operation.
 
-    This is intentionally provider-neutral product policy. It consumes the
-    existing ResourceObserverPort snapshot rather than introducing another
-    system-monitor dependency or persistence schema.
+    This contract stays in the intelligence substrate so importing an embedded
+    model provider never requires a concrete system-monitor package. Existing
+    resource observers satisfy the structural port below without an adapter.
     """
 
     max_cpu_percent: float | None = None
@@ -129,6 +129,16 @@ class ModelResourcePolicy:
                 raise ValueError(f"{name} must be in the range (0, 100]")
         if self.min_available_memory_bytes is not None and self.min_available_memory_bytes <= 0:
             raise ValueError("min_available_memory_bytes must be greater than zero")
+
+
+class ModelResourceSnapshot(Protocol):
+    cpu_percent: float
+    memory_percent: float
+    available_memory_bytes: int
+
+
+class ModelResourceObserver(Protocol):
+    def snapshot(self) -> ModelResourceSnapshot: ...
 
 
 @dataclass(frozen=True, slots=True)
