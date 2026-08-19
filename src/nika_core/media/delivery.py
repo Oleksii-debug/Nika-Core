@@ -3,7 +3,11 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from nika_core.media.contracts import AssetKind, MediaAsset, StructuredMediaArtifact
-from nika_core.media.handoff import OCRInputRequestV1, CorpusMediaHandoffV1, build_corpus_media_handoff
+from nika_core.media.handoff import (
+    CorpusMediaHandoffV1,
+    OCRInputRequestV1,
+    build_corpus_media_handoff,
+)
 from nika_core.media.presenter import render_accessible_media_text
 from nika_core.media.repository import MediaRepository
 
