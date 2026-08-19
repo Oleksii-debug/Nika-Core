@@ -127,10 +127,12 @@ class ApprovalAuthority:
         issuer_id: str | None = None,
         secret: bytes | None = None,
     ) -> None:
-        resolved_issuer = issuer_id or f"desktop-{secrets.token_urlsafe(18)}"
+        resolved_issuer = (
+            f"desktop-{secrets.token_urlsafe(18)}" if issuer_id is None else issuer_id
+        )
         if not resolved_issuer.strip():
             raise ValueError("approval issuer_id must not be empty")
-        resolved_secret = secret or secrets.token_bytes(32)
+        resolved_secret = secrets.token_bytes(32) if secret is None else secret
         if len(resolved_secret) < 32:
             raise ValueError("approval authority secret must contain at least 32 bytes")
         self._issuer_id = resolved_issuer
@@ -251,7 +253,6 @@ class ApprovalAuthority:
     def evidence(self, request_id: str, *, now: datetime | None = None) -> ApprovalEvidence:
         current = _aware_now(now)
         with self._lock:
-            self._prune_unlocked(current)
             try:
                 evidence = self._approved[request_id]
             except KeyError as exc:
