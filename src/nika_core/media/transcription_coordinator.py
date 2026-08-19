@@ -13,11 +13,13 @@ from nika_core.media.contracts import (
     TranscriptMethod,
 )
 from nika_core.media.errors import MediaError, MediaErrorCode
+from nika_core.media.hashing import sha256_file
 from nika_core.media.resources import MediaResourceCoordinator
 from nika_core.media.transcription import (
     ChunkPlanPolicy,
     ChunkState,
     OfflineTranscriberPort,
+    TranscriptionChunk,
     TranscriptionRequest,
     merge_completed_chunks,
     plan_chunks,
@@ -106,14 +108,15 @@ class TranscriptionCoordinator:
             self._chunks.put(running)
             chunk_path = chunk_dir / f"chunk-{durable.ordinal:06d}.wav"
             try:
-                promoted = self._extractor.extract(
-                    source_path=source,
-                    destination_path=chunk_path,
-                    allowed_root=root,
-                    start_ms=durable.start_ms,
-                    end_ms=durable.end_ms,
+                audio_sha256 = self._prepare_chunk_audio(
+                    durable=running,
+                    source=source,
+                    chunk_path=chunk_path,
+                    root=root,
                     cancel_event=cancel_event,
                 )
+                running = running.model_copy(update={"audio_sha256": audio_sha256})
+                self._chunks.put(running)
                 inspection = inspect_pcm16_wav(chunk_path)
                 segments = ()
                 if inspection.is_silent(peak_threshold=silence_peak_threshold):
@@ -138,10 +141,9 @@ class TranscriptionCoordinator:
                     finally:
                         self._resources.release(lease)
                     segments = result.segments
-                completed = durable.model_copy(
+                completed = running.model_copy(
                     update={
                         "state": ChunkState.COMPLETED,
-                        "audio_sha256": promoted.sha256,
                         "segments": segments,
                         "error_code": None,
                         "error_message": None,
@@ -183,3 +185,33 @@ class TranscriptionCoordinator:
             completed_chunks=len(completed_chunks),
             silent_chunks=silent_chunks,
         )
+
+    def _prepare_chunk_audio(
+        self,
+        *,
+        durable: TranscriptionChunk,
+        source: Path,
+        chunk_path: Path,
+        root: Path,
+        cancel_event: threading.Event | None,
+    ) -> str:
+        if chunk_path.exists():
+            inspection = inspect_pcm16_wav(chunk_path)
+            if inspection.is_empty:
+                raise ValueError("existing transcription chunk audio is empty")
+            checksum = sha256_file(chunk_path)
+            if durable.audio_sha256 is not None and checksum != durable.audio_sha256:
+                raise MediaError(
+                    MediaErrorCode.CHECKSUM_MISMATCH,
+                    "durable transcription chunk audio checksum changed",
+                )
+            return checksum
+        promoted = self._extractor.extract(
+            source_path=source,
+            destination_path=chunk_path,
+            allowed_root=root,
+            start_ms=durable.start_ms,
+            end_ms=durable.end_ms,
+            cancel_event=cancel_event,
+        )
+        return promoted.sha256
