@@ -16,6 +16,7 @@ from nika_core.research.models import (
     IngestResult,
     ResearchWorkspace,
     SearchHit,
+    SourceKind,
     SourceSpec,
 )
 from nika_core.research.normalize import normalize_text
@@ -59,6 +60,8 @@ class ResearchRepository:
             )
 
     def upsert_source(self, source: SourceSpec) -> None:
+        if source.kind is not SourceKind.LOCAL_FILE:
+            raise ValueError("use the HTTP source repository for non-local sources")
         now = _now()
         with self._store.connection() as conn:
             conn.execute(
@@ -122,14 +125,15 @@ class ResearchRepository:
                 or row["storage_relpath"] != artifact.storage_relpath
             ):
                 raise RuntimeError("artifact identity collision")
-            conn.execute(
-                """INSERT INTO corpus_artifact_origins(
-                    artifact_id, source_id, locator, observed_at
-                ) VALUES (?, ?, ?, ?)
-                ON CONFLICT(artifact_id, source_id, locator)
-                DO UPDATE SET observed_at=excluded.observed_at""",
-                (artifact.artifact_id, source.source_id, source.locator, now),
-            )
+            if source.kind is SourceKind.LOCAL_FILE:
+                conn.execute(
+                    """INSERT INTO corpus_artifact_origins(
+                        artifact_id, source_id, locator, observed_at
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(artifact_id, source_id, locator)
+                    DO UPDATE SET observed_at=excluded.observed_at""",
+                    (artifact.artifact_id, source.source_id, source.locator, now),
+                )
         return artifact
 
     def record_extraction(
@@ -242,13 +246,14 @@ class ResearchRepository:
             else:
                 disposition = IngestDisposition.DEDUPLICATED
 
-            conn.execute(
-                """INSERT INTO corpus_origins(document_id, source_id, locator, observed_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(document_id, source_id, locator)
-                DO UPDATE SET observed_at=excluded.observed_at""",
-                (row["document_id"], source.source_id, source.locator, now),
-            )
+            if source.kind is SourceKind.LOCAL_FILE:
+                conn.execute(
+                    """INSERT INTO corpus_origins(document_id, source_id, locator, observed_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(document_id, source_id, locator)
+                    DO UPDATE SET observed_at=excluded.observed_at""",
+                    (row["document_id"], source.source_id, source.locator, now),
+                )
 
         document = CorpusDocument(
             document_id=row["document_id"],
