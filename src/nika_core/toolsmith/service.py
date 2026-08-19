@@ -14,6 +14,8 @@ from .contracts import (
     CodingWorkerPort,
     GapDisposition,
     ReuseCandidate,
+    WorkerFailure,
+    WorkerFailureKind,
 )
 from .repository import ToolsmithRepository
 
@@ -71,10 +73,10 @@ class CapabilityEscalationService:
             and candidate.permissions.issubset(gap.permission_ceiling)
         ]
         if compatible:
-            selected = sorted(
+            selected = min(
                 compatible,
                 key=lambda item: (item.source, item.version, item.digest),
-            )[0]
+            )
             version = self._repository.transition(
                 task_id=gap.task_id,
                 capability_id=gap.requested_capability,
@@ -112,7 +114,11 @@ class CapabilityEscalationService:
             evidence={"job_id": job.job_id, "isolation_class": job.lease.isolation_class.value},
         )
         prior = await self._worker.inspect(job.job_id)
-        result = await self._worker.recover(job, prior) if prior is not None else await self._worker.execute(job)
+        result = (
+            await self._worker.recover(job, prior)
+            if prior is not None
+            else await self._worker.execute(job)
+        )
         return self._finish_build(gap=gap, job=job, row_version=version, result=result)
 
     async def recover_build(
@@ -136,7 +142,8 @@ class CapabilityEscalationService:
             raise ValueError("recover_build requires durable BUILDING state")
         recovery = await self._worker.inspect(job.job_id)
         if recovery is None:
-            self._checkpoint_block(gap, "BUILDING state has no recoverable worker state")
+            message = "BUILDING state has no recoverable worker state"
+            self._checkpoint_block(gap, message)
             version = self._repository.transition(
                 task_id=gap.task_id,
                 capability_id=gap.requested_capability,
@@ -144,7 +151,14 @@ class CapabilityEscalationService:
                 target=CandidateState.BLOCKED,
                 evidence={"reason": "missing worker recovery state", "job_id": job.job_id},
             )
-            return version, CodingResult(job_id=job.job_id)
+            return version, CodingResult(
+                job_id=job.job_id,
+                failure=WorkerFailure(
+                    WorkerFailureKind.INTERNAL_ERROR,
+                    message,
+                    retryable=False,
+                ),
+            )
         result = await self._worker.recover(job, recovery)
         return self._finish_build(gap=gap, job=job, row_version=expected_version, result=result)
 
