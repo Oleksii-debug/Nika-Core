@@ -60,6 +60,21 @@ class AgentRegistry:
             raise KeyError(f"Unknown agent: {agent_id}")
         return current
 
+    def list_latest(self) -> tuple[AgentDefinition, ...]:
+        if self._store is None:
+            return tuple(self._agents[key] for key in sorted(self._agents))
+        with self._store.connection() as conn:
+            rows = conn.execute(
+                "SELECT a.agent_id, a.name, a.version, a.goal FROM agents AS a "
+                "JOIN (SELECT agent_id, MAX(version) AS version FROM agents GROUP BY agent_id) AS latest "
+                "ON latest.agent_id = a.agent_id AND latest.version = a.version "
+                "ORDER BY a.agent_id"
+            ).fetchall()
+        return tuple(
+            AgentDefinition(row["agent_id"], row["name"], int(row["version"]), row["goal"])
+            for row in rows
+        )
+
     def _latest(self, agent_id: str) -> AgentDefinition | None:
         if self._store is None:
             return self._agents.get(agent_id)
