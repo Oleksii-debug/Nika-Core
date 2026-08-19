@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -88,12 +89,13 @@ def test_sterile_git_environment_drops_credentials_and_git_overrides() -> None:
     environment = sterile_git_environment(source)
     assert environment["PATH"] == "x"
     assert environment["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert environment["GIT_CONFIG_GLOBAL"] == ("NUL" if os.name == "nt" else "/dev/null")
     assert environment["GIT_TERMINAL_PROMPT"] == "0"
     assert environment["GCM_INTERACTIVE"] == "never"
     assert "GITHUB_TOKEN" not in environment
     assert "GH_TOKEN" not in environment
     assert "GIT_ASKPASS" not in environment
-    assert "GIT_CONFIG_GLOBAL" not in environment
+    assert environment["GIT_CONFIG_GLOBAL"] != "attacker.cfg"
     assert "SSH_AUTH_SOCK" not in environment
     assert "PYTHONPATH" not in environment
 
