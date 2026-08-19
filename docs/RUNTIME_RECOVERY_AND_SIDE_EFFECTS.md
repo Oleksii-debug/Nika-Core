@@ -115,4 +115,6 @@ A hard process loss while cancellation is PENDING deliberately requires reconcil
 - accepted cancellation wins a race against a later runtime completion;
 - failure while committing local cancel finalization rolls back local state instead of exposing a partially terminal task.
 
+The existing coordinator regression also asserts that an accepted cancellation emits `runtime.cancel_accepted` before the terminal `runtime.finished` evidence, preserving the stronger audit contract in the legacy path.
+
 These tests provide automated engineering evidence only. They do not imply HUMAN_TESTED or NVDA_VERIFIED.
