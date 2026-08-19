@@ -203,7 +203,8 @@ class FoundryLocalProvider:
         evidence and may additionally pin the exact public variant ID. Download
         is never inferred from ``ModelRequest``. Foundry's documented download
         cancellation event is always used. A caller timeout signals that event
-        and retains the shared provider slot until the native worker really exits.
+        and retains the shared provider/model-management slots until the native
+        worker really exits.
         """
         if authorization.provider_id != self.capabilities.provider_id:
             raise ValueError(
@@ -258,8 +259,11 @@ class FoundryLocalProvider:
                 await asyncio.wait_for(asyncio.shield(worker), timeout=remaining)
             except TimeoutError as exc:
                 effective_cancel_event.set()
-                self._release_slot_when_worker_finishes(worker)
+                self._release_slot_when_worker_finishes(
+                    worker, release_model_management=True
+                )
                 inference_acquired = False
+                management_acquired = False
                 raise ModelGatewayError(
                     ModelErrorCode.TIMEOUT,
                     (
@@ -271,8 +275,11 @@ class FoundryLocalProvider:
                 ) from exc
             except asyncio.CancelledError:
                 effective_cancel_event.set()
-                self._release_slot_when_worker_finishes(worker)
+                self._release_slot_when_worker_finishes(
+                    worker, release_model_management=True
+                )
                 inference_acquired = False
+                management_acquired = False
                 raise
             except Exception as exc:
                 if effective_cancel_event.is_set():
@@ -287,6 +294,13 @@ class FoundryLocalProvider:
             evidence = self._model_evidence(model)
             self._validate_model_identity(model, expected_model_id)
             if not evidence.cached:
+                if effective_cancel_event.is_set():
+                    raise ModelGatewayError(
+                        ModelErrorCode.CANCELLED,
+                        f"Foundry Local model '{authorization.model}' download was cancelled",
+                        provider_id=self.capabilities.provider_id,
+                        retryable=False,
+                    )
                 raise ModelGatewayError(
                     ModelErrorCode.PROVIDER_ERROR,
                     f"Foundry Local model '{authorization.model}' download did not produce cache evidence",
@@ -351,10 +365,10 @@ class FoundryLocalProvider:
         FoundryLocalManager is a process-wide singleton. Unloading every model in
         its catalog would allow one adapter/proof to disrupt another consumer.
         Nika therefore tracks ownership only when this instance performed the
-        load. Closing while native inference/download work still owns the slot
-        fails closed instead of racing an unload against active native work.
+        load. Closing while native inference/download or model-management work
+        still owns a slot fails closed instead of racing an unload.
         """
-        if self._inference_lock.locked():
+        if self._inference_lock.locked() or self._model_management_lock.locked():
             raise RuntimeError("cannot close Foundry Local provider while native work is active")
 
         with self._owned_model_lock:
@@ -373,7 +387,12 @@ class FoundryLocalProvider:
             with self._owned_model_lock:
                 self._owned_loaded_models.pop(model_id, None)
 
-    def _release_slot_when_worker_finishes(self, worker: asyncio.Task[Any]) -> None:
+    def _release_slot_when_worker_finishes(
+        self,
+        worker: asyncio.Task[Any],
+        *,
+        release_model_management: bool = False,
+    ) -> None:
         def release(task: asyncio.Task[Any]) -> None:
             try:
                 task.exception()
@@ -381,6 +400,8 @@ class FoundryLocalProvider:
                 pass
             if self._inference_lock.locked():
                 self._inference_lock.release()
+            if release_model_management and self._model_management_lock.locked():
+                self._model_management_lock.release()
 
         worker.add_done_callback(release)
 
