@@ -41,12 +41,12 @@ def _validate_windows_component(component: str, *, label: str) -> None:
 
 
 def _normalize_workspace_relative(value: str, *, label: str) -> PurePosixPath:
-    stripped = value.strip()
-    windows_path = PureWindowsPath(stripped)
-    normalized = PurePosixPath(stripped.replace("\\", "/"))
+    if not value or not value.strip():
+        raise ValueError(f"{label} must stay inside a workspace-relative scope")
+    windows_path = PureWindowsPath(value)
+    normalized = PurePosixPath(value.replace("\\", "/"))
     if (
-        not stripped
-        or normalized == PurePosixPath(".")
+        normalized == PurePosixPath(".")
         or windows_path.drive
         or windows_path.root
         or normalized.is_absolute()
@@ -65,22 +65,24 @@ def _executable_scope(value: str) -> tuple[str, str, str]:
     stripped = value.strip()
     if not stripped:
         raise ValueError("process executable must not be empty")
+    if stripped != value:
+        raise ValueError("process executable must not contain surrounding whitespace")
 
-    windows_path = PureWindowsPath(stripped)
-    posix_path = PurePosixPath(stripped)
+    windows_path = PureWindowsPath(value)
+    posix_path = PurePosixPath(value)
     path_scoped = bool(
         windows_path.drive
         or windows_path.root
         or posix_path.is_absolute()
-        or "/" in stripped
-        or "\\" in stripped
+        or "/" in value
+        or "\\" in value
     )
     if not path_scoped:
-        _validate_windows_component(stripped, label="process executable")
-        normalized_name = stripped.casefold()
+        _validate_windows_component(value, label="process executable")
+        normalized_name = value.casefold()
         return ("name", normalized_name, normalized_name)
 
-    if windows_path.drive or "\\" in stripped or stripped.startswith("//"):
+    if windows_path.drive or "\\" in value or value.startswith("//"):
         if not windows_path.is_absolute():
             raise ValueError("Windows executable path scope must be absolute")
         for component in windows_path.parts[1:]:
