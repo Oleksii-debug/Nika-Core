@@ -92,7 +92,9 @@ class FFprobeAdapter:
         duration = _optional_nonnegative_float(format_info.get("duration"), "duration")
         bit_rate = _optional_nonnegative_int(format_info.get("bit_rate"), "bit_rate")
         format_name = format_info.get("format_name")
-        normalized_streams = tuple(_normalize_stream(item) for item in streams if isinstance(item, dict))
+        normalized_streams = tuple(
+            _normalize_stream(item) for item in streams if isinstance(item, dict)
+        )
         return Probe(
             asset_id=asset_id,
             container=str(format_name) if format_name is not None else None,
@@ -106,9 +108,15 @@ class FFprobeAdapter:
 def _classify_ffmpeg_license(buildconf: str) -> str:
     normalized = buildconf.lower()
     if "--enable-nonfree" in normalized:
-        return "FFmpeg-NONFREE-BUILD-REVIEW-REQUIRED"
-    if "--enable-gpl" in normalized or "--enable-version3" in normalized:
+        return "NONFREE-UNREDISTRIBUTABLE-REVIEW-REQUIRED"
+    gpl = "--enable-gpl" in normalized
+    version3 = "--enable-version3" in normalized
+    if gpl and version3:
+        return "GPL-3.0-or-later/build-dependent"
+    if gpl:
         return "GPL-2.0-or-later/build-dependent"
+    if version3:
+        return "LGPL-3.0-or-later/build-dependent"
     return "LGPL-2.1-or-later/build-dependent"
 
 
