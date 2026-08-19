@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.kernel.action_registry import ActionDefinition, Keymap
+from nika_core.kernel.action_registry import ActionDefinition, ActionRegistry, Keymap
 from nika_core.kernel.agent_registry import AgentRegistry
 from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.default_actions import build_default_action_registry
@@ -24,13 +24,14 @@ def _focus(focus_id: str, message: str) -> UIResult:
     )
 
 
-def _register_r4_actions(actions) -> None:
+def _register_r4_actions(actions: ActionRegistry) -> None:
     actions.register(
         ActionDefinition(
             action_id="approval.approve",
             label="Підтвердити небезпечну дію",
             category="approval",
             default_binding=None,
+            scope="explicit",
             may_be_unbound=True,
         )
     )
@@ -40,6 +41,7 @@ def _register_r4_actions(actions) -> None:
             label="Відхилити небезпечну дію",
             category="approval",
             default_binding=None,
+            scope="explicit",
             may_be_unbound=True,
         )
     )
