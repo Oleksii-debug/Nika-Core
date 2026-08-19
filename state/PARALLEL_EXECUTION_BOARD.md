@@ -1,22 +1,37 @@
 # PARALLEL EXECUTION BOARD — Nika Core
 
-Updated: 2026-08-18
-Mode: PARALLEL-FIRST
+Updated: 2026-08-19
+Mode: M12 PRE-HUMAN RELEASE FREEZE
 Canonical progress evidence: merged PR + exact green CI + milestone acceptance evidence.
 
-## Operating rule
-Nika Core development is not roadmap-sequential. Every autonomous cycle scans the full roadmap and advances independent large lanes when they can be isolated safely. Dependencies constrain integration order, not research, contract design, implementation behind stable ports, fixtures, mocks, tests, documentation or proof prototypes.
-
-A lane may be marked only with these evidence states:
+## Evidence states
 - PREPARED — scope/contracts/reuse decision ready.
-- IMPLEMENTED — source/tests exist on a branch.
+- IMPLEMENTED — production-intended source/tests exist on a branch.
 - GREEN — exact branch/PR head passed required automated checks.
-- INTEGRATED — exact green candidate merged into main.
+- INTEGRATED — exact green candidate merged into `main`.
 - PACKAGED — installable Windows artifact built and checked.
-- HUMAN_TESTED — a person completed the specified manual test.
+- HUMAN_TESTED — a person completed the specified manual protocol.
 - NVDA_VERIFIED — human NVDA test passed; automation may never award this state.
 
-## Active parallel lanes
+## Current product truth
+Overall acceptance-gate proven progress: **98.0%**.
+
+M0–M11 are GREEN / INTEGRATED. M11 additionally has automated PACKAGED candidate evidence. M12 automated pre-human QA is GREEN / INTEGRATED, but the final human Windows/NVDA gate is still open.
+
+Human truth:
+- HUMAN_TESTED: false.
+- NVDA_VERIFIED: false.
+- PRODUCTION_RELEASE_READY: false.
+
+Exact M12 human-bound candidate:
+- candidate head: `d7bdfd697819adf13ad7423726a004fd781d857d`;
+- Core CI 200: SUCCESS;
+- M12 Pre-Human Release Gate run 1: SUCCESS;
+- artifact: `NikaCore-0.0.2-m12-prehuman-d7bdfd697819adf13ad7423726a004fd781d857d`;
+- artifact id: `9340947647`;
+- digest: `sha256:ee0ec0b7506c6bc84b8052f1c1cdb80a33a6f0dea8eb6b221cee1860dc96d4c5`.
+
+## Integrated lanes
 
 ### L1 — M3 durable memory, scheduler, resource control
 Current state: IMPLEMENTED / GREEN / INTEGRATED.
@@ -29,64 +44,67 @@ Exact green head: `14368c60fa8c8351e6a8776263d3d90b3e5dfb0e`; Core CI 112; PR #1
 ### L3 — M5 accessible Windows UI
 Current state: IMPLEMENTED / GREEN / INTEGRATED.
 Exact green head: `9b536af11aaa30e72c5d3562e8b2beede7e5b5b2`; Core CI 137; PR #13 merged as `6b9c023d62b30500bec50a1d9484a78cfb6aafbd`.
-Human truth: M5 diagnostic package is not release PACKAGED; HUMAN_TESTED=false; NVDA_VERIFIED=false.
+Automated packaged WebView2/UIA evidence exists, but HUMAN_TESTED=false and NVDA_VERIFIED=false.
 
 ### L4 — M6 Agent Builder and permissions
 Current state: IMPLEMENTED / GREEN / INTEGRATED.
 Exact green head: `b2f5939dae432f2bb0b819b3c70adf8c9d0dafe4`; Core CI 142; PR #15 merged as `088da78b45be390fe0aab0c6d1c84c5a8f5d9d53`.
-Safety truth: configuration activation approval never substitutes for execution-time high-impact tool approval.
 
 ### L5 — M7 multi-agent laboratory
-Ownership: `src/nika_core/multi_agent`, team persistence, supervisor/child contracts, typed handoffs and quota tests.
-Goal: durable delegation, bounded parallel children, depth/concurrency quotas, privilege attenuation and parent/child evidence.
-Integration dependency: M2 and M6 integrated — satisfied.
-Branch: `dev/m7-multi-agent-lab`.
 Current state: IMPLEMENTED / GREEN / INTEGRATED.
-Exact green head: `4feb976faa97949bacc321bcbce792d01359a58c`.
-Acceptance evidence: Core CI run 150 passed shared dependency consistency, Ruff, compile and complete pytest verification on Ubuntu and Windows; PR #17 merged as `5a01692c1372375f040cd38558e33204b082d5a5`.
-Integrated evidence: SQLite v6 durable team/member/handoff/result tables; stable parent-child identity; typed task/result/status/error handoffs; persisted depth/children/total/concurrency quotas; fail-closed privilege attenuation using M6 ToolGrant; bounded parallel fan-out behind AgentRuntimePort; worker-failure containment; cancellation propagation; restart-safe thread/resume evidence; deterministic evaluator aggregation.
+Exact green head: `4feb976faa97949bacc321bcbce792d01359a58c`; Core CI 150; PR #17 merged as `5a01692c1372375f040cd38558e33204b082d5a5`.
 
 ### L6 — M8 controlled learning and experiments
-Ownership: `src/nika_core/experiments`, strategy/eval/replay models and migrations/tests.
-Goal: experiment/run/metric/dataset evidence, replay evaluation, champion/challenger promotion and rollback without silent production-source rewriting.
-Integration dependency: current runtime/model/memory/scheduler/resource contracts are integrated and sufficient to implement the deterministic core.
-Current state: PREPARED / NEXT WEIGHTED MILESTONE.
-Next batch: create versioned immutable experiment/strategy definitions, run and metric persistence, dataset/replay references, deterministic evaluation/comparison, explicit promotion and rollback gates, restart-safe evidence and tests. Learning remains simulation/evaluation only and may never silently rewrite production source or widen permissions.
+Current state: IMPLEMENTED / GREEN / INTEGRATED.
+Exact green head: `d8f14ac097f2eb664b7f893543db359fb6245e6c`; Core CI 159; PR #19 merged as `a8fd7b6c094489cebb79a4221e4124b5cfbad8f6`.
+Safety truth: no production-source mutation path and no silent permission widening.
 
-### L7 — M9 plugin/workspace SDK and real workspaces
-Ownership: `src/nika_core/plugins`, `src/nika_core/workspaces`, SDK manifests/contracts and compatibility tests.
-Goal: versioned plugin/workspace lifecycle and capability declarations; first proof workspaces are Software Factory and Accessibility Rescue.
-Current state: PREPARED FOR IMPLEMENTATION.
+### L7 — M9 Plugin SDK and real workspaces
+Current state: IMPLEMENTED / GREEN / INTEGRATED.
+Foundation exact green head: `ef4bafc02d4517b3718f07e5f61b7e4e22072c25`; Core CI 188; PR #21 merged as `e8967b97ec9772cb2af0b3b781468553708d4015`.
+Semantic-adapter exact green head: `680a8a15dfb5a30a7c6eaba3860817c1cbda7ac5`; Core CI 193 Ubuntu+Windows plus live Playwright ARIA and Windows UIA proofs; PR #24 merged as `e6af748fb655fda2719be93258b6c2a427287994`.
+Integrated evidence: versioned plugin/workspace compatibility and risk declarations, lazy explicit activation, Software Factory behind `CodingWorkerPort`, semantic-first Accessibility Repair/Assistant, optional Playwright and Windows UIA adapters.
 
 ### L8 — M10 security/sandbox/reliability
-Ownership: `src/nika_core/security`, sandbox/risk/approval policy, public-repository hygiene and security tests.
-Goal: enforce R0–R4 policy, least privilege, sandbox boundaries, audit evidence, secret hygiene, failure containment.
-Current state: PREPARED FOR IMPLEMENTATION.
+Current state: IMPLEMENTED / GREEN / INTEGRATED.
+Exact green head: `17826cc041caeaa1fe03f8dbe4ce5e50c7aecad5`; Core CI 167 Ubuntu+Windows; PR #22 merged as `976cb9914966a67763742a28c229730417ee63c8`.
+Integrated evidence: traversal-safe workspace boundaries, exact network/process allowlists, bounded execution budgets, exact-action fingerprints, expiring single-use approvals and fail-closed authorization order.
 
 ### L9 — M11 Windows packaging/distribution
-Ownership: `packaging/`, build workflow/specs, release metadata and smoke-test harness.
-Goal: reproducible standalone Windows candidate without bundling heavy optional models/workers.
-Current state: PREPARED FOR IMPLEMENTATION. M5 produced a diagnostic one-dir package only for accessibility acceptance; it is not M11 release credit.
+Current state: IMPLEMENTED / GREEN / INTEGRATED / PACKAGED candidate evidence.
+Exact green head: `0f48c3c4889478f967e383d385576e9322e55c9b`; Core CI 196; M11 Windows Release Candidate run 3; PR #23 merged as `5d86d83f6ce99fa4c9bd6a0eaadef1a6b404283c`.
+Artifact: `NikaCore-0.0.2-windows-x64`, id `9340673484`, digest `sha256:4611ba73baab2ecd37ce07d5596853edd6f4d6fa7559ff58d660d5f5aee5b12e`.
 
 ### L10 — M12 full-system QA/accessibility/release gate
-Ownership: `qa/`, cross-lane integration fixtures, Windows/NVDA manual protocol, recovery/security regression matrix.
-Goal: keep final QA executable continuously instead of postponing all testing until the end.
-Current state: PREPARED FOR IMPLEMENTATION.
+Current state: AUTOMATED PRE-HUMAN GATE GREEN / INTEGRATED; HUMAN GATE OPEN.
+Exact automated green head: `d7bdfd697819adf13ad7423726a004fd781d857d`; Core CI 200; M12 Pre-Human Release Gate run 1; PR #26 merged as `a278767de4435535cc54e5674ddc72d37051ba03`.
+Exact pre-human artifact is recorded above.
+
+## Release-freeze operating rule
+Normal feature expansion is paused while human acceptance is bound to the exact M12 artifact. Automation must not mutate production source merely to keep hourly workers busy.
+
+Safe autonomous work during the freeze is limited to:
+1. artifact/evidence integrity checks;
+2. canonical status/evidence consistency;
+3. closing stale/superseded coordination artifacts;
+4. protocol clarification;
+5. investigation of concrete human-reported defects;
+6. preparing one coherent repair candidate only after a real defect is demonstrated.
+
+Do **not** create status-only PR chains whose sole purpose is to record that the previous status-only PR merged. One coherent reconciliation PR is sufficient; if no new evidence or defect exists, record no new PR.
 
 ## Collision policy
-1. Every lane branches from the latest green `main` unless it genuinely depends on another unmerged lane.
+1. Source-development lanes branch from latest green `main` unless a real dependency requires otherwise.
 2. Do not stack unrelated branches.
-3. Prefer new lane-owned modules and stable ports over edits to shared files.
-4. Shared contract changes require an explicit compatibility decision and targeted cross-lane tests.
-5. A blocked lane never blocks independent lanes.
-6. Merge/integration remains dependency ordered even when implementation is parallel.
+3. Shared contracts require explicit compatibility decisions and targeted tests.
+4. A blocked lane does not justify weakening another lane's gate.
+5. Release-freeze rules override normal feature-parallelism while the exact human candidate is pending.
 
 ## CI policy
-- Standard public GitHub-hosted runners may be used for coherent PR/main gates.
-- Prefer parallel independent jobs and Windows/Linux proof where it adds evidence.
-- Never weaken checks to make a lane green.
-- Avoid repeated reruns of an identical deterministic failure; inspect and repair first.
-- Do not claim product-weight progress for PREPARED/IMPLEMENTED work.
+- Coherent PR/main gates use the shared verification harness on Ubuntu and Windows where applicable.
+- Focused Windows/WebView2/package/security jobs run only when they add material evidence.
+- Never weaken checks to obtain green.
+- Avoid rerunning expensive identical gates without new code/evidence.
 
 ## Reporting policy
-Every development report should show confirmed A–Z product progress, lane state changes, blockers, integrated evidence and what still lacks Windows, human or NVDA proof.
+Every meaningful development report records exact starting `main` SHA, lane/branch, changes, REUSE/ADAPT/CUSTOM decision, tests, exact green head, PR/merge, proven A–Z progress, blockers, unverified work and HUMAN_TESTED/NVDA_VERIFIED truth.
