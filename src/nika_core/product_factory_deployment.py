@@ -1,0 +1,503 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from enum import StrEnum
+from typing import Protocol
+
+
+class DeploymentFabricError(ValueError):
+    """Raised when PF3 execution/deployment invariants are violated."""
+
+
+class Platform(StrEnum):
+    WINDOWS = "windows"
+    LINUX = "linux"
+    MACOS = "macos"
+
+
+class EnvironmentTier(StrEnum):
+    DEVELOPMENT = "development"
+    STAGING = "staging"
+    PRODUCTION = "production"
+
+
+class DeploymentState(StrEnum):
+    HEALTH_CHECK = "health_check"
+    HEALTHY = "healthy"
+    REJECTED = "rejected"
+    ROLLED_BACK = "rolled_back"
+    UNCERTAIN = "uncertain"
+
+
+@dataclass(frozen=True, slots=True)
+class NodeIdentity:
+    node_id: str
+    platform: Platform
+    architecture: str
+    instance_id: str
+
+    def __post_init__(self) -> None:
+        if not all(value.strip() for value in (self.node_id, self.architecture, self.instance_id)):
+            raise DeploymentFabricError("node identity fields must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
+class NodeCapabilities:
+    features: frozenset[str] = frozenset()
+    toolchains: frozenset[str] = frozenset()
+    gpu: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceEnvelope:
+    cpu_cores: int
+    memory_mb: int
+    disk_mb: int
+
+    def __post_init__(self) -> None:
+        if min(self.cpu_cores, self.memory_mb, self.disk_mb) <= 0:
+            raise DeploymentFabricError("resource envelope values must be positive")
+
+    def fits(self, requested: ResourceEnvelope) -> bool:
+        return (
+            self.cpu_cores >= requested.cpu_cores
+            and self.memory_mb >= requested.memory_mb
+            and self.disk_mb >= requested.disk_mb
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionNode:
+    identity: NodeIdentity
+    capabilities: NodeCapabilities
+    resources: ResourceEnvelope
+    enabled: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionRequest:
+    project_id: str
+    work_id: str
+    platform: Platform
+    required_features: frozenset[str]
+    required_toolchains: frozenset[str]
+    resources: ResourceEnvelope
+    require_gpu: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.project_id.strip() or not self.work_id.strip():
+            raise DeploymentFabricError("execution request identity must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
+class WorkLease:
+    lease_id: str
+    project_id: str
+    work_id: str
+    node_id: str
+    issued_at: datetime
+    expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedBuildEvidence:
+    work_id: str
+    node_id: str
+    release_sha: str
+    artifact_digest: str
+    succeeded: bool
+    evidence_refs: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _validate_sha(self.release_sha)
+        _validate_digest(self.artifact_digest)
+        if not self.work_id.strip() or not self.node_id.strip() or not self.evidence_refs:
+            raise DeploymentFabricError("build evidence identity/refs must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionRegistrySnapshot:
+    nodes: tuple[ExecutionNode, ...]
+    leases: tuple[WorkLease, ...]
+    next_lease: int
+
+
+@dataclass(slots=True)
+class ExecutionNodeRegistry:
+    _nodes: dict[str, ExecutionNode] = field(default_factory=dict, init=False, repr=False)
+    _leases: dict[str, WorkLease] = field(default_factory=dict, init=False, repr=False)
+    _next_lease: int = field(default=1, init=False, repr=False)
+
+    def register(self, node: ExecutionNode) -> None:
+        existing = self._nodes.get(node.identity.node_id)
+        if existing is not None and existing.identity != node.identity:
+            raise DeploymentFabricError("node id already belongs to another node identity")
+        self._nodes[node.identity.node_id] = node
+
+    def acquire(
+        self,
+        request: ExecutionRequest,
+        *,
+        now: datetime | None = None,
+        lease_seconds: int = 300,
+    ) -> WorkLease:
+        if lease_seconds <= 0:
+            raise DeploymentFabricError("lease_seconds must be positive")
+        instant = _aware(now or datetime.now(UTC))
+        self._expire(instant)
+        leased_nodes = {lease.node_id for lease in self._leases.values()}
+        candidates = sorted(self._nodes.values(), key=lambda node: node.identity.node_id)
+        for node in candidates:
+            if node.identity.node_id in leased_nodes or not self._matches(node, request):
+                continue
+            lease = WorkLease(
+                f"lease-{self._next_lease:08d}",
+                request.project_id,
+                request.work_id,
+                node.identity.node_id,
+                instant,
+                instant + timedelta(seconds=lease_seconds),
+            )
+            self._next_lease += 1
+            self._leases[lease.lease_id] = lease
+            return lease
+        raise DeploymentFabricError(
+            f"no available execution node satisfies platform {request.platform.value} and scope"
+        )
+
+    def release(self, lease_id: str) -> None:
+        if self._leases.pop(lease_id, None) is None:
+            raise DeploymentFabricError("unknown work lease")
+
+    def snapshot(self) -> ExecutionRegistrySnapshot:
+        return ExecutionRegistrySnapshot(
+            tuple(self._nodes[key] for key in sorted(self._nodes)),
+            tuple(self._leases[key] for key in sorted(self._leases)),
+            self._next_lease,
+        )
+
+    def restore(self, snapshot: ExecutionRegistrySnapshot) -> None:
+        node_ids = [node.identity.node_id for node in snapshot.nodes]
+        lease_ids = [lease.lease_id for lease in snapshot.leases]
+        if len(node_ids) != len(set(node_ids)) or len(lease_ids) != len(set(lease_ids)):
+            raise DeploymentFabricError("snapshot contains duplicate identities")
+        if any(lease.node_id not in set(node_ids) for lease in snapshot.leases):
+            raise DeploymentFabricError("snapshot lease references unknown node")
+        if snapshot.next_lease < 1:
+            raise DeploymentFabricError("snapshot next lease counter is invalid")
+        self._nodes = {node.identity.node_id: node for node in snapshot.nodes}
+        self._leases = {lease.lease_id: lease for lease in snapshot.leases}
+        self._next_lease = snapshot.next_lease
+
+    @staticmethod
+    def _matches(node: ExecutionNode, request: ExecutionRequest) -> bool:
+        return (
+            node.enabled
+            and node.identity.platform is request.platform
+            and node.resources.fits(request.resources)
+            and request.required_features <= node.capabilities.features
+            and request.required_toolchains <= node.capabilities.toolchains
+            and (not request.require_gpu or node.capabilities.gpu)
+        )
+
+    def _expire(self, now: datetime) -> None:
+        for key in [key for key, lease in self._leases.items() if lease.expires_at <= now]:
+            del self._leases[key]
+
+
+@dataclass(frozen=True, slots=True)
+class EnvironmentIdentity:
+    environment_id: str
+    project_id: str
+    tier: EnvironmentTier
+    provider_ref: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseRef:
+    project_id: str
+    version: str
+    source_sha: str
+    artifact_digest: str
+
+    def __post_init__(self) -> None:
+        if not self.project_id.strip() or not self.version.strip():
+            raise DeploymentFabricError("release identity must not be empty")
+        _validate_sha(self.source_sha)
+        _validate_digest(self.artifact_digest)
+
+
+@dataclass(frozen=True, slots=True)
+class DeploymentIntent:
+    intent_id: str
+    project_id: str
+    environment: EnvironmentIdentity
+    release: ReleaseRef
+    migration_refs: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.intent_id.strip() or not self.project_id.strip():
+            raise DeploymentFabricError("deployment intent identity must not be empty")
+        if (
+            self.project_id != self.environment.project_id
+            or self.project_id != self.release.project_id
+        ):
+            raise DeploymentFabricError("deployment intent project identity mismatch")
+
+
+@dataclass(frozen=True, slots=True)
+class HealthEvidence:
+    environment_id: str
+    release_sha: str
+    healthy: bool
+    evidence_refs: tuple[str, ...]
+    checked_at: datetime
+
+    def __post_init__(self) -> None:
+        _validate_sha(self.release_sha)
+        _aware(self.checked_at)
+        if not self.environment_id.strip() or not self.evidence_refs:
+            raise DeploymentFabricError("health evidence identity/refs must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
+class RollbackEvidence:
+    environment_id: str
+    failed_release_sha: str
+    restored_release_sha: str | None
+    succeeded: bool
+    evidence_refs: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _validate_sha(self.failed_release_sha)
+        if self.restored_release_sha is not None:
+            _validate_sha(self.restored_release_sha)
+        if not self.environment_id.strip() or not self.evidence_refs:
+            raise DeploymentFabricError("rollback evidence identity/refs must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderDeploymentResult:
+    applied: bool
+    uncertain: bool
+    evidence_refs: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderInspection:
+    release_sha: str | None
+    healthy: bool | None
+    evidence_refs: tuple[str, ...]
+
+
+class DeploymentProviderPort(Protocol):
+    def deploy(self, intent: DeploymentIntent) -> ProviderDeploymentResult: ...
+
+    def health(self, intent: DeploymentIntent) -> HealthEvidence: ...
+
+    def rollback(
+        self, intent: DeploymentIntent, previous_release_sha: str | None
+    ) -> RollbackEvidence: ...
+
+    def inspect(self, intent: DeploymentIntent) -> ProviderInspection: ...
+
+
+@dataclass(frozen=True, slots=True)
+class DeploymentRecord:
+    intent: DeploymentIntent
+    state: DeploymentState
+    provider_evidence_refs: tuple[str, ...] = ()
+    health: HealthEvidence | None = None
+    rollback: RollbackEvidence | None = None
+    previous_release_sha: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DeploymentFabricSnapshot:
+    records: tuple[DeploymentRecord, ...]
+    healthy_staging: tuple[tuple[str, str], ...]
+    current_releases: tuple[tuple[str, str], ...]
+
+
+@dataclass(slots=True)
+class DeploymentFabric:
+    provider: DeploymentProviderPort
+    _records: dict[str, DeploymentRecord] = field(default_factory=dict, init=False, repr=False)
+    _healthy_staging: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _current_releases: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+
+    def deploy(self, intent: DeploymentIntent) -> DeploymentRecord:
+        existing = self._records.get(intent.intent_id)
+        if existing is not None:
+            if existing.intent != intent:
+                raise DeploymentFabricError("deployment intent id conflicts with prior payload")
+            return existing
+        self._enforce_staging_first(intent)
+        previous = self._current_releases.get(intent.environment.environment_id)
+        result = self.provider.deploy(intent)
+        if not result.evidence_refs:
+            raise DeploymentFabricError("provider deploy result requires evidence refs")
+        if result.uncertain:
+            return self._save(
+                DeploymentRecord(
+                    intent,
+                    DeploymentState.UNCERTAIN,
+                    result.evidence_refs,
+                    previous_release_sha=previous,
+                )
+            )
+        if not result.applied:
+            return self._save(
+                DeploymentRecord(
+                    intent,
+                    DeploymentState.REJECTED,
+                    result.evidence_refs,
+                    previous_release_sha=previous,
+                )
+            )
+        record = DeploymentRecord(
+            intent,
+            DeploymentState.HEALTH_CHECK,
+            result.evidence_refs,
+            previous_release_sha=previous,
+        )
+        return self._finish_health(record, self.provider.health(intent))
+
+    def reconcile(self, intent_id: str) -> DeploymentRecord:
+        record = self._record(intent_id)
+        if record.state is not DeploymentState.UNCERTAIN:
+            return record
+        inspection = self.provider.inspect(record.intent)
+        if not inspection.evidence_refs:
+            raise DeploymentFabricError("provider inspection requires evidence refs")
+        if inspection.release_sha is None:
+            return self._save(
+                DeploymentRecord(
+                    record.intent,
+                    DeploymentState.REJECTED,
+                    record.provider_evidence_refs + inspection.evidence_refs,
+                    previous_release_sha=record.previous_release_sha,
+                )
+            )
+        if inspection.release_sha != record.intent.release.source_sha:
+            raise DeploymentFabricError(
+                "provider reports a different release for uncertain deployment"
+            )
+        if inspection.healthy is None:
+            return record
+        health = HealthEvidence(
+            record.intent.environment.environment_id,
+            record.intent.release.source_sha,
+            inspection.healthy,
+            inspection.evidence_refs,
+            datetime.now(UTC),
+        )
+        return self._finish_health(record, health)
+
+    def snapshot(self) -> DeploymentFabricSnapshot:
+        return DeploymentFabricSnapshot(
+            tuple(self._records[key] for key in sorted(self._records)),
+            tuple(sorted(self._healthy_staging.items())),
+            tuple(sorted(self._current_releases.items())),
+        )
+
+    def restore(self, snapshot: DeploymentFabricSnapshot) -> None:
+        ids = [record.intent.intent_id for record in snapshot.records]
+        if len(ids) != len(set(ids)):
+            raise DeploymentFabricError("deployment snapshot contains duplicate intents")
+        self._records = {record.intent.intent_id: record for record in snapshot.records}
+        self._healthy_staging = dict(snapshot.healthy_staging)
+        self._current_releases = dict(snapshot.current_releases)
+
+    def _finish_health(
+        self, record: DeploymentRecord, health: HealthEvidence
+    ) -> DeploymentRecord:
+        intent = record.intent
+        if health.environment_id != intent.environment.environment_id:
+            raise DeploymentFabricError("health evidence environment mismatch")
+        if health.release_sha != intent.release.source_sha:
+            raise DeploymentFabricError("health evidence release mismatch")
+        if health.healthy:
+            updated = DeploymentRecord(
+                intent,
+                DeploymentState.HEALTHY,
+                record.provider_evidence_refs,
+                health=health,
+                previous_release_sha=record.previous_release_sha,
+            )
+            environment_id = intent.environment.environment_id
+            self._current_releases[environment_id] = intent.release.source_sha
+            if intent.environment.tier is EnvironmentTier.STAGING:
+                self._healthy_staging[intent.project_id] = intent.release.source_sha
+            return self._save(updated)
+        rollback = self.provider.rollback(intent, record.previous_release_sha)
+        if rollback.environment_id != intent.environment.environment_id:
+            raise DeploymentFabricError("rollback evidence environment mismatch")
+        if rollback.failed_release_sha != intent.release.source_sha:
+            raise DeploymentFabricError("rollback evidence failed release mismatch")
+        return self._save(
+            DeploymentRecord(
+                intent,
+                DeploymentState.ROLLED_BACK if rollback.succeeded else DeploymentState.REJECTED,
+                record.provider_evidence_refs,
+                health=health,
+                rollback=rollback,
+                previous_release_sha=record.previous_release_sha,
+            )
+        )
+
+    def _enforce_staging_first(self, intent: DeploymentIntent) -> None:
+        if (
+            intent.environment.tier is EnvironmentTier.PRODUCTION
+            and self._healthy_staging.get(intent.project_id) != intent.release.source_sha
+        ):
+            raise DeploymentFabricError(
+                "production deploy requires healthy staging proof for exact release"
+            )
+
+    def _record(self, intent_id: str) -> DeploymentRecord:
+        try:
+            return self._records[intent_id]
+        except KeyError as exc:
+            raise DeploymentFabricError("unknown deployment intent") from exc
+
+    def _save(self, record: DeploymentRecord) -> DeploymentRecord:
+        self._records[record.intent.intent_id] = record
+        return record
+
+
+def local_windows_node() -> ExecutionNode:
+    return ExecutionNode(
+        NodeIdentity("local-windows", Platform.WINDOWS, "x86_64", "local-windows-1"),
+        NodeCapabilities(
+            frozenset({"local", "package"}), frozenset({"python", "powershell"})
+        ),
+        ResourceEnvelope(2, 2048, 4096),
+    )
+
+
+def local_linux_node() -> ExecutionNode:
+    return ExecutionNode(
+        NodeIdentity("local-linux", Platform.LINUX, "x86_64", "local-linux-1"),
+        NodeCapabilities(
+            frozenset({"local", "container"}), frozenset({"python", "bash"})
+        ),
+        ResourceEnvelope(2, 2048, 4096),
+    )
+
+
+def _aware(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise DeploymentFabricError("timestamp must be timezone-aware")
+    return value.astimezone(UTC)
+
+
+def _validate_sha(value: str) -> None:
+    if len(value) != 40 or any(character not in "0123456789abcdef" for character in value):
+        raise DeploymentFabricError("release SHA must be a lowercase 40-character hex SHA")
+
+
+def _validate_digest(value: str) -> None:
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise DeploymentFabricError("artifact digest must be a lowercase 64-character hex digest")
