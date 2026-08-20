@@ -1,15 +1,18 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from enum import StrEnum
 import hashlib
 import json
 import re
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any
 
 
-_SECRET_KEY = re.compile(r"(?:password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|oauth)", re.I)
+_SECRET_KEY = re.compile(
+    r"(?:password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|oauth)",
+    re.IGNORECASE,
+)
 
 
 class ProductProjectError(ValueError):
@@ -38,7 +41,10 @@ def _reject_secret_material(value: Any, path: str = "project") -> None:
     if isinstance(value, dict):
         for key, child in value.items():
             if _SECRET_KEY.search(str(key)):
-                raise ProductProjectError(f"raw credential material is forbidden at {path}.{key}; store an opaque credential_ref")
+                raise ProductProjectError(
+                    f"raw credential material is forbidden at {path}.{key}; "
+                    "store an opaque credential_ref"
+                )
             _reject_secret_material(child, f"{path}.{key}")
     elif isinstance(value, (list, tuple)):
         for index, child in enumerate(value):
@@ -98,7 +104,9 @@ class ProductRequirement:
 
     def __post_init__(self) -> None:
         if not self.requirement_id.strip() or not self.text.strip() or not self.acceptance:
-            raise ProductProjectError("product requirement requires identity, text and acceptance criteria")
+            raise ProductProjectError(
+                "product requirement requires identity, text and acceptance criteria"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,22 +181,51 @@ class ProductProjectRepository:
     def __init__(self, store: Any) -> None:
         self.store = store
 
-    def create(self, *, project_id: str, name: str, spec: ProductProjectSpec, idempotency_key: str) -> ProductProject:
+    def create(
+        self,
+        *,
+        project_id: str,
+        name: str,
+        spec: ProductProjectSpec,
+        idempotency_key: str,
+    ) -> ProductProject:
         if not project_id.strip() or not name.strip() or not idempotency_key.strip():
             raise ProductProjectError("project_id, name and idempotency_key are required")
-        fingerprint = hashlib.sha256(_canonical({"project_id": project_id, "name": name, "spec": spec.to_dict()}).encode()).hexdigest()
+        fingerprint = hashlib.sha256(
+            _canonical({"project_id": project_id, "name": name, "spec": spec.to_dict()}).encode()
+        ).hexdigest()
         now = _now()
         with self.store.connection() as conn:
-            existing = conn.execute("SELECT project_id, input_fingerprint FROM product_project_idempotency WHERE operation_key = ?", (idempotency_key,)).fetchone()
+            existing = conn.execute(
+                "SELECT project_id, input_fingerprint FROM product_project_idempotency "
+                "WHERE operation_key = ?",
+                (idempotency_key,),
+            ).fetchone()
             if existing is not None:
                 if existing["input_fingerprint"] != fingerprint:
-                    raise ProductProjectError("idempotency key was already used with different input")
+                    raise ProductProjectError(
+                        "idempotency key was already used with different input"
+                    )
                 return self._get_conn(conn, existing["project_id"])
-            if conn.execute("SELECT 1 FROM product_projects WHERE project_id = ?", (project_id,)).fetchone():
+            if conn.execute(
+                "SELECT 1 FROM product_projects WHERE project_id = ?", (project_id,)
+            ).fetchone():
                 raise ProductProjectError(f"product project already exists: {project_id}")
-            conn.execute("INSERT INTO product_projects(project_id,name,current_spec_version,row_version,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)", (project_id, name, 1, 0, "active", now, now))
-            conn.execute("INSERT INTO product_project_specs(project_id,spec_version,spec_json,created_at) VALUES (?,?,?,?)", (project_id, 1, _canonical(spec.to_dict()), now))
-            conn.execute("INSERT INTO product_project_idempotency(operation_key,project_id,input_fingerprint,created_at) VALUES (?,?,?,?)", (idempotency_key, project_id, fingerprint, now))
+            conn.execute(
+                "INSERT INTO product_projects(project_id,name,current_spec_version,row_version,"
+                "status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+                (project_id, name, 1, 0, "active", now, now),
+            )
+            conn.execute(
+                "INSERT INTO product_project_specs(project_id,spec_version,spec_json,created_at) "
+                "VALUES (?,?,?,?)",
+                (project_id, 1, _canonical(spec.to_dict()), now),
+            )
+            conn.execute(
+                "INSERT INTO product_project_idempotency(operation_key,project_id,"
+                "input_fingerprint,created_at) VALUES (?,?,?,?)",
+                (idempotency_key, project_id, fingerprint, now),
+            )
             self._audit(conn, project_id, "product_project.created", {"spec_version": 1})
             return self._get_conn(conn, project_id)
 
@@ -196,45 +233,137 @@ class ProductProjectRepository:
         with self.store.connection() as conn:
             return self._get_conn(conn, project_id)
 
-    def update_spec(self, project_id: str, spec: ProductProjectSpec, *, expected_row_version: int) -> ProductProject:
+    def update_spec(
+        self, project_id: str, spec: ProductProjectSpec, *, expected_row_version: int
+    ) -> ProductProject:
         now = _now()
         with self.store.connection() as conn:
-            row = conn.execute("SELECT current_spec_version,row_version FROM product_projects WHERE project_id = ?", (project_id,)).fetchone()
+            row = conn.execute(
+                "SELECT current_spec_version,row_version FROM product_projects WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()
             if row is None:
                 raise KeyError(project_id)
             if int(row["row_version"]) != expected_row_version:
-                raise StaleProjectVersionError(f"stale ProductProject write: expected {expected_row_version}, current {row['row_version']}")
+                raise StaleProjectVersionError(
+                    f"stale ProductProject write: expected {expected_row_version}, "
+                    f"current {row['row_version']}"
+                )
             spec_version = int(row["current_spec_version"]) + 1
-            cursor = conn.execute("UPDATE product_projects SET current_spec_version=?, row_version=row_version+1, updated_at=? WHERE project_id=? AND row_version=?", (spec_version, now, project_id, expected_row_version))
+            cursor = conn.execute(
+                "UPDATE product_projects SET current_spec_version=?, row_version=row_version+1, "
+                "updated_at=? WHERE project_id=? AND row_version=?",
+                (spec_version, now, project_id, expected_row_version),
+            )
             if cursor.rowcount != 1:
                 raise StaleProjectVersionError("concurrent ProductProject update")
-            conn.execute("INSERT INTO product_project_specs(project_id,spec_version,spec_json,created_at) VALUES (?,?,?,?)", (project_id, spec_version, _canonical(spec.to_dict()), now))
-            self._audit(conn, project_id, "product_project.spec_versioned", {"spec_version": spec_version})
+            conn.execute(
+                "INSERT INTO product_project_specs(project_id,spec_version,spec_json,created_at) "
+                "VALUES (?,?,?,?)",
+                (project_id, spec_version, _canonical(spec.to_dict()), now),
+            )
+            self._audit(
+                conn,
+                project_id,
+                "product_project.spec_versioned",
+                {"spec_version": spec_version},
+            )
             return self._get_conn(conn, project_id)
 
-    def record_research_handoff(self, project_id: str, package: ResearchEvidencePackage, options: tuple[ProductOption, ...]) -> None:
+    def record_research_handoff(
+        self,
+        project_id: str,
+        package: ResearchEvidencePackage,
+        options: tuple[ProductOption, ...],
+    ) -> None:
         option_ids = {option.option_id for option in options}
         if len(option_ids) != len(options):
             raise ProductProjectError("duplicate product option id")
         for option in options:
             if package.package_id not in option.evidence_package_ids:
-                raise ProductProjectError("product option must reference supplied evidence package")
-        payload = {"package_id": package.package_id, "research_artifact_ref": package.research_artifact_ref, "evidence": [{"evidence_id": e.evidence_id, "provenance_ref": e.provenance_ref, "claim": e.claim} for e in package.evidence], "options": [{"option_id": o.option_id, "title": o.title, "summary": o.summary, "evidence_package_ids": list(o.evidence_package_ids)} for o in options]}
+                raise ProductProjectError(
+                    "product option must reference supplied evidence package"
+                )
+        payload = {
+            "package_id": package.package_id,
+            "research_artifact_ref": package.research_artifact_ref,
+            "evidence": [
+                {
+                    "evidence_id": e.evidence_id,
+                    "provenance_ref": e.provenance_ref,
+                    "claim": e.claim,
+                }
+                for e in package.evidence
+            ],
+            "options": [
+                {
+                    "option_id": o.option_id,
+                    "title": o.title,
+                    "summary": o.summary,
+                    "evidence_package_ids": list(o.evidence_package_ids),
+                }
+                for o in options
+            ],
+        }
         with self.store.connection() as conn:
-            if not conn.execute("SELECT 1 FROM product_projects WHERE project_id=?", (project_id,)).fetchone():
+            if not conn.execute(
+                "SELECT 1 FROM product_projects WHERE project_id=?", (project_id,)
+            ).fetchone():
                 raise KeyError(project_id)
-            conn.execute("INSERT INTO product_research_handoffs(project_id,package_id,payload_json,created_at) VALUES (?,?,?,?)", (project_id, package.package_id, _canonical(payload), _now()))
-            self._audit(conn, project_id, "product_project.research_handoff", {"package_id": package.package_id, "option_ids": sorted(option_ids)})
+            conn.execute(
+                "INSERT INTO product_research_handoffs(project_id,package_id,payload_json,"
+                "created_at) VALUES (?,?,?,?)",
+                (project_id, package.package_id, _canonical(payload), _now()),
+            )
+            self._audit(
+                conn,
+                project_id,
+                "product_project.research_handoff",
+                {"package_id": package.package_id, "option_ids": sorted(option_ids)},
+            )
 
     def _get_conn(self, conn: Any, project_id: str) -> ProductProject:
-        row = conn.execute("SELECT p.*, s.spec_json FROM product_projects p JOIN product_project_specs s ON s.project_id=p.project_id AND s.spec_version=p.current_spec_version WHERE p.project_id=?", (project_id,)).fetchone()
+        row = conn.execute(
+            "SELECT p.*, s.spec_json FROM product_projects p JOIN product_project_specs s "
+            "ON s.project_id=p.project_id AND s.spec_version=p.current_spec_version "
+            "WHERE p.project_id=?",
+            (project_id,),
+        ).fetchone()
         if row is None:
             raise KeyError(project_id)
         data = json.loads(row["spec_json"])
-        requirements = tuple(ProductRequirement(r["requirement_id"], r["text"], tuple(r["acceptance"]), tuple(r.get("evidence_package_ids", ())), tuple(r.get("decision_ids", ()))) for r in data.pop("requirements", []))
-        spec = ProductProjectSpec(requirements=requirements, **{key: (tuple(value) if key.endswith("_refs") else value) for key, value in data.items()})
-        return ProductProject(row["project_id"], row["name"], int(row["current_spec_version"]), int(row["row_version"]), row["status"], spec, row["created_at"], row["updated_at"])
+        requirements = tuple(
+            ProductRequirement(
+                r["requirement_id"],
+                r["text"],
+                tuple(r["acceptance"]),
+                tuple(r.get("evidence_package_ids", ())),
+                tuple(r.get("decision_ids", ())),
+            )
+            for r in data.pop("requirements", [])
+        )
+        spec = ProductProjectSpec(
+            requirements=requirements,
+            **{
+                key: (tuple(value) if key.endswith("_refs") else value)
+                for key, value in data.items()
+            },
+        )
+        return ProductProject(
+            row["project_id"],
+            row["name"],
+            int(row["current_spec_version"]),
+            int(row["row_version"]),
+            row["status"],
+            spec,
+            row["created_at"],
+            row["updated_at"],
+        )
 
     @staticmethod
     def _audit(conn: Any, project_id: str, event_type: str, payload: dict[str, Any]) -> None:
-        conn.execute("INSERT INTO audit_events(event_type,entity_type,entity_id,payload_json,created_at) VALUES (?,?,?,?,?)", (event_type, "product_project", project_id, _canonical(payload), _now()))
+        conn.execute(
+            "INSERT INTO audit_events(event_type,entity_type,entity_id,payload_json,created_at) "
+            "VALUES (?,?,?,?,?)",
+            (event_type, "product_project", project_id, _canonical(payload), _now()),
+        )
