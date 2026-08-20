@@ -158,6 +158,11 @@ class CodingWorkerComponentAdapter:
             raise CodingWorkerAdapterError(
                 "coding result job id does not match active work request"
             )
+        for changed_file in result.changed_files:
+            if not job.allowed_paths.allows(changed_file.path):
+                raise CodingWorkerAdapterError(
+                    f"changed file is outside component allowed paths: {changed_file.path}"
+                )
         exact = await self.evidence.collect(request, job, result)
         if exact.work_id != request.work_id or exact.repository_id != request.repository_id:
             raise CodingWorkerAdapterError(

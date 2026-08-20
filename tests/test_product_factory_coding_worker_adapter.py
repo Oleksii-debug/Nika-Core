@@ -249,6 +249,26 @@ def test_stale_evidence_is_rejected_before_it_can_reach_reconciliation() -> None
         _run(adapter.dispatch(request))
 
 
+def test_changed_file_outside_component_scope_is_rejected() -> None:
+    def outside_scope(job):
+        return CodingResult(
+            job_id=job.job_id,
+            changed_files=(ChangedFile("src/other/item.py", DIGEST, 10),),
+            test_evidence=(TestEvidence(("pytest",), 0, "ok"),),
+        )
+
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    adapter = CodingWorkerComponentAdapter(
+        FakeWorker(outside_scope),
+        FakeContexts(),
+        FakeEvidence(),
+    )
+
+    with pytest.raises(CodingWorkerAdapterError, match="outside component allowed paths"):
+        _run(adapter.dispatch(request))
+
+
 def test_cancelled_result_keeps_typed_cancel_failure() -> None:
     def cancelled(job):
         return CodingResult(
