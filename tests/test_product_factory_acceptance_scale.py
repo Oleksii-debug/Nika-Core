@@ -38,9 +38,11 @@ from nika_core.product_factory_orchestration import (
 )
 from nika_core.toolsmith.contracts import (
     CodingResult,
-    TestEvidence,
     WorkerFailure,
     WorkerFailureKind,
+)
+from nika_core.toolsmith.contracts import (
+    TestEvidence as WorkerTestEvidence,
 )
 
 SHA_A = "a" * 40
@@ -117,7 +119,7 @@ def _success(request) -> WorkerResultEnvelope:
         DIGEST,
         CodingResult(
             job_id=request.work_id,
-            test_evidence=(TestEvidence(command, 0, f"proof:{request.work_id}"),),
+            test_evidence=(WorkerTestEvidence(command, 0, f"proof:{request.work_id}"),),
         ),
     )
 
