@@ -5,6 +5,7 @@ on:
     paths:
       - "src/nika_core/media/**"
       - "tests/test_media_*.py"
+      - "scripts/prove_media_engines.py"
       - "pyproject.toml"
       - ".github/workflows/dev05-media-foundation.yml"
   workflow_dispatch:
@@ -50,6 +51,7 @@ jobs:
         run: >-
           python -m compileall -q
           src/nika_core/media
+          scripts/prove_media_engines.py
           tests/test_media_adversarial.py
           tests/test_media_batch_a.py
           tests/test_media_batch_b.py
@@ -57,12 +59,16 @@ jobs:
           tests/test_media_batch_b_safety.py
           tests/test_media_batch_c.py
           tests/test_media_batch_d.py
+          tests/test_media_execution_evidence.py
+          tests/test_media_heavy_model_policy.py
           tests/test_media_persistence_privacy.py
           tests/test_media_process_files.py
+          tests/test_media_resource_evidence.py
       - name: Lint media foundation
         run: >-
           python -m ruff check
           src/nika_core/media
+          scripts/prove_media_engines.py
           tests/test_media_adversarial.py
           tests/test_media_batch_a.py
           tests/test_media_batch_b.py
@@ -70,8 +76,11 @@ jobs:
           tests/test_media_batch_b_safety.py
           tests/test_media_batch_c.py
           tests/test_media_batch_d.py
+          tests/test_media_execution_evidence.py
+          tests/test_media_heavy_model_policy.py
           tests/test_media_persistence_privacy.py
           tests/test_media_process_files.py
+          tests/test_media_resource_evidence.py
       - name: Run focused DEV05 media tests
         run: >-
           python -m pytest -q
@@ -82,5 +91,8 @@ jobs:
           tests/test_media_batch_b_safety.py
           tests/test_media_batch_c.py
           tests/test_media_batch_d.py
+          tests/test_media_execution_evidence.py
+          tests/test_media_heavy_model_policy.py
           tests/test_media_persistence_privacy.py
           tests/test_media_process_files.py
+          tests/test_media_resource_evidence.py
