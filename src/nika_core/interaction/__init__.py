@@ -26,15 +26,29 @@ from .orchestration import (
     InteractionUncertainError,
     SemanticInteractionCoordinator,
 )
+from .playwright_adapter import (
+    BrowserSession,
+    DialogBroker,
+    DialogRule,
+    DownloadBroker,
+    FrameScope,
+    PageRegistry,
+    PlaywrightInteractionAdapter,
+)
 from .resolver import resolve_strict, validate_snapshot
 
 __all__ = [
     "AmbiguousTargetError",
     "ApplicationIdentity",
     "BrowserContextIdentity",
+    "BrowserSession",
     "ControlLocator",
     "ControlNode",
+    "DialogBroker",
+    "DialogRule",
+    "DownloadBroker",
     "FallbackReason",
+    "FrameScope",
     "InteractionAction",
     "InteractionAdapter",
     "InteractionEvidence",
@@ -44,7 +58,9 @@ __all__ = [
     "InteractionRisk",
     "InteractionTarget",
     "InteractionUncertainError",
+    "PageRegistry",
     "PermissionBlockedError",
+    "PlaywrightInteractionAdapter",
     "SemanticInteractionCoordinator",
     "SemanticSnapshot",
     "StaleSnapshotError",
