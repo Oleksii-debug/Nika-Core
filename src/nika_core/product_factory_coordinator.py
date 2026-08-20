@@ -6,8 +6,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 
-from nika_core.product_factory_orchestration import ProductRepositoryGraph
-from nika_core.toolsmith.contracts import CodingResult, TestEvidence
+from nika_core.product_factory_orchestration import ProductComponent, ProductRepositoryGraph, RepositoryRef
+from nika_core.toolsmith.contracts import CodingResult
 
 
 class CoordinatorError(ValueError):
@@ -20,7 +20,6 @@ class WorkState(StrEnum):
     RUNNING = "running"
     REVIEW_REQUIRED = "review_required"
     ACCEPTED = "accepted"
-    REJECTED = "rejected"
     REPAIR_REQUIRED = "repair_required"
     BLOCKED = "blocked"
 
@@ -79,10 +78,8 @@ class ReviewDecision:
     evidence_refs: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if not self.reviewer_id.strip() or not self.reason.strip():
-            raise CoordinatorError("review identity and reason must not be empty")
-        if not self.evidence_refs:
-            raise CoordinatorError("review requires evidence")
+        if not self.reviewer_id.strip() or not self.reason.strip() or not self.evidence_refs:
+            raise CoordinatorError("independent review requires reviewer, reason and evidence")
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,12 +104,7 @@ class ComponentDispatcherPort(Protocol):
 
 @dataclass(slots=True)
 class ProductFactoryCoordinator:
-    """Deterministic PF4 coordinator above bounded component work.
-
-    It does not own an agent runtime or CodingWorker implementation. It only decides
-    which graph components are dependency-ready, validates exact worker evidence and
-    drives review/repair/restart state.
-    """
+    """PF4 coordinator above bounded component work, not a second agent runtime."""
 
     graph: ProductRepositoryGraph
     _records: dict[str, WorkRecord] = field(default_factory=dict, init=False, repr=False)
@@ -129,15 +121,15 @@ class ProductFactoryCoordinator:
             raise CoordinatorError("coordinator is already planned")
         if not permission_ceiling:
             raise CoordinatorError("project permission ceiling must not be empty")
-
+        components = self._components()
+        repositories = self._repositories()
         for component_id in self.graph.dependency_order():
-            component = self.graph.component(component_id)
-            repository = self.graph.repository(component.repository_id)
+            component = components[component_id]
+            repository = repositories[component.repository_id]
             base_sha = base_shas.get(repository.repository_id)
             goal = goals.get(component_id, "").strip()
             if base_sha is None or not goal:
                 raise CoordinatorError(f"missing base SHA or goal for component {component_id}")
-            _validate_sha(base_sha, f"base SHA for {repository.repository_id}")
             request = ComponentWorkRequest(
                 work_id=_stable_id("work", self.graph.project_id, component_id, 1),
                 project_id=self.graph.project_id,
@@ -156,7 +148,7 @@ class ProductFactoryCoordinator:
     def ready_requests(self) -> tuple[ComponentWorkRequest, ...]:
         return tuple(
             record.request
-            for component_id, record in sorted(self._records.items())
+            for _, record in sorted(self._records.items())
             if record.state is WorkState.READY
         )
 
@@ -164,7 +156,7 @@ class ProductFactoryCoordinator:
         record = self._record(component_id)
         if record.state is not WorkState.READY:
             raise CoordinatorError(f"component {component_id} is not ready")
-        self._records[component_id] = WorkRecord(request=record.request, state=WorkState.RUNNING)
+        self._records[component_id] = WorkRecord(record.request, WorkState.RUNNING)
         self._touch()
         return record.request
 
@@ -180,18 +172,13 @@ class ProductFactoryCoordinator:
         if envelope.coding_result.job_id != request.work_id:
             raise CoordinatorError("coding result job id does not match Product Factory work id")
         if not envelope.coding_result.succeeded:
-            updated = WorkRecord(
-                request=request,
-                state=WorkState.REPAIR_REQUIRED,
-                result=envelope,
-                blocker=envelope.coding_result.failure.message if envelope.coding_result.failure else None,
-            )
-        elif not envelope.coding_result.test_evidence:
-            raise CoordinatorError("successful worker result requires test evidence")
-        elif any(item.exit_code != 0 for item in envelope.coding_result.test_evidence):
-            raise CoordinatorError("successful worker result contains failing test evidence")
+            blocker = envelope.coding_result.failure.message if envelope.coding_result.failure else None
+            updated = WorkRecord(request, WorkState.REPAIR_REQUIRED, envelope, blocker=blocker)
         else:
-            updated = WorkRecord(request=request, state=WorkState.REVIEW_REQUIRED, result=envelope)
+            evidence = envelope.coding_result.test_evidence
+            if not evidence or any(item.exit_code != 0 for item in evidence):
+                raise CoordinatorError("successful worker result requires passing test evidence")
+            updated = WorkRecord(request, WorkState.REVIEW_REQUIRED, envelope)
         self._records[envelope.component_id] = updated
         self._touch()
         return updated
@@ -202,9 +189,9 @@ class ProductFactoryCoordinator:
             raise CoordinatorError("component is not awaiting independent review")
         state = WorkState.ACCEPTED if decision.accepted else WorkState.REPAIR_REQUIRED
         updated = WorkRecord(
-            request=record.request,
-            state=state,
-            result=record.result,
+            record.request,
+            state,
+            record.result,
             review=decision,
             blocker=None if decision.accepted else decision.reason,
         )
@@ -215,11 +202,10 @@ class ProductFactoryCoordinator:
 
     def prepare_repair(self, component_id: str, *, base_sha: str, reason: str) -> ComponentWorkRequest:
         record = self._record(component_id)
-        if record.state not in {WorkState.REPAIR_REQUIRED, WorkState.REJECTED}:
-            raise CoordinatorError("repair can only be prepared from a rejected/repair state")
+        if record.state is not WorkState.REPAIR_REQUIRED:
+            raise CoordinatorError("repair can only be prepared from repair_required")
         if not reason.strip():
             raise CoordinatorError("repair reason must not be empty")
-        _validate_sha(base_sha, "repair base_sha")
         attempt = record.request.attempt + 1
         request = ComponentWorkRequest(
             work_id=_stable_id("work", self.graph.project_id, component_id, attempt),
@@ -233,7 +219,7 @@ class ProductFactoryCoordinator:
             acceptance_commands=record.request.acceptance_commands,
             attempt=attempt,
         )
-        self._records[component_id] = WorkRecord(request=request, state=WorkState.READY)
+        self._records[component_id] = WorkRecord(request, WorkState.READY)
         self._touch()
         return request
 
@@ -243,51 +229,45 @@ class ProductFactoryCoordinator:
         record = self._record(component_id)
         if record.state is WorkState.ACCEPTED:
             raise CoordinatorError("accepted component cannot be blocked")
-        updated = WorkRecord(request=record.request, state=WorkState.BLOCKED, blocker=reason)
+        updated = WorkRecord(record.request, WorkState.BLOCKED, blocker=reason)
         self._records[component_id] = updated
         self._touch()
-        self._advance_ready()
         return updated
 
     def snapshot(self) -> CoordinatorSnapshot:
         return CoordinatorSnapshot(
-            project_id=self.graph.project_id,
-            revision=self._revision,
-            records=tuple(self._records[key] for key in sorted(self._records)),
+            self.graph.project_id,
+            self._revision,
+            tuple(self._records[key] for key in sorted(self._records)),
         )
 
     def restore(self, snapshot: CoordinatorSnapshot) -> None:
         if snapshot.project_id != self.graph.project_id:
             raise CoordinatorError("snapshot project does not match repository graph")
-        expected = set(self.graph.component_ids())
-        actual = {record.request.component_id for record in snapshot.records}
-        if actual != expected:
+        expected = set(self._components())
+        actual = [record.request.component_id for record in snapshot.records]
+        if set(actual) != expected or len(actual) != len(set(actual)):
             raise CoordinatorError("snapshot component set does not match repository graph")
-        if len(actual) != len(snapshot.records):
-            raise CoordinatorError("snapshot contains duplicate component records")
         self._records = {record.request.component_id: record for record in snapshot.records}
         self._revision = snapshot.revision
         self._advance_ready()
 
     def _advance_ready(self) -> None:
+        accepted = {key for key, item in self._records.items() if item.state is WorkState.ACCEPTED}
+        components = self._components()
         changed = False
-        accepted = {
-            component_id
-            for component_id, record in self._records.items()
-            if record.state is WorkState.ACCEPTED
-        }
         for component_id, record in tuple(self._records.items()):
-            if record.state is not WorkState.PLANNED:
-                continue
-            component = self.graph.component(component_id)
-            if set(component.dependencies) <= accepted:
-                self._records[component_id] = WorkRecord(
-                    request=record.request,
-                    state=WorkState.READY,
-                )
+            if record.state is WorkState.PLANNED and set(components[component_id].dependencies) <= accepted:
+                self._records[component_id] = WorkRecord(record.request, WorkState.READY)
                 changed = True
         if changed:
             self._touch()
+
+    def _components(self) -> dict[str, ProductComponent]:
+        return {component.component_id: component for component in self.graph.components}
+
+    def _repositories(self) -> dict[str, RepositoryRef]:
+        return {repository.repository_id: repository for repository in self.graph.repositories}
 
     def _record(self, component_id: str) -> WorkRecord:
         try:
@@ -299,17 +279,9 @@ class ProductFactoryCoordinator:
         self._revision += 1
 
 
-def validate_test_evidence(evidence: tuple[TestEvidence, ...]) -> None:
-    if not evidence:
-        raise CoordinatorError("test evidence must not be empty")
-    if any(item.exit_code != 0 for item in evidence):
-        raise CoordinatorError("test evidence contains a failing command")
-
-
 def _stable_id(prefix: str, *parts: object) -> str:
     payload = json.dumps(parts, sort_keys=True, separators=(",", ":"), default=str)
-    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
-    return f"{prefix}-{digest}"
+    return f"{prefix}-{hashlib.sha256(payload.encode()).hexdigest()[:24]}"
 
 
 def _validate_sha(value: str, label: str) -> None:
