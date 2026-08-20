@@ -3,15 +3,15 @@ from __future__ import annotations
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.product_factory_project_binding import (
-    ProductProjectBindingError,
-    ProductProjectCoordinatorBinding,
-    StaleProductProjectBindingError,
-)
 from nika_core.product_factory_orchestration import (
     ProductComponent,
     ProductRepositoryGraph,
     RepositoryRef,
+)
+from nika_core.product_factory_project_binding import (
+    ProductProjectBindingError,
+    ProductProjectCoordinatorBinding,
+    StaleProductProjectBindingError,
 )
 from nika_core.product_project import (
     ProductProjectRepository,
