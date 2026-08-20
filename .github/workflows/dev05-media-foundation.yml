@@ -44,7 +44,7 @@ jobs:
       - name: Verify pinned media package identities
         run: >-
           python -c "import importlib.metadata as m;
-          assert m.version('yt-dlp') == '2026.6.9';
+          assert m.version('yt-dlp') == '2026.7.4';
           assert m.version('pysubs2') == '1.8.1';
           print('yt-dlp', m.version('yt-dlp'), 'pysubs2', m.version('pysubs2'))"
       - name: Compile media foundation
