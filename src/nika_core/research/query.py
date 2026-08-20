@@ -12,6 +12,7 @@ from nika_core.research.models import (
 )
 from nika_core.research.network_repository import NetworkResearchRepository
 from nika_core.research.normalize import normalize_text
+from nika_core.research.query_results import ScopedResearchResultWriter
 
 
 class SearchMode(StrEnum):
@@ -53,14 +54,27 @@ class DeterministicResearchQueryService:
     ) -> None:
         self._store = store
         self._network = network_repository
+        self._result_writer = ScopedResearchResultWriter(
+            store=store,
+            network_repository=network_repository,
+        )
 
     def execute(self, spec: ResearchQuerySpec) -> ResearchQueryExecution:
         self._validate_spec(spec)
         hits = self._search(spec, self._fts_query(spec.text, spec.mode))
-        result_set = self._network.save_result_set(
+        match_reason = (
+            f"Quoted phrase full-text match for: {spec.text}"
+            if spec.mode is SearchMode.PHRASE
+            else f"Literal-token full-text match for: {spec.text}"
+        )
+        result_set = self._result_writer.save(
             workspace_id=spec.workspace_id,
             query=spec.text,
             hits=hits,
+            source_ids=self._normalized_source_ids(spec.filters.source_ids),
+            source_kinds=spec.filters.source_kinds,
+            freshness=spec.filters.freshness,
+            why_matched=match_reason,
         )
         return ResearchQueryExecution(spec=spec, result_set=result_set)
 
