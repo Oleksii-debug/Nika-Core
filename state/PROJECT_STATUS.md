@@ -35,35 +35,44 @@ Integrated Product Factory foundation includes:
 ### PF1 — durable ProductProject
 PF1 #91 is **INTEGRATED**. PF5 consumes the public ProductProject create/get/update-spec and research-handoff contracts.
 
-PF1 successor #101 (`auto/pf1-product-decisions`) is **RED / NOT INTEGRATED** on head `1e0c234d16aed11d0f158f0f9c9b7f90b77bd833`: Core #694 and M12 #462 failed. Until a repaired exact candidate integrates, PF5 must continue to fail closed for durable product-decision writes and must not bypass PF1 with direct SQL.
+PF1 successor #101 (`auto/pf1-product-decisions`) is **RED / NOT INTEGRATED** on inspected head `1e0c234d16aed11d0f158f0f9c9b7f90b77bd833`: Core #694 and M12 #462 failed. Until a repaired exact candidate integrates, PF5 must continue to fail closed for durable product-decision writes and must not bypass PF1 with direct SQL.
 
 ### PF2 — orchestration
-PF2 #92/#93/#94/#97/#98 are **INTEGRATED**. The public surface includes durable ProductProject identity/spec/row-version binding for coordinator checkpoints and fail-closed stale resume. PF5 may consume it but does not duplicate PF2 persistence or recovery ownership.
+PF2 #92/#93/#94/#97/#98 are **INTEGRATED**. The public surface includes durable ProductProject identity/spec/row-version binding for coordinator checkpoints and fail-closed stale resume. PF5 consumes public snapshots only and does not duplicate PF2 persistence/recovery ownership.
 
 ### PF3 — execution/deployment/credentials
-PF3 #95 and #99 are **INTEGRATED**. Downstream-safe surface now includes execution nodes/capabilities/resources/leases, exact release/deployment/health/rollback snapshots and opaque project-scoped credential/identity reference policy.
+PF3 #95/#99 are **INTEGRATED**. Downstream-safe surface includes execution nodes/capabilities/resources/leases, exact release/deployment/health/rollback snapshots and opaque project-scoped credential/identity reference policy with bounded leases, revocation/rotation and audit-safe restart state.
 
-PF5 does not handle raw secrets, enumerate unrelated credentials, perform provider deployment actions, or copy PF3 credential-broker internals into Command Center code.
+PF5 does not handle raw secret material, issue credential handles, enumerate unrelated credentials, perform deployment-provider actions, or copy PF3 broker internals into presentation code.
 
 ### PF4 — acceptance gatekeeper
-PF4 remains the independent PF0–PF12 acceptance/evidence lane. It rejects stale/mismatched SHA evidence and must not become a competing feature writer.
+PF4 remains the independent PF0–PF12 acceptance/evidence lane. PF5 presents integrated state but does not award PF0–PF12 acceptance credit on PF4's behalf.
 
 ### PF5 — command journey/release owner
-PF5 #90 and #96 are **INTEGRATED**.
+PF5 #90/#96 are **INTEGRATED**.
 
-Current real PF5 code/evidence PR is #100, `auto-pf5/project-scoped-command-center`, rebuilt linearly from exact current main `c0e5564b0ee20ada8a1a9c380aa8f8dfec4ff0ff` after PF2 #98 and PF3 #99 integrations. Rollback snapshots are preserved at `backup/auto-pf5-100-118e41d9` and `backup/auto-pf5-100-249a9ca4`.
+Current real PF5 code/evidence PR is #100, `auto-pf5/project-scoped-command-center`, based on exact current main `c0e5564b0ee20ada8a1a9c380aa8f8dfec4ff0ff`. Rollback snapshots remain preserved at `backup/auto-pf5-100-118e41d9` and `backup/auto-pf5-100-249a9ca4`.
 
-PR #100 closes one downstream presentation-integrity family:
-- composes integrated PF1/PF2/PF3 presentation only through a project-scoped `ProductCommandCenter`;
-- requires PF2 `CoordinatorSnapshot` identity and every work record to match the inspected ProductProject;
-- filters global PF3 execution snapshots to target-project leases and only nodes serving those leases;
-- filters PF3 deployment snapshots to target-project records/environment state;
-- recomputes blocker count after composition;
-- duplicate `(status kind, item_id)` presentation identity fails closed;
-- existing PF3 provider/credential non-disclosure remains intact;
-- focused tests attack foreign/corrupt coordinator state, cross-project execution/deployment leakage and duplicate presentation identity.
+PR #100 is now a large Command Center integrity/security batch, not the earlier narrow five-file draft. The same root-cause family is closed across all currently integrated PF1/PF2/PF3 presentation inputs:
 
-Earlier #100 candidates `118e41d9866e6e872ee3a91b5f827c0eb4fe4013` and `249a9ca4064ccccfd68b089ac1433a5e446710b5` obtained substantial exact-head green evidence but were superseded when PF2/PF3 advanced `main`; they receive no merge credit. Fresh exact-head Core + M12 are required for the final current-main rebuild.
+- **single-project composition boundary:** one `ProductCommandCenter` combines durable PF1 detail with PF2 coordinator, PF3 execution/deployment and integrated PF3 Credential Broker snapshots;
+- **single-version PF1 read:** visible ProductProject detail and internal opaque credential references come from one repository read, preventing a spec update from racing between two independent presentation reads;
+- **PF2 identity/evidence integrity:** project identity, component identity and work identity must be unique and target-scoped; worker result `work_id/component_id/repository_id/base_sha/job_id` must match its request; review evidence without a result fails closed; accepted state requires an accepted independent review;
+- **PF3 execution integrity:** duplicate node/lease identities, one node assigned to multiple active leases, unknown-node leases, empty lease identity and invalid lease lifetime fail closed before presentation; only target-project leases and their nodes are shown;
+- **PF3 deployment integrity:** duplicate intent/staging/current-release identities fail closed; health evidence must match environment + exact release; rollback evidence must match environment + failed release; HEALTHY and ROLLED_BACK states require corresponding successful evidence; foreign-project deployment state is filtered;
+- **PF3 credential presentation:** ProductProject-declared opaque credential refs are reconciled against project-scoped broker snapshot state; active, revoked, missing and broker-only/unlinked states are represented textually; missing/revoked declared credentials become explicit blockers;
+- **credential confidentiality:** raw `secret_ref`, protected handle material and raw Credential Broker audit detail are never serialized into ProductProject presentation; stable visible IDs use one-way SHA-256 of the opaque reference; oversized audit identities are hashed rather than copied;
+- **credential cross-project fail-closed:** duplicate secret/identity/audit identities, target identity bound to foreign secret, foreign identity bound to target secret, provider mismatch and cross-project audit evidence are rejected rather than silently filtered;
+- **bounded accessible text:** credential labels/details/evidence are bounded to the existing ProductStatus contracts and credential audit evidence is capped to the latest 20 events per credential so a corrupt or pathological snapshot cannot create an unbounded Command Center payload;
+- **semantic status identity:** duplicate `(ProductStatusKind, item_id)` remains a final fail-closed guard and blocker count is recomputed only after the full project-scoped composition.
+
+The expanded regression matrix now attacks cross-project leakage, corrupt PF2 result/review binding, corrupt execution leases, corrupt deployment health/rollback state, credential redaction, revoked/missing blockers, identity/audit cross-binding, duplicate identities, oversized metadata and bounded audit evidence. No new dependency, migration, provider action, raw secret surface or shared UI edit was added.
+
+Earlier #100 candidates obtained green/substantial evidence but are superseded whenever source or upstream `main` changes. Only the final exact PR head after this expanded batch may receive GREEN/merge credit.
+
+## Release/provenance deep-research result
+
+PF5 re-audited current M12 release mechanics against current official GitHub and SLSA guidance. Current M12 already binds the package manifest to exact source SHA and verifies package/UIA/recovery behavior, but the uploaded ZIP is not yet backed by a GitHub cryptographic artifact attestation. Official GitHub Artifact Attestations can bind a released binary/ZIP to repository, workflow and commit using Sigstore/OIDC; GitHub documents this as SLSA v1 Build Level 2 provenance for artifact attestations. Current official new-implementation action is `actions/attest@v4`. This is **researched/prepared, not yet implemented in #100**; it is the next PF5 release-integrity batch after #100 integration so Command Center safety and release workflow ownership are not mixed during review.
 
 ## Shared/manual ownership
 
@@ -73,7 +82,7 @@ DEV04 #78 retains Interaction/UIA/shared semantic UI ownership. PF5 does not edi
 
 ## Accessibility and UI truth
 
-The primary user remains Windows/NVDA-first. Automated semantic/UIA/WebView2 tests never set `NVDA_VERIFIED=true`. PF5 currently exposes native/API and textual presentation contracts only.
+The primary user remains Windows/NVDA-first. Automated semantic/UIA/WebView2 tests never set `NVDA_VERIFIED=true`. PF5 currently advances API/textual Command Center contracts while shared UI ownership remains separate.
 
 Interaction priority remains:
 1. native/application API;
@@ -84,19 +93,19 @@ Interaction priority remains:
 
 ## Product Factory acceptance truth
 
-Backend contracts are not Product Factory completion. PF11 still requires a representative request through the real factory: research, durable ProductProject, required product decision, acceptance criteria, dynamic team, repository, isolated implementation, independent QA/accessibility, package/release provenance, restart/resume and explicit human-only items.
+Backend contracts are not Product Factory completion. PF11 still requires the representative request through the real factory: research, durable ProductProject, required product decision, acceptance criteria, dynamic team, repository, isolated implementation, independent QA/accessibility, package/release provenance, restart/resume and explicit human-only items.
 
 The representative expense application is an acceptance scenario, not code hard-coded into Nika Core.
 
 ## Release/package truth
 
-No Product Factory Windows candidate is promoted from PF5 #100. M12 packages produced while testing isolated PF5 backend candidates are CI evidence only, not human-bound Product Factory releases. Shared packaged WebView2/UIA remains mandatory and PF5 does not weaken it.
+No Product Factory Windows candidate is promoted from PF5 #100. M12 ZIPs created while validating isolated PF5 backend/presentation candidates are CI evidence only. A later human candidate requires a fresh exact integrated `main` package after all required Product Journey behavior is integrated. Shared packaged WebView2/UIA remains mandatory and PF5 does not weaken it.
 
 ## Next dependency-ordered wave
 
-1. PF5 proves the final current-main #100 rebuild with fresh exact-head Core + M12, then rechecks live-main compatibility before merge.
-2. PF1 repairs #101 and integrates a durable public product-decision lifecycle before PF5 can claim create/inspect/update/decision completeness.
-3. PF5 may consume integrated PF2 checkpoint identity and integrated PF3 credential-reference state in later presentation/journey work without duplicating owners.
+1. Finish the expanded #100 code/status batch, obtain fresh exact-head Core + M12, recheck live `main`, and integrate only if there is zero incompatible drift.
+2. PF1 owner repairs #101 and integrates a durable public product-decision lifecycle; only then may PF5 replace its fail-closed decision placeholder with the real public API.
+3. After #100 integration, PF5 opens one large release-integrity batch adding official GitHub artifact attestation for the exact Windows ZIP plus deterministic verification/truth regressions; SBOM adoption remains separate unless the release dependency surface and license evidence justify it.
 4. Shared semantic UI wiring waits for DEV04 ownership release plus an explicit compatibility decision.
 5. PF11 packaging/release follows only after the representative integrated journey exists.
 
