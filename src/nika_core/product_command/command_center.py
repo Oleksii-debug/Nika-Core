@@ -92,17 +92,16 @@ def _validate_coordinator_scope(
                 "coordinator snapshot contains cross-project work records"
             )
         result = record.result
-        if result is not None:
-            if (
-                result.work_id != request.work_id
-                or result.component_id != request.component_id
-                or result.repository_id != request.repository_id
-                or result.base_sha != request.base_sha
-                or result.coding_result.job_id != request.work_id
-            ):
-                raise ProductCommandCenterScopeError(
-                    "coordinator result evidence does not match its work request"
-                )
+        if result is not None and (
+            result.work_id != request.work_id
+            or result.component_id != request.component_id
+            or result.repository_id != request.repository_id
+            or result.base_sha != request.base_sha
+            or result.coding_result.job_id != request.work_id
+        ):
+            raise ProductCommandCenterScopeError(
+                "coordinator result evidence does not match its work request"
+            )
         if record.review is not None and result is None:
             raise ProductCommandCenterScopeError(
                 "coordinator review exists without worker result evidence"
@@ -111,11 +110,12 @@ def _validate_coordinator_scope(
             raise ProductCommandCenterScopeError(
                 "review-required coordinator record lacks worker result evidence"
             )
-        if record.state is WorkState.ACCEPTED:
-            if result is None or record.review is None or not record.review.accepted:
-                raise ProductCommandCenterScopeError(
-                    "accepted coordinator record lacks accepted independent review evidence"
-                )
+        if record.state is WorkState.ACCEPTED and (
+            result is None or record.review is None or not record.review.accepted
+        ):
+            raise ProductCommandCenterScopeError(
+                "accepted coordinator record lacks accepted independent review evidence"
+            )
 
 
 def _validate_execution_snapshot(snapshot: ExecutionRegistrySnapshot) -> None:
