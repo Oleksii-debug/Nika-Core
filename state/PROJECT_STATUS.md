@@ -19,7 +19,7 @@ Current human/release truth:
 
 Current main at this reconciliation point:
 
-`df84a72d6705aa78cb0c69df9e47a367098b74bb`
+`be7b4ab4abd59a3e373ad48562e023b07febc98c`
 
 Integrated Product Factory foundation includes:
 - PF5 PR #90 — command/presentation routing foundation;
@@ -28,7 +28,8 @@ Integrated Product Factory foundation includes:
 - PF2 PR #93 — deterministic Product Factory coordinator/reconciliation;
 - PF2 PR #94 — public CodingWorkerPort adapter;
 - PF2 PR #97 — restart recovery for in-flight component work;
-- PF3 PR #95 — provider-neutral ExecutionNode + deterministic deployment/health/rollback foundation, exact candidate `4a3e0b342ec06c936693c8f583ed4f7a4fdc2007`, integrated after Core #671 + M12 #439 as merge `df84a72d6705aa78cb0c69df9e47a367098b74bb`.
+- PF3 PR #95 — provider-neutral ExecutionNode + deterministic deployment/health/rollback foundation;
+- PF5 PR #96 — ProductProject command journey plus PF2/PF3 textual execution/deployment presentation, exact head `5beb29c70ee0e5e72f729ad555a49384b3308c9c`, integrated after Core #681 + M12 #449 as merge `be7b4ab4abd59a3e373ad48562e023b07febc98c`.
 
 ## Product Factory dependency flow
 
@@ -38,31 +39,34 @@ PF1 #91 is **INTEGRATED**. PF5 consumes the public `ProductProjectRepository` cr
 The integrated PF1 API still does not expose a durable product-decision approve/reject write operation. PF5 must not bypass this ownership boundary with direct SQL. Product decision persistence remains an explicit upstream capability gap rather than a false-complete journey claim.
 
 ### PF2 — orchestration
-PRs #92/#93/#94/#97 are **INTEGRATED**. The integrated surface includes team/repository graph, coordinator state, CodingWorkerPort adaptation and restart recovery.
+PRs #92/#93/#94/#97 are **INTEGRATED**.
 
-Open follow-up PR #98, `auto-pf2/product-project-binding`, head `14036a6d0d484afbd68fc36c2ce746e73c5d828c`, is **NOT INTEGRATED**. PF5 does not import or rely on it.
+Open follow-up PR #98, `auto-pf2/product-project-binding`, exact head `bba309b4713d385e6b7a653fffbdec313866d499`, is based on current main and remains **NOT INTEGRATED**. It binds durable ProductProject version identity to coordinator checkpoints. PF5 does not import or rely on it until exact-head gates and integration complete.
 
-### PF3 — execution/deployment
-PF3 #95 is **INTEGRATED**. PF5 may now consume its public execution-node, lease, exact release, staging, health, rollback and deployment snapshot contracts. PF5 does not execute provider deployments, expose provider credential references, or invent a Product Operations service that PF3 has not integrated.
+### PF3 — execution/deployment/credentials
+PF3 #95 is **INTEGRATED**. PF5 consumes only its public execution-node, lease, exact release, staging, health, rollback and deployment snapshot contracts.
+
+Open PF3 follow-up #99, `auto-pf3/credential-broker-foundation`, exact head `3d68f5cb06b814c2917a608820226ca56628ffb7`, remains **NOT INTEGRATED**. PF5 does not import credential-broker internals, raw credential material or unmerged sibling contracts.
 
 ### PF4 — acceptance gatekeeper
 PF4 remains the independent PF0–PF12 acceptance/evidence lane. It rejects stale/mismatched SHA evidence and must not become a competing feature writer.
 
 ### PF5 — command journey/release owner
-PF5 PR #90 is integrated. Current real PF5 code/evidence PR is #96, `auto-pf5/command-journey-pf2-presentation`.
+PF5 #90 and #96 are **INTEGRATED**.
 
-PR #96 now advances one downstream Product Journey family against integrated upstream contracts:
-- conservative deterministic Ukrainian + English ProductProject/Toolsmith routing;
-- explicit ambiguity for mixed product/capability intent;
-- integrated PF1 ProductProject create/inspect/update through the canonical durable repository;
-- visible optimistic version checking, SQLite restart continuity and credential-reference redaction tests;
-- integrated PF2 CoordinatorSnapshot/WorkRecord → textual component/review/QA/blocker presentation;
-- integrated PF3 ExecutionRegistrySnapshot/DeploymentFabricSnapshot → textual node/build/release/staging/health/rollback/blocker presentation;
-- PF3 `provider_ref` is intentionally absent from the PF5 presentation boundary;
-- product-decision writes still fail closed until PF1 exposes a public durable decision-write API;
-- canonical status reconciliation occurs in this same real code/evidence PR.
+Current real PF5 code/evidence PR is #100, `auto-pf5/project-scoped-command-center`, starting from exact main `be7b4ab4abd59a3e373ad48562e023b07febc98c`.
 
-The previous #96 exact head `ee303c76da16adef5a4519ce9068839c73cd2c0e` passed Core #679 but M12 #447 failed and is superseded. Its history is preserved at `backup/auto-pf5-96-ee303c76`. The current candidate is being rebuilt linearly from live main `df84a72d6705aa78cb0c69df9e47a367098b74bb`; only fresh exact-head evidence on the final rebuilt SHA may receive merge credit.
+PR #100 closes one downstream presentation-integrity family:
+- composes integrated PF1/PF2/PF3 presentation only through a project-scoped `ProductCommandCenter`;
+- requires PF2 `CoordinatorSnapshot` identity and every work record to match the inspected ProductProject;
+- filters global PF3 execution snapshots to target-project leases and only the nodes serving those leases;
+- filters PF3 deployment snapshots to target-project records/environment state;
+- recomputes blocker count after composition;
+- duplicate `(status kind, item_id)` presentation identity fails closed;
+- existing PF3 `provider_ref`/credential non-disclosure remains intact;
+- focused tests attack foreign/corrupt coordinator state, cross-project execution/deployment leakage and duplicate presentation identity.
+
+The initial #100 exact head `13d9c1d62801969469f6e4e9e25cd37bb414d8f6` reached exact-checkout Core #687/M12 #455 before this required canonical status reconciliation. It is therefore lineage evidence only. Fresh exact-head gates are required on the final #100 SHA.
 
 ## Shared/manual ownership
 
@@ -89,14 +93,14 @@ The representative expense application is an acceptance scenario, not code hard-
 
 ## Release/package truth
 
-No Product Factory Windows candidate is promoted from PF5 #96. Package/release work starts only at a meaningful integrated exact-SHA milestone. The known packaged WebView2/UIA blocker is shared-UI ownership, not permission for PF5 to weaken or bypass accessibility gates.
+No Product Factory Windows candidate is promoted from PF5 #100. Package/release work starts only at a meaningful integrated exact-SHA milestone. The known packaged WebView2/UIA blocker remains shared-UI ownership, not permission for PF5 to weaken or bypass accessibility gates.
 
 ## Next dependency-ordered wave
 
-1. PF5 finishes #96 current-main rebuild, local/best-effort preflight and fresh exact-head Core/M12.
+1. PF5 proves #100 on its final exact head with fresh Core + M12, then rechecks live-main compatibility before merge.
 2. PF1 owner adds a durable public product-decision write boundary before PF5 can claim create/inspect/update/decision completeness.
-3. PF2 repairs/integrates #98 independently; PF5 consumes it only after integration.
-4. PF3 follow-up may add credential/real-provider/operations capability under its own ownership; PF5 consumes only integrated public contracts.
+3. PF2 proves/integrates #98 independently; PF5 consumes it only after integration.
+4. PF3 proves/integrates #99 independently; PF5 consumes only integrated public credential/identity contracts.
 5. Shared semantic UI wiring waits for DEV04 ownership release plus an explicit compatibility decision.
 6. PF11 packaging/release follows only after the representative integrated journey exists.
 
