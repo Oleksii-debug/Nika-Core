@@ -336,7 +336,7 @@ class PlaywrightInteractionAdapter:
     @staticmethod
     def _semantic_revision(snapshot_text: str, mutation_counter: int) -> int:
         normalized = snapshot_text.replace("[focused]", "")
-        digest = hashlib.sha256(f"{mutation_counter}\0{normalized}".encode("utf-8")).digest()
+        digest = hashlib.sha256(f"{mutation_counter}\0{normalized}".encode()).digest()
         return int.from_bytes(digest[:8], "big")
 
     @staticmethod
@@ -561,9 +561,13 @@ class PlaywrightInteractionAdapter:
         action: InteractionAction,
         value: str | None,
     ) -> bool:
-        if before.target.browser is not None and after.target.browser is not None:
-            if before.target.browser.document_generation != after.target.browser.document_generation:
-                return action is InteractionAction.INVOKE
+        if (
+            before.target.browser is not None
+            and after.target.browser is not None
+            and before.target.browser.document_generation
+            != after.target.browser.document_generation
+        ):
+            return action is InteractionAction.INVOKE
         if action is InteractionAction.INVOKE:
             return (
                 after.revision != before.revision
