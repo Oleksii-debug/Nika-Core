@@ -95,6 +95,27 @@ def test_aria_name_decoder_preserves_ukrainian_and_escapes() -> None:
     assert PlaywrightInteractionAdapter._decode_aria_name(None) == ""
 
 
+def test_aria_scalar_decoder_preserves_values_and_empty_children() -> None:
+    assert PlaywrightInteractionAdapter._decode_scalar("Перевірка UTF-8") == "Перевірка UTF-8"
+    assert PlaywrightInteractionAdapter._decode_scalar('"quoted value"') == "quoted value"
+    assert PlaywrightInteractionAdapter._decode_scalar("") is None
+    assert PlaywrightInteractionAdapter._decode_scalar(None) is None
+
+
+def test_semantic_revision_tracks_accessibility_state_but_ignores_focus_marker() -> None:
+    baseline = '- button "Save"\n- textbox "Name": Oleksii'
+    changed = '- button "Save"\n- textbox "Name": Олексій'
+    assert PlaywrightInteractionAdapter._semantic_revision(baseline, 1) != (
+        PlaywrightInteractionAdapter._semantic_revision(changed, 1)
+    )
+    assert PlaywrightInteractionAdapter._semantic_revision('- button "Save" [focused]', 1) == (
+        PlaywrightInteractionAdapter._semantic_revision('- button "Save" ', 1)
+    )
+    assert PlaywrightInteractionAdapter._semantic_revision(baseline, 1) != (
+        PlaywrightInteractionAdapter._semantic_revision(baseline, 2)
+    )
+
+
 def test_navigation_rejects_non_http_before_browser_access(tmp_path: Path) -> None:
     adapter = PlaywrightInteractionAdapter(
         session=BrowserSession(download_root=tmp_path),
