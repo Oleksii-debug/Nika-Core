@@ -59,7 +59,12 @@ class DeterministicResearchQueryService:
             network_repository=network_repository,
         )
 
-    def execute(self, spec: ResearchQuerySpec) -> ResearchQueryExecution:
+    def execute(
+        self,
+        spec: ResearchQuerySpec,
+        *,
+        result_set_id: str | None = None,
+    ) -> ResearchQueryExecution:
         self._validate_spec(spec)
         hits = self._search(spec, self._fts_query(spec.text, spec.mode))
         match_reason = (
@@ -75,6 +80,7 @@ class DeterministicResearchQueryService:
             source_kinds=spec.filters.source_kinds,
             freshness=spec.filters.freshness,
             why_matched=match_reason,
+            result_set_id=result_set_id,
         )
         return ResearchQueryExecution(spec=spec, result_set=result_set)
 

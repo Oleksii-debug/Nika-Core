@@ -59,7 +59,21 @@ class ScopedResearchResultWriter:
         source_kinds: tuple[SourceKind, ...] = (),
         freshness: tuple[FreshnessState, ...] = (),
         why_matched: str,
+        result_set_id: str | None = None,
     ) -> ResearchResultSet:
+        stable_result_set_id = result_set_id.strip() if result_set_id is not None else None
+        if result_set_id is not None and not stable_result_set_id:
+            raise ValueError("result_set_id must not be empty")
+        if stable_result_set_id is not None:
+            try:
+                existing = self._network.get_result_set(stable_result_set_id)
+            except KeyError:
+                existing = None
+            if existing is not None:
+                if existing.workspace_id != workspace_id or existing.query != query:
+                    raise ValueError("result_set_id already exists for a different query")
+                return existing
+
         source_id_set = set(source_ids)
         source_kind_set = set(source_kinds)
         freshness_set = set(freshness)
@@ -83,7 +97,7 @@ class ScopedResearchResultWriter:
                 )
             prepared.append((hit, evidence))
 
-        result_set_id = uuid4().hex
+        saved_result_set_id = stable_result_set_id or uuid4().hex
         created_at = _now()
         items: list[ResearchResultItem] = []
         with self._store.connection() as conn:
@@ -91,7 +105,7 @@ class ScopedResearchResultWriter:
                 """INSERT INTO research_result_sets(
                     result_set_id, workspace_id, query, created_at
                 ) VALUES (?, ?, ?, ?)""",
-                (result_set_id, workspace_id, query, created_at),
+                (saved_result_set_id, workspace_id, query, created_at),
             )
             for ordinal, (hit, evidence) in enumerate(prepared):
                 conn.execute(
@@ -100,7 +114,7 @@ class ScopedResearchResultWriter:
                         why_matched, evidence_json
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
-                        result_set_id,
+                        saved_result_set_id,
                         ordinal,
                         hit.document_id,
                         hit.title,
@@ -122,7 +136,7 @@ class ScopedResearchResultWriter:
                     )
                 )
         return ResearchResultSet(
-            result_set_id=result_set_id,
+            result_set_id=saved_result_set_id,
             workspace_id=workspace_id,
             query=query,
             items=tuple(items),
