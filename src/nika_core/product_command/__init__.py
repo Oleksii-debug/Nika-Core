@@ -8,6 +8,7 @@ from nika_core.product_command.contracts import (
     ProductStatusKind,
     ProductUserDecision,
 )
+from nika_core.product_command.coordinator_adapter import coordinator_status_entries
 
 __all__ = [
     "CommandRouteDecision",
@@ -18,4 +19,5 @@ __all__ = [
     "ProductStatusEntry",
     "ProductStatusKind",
     "ProductUserDecision",
+    "coordinator_status_entries",
 ]
