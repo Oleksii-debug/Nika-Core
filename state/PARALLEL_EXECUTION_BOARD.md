@@ -1,147 +1,127 @@
 # PARALLEL EXECUTION BOARD — Nika Core
 
-Updated: 2026-08-19.
-Mode: **ACTIVE DEVELOPMENT — Product Journey repair + Full Product Vision expansion**.
-Canonical evidence: live GitHub code + exact executable checks + integration. Historical artifacts never override newer defect evidence.
+Updated: 2026-08-20.
+Mode: **ACTIVE AUTONOMOUS PRODUCT FACTORY DEVELOPMENT**.
+Canonical technical evidence: live GitHub `main`, exact PR heads and current Actions. Drive owns automation routing/ownership/handoff truth.
 
 ## Evidence states
 - PREPARED — scope/contracts/reuse decision ready.
 - IMPLEMENTED — production-intended source/tests exist on a branch.
 - GREEN — exact branch/PR head passed required automated checks.
 - INTEGRATED — exact green candidate merged into `main`.
-- PACKAGED — installable Windows artifact built and checked.
-- HUMAN_TESTED — a person completed the specified manual protocol.
+- PACKAGED — exact installable artifact built and checked.
+- HUMAN_TESTED — a person completed the required manual protocol.
 - NVDA_VERIFIED — the human NVDA protocol passed; automation may never award this state.
 
-## Current product truth
+Current global truth:
+- `HUMAN_TESTED=false`;
+- `NVDA_VERIFIED=false`;
+- `PRODUCTION_RELEASE_READY=false`;
+- `PF11=false`;
+- historical Core percentages and stale Windows ZIPs are archival only.
 
-The old **98%** number is retained only as historical credit for the original scoped Core roadmap. It is **not** a Full Product Vision completion percentage.
+## Canonical main
 
-Current practical truth:
-- the reusable Core foundation is substantial and historically well-tested;
-- a concrete Product Journey defect invalidated the old Windows package as a current human candidate;
-- no Windows ZIP is currently approved for the user's NVDA test;
-- HUMAN_TESTED: false;
-- NVDA_VERIFIED: false;
-- PRODUCTION_RELEASE_READY: false;
-- Full Product Vision percentage: deliberately **not assigned yet**.
+`df84a72d6705aa78cb0c69df9e47a367098b74bb`
 
-Starting `main` for current independent lanes: `8065cc3fedb63f9c07e1773acf2332b5709560da`.
+Integrated Product Factory foundation:
+- PF5 #90 — command/presentation routing;
+- PF1 #91 — durable ProductProject + Research→Product handoff;
+- PF2 #92 — Dynamic Team Composer + ProductRepositoryGraph;
+- PF2 #93 — deterministic coordinator/reconciliation;
+- PF2 #94 — public CodingWorkerPort adapter;
+- PF2 #97 — restart recovery for in-flight component work;
+- PF3 #95 — ExecutionNode + deployment/staging/health/rollback foundation, exact head `4a3e0b342ec06c936693c8f583ed4f7a4fdc2007`, Core #671 + M12 #439 green, integrated as current main.
 
-## Active lane ownership
+## Scheduled Product Factory dependency order
 
-### L-WIN — Real Windows Product Journey
-Owner scope: final Windows UI/backend lifecycle only.
-PR #37 — `fix/windows-desktop-functional-backend`.
-Latest inspected head: `a56a9193fd9e7ae30ae8acac997609f38db6fef9`.
+`PF1 → PF2 → PF3 → PF4 → PF5`
 
-Implemented:
-- real task creation through Nika backend/runtime;
-- real persisted Tasks/Agents/Workspaces state in the UI;
-- pause/resume/stop wiring;
-- removal of placeholder-only state surfaces;
-- backend/bridge lifecycle tests;
-- compatibility with already-integrated Windows release license/notices repair.
+PF5 runs downstream last and consumes only integrated upstream contracts.
 
-Evidence inspected:
-- Core CI: SUCCESS;
-- Windows release-candidate build: SUCCESS;
-- complete M12 pre-human gate: CANCELLED.
+### AUTO-PF1 — ProductProject
+PF1 #91 is **INTEGRATED**.
 
-State: **IMPLEMENTED / PARTIALLY GREEN / NOT INTEGRATED**.
-Blocker: complete non-cancelled full-system gate on the exact final head. Do not promote an intermediate ZIP.
+Available to downstream: durable create/get/update-spec, optimistic concurrency and Research→Product handoff. A durable public product-decision write API is not yet integrated; PF5 must fail closed instead of writing PF1 tables directly.
 
-Owned files currently include the Windows launcher, task/agent registry lifecycle surfaces, DesktopBackend/bridge/web UI and its dedicated tests. Other lanes must not collide with those files without an explicit compatibility decision.
+### AUTO-PF2 — orchestration
+PF2 #92/#93/#94/#97 are **INTEGRATED**. Open follow-up #98 remains **NOT INTEGRATED** and PF5 does not consume it.
 
-### L-INT — Deterministic Brain + Embedded Brain
-Owner scope: model-free planning/execution, embedded-model adapter architecture, intelligence reuse contracts and directly coupled tests/docs.
-PR #40 — `feat/embedded-intelligence-foundry-local`.
+### AUTO-PF3 — execution/deployment
+PF3 #95 is **INTEGRATED**. Public downstream-safe surface includes execution nodes/capabilities/resources/leases, normalized exact release evidence, deployment snapshots, staging-first policy state, health and rollback evidence.
 
-Implemented on branch:
-- first-class **Deterministic Brain** that uses no language model;
-- Nika-owned world-state/goal/action/plan contracts;
-- Unified Planning/Pyperplan adapter for explicit planning domains;
-- execution through existing guarded ToolExecutor so planner-selected actions preserve approval/security rules;
-- Microsoft **Foundry Local** in-process provider behind existing ModelGateway;
-- explicit/fail-closed model download policy;
-- optional Windows WinML SDK dependency and separate cross-platform SDK path;
-- fake-SDK Foundry provider contract tests without downloading a large model;
-- deterministic planning/execution/impossible-goal/replanning/high-impact-approval tests;
-- Windows CI proof that the selected official Foundry SDK package resolves/imports;
-- expanded Full Product Vision, current intelligence reuse decisions, Product Journey/Toolsmith gates and current scope docs.
+PF5 may present these contracts. PF5 does not execute deployment provider actions, expose `provider_ref`, handle raw credentials or claim a Product Operations service that has not been integrated.
 
-State: **IMPLEMENTED / FINAL CI REQUIRED / NOT INTEGRATED** until the latest exact head completes all required checks.
-Remaining after code-level integration: real physical-Windows Foundry model inference benchmark/proof before calling the embedded model hardware-proven.
+### AUTO-PF4 — acceptance QA
+PF4 remains the independent PF0–PF12 gatekeeper and evidence lane. It rejects stale/false exact-SHA evidence without becoming a competing feature writer.
 
-Collision decision: this lane was created from the same current `main` and intentionally does not modify PR #37's eight owned product/UI files, so both lanes may advance in parallel.
+### AUTO-PF5 — command journey + release
+PF5 #90 is **INTEGRATED**.
 
-## Prepared next Full Product Vision lanes
+Current real PF5 code/evidence PR: #96, `auto-pf5/command-journey-pf2-presentation`.
 
-These lanes are real end-state product work. They do not receive progress credit merely because architecture is documented.
+Current coherent scope:
+- deterministic Ukrainian + English ProductProject/Toolsmith routing;
+- explicit ambiguity for mixed product/capability intent;
+- real integrated PF1 ProductProject create/inspect/update through `ProductProjectRepository`;
+- SQLite restart, stale-version and credential-reference redaction tests;
+- integrated PF2 CoordinatorSnapshot → textual component/review/QA/blocker projection;
+- integrated PF3 ExecutionRegistrySnapshot/DeploymentFabricSnapshot → textual execution-node/build/release/staging/health/rollback/blocker projection;
+- no PF3 provider credential reference in PF5 presentation;
+- product-decision persistence fails closed until PF1 exposes a durable public decision API;
+- canonical status reconciliation in this same real code/evidence PR.
 
-### L-TOOL — Capability Escalation / Toolsmith
-Goal: active task proves a missing capability -> reuse search -> bounded Software Factory/CodingWorker request if necessary -> isolated implementation/test -> permission-aware registration -> original task resumes from checkpoint.
-Prerequisites: stable current Software Factory/CodingWorker boundary and task/checkpoint contracts.
-Must not self-modify production main or self-expand permissions.
+The prior #96 exact head `ee303c76da16adef5a4519ce9068839c73cd2c0e` is superseded: Core #679 passed, M12 #447 failed. Rollback history is preserved at `backup/auto-pf5-96-ee303c76`. The branch is being rebuilt linearly from current main `df84a72d6705aa78cb0c69df9e47a367098b74bb`; only fresh exact-head gates on the final rebuilt SHA count.
 
-### L-RESEARCH — Universal Research + Corpus/Knowledge
-Goal: one reusable engine for sources, incremental freshness/change state, HTTP/API/browser/document extraction, deterministic pre-filter, evidence/confidence, dedup, structured cards, review, scheduled deltas and accessible reports; plus provenance-scoped local corpus/FTS before optional semantic retrieval.
-GrantScanner/Product Search/etc. become profiles rather than duplicate crawlers.
+State: **IMPLEMENTED / CURRENT-MAIN REBUILD + PREFLIGHT + FRESH GATES REQUIRED / NOT INTEGRATED**.
 
-### L-MODEL — Model Engineering Lab + local resource profiles
-Goal: benchmark Foundry/Ollama/cloud/specialist models on versioned tasks; measure quality/latency/RAM/CPU/GPU; manage model license/checksum/artifacts; add normal/battery/night/low-memory/heavy-worker resource profiles where measured.
+## Manual/shared ownership — no scheduled duplication
 
-### L-TRADER — AI Trader real workspace
-Goal: no-lookahead replay, chronological odds/event snapshots, virtual bank, singles/combinations/portfolio exposure, time waves, versioned strategies, risk/drawdown, held-out validation, paper/live-prematch simulation, restart-safe sessions and accessible reports.
-Generic M8 Experiment Engine is foundation only; it does not mean AI Trader itself exists.
+- DEV01 #86 — Research/Corpus report exports.
+- DEV02 #72 — Windows worker containment proof.
+- DEV03 #67 — deterministic trader replay/accounting/risk.
+- DEV04 #78 — strict Windows UIA semantic vertical and shared Interaction/UIA ownership; dedicated live proof remains blocked by duplicate semantic-node identity.
+- DEV05 #89 — stable platform subtitle acquisition.
+- M10 #61/#62 — authorization/approval security ownership.
 
-### L-CMD — Command center + workspace creation Product Journeys
-Goal: user can give a natural-language command in final accessible Windows UI, create/configure agents/workspaces/tasks, route through real services, see durable accessible results, and request a missing capability through Toolsmith.
+PF5 does not edit these production slices without an explicit compatibility decision.
 
-### L-RELEASE — Combined release/integration
-Goal: after required product lanes merge, rebuild one exact Windows candidate containing all required repairs; run Core, security/recovery, Product Journey, WebView2/UIA/keyboard/focus/package/license/checksum gates; only then hand the exact artifact to the human NVDA protocol.
+## PF5 interaction/UI rule
 
-## Removed active scope
+Shared semantic Windows UI remains outside PF5 ownership while DEV04 #78 is active. PF5 advances native/API and textual presentation contracts first.
 
-**Telegram is removed from active Nika Core development.** Historical Telegram/Telethon/TDLib material is archival reference only. Scheduled/manual workers must not spend development time on Telegram unless the user explicitly introduces it as a new future workspace.
+Interaction priority:
+1. native/application API;
+2. DOM/UIA/accessibility semantics;
+3. named deterministic controls;
+4. screenshot/OCR/vision fallback;
+5. coordinates last.
 
-## Parallel collaboration model
-
-### Scheduled workers — normal mode
-Five scheduled workers may run simultaneously when manual Deep Research coding lanes are not active. They should own large non-overlapping vertical areas rather than microtasks.
-
-### Manual Deep Research developer/auditor mode
-When the user starts manual Deep Research developer chats, those chats are **real coding lanes**, not research-only roles. Each may take a large subsystem, read live GitHub, implement code, trigger tests and drive one coherent branch toward integration. A paired auditor independently inspects live code/evidence and returns defects.
-
-During manual Deep Research coding periods, scheduled workers should be **paused or reassigned** to complementary low-collision duties such as:
-- cross-lane Integration QA;
-- release/package proof;
-- regression/security/accessibility auditing;
-- dependency/license/evidence consistency;
-- stale-conflict detection and merge readiness.
-
-They should not simultaneously edit the same subsystem just to maximize agent count.
+Automated semantic/UIA evidence never sets `NVDA_VERIFIED=true`.
 
 ## Collision policy
-1. Separate branch for each independent lane.
-2. Branch from latest compatible green `main` unless a real dependency requires otherwise.
-3. Do not stack unrelated branches.
-4. Shared-contract edits require explicit compatibility decision and targeted tests.
-5. If another lane owns overlapping files, audit/research another independent surface rather than create competing edits.
-6. A blocked lane does not block independent lanes.
-7. Acceptance credit requires exact green evidence + integration, not implementation alone.
+1. One writer per production slice.
+2. Separate branch per independent coherent lane.
+3. Branch from latest compatible green main unless a real dependency requires otherwise.
+4. Never import an unmerged sibling branch as canonical dependency.
+5. Shared-contract edits require explicit compatibility decision and focused tests.
+6. A blocked upstream lane does not idle independent downstream work.
+7. Exact-head acceptance + current-main compatibility are required before merge credit.
+8. No direct scheduled-worker writes to `main`.
 
-## Large-batch policy
-A development run is not one file/function/test. Each lane should advance the largest safe coherent slice: reuse check -> contract -> implementation -> persistence/recovery -> errors -> tests -> accessibility/security impact -> docs/evidence -> CI/integration. Stop only at a real subsystem boundary, required external proof, blocker or safety approval boundary.
+## Product Factory release policy
 
-## CI/release policy
-- Shared verification runs on Ubuntu + Windows where applicable.
-- Focused WebView2/UIA/package/security/model-hardware proofs run only when they add real evidence.
-- Never weaken a gate to get green.
-- Do not repeatedly download large models or rebuild release EXEs on every development push.
-- An integrated behavior change invalidates any older human-candidate artifact until a fresh combined exact candidate passes the complete release gate.
+Backend-only tests do not close Product Factory. PF11 requires a representative product created by the real factory from a clean packaged Windows Nika installation: research, durable ProductProject, product decision, acceptance criteria, team, repository, isolated implementation, independent QA/accessibility, package/release provenance and restart/resume.
 
-## Human truth
-- HUMAN_TESTED remains false until the user actually performs the exact protocol.
-- NVDA_VERIFIED remains false until the user actually completes the Windows/NVDA acceptance.
-- Automated accessibility evidence never promotes either state.
+The expense application is an acceptance scenario, not a hard-coded Core product. Do not promote a new human candidate from isolated PF5 backend/presentation work.
+
+## Next dependency-ordered integration wave
+
+1. PF5 completes #96 current-main rebuild, preflight and fresh exact-head Core/M12.
+2. PF1 adds a durable public decision-write boundary before PF5 can claim create/inspect/update/decision completeness.
+3. PF2 repairs/integrates #98 independently; PF5 consumes it only after integration.
+4. PF3 follow-up owns credential/real-provider/operations capabilities; PF5 consumes only integrated public contracts.
+5. Shared semantic UI waits for DEV04 ownership release plus compatibility decision.
+6. PF11 package/release follows only after the representative integrated journey exists.
+
+Progress is evidence-based; no invented Full Product Vision percentage is assigned.
