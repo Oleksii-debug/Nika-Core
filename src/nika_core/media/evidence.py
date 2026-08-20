@@ -2,17 +2,83 @@ from __future__ import annotations
 
 import math
 import platform
+import re
 import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
 
 from nika_core.media.contracts import EngineDescriptor, FrozenModel, ModelDescriptor
 from nika_core.media.hashing import sha256_file
 from nika_core.resources.contracts import ResourceObserverPort
+
+_SECRET_MARKERS = (
+    "authorization:",
+    "bearer ",
+    "cookie=",
+    "cookies=",
+    "password=",
+    "passwd=",
+    "token=",
+    "access_token=",
+    "refresh_token=",
+    "api_key=",
+    "apikey=",
+    "--cookies-from-browser",
+)
+_WINDOWS_ABSOLUTE_PATH = re.compile(r"^[a-zA-Z]:[\\/]")
+
+
+def _safe_reference(value: str, *, field_name: str) -> str:
+    candidate = value.strip()
+    if not candidate:
+        raise ValueError(f"{field_name} must not be empty")
+    if any(ord(character) < 32 for character in candidate):
+        raise ValueError(f"{field_name} must not contain control characters")
+
+    lowered = candidate.lower()
+    if any(marker in lowered for marker in _SECRET_MARKERS):
+        raise ValueError(f"{field_name} must not contain credential material")
+    if (
+        candidate.startswith(("/", "~", "\\\\"))
+        or _WINDOWS_ABSOLUTE_PATH.match(candidate)
+        or lowered.startswith("file:")
+    ):
+        raise ValueError(f"{field_name} must not contain a local filesystem reference")
+
+    parsed = urlsplit(candidate)
+    if parsed.scheme:
+        if parsed.scheme.lower() not in {"http", "https"}:
+            raise ValueError(f"{field_name} URL scheme must be http or https")
+        if not parsed.hostname:
+            raise ValueError(f"{field_name} URL must include a hostname")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError(f"{field_name} URL must not include user information")
+        if parsed.query:
+            raise ValueError(f"{field_name} URL must not include a query string")
+    return candidate
+
+
+def _safe_machine_label(value: str) -> str:
+    candidate = value.strip()
+    if not candidate:
+        raise ValueError("machine_label must not be empty")
+    lowered = candidate.lower()
+    if any(marker in lowered for marker in _SECRET_MARKERS):
+        raise ValueError("machine_label must not contain credential material")
+    if (
+        candidate.startswith(("/", "~", "\\\\"))
+        or _WINDOWS_ABSOLUTE_PATH.match(candidate)
+        or any(separator in candidate for separator in ("/", "\\", ":"))
+    ):
+        raise ValueError("machine_label must be an operator label, not a path or endpoint")
+    if any(ord(character) < 32 for character in candidate):
+        raise ValueError("machine_label must not contain control characters")
+    return candidate
 
 
 class BinaryEvidence(FrozenModel):
@@ -24,6 +90,11 @@ class BinaryEvidence(FrozenModel):
     source_reference: str = Field(min_length=1, max_length=1000)
     license_classification: str = Field(min_length=1, max_length=300)
 
+    @field_validator("source_reference")
+    @classmethod
+    def validate_source_reference(cls, value: str) -> str:
+        return _safe_reference(value, field_name="binary source_reference")
+
 
 class ModelEvidence(FrozenModel):
     model_id: str = Field(min_length=1, max_length=160)
@@ -33,6 +104,16 @@ class ModelEvidence(FrozenModel):
     size_bytes: int = Field(ge=1)
     license_reference: str = Field(min_length=1, max_length=1000)
     source_reference: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("license_reference")
+    @classmethod
+    def validate_license_reference(cls, value: str) -> str:
+        return _safe_reference(value, field_name="model license_reference")
+
+    @field_validator("source_reference")
+    @classmethod
+    def validate_source_reference(cls, value: str) -> str:
+        return _safe_reference(value, field_name="model source_reference")
 
 
 class EngineExecutionEvidence(FrozenModel):
@@ -65,6 +146,11 @@ class TargetMachineResourceEvidence(FrozenModel):
     samples: tuple[ResourceMeasurementSample, ...] = Field(min_length=1, max_length=60)
     operator_attested_target: bool = False
 
+    @field_validator("machine_label")
+    @classmethod
+    def validate_machine_label(cls, value: str) -> str:
+        return _safe_machine_label(value)
+
     @model_validator(mode="after")
     def validate_sample_order(self) -> TargetMachineResourceEvidence:
         expected = tuple(range(1, len(self.samples) + 1))
@@ -89,6 +175,11 @@ class MediaProofManifest(FrozenModel):
         engines_by_id = {item.engine_id: item for item in self.engines}
         if len(engines_by_id) != len(self.engines):
             raise ValueError("engine evidence IDs must be unique")
+        for descriptor in self.engines:
+            _safe_reference(
+                descriptor.source_reference,
+                field_name=f"engine {descriptor.engine_id} source_reference",
+            )
         binaries_by_component = {item.component_id: item for item in self.binaries}
         if len(binaries_by_component) != len(self.binaries):
             raise ValueError("binary evidence component IDs must be unique")

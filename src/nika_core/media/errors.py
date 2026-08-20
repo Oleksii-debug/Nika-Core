@@ -14,6 +14,7 @@ class MediaErrorCode(StrEnum):
     UNSUPPORTED_SOURCE = "unsupported_source"
     PLAYLIST_LIMIT = "playlist_limit"
     DURATION_LIMIT = "duration_limit"
+    METADATA_LIMIT = "metadata_limit"
     PROCESS_FAILED = "process_failed"
     PROCESS_TIMEOUT = "process_timeout"
     PROCESS_CANCELLED = "process_cancelled"
