@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from nika_core.research.network_schema import RESEARCH_NETWORK_MIGRATION_11
+from nika_core.research.profile_schema import RESEARCH_PROFILE_MIGRATION_12
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -396,4 +397,5 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "CREATE INDEX IF NOT EXISTS idx_corpus_document_artifacts_doc ON corpus_document_artifacts(document_id)",
     ),
     11: RESEARCH_NETWORK_MIGRATION_11,
+    12: RESEARCH_PROFILE_MIGRATION_12,
 }
