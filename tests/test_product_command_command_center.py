@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +15,7 @@ from nika_core.product_command.product_project_adapter import ProductProjectComm
 from nika_core.product_factory_coordinator import (
     ComponentWorkRequest,
     CoordinatorSnapshot,
+    ReviewDecision,
     WorkRecord,
     WorkState,
 )
@@ -26,11 +28,13 @@ from nika_core.product_factory_deployment import (
     EnvironmentTier,
     ExecutionNode,
     ExecutionRegistrySnapshot,
+    HealthEvidence,
     NodeCapabilities,
     NodeIdentity,
     Platform,
     ReleaseRef,
     ResourceEnvelope,
+    RollbackEvidence,
     WorkLease,
 )
 from nika_core.product_project import ProductProjectRepository, ProductProjectSpec
@@ -153,6 +157,91 @@ def test_command_center_rejects_foreign_or_corrupt_coordinator_snapshot(tmp_path
         )
 
 
+def test_duplicate_coordinator_component_identity_fails_closed(tmp_path) -> None:
+    center = _center(tmp_path)
+    record = _work_record()
+
+    with pytest.raises(ProductCommandCenterScopeError, match="duplicate component identities"):
+        center.inspect_project(
+            "project-1",
+            coordinator=CoordinatorSnapshot("project-1", 1, (record, record)),
+        )
+
+
+def test_duplicate_coordinator_work_identity_fails_closed(tmp_path) -> None:
+    center = _center(tmp_path)
+    first = _work_record(component_id="core")
+    second_request = ComponentWorkRequest(
+        work_id=first.request.work_id,
+        project_id="project-1",
+        component_id="ui",
+        repository_id="repo-core",
+        goal="Implement UI",
+        base_sha=SHA_A,
+        allowed_paths=("ui/",),
+        permission_ceiling=frozenset({"workspace.write"}),
+        acceptance_commands=(("python", "-m", "pytest"),),
+    )
+    second = WorkRecord(second_request, WorkState.READY)
+
+    with pytest.raises(ProductCommandCenterScopeError, match="duplicate work identities"):
+        center.inspect_project(
+            "project-1",
+            coordinator=CoordinatorSnapshot("project-1", 1, (first, second)),
+        )
+
+
+def test_coordinator_result_identity_mismatch_fails_closed(tmp_path) -> None:
+    center = _center(tmp_path)
+    base = _work_record()
+    result = SimpleNamespace(
+        work_id="wrong-work",
+        component_id=base.request.component_id,
+        repository_id=base.request.repository_id,
+        base_sha=base.request.base_sha,
+        coding_result=SimpleNamespace(job_id=base.request.work_id),
+    )
+    record = WorkRecord(base.request, WorkState.RUNNING, result=result)
+
+    with pytest.raises(ProductCommandCenterScopeError, match="result evidence does not match"):
+        center.inspect_project(
+            "project-1",
+            coordinator=CoordinatorSnapshot("project-1", 1, (record,)),
+        )
+
+
+def test_review_without_worker_result_fails_closed(tmp_path) -> None:
+    center = _center(tmp_path)
+    base = _work_record()
+    review = ReviewDecision("auditor", True, "approved", ("review://ok",))
+    record = WorkRecord(base.request, WorkState.REVIEW_REQUIRED, review=review)
+
+    with pytest.raises(ProductCommandCenterScopeError, match="review exists without"):
+        center.inspect_project(
+            "project-1",
+            coordinator=CoordinatorSnapshot("project-1", 1, (record,)),
+        )
+
+
+def test_accepted_work_without_accepted_review_evidence_fails_closed(tmp_path) -> None:
+    center = _center(tmp_path)
+    base = _work_record()
+    result = SimpleNamespace(
+        work_id=base.request.work_id,
+        component_id=base.request.component_id,
+        repository_id=base.request.repository_id,
+        base_sha=base.request.base_sha,
+        coding_result=SimpleNamespace(job_id=base.request.work_id),
+    )
+    record = WorkRecord(base.request, WorkState.ACCEPTED, result=result)
+
+    with pytest.raises(ProductCommandCenterScopeError, match="accepted independent review"):
+        center.inspect_project(
+            "project-1",
+            coordinator=CoordinatorSnapshot("project-1", 1, (record,)),
+        )
+
+
 def test_execution_presentation_only_exposes_nodes_leased_to_target_project(tmp_path) -> None:
     center = _center(tmp_path)
     snapshot = ExecutionRegistrySnapshot(
@@ -172,6 +261,59 @@ def test_execution_presentation_only_exposes_nodes_leased_to_target_project(tmp_
     assert "node-b" not in serialized
     assert "work-b" not in serialized
     assert "project-2" not in serialized
+
+
+def test_duplicate_execution_node_identity_fails_closed(tmp_path) -> None:
+    center = _center(tmp_path)
+    snapshot = ExecutionRegistrySnapshot((_node("node-a"), _node("node-a")), (), 1)
+
+    with pytest.raises(ProductCommandCenterScopeError, match="duplicate node identities"):
+        center.inspect_project("project-1", execution=snapshot)
+
+
+def test_duplicate_execution_lease_identity_fails_closed(tmp_path) -> None:
+    center = _center(tmp_path)
+    lease = _lease("lease-a", "project-1", "work-a", "node-a")
+    snapshot = ExecutionRegistrySnapshot((_node("node-a"),), (lease, lease), 2)
+
+    with pytest.raises(ProductCommandCenterScopeError, match="duplicate lease identities"):
+        center.inspect_project("project-1", execution=snapshot)
+
+
+def test_execution_node_cannot_have_two_active_leases(tmp_path) -> None:
+    center = _center(tmp_path)
+    snapshot = ExecutionRegistrySnapshot(
+        (_node("node-a"),),
+        (
+            _lease("lease-a", "project-1", "work-a", "node-a"),
+            _lease("lease-b", "project-2", "work-b", "node-a"),
+        ),
+        3,
+    )
+
+    with pytest.raises(ProductCommandCenterScopeError, match="multiple active leases"):
+        center.inspect_project("project-1", execution=snapshot)
+
+
+def test_execution_lease_unknown_node_fails_closed(tmp_path) -> None:
+    center = _center(tmp_path)
+    snapshot = ExecutionRegistrySnapshot(
+        (_node("node-a"),),
+        (_lease("lease-b", "project-1", "work-b", "missing-node"),),
+        2,
+    )
+
+    with pytest.raises(ProductCommandCenterScopeError, match="unknown node"):
+        center.inspect_project("project-1", execution=snapshot)
+
+
+def test_execution_lease_invalid_lifetime_fails_closed(tmp_path) -> None:
+    center = _center(tmp_path)
+    bad = WorkLease("lease-a", "project-1", "work-a", "node-a", NOW, NOW)
+    snapshot = ExecutionRegistrySnapshot((_node("node-a"),), (bad,), 2)
+
+    with pytest.raises(ProductCommandCenterScopeError, match="invalid lease lifetime"):
+        center.inspect_project("project-1", execution=snapshot)
 
 
 def test_deployment_presentation_filters_foreign_project_records(tmp_path) -> None:
@@ -207,12 +349,124 @@ def test_deployment_presentation_filters_foreign_project_records(tmp_path) -> No
     assert "credential://provider/" not in serialized
 
 
-def test_duplicate_project_status_identity_fails_closed(tmp_path) -> None:
+def test_duplicate_deployment_intent_identity_fails_closed(tmp_path) -> None:
     center = _center(tmp_path)
-    record = _work_record()
+    record = _deployment_record(
+        project_id="project-1",
+        intent_id="stage-target",
+        environment_id="env-target",
+        source_sha=SHA_A,
+        digest=DIGEST_A,
+    )
+    snapshot = DeploymentFabricSnapshot((record, record), (), ())
 
-    with pytest.raises(ProductCommandCenterScopeError, match="duplicate ProductProject status"):
+    with pytest.raises(ProductCommandCenterScopeError, match="duplicate intent identities"):
+        center.inspect_project("project-1", deployment=snapshot)
+
+
+def test_duplicate_healthy_staging_project_identity_fails_closed(tmp_path) -> None:
+    center = _center(tmp_path)
+    snapshot = DeploymentFabricSnapshot(
+        (),
+        (("project-1", SHA_A), ("project-1", SHA_B)),
+        (),
+    )
+
+    with pytest.raises(ProductCommandCenterScopeError, match="healthy-staging"):
+        center.inspect_project("project-1", deployment=snapshot)
+
+
+def test_duplicate_current_release_environment_identity_fails_closed(tmp_path) -> None:
+    center = _center(tmp_path)
+    snapshot = DeploymentFabricSnapshot(
+        (),
+        (),
+        (("env-target", SHA_A), ("env-target", SHA_B)),
+    )
+
+    with pytest.raises(ProductCommandCenterScopeError, match="current-release"):
+        center.inspect_project("project-1", deployment=snapshot)
+
+
+def test_mismatched_deployment_health_evidence_fails_closed(tmp_path) -> None:
+    center = _center(tmp_path)
+    base = _deployment_record(
+        project_id="project-1",
+        intent_id="stage-target",
+        environment_id="env-target",
+        source_sha=SHA_A,
+        digest=DIGEST_A,
+    )
+    health = HealthEvidence("env-other", SHA_A, True, ("health://ok",), NOW)
+    record = DeploymentRecord(
+        base.intent,
+        DeploymentState.HEALTH_CHECK,
+        ("deploy://ok",),
+        health=health,
+    )
+
+    with pytest.raises(ProductCommandCenterScopeError, match="health evidence does not match"):
         center.inspect_project(
             "project-1",
-            coordinator=CoordinatorSnapshot("project-1", 1, (record, record)),
+            deployment=DeploymentFabricSnapshot((record,), (), ()),
+        )
+
+
+def test_healthy_deployment_state_requires_healthy_evidence(tmp_path) -> None:
+    center = _center(tmp_path)
+    base = _deployment_record(
+        project_id="project-1",
+        intent_id="stage-target",
+        environment_id="env-target",
+        source_sha=SHA_A,
+        digest=DIGEST_A,
+    )
+    record = DeploymentRecord(base.intent, DeploymentState.HEALTHY, ("deploy://ok",))
+
+    with pytest.raises(ProductCommandCenterScopeError, match="lacks matching healthy evidence"):
+        center.inspect_project(
+            "project-1",
+            deployment=DeploymentFabricSnapshot((record,), (), ()),
+        )
+
+
+def test_mismatched_rollback_evidence_fails_closed(tmp_path) -> None:
+    center = _center(tmp_path)
+    base = _deployment_record(
+        project_id="project-1",
+        intent_id="stage-target",
+        environment_id="env-target",
+        source_sha=SHA_A,
+        digest=DIGEST_A,
+    )
+    rollback = RollbackEvidence("env-target", SHA_B, None, False, ("rollback://bad",))
+    record = DeploymentRecord(
+        base.intent,
+        DeploymentState.REJECTED,
+        ("deploy://ok",),
+        rollback=rollback,
+    )
+
+    with pytest.raises(ProductCommandCenterScopeError, match="rollback evidence does not match"):
+        center.inspect_project(
+            "project-1",
+            deployment=DeploymentFabricSnapshot((record,), (), ()),
+        )
+
+
+def test_rolled_back_state_requires_successful_rollback_evidence(tmp_path) -> None:
+    center = _center(tmp_path)
+    base = _deployment_record(
+        project_id="project-1",
+        intent_id="stage-target",
+        environment_id="env-target",
+        source_sha=SHA_A,
+        digest=DIGEST_A,
+    )
+    record = DeploymentRecord(base.intent, DeploymentState.ROLLED_BACK, ("deploy://ok",))
+
+    with pytest.raises(ProductCommandCenterScopeError, match="successful rollback evidence"):
+        center.inspect_project(
+            "project-1",
+            deployment=DeploymentFabricSnapshot((record,), (), ()),
         )
