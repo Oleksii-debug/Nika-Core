@@ -4,8 +4,8 @@ from nika_core.product_factory_coordinator import (
     CoordinatorError,
     ProductFactoryCoordinator,
     ReviewDecision,
-    WorkState,
     WorkerResultEnvelope,
+    WorkState,
 )
 from nika_core.product_factory_orchestration import (
     ProductComponent,
