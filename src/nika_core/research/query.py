@@ -4,7 +4,12 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.research.models import FreshnessState, ResearchResultSet, SearchHit, SourceKind
+from nika_core.research.models import (
+    FreshnessState,
+    ResearchResultSet,
+    SearchHit,
+    SourceKind,
+)
 from nika_core.research.network_repository import NetworkResearchRepository
 from nika_core.research.normalize import normalize_text
 
@@ -67,22 +72,28 @@ class DeterministicResearchQueryService:
         if filters.source_ids:
             lines.append(f"Source IDs: {', '.join(filters.source_ids)}")
         if filters.source_kinds:
-            lines.append("Source kinds: " + ", ".join(kind.value for kind in filters.source_kinds))
+            values = ", ".join(kind.value for kind in filters.source_kinds)
+            lines.append(f"Source kinds: {values}")
         if filters.media_types:
             lines.append(f"Media types: {', '.join(filters.media_types)}")
         if filters.freshness:
-            lines.append("Freshness: " + ", ".join(state.value for state in filters.freshness))
+            values = ", ".join(state.value for state in filters.freshness)
+            lines.append(f"Freshness: {values}")
         lines.extend((f"Results: {len(execution.result_set.items)}", ""))
 
         for index, item in enumerate(execution.result_set.items, start=1):
-            lines.extend((f"{index}. {item.title}", f"Snippet: {item.snippet}", "Sources:"))
+            lines.extend(
+                (f"{index}. {item.title}", f"Snippet: {item.snippet}", "Sources:")
+            )
             if not item.evidence:
                 lines.append("- No source provenance recorded")
             for evidence in item.evidence:
                 label = evidence.source_kind.value
                 if evidence.freshness is not None:
                     label += f", freshness={evidence.freshness.value}"
-                lines.append(f"- {label}: {evidence.locator} (observed {evidence.observed_at})")
+                lines.append(
+                    f"- {label}: {evidence.locator} (observed {evidence.observed_at})"
+                )
             lines.append("")
         return "\n".join(lines).rstrip() + "\n"
 
@@ -91,7 +102,11 @@ class DeterministicResearchQueryService:
             raise ValueError("workspace_id is required")
         if spec.limit < 1 or spec.limit > 100:
             raise ValueError("limit must be between 1 and 100")
-        if spec.filters.freshness and spec.filters.source_kinds and SourceKind.HTTP not in spec.filters.source_kinds:
+        if (
+            spec.filters.freshness
+            and spec.filters.source_kinds
+            and SourceKind.HTTP not in spec.filters.source_kinds
+        ):
             raise ValueError("freshness filters require HTTP sources")
 
         source_ids = self._normalized_source_ids(spec.filters.source_ids)
@@ -100,11 +115,13 @@ class DeterministicResearchQueryService:
         placeholders = ",".join("?" for _ in source_ids)
         with self._store.connection() as conn:
             local_rows = conn.execute(
-                f"SELECT source_id, workspace_id FROM research_sources WHERE source_id IN ({placeholders})",
+                "SELECT source_id, workspace_id FROM research_sources "
+                f"WHERE source_id IN ({placeholders})",
                 source_ids,
             ).fetchall()
             http_rows = conn.execute(
-                f"SELECT source_id, workspace_id FROM research_http_sources WHERE source_id IN ({placeholders})",
+                "SELECT source_id, workspace_id FROM research_http_sources "
+                f"WHERE source_id IN ({placeholders})",
                 source_ids,
             ).fetchall()
         owners: dict[str, set[str]] = {}
@@ -139,7 +156,9 @@ class DeterministicResearchQueryService:
         params: list[object] = [fts_query, spec.workspace_id]
 
         if filters.media_types:
-            media_types = tuple(dict.fromkeys(value.strip() for value in filters.media_types))
+            media_types = tuple(
+                dict.fromkeys(value.strip() for value in filters.media_types)
+            )
             if any(not value for value in media_types):
                 raise ValueError("media_types must not contain empty values")
             placeholders = ",".join("?" for _ in media_types)
