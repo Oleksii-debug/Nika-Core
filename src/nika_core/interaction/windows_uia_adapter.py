@@ -177,6 +177,36 @@ class PywinautoUIABackend:
             return None
 
     @staticmethod
+    def _same_element(left, right) -> bool:
+        """Use pywinauto's UIAElementInfo equality, which delegates to CompareElements.
+
+        RuntimeId is opaque identity evidence but may appear more than once when a provider
+        or traversal returns multiple wrappers for the same live AutomationElement. Those
+        wrappers may be collapsed only when UI Automation itself confirms they are the same
+        element. Comparison failure is treated as distinct so the caller remains fail-closed.
+        """
+        try:
+            return bool(left.element_info == right.element_info)
+        except Exception as exc:  # noqa: BLE001 - stale/failed COM comparison must fail closed
+            logger.debug("UIA CompareElements-equivalent comparison failed: %r", exc)
+            return False
+
+    def _dedupe_same_elements(self, wrappers) -> tuple:
+        unique: list = []
+        by_runtime: dict[tuple[int, ...], list] = {}
+        for wrapper in wrappers:
+            runtime_id = self._runtime_id(wrapper.element_info)
+            if runtime_id is None:
+                unique.append(wrapper)
+                continue
+            same_runtime = by_runtime.setdefault(runtime_id, [])
+            if any(self._same_element(existing, wrapper) for existing in same_runtime):
+                continue
+            same_runtime.append(wrapper)
+            unique.append(wrapper)
+        return tuple(unique)
+
+    @staticmethod
     def _patterns(wrapper) -> tuple[str, ...]:
         pairs = (
             ("Invoke", "iface_invoke"),
@@ -232,7 +262,7 @@ class PywinautoUIABackend:
         if view not in {"control", "content"}:
             raise ValueError("view must be 'control' or 'content'")
         window = self._window(hwnd)
-        wrappers = (window, *window.descendants())
+        wrappers = self._dedupe_same_elements((window, *window.descendants()))
         records: list[UIAControlRecord] = []
         for wrapper in wrappers:
             info = wrapper.element_info
@@ -245,7 +275,7 @@ class PywinautoUIABackend:
 
     def _wrapper_by_runtime_id(self, hwnd: int, runtime_id: tuple[int, ...]):
         window = self._window(hwnd)
-        candidates = (window, *window.descendants())
+        candidates = self._dedupe_same_elements((window, *window.descendants()))
         matches = [
             wrapper
             for wrapper in candidates
