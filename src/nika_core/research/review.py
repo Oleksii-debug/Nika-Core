@@ -27,7 +27,7 @@ def _required(value: str, field_name: str) -> str:
 
 
 def _entity_id(workspace_id: str, document_id: str) -> str:
-    payload = f"{workspace_id}\0{document_id}".encode("utf-8")
+    payload = f"{workspace_id}\0{document_id}".encode()
     return hashlib.sha256(payload).hexdigest()
 
 
