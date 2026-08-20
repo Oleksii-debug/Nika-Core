@@ -16,6 +16,7 @@ from nika_core.research.models import (
     ExtractedDocument,
     ResearchEvidence,
     ResearchResultItem,
+    ResearchWorkspace,
     SourceKind,
     SourceSpec,
 )
@@ -38,7 +39,6 @@ from nika_core.research.scheduled_profiles import (
     ScheduledResearchProfileService,
 )
 from nika_core.research.web_service import HttpResearchService
-from nika_core.research.models import ResearchWorkspace
 from nika_core.scheduler import ScheduledJob, TriggerKind
 
 PUBLIC_IP = "93.184.216.34"
