@@ -448,11 +448,13 @@ class DeploymentFabric:
         )
 
     def _enforce_staging_first(self, intent: DeploymentIntent) -> None:
-        if intent.environment.tier is EnvironmentTier.PRODUCTION:
-            if self._healthy_staging.get(intent.project_id) != intent.release.source_sha:
-                raise DeploymentFabricError(
-                    "production deploy requires healthy staging proof for exact release"
-                )
+        if (
+            intent.environment.tier is EnvironmentTier.PRODUCTION
+            and self._healthy_staging.get(intent.project_id) != intent.release.source_sha
+        ):
+            raise DeploymentFabricError(
+                "production deploy requires healthy staging proof for exact release"
+            )
 
     def _record(self, intent_id: str) -> DeploymentRecord:
         try:
