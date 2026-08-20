@@ -39,6 +39,38 @@ def test_safe_process_runner_supports_explicit_cancellation(tmp_path: Path) -> N
     assert caught.value.code == MediaErrorCode.PROCESS_CANCELLED
 
 
+def test_safe_process_runner_terminates_when_watched_file_exceeds_limit(tmp_path: Path) -> None:
+    watched = tmp_path / "download.partial.part"
+    code = (
+        "from pathlib import Path; import time; "
+        "Path('download.partial.part').write_bytes(b'x' * 128); time.sleep(10)"
+    )
+    with pytest.raises(MediaError) as caught:
+        SafeProcessRunner().run(
+            (sys.executable, "-c", code),
+            cwd=tmp_path,
+            timeout_seconds=5,
+            watched_paths=(watched,),
+            max_watched_file_bytes=16,
+        )
+    assert caught.value.code == MediaErrorCode.SOURCE_TOO_LARGE
+    assert watched.exists()
+    assert watched.stat().st_size == 128
+
+
+def test_safe_process_runner_rejects_watch_path_outside_cwd(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "outside.partial"
+    with pytest.raises(MediaError) as caught:
+        SafeProcessRunner().run(
+            (sys.executable, "-c", "print('never started')"),
+            cwd=tmp_path,
+            timeout_seconds=5,
+            watched_paths=(outside,),
+            max_watched_file_bytes=16,
+        )
+    assert caught.value.code == MediaErrorCode.PATH_ESCAPE
+
+
 def test_partial_promotion_validates_checksum_and_renames_atomically(tmp_path: Path) -> None:
     partial = tmp_path / "audio.wav.partial"
     final = tmp_path / "audio.wav"
