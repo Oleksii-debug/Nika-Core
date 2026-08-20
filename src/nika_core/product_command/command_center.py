@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from nika_core.product_command.contracts import ProductProjectDetail, ProductStatusKind
 from nika_core.product_command.coordinator_adapter import coordinator_status_entries
+from nika_core.product_command.credential_adapter import credential_status_entries
 from nika_core.product_command.deployment_adapter import (
     deployment_status_entries,
     execution_status_entries,
 )
 from nika_core.product_command.product_project_adapter import ProductProjectCommandService
 from nika_core.product_factory_coordinator import CoordinatorSnapshot
+from nika_core.product_factory_credentials import CredentialBrokerSnapshot
 from nika_core.product_factory_deployment import (
     DeploymentFabricSnapshot,
     ExecutionRegistrySnapshot,
@@ -31,8 +33,9 @@ class ProductCommandCenter:
         coordinator: CoordinatorSnapshot | None = None,
         execution: ExecutionRegistrySnapshot | None = None,
         deployment: DeploymentFabricSnapshot | None = None,
+        credentials: CredentialBrokerSnapshot | None = None,
     ) -> ProductProjectDetail:
-        detail = self._projects.inspect_project(project_id)
+        detail, credential_refs = self._projects.inspect_project_context(project_id)
         statuses = list(detail.statuses)
 
         if coordinator is not None:
@@ -43,6 +46,11 @@ class ProductCommandCenter:
         if deployment is not None:
             statuses.extend(
                 deployment_status_entries(_scope_deployment(project_id, deployment))
+            )
+        if credentials is not None:
+            _validate_credential_scope(project_id, credential_refs, credentials)
+            statuses.extend(
+                credential_status_entries(project_id, credential_refs, credentials)
             )
 
         _require_unique_status_identity(statuses)
@@ -95,6 +103,83 @@ def _scope_deployment(
         item for item in snapshot.current_releases if item[0] in environment_ids
     )
     return DeploymentFabricSnapshot(records, healthy_staging, current_releases)
+
+
+def _validate_credential_scope(
+    project_id: str,
+    declared_refs: tuple[str, ...],
+    snapshot: CredentialBrokerSnapshot,
+) -> None:
+    if any(not ref.strip() for ref in declared_refs):
+        raise ProductCommandCenterScopeError(
+            "ProductProject contains an empty credential reference"
+        )
+    if len(declared_refs) != len(set(declared_refs)):
+        raise ProductCommandCenterScopeError(
+            "ProductProject contains duplicate credential references"
+        )
+
+    secret_refs = [secret.secret_ref for secret in snapshot.secrets]
+    identity_refs = [identity.identity_ref for identity in snapshot.identities]
+    audit_ids = [event.event_id for event in snapshot.audit_events]
+    if len(secret_refs) != len(set(secret_refs)):
+        raise ProductCommandCenterScopeError(
+            "credential snapshot contains duplicate secret-reference identities"
+        )
+    if len(identity_refs) != len(set(identity_refs)):
+        raise ProductCommandCenterScopeError(
+            "credential snapshot contains duplicate identity-reference identities"
+        )
+    if len(audit_ids) != len(set(audit_ids)):
+        raise ProductCommandCenterScopeError(
+            "credential snapshot contains duplicate audit-event identities"
+        )
+
+    secrets = {secret.secret_ref: secret for secret in snapshot.secrets}
+    target_refs = {
+        secret.secret_ref for secret in snapshot.secrets if secret.project_id == project_id
+    }
+    for declared_ref in declared_refs:
+        secret = secrets.get(declared_ref)
+        if secret is not None and secret.project_id != project_id:
+            raise ProductCommandCenterScopeError(
+                "ProductProject credential reference resolves to another project"
+            )
+
+    for identity in snapshot.identities:
+        touches_target = identity.project_id == project_id or any(
+            ref in target_refs for ref in identity.secret_refs
+        )
+        if not touches_target:
+            continue
+        if identity.project_id != project_id:
+            raise ProductCommandCenterScopeError(
+                "credential identity crosses ProductProject boundary"
+            )
+        for secret_ref in identity.secret_refs:
+            secret = secrets.get(secret_ref)
+            if secret is None or secret.project_id != project_id:
+                raise ProductCommandCenterScopeError(
+                    "credential identity binds a secret outside ProductProject scope"
+                )
+            if secret.provider != identity.provider:
+                raise ProductCommandCenterScopeError(
+                    "credential identity provider does not match bound secret provider"
+                )
+
+    for event in snapshot.audit_events:
+        touches_target = event.project_id == project_id or event.secret_ref in target_refs
+        if not touches_target:
+            continue
+        secret = secrets.get(event.secret_ref)
+        if (
+            event.project_id != project_id
+            or secret is None
+            or secret.project_id != project_id
+        ):
+            raise ProductCommandCenterScopeError(
+                "credential audit event crosses ProductProject boundary"
+            )
 
 
 def _require_unique_status_identity(statuses) -> None:
