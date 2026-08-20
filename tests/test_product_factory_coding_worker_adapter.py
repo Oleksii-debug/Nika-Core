@@ -23,10 +23,12 @@ from nika_core.toolsmith.contracts import (
     ProcessPolicy,
     RecoveryState,
     ResourceBudget,
-    TestEvidence as WorkerTestEvidence,
     WorkerFailure,
     WorkerFailureKind,
     WorkspaceLease,
+)
+from nika_core.toolsmith.contracts import (
+    TestEvidence as WorkerTestEvidence,
 )
 
 SHA_A = "a" * 40
