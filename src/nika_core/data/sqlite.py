@@ -7,6 +7,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from nika_core.data.schema import MIGRATIONS, SCHEMA_VERSION
+from nika_core.product_project_schema import (
+    PRODUCT_PROJECT_MIGRATIONS,
+    PRODUCT_PROJECT_SCHEMA_VERSION,
+)
 
 
 class SQLiteStore:
@@ -50,6 +54,34 @@ class SQLiteStore:
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (version, datetime.now(UTC).isoformat()),
                 )
+            self._initialize_product_project_schema(conn)
+
+    @staticmethod
+    def _initialize_product_project_schema(conn: sqlite3.Connection) -> None:
+        """Apply the independently-owned PF schema without editing reserved research migrations."""
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS product_project_schema_migrations ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        row = conn.execute(
+            "SELECT MAX(version) AS version FROM product_project_schema_migrations"
+        ).fetchone()
+        current = int(row["version"] or 0)
+        if current > PRODUCT_PROJECT_SCHEMA_VERSION:
+            raise RuntimeError(
+                "product project database schema "
+                f"{current} is newer than supported schema {PRODUCT_PROJECT_SCHEMA_VERSION}"
+            )
+        for version in range(current + 1, PRODUCT_PROJECT_SCHEMA_VERSION + 1):
+            statements = PRODUCT_PROJECT_MIGRATIONS.get(version)
+            if statements is None:
+                raise RuntimeError(f"missing product project migration {version}")
+            for statement in statements:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO product_project_schema_migrations(version, applied_at) VALUES (?, ?)",
+                (version, datetime.now(UTC).isoformat()),
+            )
 
     def schema_version(self) -> int:
         with self.connection() as conn:
