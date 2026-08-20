@@ -12,7 +12,12 @@ from nika_core.product_factory_orchestration import (
     ProductRepositoryGraph,
     RepositoryRef,
 )
-from nika_core.toolsmith.contracts import CodingResult, TestEvidence, WorkerFailure, WorkerFailureKind
+from nika_core.toolsmith.contracts import (
+    CodingResult,
+    TestEvidence,
+    WorkerFailure,
+    WorkerFailureKind,
+)
 
 
 SHA_A = "a" * 40
