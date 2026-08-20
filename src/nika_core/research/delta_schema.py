@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 RESEARCH_DELTA_MIGRATION_13: tuple[str, ...] = (
+    """CREATE TABLE IF NOT EXISTS research_profile_series_tasks (
+        series_id TEXT NOT NULL,
+        task_id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(task_id) REFERENCES tasks(task_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_research_profile_series_tasks ON research_profile_series_tasks(series_id, created_at DESC, task_id)",
     """CREATE TABLE IF NOT EXISTS research_profile_run_history (
         task_id TEXT PRIMARY KEY,
         series_id TEXT NOT NULL,
