@@ -1,10 +1,47 @@
 # Software Factory and local intelligence reuse audit
 
-Updated: 2026-08-19.
+Updated: 2026-08-20.
 Status: binding reuse/adoption direction. Implementation credit still requires exact executable gates.
 
 ## Software Factory objective
 The user should be able to state an end product such as “build an accessible chess application” and let Nika coordinate planning, reuse research, implementation, testing, accessibility review and release work. Nika should not recreate a complete coding-agent runtime that already exists.
+
+The 2026-08-20 binding clarification expands this objective: Software Factory is the implementation arm of a larger **Autonomous Product Factory**, not merely a code-generation service. Large goals such as a messenger, social network, screen-reader-like product, browser-agent platform or business application are durable ProductProjects that may span many repositories, specialist workers, platforms and weeks/months of execution. See `docs/AUTONOMOUS_PRODUCT_FACTORY.md` and `docs/AUTONOMOUS_PRODUCT_FACTORY_ACCEPTANCE.md`.
+
+## ProductProject boundary
+A long-lived product effort is not represented only by one CodingJob. Nika owns a first-class durable ProductProject describing goal, research evidence, requirements, architecture decisions, repositories/components, milestones, team ownership, budgets, connectors, risks, tests, releases, deployments, incidents and maintenance state.
+
+CodingJob remains a bounded worker unit inside ProductProject. Toolsmith may also use CodingJob for a narrow missing capability without creating a full ProductProject.
+
+## Research-to-Product boundary
+Universal Research and Software Factory must share a formal handoff. When the user requests market/problem research before development, evidence and decisions flow into versioned product requirements without manual copy/paste:
+
+`Goal -> Research -> Opportunity/Problem -> Product Options -> User/Policy Decision -> ProductProject -> Requirements -> Architecture -> Implementation`.
+
+A user may also start directly from a supplied specification when research is unnecessary.
+
+## Dynamic Team Composer
+Nika coordinates roles based on project scope and risk; the team is not a fixed set of permanent agents.
+
+Possible roles include:
+- product researcher;
+- product planner/manager;
+- requirements analyst;
+- architect;
+- security architect;
+- coding worker;
+- backend/web/Windows/mobile/data specialists as required;
+- independent test/reviewer;
+- accessibility reviewer;
+- DevOps/release worker;
+- support/maintenance worker.
+
+A single capable worker may perform several roles when that is more efficient. Multi-agent fan-out must be justified by useful independence rather than agent count. New specialization may be composed during execution when a project reveals a gap, under the ProductProject permission ceiling.
+
+## Multi-repository product graph
+Software Factory must support one-repository and multi-repository products through a Nika-owned ProductRepositoryGraph. Components may include backend/API, web, Windows desktop, Android, iOS/macOS, infrastructure, shared SDK, tests and documentation.
+
+Every component has explicit identity, repository/ref ownership, dependencies, build/test commands, release version and deployment target. Parallel workers must not silently edit overlapping ownership. Shared-contract changes require an explicit compatibility/integration decision.
 
 ## OpenHands — ADAPT as the first Software Factory coding-worker candidate
 Official SDK: https://docs.openhands.dev/sdk
@@ -13,10 +50,12 @@ Official repository/license: https://github.com/OpenHands/OpenHands
 Nika decision:
 - do not build a complete coding-agent shell/editor/tool runtime from scratch before a practical OpenHands proof;
 - integrate only compatible permissively licensed surfaces unless a separate licensing decision is made;
-- Nika owns project state, roles, safety, branch policy, approval, acceptance gates and release truth;
+- Nika owns ProductProject/project state, roles, safety, branch policy, approval, acceptance gates and release truth;
 - OpenHands is a replaceable implementation of `CodingWorkerPort`, not the owner of Nika projects;
 - production modifications happen in an isolated workspace/worktree/branch and return patch/commit/test evidence;
 - prefer official SDK/API/server integration; never automate the OpenHands web UI as a hidden workaround.
+
+Codex or another future coding worker may be integrated behind the same Nika-owned worker contracts if it proves useful. No coding-worker provider becomes the product architecture.
 
 Required proof before adoption:
 1. open an isolated test repository/worktree;
@@ -29,24 +68,17 @@ Required proof before adoption:
 8. verify no API keys, auth files, browser profiles or private logs enter commits;
 9. compare glue-code volume against a thinner direct model + shell/file-tool adapter.
 
-## Software Factory role model
-Nika coordinates roles, not necessarily separate heavyweight agents for every task:
-- product planner;
-- reuse researcher;
-- architect;
-- coding worker;
-- independent test/reviewer;
-- accessibility reviewer;
-- release worker.
-
-A single capable worker may perform several roles when that is more efficient. Multi-agent fan-out must be justified by useful independence rather than agent count.
-
 ## Capability Escalation / Toolsmith
 Software Factory is also the implementation arm of Nika's Toolsmith loop. A running agent that proves it lacks a capability may request a bounded capability addition. Nika first searches its existing Tool Registry/plugins and maintained upstream solutions; only then may a CodingWorker adapt/create the missing capability in isolation. The candidate must pass tests/security/compatibility gates, be registered/versioned normally, and allow the original task to resume from checkpoint. No direct production-main rewrite and no self-granted permission expansion are allowed.
 
+Toolsmith and Product Factory share worker/reuse/security infrastructure but are distinct scopes:
+- Toolsmith closes a narrow capability gap for an existing task;
+- Product Factory manages the lifecycle of an entire product or major system.
+
 ## Nika-owned Software Factory contracts
-Do not leak OpenHands-specific objects into the domain. Stable contracts describe:
-- repository/workspace identity and allowed paths;
+Do not leak OpenHands/Codex/provider-specific objects into the domain. Stable contracts describe:
+- ProductProject identity and version;
+- repository/component/workspace identity and allowed paths;
 - requested goal and acceptance criteria;
 - branch/worktree isolation policy;
 - allowed tools and network policy;
@@ -55,6 +87,25 @@ Do not leak OpenHands-specific objects into the domain. Stable contracts describ
 - cancellation/deadline/resource limits;
 - risk classification and approval requirements;
 - provenance: worker implementation, model/provider, versions and source baseline.
+
+## Deployment Fabric
+Source code is not by itself a completed product. Product Factory requires a provider-neutral DeploymentFabric for approved environments. It should support, where applicable, deterministic build/package, staging, database migration, hosting/cloud/domain/DNS connectors, post-deploy health proof, release promotion and rollback.
+
+Deployment providers are adapters. Nika owns deployment intent, environment identity, policy, audit and release truth. Production promotion remains governed by authorization policy.
+
+## Remote build/execution nodes
+Nika must not assume one local Windows laptop can build every target. Product Factory needs a versioned execution-node abstraction for approved local/remote workers such as Windows, Linux CI, macOS/Xcode, cloud/GPU or organization-managed nodes.
+
+Nodes advertise platform/capability/resource evidence and receive only project-scoped paths/network/credentials. A missing required platform blocks or reroutes the job; Nika must never falsify success.
+
+## Credential/Identity Broker consequence
+Product Factory may connect GitHub, hosting, cloud, APIs, deployment targets or business platforms, but raw passwords/API keys do not belong in prompts, model memory, Git, logs or ProductProject records. Project state stores opaque references; workers receive least-privilege scoped/short-lived credentials where supported; uses are auditable and revocable.
+
+## Product operations and maintenance
+Factory responsibility continues after v1. A ProductProject may track health/incidents, user-approved feedback, GitHub/provider issues, dependency/security advisories, maintenance tasks, isolated fixes, regression tests, new releases and rollback. Production source is never silently self-modified; maintenance uses the same branch/test/review/release gates.
+
+## Product-factory acceptance
+The representative proof is not “generate one source file”. From a clean packaged Nika installation, a natural-language product request must produce research/decision where requested, durable ProductProject state, requirements, team composition, repository creation/connection, isolated implementation, independent QA/accessibility evidence, package/release evidence and restart/resume without manual source-code copy/paste. Binding gates are in `docs/AUTONOMOUS_PRODUCT_FACTORY_ACCEPTANCE.md`.
 
 # Deterministic Brain — no LLM/model required
 
@@ -139,7 +190,7 @@ Nika's end-state intelligence choices are independent and replaceable:
 Routing uses privacy, capability, latency/resource and user-policy constraints. No provider becomes the product architecture.
 
 ## Packaging consequence
-Foundry model files, llama.cpp/other engines, OpenHands, browser automation, vision models, transcription models and other heavyweight capabilities stay optional components. Nika Core remains a small control plane. Program updates should not force re-downloading models or user data.
+Foundry model files, llama.cpp/other engines, OpenHands/Codex, browser automation, vision models, transcription models and other heavyweight capabilities stay optional components. Nika Core remains a small control plane. Program updates should not force re-downloading models or user data.
 
 ## Product Journey consequence
 An intelligence adapter is not a finished user capability until it is reachable from the final packaged Windows product through a real task/agent path, produces accessible status/errors, preserves relevant state, and passes the Product Journey gate in `docs/ACCEPTANCE_GATES.md`.
