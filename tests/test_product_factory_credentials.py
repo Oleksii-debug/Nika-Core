@@ -110,6 +110,7 @@ def test_opaque_lease_and_audit_never_serialize_raw_secret() -> None:
         repr(broker.audit_events(PROJECT_A)),
     )
     assert all(RAW_SECRET not in surface for surface in serialized_surfaces)
+    assert lease.handle_ref not in repr(lease)
     assert lease.handle_ref.startswith("fake-protected-handle-")
     assert evidence.secret_ref == "secret-a"
 
@@ -146,6 +147,20 @@ def test_scope_and_audience_are_attenuated_fail_closed() -> None:
             audience="unrelated-service",
             scopes=frozenset({"repo:read"}),
             now=NOW,
+        )
+
+
+def test_lease_ttl_is_bounded() -> None:
+    broker, _store = broker_with_secret()
+
+    with pytest.raises(CredentialBrokerError, match="ttl exceeds maximum"):
+        broker.issue_lease(
+            project_id=PROJECT_A,
+            secret_ref="secret-a",
+            audience="github-api",
+            scopes=frozenset({"repo:read"}),
+            now=NOW,
+            ttl_seconds=901,
         )
 
 
@@ -264,7 +279,7 @@ def test_identity_is_only_visible_to_own_project() -> None:
         broker.get_identity(project_id=PROJECT_B, identity_ref="identity-a")
 
 
-def test_restart_snapshot_never_restores_active_leases() -> None:
+def test_restart_snapshot_drops_leases_but_preserves_audit() -> None:
     broker, store = broker_with_secret()
     lease = broker.issue_lease(
         project_id=PROJECT_A,
@@ -279,6 +294,7 @@ def test_restart_snapshot_never_restores_active_leases() -> None:
 
     assert RAW_SECRET not in repr(snapshot)
     assert restored.list_project_secret_refs(PROJECT_A) == broker.list_project_secret_refs(PROJECT_A)
+    assert restored.audit_events(PROJECT_A) == broker.audit_events(PROJECT_A)
     with pytest.raises(CredentialBrokerError, match="unknown or invalidated"):
         restored.authorize_use(
             lease_id=lease.lease_id,
@@ -292,8 +308,8 @@ def test_snapshot_rejects_cross_project_identity_tampering() -> None:
     broker, store = broker_with_secret()
     snapshot = broker.snapshot()
     tampered = type(snapshot)(
-        snapshot.secrets,
-        (
+        secrets=snapshot.secrets,
+        identities=(
             IdentityRef(
                 "identity-tampered",
                 PROJECT_B,
@@ -302,11 +318,35 @@ def test_snapshot_rejects_cross_project_identity_tampering() -> None:
                 ("secret-a",),
             ),
         ),
-        snapshot.next_lease,
-        snapshot.next_event,
+        audit_events=snapshot.audit_events,
+        next_lease=snapshot.next_lease,
+        next_event=snapshot.next_event,
     )
 
     with pytest.raises(CredentialBrokerError, match="crosses project boundary"):
+        CredentialBroker(store).restore(tampered)
+
+
+def test_snapshot_rejects_cross_provider_identity_tampering() -> None:
+    broker, store = broker_with_secret()
+    snapshot = broker.snapshot()
+    tampered = type(snapshot)(
+        secrets=snapshot.secrets,
+        identities=(
+            IdentityRef(
+                "identity-tampered",
+                PROJECT_A,
+                "other-provider",
+                "subject-ref-a",
+                ("secret-a",),
+            ),
+        ),
+        audit_events=snapshot.audit_events,
+        next_lease=snapshot.next_lease,
+        next_event=snapshot.next_event,
+    )
+
+    with pytest.raises(CredentialBrokerError, match="provider does not match"):
         CredentialBroker(store).restore(tampered)
 
 

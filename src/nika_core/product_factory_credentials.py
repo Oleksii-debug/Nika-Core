@@ -5,6 +5,8 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Protocol
 
+_MAX_CREDENTIAL_LEASE_TTL_SECONDS = 900
+
 
 class CredentialBrokerError(ValueError):
     """Raised when PF3 credential/identity invariants are violated."""
@@ -68,7 +70,7 @@ class CredentialLease:
     audience: str
     scopes: frozenset[str]
     generation: int
-    handle_ref: str
+    handle_ref: str = field(repr=False)
     issued_at: datetime
     expires_at: datetime
 
@@ -141,6 +143,7 @@ class CredentialAuditEvent:
 class CredentialBrokerSnapshot:
     secrets: tuple[SecretRef, ...]
     identities: tuple[IdentityRef, ...]
+    audit_events: tuple[CredentialAuditEvent, ...]
     next_lease: int
     next_event: int
 
@@ -210,6 +213,8 @@ class CredentialBroker:
     ) -> CredentialLease:
         if ttl_seconds <= 0:
             raise CredentialBrokerError("credential lease ttl must be positive")
+        if ttl_seconds > _MAX_CREDENTIAL_LEASE_TTL_SECONDS:
+            raise CredentialBrokerError("credential lease ttl exceeds maximum")
         instant = _aware(now or datetime.now(UTC))
         secret = self._authorized_secret(project_id, secret_ref)
         if secret.state is CredentialState.REVOKED:
@@ -358,6 +363,7 @@ class CredentialBroker:
         return CredentialBrokerSnapshot(
             tuple(self._secrets[key] for key in sorted(self._secrets)),
             tuple(self._identities[key] for key in sorted(self._identities)),
+            tuple(self._audit),
             self._next_lease,
             self._next_event,
         )
@@ -365,8 +371,11 @@ class CredentialBroker:
     def restore(self, snapshot: CredentialBrokerSnapshot) -> None:
         secret_ids = [secret.secret_ref for secret in snapshot.secrets]
         identity_ids = [identity.identity_ref for identity in snapshot.identities]
+        audit_ids = [event.event_id for event in snapshot.audit_events]
         if len(secret_ids) != len(set(secret_ids)) or len(identity_ids) != len(set(identity_ids)):
             raise CredentialBrokerError("credential broker snapshot contains duplicate identities")
+        if len(audit_ids) != len(set(audit_ids)):
+            raise CredentialBrokerError("credential broker snapshot contains duplicate audit events")
         secrets = {secret.secret_ref: secret for secret in snapshot.secrets}
         for identity in snapshot.identities:
             bound = [secrets.get(secret_ref) for secret_ref in identity.secret_refs]
@@ -374,10 +383,16 @@ class CredentialBroker:
                 raise CredentialBrokerError("snapshot identity references unknown secret")
             if any(secret.project_id != identity.project_id for secret in bound if secret is not None):
                 raise CredentialBrokerError("snapshot identity crosses project boundary")
+            if any(secret.provider != identity.provider for secret in bound if secret is not None):
+                raise CredentialBrokerError("snapshot identity provider does not match credential provider")
+        for event in snapshot.audit_events:
+            secret = secrets.get(event.secret_ref)
+            if secret is None or secret.project_id != event.project_id:
+                raise CredentialBrokerError("snapshot audit event crosses credential project boundary")
         self._secrets = secrets
         self._identities = {identity.identity_ref: identity for identity in snapshot.identities}
         self._leases = {}
-        self._audit = []
+        self._audit = list(snapshot.audit_events)
         self._next_lease = snapshot.next_lease
         self._next_event = snapshot.next_event
 
