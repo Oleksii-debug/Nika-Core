@@ -5,11 +5,20 @@ import re
 from nika_core.product_command.contracts import CommandRouteDecision, CommandRouteKind
 
 _PRODUCT_PATTERNS = (
-    re.compile(r"\b(create|build|develop|launch|maintain)\b.*\b(product|application|app|service|website|platform)\b", re.I),
-    re.compile(r"\b(product|application|app|service|website|platform)\b.*\b(research|design|implement|test|package|deploy|maintain)\b", re.I),
+    re.compile(
+        r"\b(create|build|develop|launch|maintain)\b.*\b(product|application|app|service|website|platform)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(product|application|app|service|website|platform)\b.*\b(research|design|implement|test|package|deploy|maintain)\b",
+        re.IGNORECASE,
+    ),
 )
 _TOOLSMITH_PATTERNS = (
-    re.compile(r"\b(missing|need|add|build)\b.*\b(tool|capability|plugin|connector)\b", re.I),
+    re.compile(
+        r"\b(missing|need|add|build)\b.*\b(tool|capability|plugin|connector)\b",
+        re.IGNORECASE,
+    ),
 )
 
 
