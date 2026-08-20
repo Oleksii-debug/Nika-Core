@@ -64,6 +64,7 @@ jobs:
           tests/test_media_persistence_privacy.py
           tests/test_media_process_files.py
           tests/test_media_resource_evidence.py
+          tests/test_media_semantic_corrector.py
       - name: Lint media foundation
         run: >-
           python -m ruff check
@@ -81,6 +82,7 @@ jobs:
           tests/test_media_persistence_privacy.py
           tests/test_media_process_files.py
           tests/test_media_resource_evidence.py
+          tests/test_media_semantic_corrector.py
       - name: Run focused DEV05 media tests
         run: >-
           python -m pytest -q
@@ -96,3 +98,4 @@ jobs:
           tests/test_media_persistence_privacy.py
           tests/test_media_process_files.py
           tests/test_media_resource_evidence.py
+          tests/test_media_semantic_corrector.py
