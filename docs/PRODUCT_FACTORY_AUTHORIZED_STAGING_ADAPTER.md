@@ -15,6 +15,10 @@ Current upstream evidence checked on 2026-08-21:
   for Nika to classify mutating transport failures as uncertain rather than safe rejection.
 - Ansible Runner 2.4.3 is the current release observed in the upstream release feed. It is an optional
   dependency only; base Nika installation does not pull it in.
+- Ansible's official control-node documentation does not support native Windows as a control node. WSL is
+  also explicitly not supported for production use. Therefore Nika's Windows desktop must not silently
+  become an Ansible/SSH control plane: the real Runner dependency is installed only on non-Windows, and a
+  real staging proof must execute on an explicitly authorized suitable execution/control node or service.
 
 ## Trust boundary
 
@@ -56,13 +60,15 @@ written to ordinary Nika logs/evidence.
 
 ## Real vs fake evidence
 
-Production code includes a real optional `AnsibleRunnerClient` bridge. The focused tests inject a fake
-Runner execution port and a fake ansible-runner module object; they do not connect to SSH, WinRM, a cloud
-provider, an inventory host, AWX/AAP or any external deployment target.
+Production code includes a real optional `AnsibleRunnerClient` bridge for a supported non-Windows
+control node. The focused tests inject a fake Runner execution port and a fake ansible-runner module
+object; they do not connect to SSH, WinRM, a cloud provider, an inventory host, AWX/AAP or any external
+deployment target. Windows CI exercises the provider-neutral adapter contract without installing or
+pretending to run a native Windows Ansible control node.
 
 This means the adapter contract and normalization boundary are implemented, while real staging mutation
-remains unverified until an explicitly authorized staging environment, inventory, playbooks and protected
-credentials are supplied under the project's high-impact authorization policy.
+remains unverified until an explicitly authorized staging environment, supported control node, inventory,
+playbooks and protected credentials are supplied under the project's high-impact authorization policy.
 
 ## Focused acceptance matrix
 
