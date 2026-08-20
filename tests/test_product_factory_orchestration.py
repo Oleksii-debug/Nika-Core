@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+
 from nika_core.product_factory_orchestration import (
     ComponentBrief,
     DynamicTeamComposer,
