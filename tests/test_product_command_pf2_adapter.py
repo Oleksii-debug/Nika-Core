@@ -5,9 +5,9 @@ from nika_core.product_factory_coordinator import (
     ComponentWorkRequest,
     CoordinatorSnapshot,
     ReviewDecision,
+    WorkerResultEnvelope,
     WorkRecord,
     WorkState,
-    WorkerResultEnvelope,
 )
 from nika_core.toolsmith.contracts import CodingResult, TestEvidence
 
