@@ -180,14 +180,18 @@ def test_remote_acquisition_rejects_credentials_and_private_targets_before_runne
     assert runner.calls == []
 
 
-def test_remote_acquisition_rejects_format_argument_injection(tmp_path: Path) -> None:
+@pytest.mark.parametrize("format_id", ["best --exec calc.exe", "--exec"])
+def test_remote_acquisition_rejects_format_argument_injection(
+    tmp_path: Path,
+    format_id: str,
+) -> None:
     runner = WritingRunner()
     with pytest.raises(ValueError, match="format_id"):
         YtDlpRemoteAcquirer(runner).acquire_media(
             "https://example.com/watch/42",
             version_id="v1",
             output_root=tmp_path,
-            format_id="best --exec calc.exe",
+            format_id=format_id,
         )
     assert runner.calls == []
 
