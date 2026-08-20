@@ -16,6 +16,10 @@ from nika_core.product_factory_credentials import (
 )
 
 _MAX_AUDIT_EVIDENCE_PER_CREDENTIAL = 20
+_MAX_STATUS_LABEL = 240
+_MAX_STATUS_DETAIL = 4000
+_MAX_EVIDENCE_REFERENCE = 512
+_MAX_EVIDENCE_LABEL = 240
 
 
 def credential_status_entries(
@@ -69,7 +73,10 @@ def credential_status_entries(
                 ProductStatusEntry(
                     kind=ProductStatusKind.BLOCKER,
                     item_id=f"credential:{opaque_id}:revoked",
-                    label=f"Credential blocker: {secret.provider} / {secret.purpose}",
+                    label=_bounded_text(
+                        f"Credential blocker: {secret.provider} / {secret.purpose}",
+                        _MAX_STATUS_LABEL,
+                    ),
                     state="active",
                     detail=(
                         "A credential declared by ProductProject is revoked. Re-authorization "
@@ -92,16 +99,22 @@ def _credential_entry(
     audiences = ", ".join(sorted(secret.allowed_audiences))
     link_state = "declared" if linked else "broker-only"
     visible_state = secret.state.value if linked else f"{secret.state.value}_unlinked"
+    label = _bounded_text(
+        f"Credential {secret.provider} / {secret.purpose}",
+        _MAX_STATUS_LABEL,
+    )
+    detail = _bounded_text(
+        f"Provider: {secret.provider}; purpose: {secret.purpose}; generation: "
+        f"{secret.generation}; ProductProject link: {link_state}; scopes: {scopes}; "
+        f"audiences: {audiences}.",
+        _MAX_STATUS_DETAIL,
+    )
     return ProductStatusEntry(
         kind=ProductStatusKind.CREDENTIAL,
         item_id=f"credential:{opaque_id}",
-        label=f"Credential {secret.provider} / {secret.purpose}",
+        label=label,
         state=visible_state,
-        detail=(
-            f"Provider: {secret.provider}; purpose: {secret.purpose}; generation: "
-            f"{secret.generation}; scopes: {scopes}; audiences: {audiences}; "
-            f"ProductProject link: {link_state}."
-        ),
+        detail=detail,
         evidence=_audit_evidence(audit_events),
     )
 
@@ -113,12 +126,30 @@ def _audit_evidence(
     return tuple(
         EvidenceReference(
             kind="credential_audit",
-            reference=event.event_id,
-            label=f"Credential broker audit: {event.action}",
+            reference=_evidence_reference(event.event_id),
+            label=_bounded_text(
+                f"Credential broker audit: {event.action}",
+                _MAX_EVIDENCE_LABEL,
+            ),
         )
         for event in selected
     )
 
 
+def _evidence_reference(event_id: str) -> str:
+    if len(event_id) <= _MAX_EVIDENCE_REFERENCE:
+        return event_id
+    digest = hashlib.sha256(event_id.encode("utf-8")).hexdigest()
+    return f"credential-audit-sha256:{digest}"
+
+
 def _opaque_reference_id(secret_ref: str) -> str:
     return hashlib.sha256(secret_ref.encode("utf-8")).hexdigest()
+
+
+def _bounded_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    if limit <= 1:
+        return value[:limit]
+    return value[: limit - 1] + "…"
