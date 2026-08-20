@@ -6,7 +6,6 @@ from ..data.sqlite import SQLiteStore
 from .accounting import AccountSnapshot
 from .orders import SimulatedFill
 
-
 _TRADER_SCHEMA_VERSION = 1
 
 
