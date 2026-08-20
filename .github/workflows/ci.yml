@@ -163,8 +163,11 @@ jobs:
         run: python scripts/m9_browser_adapter_proof.py
 
   m9-live-windows-uia-proof:
-    name: M9 live Windows UIA semantic proof
-    if: github.event_name == 'pull_request' && github.head_ref == 'dev/m9-real-adapter-proofs'
+    name: M9 / DEV04 live Windows UIA semantic proof
+    if: >-
+      github.event_name == 'pull_request' &&
+      (github.head_ref == 'dev/m9-real-adapter-proofs' ||
+       github.head_ref == 'dev/dev04-windows-uia-semantic-vertical')
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -177,7 +180,9 @@ jobs:
           cache: pip
       - name: Verify exact candidate checkout identity
         run: python scripts/qa_assert_checkout_identity.py
-      - name: Install M9 Windows UIA adapter
-        run: python -m pip install -e ".[windows-interaction]"
-      - name: Prove UIA semantic tree through Nika adapter
-        run: python scripts/m9_windows_uia_proof.py
+      - name: Install Windows UIA adapter
+        run: python -m pip install -e ".[dev,windows-interaction]"
+      - name: Run deterministic strict-identity UIA tests
+        run: python -m pytest tests/test_interaction_windows_uia_adapter.py -q
+      - name: Prove strict WinForms UIA semantic actions through Nika adapter
+        run: python scripts/dev04_windows_uia_proof.py
