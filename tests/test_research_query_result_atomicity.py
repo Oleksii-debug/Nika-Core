@@ -7,9 +7,9 @@ import pytest
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.research import NetworkResearchRepository, ResearchWorkspace
+from nika_core.research.models import SearchHit
 from nika_core.research.query_results import ScopedResearchResultWriter
 from nika_core.research.repository import ResearchRepository
-from nika_core.research.models import SearchHit
 
 
 def test_result_header_rolls_back_when_item_insert_fails(tmp_path: Path) -> None:
