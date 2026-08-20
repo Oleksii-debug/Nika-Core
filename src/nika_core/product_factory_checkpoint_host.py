@@ -435,7 +435,7 @@ def _decode_coordinator(payload: Any) -> CoordinatorSnapshot:
     data = _dict(payload, "coordinator")
     records = data.get("records")
     if not isinstance(records, list):
-        raise ValueError("coordinator records must be a list")
+        raise TypeError("coordinator records must be a list")
     return CoordinatorSnapshot(
         project_id=_text(data, "project_id"),
         revision=_nonnegative_int(data, "revision"),
@@ -538,7 +538,7 @@ def _decode_review(payload: Any) -> ReviewDecision:
     data = _dict(payload, "review decision")
     accepted = data.get("accepted")
     if not isinstance(accepted, bool):
-        raise ValueError("review accepted must be boolean")
+        raise TypeError("review accepted must be boolean")
     return ReviewDecision(
         reviewer_id=_text(data, "reviewer_id"),
         accepted=accepted,
@@ -623,7 +623,7 @@ def _decode_test_evidence(payload: Any) -> TestEvidence:
         raise ValueError("test evidence command must be non-empty argv")
     exit_code = data.get("exit_code")
     if not isinstance(exit_code, int) or isinstance(exit_code, bool):
-        raise ValueError("test evidence exit_code must be an integer")
+        raise TypeError("test evidence exit_code must be an integer")
     return TestEvidence(
         command=tuple(command),
         exit_code=exit_code,
@@ -652,7 +652,7 @@ def _decode_failure(payload: Any) -> WorkerFailure:
     data = _dict(payload, "worker failure")
     retryable = data.get("retryable")
     if not isinstance(retryable, bool):
-        raise ValueError("worker failure retryable must be boolean")
+        raise TypeError("worker failure retryable must be boolean")
     return WorkerFailure(
         kind=WorkerFailureKind(_text(data, "kind")),
         message=_text(data, "message"),
@@ -662,7 +662,7 @@ def _decode_failure(payload: Any) -> WorkerFailure:
 
 def _dict(value: Any, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
-        raise ValueError(f"{label} must be an object")
+        raise TypeError(f"{label} must be an object")
     return value
 
 
@@ -685,7 +685,7 @@ def _text_tuple(data: dict[str, Any], key: str) -> tuple[str, ...]:
 def _argv_tuple(data: dict[str, Any], key: str) -> tuple[tuple[str, ...], ...]:
     value = data.get(key)
     if not isinstance(value, list):
-        raise ValueError(f"{key} must be an argv list")
+        raise TypeError(f"{key} must be an argv list")
     commands: list[tuple[str, ...]] = []
     for command in value:
         if not isinstance(command, list) or not command or not all(
