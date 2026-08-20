@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -88,6 +89,10 @@ def _context() -> CodingWorkerDispatchContext:
     )
 
 
+def _run(coroutine):
+    return asyncio.run(coroutine)
+
+
 class FakeContexts:
     def __init__(self) -> None:
         self.requests = []
@@ -145,8 +150,7 @@ class FakeWorker:
         )
 
 
-@pytest.mark.asyncio
-async def test_dispatch_maps_component_scope_to_public_coding_job_and_exact_evidence() -> None:
+def test_dispatch_maps_component_scope_to_public_coding_job_and_exact_evidence() -> None:
     coordinator = _coordinator()
     request = coordinator.start("core")
     worker = FakeWorker()
@@ -154,7 +158,7 @@ async def test_dispatch_maps_component_scope_to_public_coding_job_and_exact_evid
     evidence = FakeEvidence()
     adapter = CodingWorkerComponentAdapter(worker, contexts, evidence)
 
-    envelope = await adapter.dispatch(request)
+    envelope = _run(adapter.dispatch(request))
 
     job = worker.executed[0]
     assert job.job_id == request.work_id
@@ -172,20 +176,18 @@ async def test_dispatch_maps_component_scope_to_public_coding_job_and_exact_evid
     assert envelope.coding_result.test_evidence[0].exit_code == 0
 
 
-@pytest.mark.asyncio
-async def test_run_component_hands_success_to_independent_review_without_auto_accepting() -> None:
+def test_run_component_hands_success_to_independent_review_without_auto_accepting() -> None:
     coordinator = _coordinator()
     adapter = CodingWorkerComponentAdapter(FakeWorker(), FakeContexts(), FakeEvidence())
 
-    record = await adapter.run_component(coordinator, "core")
+    record = _run(adapter.run_component(coordinator, "core"))
 
     assert record.state is WorkState.REVIEW_REQUIRED
     assert "ui" not in {request.component_id for request in coordinator.ready_requests()}
     assert "docs" in {request.component_id for request in coordinator.ready_requests()}
 
 
-@pytest.mark.asyncio
-async def test_typed_worker_failure_is_preserved_and_coordinator_requires_repair() -> None:
+def test_typed_worker_failure_is_preserved_and_coordinator_requires_repair() -> None:
     def fail(job):
         return CodingResult(
             job_id=job.job_id,
@@ -195,7 +197,7 @@ async def test_typed_worker_failure_is_preserved_and_coordinator_requires_repair
     coordinator = _coordinator()
     adapter = CodingWorkerComponentAdapter(FakeWorker(fail), FakeContexts(), FakeEvidence())
 
-    record = await adapter.run_component(coordinator, "core")
+    record = _run(adapter.run_component(coordinator, "core"))
 
     assert record.state is WorkState.REPAIR_REQUIRED
     assert record.result is not None
@@ -204,28 +206,26 @@ async def test_typed_worker_failure_is_preserved_and_coordinator_requires_repair
     assert [request.component_id for request in coordinator.ready_requests()] == ["docs"]
 
 
-@pytest.mark.asyncio
-async def test_cancel_and_inspect_delegate_to_same_public_worker_identity() -> None:
+def test_cancel_and_inspect_delegate_to_same_public_worker_identity() -> None:
     worker = FakeWorker()
     adapter = CodingWorkerComponentAdapter(worker, FakeContexts(), FakeEvidence())
 
-    await adapter.cancel("work-1")
-    state = await adapter.inspect("work-1")
+    _run(adapter.cancel("work-1"))
+    state = _run(adapter.inspect("work-1"))
 
     assert worker.cancelled == ["work-1"]
     assert worker.inspected == ["work-1"]
     assert state == RecoveryState("running", "token-1")
 
 
-@pytest.mark.asyncio
-async def test_recovery_rebuilds_same_bounded_job_and_returns_exact_envelope() -> None:
+def test_recovery_rebuilds_same_bounded_job_and_returns_exact_envelope() -> None:
     coordinator = _coordinator()
     request = coordinator.start("core")
     worker = FakeWorker()
     adapter = CodingWorkerComponentAdapter(worker, FakeContexts(), FakeEvidence())
     state = RecoveryState("interrupted", "resume-token")
 
-    envelope = await adapter.recover(request, state)
+    envelope = _run(adapter.recover(request, state))
 
     recovered_job, recovered_state = worker.recovered[0]
     assert recovered_job.job_id == request.work_id
@@ -236,8 +236,7 @@ async def test_recovery_rebuilds_same_bounded_job_and_returns_exact_envelope() -
     assert envelope.result_sha == SHA_B
 
 
-@pytest.mark.asyncio
-async def test_stale_evidence_is_rejected_before_it_can_reach_reconciliation() -> None:
+def test_stale_evidence_is_rejected_before_it_can_reach_reconciliation() -> None:
     coordinator = _coordinator()
     request = coordinator.start("core")
     adapter = CodingWorkerComponentAdapter(
@@ -247,11 +246,10 @@ async def test_stale_evidence_is_rejected_before_it_can_reach_reconciliation() -
     )
 
     with pytest.raises(CodingWorkerAdapterError, match="stale worker evidence"):
-        await adapter.dispatch(request)
+        _run(adapter.dispatch(request))
 
 
-@pytest.mark.asyncio
-async def test_cancelled_result_keeps_typed_cancel_failure() -> None:
+def test_cancelled_result_keeps_typed_cancel_failure() -> None:
     def cancelled(job):
         return CodingResult(
             job_id=job.job_id,
@@ -262,7 +260,7 @@ async def test_cancelled_result_keeps_typed_cancel_failure() -> None:
     coordinator = _coordinator()
     adapter = CodingWorkerComponentAdapter(FakeWorker(cancelled), FakeContexts(), FakeEvidence())
 
-    record = await adapter.run_component(coordinator, "core")
+    record = _run(adapter.run_component(coordinator, "core"))
 
     assert record.state is WorkState.REPAIR_REQUIRED
     assert record.result is not None
@@ -271,8 +269,7 @@ async def test_cancelled_result_keeps_typed_cancel_failure() -> None:
     assert record.result.coding_result.recovery_state == RecoveryState("cancelled", "resume-later")
 
 
-@pytest.mark.asyncio
-async def test_worker_result_for_wrong_job_id_is_rejected() -> None:
+def test_worker_result_for_wrong_job_id_is_rejected() -> None:
     def wrong_job(_job):
         return CodingResult(
             job_id="foreign-work",
@@ -284,4 +281,4 @@ async def test_worker_result_for_wrong_job_id_is_rejected() -> None:
     adapter = CodingWorkerComponentAdapter(FakeWorker(wrong_job), FakeContexts(), FakeEvidence())
 
     with pytest.raises(CodingWorkerAdapterError, match="job id"):
-        await adapter.dispatch(request)
+        _run(adapter.dispatch(request))
