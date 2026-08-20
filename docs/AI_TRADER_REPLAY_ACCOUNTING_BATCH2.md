@@ -1,6 +1,7 @@
 # AI Trader Research Lab — Batch 2 replay, accounting, risk
 
 Starting integrated main: `782105eba05da9714c30d45483049dbb1fe06370`.
+Current-main compatibility refresh base: `bb660079e91be2bfe74a45a075153a600fc9e232`.
 
 ## Scope
 
