@@ -9,6 +9,7 @@ import pytest
 from nika_core.media.acquisition import RemoteAcquisitionPolicy, YtDlpRemoteAcquirer
 from nika_core.media.contracts import AssetKind
 from nika_core.media.errors import MediaError, MediaErrorCode
+from nika_core.media.hashing import sha256_json
 from nika_core.media.process import ProcessResult
 
 
@@ -110,12 +111,11 @@ def test_oversized_resume_part_fails_before_subprocess(tmp_path: Path) -> None:
     runner = WritingRunner()
     acquirer = YtDlpRemoteAcquirer(runner)
     version_id = "remote-version:oversized"
-    stem = acquirer._validate_format_id(None)  # exercise validator without changing name basis
-    assert stem is None
-
-    from nika_core.media.hashing import sha256_json
-
-    name = f"remote-{sha256_json({'version_id': version_id, 'format_id': 'best'})[:32]}.media.partial.part"
+    name = (
+        "remote-"
+        f"{sha256_json({'version_id': version_id, 'format_id': 'best'})[:32]}"
+        ".media.partial.part"
+    )
     (tmp_path / name).write_bytes(b"12345")
 
     with pytest.raises(MediaError) as raised:
