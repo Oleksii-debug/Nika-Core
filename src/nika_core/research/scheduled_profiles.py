@@ -275,7 +275,7 @@ class ScheduledResearchProfileService:
         previous: tuple[ResearchResultItem, ...],
     ) -> tuple[ResearchDeltaItem, ...]:
         prior_documents = {item.document_id for item in previous}
-        prior_by_origin: dict[tuple[str, str, str], ResearchResultItem] = {}
+        prior_by_origin: dict[tuple[str, str], ResearchResultItem] = {}
         for item in previous:
             for evidence in item.evidence:
                 prior_by_origin.setdefault(cls._origin_key(evidence), item)
@@ -304,8 +304,8 @@ class ScheduledResearchProfileService:
         return tuple(delta)
 
     @staticmethod
-    def _origin_key(evidence: ResearchEvidence) -> tuple[str, str, str]:
-        return evidence.source_kind.value, evidence.source_id, evidence.locator
+    def _origin_key(evidence: ResearchEvidence) -> tuple[str, str]:
+        return evidence.source_kind.value, evidence.source_id
 
     @staticmethod
     def _required_text(value: object, label: str) -> str:
