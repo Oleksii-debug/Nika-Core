@@ -32,6 +32,10 @@ def _digest(value: int) -> str:
     return f"{value:064x}"[-64:]
 
 
+def _trusted_data_dir() -> Path:
+    return Path.cwd().resolve() / "trusted-nika-ansible"
+
+
 def _intent(
     *,
     tier: EnvironmentTier = EnvironmentTier.STAGING,
@@ -86,7 +90,7 @@ def _adapter(*executions: RunnerExecution) -> tuple[AuthorizedAnsibleStagingAdap
             "inventory/staging.ini",
             "approval-ref:pf3-staging-eu",
         ),
-        AnsibleRunnerConfig(Path("/trusted/nika-ansible")),
+        AnsibleRunnerConfig(_trusted_data_dir()),
         runner,
     )
     return adapter, runner
@@ -243,7 +247,7 @@ def test_authorization_reference_rejects_raw_secret_shape() -> None:
 
 def test_playbook_names_cannot_escape_trusted_runner_project() -> None:
     with pytest.raises(StagingAdapterError, match="trusted relative leaf"):
-        AnsibleRunnerConfig(Path("/trusted/nika-ansible"), deploy_playbook="../deploy.yml")
+        AnsibleRunnerConfig(_trusted_data_dir(), deploy_playbook="../deploy.yml")
 
 
 def test_private_data_dir_must_be_absolute_trusted_configuration() -> None:
@@ -279,7 +283,7 @@ def test_ansible_runner_client_extracts_only_named_contract_and_hash_evidence() 
 
     client = AnsibleRunnerClient(SimpleNamespace(run=run))
     execution = client.execute(
-        private_data_dir=Path("/trusted/nika-ansible"),
+        private_data_dir=_trusted_data_dir(),
         playbook="nika_pf3_deploy.yml",
         inventory="inventory/staging.ini",
         ident="nika-pf3-deploy-1",
@@ -303,7 +307,7 @@ def test_ansible_runner_client_evidence_is_deterministic_for_same_normalized_res
         )
 
     kwargs = {
-        "private_data_dir": Path("/trusted/nika-ansible"),
+        "private_data_dir": _trusted_data_dir(),
         "playbook": "nika_pf3_deploy.yml",
         "inventory": "inventory/staging.ini",
         "ident": "nika-pf3-deploy-1",
@@ -312,3 +316,16 @@ def test_ansible_runner_client_evidence_is_deterministic_for_same_normalized_res
     first = AnsibleRunnerClient(module()).execute(**kwargs)
     second = AnsibleRunnerClient(module()).execute(**kwargs)
     assert first == second
+
+
+def test_default_runner_loader_rejects_native_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("nika_core.product_factory_ansible_staging.sys.platform", "win32")
+    client = AnsibleRunnerClient()
+    with pytest.raises(StagingAdapterError, match="native Windows"):
+        client.execute(
+            private_data_dir=_trusted_data_dir(),
+            playbook="nika_pf3_deploy.yml",
+            inventory="inventory/staging.ini",
+            ident="nika-pf3-deploy-1",
+            extravars={"nika_release_sha": _sha(1)},
+        )
