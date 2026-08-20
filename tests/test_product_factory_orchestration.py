@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from nika_core.product_factory_orchestration import (
     ComponentBrief,
     DynamicTeamComposer,
@@ -15,7 +14,6 @@ from nika_core.product_factory_orchestration import (
     RepositoryRef,
     TeamCompositionRequest,
 )
-
 
 FULL_CEILING = frozenset(
     {"read_project", "update_project", "read_source", "write_source", "run_tests", "build_release"}
