@@ -19,7 +19,6 @@ from nika_core.toolsmith.contracts import (
     WorkerFailureKind,
 )
 
-
 SHA_A = "a" * 40
 SHA_B = "b" * 40
 DIGEST = "d" * 64
