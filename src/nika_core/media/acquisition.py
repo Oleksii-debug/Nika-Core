@@ -180,6 +180,8 @@ class YtDlpRemoteAcquirer:
         value = format_id.strip()
         if not value or len(value) > 120:
             raise ValueError("format_id must be non-empty text up to 120 characters")
+        if value.startswith("-"):
+            raise ValueError("format_id must not look like a command-line option")
         allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._+-/,[]()")
         if any(char not in allowed for char in value):
             raise ValueError("format_id contains unsupported characters")
