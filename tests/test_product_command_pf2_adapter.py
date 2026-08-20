@@ -1,5 +1,5 @@
-from nika_core.product_command.coordinator_adapter import coordinator_status_entries
 from nika_core.product_command.contracts import CommandRouteKind, ProductStatusKind
+from nika_core.product_command.coordinator_adapter import coordinator_status_entries
 from nika_core.product_command.routing import route_command
 from nika_core.product_factory_coordinator import (
     ComponentWorkRequest,
