@@ -46,6 +46,7 @@ credentials = [
   "keyring==25.7.0; sys_platform == 'win32'",
   "pywin32-ctypes==0.2.3; sys_platform == 'win32'",
 ]
+deployment = ["ansible-runner==2.4.3"]
 dev = ["pytest>=8,<9", "ruff>=0.12,<1", "pytest-cov>=6,<8"]
 qa = ["pip-audit>=2,<3", "pyinstaller>=6,<7"]
 
