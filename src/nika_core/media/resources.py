@@ -18,9 +18,10 @@ class MediaResourceLease:
 class MediaResourceCoordinator:
     """Thin DEV05 binding over the canonical ResourceManager.
 
-    Heavy media-model work uses a shared machine-level owner so only one heavy resident may be
-    granted at once by default. Media-specific minimum-memory and cross-class exclusion policy
-    stays in this adapter rather than widening the shared ResourceManager contract.
+    Heavy media-model work uses a shared machine-level owner and remains single-resident until a
+    future measured target-machine policy explicitly proves that higher concurrency is safe.
+    Media-specific minimum-memory and cross-class exclusion policy stays in this adapter rather
+    than widening the shared ResourceManager contract.
     """
 
     def __init__(
@@ -83,6 +84,13 @@ class MediaResourceCoordinator:
         return released
 
     def _validate_local_policy(self, claim: MediaResourceClaim) -> None:
+        if claim.resource_class == ResourceClass.HEAVY_MODEL and claim.max_concurrent != 1:
+            raise MediaError(
+                MediaErrorCode.RESOURCE_BLOCKED,
+                "heavy media-model concurrency above one requires separate target-machine proof",
+                retryable=False,
+            )
+
         if claim.min_available_memory_bytes is not None:
             if self._observer is None:
                 raise MediaError(
