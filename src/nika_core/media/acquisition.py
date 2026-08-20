@@ -23,6 +23,8 @@ class ProcessRunnerPort(Protocol):
         timeout_seconds: float,
         env: dict[str, str] | None = None,
         cancel_event: threading.Event | None = None,
+        watched_paths: tuple[Path, ...] = (),
+        max_watched_file_bytes: int | None = None,
     ) -> ProcessResult: ...
 
 
@@ -126,6 +128,8 @@ class YtDlpRemoteAcquirer:
                 cwd=root,
                 timeout_seconds=active_policy.timeout_seconds,
                 cancel_event=cancel_event,
+                watched_paths=(partial_path, resume_path),
+                max_watched_file_bytes=active_policy.max_bytes,
             )
         except MediaError:
             self._enforce_partial_bound(resume_path, max_bytes=active_policy.max_bytes)
