@@ -11,7 +11,6 @@ from nika_core.interaction import (
     DownloadBroker,
     FrameScope,
     PlaywrightInteractionAdapter,
-    UnsupportedInteractionError,
 )
 
 
@@ -116,15 +115,12 @@ def test_semantic_revision_tracks_accessibility_state_but_ignores_focus_marker()
     )
 
 
-def test_navigation_rejects_non_http_before_browser_access(tmp_path: Path) -> None:
+def test_adapter_exposes_no_direct_navigation_bypass(tmp_path: Path) -> None:
     adapter = PlaywrightInteractionAdapter(
         session=BrowserSession(download_root=tmp_path),
         page_id="not-started",
     )
-    with pytest.raises(UnsupportedInteractionError, match="http/https"):
-        adapter.navigate("file:///C:/Users/example/private.html")
-    with pytest.raises(UnsupportedInteractionError, match="http/https"):
-        adapter.navigate("javascript:alert(1)")
+    assert not hasattr(adapter, "navigate")
 
 
 def test_browser_session_is_ephemeral_by_contract(tmp_path: Path) -> None:
