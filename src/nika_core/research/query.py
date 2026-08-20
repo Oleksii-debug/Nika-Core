@@ -1,19 +1,18 @@
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.research.models import (
     FreshnessState,
-    ResearchEvidence,
     ResearchResultSet,
     SearchHit,
     SourceKind,
 )
 from nika_core.research.network_repository import NetworkResearchRepository
 from nika_core.research.normalize import normalize_text
+from nika_core.research.query_results import ScopedResearchResultWriter
 
 
 class SearchMode(StrEnum):
@@ -55,16 +54,28 @@ class DeterministicResearchQueryService:
     ) -> None:
         self._store = store
         self._network = network_repository
+        self._result_writer = ScopedResearchResultWriter(
+            store=store,
+            network_repository=network_repository,
+        )
 
     def execute(self, spec: ResearchQuerySpec) -> ResearchQueryExecution:
         self._validate_spec(spec)
         hits = self._search(spec, self._fts_query(spec.text, spec.mode))
-        result_set = self._network.save_result_set(
+        match_reason = (
+            f"Quoted phrase full-text match for: {spec.text}"
+            if spec.mode is SearchMode.PHRASE
+            else f"Literal-token full-text match for: {spec.text}"
+        )
+        result_set = self._result_writer.save(
             workspace_id=spec.workspace_id,
             query=spec.text,
             hits=hits,
+            source_ids=self._normalized_source_ids(spec.filters.source_ids),
+            source_kinds=spec.filters.source_kinds,
+            freshness=spec.filters.freshness,
+            why_matched=match_reason,
         )
-        result_set = self._scope_persisted_evidence(result_set, spec.filters)
         return ResearchQueryExecution(spec=spec, result_set=result_set)
 
     @staticmethod
@@ -226,83 +237,3 @@ class DeterministicResearchQueryService:
             )
             for row in rows
         ]
-
-    def _scope_persisted_evidence(
-        self,
-        result_set: ResearchResultSet,
-        filters: ResearchSearchFilters,
-    ) -> ResearchResultSet:
-        source_ids = set(self._normalized_source_ids(filters.source_ids))
-        source_kinds = set(filters.source_kinds)
-        freshness = set(filters.freshness)
-        if not source_ids and not source_kinds and not freshness:
-            return result_set
-
-        scoped_items = []
-        updates: list[tuple[str, str, int]] = []
-        for item in result_set.items:
-            evidence = tuple(
-                entry
-                for entry in item.evidence
-                if self._evidence_allowed(
-                    entry,
-                    source_ids=source_ids,
-                    source_kinds=source_kinds,
-                    freshness=freshness,
-                )
-            )
-            if not evidence:
-                raise RuntimeError(
-                    "query result matched a source filter but retained no matching provenance"
-                )
-            scoped_items.append(replace(item, evidence=evidence))
-            updates.append(
-                (
-                    self._evidence_json(evidence),
-                    result_set.result_set_id,
-                    item.ordinal,
-                )
-            )
-        with self._store.connection() as conn:
-            conn.executemany(
-                """UPDATE research_result_items SET evidence_json=?
-                WHERE result_set_id=? AND ordinal=?""",
-                updates,
-            )
-        return replace(result_set, items=tuple(scoped_items))
-
-    @staticmethod
-    def _evidence_allowed(
-        evidence: ResearchEvidence,
-        *,
-        source_ids: set[str],
-        source_kinds: set[SourceKind],
-        freshness: set[FreshnessState],
-    ) -> bool:
-        if source_ids and evidence.source_id not in source_ids:
-            return False
-        if source_kinds and evidence.source_kind not in source_kinds:
-            return False
-        if freshness:
-            if evidence.source_kind is not SourceKind.HTTP:
-                return False
-            if evidence.freshness not in freshness:
-                return False
-        return True
-
-    @staticmethod
-    def _evidence_json(evidence: tuple[ResearchEvidence, ...]) -> str:
-        return json.dumps(
-            [
-                {
-                    "source_id": item.source_id,
-                    "source_kind": item.source_kind.value,
-                    "locator": item.locator,
-                    "observed_at": item.observed_at,
-                    "freshness": item.freshness.value if item.freshness is not None else None,
-                }
-                for item in evidence
-            ],
-            ensure_ascii=False,
-            sort_keys=True,
-        )
