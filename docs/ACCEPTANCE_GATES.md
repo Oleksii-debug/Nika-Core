@@ -1,6 +1,8 @@
 # Acceptance gates
 
-A progress percentage moves only when evidence closes gates. Historical Core percentages and expanded Full Product Vision readiness are tracked separately; do not treat old Core credit as proof that every end-state workspace or user journey exists.
+A progress percentage moves only when evidence closes gates. Historical Core percentages and expanded Full Product Vision readiness are tracked separately; do not treat old Core credit as proof that every end-state workspace, ProductProject or user journey exists.
+
+The 2026-08-20 Autonomous Product Factory expansion adds product-level gates. Backend coding-worker success is not evidence that Nika can autonomously create a complete product. Binding extended gates are in `docs/AUTONOMOUS_PRODUCT_FACTORY_ACCEPTANCE.md`.
 
 ## Universal gates
 - source compiles and imports;
@@ -45,6 +47,41 @@ A user-facing subsystem is not complete until the same real capability is proven
 
 Placeholders, dead buttons, mock-only lists, or backend-only tests do not close this gate. The packaged path must cover success and critical error behavior, keyboard/focus semantics, and WebView2/UIA discovery where applicable. Final human NVDA verification remains separate and human-only.
 
+## ProductProject durability gate
+A full digital-product goal that is expected to span multiple tasks/worker cycles must create a first-class durable ProductProject rather than being represented as only one AgentTask/CodingJob. Goal, research/decisions, requirements, architecture, repositories/components, milestones, team ownership, blockers, artifacts, releases/deployments and maintenance state must survive restart. Scope mutation is versioned/recorded rather than silently overwritten.
+
+## Research-to-Product gate
+When product discovery is requested, Universal Research must be able to produce a versioned evidence package that becomes ProductProject input without manual copy/paste. Product options and requirements remain traceable to evidence/decisions. If the user must choose a direction, implementation cannot silently choose on the user's behalf outside an authorized policy.
+
+## Dynamic Team Composer gate
+Team composition must be derived from ProductProject scope/risk/dependencies rather than a fixed hard-coded agent count. New specializations may be added during work without corrupting existing ownership. Child/worker permissions may not exceed the ProductProject ceiling.
+
+## Multi-repository Product Factory gate
+A ProductProject must be able to own one or multiple repositories/components with explicit ownership, dependencies, build/test commands and release identity. Parallel workers cannot silently edit overlapping ownership. Shared-contract changes require an explicit compatibility decision.
+
+## Coding-worker / autonomous implementation gate
+From structured ProductProject acceptance criteria, implementation must occur in isolated branches/workspaces; exact commits/diffs and machine-readable tests return to Nika; independent QA/audit may reject and force repair; workers cannot write directly to production main, self-promote failed candidates or widen their own permissions.
+
+Coding-worker success alone is not Product Factory completion. The full representative proof is defined in `docs/AUTONOMOUS_PRODUCT_FACTORY_ACCEPTANCE.md`.
+
+## Multi-platform execution gate
+Product Factory must be able to model execution/build nodes by platform/capability/resource. A task requiring unavailable Windows/Linux/macOS/GPU capability must fail clearly or route to an authorized suitable node; it must never fabricate successful evidence. Nodes receive only project-scoped paths/network/credentials.
+
+## Credential/Identity Broker gate
+ProductProject/workspace/task records, model prompts, Git and normal logs may not contain raw persistent passwords/API keys merely because an agent needs a connector. Persistent secret material is referenced through protected credential storage; workers receive least-privilege scoped/short-lived credentials where supported. Revocation blocks later use. A worker cannot enumerate unrelated credentials. Audit evidence records credential use without serializing the secret.
+
+## Deployment gate
+For a deployable test product, prove exact-SHA build/package, approved staging deployment, environment identity without secret leakage, post-deploy health checks and failure/rollback behavior. Production promotion remains inside the applicable user/policy authorization level. Source code alone is not a completed deployed product.
+
+## Product operations/maintenance gate
+A released test ProductProject must be able to create maintenance work from approved incident/health/dependency/security evidence, implement a fix in isolation, regression-test it and issue a versioned release. Production source is never silently self-modified outside ordinary implementation/review/release gates.
+
+## Business Factory gate
+Using a controlled sandbox/test channel, prove the lifecycle from business objective to research/opportunity, allowed lead/work-order creation, ProductProject handoff, Product Factory delivery and durable support/payment state. External communication/account/contract/financial actions must follow platform rules and Nika authorization. No spam, deceptive impersonation, prohibited automation or self-expansion of account/financial authority receives acceptance credit.
+
+## IP/license/compliance gate
+Competitor research may use permitted public information and standards to design an independent implementation; Product Factory must not treat access to proprietary source/assets/credentials as authorization to copy them. Adopted dependencies/tools record source/version/license/distribution obligations, and missing/unacceptable provenance blocks release.
+
 ## Action Registry / keymap gate
 Every app action has a stable ID. User overrides persist outside source. Remap/clear/restore works; duplicate bindings are detected; standard edit keys remain usable in editable controls; all critical actions are also reachable from semantic UI controls.
 
@@ -59,6 +96,13 @@ A challenger is evaluated against explicit metrics and fixed/held-out data. Prom
 
 ## Windows/WebView2/NVDA gate
 Semantic HTML/unit accessibility checks -> packaged WebView2 host UI Automation discovery -> keyboard/focus flow -> packaged startup. The real descendant controls must be discoverable by UI Automation in the packaged app. Final NVDA VERIFIED remains human-only.
+
+## Autonomous Product Factory representative gate
+From a clean packaged Windows Nika installation, issue a natural-language request such as:
+
+`Create an accessible Windows personal-expense application. Research alternatives first, propose the architecture, wait for the required product decision, create/connect the repository, implement it, test it and prepare the Windows release.`
+
+Without manual source-code copy/paste, the evidence chain must cover research/decision, durable ProductProject, requirements, team composition, repository creation/connection, isolated implementation, independent QA/accessibility review, package/release provenance, restart/resume and explicit remaining human-only acceptance items. A later deployment scenario additionally proves approved staging, health and rollback. Full detailed gates are in `docs/AUTONOMOUS_PRODUCT_FACTORY_ACCEPTANCE.md`.
 
 ## Release gate
 Fresh exact integration SHA -> cheap CI -> Windows package -> packaged smoke/E2E -> manifest/checksums/license/security scan -> user candidate. A previous, superseded or human-rejected artifact is never reissued as fresh. Any integrated product behavior change invalidates older candidate evidence until a fresh combined candidate passes the complete gate.
