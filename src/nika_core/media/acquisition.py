@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,9 +46,9 @@ class RemoteAcquisitionResult:
 
 
 class YtDlpRemoteAcquirer:
-    """Acquire remote media bytes without persisting extractor/signed asset URLs.
+    """Acquire remote media bytes without persisting extractor or signed asset URLs.
 
-    yt-dlp is given the stable source page URL and a deterministic bounded output
+    yt-dlp receives the stable source-page URL and a deterministic bounded output
     path. Its own ``.part`` file is intentionally retained after timeout/cancel so a
     later explicit retry can resume. A completed download first becomes ``.partial``;
     Nika checks the byte bound/checksum and only then atomically promotes it.
@@ -68,7 +69,7 @@ class YtDlpRemoteAcquirer:
         cancel_event: threading.Event | None = None,
     ) -> RemoteAcquisitionResult:
         active_policy = policy or RemoteAcquisitionPolicy()
-        YtDlpAdapter.validate_source_url(
+        YtDlpAdapter._validate_source_url(  # noqa: SLF001 - shared media policy boundary
             source_url,
             policy=YtDlpPolicy(allow_private_networks=active_policy.allow_private_networks),
         )
@@ -98,7 +99,7 @@ class YtDlpRemoteAcquirer:
             )
 
         argv = [
-            __import__("sys").executable,
+            sys.executable,
             "-m",
             "yt_dlp",
             "--ignore-config",
