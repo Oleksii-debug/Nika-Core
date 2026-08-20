@@ -32,8 +32,8 @@ from nika_core.toolsmith.contracts import (
     ChangedFile,
     CodingResult,
     RecoveryState,
-    TestEvidence as WorkerTestEvidence,
 )
+from nika_core.toolsmith.contracts import TestEvidence as WorkerTestEvidence
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
