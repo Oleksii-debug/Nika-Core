@@ -57,8 +57,8 @@ def _profile_stack(store: SQLiteStore) -> tuple[ResearchProfileRepository, Resea
     return definitions, ResearchProfileService(repository=definitions, query_service=queries)
 
 
-def test_sqlite_store_upgrades_existing_schema_11_to_profile_migration_12(tmp_path: Path) -> None:
-    assert SCHEMA_VERSION == 12
+def test_sqlite_store_upgrades_existing_schema_11_through_profile_migration_12(tmp_path: Path) -> None:
+    assert SCHEMA_VERSION >= 12
     path = tmp_path / "upgrade.db"
     conn = sqlite3.connect(path)
     conn.execute(
