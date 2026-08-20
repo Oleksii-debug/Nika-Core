@@ -18,8 +18,9 @@ canonical `ResourceManager` for its existing concurrency/CPU/memory-percent gran
   requested floor.
 - Mutual exclusion is symmetric: either the candidate claim or an active claim can declare the
   conflicting resource class.
-- Heavy model claims still share the machine-level `media_heavy_model/local_machine` resource
-  scope and default to one resident at a time.
+- Heavy model claims share the machine-level `media_heavy_model/local_machine` resource scope and
+  are hard-limited to one resident at a time. Any future concurrency above one requires a separate
+  measured target-machine policy rather than a caller-provided integer.
 - Reusing a live `claim_id` with identical policy is idempotent. Reusing it with different policy
   fails closed.
 - Release removes the DEV05 active-claim record only after the canonical manager confirms release.
@@ -28,19 +29,24 @@ These checks are process-local lease coordination on top of the existing canonic
 batch does not claim crash-durable GPU/model residency detection. A new process must measure the
 machine again before granting new minimum-memory work.
 
-## Engine, binary-build, and model evidence are separate
+## Engine, binary-build, model, and execution evidence are separate
 
-`MediaProofManifest` records three independent surfaces:
+`MediaProofManifest` schema v2 records four independent surfaces:
 
 1. `EngineDescriptor`: engine identity, upstream/source license, version, and engine-provided
    build information when available.
 2. `BinaryEvidence`: exact executable checksum and size plus the explicit binary supplier/source
    reference and binary-build license classification.
 3. `ModelEvidence`: exact model/data checksum and size plus its own license and source reference.
+4. `EngineExecutionEvidence`: engine ID, proof kind, fixture checksum and a SHA-256 fingerprint of
+   the normalized execution result. Raw OCR text or private media contents are not copied into the
+   manifest.
 
-A model evidence record is invalid unless its referenced engine is present in the same manifest.
-Local absolute paths are not serialized; binary evidence records only the file name. No cookie,
-token, browser profile, API key, or other credential field exists in this evidence schema.
+A model or execution evidence record is invalid unless its referenced engine is present in the
+same manifest. Execution IDs are unique. `real_engine_execution_proven=true` is invalid unless
+execution evidence exists for every declared engine. Local absolute paths are not serialized;
+binary evidence records only the file name. No cookie, token, browser profile, API key, or other
+credential field exists in this evidence schema.
 
 ## Opt-in physical proof helper
 
@@ -49,9 +55,10 @@ downloads FFmpeg, Tesseract, language data, or ASR models.
 
 Required inputs are explicit local `ffprobe` and `tesseract` executables, output path, and audited
 Tesseract binary supplier/license evidence. Optional fixtures can execute a real FFprobe probe and
-a real Tesseract OCR page. `real_engine_execution_proven=true` is emitted only when **both** real
-fixture paths run successfully. Merely executing `--version`/audit commands is not treated as a
-full real-engine execution proof.
+a real Tesseract OCR page. Each successful fixture creates execution evidence from the fixture
+checksum plus a hash of the normalized result. `real_engine_execution_proven=true` is emitted only
+when **both** real fixture paths run successfully. Merely executing `--version`/audit commands is
+not treated as a full real-engine execution proof.
 
 Optional Tesseract traineddata evidence is all-or-nothing: file, model ID, version, license
 reference, and source reference must be supplied together. File checksum and size are measured and
