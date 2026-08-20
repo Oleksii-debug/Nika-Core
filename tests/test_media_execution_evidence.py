@@ -8,7 +8,11 @@ from nika_core.media.evidence import (
 )
 
 
-def _engine(engine_id: str, *, executable_sha256: str = "a" * 64) -> EngineDescriptor:
+def _engine(
+    engine_id: str,
+    *,
+    executable_sha256: str | None = "a" * 64,
+) -> EngineDescriptor:
     return EngineDescriptor(
         engine_id=engine_id,
         name=engine_id,
