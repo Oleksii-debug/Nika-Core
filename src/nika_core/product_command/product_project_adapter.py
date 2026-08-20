@@ -94,6 +94,9 @@ class ProductProjectCommandService:
 
 def project_detail(project: ProductProject) -> ProductProjectDetail:
     statuses = _spec_statuses(project)
+    version_log = (
+        f"Durable ProductProject spec version {project.spec_version}; row={project.row_version}."
+    )
     return ProductProjectDetail(
         summary=ProductProjectSummary(
             project_id=project.project_id,
@@ -107,10 +110,7 @@ def project_detail(project: ProductProject) -> ProductProjectDetail:
             ),
         ),
         statuses=statuses,
-        logs=(
-            f"Durable ProductProject spec version {project.spec_version}; "
-            f"row version {project.row_version}.",
-        ),
+        logs=(version_log,),
     )
 
 
