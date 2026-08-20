@@ -4,12 +4,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.research.models import (
-    FreshnessState,
-    ResearchResultSet,
-    SearchHit,
-    SourceKind,
-)
+from nika_core.research.models import FreshnessState, ResearchResultSet, SearchHit, SourceKind
 from nika_core.research.network_repository import NetworkResearchRepository
 from nika_core.research.normalize import normalize_text
 
@@ -56,8 +51,7 @@ class DeterministicResearchQueryService:
 
     def execute(self, spec: ResearchQuerySpec) -> ResearchQueryExecution:
         self._validate_spec(spec)
-        fts_query = self._fts_query(spec.text, spec.mode)
-        hits = self._search(spec, fts_query)
+        hits = self._search(spec, self._fts_query(spec.text, spec.mode))
         result_set = self._network.save_result_set(
             workspace_id=spec.workspace_id,
             query=spec.text,
@@ -69,45 +63,26 @@ class DeterministicResearchQueryService:
     def render_text(execution: ResearchQueryExecution) -> str:
         spec = execution.spec
         filters = spec.filters
-        filter_lines: list[str] = []
+        lines = ["Research results", f"Query: {spec.text}", f"Mode: {spec.mode.value}"]
         if filters.source_ids:
-            filter_lines.append(f"Source IDs: {', '.join(filters.source_ids)}")
+            lines.append(f"Source IDs: {', '.join(filters.source_ids)}")
         if filters.source_kinds:
-            filter_lines.append(
-                "Source kinds: " + ", ".join(kind.value for kind in filters.source_kinds)
-            )
+            lines.append("Source kinds: " + ", ".join(kind.value for kind in filters.source_kinds))
         if filters.media_types:
-            filter_lines.append(f"Media types: {', '.join(filters.media_types)}")
+            lines.append(f"Media types: {', '.join(filters.media_types)}")
         if filters.freshness:
-            filter_lines.append(
-                "Freshness: " + ", ".join(state.value for state in filters.freshness)
-            )
+            lines.append("Freshness: " + ", ".join(state.value for state in filters.freshness))
+        lines.extend((f"Results: {len(execution.result_set.items)}", ""))
 
-        lines = [
-            "Research results",
-            f"Query: {spec.text}",
-            f"Mode: {spec.mode.value}",
-            *filter_lines,
-            f"Results: {len(execution.result_set.items)}",
-            "",
-        ]
         for index, item in enumerate(execution.result_set.items, start=1):
-            lines.extend(
-                [
-                    f"{index}. {item.title}",
-                    f"Snippet: {item.snippet}",
-                    "Sources:",
-                ]
-            )
+            lines.extend((f"{index}. {item.title}", f"Snippet: {item.snippet}", "Sources:"))
             if not item.evidence:
                 lines.append("- No source provenance recorded")
             for evidence in item.evidence:
                 label = evidence.source_kind.value
                 if evidence.freshness is not None:
                     label += f", freshness={evidence.freshness.value}"
-                lines.append(
-                    f"- {label}: {evidence.locator} (observed {evidence.observed_at})"
-                )
+                lines.append(f"- {label}: {evidence.locator} (observed {evidence.observed_at})")
             lines.append("")
         return "\n".join(lines).rstrip() + "\n"
 
@@ -116,18 +91,12 @@ class DeterministicResearchQueryService:
             raise ValueError("workspace_id is required")
         if spec.limit < 1 or spec.limit > 100:
             raise ValueError("limit must be between 1 and 100")
-        if spec.filters.freshness and (
-            spec.filters.source_kinds
-            and SourceKind.HTTP not in spec.filters.source_kinds
-        ):
+        if spec.filters.freshness and spec.filters.source_kinds and SourceKind.HTTP not in spec.filters.source_kinds:
             raise ValueError("freshness filters require HTTP sources")
 
-        source_ids = tuple(dict.fromkeys(source_id.strip() for source_id in spec.filters.source_ids))
-        if any(not source_id for source_id in source_ids):
-            raise ValueError("source_ids must not contain empty values")
+        source_ids = self._normalized_source_ids(spec.filters.source_ids)
         if not source_ids:
             return
-
         placeholders = ",".join("?" for _ in source_ids)
         with self._store.connection() as conn:
             local_rows = conn.execute(
@@ -144,13 +113,15 @@ class DeterministicResearchQueryService:
         unknown = tuple(source_id for source_id in source_ids if source_id not in owners)
         if unknown:
             raise ValueError(f"unknown source_ids: {', '.join(unknown)}")
-        cross_workspace = tuple(
-            source_id
-            for source_id in source_ids
-            if owners[source_id] != {spec.workspace_id}
-        )
-        if cross_workspace:
+        if any(owners[source_id] != {spec.workspace_id} for source_id in source_ids):
             raise ValueError("source filter crosses workspace boundary")
+
+    @staticmethod
+    def _normalized_source_ids(source_ids: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(dict.fromkeys(source_id.strip() for source_id in source_ids))
+        if any(not source_id for source_id in normalized):
+            raise ValueError("source_ids must not contain empty values")
+        return normalized
 
     @staticmethod
     def _fts_query(text: str, mode: SearchMode) -> str:
@@ -168,50 +139,50 @@ class DeterministicResearchQueryService:
         params: list[object] = [fts_query, spec.workspace_id]
 
         if filters.media_types:
-            values = tuple(dict.fromkeys(value.strip() for value in filters.media_types))
-            if any(not value for value in values):
+            media_types = tuple(dict.fromkeys(value.strip() for value in filters.media_types))
+            if any(not value for value in media_types):
                 raise ValueError("media_types must not contain empty values")
-            placeholders = ",".join("?" for _ in values)
+            placeholders = ",".join("?" for _ in media_types)
             clauses.append(f"d.media_type IN ({placeholders})")
-            params.extend(values)
+            params.extend(media_types)
 
-        origin_clauses: list[str] = []
-        source_ids = tuple(dict.fromkeys(filters.source_ids))
+        source_ids = self._normalized_source_ids(filters.source_ids)
         kinds = set(filters.source_kinds)
+        freshness = tuple(dict.fromkeys(state.value for state in filters.freshness))
+        origin_clauses: list[str] = []
+        origin_params: list[object] = []
         allow_local = not kinds or SourceKind.LOCAL_FILE in kinds
         allow_http = not kinds or SourceKind.HTTP in kinds
 
-        if source_ids or kinds:
-            if allow_local:
-                local = "SELECT 1 FROM corpus_origins lo WHERE lo.document_id=d.document_id"
-                local_params: list[object] = []
-                if source_ids:
-                    placeholders = ",".join("?" for _ in source_ids)
-                    local += f" AND lo.source_id IN ({placeholders})"
-                    local_params.extend(source_ids)
-                origin_clauses.append(f"EXISTS ({local})")
-                params.extend(local_params)
-            if allow_http:
-                http = "SELECT 1 FROM corpus_http_origins ho WHERE ho.document_id=d.document_id"
-                http_params: list[object] = []
-                if source_ids:
-                    placeholders = ",".join("?" for _ in source_ids)
-                    http += f" AND ho.source_id IN ({placeholders})"
-                    http_params.extend(source_ids)
-                origin_clauses.append(f"EXISTS ({http})")
-                params.extend(http_params)
-            clauses.append("(" + " OR ".join(origin_clauses) + ")")
+        if (source_ids or kinds) and allow_local and not freshness:
+            local = "SELECT 1 FROM corpus_origins lo WHERE lo.document_id=d.document_id"
+            if source_ids:
+                placeholders = ",".join("?" for _ in source_ids)
+                local += f" AND lo.source_id IN ({placeholders})"
+                origin_params.extend(source_ids)
+            origin_clauses.append(f"EXISTS ({local})")
 
-        if filters.freshness:
-            values = tuple(dict.fromkeys(state.value for state in filters.freshness))
-            placeholders = ",".join("?" for _ in values)
-            clauses.append(
-                "EXISTS (SELECT 1 FROM corpus_http_origins fho "
-                "JOIN research_http_sources fhs ON fhs.source_id=fho.source_id "
-                "WHERE fho.document_id=d.document_id "
-                f"AND fhs.freshness IN ({placeholders}))"
+        if allow_http and (source_ids or kinds or freshness):
+            http = (
+                "SELECT 1 FROM corpus_http_origins ho "
+                "JOIN research_http_sources hs ON hs.source_id=ho.source_id "
+                "WHERE ho.document_id=d.document_id"
             )
-            params.extend(values)
+            if source_ids:
+                placeholders = ",".join("?" for _ in source_ids)
+                http += f" AND ho.source_id IN ({placeholders})"
+                origin_params.extend(source_ids)
+            if freshness:
+                placeholders = ",".join("?" for _ in freshness)
+                http += f" AND hs.freshness IN ({placeholders})"
+                origin_params.extend(freshness)
+            origin_clauses.append(f"EXISTS ({http})")
+
+        if source_ids or kinds or freshness:
+            if not origin_clauses:
+                return []
+            clauses.append("(" + " OR ".join(origin_clauses) + ")")
+            params.extend(origin_params)
 
         params.append(spec.limit)
         sql = f"""SELECT corpus_fts.document_id, corpus_fts.title,
