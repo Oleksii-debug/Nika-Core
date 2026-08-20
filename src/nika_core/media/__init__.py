@@ -26,6 +26,12 @@ from nika_core.media.contracts import (
     Transcript,
     TranscriptMethod,
 )
+from nika_core.media.corrector import (
+    RevisionCorrector,
+    SemanticCorrectionPolicy,
+    SemanticCorrectionSuggestion,
+    normalize_text,
+)
 from nika_core.media.delivery import MediaDeliveryCoordinator
 from nika_core.media.errors import MediaError, MediaErrorCode
 from nika_core.media.handoff import (
@@ -77,7 +83,10 @@ __all__ = [
     "ProvenanceChain",
     "ProvenanceEvent",
     "ResourceClass",
+    "RevisionCorrector",
     "Segment",
+    "SemanticCorrectionPolicy",
+    "SemanticCorrectionSuggestion",
     "StructuredMediaArtifact",
     "SubtitleKind",
     "SubtitleTrack",
@@ -86,6 +95,7 @@ __all__ = [
     "TranscriptMethod",
     "build_corpus_media_handoff",
     "initialize_media_schema",
+    "normalize_text",
     "render_accessible_media_text",
     "validate_artifact_for_handoff",
 ]
