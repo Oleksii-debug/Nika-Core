@@ -1,11 +1,7 @@
-"""Persistent Playwright semantic adapter for Nika computer interaction.
+"""Persistent strict Playwright adapter for Nika semantic computer interaction.
 
-Playwright objects remain private to this module. The public contracts are the framework-neutral
-objects from :mod:`nika_core.interaction.domain` and the synchronous ``InteractionAdapter``
-protocol consumed by ``SemanticInteractionCoordinator``.
-
-The adapter deliberately never uses ``first()``, ``last()`` or ``nth()`` to resolve an action
-target. Zero and multiple semantic matches fail closed. Bounds are captured only as evidence.
+Playwright objects stay private to this module. Action targets are never selected with positional
+``first/last/nth`` escape hatches. Bounds are evidence only and never participate in resolution.
 """
 
 from __future__ import annotations
@@ -34,20 +30,18 @@ from .domain import (
 _ARIA_LINE: Final = re.compile(
     r'^(?P<indent>\s*)-\s+(?P<role>[A-Za-z][\w-]*)'
     r'(?:\s+"(?P<name>(?:[^"\\]|\\.)*)")?'
-    r'(?:\s+\[(?P<state>[^\]]+)\])?\s*:?[\s]*$'
+    r'(?:\s+\[(?P<state>[^\]]+)\])?'
+    r'(?:\s*:\s*(?P<scalar>.*))?$'
 )
 _FORM_ROLES: Final = frozenset(
     {"checkbox", "combobox", "listbox", "searchbox", "slider", "spinbutton", "textbox"}
 )
+_NON_CONTROL_SNAPSHOT_ROLES: Final = frozenset({"text"})
 
 
 @dataclass(frozen=True, slots=True)
 class FrameScope:
-    """Framework-neutral exact frame selector.
-
-    Exactly one of ``name`` or ``url`` must be supplied. URL matching is exact; callers that need
-    a looser rule must first discover a concrete frame and then bind its exact URL.
-    """
+    """Exact frame identity; never positional."""
 
     name: str | None = None
     url: str | None = None
@@ -75,7 +69,7 @@ class DialogRule:
 
 @dataclass(slots=True)
 class DialogBroker:
-    """Fail-closed exact dialog broker; unexpected dialogs are dismissed, never accepted."""
+    """Unexpected dialogs are dismissed; acceptance requires one exact queued rule."""
 
     _rules: list[DialogRule] = field(default_factory=list)
     events: list[tuple[str, str, str]] = field(default_factory=list)
@@ -86,12 +80,12 @@ class DialogBroker:
     def handle(self, dialog: Any) -> None:
         dtype = str(dialog.type)
         message = str(dialog.message)
-        matching = [rule for rule in self._rules if rule.dialog_type == dtype and rule.message == message]
-        if len(matching) != 1:
+        matches = [rule for rule in self._rules if rule.dialog_type == dtype and rule.message == message]
+        if len(matches) != 1:
             dialog.dismiss()
             self.events.append((dtype, message, "unexpected-dismiss"))
             return
-        rule = matching[0]
+        rule = matches[0]
         self._rules.remove(rule)
         if rule.response == "accept":
             dialog.accept(rule.prompt_text)
@@ -102,7 +96,7 @@ class DialogBroker:
 
 @dataclass(slots=True)
 class DownloadBroker:
-    """Persist downloads only under an explicitly approved root."""
+    """Persist browser downloads only beneath an explicitly approved artifact root."""
 
     approved_root: Path
     saved: list[Path] = field(default_factory=list)
@@ -112,7 +106,8 @@ class DownloadBroker:
         self.approved_root.mkdir(parents=True, exist_ok=True)
 
     def handle(self, download: Any) -> None:
-        filename = Path(str(download.suggested_filename)).name
+        suggested = str(download.suggested_filename)
+        filename = Path(suggested).name
         if not filename or filename in {".", ".."}:
             raise UnsupportedInteractionError("download did not provide a safe filename")
         destination = (self.approved_root / filename).resolve()
@@ -131,7 +126,7 @@ class _PageRecord:
 
 @dataclass(slots=True)
 class PageRegistry:
-    """Stable in-process identities for all pages in one browser context."""
+    """Stable per-session identities for pages, popups and tabs."""
 
     context: Any
     pages: dict[str, _PageRecord] = field(default_factory=dict)
@@ -143,21 +138,21 @@ class PageRegistry:
         self.context.on("page", self.register)
 
     def register(self, page: Any) -> str:
-        key = id(page)
-        existing = self._by_object.get(key)
+        object_id = id(page)
+        existing = self._by_object.get(object_id)
         if existing is not None:
             return existing
         page_id = uuid.uuid4().hex
         record = _PageRecord(page=page, page_id=page_id)
         self.pages[page_id] = record
-        self._by_object[key] = page_id
+        self._by_object[object_id] = page_id
 
-        def on_frame_navigated(frame: Any, *, expected_page_id: str = page_id) -> None:
-            current = self.pages.get(expected_page_id)
+        def on_navigation(frame: Any, *, registered_page_id: str = page_id) -> None:
+            current = self.pages.get(registered_page_id)
             if current is not None and frame == current.page.main_frame:
                 current.document_generation += 1
 
-        page.on("framenavigated", on_frame_navigated)
+        page.on("framenavigated", on_navigation)
         page.on("close", lambda: self.remove(page_id))
         return page_id
 
@@ -175,7 +170,7 @@ class PageRegistry:
 
 @dataclass(slots=True)
 class BrowserSession:
-    """Explicit Playwright lifetime with an ephemeral persistent-in-process context."""
+    """Explicit Playwright lifetime using an ephemeral, non-personal BrowserContext."""
 
     download_root: Path
     headless: bool = True
@@ -201,8 +196,6 @@ class BrowserSession:
             raise RuntimeError("Playwright browser component is not installed") from exc
         self._playwright = sync_playwright().start()
         self._browser = self._playwright.chromium.launch(headless=self.headless)
-        # Never attach to or copy a personal browser profile. This context persists only for the
-        # lifetime of this explicit Nika session.
         self.context = self._browser.new_context(accept_downloads=True)
         self.context.set_default_timeout(self.timeout_ms)
         self.context.on("dialog", self.dialogs.handle)
@@ -227,13 +220,10 @@ class BrowserSession:
     def new_page(self) -> str:
         self.start()
         assert self.context is not None and self.registry is not None
-        page = self.context.new_page()
-        return self.registry.register(page)
+        return self.registry.register(self.context.new_page())
 
     def page_ids(self) -> tuple[str, ...]:
-        if self.registry is None:
-            return ()
-        return tuple(self.registry.pages)
+        return () if self.registry is None else tuple(self.registry.pages)
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,7 +236,7 @@ class _SemanticDescriptor:
 
 @dataclass(slots=True)
 class PlaywrightInteractionAdapter:
-    """Strict semantic browser adapter backed by a persistent Playwright session."""
+    """Synchronous strict-semantic adapter consumed by ``SemanticInteractionCoordinator``."""
 
     session: BrowserSession
     page_id: str
@@ -278,33 +268,32 @@ class PlaywrightInteractionAdapter:
         return frames[0]
 
     def navigate(self, url: str) -> None:
-        parts = urlsplit(url)
-        if parts.scheme not in {"http", "https"}:
+        if urlsplit(url).scheme not in {"http", "https"}:
             raise UnsupportedInteractionError("browser navigation permits only http/https URLs")
         self._record().page.goto(url, wait_until="domcontentloaded")
 
     def set_content(self, html: str) -> None:
         record = self._record()
         record.page.set_content(html, wait_until="domcontentloaded")
-        # ``set_content`` replaces the document without guaranteeing a main-frame navigation
-        # event, so advance identity explicitly.
         record.document_generation += 1
 
-    def _revision(self, root: Any) -> int:
-        script = """
-        () => {
-          if (!globalThis.__nikaSemanticRevisionState) {
-            const state = {revision: 1};
-            const observer = new MutationObserver(() => { state.revision += 1; });
-            observer.observe(document.documentElement, {
-              subtree: true, childList: true, attributes: true, characterData: true
-            });
-            globalThis.__nikaSemanticRevisionState = state;
-          }
-          return globalThis.__nikaSemanticRevisionState.revision;
-        }
-        """
-        return int(root.evaluate(script))
+    @staticmethod
+    def _decode_aria_name(raw: str | None) -> str:
+        return "" if raw is None else str(json.loads(f'"{raw}"'))
+
+    @staticmethod
+    def _decode_scalar(raw: str | None) -> str | None:
+        if raw is None:
+            return None
+        value = raw.strip()
+        if not value:
+            return None
+        if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+            try:
+                return str(json.loads(value))
+            except json.JSONDecodeError:
+                return value[1:-1]
+        return value
 
     @staticmethod
     def _state_attributes(raw: str | None) -> tuple[tuple[str, str], ...]:
@@ -319,54 +308,92 @@ class PlaywrightInteractionAdapter:
                 attrs.append((token.strip(), "true"))
         return tuple(attrs)
 
+    def _mutation_counter(self, root: Any) -> int:
+        return int(
+            root.evaluate(
+                """
+                () => {
+                  if (!globalThis.__nikaSemanticRevisionState) {
+                    const state = {revision: 1};
+                    const observer = new MutationObserver(() => { state.revision += 1; });
+                    observer.observe(document.documentElement, {
+                      subtree: true, childList: true, attributes: true, characterData: true
+                    });
+                    globalThis.__nikaSemanticRevisionState = state;
+                  }
+                  return globalThis.__nikaSemanticRevisionState.revision;
+                }
+                """
+            )
+        )
+
     @staticmethod
-    def _decode_aria_name(raw: str | None) -> str:
-        if raw is None:
-            return ""
-        # aria_snapshot quotes strings with JSON-compatible escaping. json.loads preserves raw
-        # UTF-8 (including Ukrainian text) while decoding escaped quotes/backslashes safely.
-        return str(json.loads(f'"{raw}"'))
+    def _semantic_revision(snapshot_text: str, mutation_counter: int) -> int:
+        normalized = snapshot_text.replace("[focused]", "")
+        digest = hashlib.sha256(
+            f"{mutation_counter}\0{normalized}".encode("utf-8")
+        ).digest()
+        return int.from_bytes(digest[:8], "big")
+
+    @staticmethod
+    def _semantic_locator(scope: Any, role: str, name: str) -> Any:
+        kwargs: dict[str, Any] = {"exact": True}
+        if name:
+            kwargs["name"] = name
+        return scope.get_by_role(role, **kwargs)
+
+    def _locator_for_descriptor(self, descriptor: _SemanticDescriptor, *, root: Any | None = None) -> Any:
+        scope = self._root() if root is None else root
+        for role, name in descriptor.ancestors:
+            candidate = self._semantic_locator(scope, role, name)
+            if candidate.count() != 1:
+                break
+            scope = candidate
+        return self._semantic_locator(scope, descriptor.role, descriptor.name)
 
     def _parse_snapshot(self, snapshot: str) -> tuple[ControlNode, ...]:
         controls: list[ControlNode] = []
         stack: list[tuple[int, str, str, str]] = []
         descriptors: dict[str, _SemanticDescriptor] = {}
-        duplicate_counter: dict[tuple[tuple[tuple[str, str], ...], str, str], int] = {}
+        occurrences: dict[tuple[tuple[tuple[str, str], ...], str, str], int] = {}
         root = self._root()
+        generation = self._record().document_generation
 
         for raw_line in snapshot.splitlines():
             match = _ARIA_LINE.match(raw_line)
             if match is None:
                 continue
-            indent = len(match.group("indent").replace("\t", "  "))
             role = match.group("role").casefold()
+            if role in _NON_CONTROL_SNAPSHOT_ROLES:
+                continue
+            indent = len(match.group("indent").replace("\t", "  "))
             name = self._decode_aria_name(match.group("name"))
+            scalar = self._decode_scalar(match.group("scalar"))
             while stack and stack[-1][0] >= indent:
                 stack.pop()
             ancestors = tuple((entry[1], entry[2]) for entry in stack)
             semantic_key = (ancestors, role, name)
-            ordinal = duplicate_counter.get(semantic_key, 0) + 1
-            duplicate_counter[semantic_key] = ordinal
-            digest = hashlib.sha256(
-                repr((self.page_id, self._record().document_generation, semantic_key, ordinal)).encode(
-                    "utf-8"
-                )
+            ordinal = occurrences.get(semantic_key, 0) + 1
+            occurrences[semantic_key] = ordinal
+            node_id = "pw:" + hashlib.sha256(
+                repr((self.page_id, generation, semantic_key, ordinal)).encode("utf-8")
             ).hexdigest()[:24]
-            node_id = f"pw:{digest}"
-            state_attrs = list(self._state_attributes(match.group("state")))
-            state = dict(state_attrs)
+
+            attrs = list(self._state_attributes(match.group("state")))
+            state = dict(attrs)
             if stack:
-                state_attrs.append(("ancestor_node_id", stack[-1][3]))
-            if role in _FORM_ROLES and name:
-                state_attrs.append(("label", name))
+                attrs.append(("ancestor_node_id", stack[-1][3]))
+            if role in _FORM_ROLES:
+                if name:
+                    attrs.append(("label", name))
+                if scalar is not None:
+                    attrs.append(("value", scalar))
             elif name:
-                state_attrs.append(("text", name))
-            descriptor = _SemanticDescriptor(
-                node_id=node_id,
-                role=role,
-                name=name,
-                ancestors=ancestors,
-            )
+                attrs.append(("text", name))
+            elif scalar is not None:
+                attrs.append(("text", scalar))
+
+            descriptor = _SemanticDescriptor(node_id, role, name, ancestors)
             descriptors[node_id] = descriptor
             locator = self._locator_for_descriptor(descriptor, root=root)
             bounds: tuple[int, int, int, int] | None = None
@@ -387,9 +414,9 @@ class PlaywrightInteractionAdapter:
                     enabled="disabled" not in state,
                     visible=True,
                     focused="focused" in state,
-                    value=state.get("value"),
+                    value=scalar if role in _FORM_ROLES else None,
                     bounds=bounds,
-                    attributes=tuple(state_attrs),
+                    attributes=tuple(attrs),
                 )
             )
             stack.append((indent, role, name, node_id))
@@ -397,29 +424,10 @@ class PlaywrightInteractionAdapter:
         self._node_descriptors = descriptors
         return tuple(controls)
 
-    @staticmethod
-    def _semantic_locator(scope: Any, role: str, name: str) -> Any:
-        kwargs: dict[str, Any] = {"exact": True}
-        if name:
-            kwargs["name"] = name
-        return scope.get_by_role(role, **kwargs)
-
-    def _locator_for_descriptor(self, descriptor: _SemanticDescriptor, *, root: Any | None = None) -> Any:
-        scope = root if root is not None else self._root()
-        for role, name in descriptor.ancestors:
-            candidate = self._semantic_locator(scope, role, name)
-            count = candidate.count()
-            if count != 1:
-                # Never pick a positional ancestor. Leaving scope unchanged guarantees that the
-                # final semantic target either resolves uniquely or fails closed.
-                break
-            scope = candidate
-        return self._semantic_locator(scope, descriptor.role, descriptor.name)
-
     def _locator_for_node(self, node: ControlNode) -> Any:
         descriptor = self._node_descriptors.get(node.node_id)
         if descriptor is None:
-            raise StaleSnapshotError("semantic node does not belong to the current observation")
+            raise StaleSnapshotError("semantic node does not belong to current observation")
         locator = self._locator_for_descriptor(descriptor)
         count = locator.count()
         if count == 0:
@@ -431,22 +439,22 @@ class PlaywrightInteractionAdapter:
     def observe(self) -> SemanticSnapshot:
         record = self._record()
         root = self._root()
-        revision_before = self._revision(root)
+        mutation_before = self._mutation_counter(root)
         snapshot_text = root.locator("body").aria_snapshot()
+        mutation_after = self._mutation_counter(root)
+        if mutation_after != mutation_before:
+            raise StaleSnapshotError("semantic tree mutated while being observed")
         controls = self._parse_snapshot(snapshot_text)
-        revision_after = self._revision(root)
-        if revision_after != revision_before:
-            raise StaleSnapshotError("semantic tree mutated while it was being observed")
-        browser_identity = BrowserContextIdentity(
+        browser = BrowserContextIdentity(
             session_id=self.session.session_id,
             context_id=self.session.context_id,
             page_id=self.page_id,
             document_generation=record.document_generation,
         )
         return SemanticSnapshot(
-            target=InteractionTarget(browser=browser_identity),
+            target=InteractionTarget(browser=browser),
             generation=record.document_generation,
-            revision=revision_after,
+            revision=self._semantic_revision(snapshot_text, mutation_after),
             controls=controls,
         )
 
@@ -492,16 +500,16 @@ class PlaywrightInteractionAdapter:
         if action is InteractionAction.SELECT:
             if value is None:
                 raise ValueError("SELECT requires a value")
-            matches = int(
+            count = int(
                 locator.evaluate(
                     "(el, label) => Array.from(el.options ?? []).filter(o => o.label === label).length",
                     value,
                 )
             )
-            if matches == 0:
-                raise TargetNotFoundError("no select option has the requested exact label")
-            if matches != 1:
-                raise AmbiguousTargetError(f"select option label is ambiguous: {matches} matches")
+            if count == 0:
+                raise TargetNotFoundError("no select option has requested exact label")
+            if count != 1:
+                raise AmbiguousTargetError(f"select option label is ambiguous: {count} matches")
             locator.select_option(label=value)
             return
         if action is InteractionAction.TOGGLE:
@@ -511,10 +519,10 @@ class PlaywrightInteractionAdapter:
             return
         if action in {InteractionAction.EXPAND, InteractionAction.COLLAPSE}:
             expected = action is InteractionAction.EXPAND
-            before = locator.get_attribute("aria-expanded")
-            if before is None:
+            current = locator.get_attribute("aria-expanded")
+            if current is None:
                 raise UnsupportedInteractionError("target does not expose aria-expanded semantics")
-            if (before.casefold() == "true") != expected:
+            if (current.casefold() == "true") != expected:
                 locator.click()
             return
         raise UnsupportedInteractionError(f"unsupported browser action: {action.value}")
@@ -522,9 +530,7 @@ class PlaywrightInteractionAdapter:
     @staticmethod
     def _snapshot_node(snapshot: SemanticSnapshot, node_id: str) -> ControlNode | None:
         matches = tuple(candidate for candidate in snapshot.controls if candidate.node_id == node_id)
-        if len(matches) != 1:
-            return None
-        return matches[0]
+        return matches[0] if len(matches) == 1 else None
 
     def verify(
         self,
@@ -534,12 +540,10 @@ class PlaywrightInteractionAdapter:
         action: InteractionAction,
         value: str | None,
     ) -> bool:
-        if after.target.browser is not None and before.target.browser is not None:
-            if after.target.browser.document_generation != before.target.browser.document_generation:
+        if before.target.browser is not None and after.target.browser is not None:
+            if before.target.browser.document_generation != after.target.browser.document_generation:
                 return action is InteractionAction.INVOKE
         if action is InteractionAction.INVOKE:
-            # A successful low-level click alone is never proof. Require navigation, semantic
-            # mutation, a newly registered popup/tab, or a persisted approved download.
             return (
                 after.revision != before.revision
                 or frozenset(self.session.page_ids()) != self._pre_action_pages
@@ -556,11 +560,11 @@ class PlaywrightInteractionAdapter:
         if action is InteractionAction.SET_VALUE:
             return value is not None and locator.input_value() == value
         if action is InteractionAction.SELECT:
-            selected_label = locator.evaluate(
+            selected = locator.evaluate(
                 "el => el.selectedOptions && el.selectedOptions.length === 1 "
                 "? el.selectedOptions[0].label : null"
             )
-            return value is not None and selected_label == value
+            return value is not None and selected == value
         if action is InteractionAction.TOGGLE:
             before_node = self._snapshot_node(before, node.node_id)
             after_node = self._snapshot_node(after, node.node_id)
