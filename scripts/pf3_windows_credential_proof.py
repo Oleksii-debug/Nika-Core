@@ -99,7 +99,7 @@ def main() -> int:
         restarted.provision_secret(secret_ref, 2, exact_windows_limit_material)
         if not restarted.contains(secret_ref, 2):
             raise RuntimeError("maximum-size Windows credential was not readable")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         proof_error = exc
     finally:
         cleanup_errors.extend(_cleanup(restarted or store, secret_ref))
