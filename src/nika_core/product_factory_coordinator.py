@@ -6,7 +6,11 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 
-from nika_core.product_factory_orchestration import ProductComponent, ProductRepositoryGraph, RepositoryRef
+from nika_core.product_factory_orchestration import (
+    ProductComponent,
+    ProductRepositoryGraph,
+    RepositoryRef,
+)
 from nika_core.toolsmith.contracts import CodingResult
 
 
