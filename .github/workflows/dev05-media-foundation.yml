@@ -59,6 +59,7 @@ jobs:
           tests/test_media_batch_b_safety.py
           tests/test_media_batch_c.py
           tests/test_media_batch_d.py
+          tests/test_media_execution_evidence.py
           tests/test_media_heavy_model_policy.py
           tests/test_media_persistence_privacy.py
           tests/test_media_process_files.py
@@ -75,6 +76,7 @@ jobs:
           tests/test_media_batch_b_safety.py
           tests/test_media_batch_c.py
           tests/test_media_batch_d.py
+          tests/test_media_execution_evidence.py
           tests/test_media_heavy_model_policy.py
           tests/test_media_persistence_privacy.py
           tests/test_media_process_files.py
@@ -89,6 +91,7 @@ jobs:
           tests/test_media_batch_b_safety.py
           tests/test_media_batch_c.py
           tests/test_media_batch_d.py
+          tests/test_media_execution_evidence.py
           tests/test_media_heavy_model_policy.py
           tests/test_media_persistence_privacy.py
           tests/test_media_process_files.py
