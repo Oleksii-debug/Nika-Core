@@ -1,3 +1,7 @@
+from nika_core.product_command.command_center import (
+    ProductCommandCenter,
+    ProductCommandCenterScopeError,
+)
 from nika_core.product_command.contracts import (
     CommandRouteDecision,
     CommandRouteKind,
@@ -9,6 +13,7 @@ from nika_core.product_command.contracts import (
     ProductUserDecision,
 )
 from nika_core.product_command.coordinator_adapter import coordinator_status_entries
+from nika_core.product_command.credential_adapter import credential_status_entries
 from nika_core.product_command.deployment_adapter import (
     deployment_status_entries,
     execution_status_entries,
@@ -23,6 +28,8 @@ __all__ = [
     "CommandRouteDecision",
     "CommandRouteKind",
     "EvidenceReference",
+    "ProductCommandCenter",
+    "ProductCommandCenterScopeError",
     "ProductProjectCommandService",
     "ProductProjectDecisionUnavailableError",
     "ProductProjectDetail",
@@ -31,6 +38,7 @@ __all__ = [
     "ProductStatusKind",
     "ProductUserDecision",
     "coordinator_status_entries",
+    "credential_status_entries",
     "deployment_status_entries",
     "execution_status_entries",
     "project_detail",
