@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -247,6 +248,10 @@ class AuthorizedAnsibleStagingAdapter:
 
 
 def _load_ansible_runner() -> ModuleType:
+    if sys.platform == "win32":
+        raise StagingAdapterError(
+            "native Windows is not a supported Ansible control node; use an authorized non-Windows execution node"
+        )
     try:
         return import_module("ansible_runner")
     except ModuleNotFoundError as exc:
