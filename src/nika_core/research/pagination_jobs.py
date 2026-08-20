@@ -6,7 +6,13 @@ from dataclasses import dataclass
 from nika_core.kernel.checkpoint import CheckpointService
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.task_state import TaskState, can_transition
-from nika_core.research.models import BlobArtifact, RefreshDisposition, RefreshJobSummary, SourceKind, SourceSpec
+from nika_core.research.models import (
+    BlobArtifact,
+    RefreshDisposition,
+    RefreshJobSummary,
+    SourceKind,
+    SourceSpec,
+)
 from nika_core.research.network_repository import NetworkResearchRepository
 from nika_core.research.pagination import (
     PaginationDiscovery,
@@ -102,7 +108,10 @@ class PaginatedResearchRefreshService:
             raise ValueError("task is not a paginated Research refresh job")
         return _policy_from_payload(task.payload.get("pagination_policy"))
 
-    def _initial_frontier(self, task_id: str) -> tuple[list[_FrontierItem], int, int, int, int]:
+    def _initial_frontier(
+        self,
+        task_id: str,
+    ) -> tuple[list[_FrontierItem], int, int, int, int]:
         task = self._tasks.get(task_id)
         if task.agent_id != self.AGENT_ID:
             raise ValueError("task is not a paginated Research refresh job")
@@ -124,7 +133,9 @@ class PaginatedResearchRefreshService:
                 raise ValueError("paginated Research checkpoint item is invalid")
             source_id = item.get("source_id")
             url = item.get("url")
-            if not isinstance(source_id, str) or not source_id or not isinstance(url, str) or not url:
+            valid_source_id = isinstance(source_id, str) and bool(source_id)
+            valid_url = isinstance(url, str) and bool(url)
+            if not valid_source_id or not valid_url:
                 raise ValueError("paginated Research checkpoint item fields are invalid")
             frontier.append(_FrontierItem(source_id, url))
         next_index = int(checkpoint.payload.get("next_index", 0))
@@ -162,7 +173,11 @@ class PaginatedResearchRefreshService:
             },
         )
 
-    def _discover(self, source_id: str, policy: PaginationPolicy) -> PaginationDiscovery | None:
+    def _discover(
+        self,
+        source_id: str,
+        policy: PaginationPolicy,
+    ) -> PaginationDiscovery | None:
         """Read the latest stored static payload; never performs another network request."""
         state = self._network.get_source(source_id)
         store = self._network._store
