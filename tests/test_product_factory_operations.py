@@ -141,7 +141,7 @@ def test_failed_service_rolls_back_without_corrupting_unrelated_state() -> None:
         )
     )
     assert rolled_back.health is ServiceHealth.ROLLED_BACK
-    assert coordinator.health_summary().healthy == ("messages", "profiles")
+    assert coordinator.health_summary().healthy == ("profiles", "messages")
 
 
 def test_credential_revocation_mid_project_blocks_only_dependents_and_survives_restart() -> None:
