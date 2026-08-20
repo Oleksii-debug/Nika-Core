@@ -139,7 +139,10 @@ jobs:
 
   m9-live-playwright-semantic-proof:
     name: M9 live Playwright semantic proof
-    if: github.event_name == 'pull_request' && github.head_ref == 'dev/m9-real-adapter-proofs'
+    if: >-
+      github.event_name == 'pull_request' &&
+      (github.head_ref == 'dev/m9-real-adapter-proofs' ||
+       github.head_ref == 'dev/dev04-playwright-semantic-vertical')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
