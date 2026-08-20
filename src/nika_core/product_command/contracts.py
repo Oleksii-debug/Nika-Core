@@ -22,6 +22,7 @@ class ProductStatusKind(StrEnum):
     QA = "qa"
     BUILD = "build"
     RELEASE = "release"
+    CREDENTIAL = "credential"
     DEPLOYMENT = "deployment"
     INCIDENT = "incident"
     BLOCKER = "blocker"
