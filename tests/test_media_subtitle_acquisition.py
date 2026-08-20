@@ -14,6 +14,7 @@ from nika_core.media.contracts import (
     SubtitleTrack,
 )
 from nika_core.media.errors import MediaError, MediaErrorCode
+from nika_core.media.hashing import sha256_json
 from nika_core.media.process import ProcessResult
 from nika_core.media.subtitle_acquisition import (
     SubtitleAcquisitionPolicy,
@@ -84,6 +85,7 @@ def discovery_for(
     track: SubtitleTrack,
     *,
     version_id: str = "remote-version:one",
+    subtitles: tuple[SubtitleTrack, ...] | None = None,
 ) -> YtDlpDiscovery:
     source = MediaSource(
         source_id="remote:one",
@@ -99,7 +101,7 @@ def discovery_for(
     return YtDlpDiscovery(
         source=source,
         version=version,
-        subtitles=(track,),
+        subtitles=(track,) if subtitles is None else subtitles,
         formats=(),
         sanitized_metadata={},
     )
@@ -205,7 +207,7 @@ def test_version_drift_and_disappeared_track_fail_before_download(tmp_path: Path
     assert drift.value.code == MediaErrorCode.INVALID_METADATA
     assert runner.calls == []
 
-    missing = discovery_for(raw).model_copy(update={"subtitles": ()})
+    missing = discovery_for(raw, subtitles=())
     with pytest.raises(MediaError) as disappeared:
         YtDlpSubtitleAcquirer(runner, StaticDiscovery(missing)).acquire_subtitle(
             "https://example.test/watch/42",
@@ -248,7 +250,7 @@ def test_oversized_existing_staging_fails_before_download(tmp_path: Path) -> Non
         kind=SubtitleKind.MANUAL,
         format="vtt",
     )
-    stable_stem = "remote-" + __import__("nika_core.media.hashing", fromlist=["sha256_json"]).sha256_json(
+    stable_stem = "remote-" + sha256_json(
         {"version_id": "remote-version:one", "track_id": raw.track_id}
     )[:32]
     staging = tmp_path / f".{stable_stem}.subtitle-staging"
