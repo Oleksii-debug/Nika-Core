@@ -114,14 +114,12 @@ class SafeProcessRunner:
                 )
                 self._terminate_tree(process)
                 break
-            if self._watched_file_limit_exceeded(
+            watched_failure = self._watched_file_failure(
                 bounded_paths,
                 max_bytes=max_watched_file_bytes,
-            ):
-                failure = MediaError(
-                    MediaErrorCode.SOURCE_TOO_LARGE,
-                    "media subprocess output exceeded the configured byte limit",
-                )
+            )
+            if watched_failure is not None:
+                failure = watched_failure
                 self._terminate_tree(process)
                 break
             if stdout_reader.exceeded or stderr_reader.exceeded:
@@ -147,13 +145,10 @@ class SafeProcessRunner:
         stdout_reader.join(timeout=2)
         stderr_reader.join(timeout=2)
         elapsed = time.monotonic() - started
-        if failure is None and self._watched_file_limit_exceeded(
-            bounded_paths,
-            max_bytes=max_watched_file_bytes,
-        ):
-            failure = MediaError(
-                MediaErrorCode.SOURCE_TOO_LARGE,
-                "media subprocess output exceeded the configured byte limit",
+        if failure is None:
+            failure = self._watched_file_failure(
+                bounded_paths,
+                max_bytes=max_watched_file_bytes,
             )
         if failure is None and (stdout_reader.exceeded or stderr_reader.exceeded):
             failure = self._output_limit_error()
@@ -190,30 +185,33 @@ class SafeProcessRunner:
         return parent / candidate.name
 
     @staticmethod
-    def _watched_file_limit_exceeded(
+    def _watched_file_failure(
         paths: tuple[Path, ...],
         *,
         max_bytes: int | None,
-    ) -> bool:
+    ) -> MediaError | None:
         if max_bytes is None:
-            return False
+            return None
         for path in paths:
             if not path.exists():
                 continue
             if path.is_symlink():
-                raise MediaError(
+                return MediaError(
                     MediaErrorCode.PATH_ESCAPE,
                     "watched media output must not be a symbolic link",
                 )
             resolved = path.resolve(strict=True)
             if not resolved.is_file():
-                raise MediaError(
+                return MediaError(
                     MediaErrorCode.INVALID_SOURCE,
                     "watched media output must be a regular file",
                 )
             if resolved.stat().st_size > max_bytes:
-                return True
-        return False
+                return MediaError(
+                    MediaErrorCode.SOURCE_TOO_LARGE,
+                    "media subprocess output exceeded the configured byte limit",
+                )
+        return None
 
     @staticmethod
     def _output_limit_error() -> MediaError:
