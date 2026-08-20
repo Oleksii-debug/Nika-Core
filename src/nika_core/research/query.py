@@ -205,7 +205,10 @@ class DeterministicResearchQueryService:
             http = (
                 "SELECT 1 FROM corpus_http_origins ho "
                 "JOIN research_http_sources hs ON hs.source_id=ho.source_id "
-                "WHERE ho.document_id=d.document_id"
+                "JOIN research_http_snapshots snap ON snap.snapshot_id=ho.snapshot_id "
+                "WHERE ho.document_id=d.document_id "
+                "AND hs.current_raw_sha256 IS NOT NULL "
+                "AND snap.raw_sha256=hs.current_raw_sha256"
             )
             if source_ids:
                 placeholders = ",".join("?" for _ in source_ids)
