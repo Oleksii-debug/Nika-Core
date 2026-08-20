@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from importlib import import_module
 from pathlib import Path, PurePath
 from types import ModuleType
-from typing import Any, Mapping, Protocol
+from typing import Any, Protocol
 
 from nika_core.product_factory_deployment import (
     DeploymentFabricError,
@@ -298,7 +299,7 @@ def _contract_time(contract: Mapping[str, object]) -> datetime:
     if not isinstance(value, str):
         raise StagingAdapterError("health contract must include observed_at")
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError as exc:
         raise StagingAdapterError("health observed_at is not valid ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
