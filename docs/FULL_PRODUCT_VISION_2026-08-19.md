@@ -1,6 +1,6 @@
 # Nika Core — Full Product Vision
 
-Updated: 2026-08-19.
+Updated: 2026-08-20.
 Status: binding end-state product scope. This document expands the Core milestone roadmap; it does not retroactively award implementation credit.
 
 ## 1. Product truth
@@ -12,6 +12,8 @@ Nika Core is the reusable Windows/NVDA-first control plane for a much larger end
 - A subsystem being implemented internally does not count as a finished user capability until its complete product journey is wired and proven.
 
 The previous 98% number is historical Core-gate evidence. It must never be described as 98% completion of the expanded Full Product Vision.
+
+The 2026-08-20 binding clarification is equally important: Nika is **not** supposed to prebuild every possible future vertical into Core. The end-state platform must become an autonomous digital product factory able to research, design, implement, test, deploy and maintain new products/workspaces when the user requests them. Binding details are in `docs/AUTONOMOUS_PRODUCT_FACTORY.md`, `docs/AUTONOMOUS_PRODUCT_FACTORY_ACCEPTANCE.md` and `docs/AUTONOMOUS_BUSINESS_FACTORY.md`.
 
 ## 2. End-state intelligence modes
 
@@ -123,6 +125,8 @@ Shared capabilities:
 
 First practical profiles may include grants, products, education/events and other structured opportunity searches. Telegram is not an active or required workspace.
 
+Universal Research must also serve Product Factory and Business Factory. Research results must be able to become versioned ProductProject/business-opportunity evidence without manual copying.
+
 ## 6. Corpus and Knowledge layer
 
 Nika must support an approved local knowledge corpus independent of any particular model:
@@ -184,6 +188,8 @@ Resource Manager should evolve beyond concurrency counts to profiles such as:
 
 Nika should unload idle heavy models when useful, avoid unnecessary simultaneous Chromium/model/transcription jobs, and keep model/component caches separate from program updates.
 
+Product Factory may also schedule authorized remote/platform-specific execution nodes when the target cannot reasonably be built on the local Windows machine.
+
 ## 10. Shared accessible report service
 
 Workspaces should reuse a common report/artifact layer. Required output principles:
@@ -194,9 +200,11 @@ Workspaces should reuse a common report/artifact layer. Required output principl
 - source/provenance/evidence fields where analysis depends on external material;
 - explicit error/uncertainty text rather than color-only status.
 
+Product Factory additionally uses the same accessible artifact layer for requirements, architecture decisions, project status, test evidence, release notes, deployment evidence and maintenance reports.
+
 ## 11. Command center
 
-The final Nika Windows application must provide a natural-language command surface in addition to structured screens. The command surface routes requests into versioned tasks/agents/workspaces; it does not bypass validation or permissions.
+The final Nika Windows application must provide a natural-language command surface in addition to structured screens. The command surface routes requests into versioned tasks/agents/workspaces/ProductProjects; it does not bypass validation or permissions.
 
 Examples of intended behavior:
 
@@ -206,15 +214,52 @@ Examples of intended behavior:
 - run an AI Trader replay experiment;
 - request a report;
 - request a new capability through Toolsmith/Software Factory;
+- create a durable ProductProject from a product goal;
+- ask Nika to research a market/problem before proposing a product;
+- approve a product direction and let Nika compose a development team;
+- inspect ProductProject milestones, repositories, tests, builds and blockers;
+- request an approved staging deployment/release;
+- ask Business Factory to research a lawful business opportunity and convert an approved opportunity into a WorkOrder/ProductProject;
 - choose or constrain the intelligence mode.
 
 Ambiguous or unsafe commands are clarified or blocked before external side effects.
 
-## 12. Explicitly removed active scope
+## 12. Autonomous Product Factory — binding end-state capability
 
-**Telegram is removed from the active Nika Core roadmap and active workspace catalog by user decision on 2026-08-19.** Historical documents may mention Telegram, Telethon or TDLib, but those mentions are not implementation requirements. If the user later asks Nika to build such a workspace, it is treated like any new optional workspace and goes through fresh reuse/security/product gates.
+Nika must be capable of managing the complete lifecycle of a new digital product rather than requiring every possible product to be manually prebuilt into Nika itself.
 
-## 13. Development acceleration model
+Binding architecture is defined in `docs/AUTONOMOUS_PRODUCT_FACTORY.md`. At minimum the end-state includes:
+
+- first-class durable `ProductProject` identity/state;
+- formal Research -> Product lifecycle;
+- dynamic Team Composer;
+- one- or multi-repository ProductRepositoryGraph;
+- provider-neutral CodingWorker integration;
+- independent QA/audit and accessibility review;
+- build/package/release orchestration;
+- Deployment Fabric;
+- multi-platform/remote execution nodes;
+- Credential/Identity Broker;
+- post-release operations/maintenance;
+- IP/license/compliance gates.
+
+A messenger, social network, screen-reader-like product, browser-agent platform, business application or other complex software is an example of a possible ProductProject class. Nika is not required to hard-code those products into Core. Project size changes duration, resources and team composition; it does not change the lifecycle architecture.
+
+Completion is proven through `docs/AUTONOMOUS_PRODUCT_FACTORY_ACCEPTANCE.md`, not by demonstrating that a coding worker can generate a few files.
+
+## 13. Autonomous Business Factory — binding future orchestration layer
+
+Business Agent Lab is expanded into a reusable Business Factory described in `docs/AUTONOMOUS_BUSINESS_FACTORY.md`.
+
+It may research markets/opportunities, compose appropriate business roles, qualify leads/work, create proposals within policy, convert approved work into ProductProjects, coordinate delivery and track support/payment state. The business model is not hard-coded to one marketplace or niche.
+
+External communication, account actions, contracts, publishing and money movement remain subject to user-configured authorization profiles, platform rules and audit. Agents cannot self-promote to broader financial/account authority.
+
+## 14. Explicitly removed active scope
+
+**Telegram is removed from the active Nika Core roadmap and active workspace catalog by user decision on 2026-08-19.** Historical documents may mention Telegram, Telethon or TDLib, but those mentions are not implementation requirements. If the user later asks Nika to build such a workspace/product, it is treated like any new optional ProductProject/workspace and goes through fresh research/reuse/security/product gates.
+
+## 15. Development acceleration model
 
 Manual ChatGPT Deep Research developer chats are allowed to be real coding lanes, not research-only lanes. A Deep Research developer may read the complete live project, reason over a large subsystem, implement code on its owned branch, run/trigger tests and drive one large coherent batch toward integration.
 
@@ -222,13 +267,17 @@ For each manual developer lane, an independent auditor chat may review live GitH
 
 When manual developer/auditor lanes are active, scheduled autonomous workers should be paused or reassigned to complementary low-collision work such as integration QA, release/package proof, regression hunting, architecture/evidence consistency and cross-lane conflict detection. They should not duplicate the same source ownership merely to maximize the number of running agents.
 
-## 14. Scope accounting
+For Product Factory development, source ownership must additionally be separated by ProductProject/component/repository. A central project coordinator owns dependency/integration truth; parallel workers own explicit non-overlapping implementation scopes.
+
+## 16. Scope accounting
 
 Future status reports must keep these truths separate:
 
 - historical/core acceptance-gate progress;
 - current integrated Core readiness after regressions/repairs;
 - Full Product Vision capability readiness;
+- Autonomous Product Factory readiness;
+- Autonomous Business Factory readiness where active;
 - packaged Windows candidate readiness;
 - HUMAN_TESTED;
 - NVDA_VERIFIED.
