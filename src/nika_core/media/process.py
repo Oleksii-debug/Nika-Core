@@ -62,14 +62,23 @@ class SafeProcessRunner:
         timeout_seconds: float,
         env: dict[str, str] | None = None,
         cancel_event: threading.Event | None = None,
+        watched_paths: tuple[Path, ...] = (),
+        max_watched_file_bytes: int | None = None,
     ) -> ProcessResult:
         normalized = tuple(str(part) for part in argv)
         self._validate_argv(normalized)
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if max_watched_file_bytes is not None and max_watched_file_bytes <= 0:
+            raise ValueError("max_watched_file_bytes must be positive")
+        if watched_paths and max_watched_file_bytes is None:
+            raise ValueError("watched_paths require max_watched_file_bytes")
         resolved_cwd = cwd.resolve(strict=True)
         if not resolved_cwd.is_dir():
             raise ValueError("cwd must be a directory")
+        bounded_paths = tuple(
+            self._bounded_watch_path(path, cwd=resolved_cwd) for path in watched_paths
+        )
 
         creationflags = 0
         start_new_session = os.name != "nt"
@@ -105,6 +114,14 @@ class SafeProcessRunner:
                 )
                 self._terminate_tree(process)
                 break
+            watched_failure = self._watched_file_failure(
+                bounded_paths,
+                max_bytes=max_watched_file_bytes,
+            )
+            if watched_failure is not None:
+                failure = watched_failure
+                self._terminate_tree(process)
+                break
             if stdout_reader.exceeded or stderr_reader.exceeded:
                 failure = self._output_limit_error()
                 self._terminate_tree(process)
@@ -128,6 +145,11 @@ class SafeProcessRunner:
         stdout_reader.join(timeout=2)
         stderr_reader.join(timeout=2)
         elapsed = time.monotonic() - started
+        if failure is None:
+            failure = self._watched_file_failure(
+                bounded_paths,
+                max_bytes=max_watched_file_bytes,
+            )
         if failure is None and (stdout_reader.exceeded or stderr_reader.exceeded):
             failure = self._output_limit_error()
         if failure is not None:
@@ -148,6 +170,48 @@ class SafeProcessRunner:
                 retryable=False,
             )
         return result
+
+    @staticmethod
+    def _bounded_watch_path(path: Path, *, cwd: Path) -> Path:
+        candidate = path if path.is_absolute() else cwd / path
+        parent = candidate.parent.resolve(strict=True)
+        try:
+            parent.relative_to(cwd)
+        except ValueError as exc:
+            raise MediaError(
+                MediaErrorCode.PATH_ESCAPE,
+                "watched media path escapes subprocess cwd",
+            ) from exc
+        return parent / candidate.name
+
+    @staticmethod
+    def _watched_file_failure(
+        paths: tuple[Path, ...],
+        *,
+        max_bytes: int | None,
+    ) -> MediaError | None:
+        if max_bytes is None:
+            return None
+        for path in paths:
+            if not path.exists():
+                continue
+            if path.is_symlink():
+                return MediaError(
+                    MediaErrorCode.PATH_ESCAPE,
+                    "watched media output must not be a symbolic link",
+                )
+            resolved = path.resolve(strict=True)
+            if not resolved.is_file():
+                return MediaError(
+                    MediaErrorCode.INVALID_SOURCE,
+                    "watched media output must be a regular file",
+                )
+            if resolved.stat().st_size > max_bytes:
+                return MediaError(
+                    MediaErrorCode.SOURCE_TOO_LARGE,
+                    "media subprocess output exceeded the configured byte limit",
+                )
+        return None
 
     @staticmethod
     def _output_limit_error() -> MediaError:

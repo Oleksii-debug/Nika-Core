@@ -1,3 +1,8 @@
+from nika_core.media.acquisition import (
+    RemoteAcquisitionPolicy,
+    RemoteAcquisitionResult,
+    YtDlpRemoteAcquirer,
+)
 from nika_core.media.components import OptionalComponentRegistry
 from nika_core.media.contracts import (
     AssetKind,
@@ -82,6 +87,8 @@ __all__ = [
     "ProcessingState",
     "ProvenanceChain",
     "ProvenanceEvent",
+    "RemoteAcquisitionPolicy",
+    "RemoteAcquisitionResult",
     "ResourceClass",
     "RevisionCorrector",
     "Segment",
@@ -93,6 +100,7 @@ __all__ = [
     "TextRevision",
     "Transcript",
     "TranscriptMethod",
+    "YtDlpRemoteAcquirer",
     "build_corpus_media_handoff",
     "initialize_media_schema",
     "normalize_text",
