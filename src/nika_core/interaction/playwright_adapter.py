@@ -1,16 +1,17 @@
 """Persistent Playwright semantic adapter for Nika computer interaction.
 
-Playwright objects remain private to this module.  The public contracts are the framework-neutral
+Playwright objects remain private to this module. The public contracts are the framework-neutral
 objects from :mod:`nika_core.interaction.domain` and the synchronous ``InteractionAdapter``
 protocol consumed by ``SemanticInteractionCoordinator``.
 
 The adapter deliberately never uses ``first()``, ``last()`` or ``nth()`` to resolve an action
-target.  Zero and multiple semantic matches fail closed.  Bounds are captured only as evidence.
+target. Zero and multiple semantic matches fail closed. Bounds are captured only as evidence.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -36,7 +37,7 @@ _ARIA_LINE: Final = re.compile(
     r'(?:\s+\[(?P<state>[^\]]+)\])?\s*:?[\s]*$'
 )
 _FORM_ROLES: Final = frozenset(
-    {"checkbox", "combobox", "listbox", "radio", "searchbox", "slider", "spinbutton", "textbox"}
+    {"checkbox", "combobox", "listbox", "searchbox", "slider", "spinbutton", "textbox"}
 )
 
 
@@ -227,8 +228,7 @@ class BrowserSession:
         self.start()
         assert self.context is not None and self.registry is not None
         page = self.context.new_page()
-        page_id = self.registry.register(page)
-        return page_id
+        return self.registry.register(page)
 
     def page_ids(self) -> tuple[str, ...]:
         if self.registry is None:
@@ -253,6 +253,8 @@ class PlaywrightInteractionAdapter:
     frame_scope: FrameScope | None = None
     _node_descriptors: dict[str, _SemanticDescriptor] = field(default_factory=dict, init=False)
     _last_focus: str | None = field(default=None, init=False)
+    _pre_action_pages: frozenset[str] = field(default_factory=frozenset, init=False)
+    _pre_action_download_count: int = field(default=0, init=False)
 
     def _record(self) -> _PageRecord:
         if self.session.registry is None:
@@ -279,11 +281,14 @@ class PlaywrightInteractionAdapter:
         parts = urlsplit(url)
         if parts.scheme not in {"http", "https"}:
             raise UnsupportedInteractionError("browser navigation permits only http/https URLs")
-        page = self._record().page
-        page.goto(url, wait_until="domcontentloaded")
+        self._record().page.goto(url, wait_until="domcontentloaded")
 
     def set_content(self, html: str) -> None:
-        self._record().page.set_content(html, wait_until="domcontentloaded")
+        record = self._record()
+        record.page.set_content(html, wait_until="domcontentloaded")
+        # ``set_content`` replaces the document without guaranteeing a main-frame navigation
+        # event, so advance identity explicitly.
+        record.document_generation += 1
 
     def _revision(self, root: Any) -> int:
         script = """
@@ -314,6 +319,14 @@ class PlaywrightInteractionAdapter:
                 attrs.append((token.strip(), "true"))
         return tuple(attrs)
 
+    @staticmethod
+    def _decode_aria_name(raw: str | None) -> str:
+        if raw is None:
+            return ""
+        # aria_snapshot quotes strings with JSON-compatible escaping. json.loads preserves raw
+        # UTF-8 (including Ukrainian text) while decoding escaped quotes/backslashes safely.
+        return str(json.loads(f'"{raw}"'))
+
     def _parse_snapshot(self, snapshot: str) -> tuple[ControlNode, ...]:
         controls: list[ControlNode] = []
         stack: list[tuple[int, str, str, str]] = []
@@ -327,7 +340,7 @@ class PlaywrightInteractionAdapter:
                 continue
             indent = len(match.group("indent").replace("\t", "  "))
             role = match.group("role").casefold()
-            name = bytes(match.group("name") or "", "utf-8").decode("unicode_escape")
+            name = self._decode_aria_name(match.group("name"))
             while stack and stack[-1][0] >= indent:
                 stack.pop()
             ancestors = tuple((entry[1], entry[2]) for entry in stack)
@@ -397,8 +410,8 @@ class PlaywrightInteractionAdapter:
             candidate = self._semantic_locator(scope, role, name)
             count = candidate.count()
             if count != 1:
-                # Do not pick a positional ancestor. Leaving the scope unchanged guarantees the
-                # final target will either resolve uniquely or fail closed.
+                # Never pick a positional ancestor. Leaving scope unchanged guarantees that the
+                # final semantic target either resolves uniquely or fails closed.
                 break
             scope = candidate
         return self._semantic_locator(scope, descriptor.role, descriptor.name)
@@ -467,6 +480,8 @@ class PlaywrightInteractionAdapter:
             self.focus(node)
             return
         if action is InteractionAction.INVOKE:
+            self._pre_action_pages = frozenset(self.session.page_ids())
+            self._pre_action_download_count = len(self.session.downloads.saved)
             locator.click()
             return
         if action is InteractionAction.SET_VALUE:
@@ -477,11 +492,21 @@ class PlaywrightInteractionAdapter:
         if action is InteractionAction.SELECT:
             if value is None:
                 raise ValueError("SELECT requires a value")
+            matches = int(
+                locator.evaluate(
+                    "(el, label) => Array.from(el.options ?? []).filter(o => o.label === label).length",
+                    value,
+                )
+            )
+            if matches == 0:
+                raise TargetNotFoundError("no select option has the requested exact label")
+            if matches != 1:
+                raise AmbiguousTargetError(f"select option label is ambiguous: {matches} matches")
             locator.select_option(label=value)
             return
         if action is InteractionAction.TOGGLE:
-            if node.role not in {"checkbox", "radio", "switch"}:
-                raise UnsupportedInteractionError("TOGGLE requires checkbox/radio/switch semantics")
+            if node.role not in {"checkbox", "switch"}:
+                raise UnsupportedInteractionError("TOGGLE requires checkbox/switch semantics")
             locator.click()
             return
         if action in {InteractionAction.EXPAND, InteractionAction.COLLAPSE}:
@@ -494,6 +519,13 @@ class PlaywrightInteractionAdapter:
             return
         raise UnsupportedInteractionError(f"unsupported browser action: {action.value}")
 
+    @staticmethod
+    def _snapshot_node(snapshot: SemanticSnapshot, node_id: str) -> ControlNode | None:
+        matches = tuple(candidate for candidate in snapshot.controls if candidate.node_id == node_id)
+        if len(matches) != 1:
+            return None
+        return matches[0]
+
     def verify(
         self,
         before: SemanticSnapshot,
@@ -502,16 +534,18 @@ class PlaywrightInteractionAdapter:
         action: InteractionAction,
         value: str | None,
     ) -> bool:
-        descriptor = self._node_descriptors.get(node.node_id)
-        # A navigation invalidates old node identity by design. For an invocation, a changed
-        # document generation is itself a deterministic postcondition.
         if after.target.browser is not None and before.target.browser is not None:
             if after.target.browser.document_generation != before.target.browser.document_generation:
                 return action is InteractionAction.INVOKE
         if action is InteractionAction.INVOKE:
-            # Require observable semantic state change; a successful low-level click alone is not
-            # accepted as proof that the requested external/UI effect occurred.
-            return after.revision != before.revision
+            # A successful low-level click alone is never proof. Require navigation, semantic
+            # mutation, a newly registered popup/tab, or a persisted approved download.
+            return (
+                after.revision != before.revision
+                or frozenset(self.session.page_ids()) != self._pre_action_pages
+                or len(self.session.downloads.saved) > self._pre_action_download_count
+            )
+        descriptor = self._node_descriptors.get(node.node_id)
         if descriptor is None:
             return False
         locator = self._locator_for_descriptor(descriptor)
@@ -522,9 +556,19 @@ class PlaywrightInteractionAdapter:
         if action is InteractionAction.SET_VALUE:
             return value is not None and locator.input_value() == value
         if action is InteractionAction.SELECT:
-            return value is not None and locator.locator("option:checked").text_content() == value
+            selected_label = locator.evaluate(
+                "el => el.selectedOptions && el.selectedOptions.length === 1 "
+                "? el.selectedOptions[0].label : null"
+            )
+            return value is not None and selected_label == value
         if action is InteractionAction.TOGGLE:
-            return after.revision != before.revision
+            before_node = self._snapshot_node(before, node.node_id)
+            after_node = self._snapshot_node(after, node.node_id)
+            if before_node is None or after_node is None:
+                return False
+            return dict(before_node.attributes).get("checked") != dict(after_node.attributes).get(
+                "checked"
+            )
         if action in {InteractionAction.EXPAND, InteractionAction.COLLAPSE}:
             expected = "true" if action is InteractionAction.EXPAND else "false"
             return locator.get_attribute("aria-expanded") == expected
