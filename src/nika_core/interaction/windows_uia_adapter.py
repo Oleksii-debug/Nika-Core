@@ -7,6 +7,7 @@ fail-closed; no ``top_window()`` or positional control selection is used.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -24,6 +25,8 @@ from .domain import (
     UnsupportedInteractionError,
     WindowIdentity,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,17 +134,22 @@ class PywinautoUIABackend:
 
     def enumerate_windows(self, pid: int) -> tuple[UIAWindowRecord, ...]:
         windows: list[UIAWindowRecord] = []
-        for wrapper in self._desktop().windows(
-            process=pid, visible_only=True, enabled_only=False
-        ):
+        # pywinauto's process= filter can miss freshly-created top-level UIA windows on
+        # hosted Windows runners. Enumerate the top-level UIA surface, then enforce PID
+        # identity ourselves. This remains semantic and fail-closed: no z-order/top_window
+        # guessing and no positional selection are introduced.
+        for wrapper in self._desktop().windows(visible_only=True, enabled_only=False):
             info = wrapper.element_info
+            process_id = int(getattr(info, "process_id", 0) or 0)
+            if process_id != pid:
+                continue
             handle = int(getattr(info, "handle", 0) or 0)
             if not handle:
                 continue
             windows.append(
                 UIAWindowRecord(
                     hwnd=handle,
-                    pid=int(getattr(info, "process_id", 0) or 0),
+                    pid=process_id,
                     title=str(getattr(info, "name", "") or ""),
                     enabled=bool(getattr(info, "enabled", True)),
                 )
@@ -150,7 +158,8 @@ class PywinautoUIABackend:
 
     def _window(self, hwnd: int):
         matches = [
-            wrapper for wrapper in self._desktop().windows(handle=hwnd)
+            wrapper
+            for wrapper in self._desktop().windows(handle=hwnd)
             if int(wrapper.handle) == hwnd
         ]
         if len(matches) != 1:
@@ -184,8 +193,8 @@ class PywinautoUIABackend:
             try:
                 if getattr(wrapper, attribute, None) is not None:
                     available.append(name)
-            except Exception:  # noqa: BLE001 - unsupported COM pattern
-                pass
+            except Exception as exc:  # noqa: BLE001 - unsupported COM pattern
+                logger.debug("UIA pattern probe failed for %s: %r", name, exc)
         return tuple(available)
 
     def _record(self, wrapper) -> UIAControlRecord:
@@ -202,8 +211,8 @@ class PywinautoUIABackend:
         value = None
         try:
             value = wrapper.get_value()
-        except Exception:  # noqa: BLE001 - not every control supports Value
-            pass
+        except Exception as exc:  # noqa: BLE001 - not every control supports Value
+            logger.debug("UIA Value probe unavailable: %r", exc)
         return UIAControlRecord(
             runtime_id=self._runtime_id(info),
             automation_id=str(getattr(info, "automation_id", "") or ""),
