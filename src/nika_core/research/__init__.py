@@ -81,6 +81,14 @@ _EXPORTS: dict[str, tuple[str, str]] = {
         "nika_core.research.profiles",
         "ResearchProfileRepository",
     ),
+    "ResearchProfileRunService": (
+        "nika_core.research.profile_jobs",
+        "ResearchProfileRunService",
+    ),
+    "ResearchProfileRunSummary": (
+        "nika_core.research.profile_jobs",
+        "ResearchProfileRunSummary",
+    ),
     "ResearchProfileService": (
         "nika_core.research.profiles",
         "ResearchProfileService",
@@ -175,6 +183,8 @@ __all__ = [
     "ResearchProfile",
     "ResearchProfileExecution",
     "ResearchProfileRepository",
+    "ResearchProfileRunService",
+    "ResearchProfileRunSummary",
     "ResearchProfileService",
     "ResearchQueryExecution",
     "ResearchQuerySpec",
