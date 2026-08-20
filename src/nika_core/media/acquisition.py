@@ -69,7 +69,7 @@ class YtDlpRemoteAcquirer:
         cancel_event: threading.Event | None = None,
     ) -> RemoteAcquisitionResult:
         active_policy = policy or RemoteAcquisitionPolicy()
-        YtDlpAdapter._validate_source_url(  # noqa: SLF001 - shared media policy boundary
+        YtDlpAdapter._validate_source_url(
             source_url,
             policy=YtDlpPolicy(allow_private_networks=active_policy.allow_private_networks),
         )
