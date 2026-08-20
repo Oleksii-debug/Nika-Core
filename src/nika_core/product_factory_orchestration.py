@@ -3,9 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import posixpath
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Iterable
+from typing import ClassVar
 
 
 class ProjectScale(StrEnum):
@@ -81,7 +82,7 @@ class TeamPlan:
 class DynamicTeamComposer:
     """Deterministic PF2 team composition without owning an agent runtime."""
 
-    _RISK_SPECIALISTS = {
+    _RISK_SPECIALISTS: ClassVar[dict[str, str]] = {
         "accessibility": "accessibility",
         "credentials": "security",
         "deployment": "release",
@@ -90,7 +91,7 @@ class DynamicTeamComposer:
         "privacy": "security",
         "security": "security",
     }
-    _KIND_SPECIALISTS = {
+    _KIND_SPECIALISTS: ClassVar[dict[str, str]] = {
         "android": "mobile",
         "backend": "backend",
         "data": "data",
@@ -101,7 +102,7 @@ class DynamicTeamComposer:
         "web": "web",
         "windows": "windows",
     }
-    _PERMISSIONS = {
+    _PERMISSIONS: ClassVar[dict[str, frozenset[str]]] = {
         "accessibility": frozenset({"read_source", "run_tests"}),
         "architecture": frozenset({"read_source"}),
         "backend": frozenset({"read_source", "write_source", "run_tests"}),
@@ -474,7 +475,7 @@ class ProductRepositoryGraph:
             if len(matching_repos) != 1:
                 raise RepositoryGraphError(f"lease path {path} is ambiguous across repositories")
             result.append((next(iter(matching_repos)), path))
-        if not set(repo_id for repo_id, _ in result).issubset(repos):
+        if not {repo_id for repo_id, _ in result}.issubset(repos):
             raise RepositoryGraphError("lease path repository mismatch")
         return tuple(result)
 
