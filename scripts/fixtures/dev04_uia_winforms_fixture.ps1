@@ -79,7 +79,14 @@ $form.Controls.Add($status)
 $apply.Add_Click({
     $status.Text = 'Applied: ' + $input.Text
     $status.AccessibleName = $status.Text
-})
+}.GetNewClosure())
 
-$form.Add_Shown({ $input.Focus() })
+$form.Add_Shown({
+    param($sender, $eventArgs)
+    $target = $sender.Controls.Find('ProblemInput', $true)
+    if ($target.Count -ne 1) {
+        throw "Expected exactly one ProblemInput control, found $($target.Count)"
+    }
+    [void]$target[0].Focus()
+})
 [void]$form.ShowDialog()
