@@ -1,7 +1,7 @@
 # PARALLEL EXECUTION BOARD — Nika Core
 
 Updated: 2026-08-20.
-Mode: **ACTIVE AUTONOMOUS PRODUCT FACTORY DEVELOPMENT**.
+Mode: **ACTIVE AUTONOMOUS PRODUCT FACTORY DEVELOPMENT — LARGE COHERENT BATCHES**.
 Canonical technical evidence: live GitHub `main`, exact PR heads and current Actions. Drive owns automation routing/ownership/handoff truth.
 
 ## Evidence states
@@ -13,115 +13,84 @@ Canonical technical evidence: live GitHub `main`, exact PR heads and current Act
 - HUMAN_TESTED — a person completed the required manual protocol.
 - NVDA_VERIFIED — the human NVDA protocol passed; automation may never award this state.
 
-Current global truth:
-- `HUMAN_TESTED=false`;
-- `NVDA_VERIFIED=false`;
-- `PRODUCTION_RELEASE_READY=false`;
-- `PF11=false`;
-- historical Core percentages and stale Windows ZIPs are archival only.
+Global truth: `PF11=false`; `HUMAN_TESTED=false`; `NVDA_VERIFIED=false`; `PRODUCTION_RELEASE_READY=false`.
 
 ## Canonical main
 
-`df84a72d6705aa78cb0c69df9e47a367098b74bb`
+`568b90f176a874d77bbc585501cc614daf1d246c`
 
-Integrated Product Factory foundation:
-- PF5 #90 — command/presentation routing;
-- PF1 #91 — durable ProductProject + Research→Product handoff;
-- PF2 #92 — Dynamic Team Composer + ProductRepositoryGraph;
-- PF2 #93 — deterministic coordinator/reconciliation;
-- PF2 #94 — public CodingWorkerPort adapter;
-- PF2 #97 — restart recovery for in-flight component work;
-- PF3 #95 — ExecutionNode + deployment/staging/health/rollback foundation, exact head `4a3e0b342ec06c936693c8f583ed4f7a4fdc2007`, Core #671 + M12 #439 green, integrated as current main.
+Integrated dependency chain now includes PF1 #91; PF2 #92/#93/#94/#97/#98/#102; PF3 #95/#99; PF5 #90/#96. PF2 #102 adds canonical durable coordinator checkpoint hosting plus 1/5/25/100-component and 100-component/10-repository/10-wave restart qualification; exact head `75419f68b7531fe0c2c6fa46d5ce1c5e5ab95622`, Core #711 + M12 #479 green.
 
-## Scheduled Product Factory dependency order
+## Dependency order
 
-`PF1 → PF2 → PF3 → PF4 → PF5`
+`PF1 → PF2 → PF3 → PF4 → PF5`.
 
-PF5 runs downstream last and consumes only integrated upstream contracts.
+PF5 runs downstream-last and may consume only integrated upstream contracts. A main advance invalidates merge credit from an older PF5 exact head even when code paths do not overlap; compatibility must be refreshed and fresh exact-head gates rerun.
 
-### AUTO-PF1 — ProductProject
-PF1 #91 is **INTEGRATED**.
+### PF1
+PF1 #91 is integrated. The last inspected decision successor #101 was RED/not integrated on `1e0c234d16aed11d0f158f0f9c9b7f90b77bd833`, Core #694 + M12 #462. Known Core Ubuntu failure family was five Ruff `ISC004` findings. PF5 does not edit PF1 and continues to fail closed for decision writes until a repaired public lifecycle integrates.
 
-Available to downstream: durable create/get/update-spec, optimistic concurrency and Research→Product handoff. A durable public product-decision write API is not yet integrated; PF5 must fail closed instead of writing PF1 tables directly.
+### PF2
+PF2 #92/#93/#94/#97/#98/#102 are integrated. PF2 now owns durable ProductProject-bound coordinator checkpoint/recovery and large-scale restart behavior in the canonical SQLite host. PF5 #100 validates PF2 snapshot identity/evidence before presentation but does not duplicate persistence/recovery ownership.
 
-### AUTO-PF2 — orchestration
-PF2 #92/#93/#94/#97 are **INTEGRATED**. Open follow-up #98 remains **NOT INTEGRATED** and PF5 does not consume it.
+### PF3
+PF3 #95/#99 are integrated. PF5 #100 consumes public execution/deployment/Credential Broker snapshots only after fail-closed identity/evidence checks. Raw credential material, protected handles and unrelated-project credentials remain outside PF5.
 
-### AUTO-PF3 — execution/deployment
-PF3 #95 is **INTEGRATED**. Public downstream-safe surface includes execution nodes/capabilities/resources/leases, normalized exact release evidence, deployment snapshots, staging-first policy state, health and rollback evidence.
+### PF4
+PF4 #103 remains independent adversarial acceptance QA. It may reject upstream PF0–PF12 behavior even when PF5 presentation is safe. PF5 does not self-award PF acceptance.
 
-PF5 may present these contracts. PF5 does not execute deployment provider actions, expose `provider_ref`, handle raw credentials or claim a Product Operations service that has not been integrated.
+### PF5 — current large batch
+PR #100: `auto-pf5/project-scoped-command-center`.
+Current base: `568b90f176a874d77bbc585501cc614daf1d246c`.
 
-### AUTO-PF4 — acceptance QA
-PF4 remains the independent PF0–PF12 gatekeeper and evidence lane. It rejects stale/false exact-SHA evidence without becoming a competing feature writer.
+Large root-cause family in #100:
+1. one durable PF1 read for visible detail + internal opaque credential refs;
+2. PF2 exact project/component/work/result/job/review identity validation;
+3. PF3 execution node/lease uniqueness, ownership and lifetime validation;
+4. PF3 deployment intent/health/rollback exact environment/SHA validation;
+5. project-scoped Credential Broker presentation for active/revoked/missing/broker-only credentials;
+6. explicit blockers for missing/revoked declared credentials;
+7. one-way credential presentation identities and no raw `secret_ref`/protected-handle/audit-detail disclosure;
+8. fail-closed cross-project identity/secret/audit binding and provider mismatch;
+9. bounded label/detail/evidence payload and latest-20 audit cap;
+10. final semantic status identity uniqueness + blocker recount after full composition;
+11. broad adversarial tests for every family above.
 
-### AUTO-PF5 — command journey + release
-PF5 #90 is **INTEGRATED**.
+No new dependency, migration, provider action, secret storage, shared UI, release workflow or manual-lane source is part of #100.
 
-Current real PF5 code/evidence PR: #96, `auto-pf5/command-journey-pf2-presentation`.
+Historical #100 lineage:
+- `51254f0f...`: exact checkout passed, Core #718 stopped before pytest on exactly 3 Ruff findings (2×SIM102, 1×I001); repaired as one static-analysis family;
+- `15afcc7b...`: Core Ubuntu became green and M12 Ubuntu advanced, but PF2 #102 moved main before merge credit; preserved at `backup/auto-pf5-100-15afcc7b`;
+- refreshed branch now sits on integrated PF2 #102 main; old CI cannot transfer.
 
-Current coherent scope:
-- deterministic Ukrainian + English ProductProject/Toolsmith routing;
-- explicit ambiguity for mixed product/capability intent;
-- real integrated PF1 ProductProject create/inspect/update through `ProductProjectRepository`;
-- SQLite restart, stale-version and credential-reference redaction tests;
-- integrated PF2 CoordinatorSnapshot → textual component/review/QA/blocker projection;
-- integrated PF3 ExecutionRegistrySnapshot/DeploymentFabricSnapshot → textual execution-node/build/release/staging/health/rollback/blocker projection;
-- no PF3 provider credential reference in PF5 presentation;
-- product-decision persistence fails closed until PF1 exposes a durable public decision API;
-- canonical status reconciliation in this same real code/evidence PR.
+State: **IMPLEMENTED / CURRENT-MAIN REFRESH COMPLETED / FRESH FINAL CORE+M12 REQUIRED / NOT INTEGRATED**.
 
-The prior #96 exact head `ee303c76da16adef5a4519ce9068839c73cd2c0e` is superseded: Core #679 passed, M12 #447 failed. Rollback history is preserved at `backup/auto-pf5-96-ee303c76`. The branch is being rebuilt linearly from current main `df84a72d6705aa78cb0c69df9e47a367098b74bb`; only fresh exact-head gates on the final rebuilt SHA count.
+## Release-integrity successor — implementation-ready research
 
-State: **IMPLEMENTED / CURRENT-MAIN REBUILD + PREFLIGHT + FRESH GATES REQUIRED / NOT INTEGRATED**.
+After #100 integration, PF5 will take one large release block instead of micro changes:
+- calculate and persist the exact outer Windows ZIP SHA-256;
+- generate GitHub Artifact Attestation for that exact ZIP;
+- pin current inspected `actions/attest` v4.2.2 by full immutable SHA `1e69f48acb82d1966a394da916b4c1698aa569d6` rather than movable `@v4`;
+- give only the packaged-release job `id-token: write` + `attestations: write` plus required read authority;
+- verify attestation/repository/source identity and reject stale/superseded ZIP evidence;
+- keep claims at SLSA v1 Build Level 2 unless a later reusable/hardened build workflow proves Level 3 requirements;
+- do not bundle SBOM work merely for optics; treat it as a separate evidence decision if dependency/license requirements justify it.
 
-## Manual/shared ownership — no scheduled duplication
+## Ownership boundaries
 
-- DEV01 #86 — Research/Corpus report exports.
-- DEV02 #72 — Windows worker containment proof.
-- DEV03 #67 — deterministic trader replay/accounting/risk.
-- DEV04 #78 — strict Windows UIA semantic vertical and shared Interaction/UIA ownership; dedicated live proof remains blocked by duplicate semantic-node identity.
-- DEV05 #89 — stable platform subtitle acquisition.
-- M10 #61/#62 — authorization/approval security ownership.
+Manual DEV01 #86, DEV02 #72, DEV03 #67, DEV04 #78, DEV05 #89 and M10 #61/#62 remain independent source owners. DEV04 retains shared semantic Windows UI/WebView2/UIA ownership. PF5 does not edit those surfaces without compatibility decision.
 
-PF5 does not edit these production slices without an explicit compatibility decision.
+## Release / accessibility rules
 
-## PF5 interaction/UI rule
+Backend-only green does not equal PF11. Isolated PR M12 ZIPs are CI evidence only and never a human candidate. Final NVDA verification is human-only.
 
-Shared semantic Windows UI remains outside PF5 ownership while DEV04 #78 is active. PF5 advances native/API and textual presentation contracts first.
+Interaction order remains native/application API → DOM/UIA/accessibility semantics → named deterministic controls → vision/OCR → coordinates last.
 
-Interaction priority:
-1. native/application API;
-2. DOM/UIA/accessibility semantics;
-3. named deterministic controls;
-4. screenshot/OCR/vision fallback;
-5. coordinates last.
+## Next large wave
 
-Automated semantic/UIA evidence never sets `NVDA_VERIFIED=true`.
+1. Complete refreshed #100 exact-head Core + M12 and final main-drift check; merge only if both green and current-main compatible.
+2. Let PF1 repair/integrate #101 independently; do not consume unmerged decision code.
+3. Start one large PF5 ZIP-digest + Artifact-Attestation release-integrity branch immediately after #100 integration.
+4. Only after required decision/UI/release dependencies integrate, assemble PF11 representative packaged journey and a genuinely fresh human/NVDA candidate.
 
-## Collision policy
-1. One writer per production slice.
-2. Separate branch per independent coherent lane.
-3. Branch from latest compatible green main unless a real dependency requires otherwise.
-4. Never import an unmerged sibling branch as canonical dependency.
-5. Shared-contract edits require explicit compatibility decision and focused tests.
-6. A blocked upstream lane does not idle independent downstream work.
-7. Exact-head acceptance + current-main compatibility are required before merge credit.
-8. No direct scheduled-worker writes to `main`.
-
-## Product Factory release policy
-
-Backend-only tests do not close Product Factory. PF11 requires a representative product created by the real factory from a clean packaged Windows Nika installation: research, durable ProductProject, product decision, acceptance criteria, team, repository, isolated implementation, independent QA/accessibility, package/release provenance and restart/resume.
-
-The expense application is an acceptance scenario, not a hard-coded Core product. Do not promote a new human candidate from isolated PF5 backend/presentation work.
-
-## Next dependency-ordered integration wave
-
-1. PF5 completes #96 current-main rebuild, preflight and fresh exact-head Core/M12.
-2. PF1 adds a durable public decision-write boundary before PF5 can claim create/inspect/update/decision completeness.
-3. PF2 repairs/integrates #98 independently; PF5 consumes it only after integration.
-4. PF3 follow-up owns credential/real-provider/operations capabilities; PF5 consumes only integrated public contracts.
-5. Shared semantic UI waits for DEV04 ownership release plus compatibility decision.
-6. PF11 package/release follows only after the representative integrated journey exists.
-
-Progress is evidence-based; no invented Full Product Vision percentage is assigned.
+No invented completion percentage is assigned.
