@@ -44,18 +44,21 @@ class _RelNextParser(HTMLParser):
             self.hrefs.append(href)
 
 
-def _same_origin(left: str, right: str) -> bool:
-    left_parts = urlsplit(left)
-    right_parts = urlsplit(right)
+def _origin(url: str) -> tuple[str, str | None, int | None]:
+    parts = urlsplit(url)
+    scheme = parts.scheme.casefold()
+    port = parts.port
+    if port is None:
+        port = 443 if scheme == "https" else 80 if scheme == "http" else None
     return (
-        left_parts.scheme.casefold(),
-        left_parts.hostname.casefold() if left_parts.hostname else None,
-        left_parts.port,
-    ) == (
-        right_parts.scheme.casefold(),
-        right_parts.hostname.casefold() if right_parts.hostname else None,
-        right_parts.port,
+        scheme,
+        parts.hostname.casefold() if parts.hostname else None,
+        port,
     )
+
+
+def _same_origin(left: str, right: str) -> bool:
+    return _origin(left) == _origin(right)
 
 
 def _normalize_candidate(page_url: str, candidate: str) -> str | None:
