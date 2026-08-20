@@ -12,6 +12,7 @@ from nika_core.research.models import (
 )
 from nika_core.research.network_repository import NetworkResearchRepository
 from nika_core.research.normalize import normalize_text
+from nika_core.research.query_results import ScopedResearchResultWriter
 
 
 class SearchMode(StrEnum):
@@ -53,14 +54,33 @@ class DeterministicResearchQueryService:
     ) -> None:
         self._store = store
         self._network = network_repository
+        self._result_writer = ScopedResearchResultWriter(
+            store=store,
+            network_repository=network_repository,
+        )
 
-    def execute(self, spec: ResearchQuerySpec) -> ResearchQueryExecution:
+    def execute(
+        self,
+        spec: ResearchQuerySpec,
+        *,
+        result_set_id: str | None = None,
+    ) -> ResearchQueryExecution:
         self._validate_spec(spec)
         hits = self._search(spec, self._fts_query(spec.text, spec.mode))
-        result_set = self._network.save_result_set(
+        match_reason = (
+            f"Quoted phrase full-text match for: {spec.text}"
+            if spec.mode is SearchMode.PHRASE
+            else f"Literal-token full-text match for: {spec.text}"
+        )
+        result_set = self._result_writer.save(
             workspace_id=spec.workspace_id,
             query=spec.text,
             hits=hits,
+            source_ids=self._normalized_source_ids(spec.filters.source_ids),
+            source_kinds=spec.filters.source_kinds,
+            freshness=spec.filters.freshness,
+            why_matched=match_reason,
+            result_set_id=result_set_id,
         )
         return ResearchQueryExecution(spec=spec, result_set=result_set)
 
@@ -185,7 +205,10 @@ class DeterministicResearchQueryService:
             http = (
                 "SELECT 1 FROM corpus_http_origins ho "
                 "JOIN research_http_sources hs ON hs.source_id=ho.source_id "
-                "WHERE ho.document_id=d.document_id"
+                "JOIN research_http_snapshots snap ON snap.snapshot_id=ho.snapshot_id "
+                "WHERE ho.document_id=d.document_id "
+                "AND hs.current_raw_sha256 IS NOT NULL "
+                "AND snap.raw_sha256=hs.current_raw_sha256"
             )
             if source_ids:
                 placeholders = ",".join("?" for _ in source_ids)

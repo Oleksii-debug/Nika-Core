@@ -17,6 +17,7 @@ from nika_core.resources.contracts import ResourceObserverPort
 
 class BinaryEvidence(FrozenModel):
     component_id: str = Field(min_length=1, max_length=120)
+    engine_id: str | None = Field(default=None, min_length=1, max_length=160)
     path_name: str = Field(min_length=1, max_length=300)
     sha256: str = Field(pattern="^[0-9a-f]{64}$")
     size_bytes: int = Field(ge=1)
@@ -85,27 +86,49 @@ class MediaProofManifest(FrozenModel):
 
     @model_validator(mode="after")
     def validate_identity(self) -> MediaProofManifest:
-        engine_ids = {item.engine_id for item in self.engines}
-        if len(engine_ids) != len(self.engines):
+        engines_by_id = {item.engine_id: item for item in self.engines}
+        if len(engines_by_id) != len(self.engines):
             raise ValueError("engine evidence IDs must be unique")
-        binary_ids = {item.component_id for item in self.binaries}
-        if len(binary_ids) != len(self.binaries):
+        binaries_by_component = {item.component_id: item for item in self.binaries}
+        if len(binaries_by_component) != len(self.binaries):
             raise ValueError("binary evidence component IDs must be unique")
+        binaries_by_engine = {
+            item.engine_id or item.component_id: item for item in self.binaries
+        }
+        if len(binaries_by_engine) != len(self.binaries):
+            raise ValueError("binary evidence engine IDs must be unique")
         model_ids = {item.model_id for item in self.models}
         if len(model_ids) != len(self.models):
             raise ValueError("model evidence IDs must be unique")
         execution_ids = {item.engine_id for item in self.executions}
         if len(execution_ids) != len(self.executions):
             raise ValueError("engine execution evidence IDs must be unique")
+        engine_ids = set(engines_by_id)
+        binary_engine_ids = set(binaries_by_engine)
+        if not binary_engine_ids.issubset(engine_ids):
+            raise ValueError("binary evidence must reference a proven engine")
+        for engine_id, binary in binaries_by_engine.items():
+            descriptor = engines_by_id[engine_id]
+            if descriptor.executable_sha256 is None:
+                raise ValueError(
+                    "binary evidence requires the matching engine descriptor executable checksum"
+                )
+            if descriptor.executable_sha256 != binary.sha256:
+                raise ValueError("binary evidence checksum must match the engine descriptor")
         for model in self.models:
             if model.engine_id not in engine_ids:
                 raise ValueError("model evidence must reference a proven engine")
         if not execution_ids.issubset(engine_ids):
             raise ValueError("engine execution evidence must reference a proven engine")
-        if self.real_engine_execution_proven and execution_ids != engine_ids:
-            raise ValueError(
-                "full real-engine proof requires execution evidence for every declared engine"
-            )
+        if self.real_engine_execution_proven:
+            if execution_ids != engine_ids:
+                raise ValueError(
+                    "full real-engine proof requires execution evidence for every declared engine"
+                )
+            if binary_engine_ids != engine_ids:
+                raise ValueError(
+                    "full real-engine proof requires audited binary evidence for every declared engine"
+                )
         attested_measurement = bool(
             self.resource_measurement is not None
             and self.resource_measurement.operator_attested_target
@@ -123,12 +146,14 @@ def binary_evidence(
     path: Path,
     source_reference: str,
     license_classification: str,
+    engine_id: str | None = None,
 ) -> BinaryEvidence:
     resolved = path.resolve(strict=True)
     if not resolved.is_file():
         raise ValueError("binary evidence path must be a regular file")
     return BinaryEvidence(
         component_id=component_id,
+        engine_id=engine_id,
         path_name=resolved.name,
         sha256=sha256_file(resolved),
         size_bytes=resolved.stat().st_size,
