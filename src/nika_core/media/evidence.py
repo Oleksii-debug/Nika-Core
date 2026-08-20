@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import math
+import platform
+import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from nika_core.media.contracts import EngineDescriptor, FrozenModel, ModelDescriptor
 from nika_core.media.hashing import sha256_file
+from nika_core.resources.contracts import ResourceObserverPort
 
 
 class BinaryEvidence(FrozenModel):
@@ -35,12 +41,45 @@ class EngineExecutionEvidence(FrozenModel):
     result_sha256: str = Field(pattern="^[0-9a-f]{64}$")
 
 
+class ResourceMeasurementSample(FrozenModel):
+    ordinal: int = Field(ge=1, le=60)
+    cpu_percent: float = Field(ge=0.0, le=100.0)
+    memory_percent: float = Field(ge=0.0, le=100.0)
+    available_memory_bytes: int = Field(ge=0)
+
+    @field_validator("cpu_percent", "memory_percent")
+    @classmethod
+    def finite_percent(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("resource percentages must be finite")
+        return value
+
+
+class TargetMachineResourceEvidence(FrozenModel):
+    machine_label: str = Field(min_length=1, max_length=160)
+    platform_system: str = Field(min_length=1, max_length=120)
+    platform_release: str = Field(min_length=1, max_length=240)
+    machine_architecture: str = Field(min_length=1, max_length=120)
+    python_version: str = Field(min_length=1, max_length=120)
+    samples: tuple[ResourceMeasurementSample, ...] = Field(min_length=1, max_length=60)
+    operator_attested_target: bool = False
+
+    @model_validator(mode="after")
+    def validate_sample_order(self) -> TargetMachineResourceEvidence:
+        expected = tuple(range(1, len(self.samples) + 1))
+        actual = tuple(item.ordinal for item in self.samples)
+        if actual != expected:
+            raise ValueError("resource measurement samples must use contiguous ordinals")
+        return self
+
+
 class MediaProofManifest(FrozenModel):
-    schema_version: int = 2
+    schema_version: int = 3
     engines: tuple[EngineDescriptor, ...] = ()
     binaries: tuple[BinaryEvidence, ...] = ()
     models: tuple[ModelEvidence, ...] = ()
     executions: tuple[EngineExecutionEvidence, ...] = ()
+    resource_measurement: TargetMachineResourceEvidence | None = None
     real_engine_execution_proven: bool = False
     target_machine_measured: bool = False
 
@@ -66,6 +105,14 @@ class MediaProofManifest(FrozenModel):
         if self.real_engine_execution_proven and execution_ids != engine_ids:
             raise ValueError(
                 "full real-engine proof requires execution evidence for every declared engine"
+            )
+        attested_measurement = bool(
+            self.resource_measurement is not None
+            and self.resource_measurement.operator_attested_target
+        )
+        if self.target_machine_measured != attested_measurement:
+            raise ValueError(
+                "target_machine_measured requires an operator-attested resource measurement"
             )
         return self
 
@@ -113,4 +160,43 @@ def model_evidence(
         size_bytes=size,
         license_reference=descriptor.license_reference,
         source_reference=source_reference,
+    )
+
+
+def resource_evidence(
+    *,
+    observer: ResourceObserverPort,
+    machine_label: str,
+    operator_attested_target: bool,
+    sample_count: int = 5,
+    sample_interval_seconds: float = 0.2,
+    sleep: Callable[[float], None] = time.sleep,
+) -> TargetMachineResourceEvidence:
+    if sample_count < 1 or sample_count > 60:
+        raise ValueError("sample_count must be between 1 and 60")
+    if not math.isfinite(sample_interval_seconds) or sample_interval_seconds < 0:
+        raise ValueError("sample_interval_seconds must be finite and non-negative")
+
+    samples: list[ResourceMeasurementSample] = []
+    for index in range(sample_count):
+        snapshot = observer.snapshot()
+        samples.append(
+            ResourceMeasurementSample(
+                ordinal=index + 1,
+                cpu_percent=snapshot.cpu_percent,
+                memory_percent=snapshot.memory_percent,
+                available_memory_bytes=snapshot.available_memory_bytes,
+            )
+        )
+        if index + 1 < sample_count and sample_interval_seconds:
+            sleep(sample_interval_seconds)
+
+    return TargetMachineResourceEvidence(
+        machine_label=machine_label,
+        platform_system=platform.system() or "unknown",
+        platform_release=platform.release() or "unknown",
+        machine_architecture=platform.machine() or "unknown",
+        python_version=sys.version.split()[0],
+        samples=tuple(samples),
+        operator_attested_target=operator_attested_target,
     )
