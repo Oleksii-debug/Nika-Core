@@ -45,7 +45,16 @@ class ProductProjectCommandService:
         return project_detail(project)
 
     def inspect_project(self, project_id: str) -> ProductProjectDetail:
-        return project_detail(self._repository.get(project_id))
+        detail, _credential_refs = self.inspect_project_context(project_id)
+        return detail
+
+    def inspect_project_context(
+        self,
+        project_id: str,
+    ) -> tuple[ProductProjectDetail, tuple[str, ...]]:
+        """Read one durable project version for visible detail plus internal opaque refs."""
+        project = self._repository.get(project_id)
+        return project_detail(project), project.spec.credential_refs
 
     def update_project(
         self,
