@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, model_validator
 
@@ -27,11 +28,19 @@ class ModelEvidence(FrozenModel):
     source_reference: str = Field(min_length=1, max_length=1000)
 
 
+class EngineExecutionEvidence(FrozenModel):
+    engine_id: str = Field(min_length=1, max_length=160)
+    evidence_kind: Literal["probe", "ocr"]
+    fixture_sha256: str = Field(pattern="^[0-9a-f]{64}$")
+    result_sha256: str = Field(pattern="^[0-9a-f]{64}$")
+
+
 class MediaProofManifest(FrozenModel):
-    schema_version: int = 1
+    schema_version: int = 2
     engines: tuple[EngineDescriptor, ...] = ()
     binaries: tuple[BinaryEvidence, ...] = ()
     models: tuple[ModelEvidence, ...] = ()
+    executions: tuple[EngineExecutionEvidence, ...] = ()
     real_engine_execution_proven: bool = False
     target_machine_measured: bool = False
 
@@ -46,9 +55,18 @@ class MediaProofManifest(FrozenModel):
         model_ids = {item.model_id for item in self.models}
         if len(model_ids) != len(self.models):
             raise ValueError("model evidence IDs must be unique")
+        execution_ids = {item.engine_id for item in self.executions}
+        if len(execution_ids) != len(self.executions):
+            raise ValueError("engine execution evidence IDs must be unique")
         for model in self.models:
             if model.engine_id not in engine_ids:
                 raise ValueError("model evidence must reference a proven engine")
+        if not execution_ids.issubset(engine_ids):
+            raise ValueError("engine execution evidence must reference a proven engine")
+        if self.real_engine_execution_proven and execution_ids != engine_ids:
+            raise ValueError(
+                "full real-engine proof requires execution evidence for every declared engine"
+            )
         return self
 
 
