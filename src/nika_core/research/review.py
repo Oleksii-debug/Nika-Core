@@ -9,7 +9,6 @@ from enum import StrEnum
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.research.models import ResearchEvidence, ResearchResultSet
 
-
 _MAX_NOTE_LENGTH = 4000
 _EVENT_TYPE = "research.review.changed"
 _ENTITY_TYPE = "research_document_review"
