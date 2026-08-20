@@ -32,6 +32,7 @@ _ARIA_LINE: Final = re.compile(
     r'(?:\s+\[(?P<state>[^\]]+)\])?'
     r'(?:\s*:\s*(?P<scalar>.*))?$'
 )
+_STATE_TOKEN: Final = re.compile(r'(?P<key>[\w-]+)(?:=(?P<value>"(?:[^"\\]|\\.)*"|\S+))?')
 _FORM_ROLES: Final = frozenset(
     {"checkbox", "combobox", "listbox", "searchbox", "slider", "spinbutton", "textbox"}
 )
@@ -105,8 +106,7 @@ class DownloadBroker:
         self.approved_root.mkdir(parents=True, exist_ok=True)
 
     def handle(self, download: Any) -> None:
-        suggested = str(download.suggested_filename)
-        filename = Path(suggested).name
+        filename = Path(str(download.suggested_filename)).name
         if not filename or filename in {".", ".."}:
             raise UnsupportedInteractionError("download did not provide a safe filename")
         destination = (self.approved_root / filename).resolve()
@@ -134,7 +134,9 @@ class PageRegistry:
     def __post_init__(self) -> None:
         for page in tuple(self.context.pages):
             self.register(page)
-        self.context.on("page", self.register)
+        # Playwright annotates callback objects internally. Never pass a bound method whose owner
+        # is a slotted dataclass; use an ordinary lambda instead.
+        self.context.on("page", lambda page: self.register(page))
 
     def register(self, page: Any) -> str:
         object_id = id(page)
@@ -197,8 +199,9 @@ class BrowserSession:
         self._browser = self._playwright.chromium.launch(headless=self.headless)
         self.context = self._browser.new_context(accept_downloads=True)
         self.context.set_default_timeout(self.timeout_ms)
-        self.context.on("dialog", self.dialogs.handle)
-        self.context.on("download", self.downloads.handle)
+        # See PageRegistry: wrappers avoid Playwright mutating bound methods of slotted owners.
+        self.context.on("dialog", lambda dialog: self.dialogs.handle(dialog))
+        self.context.on("download", lambda download: self.downloads.handle(download))
         self.registry = PageRegistry(self.context)
         return self
 
@@ -295,14 +298,21 @@ class PlaywrightInteractionAdapter:
     def _state_attributes(raw: str | None) -> tuple[tuple[str, str], ...]:
         if not raw:
             return ()
-        attrs: list[tuple[str, str]] = []
-        for token in raw.split():
-            if "=" in token:
-                key, value = token.split("=", 1)
-                attrs.append((key.strip(), value.strip().strip('"')))
+        attributes: list[tuple[str, str]] = []
+        for match in _STATE_TOKEN.finditer(raw):
+            key = match.group("key")
+            encoded = match.group("value")
+            if encoded is None:
+                value = "true"
+            elif encoded.startswith('"'):
+                try:
+                    value = str(json.loads(encoded))
+                except json.JSONDecodeError:
+                    value = encoded[1:-1]
             else:
-                attrs.append((token.strip(), "true"))
-        return tuple(attrs)
+                value = encoded
+            attributes.append((key, value))
+        return tuple(attributes)
 
     def _mutation_counter(self, root: Any) -> int:
         return int(
@@ -339,7 +349,12 @@ class PlaywrightInteractionAdapter:
             locator = locator.filter(has_text=re.compile(rf"^{re.escape(text)}$"))
         return locator
 
-    def _locator_for_descriptor(self, descriptor: _SemanticDescriptor, *, root: Any | None = None) -> Any:
+    def _locator_for_descriptor(
+        self,
+        descriptor: _SemanticDescriptor,
+        *,
+        root: Any | None = None,
+    ) -> Any:
         scope = self._root() if root is None else root
         for role, name, text in descriptor.ancestors:
             candidate = self._semantic_locator(scope, role, name, text)
