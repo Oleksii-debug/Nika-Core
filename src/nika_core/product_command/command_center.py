@@ -8,10 +8,11 @@ from nika_core.product_command.deployment_adapter import (
     execution_status_entries,
 )
 from nika_core.product_command.product_project_adapter import ProductProjectCommandService
-from nika_core.product_factory_coordinator import CoordinatorSnapshot
+from nika_core.product_factory_coordinator import CoordinatorSnapshot, WorkState
 from nika_core.product_factory_credentials import CredentialBrokerSnapshot
 from nika_core.product_factory_deployment import (
     DeploymentFabricSnapshot,
+    DeploymentState,
     ExecutionRegistrySnapshot,
 )
 
@@ -21,7 +22,7 @@ class ProductCommandCenterScopeError(ValueError):
 
 
 class ProductCommandCenter:
-    """Compose PF1/PF2/PF3 presentation without leaking cross-project state."""
+    """Compose PF1/PF2/PF3 presentation without leaking or misbinding project state."""
 
     def __init__(self, projects: ProductProjectCommandService) -> None:
         self._projects = projects
@@ -42,8 +43,10 @@ class ProductCommandCenter:
             _validate_coordinator_scope(project_id, coordinator)
             statuses.extend(coordinator_status_entries(coordinator))
         if execution is not None:
+            _validate_execution_snapshot(execution)
             statuses.extend(execution_status_entries(_scope_execution(project_id, execution)))
         if deployment is not None:
+            _validate_deployment_snapshot(deployment)
             statuses.extend(
                 deployment_status_entries(_scope_deployment(project_id, deployment))
             )
@@ -72,10 +75,82 @@ def _validate_coordinator_scope(
         raise ProductCommandCenterScopeError(
             "coordinator snapshot belongs to a different ProductProject"
         )
-    if any(record.request.project_id != project_id for record in snapshot.records):
+    component_ids = [record.request.component_id for record in snapshot.records]
+    work_ids = [record.request.work_id for record in snapshot.records]
+    if len(component_ids) != len(set(component_ids)):
         raise ProductCommandCenterScopeError(
-            "coordinator snapshot contains cross-project work records"
+            "coordinator snapshot contains duplicate component identities"
         )
+    if len(work_ids) != len(set(work_ids)):
+        raise ProductCommandCenterScopeError(
+            "coordinator snapshot contains duplicate work identities"
+        )
+    for record in snapshot.records:
+        request = record.request
+        if request.project_id != project_id:
+            raise ProductCommandCenterScopeError(
+                "coordinator snapshot contains cross-project work records"
+            )
+        result = record.result
+        if result is not None:
+            if (
+                result.work_id != request.work_id
+                or result.component_id != request.component_id
+                or result.repository_id != request.repository_id
+                or result.base_sha != request.base_sha
+                or result.coding_result.job_id != request.work_id
+            ):
+                raise ProductCommandCenterScopeError(
+                    "coordinator result evidence does not match its work request"
+                )
+        if record.review is not None and result is None:
+            raise ProductCommandCenterScopeError(
+                "coordinator review exists without worker result evidence"
+            )
+        if record.state is WorkState.REVIEW_REQUIRED and result is None:
+            raise ProductCommandCenterScopeError(
+                "review-required coordinator record lacks worker result evidence"
+            )
+        if record.state is WorkState.ACCEPTED:
+            if result is None or record.review is None or not record.review.accepted:
+                raise ProductCommandCenterScopeError(
+                    "accepted coordinator record lacks accepted independent review evidence"
+                )
+
+
+def _validate_execution_snapshot(snapshot: ExecutionRegistrySnapshot) -> None:
+    node_ids = [node.identity.node_id for node in snapshot.nodes]
+    lease_ids = [lease.lease_id for lease in snapshot.leases]
+    leased_node_ids = [lease.node_id for lease in snapshot.leases]
+    if len(node_ids) != len(set(node_ids)):
+        raise ProductCommandCenterScopeError(
+            "execution snapshot contains duplicate node identities"
+        )
+    if len(lease_ids) != len(set(lease_ids)):
+        raise ProductCommandCenterScopeError(
+            "execution snapshot contains duplicate lease identities"
+        )
+    if len(leased_node_ids) != len(set(leased_node_ids)):
+        raise ProductCommandCenterScopeError(
+            "execution snapshot assigns one node to multiple active leases"
+        )
+    known_nodes = set(node_ids)
+    for lease in snapshot.leases:
+        if not all(
+            value.strip()
+            for value in (lease.lease_id, lease.project_id, lease.work_id, lease.node_id)
+        ):
+            raise ProductCommandCenterScopeError(
+                "execution snapshot contains an empty lease identity field"
+            )
+        if lease.node_id not in known_nodes:
+            raise ProductCommandCenterScopeError(
+                "execution snapshot lease references an unknown node"
+            )
+        if lease.expires_at <= lease.issued_at:
+            raise ProductCommandCenterScopeError(
+                "execution snapshot contains an invalid lease lifetime"
+            )
 
 
 def _scope_execution(
@@ -86,6 +161,60 @@ def _scope_execution(
     node_ids = {lease.node_id for lease in leases}
     nodes = tuple(node for node in snapshot.nodes if node.identity.node_id in node_ids)
     return ExecutionRegistrySnapshot(nodes, leases, snapshot.next_lease)
+
+
+def _validate_deployment_snapshot(snapshot: DeploymentFabricSnapshot) -> None:
+    intent_ids = [record.intent.intent_id for record in snapshot.records]
+    staging_project_ids = [project_id for project_id, _sha in snapshot.healthy_staging]
+    current_environment_ids = [environment_id for environment_id, _sha in snapshot.current_releases]
+    if len(intent_ids) != len(set(intent_ids)):
+        raise ProductCommandCenterScopeError(
+            "deployment snapshot contains duplicate intent identities"
+        )
+    if len(staging_project_ids) != len(set(staging_project_ids)):
+        raise ProductCommandCenterScopeError(
+            "deployment snapshot contains duplicate healthy-staging project identities"
+        )
+    if len(current_environment_ids) != len(set(current_environment_ids)):
+        raise ProductCommandCenterScopeError(
+            "deployment snapshot contains duplicate current-release environment identities"
+        )
+
+    for record in snapshot.records:
+        intent = record.intent
+        if (
+            intent.project_id != intent.environment.project_id
+            or intent.project_id != intent.release.project_id
+        ):
+            raise ProductCommandCenterScopeError(
+                "deployment record crosses ProductProject identity boundary"
+            )
+        if record.health is not None and (
+            record.health.environment_id != intent.environment.environment_id
+            or record.health.release_sha != intent.release.source_sha
+        ):
+            raise ProductCommandCenterScopeError(
+                "deployment health evidence does not match deployment intent"
+            )
+        if record.rollback is not None and (
+            record.rollback.environment_id != intent.environment.environment_id
+            or record.rollback.failed_release_sha != intent.release.source_sha
+        ):
+            raise ProductCommandCenterScopeError(
+                "deployment rollback evidence does not match failed release intent"
+            )
+        if record.state is DeploymentState.HEALTHY and (
+            record.health is None or not record.health.healthy
+        ):
+            raise ProductCommandCenterScopeError(
+                "healthy deployment state lacks matching healthy evidence"
+            )
+        if record.state is DeploymentState.ROLLED_BACK and (
+            record.rollback is None or not record.rollback.succeeded
+        ):
+            raise ProductCommandCenterScopeError(
+                "rolled-back deployment state lacks successful rollback evidence"
+            )
 
 
 def _scope_deployment(
