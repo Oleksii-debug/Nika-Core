@@ -18,6 +18,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--ffprobe", type=Path, required=True)
     parser.add_argument("--tesseract", type=Path, required=True)
+    parser.add_argument("--tesseract-binary-source-reference", required=True)
+    parser.add_argument("--tesseract-binary-license", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--media-fixture", type=Path)
     parser.add_argument("--ocr-fixture", type=Path)
@@ -41,10 +43,11 @@ def main() -> int:
         tesseract = TesseractOCRAdapter(executable=args.tesseract)
         tesseract_descriptor = tesseract.descriptor(cwd=cwd)
 
-        executed = False
+        ffprobe_executed = False
+        tesseract_executed = False
         if args.media_fixture is not None:
             ffprobe.probe(args.media_fixture, asset_id="proof-media", cwd=cwd)
-            executed = True
+            ffprobe_executed = True
         if args.ocr_fixture is not None:
             page = tesseract.recognize_page(
                 OCRPageRequest(
@@ -57,7 +60,7 @@ def main() -> int:
             )
             if not page.text.strip():
                 raise RuntimeError("OCR proof produced empty text")
-            executed = True
+            tesseract_executed = True
 
         models = ()
         model_args = (
@@ -96,12 +99,12 @@ def main() -> int:
                 binary_evidence(
                     component_id="tesseract",
                     path=args.tesseract,
-                    source_reference="https://github.com/tesseract-ocr/tesseract",
-                    license_classification="Apache-2.0",
+                    source_reference=args.tesseract_binary_source_reference,
+                    license_classification=args.tesseract_binary_license,
                 ),
             ),
             models=models,
-            real_engine_execution_proven=executed,
+            real_engine_execution_proven=ffprobe_executed and tesseract_executed,
             target_machine_measured=False,
         )
         args.output.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
