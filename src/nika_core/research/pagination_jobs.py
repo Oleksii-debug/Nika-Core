@@ -31,7 +31,7 @@ class _FrontierItem:
 
 
 def _page_source_id(root_source_id: str, url: str) -> str:
-    digest = hashlib.sha256(f"{root_source_id}\0{url}".encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(f"{root_source_id}\0{url}".encode()).hexdigest()
     return f"research.page.{digest}"
 
 
@@ -46,10 +46,10 @@ def _policy_to_payload(policy: PaginationPolicy) -> dict[str, object]:
 
 def _policy_from_payload(payload: object) -> PaginationPolicy:
     if not isinstance(payload, dict):
-        raise ValueError("pagination policy payload is invalid")
+        raise TypeError("pagination policy payload is invalid")
     fields = payload.get("json_next_fields")
     if not isinstance(fields, list) or not all(isinstance(item, str) for item in fields):
-        raise ValueError("pagination json_next_fields payload is invalid")
+        raise TypeError("pagination json_next_fields payload is invalid")
     return PaginationPolicy(
         max_pages=int(payload.get("max_pages", 50)),
         max_discovered_links_per_page=int(payload.get("max_discovered_links_per_page", 8)),
@@ -126,11 +126,11 @@ class PaginatedResearchRefreshService:
             raise ValueError("unexpected checkpoint stage for paginated Research refresh job")
         raw_frontier = checkpoint.payload.get("frontier")
         if not isinstance(raw_frontier, list):
-            raise ValueError("paginated Research checkpoint frontier is invalid")
+            raise TypeError("paginated Research checkpoint frontier is invalid")
         frontier: list[_FrontierItem] = []
         for item in raw_frontier:
             if not isinstance(item, dict):
-                raise ValueError("paginated Research checkpoint item is invalid")
+                raise TypeError("paginated Research checkpoint item is invalid")
             source_id = item.get("source_id")
             url = item.get("url")
             valid_source_id = isinstance(source_id, str) and bool(source_id)
