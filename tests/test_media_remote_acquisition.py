@@ -16,7 +16,16 @@ from nika_core.media.process import ProcessResult
 class WritingRunner:
     def __init__(self, payload: bytes = b"remote-media") -> None:
         self.payload = payload
-        self.calls: list[tuple[tuple[str, ...], Path, float, threading.Event | None]] = []
+        self.calls: list[
+            tuple[
+                tuple[str, ...],
+                Path,
+                float,
+                threading.Event | None,
+                tuple[Path, ...],
+                int | None,
+            ]
+        ] = []
 
     def run(
         self,
@@ -26,9 +35,20 @@ class WritingRunner:
         timeout_seconds: float,
         env=None,
         cancel_event: threading.Event | None = None,
+        watched_paths: tuple[Path, ...] = (),
+        max_watched_file_bytes: int | None = None,
     ) -> ProcessResult:
         normalized = tuple(argv)
-        self.calls.append((normalized, cwd, timeout_seconds, cancel_event))
+        self.calls.append(
+            (
+                normalized,
+                cwd,
+                timeout_seconds,
+                cancel_event,
+                watched_paths,
+                max_watched_file_bytes,
+            )
+        )
         output = Path(normalized[normalized.index("-o") + 1])
         output.write_bytes(self.payload)
         return ProcessResult(normalized, 0, b"", b"", 0.01)
@@ -39,7 +59,17 @@ class FailingRunner:
         self.error = error
         self.calls = 0
 
-    def run(self, argv, *, cwd, timeout_seconds, env=None, cancel_event=None):
+    def run(
+        self,
+        argv,
+        *,
+        cwd,
+        timeout_seconds,
+        env=None,
+        cancel_event=None,
+        watched_paths=(),
+        max_watched_file_bytes=None,
+    ):
         self.calls += 1
         output = Path(argv[argv.index("-o") + 1])
         Path(f"{output}.part").write_bytes(b"resume-me")
@@ -66,7 +96,7 @@ def test_remote_acquisition_promotes_checksum_bound_immutable_asset(tmp_path: Pa
     assert (tmp_path / result.asset.relative_path).read_bytes() == b"abc123"
     assert not list(tmp_path.glob("*.partial"))
 
-    argv, cwd, timeout_seconds, _cancel = runner.calls[0]
+    argv, cwd, timeout_seconds, _cancel, watched_paths, watched_limit = runner.calls[0]
     assert cwd == tmp_path.resolve()
     assert timeout_seconds == 12
     assert argv[-1] == "https://example.com/watch/42"
@@ -77,6 +107,10 @@ def test_remote_acquisition_promotes_checksum_bound_immutable_asset(tmp_path: Pa
     assert "--exec" not in argv
     assert "--cookies-from-browser" not in argv
     assert "--write-info-json" not in argv
+    assert watched_limit == 64
+    assert len(watched_paths) == 2
+    assert watched_paths[0].name.endswith(".media.partial")
+    assert watched_paths[1].name.endswith(".media.partial.part")
 
 
 def test_remote_acquisition_preserves_bounded_resume_part_after_cancel(tmp_path: Path) -> None:
@@ -175,7 +209,17 @@ def test_checksum_mismatch_never_promotes_final_asset(tmp_path: Path) -> None:
 
 def test_missing_completed_partial_is_typed_failure(tmp_path: Path) -> None:
     class NoOutputRunner:
-        def run(self, argv, *, cwd, timeout_seconds, env=None, cancel_event=None):
+        def run(
+            self,
+            argv,
+            *,
+            cwd,
+            timeout_seconds,
+            env=None,
+            cancel_event=None,
+            watched_paths=(),
+            max_watched_file_bytes=None,
+        ):
             return ProcessResult(tuple(argv), 0, b"", b"", 0.01)
 
     with pytest.raises(MediaError) as raised:
