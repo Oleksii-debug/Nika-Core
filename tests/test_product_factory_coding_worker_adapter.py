@@ -23,7 +23,7 @@ from nika_core.toolsmith.contracts import (
     ProcessPolicy,
     RecoveryState,
     ResourceBudget,
-    TestEvidence,
+    TestEvidence as WorkerTestEvidence,
     WorkerFailure,
     WorkerFailureKind,
     WorkspaceLease,
@@ -146,7 +146,7 @@ class FakeWorker:
         return CodingResult(
             job_id=job.job_id,
             changed_files=(ChangedFile("src/core/item.py", DIGEST, 10),),
-            test_evidence=(TestEvidence(("python", "-m", "pytest"), 0, "tests-ok"),),
+            test_evidence=(WorkerTestEvidence(("python", "-m", "pytest"), 0, "tests-ok"),),
         )
 
 
@@ -254,7 +254,7 @@ def test_changed_file_outside_component_scope_is_rejected() -> None:
         return CodingResult(
             job_id=job.job_id,
             changed_files=(ChangedFile("src/other/item.py", DIGEST, 10),),
-            test_evidence=(TestEvidence(("pytest",), 0, "ok"),),
+            test_evidence=(WorkerTestEvidence(("pytest",), 0, "ok"),),
         )
 
     coordinator = _coordinator()
@@ -293,7 +293,7 @@ def test_worker_result_for_wrong_job_id_is_rejected() -> None:
     def wrong_job(_job):
         return CodingResult(
             job_id="foreign-work",
-            test_evidence=(TestEvidence(("pytest",), 0, "ok"),),
+            test_evidence=(WorkerTestEvidence(("pytest",), 0, "ok"),),
         )
 
     coordinator = _coordinator()
