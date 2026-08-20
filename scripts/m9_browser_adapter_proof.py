@@ -16,7 +16,7 @@ from nika_core.interaction import (
 
 
 def _exercise_form_and_spa(adapter: PlaywrightInteractionAdapter) -> None:
-    adapter.set_content(
+    adapter.load_inline_fixture(
         "<main><h1>Доступне керування</h1>"
         "<label for='problem'>Опис проблеми</label>"
         "<input id='problem'>"
@@ -33,6 +33,9 @@ def _exercise_form_and_spa(adapter: PlaywrightInteractionAdapter) -> None:
     adapter.act(textbox, InteractionAction.SET_VALUE, "Перевірка UTF-8")
     after = adapter.observe()
     assert adapter.verify(before, after, textbox, InteractionAction.SET_VALUE, "Перевірка UTF-8")
+    assert resolve_strict(after, ControlLocator(role="textbox", label="Опис проблеми")).value == (
+        "Перевірка UTF-8"
+    )
 
     before = adapter.observe()
     checkbox = resolve_strict(
@@ -53,18 +56,40 @@ def _exercise_form_and_spa(adapter: PlaywrightInteractionAdapter) -> None:
     assert resolve_strict(after, ControlLocator(role="button", name="Готово"))
 
 
-def _prove_ambiguity(adapter: PlaywrightInteractionAdapter) -> None:
-    adapter.set_content("<main><button>Однаково</button><button>Однаково</button></main>")
+def _prove_ambiguity_and_scope(adapter: PlaywrightInteractionAdapter) -> None:
+    adapter.load_inline_fixture(
+        "<main>"
+        "<section aria-label='Primary'><button>Однаково</button></section>"
+        "<section aria-label='Secondary'>"
+        "<button onclick=\"this.textContent='Secondary done'\">Однаково</button>"
+        "</section></main>"
+    )
+    snapshot = adapter.observe()
     try:
-        resolve_strict(adapter.observe(), ControlLocator(role="button", name="Однаково"))
+        resolve_strict(snapshot, ControlLocator(role="button", name="Однаково"))
     except AmbiguousTargetError:
         pass
     else:  # pragma: no cover - physical proof assertion
         raise AssertionError("duplicate semantic targets did not fail closed")
 
+    secondary = resolve_strict(snapshot, ControlLocator(role="region", name="Secondary"))
+    button = resolve_strict(
+        snapshot,
+        ControlLocator(
+            role="button",
+            name="Однаково",
+            ancestor_node_id=secondary.node_id,
+        ),
+    )
+    adapter.focus(button)
+    adapter.act(button, InteractionAction.INVOKE, None)
+    after = adapter.observe()
+    assert adapter.verify(snapshot, after, button, InteractionAction.INVOKE, None)
+    assert resolve_strict(after, ControlLocator(role="button", name="Secondary done"))
+
 
 def _prove_frame(adapter: PlaywrightInteractionAdapter) -> None:
-    adapter.set_content(
+    adapter.load_inline_fixture(
         "<main><iframe name='details' "
         "srcdoc=\"<main><button>Кнопка у фреймі</button></main>\"></iframe></main>"
     )
@@ -78,7 +103,9 @@ def _prove_frame(adapter: PlaywrightInteractionAdapter) -> None:
 
 
 def _prove_dialog(adapter: PlaywrightInteractionAdapter) -> None:
-    adapter.set_content("<main><button onclick=\"alert('Підтвердити')\">Діалог</button></main>")
+    adapter.load_inline_fixture(
+        "<main><button onclick=\"alert('Підтвердити')\">Діалог</button></main>"
+    )
     adapter.session.dialogs.expect(DialogRule("alert", "Підтвердити", "dismiss"))
     snapshot = adapter.observe()
     button = resolve_strict(snapshot, ControlLocator(role="button", name="Діалог"))
@@ -87,8 +114,21 @@ def _prove_dialog(adapter: PlaywrightInteractionAdapter) -> None:
     assert adapter.session.dialogs.events[-1] == ("alert", "Підтвердити", "dismiss")
 
 
+def _prove_navigation(adapter: PlaywrightInteractionAdapter) -> None:
+    target = "data:text/html,%3Cmain%3E%3Ch1%3ENext%20document%3C/h1%3E%3C/main%3E"
+    adapter.load_inline_fixture(f"<main><a href='{target}'>Перейти</a></main>")
+    before = adapter.observe()
+    link = resolve_strict(before, ControlLocator(role="link", name="Перейти"))
+    adapter.focus(link)
+    adapter.act(link, InteractionAction.INVOKE, None)
+    after = adapter.observe()
+    assert adapter.verify(before, after, link, InteractionAction.INVOKE, None)
+    assert after.generation != before.generation
+    assert resolve_strict(after, ControlLocator(role="heading", name="Next document"))
+
+
 def _prove_popup(adapter: PlaywrightInteractionAdapter) -> None:
-    adapter.set_content(
+    adapter.load_inline_fixture(
         "<main><button onclick=\"window.open('about:blank', '_blank')\">Нова вкладка</button></main>"
     )
     before = adapter.observe()
@@ -101,7 +141,7 @@ def _prove_popup(adapter: PlaywrightInteractionAdapter) -> None:
 
 
 def _prove_download(adapter: PlaywrightInteractionAdapter, root: Path) -> None:
-    adapter.set_content(
+    adapter.load_inline_fixture(
         "<main><a download='evidence.txt' href='data:text/plain,semantic-proof'>"
         "Завантажити доказ</a></main>"
     )
@@ -123,10 +163,11 @@ def main() -> None:
             page_id = session.new_page()
             adapter = PlaywrightInteractionAdapter(session=session, page_id=page_id)
             _exercise_form_and_spa(adapter)
-            _prove_ambiguity(adapter)
+            _prove_ambiguity_and_scope(adapter)
             _prove_frame(adapter)
             _prove_dialog(adapter)
             _prove_download(adapter, root)
+            _prove_navigation(adapter)
             _prove_popup(adapter)
         finally:
             session.close()
