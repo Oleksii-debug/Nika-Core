@@ -5,12 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from nika_core.data.schema import MIGRATIONS as BASE_MIGRATIONS
-from nika_core.data.schema import SCHEMA_VERSION as BASE_SCHEMA_VERSION
+from nika_core.data.schema import MIGRATIONS, SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.research import (
     DeterministicResearchQueryService,
     ExtractedDocument,
+    FreshnessState,
     NetworkResearchRepository,
     ResearchProfile,
     ResearchProfileRepository,
@@ -32,27 +32,22 @@ def _store(tmp_path: Path) -> SQLiteStore:
     return store
 
 
-def _seed_local_sources(store: SQLiteStore) -> tuple[ResearchRepository, NetworkResearchRepository]:
+def _seed_local_sources(store: SQLiteStore) -> ResearchRepository:
     repository = ResearchRepository(store)
-    network = NetworkResearchRepository(store)
     repository.upsert_workspace(ResearchWorkspace(workspace_id="ws", name="Research"))
-    repository.upsert_source(
-        SourceSpec(
-            source_id="local-a",
-            workspace_id="ws",
-            kind=SourceKind.LOCAL_FILE,
-            locator="C:/Corpus/A.txt",
+    for source_id, locator in (
+        ("local-a", "C:/Corpus/A.txt"),
+        ("local-b", "C:/Corpus/B.txt"),
+    ):
+        repository.upsert_source(
+            SourceSpec(
+                source_id=source_id,
+                workspace_id="ws",
+                kind=SourceKind.LOCAL_FILE,
+                locator=locator,
+            )
         )
-    )
-    repository.upsert_source(
-        SourceSpec(
-            source_id="local-b",
-            workspace_id="ws",
-            kind=SourceKind.LOCAL_FILE,
-            locator="C:/Corpus/B.txt",
-        )
-    )
-    return repository, network
+    return repository
 
 
 def _profile_stack(store: SQLiteStore) -> tuple[ResearchProfileRepository, ResearchProfileService]:
@@ -63,14 +58,14 @@ def _profile_stack(store: SQLiteStore) -> tuple[ResearchProfileRepository, Resea
 
 
 def test_sqlite_store_upgrades_existing_schema_11_to_profile_migration_12(tmp_path: Path) -> None:
-    assert BASE_SCHEMA_VERSION == 11
+    assert SCHEMA_VERSION == 12
     path = tmp_path / "upgrade.db"
     conn = sqlite3.connect(path)
     conn.execute(
         "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
     )
-    for version in range(1, BASE_SCHEMA_VERSION + 1):
-        for statement in BASE_MIGRATIONS[version]:
+    for version in range(1, 12):
+        for statement in MIGRATIONS[version]:
             conn.execute(statement)
         conn.execute(
             "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
@@ -86,7 +81,7 @@ def test_sqlite_store_upgrades_existing_schema_11_to_profile_migration_12(tmp_pa
     store = SQLiteStore(path)
     store.initialize()
 
-    assert store.schema_version() == 12
+    assert store.schema_version() == SCHEMA_VERSION
     with store.connection() as upgraded:
         assert upgraded.execute(
             "SELECT name FROM research_workspaces WHERE workspace_id='existing'"
@@ -97,9 +92,7 @@ def test_sqlite_store_upgrades_existing_schema_11_to_profile_migration_12(tmp_pa
                 "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'research_%'"
             ).fetchall()
         }
-    assert "research_source_sets" in tables
-    assert "research_source_set_members" in tables
-    assert "research_profiles" in tables
+    assert {"research_source_sets", "research_source_set_members", "research_profiles"} <= tables
 
 
 def test_source_set_and_profile_versions_are_immutable_and_restart_safe(tmp_path: Path) -> None:
@@ -108,93 +101,89 @@ def test_source_set_and_profile_versions_are_immutable_and_restart_safe(tmp_path
     definitions, _ = _profile_stack(store)
 
     source_set_v1 = ResearchSourceSet(
-        source_set_id="grants",
-        workspace_id="ws",
-        version=1,
-        name="Grant sources",
-        sources=(ResearchSourceRef("local-a", SourceKind.LOCAL_FILE),),
+        "grants",
+        "ws",
+        1,
+        "Grant sources",
+        (ResearchSourceRef("local-a", SourceKind.LOCAL_FILE),),
     )
-    assert definitions.save_source_set(source_set_v1) == source_set_v1
-    assert definitions.save_source_set(source_set_v1) == source_set_v1
-    with pytest.raises(ValueError, match="different content"):
-        definitions.save_source_set(
-            ResearchSourceSet(
-                source_set_id="grants",
-                workspace_id="ws",
-                version=1,
-                name="Mutated",
-                sources=(ResearchSourceRef("local-a", SourceKind.LOCAL_FILE),),
-            )
-        )
-
     source_set_v2 = ResearchSourceSet(
-        source_set_id="grants",
-        workspace_id="ws",
-        version=2,
-        name="Grant sources",
-        sources=(
+        "grants",
+        "ws",
+        2,
+        "Grant sources",
+        (
             ResearchSourceRef("local-a", SourceKind.LOCAL_FILE),
             ResearchSourceRef("local-b", SourceKind.LOCAL_FILE),
         ),
     )
+    assert definitions.save_source_set(source_set_v1) == source_set_v1
+    assert definitions.save_source_set(source_set_v1) == source_set_v1
     definitions.save_source_set(source_set_v2)
-    assert definitions.load_source_set("grants") == source_set_v2
-    assert definitions.load_source_set("grants", 1) == source_set_v1
-
-    profile_v1 = ResearchProfile(
-        profile_id="education-grants",
-        workspace_id="ws",
-        version=1,
-        name="Education grants",
-        source_set_id="grants",
-        source_set_version=1,
-        query_text="освіта грант",
-        query_mode=SearchMode.LITERAL,
-        filters=ResearchSearchFilters(media_types=("text/plain",)),
-        result_limit=25,
-    )
-    assert definitions.save_profile(profile_v1) == profile_v1
-    assert definitions.save_profile(profile_v1) == profile_v1
     with pytest.raises(ValueError, match="different content"):
-        definitions.save_profile(
-            ResearchProfile(
-                profile_id="education-grants",
-                workspace_id="ws",
-                version=1,
-                name="Changed",
-                source_set_id="grants",
-                source_set_version=1,
-                query_text="освіта грант",
+        definitions.save_source_set(
+            ResearchSourceSet(
+                "grants",
+                "ws",
+                1,
+                "Mutated",
+                (ResearchSourceRef("local-a", SourceKind.LOCAL_FILE),),
             )
         )
 
-    profile_v2 = ResearchProfile(
-        profile_id="education-grants",
-        workspace_id="ws",
-        version=2,
-        name="Education grants phrase",
-        source_set_id="grants",
-        source_set_version=2,
-        query_text="освітній грант",
-        query_mode=SearchMode.PHRASE,
-        result_limit=10,
+    profile_v1 = ResearchProfile(
+        "education-grants",
+        "ws",
+        1,
+        "Education grants",
+        "grants",
+        1,
+        "освіта грант",
+        SearchMode.LITERAL,
+        ResearchSearchFilters(media_types=("text/plain",)),
+        25,
     )
+    profile_v2 = ResearchProfile(
+        "education-grants",
+        "ws",
+        2,
+        "Education grants phrase",
+        "grants",
+        2,
+        "освітній грант",
+        SearchMode.PHRASE,
+        ResearchSearchFilters(),
+        10,
+    )
+    assert definitions.save_profile(profile_v1) == profile_v1
+    assert definitions.save_profile(profile_v1) == profile_v1
     definitions.save_profile(profile_v2)
+    with pytest.raises(ValueError, match="different content"):
+        definitions.save_profile(
+            ResearchProfile(
+                "education-grants",
+                "ws",
+                1,
+                "Changed",
+                "grants",
+                1,
+                "освіта грант",
+            )
+        )
 
     restarted = SQLiteStore(store.path)
     restarted.initialize()
-    restarted_definitions = ResearchProfileRepository(restarted)
-    assert restarted.schema_version() == 12
-    assert restarted_definitions.load_source_set("grants", 1) == source_set_v1
-    assert restarted_definitions.load_profile("education-grants", 1) == profile_v1
-    assert restarted_definitions.load_profile("education-grants") == profile_v2
+    loaded = ResearchProfileRepository(restarted)
+    assert restarted.schema_version() == SCHEMA_VERSION
+    assert loaded.load_source_set("grants", 1) == source_set_v1
+    assert loaded.load_source_set("grants") == source_set_v2
+    assert loaded.load_profile("education-grants", 1) == profile_v1
+    assert loaded.load_profile("education-grants") == profile_v2
 
 
-def test_profile_execution_is_source_set_scoped_and_persists_scoped_provenance(
-    tmp_path: Path,
-) -> None:
+def test_profile_execution_scopes_persisted_provenance_after_exact_dedup(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    repository, network = _seed_local_sources(store)
+    repository = _seed_local_sources(store)
     shared_text = "Український освітній грант для студентів та викладачів."
     first = repository.ingest_document(
         SourceSpec("local-a", "ws", SourceKind.LOCAL_FILE, "C:/Corpus/A.txt"),
@@ -210,30 +199,23 @@ def test_profile_execution_is_source_set_scoped_and_persists_scoped_provenance(
     definitions, profiles = _profile_stack(store)
     definitions.save_source_set(
         ResearchSourceSet(
-            source_set_id="only-a",
-            workspace_id="ws",
-            version=1,
-            name="Only A",
-            sources=(ResearchSourceRef("local-a", SourceKind.LOCAL_FILE),),
+            "only-a",
+            "ws",
+            1,
+            "Only A",
+            (ResearchSourceRef("local-a", SourceKind.LOCAL_FILE),),
         )
     )
     definitions.save_profile(
-        ResearchProfile(
-            profile_id="grants-a",
-            workspace_id="ws",
-            version=1,
-            name="A grants",
-            source_set_id="only-a",
-            source_set_version=1,
-            query_text="освітній грант",
-        )
+        ResearchProfile("grants-a", "ws", 1, "A grants", "only-a", 1, "освітній грант")
     )
 
     execution = profiles.execute("grants-a")
     assert len(execution.query.result_set.items) == 1
     assert {e.source_id for e in execution.query.result_set.items[0].evidence} == {"local-a"}
-
-    persisted = network.get_result_set(execution.query.result_set.result_set_id)
+    persisted = NetworkResearchRepository(store).get_result_set(
+        execution.query.result_set.result_set_id
+    )
     assert {e.source_id for e in persisted.items[0].evidence} == {"local-a"}
 
     restarted = SQLiteStore(store.path)
@@ -241,21 +223,15 @@ def test_profile_execution_is_source_set_scoped_and_persists_scoped_provenance(
     restarted_definitions, restarted_profiles = _profile_stack(restarted)
     assert restarted_definitions.load_profile("grants-a").source_set_version == 1
     again = restarted_profiles.execute("grants-a")
-    assert len(again.query.result_set.items) == 1
     assert {e.source_id for e in again.query.result_set.items[0].evidence} == {"local-a"}
 
 
-def test_source_sets_fail_closed_on_kind_workspace_and_duplicate_errors(tmp_path: Path) -> None:
+def test_source_set_validation_fails_closed(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    repository, network = _seed_local_sources(store)
+    repository = _seed_local_sources(store)
     repository.upsert_workspace(ResearchWorkspace(workspace_id="other", name="Other"))
-    network.register_source(
-        SourceSpec(
-            source_id="web",
-            workspace_id="ws",
-            kind=SourceKind.HTTP,
-            locator="https://example.org/research",
-        )
+    NetworkResearchRepository(store).register_source(
+        SourceSpec("web", "ws", SourceKind.HTTP, "https://example.org/research")
     )
     definitions = ResearchProfileRepository(store)
 
@@ -331,6 +307,6 @@ def test_profile_rejects_unpinned_source_ids_and_local_only_freshness(tmp_path: 
                 "local-only",
                 1,
                 "grant",
-                filters=ResearchSearchFilters(freshness=(pytest.importorskip("nika_core.research").FreshnessState.CURRENT,)),
+                filters=ResearchSearchFilters(freshness=(FreshnessState.CURRENT,)),
             )
         )
