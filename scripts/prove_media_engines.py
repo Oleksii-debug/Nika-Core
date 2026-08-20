@@ -5,8 +5,14 @@ import tempfile
 from pathlib import Path
 
 from nika_core.media.contracts import ModelDescriptor
-from nika_core.media.evidence import MediaProofManifest, binary_evidence, model_evidence
+from nika_core.media.evidence import (
+    EngineExecutionEvidence,
+    MediaProofManifest,
+    binary_evidence,
+    model_evidence,
+)
 from nika_core.media.ffprobe import FFprobeAdapter
+from nika_core.media.hashing import sha256_file, sha256_json
 from nika_core.media.ocr import OCRPageRequest, TesseractOCRAdapter
 
 
@@ -43,11 +49,17 @@ def main() -> int:
         tesseract = TesseractOCRAdapter(executable=args.tesseract)
         tesseract_descriptor = tesseract.descriptor(cwd=cwd)
 
-        ffprobe_executed = False
-        tesseract_executed = False
+        executions: list[EngineExecutionEvidence] = []
         if args.media_fixture is not None:
-            ffprobe.probe(args.media_fixture, asset_id="proof-media", cwd=cwd)
-            ffprobe_executed = True
+            probe = ffprobe.probe(args.media_fixture, asset_id="proof-media", cwd=cwd)
+            executions.append(
+                EngineExecutionEvidence(
+                    engine_id=ffprobe_audit.descriptor.engine_id,
+                    evidence_kind="probe",
+                    fixture_sha256=sha256_file(args.media_fixture.resolve(strict=True)),
+                    result_sha256=sha256_json(probe.model_dump(mode="json")),
+                )
+            )
         if args.ocr_fixture is not None:
             page = tesseract.recognize_page(
                 OCRPageRequest(
@@ -60,7 +72,14 @@ def main() -> int:
             )
             if not page.text.strip():
                 raise RuntimeError("OCR proof produced empty text")
-            tesseract_executed = True
+            executions.append(
+                EngineExecutionEvidence(
+                    engine_id=tesseract_descriptor.engine_id,
+                    evidence_kind="ocr",
+                    fixture_sha256=sha256_file(args.ocr_fixture.resolve(strict=True)),
+                    result_sha256=sha256_json(page.model_dump(mode="json")),
+                )
+            )
 
         models = ()
         model_args = (
@@ -104,7 +123,8 @@ def main() -> int:
                 ),
             ),
             models=models,
-            real_engine_execution_proven=ffprobe_executed and tesseract_executed,
+            executions=tuple(executions),
+            real_engine_execution_proven=len(executions) == 2,
             target_machine_measured=False,
         )
         args.output.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
