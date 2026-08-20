@@ -12,7 +12,13 @@ from nika_core.media.contracts import (
     ResourceClass,
 )
 from nika_core.media.errors import MediaError, MediaErrorCode
-from nika_core.media.evidence import MediaProofManifest, binary_evidence, model_evidence
+from nika_core.media.evidence import (
+    MediaProofManifest,
+    TargetMachineResourceEvidence,
+    binary_evidence,
+    model_evidence,
+    resource_evidence,
+)
 from nika_core.media.hashing import sha256_file
 from nika_core.media.resources import MediaResourceCoordinator
 from nika_core.resources.contracts import ResourceSnapshot
@@ -22,8 +28,10 @@ from nika_core.resources.manager import ResourceManager
 class FakeObserver:
     def __init__(self, available_memory_bytes: int = 8_000_000_000) -> None:
         self.available_memory_bytes = available_memory_bytes
+        self.calls = 0
 
     def snapshot(self) -> ResourceSnapshot:
+        self.calls += 1
         return ResourceSnapshot(
             cpu_percent=10.0,
             memory_percent=20.0,
@@ -223,6 +231,7 @@ def test_media_proof_manifest_separates_engine_binary_and_model_identity(tmp_pat
             ),
         ),
     )
+    assert manifest.schema_version == 3
     assert manifest.real_engine_execution_proven is False
     assert manifest.target_machine_measured is False
     assert manifest.engines[0].license_id == "Apache-2.0"
@@ -246,3 +255,101 @@ def test_media_proof_manifest_rejects_model_without_matching_engine(tmp_path: Pa
     )
     with pytest.raises(ValueError, match="proven engine"):
         MediaProofManifest(models=(evidence,))
+
+
+def test_resource_evidence_collects_bounded_samples_without_hostname() -> None:
+    observer = FakeObserver(available_memory_bytes=6_500_000_000)
+    evidence = resource_evidence(
+        observer=observer,
+        machine_label="target-laptop",
+        operator_attested_target=False,
+        sample_count=3,
+        sample_interval_seconds=0,
+        sleep=lambda _seconds: None,
+    )
+
+    assert observer.calls == 3
+    assert tuple(item.ordinal for item in evidence.samples) == (1, 2, 3)
+    assert {item.available_memory_bytes for item in evidence.samples} == {6_500_000_000}
+    payload = evidence.model_dump_json()
+    assert "target-laptop" in payload
+    assert "hostname" not in payload.lower()
+    assert evidence.operator_attested_target is False
+
+
+def test_resource_evidence_rejects_unbounded_or_invalid_sampling() -> None:
+    observer = FakeObserver()
+    with pytest.raises(ValueError, match="sample_count"):
+        resource_evidence(
+            observer=observer,
+            machine_label="target",
+            operator_attested_target=False,
+            sample_count=61,
+        )
+    with pytest.raises(ValueError, match="sample_interval_seconds"):
+        resource_evidence(
+            observer=observer,
+            machine_label="target",
+            operator_attested_target=False,
+            sample_interval_seconds=float("nan"),
+        )
+
+
+def test_target_machine_credit_requires_attested_measurement() -> None:
+    with pytest.raises(ValueError, match="operator-attested"):
+        MediaProofManifest(target_machine_measured=True)
+
+    measurement = resource_evidence(
+        observer=FakeObserver(),
+        machine_label="ci-runner",
+        operator_attested_target=False,
+        sample_count=1,
+        sample_interval_seconds=0,
+    )
+    manifest = MediaProofManifest(resource_measurement=measurement)
+    assert manifest.target_machine_measured is False
+
+    with pytest.raises(ValueError, match="operator-attested"):
+        MediaProofManifest(
+            resource_measurement=measurement,
+            target_machine_measured=True,
+        )
+
+
+def test_attested_resource_measurement_can_receive_target_machine_credit() -> None:
+    measurement = resource_evidence(
+        observer=FakeObserver(),
+        machine_label="ASUS-Vivobook-M1505YA",
+        operator_attested_target=True,
+        sample_count=2,
+        sample_interval_seconds=0,
+        sleep=lambda _seconds: None,
+    )
+    manifest = MediaProofManifest(
+        resource_measurement=measurement,
+        target_machine_measured=True,
+    )
+    assert manifest.target_machine_measured is True
+    assert manifest.resource_measurement is not None
+    assert manifest.resource_measurement.operator_attested_target is True
+
+
+def test_attested_measurement_cannot_be_silently_downgraded_to_false_flag() -> None:
+    measurement = TargetMachineResourceEvidence(
+        machine_label="target",
+        platform_system="Windows",
+        platform_release="11",
+        machine_architecture="AMD64",
+        python_version="3.12.0",
+        samples=(
+            {
+                "ordinal": 1,
+                "cpu_percent": 5.0,
+                "memory_percent": 25.0,
+                "available_memory_bytes": 8_000_000_000,
+            },
+        ),
+        operator_attested_target=True,
+    )
+    with pytest.raises(ValueError, match="operator-attested"):
+        MediaProofManifest(resource_measurement=measurement, target_machine_measured=False)
