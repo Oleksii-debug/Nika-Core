@@ -1,8 +1,8 @@
 # Nika Core — roadmap and progress truth
 
-Baseline created: 2026-08-17. Scope reconciled: 2026-08-19.
+Baseline created: 2026-08-17. Scope reconciled: 2026-08-19. Product-factory scope expanded: 2026-08-20.
 
-Progress is acceptance-gate based, not commit-count based. Regressions may reduce readiness. **Historical Core milestone credit and the expanded Full Product Vision are separate measurements.** See `docs/FULL_PRODUCT_VISION_2026-08-19.md`.
+Progress is acceptance-gate based, not commit-count based. Regressions may reduce readiness. **Historical Core milestone credit and the expanded Full Product Vision are separate measurements.** See `docs/FULL_PRODUCT_VISION_2026-08-19.md` and `docs/AUTONOMOUS_PRODUCT_FACTORY.md`.
 
 ## Track A — Core foundation milestone history
 
@@ -74,12 +74,47 @@ Goal: historical no-lookahead replay, odds/event snapshots, virtual bank, single
 
 Financial autonomy uses explicit user-configured authorization profiles plus Nika risk/approval policy. Agents cannot silently widen permissions or budgets.
 
-### F8 — Real workspace creation from the Nika command center
-Goal: the user can describe a new workspace/agent/capability in natural language; Nika routes it through Agent Builder/Software Factory/Toolsmith, creates it behind stable contracts, tests it, exposes it through the final accessible UI and preserves compatibility with existing workspaces.
+### F8 — Autonomous Product Factory
+Goal: the user can describe a complete digital-product goal in natural language and Nika can manage the durable product lifecycle rather than only create one workspace or one coding task.
 
-Telegram is deliberately **not** an active planned workspace. If it is ever requested again, it is treated as a new optional workspace under F8 rather than a built-in roadmap requirement.
+Required end-state capabilities include:
+- durable `ProductProject` state spanning days/weeks/months;
+- formal Research -> Product handoff;
+- market/competitor/constraint research when requested;
+- versioned requirements and acceptance criteria;
+- dynamic specialist Team Composer rather than a fixed agent count;
+- one-repository or multi-repository ProductRepositoryGraph;
+- repository creation/connection under explicit policy;
+- isolated implementation through replaceable CodingWorker adapters;
+- independent QA/audit and accessibility review;
+- build/package/release evidence;
+- Deployment Fabric and approved staging/production promotion;
+- multi-platform/remote execution nodes where the target cannot be built on the user's Windows machine;
+- Credential/Identity Broker using opaque/scoped secret references;
+- post-release operations, maintenance, regression and rollback.
 
-### F9 — Full Product integration/release
+The binding design and acceptance extension are `docs/AUTONOMOUS_PRODUCT_FACTORY.md` and `docs/AUTONOMOUS_PRODUCT_FACTORY_ACCEPTANCE.md`.
+
+Examples such as a messenger, social network, screen reader, browser-agent product or business application are **test classes/examples**, not products that must be hard-coded into Core. The strategic requirement is to build the reusable factory capable of managing such ProductProjects.
+
+### F9 — Autonomous Business Factory
+Goal: a user business objective can be researched, converted into opportunities/work orders and—after applicable policy/user gates—executed through Product Factory without hard-coding one niche or marketplace.
+
+Required lifecycle:
+`Business Goal -> Market Research -> Opportunity -> Lead/Channel -> Qualification -> Proposal -> Approval/Standing Policy -> Work Order/ProductProject -> Product Factory -> QA -> Delivery -> Payment/Invoice State -> Support`.
+
+Business automation must obey platform rules, identity requirements, communication policy and progressive financial/contractual authorization. No spam, deceptive impersonation, prohibited account automation or self-expansion of money/account permissions.
+
+Binding design: `docs/AUTONOMOUS_BUSINESS_FACTORY.md`.
+
+### F10 — Real workspace/capability creation from the Nika command center
+Goal: the user can describe a smaller new workspace/agent/capability in natural language; Nika routes it through Agent Builder/Software Factory/Toolsmith, creates it behind stable contracts, tests it, exposes it through the final accessible UI and preserves compatibility with existing workspaces.
+
+This remains a lightweight path for capabilities that do not require a full ProductProject. Large product goals route to F8 instead.
+
+Telegram is deliberately **not** an active planned workspace. If it is ever requested again, it is treated as a new optional workspace/ProductProject rather than a built-in roadmap requirement.
+
+### F11 — Full Product integration/release
 Goal: all capabilities claimed for a chosen release are integrated on one exact head, complete Core/Windows/security/accessibility/product-journey gates pass, a fresh candidate is built, and only that exact candidate enters the human Windows/NVDA protocol.
 
 ## Product Journey rule
@@ -90,20 +125,27 @@ Every user-facing capability must prove this complete chain:
 
 A subsystem with backend tests but no usable final-window path is not complete.
 
+For Product Factory and Business Factory, backend coding tests are additionally insufficient: the product-level gates in `docs/AUTONOMOUS_PRODUCT_FACTORY_ACCEPTANCE.md` must close.
+
 ## Reuse-first implementation map
 
 Binding reuse sources now include:
 - `docs/REUSE_CATALOG_2026-08-18.md` for the broad component inventory;
 - `docs/INTELLIGENCE_REUSE_2026-08-19.md` for the newer Deterministic/Embedded Brain decisions;
-- `docs/FULL_PRODUCT_VISION_2026-08-19.md` for end-state scope.
+- `docs/FULL_PRODUCT_VISION_2026-08-19.md` for end-state scope;
+- `docs/AUTONOMOUS_PRODUCT_FACTORY.md` for durable product creation/operation scope;
+- `docs/AUTONOMOUS_PRODUCT_FACTORY_ACCEPTANCE.md` for product-factory gates;
+- `docs/AUTONOMOUS_BUSINESS_FACTORY.md` for business-orchestration scope.
 
-Every lane uses **REUSE -> ADAPT -> CUSTOM (thin)**. Do not rebuild generic schedulers, planners, inference engines, browser engines, Windows automation stacks, coding workers, OCR/speech engines, vector databases, retry engines, resource monitors or packaging systems when maintained compatible components satisfy the requirement.
+Every lane uses **REUSE -> ADAPT -> CUSTOM (thin)**. Do not rebuild generic schedulers, planners, inference engines, browser engines, Windows automation stacks, coding workers, OCR/speech engines, vector databases, retry engines, resource monitors, build systems or deployment provider APIs when maintained compatible components satisfy the requirement.
 
 ## Parallel development
 
 Source work is dependency-aware parallel-first. Independent research/adapters/tests may proceed on separate branches while integration follows actual dependencies. A blocked lane does not idle unrelated lanes. Shared contracts require an explicit compatibility decision.
 
-Manual Deep Research developer chats may be real implementation lanes. When the user starts these manual developer/auditor pairs, scheduled workers should be paused or reassigned to complementary integration QA, release/package verification, regression hunting and cross-lane evidence rather than duplicating the same source ownership.
+Manual Deep Research developer chats may be real implementation lanes. When the user starts these manual Developer/Auditor pairs, scheduled workers should be paused or reassigned to complementary integration QA, release/package verification, regression hunting and cross-lane evidence rather than duplicating the same source ownership.
+
+Product Factory work must additionally allocate explicit ownership by ProductProject/component/repository. Multiple automated tasks may cooperate, but they must not duplicate the same branch/component or compete to update shared canonical state.
 
 ## CI/release policy
 
