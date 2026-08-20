@@ -13,7 +13,6 @@ from nika_core.product_factory_credentials import (
     SecretRef,
 )
 
-
 NOW = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
 PROJECT_A = "product-a"
 PROJECT_B = "product-b"
