@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from nika_core.config import AppConfig
+from nika_core.data.schema import SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.action_registry import ActionDefinition, ActionRegistry, Keymap
 from nika_core.kernel.agent_registry import AgentDefinition, AgentRegistry
@@ -60,7 +61,7 @@ def test_schema_migrates_existing_v1_database(tmp_path: Path) -> None:
 
     store = SQLiteStore(path)
     store.initialize()
-    assert store.schema_version() == 8
+    assert store.schema_version() == SCHEMA_VERSION
     with store.connection() as check:
         names = {row["name"] for row in check.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {
@@ -81,6 +82,16 @@ def test_schema_migrates_existing_v1_database(tmp_path: Path) -> None:
         "experiments",
         "experiment_observations",
         "experiment_events",
+        "capability_escalations",
+        "capability_search_candidates",
+        "capability_registry",
+        "capability_resume_bindings",
+        "research_workspaces",
+        "research_sources",
+        "corpus_documents",
+        "corpus_origins",
+        "corpus_chunks",
+        "corpus_fts",
     } <= names
 
 
