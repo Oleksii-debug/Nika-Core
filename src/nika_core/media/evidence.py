@@ -17,7 +17,7 @@ from nika_core.resources.contracts import ResourceObserverPort
 
 class BinaryEvidence(FrozenModel):
     component_id: str = Field(min_length=1, max_length=120)
-    engine_id: str = Field(min_length=1, max_length=160)
+    engine_id: str | None = Field(default=None, min_length=1, max_length=160)
     path_name: str = Field(min_length=1, max_length=300)
     sha256: str = Field(pattern="^[0-9a-f]{64}$")
     size_bytes: int = Field(ge=1)
@@ -75,7 +75,7 @@ class TargetMachineResourceEvidence(FrozenModel):
 
 
 class MediaProofManifest(FrozenModel):
-    schema_version: int = 4
+    schema_version: int = 3
     engines: tuple[EngineDescriptor, ...] = ()
     binaries: tuple[BinaryEvidence, ...] = ()
     models: tuple[ModelEvidence, ...] = ()
@@ -92,7 +92,9 @@ class MediaProofManifest(FrozenModel):
         binaries_by_component = {item.component_id: item for item in self.binaries}
         if len(binaries_by_component) != len(self.binaries):
             raise ValueError("binary evidence component IDs must be unique")
-        binaries_by_engine = {item.engine_id: item for item in self.binaries}
+        binaries_by_engine = {
+            item.engine_id or item.component_id: item for item in self.binaries
+        }
         if len(binaries_by_engine) != len(self.binaries):
             raise ValueError("binary evidence engine IDs must be unique")
         model_ids = {item.model_id for item in self.models}
@@ -141,10 +143,10 @@ class MediaProofManifest(FrozenModel):
 def binary_evidence(
     *,
     component_id: str,
-    engine_id: str,
     path: Path,
     source_reference: str,
     license_classification: str,
+    engine_id: str | None = None,
 ) -> BinaryEvidence:
     resolved = path.resolve(strict=True)
     if not resolved.is_file():
