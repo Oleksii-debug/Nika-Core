@@ -22,7 +22,7 @@ Current global truth:
 
 ## Canonical main
 
-`df84a72d6705aa78cb0c69df9e47a367098b74bb`
+`84998ea814fc5f99489ad583ab052b06cab2f12b`
 
 Integrated Product Factory foundation:
 - PF5 #90 — command/presentation routing;
@@ -31,7 +31,9 @@ Integrated Product Factory foundation:
 - PF2 #93 — deterministic coordinator/reconciliation;
 - PF2 #94 — public CodingWorkerPort adapter;
 - PF2 #97 — restart recovery for in-flight component work;
-- PF3 #95 — ExecutionNode + deployment/staging/health/rollback foundation, exact head `4a3e0b342ec06c936693c8f583ed4f7a4fdc2007`, Core #671 + M12 #439 green, integrated as current main.
+- PF3 #95 — ExecutionNode + deployment/staging/health/rollback foundation;
+- PF5 #96 — ProductProject create/inspect/update plus PF2/PF3 execution/deployment presentation, exact head `5beb29c70ee0e5e72f729ad555a49384b3308c9c`, Core #681 + M12 #449 green, integrated as merge `be7b4ab4abd59a3e373ad48562e023b07febc98c`;
+- PF2 #98 — ProductProject-version-bound coordinator checkpoints, exact head `bba309b4713d385e6b7a653fffbdec313866d499`, Core #686 + M12 #454 green, integrated as merge `84998ea814fc5f99489ad583ab052b06cab2f12b`.
 
 ## Scheduled Product Factory dependency order
 
@@ -42,38 +44,39 @@ PF5 runs downstream last and consumes only integrated upstream contracts.
 ### AUTO-PF1 — ProductProject
 PF1 #91 is **INTEGRATED**.
 
-Available to downstream: durable create/get/update-spec, optimistic concurrency and Research→Product handoff. A durable public product-decision write API is not yet integrated; PF5 must fail closed instead of writing PF1 tables directly.
+Available downstream: durable create/get/update-spec, optimistic concurrency and Research→Product handoff. A durable public product-decision write API is not yet integrated; PF5 must fail closed instead of writing PF1 tables directly.
 
 ### AUTO-PF2 — orchestration
-PF2 #92/#93/#94/#97 are **INTEGRATED**. Open follow-up #98 remains **NOT INTEGRATED** and PF5 does not consume it.
+PF2 #92/#93/#94/#97/#98 are **INTEGRATED**.
 
-### AUTO-PF3 — execution/deployment
+The integrated surface now also binds ProductProject `spec_version` + `row_version` to coordinator checkpoints and rejects stale restore. PF5 does not duplicate this persistence/recovery boundary.
+
+### AUTO-PF3 — execution/deployment/credentials
 PF3 #95 is **INTEGRATED**. Public downstream-safe surface includes execution nodes/capabilities/resources/leases, normalized exact release evidence, deployment snapshots, staging-first policy state, health and rollback evidence.
 
-PF5 may present these contracts. PF5 does not execute deployment provider actions, expose `provider_ref`, handle raw credentials or claim a Product Operations service that has not been integrated.
+Open follow-up #99, current compatibility head `50a7083f6931e240b1b529073aba47138999188a`, remains **NOT INTEGRATED** while fresh Core #695/M12 #463 run. It owns opaque Credential/Identity Broker work; PF5 does not import its unmerged contracts or handle raw credentials.
 
 ### AUTO-PF4 — acceptance QA
 PF4 remains the independent PF0–PF12 gatekeeper and evidence lane. It rejects stale/false exact-SHA evidence without becoming a competing feature writer.
 
 ### AUTO-PF5 — command journey + release
-PF5 #90 is **INTEGRATED**.
+PF5 #90 and #96 are **INTEGRATED**.
 
-Current real PF5 code/evidence PR: #96, `auto-pf5/command-journey-pf2-presentation`.
+Current real PF5 code/evidence PR: #100, `auto-pf5/project-scoped-command-center`, rebuilt linearly from exact current main `84998ea814fc5f99489ad583ab052b06cab2f12b`. Rollback history of the previous candidate is preserved at `backup/auto-pf5-100-118e41d9`.
 
 Current coherent scope:
-- deterministic Ukrainian + English ProductProject/Toolsmith routing;
-- explicit ambiguity for mixed product/capability intent;
-- real integrated PF1 ProductProject create/inspect/update through `ProductProjectRepository`;
-- SQLite restart, stale-version and credential-reference redaction tests;
-- integrated PF2 CoordinatorSnapshot → textual component/review/QA/blocker projection;
-- integrated PF3 ExecutionRegistrySnapshot/DeploymentFabricSnapshot → textual execution-node/build/release/staging/health/rollback/blocker projection;
-- no PF3 provider credential reference in PF5 presentation;
-- product-decision persistence fails closed until PF1 exposes a durable public decision API;
-- canonical status reconciliation in this same real code/evidence PR.
+- one `ProductCommandCenter` composes integrated PF1/PF2/PF3 textual presentation;
+- PF2 coordinator snapshot identity and every work record must match the inspected ProductProject or fail closed;
+- global PF3 execution snapshots are reduced to target-project leases and only nodes serving those leases;
+- global PF3 deployment snapshots are reduced to target-project records/environment state;
+- blocker count is recomputed after composition;
+- duplicate `(status kind, item_id)` identities fail closed instead of creating ambiguous semantic presentation;
+- provider credential references remain absent;
+- focused tests attack cross-project coordinator, execution and deployment leakage plus duplicate identity corruption.
 
-The prior #96 exact head `ee303c76da16adef5a4519ce9068839c73cd2c0e` is superseded: Core #679 passed, M12 #447 failed. Rollback history is preserved at `backup/auto-pf5-96-ee303c76`. The branch is being rebuilt linearly from current main `df84a72d6705aa78cb0c69df9e47a367098b74bb`; only fresh exact-head gates on the final rebuilt SHA count.
+Superseded candidate `118e41d9866e6e872ee3a91b5f827c0eb4fe4013` passed Core Ubuntu/Windows and M12 Ubuntu/Windows integrated verification before main advanced through PF2 #98; it receives no merge credit after the rebuild. Only fresh Core/M12 on the final current-main #100 SHA count.
 
-State: **IMPLEMENTED / CURRENT-MAIN REBUILD + PREFLIGHT + FRESH GATES REQUIRED / NOT INTEGRATED**.
+State: **IMPLEMENTED / CURRENT-MAIN REBUILD / FRESH EXACT-HEAD GATES REQUIRED / NOT INTEGRATED**.
 
 ## Manual/shared ownership — no scheduled duplication
 
@@ -117,10 +120,10 @@ The expense application is an acceptance scenario, not a hard-coded Core product
 
 ## Next dependency-ordered integration wave
 
-1. PF5 completes #96 current-main rebuild, preflight and fresh exact-head Core/M12.
+1. PF5 finishes rebuilt #100 fresh exact-head Core/M12 and live-main compatibility before merge.
 2. PF1 adds a durable public decision-write boundary before PF5 can claim create/inspect/update/decision completeness.
-3. PF2 repairs/integrates #98 independently; PF5 consumes it only after integration.
-4. PF3 follow-up owns credential/real-provider/operations capabilities; PF5 consumes only integrated public contracts.
+3. PF3 proves/integrates #99 independently; PF5 consumes only integrated public credential/identity contracts.
+4. PF5 may then present integrated PF2 checkpoint identity and later PF3 credential-reference state without duplicating owners.
 5. Shared semantic UI waits for DEV04 ownership release plus compatibility decision.
 6. PF11 package/release follows only after the representative integrated journey exists.
 
