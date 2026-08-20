@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from nika_core.product_command.credential_adapter import credential_status_entries
 from nika_core.product_command.contracts import ProductStatusKind
+from nika_core.product_command.credential_adapter import credential_status_entries
 from nika_core.product_factory_credentials import (
     CredentialAuditEvent,
     CredentialBrokerSnapshot,
