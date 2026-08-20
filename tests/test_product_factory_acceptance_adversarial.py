@@ -45,7 +45,10 @@ from nika_core.product_project import (
     ProductProjectSpec,
     ProductRequirement,
 )
-from nika_core.toolsmith.contracts import CodingResult, TestEvidence
+from nika_core.toolsmith.contracts import CodingResult
+from nika_core.toolsmith.contracts import (
+    TestEvidence as WorkerTestEvidence,
+)
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
@@ -133,7 +136,7 @@ def _successful_envelope(request, *, commands=None) -> WorkerResultEnvelope:
         coding_result=CodingResult(
             job_id=request.work_id,
             test_evidence=tuple(
-                TestEvidence(command, 0, f"evidence-{index}")
+                WorkerTestEvidence(command, 0, f"evidence-{index}")
                 for index, command in enumerate(evidence_commands, start=1)
             ),
         ),
