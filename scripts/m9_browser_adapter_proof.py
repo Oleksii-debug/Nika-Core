@@ -93,6 +93,8 @@ def _prove_frame(adapter: PlaywrightInteractionAdapter) -> None:
         "<main><iframe name='details' "
         "srcdoc=\"<main><button>Кнопка у фреймі</button></main>\"></iframe></main>"
     )
+    assert adapter.session.registry is not None
+    adapter.session.registry.get(adapter.page_id).page.wait_for_load_state("load")
     framed = PlaywrightInteractionAdapter(
         session=adapter.session,
         page_id=adapter.page_id,
