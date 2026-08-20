@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from nika_core.data.schema import MIGRATIONS, SCHEMA_VERSION
+from nika_core.data.migration_registry import MIGRATIONS, SCHEMA_VERSION
 
 
 class SQLiteStore:
