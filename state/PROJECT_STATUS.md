@@ -1,124 +1,112 @@
 # PROJECT STATUS — Nika Core
 
-Updated: 2026-08-19.
+Updated: 2026-08-20.
 Canonical repository: `Oleksii-debug/Nika-Core`.
-Repository visibility observed: PUBLIC.
-Development mode: **ACTIVE DEVELOPMENT — Product Journey repair + Full Product Vision expansion**.
+Canonical technical truth: live GitHub `main`, exact PR heads and current Actions. Drive is routing/ownership/handoff truth.
 
-## Practical truth first
+## Practical product truth
 
-The previously recorded M12 Windows artifact is **not a valid human NVDA candidate anymore**. A concrete packaged-product defect was found: user-visible task controls/lists were not fully wired to the real backend. A large repair exists in PR #37, but its latest exact combined head has Core CI and Windows release-candidate success while the full M12 gate was cancelled. Therefore it is not yet eligible for integration/human-candidate promotion.
+Nika Core is in active Autonomous Product Factory development. Historical Core percentages and old Windows artifacts are archival evidence only; they do not prove the expanded Full Product Vision or PF0–PF12 acceptance.
 
-At the same time, the technical-project reconciliation expanded the binding end-state scope. The old “98% A–Z” number is retained only as **historical Core milestone credit**. It is not a Full Product Vision completion percentage.
+Current human/release truth:
+- `HUMAN_TESTED=false`;
+- `NVDA_VERIFIED=false`;
+- `PRODUCTION_RELEASE_READY=false`;
+- `PF11=false`;
+- no stale ZIP may be promoted as a current Product Factory candidate.
 
-Current human truth:
-- HUMAN_TESTED: **false**;
-- NVDA_VERIFIED: **false**;
-- PRODUCTION_RELEASE_READY: **false**;
-- valid current human NVDA candidate: **none**.
+## Canonical main
 
-## Historical Core foundation evidence
+Current main at this reconciliation point:
 
-The original M0–M11 foundations and an earlier automated pre-human M12 candidate did receive exact green evidence for their then-scoped acceptance gates. This includes durable runtime/recovery, memory/scheduler/resources, ModelGateway/Ollama/cloud foundation, tools/MCP, accessible WebView2 shell, Agent Builder, multi-agent execution, Experiment Engine, plugin/workspace/security foundations and Windows packaging.
+`700394d678bce7226374ee563e8e38ab76ab4538`
 
-Historical scoped Core progress before the newly discovered Product Journey defect was recorded as **98%**. That number is archival evidence about the original roadmap, not a statement that the expanded final Nika product is 98% complete.
+Integrated Product Factory foundation now includes:
+- PF5 PR #90 command/presentation routing foundation;
+- PF2 PR #92 Dynamic Team Composer + ProductRepositoryGraph foundation;
+- PF2 PR #93 deterministic Product Factory coordinator/reconciliation;
+- PF2 PR #94 public CodingWorkerPort adapter, merged from exact candidate `925e13ef349cfa10e127abacefe3ba0e329a4f77` after Core CI #653 and M12 #421 succeeded.
 
-Detailed historical SHA/run/artifact evidence remains in Git history and LIVE DASHBOARD Issue #1; do not copy it forward as current candidate truth when newer live evidence conflicts.
+The latest main merge explicitly preserves manual DEV ownership. `HUMAN_TESTED` and `NVDA_VERIFIED` remain false.
 
-## Current canonical baseline
+## Product Factory dependency flow
 
-Starting `main` for the current intelligence reconciliation lane: `8065cc3fedb63f9c07e1773acf2332b5709560da`.
+### PF1 — durable ProductProject
+PR #91, branch `auto/pf1-product-project`, current head `7ed579fcb5b269c95a82b6b818bd462dcda9fb39`.
 
-That main includes the Windows release third-party notice/license repair. It does **not** yet include the open functional Windows backend repair or the open embedded/deterministic intelligence lane.
+PF1 remains **NOT INTEGRATED**. On this current head Core CI #660 succeeded but M12 #428 failed. Older green evidence on previous PF1 heads is stale and does not override the current exact-head failure. PF5 must not import PF1 code until PF1 repairs the failure family, refreshes current-main compatibility and integrates an exact green candidate.
 
-## Active lane A — Windows Product Journey repair
+### PF2 — orchestration
+PF2 PR #93 and follow-up PR #94 are **INTEGRATED** on current main.
 
-PR #37: `fix/windows-desktop-functional-backend`.
-Latest inspected exact head: `a56a9193fd9e7ae30ae8acac997609f38db6fef9`.
+The integrated surface now includes team/repository graph and deterministic coordinator state plus the thin adapter from Product Factory component work to the public CodingWorkerPort. PF5 consumes only these integrated contracts and does not edit DEV02 worker/security internals.
 
-Implemented scope:
-- real task create path through Nika backend/runtime;
-- real persisted task/agent/workspace state exposed to the UI;
-- pause/resume/stop wiring;
-- replacement of placeholder lists with backend state;
-- deterministic backend/bridge lifecycle tests;
-- compatibility merge with the already-integrated release-license/notices repair.
+### PF3 — execution/deployment
+Open PR #95, branch `auto-pf3/execution-deployment-foundation`, current head `1322547198d6b847869ed9a53a7e7964616abc32`.
 
-Latest exact-head evidence inspected during this development wave:
-- Core CI #228: SUCCESS;
-- M11 Windows Release Candidate #8: SUCCESS;
-- M12 Pre-Human Release Gate #6: CANCELLED.
+Core CI #654 and M12 #422 succeeded on that exact head, but the branch is still open/draft and based on an older main. State: **GREEN-BUT-UNINTEGRATED / CURRENT-MAIN COMPATIBILITY REQUIRED**. PF5 may not import its contracts until merge.
 
-Conclusion: implementation is substantial and partially green, but the complete required release gate is not green. **Do not promote a ZIP from this lane without newer exact-head full-system evidence.**
+### PF4 — acceptance gatekeeper
+PF4 remains the independent PF0–PF12 acceptance/evidence lane. It must reject stale or mismatched SHA evidence and must not become a competing feature writer.
 
-## Active lane B — Deterministic Brain + Embedded Brain
+### PF5 — command journey/release owner
+PF5 PR #90 is integrated.
 
-PR #40: `feat/embedded-intelligence-foundry-local`.
-Lane started independently from the recorded `main` baseline and does not overlap PR #37's eight product/UI/test files.
+Current real PF5 batch is PR #96, `auto-pf5/command-journey-pf2-presentation`. The previous exact candidate `a7e8fc9d1e05cbc398e9b5c59a557ae7939daa04` passed Core CI #659 and M12 #427. Live main then advanced by six commits through integrated PF2 #94. Compare from PR #96 starting main showed those main-only commits changed only `src/nika_core/product_factory_coding_worker_adapter.py` and its focused test, with no overlap with PR #96's six owned files.
 
-Implemented in the lane:
-- `FoundryLocalProvider` behind the existing ModelGateway contract using the official Microsoft Foundry Local Python SDK path;
-- model download defaults to disabled/fail-closed so ordinary inference cannot silently download large model files;
-- optional Windows `foundry-local-sdk-winml` dependency plus cross-platform SDK alternative;
-- a first-class model-free `DeterministicBrain` with Nika-owned explicit world-state/goal/action contracts;
-- Unified Planning/Pyperplan adapter behind the Nika planner contract;
-- deterministic plans execute through existing guarded ToolExecutor, preserving approval boundaries;
-- deterministic planning has explicit wall-time and maximum-step budgets; an oversized plan is rejected before executing a tool;
-- ModelGateway has explicit ordered fallback provider IDs, a single total deadline, privacy prevalidation of the complete route, and fallback only after eligible retryable failures;
-- provider capabilities record whether hard cancellation is proven. A timeout from a provider without proven hard cancellation is non-retryable and cannot trigger concurrent fallback;
-- Foundry Local in-process inference is serialized. If an async timeout/cancellation occurs while native non-streaming inference continues, the Foundry slot remains reserved until that worker actually exits;
-- Foundry model metadata can be inspected read-only for exact model/cache/hardware evidence without silently loading or downloading the model;
-- `scripts/prove_foundry_local.py` prepares a physical-Windows evidence record with SDK version, platform, model identity, explicit human-reviewed model-license reference, inference result and optional deterministic model-cache tree checksum. Model download remains opt-in only;
-- deterministic tests cover no-model multi-step execution, impossible goal, re-planning, high-impact approval denial, plan/time budgets, explicit fallback safety, sensitive-route rejection, non-cancellable timeout behavior, Foundry serialization, timeout/native-worker slot retention, model metadata and missing-model errors;
-- Windows CI contains a dependency/import proof for the official Foundry Local SDK package;
-- master/full-product/reuse/acceptance documents are reconciled to the expanded intelligence architecture.
+This same PR now refreshes canonical status to current main `700394d678bce7226374ee563e8e38ab76ab4538`; therefore the old green candidate is superseded and fresh exact-head Core + M12 are required before merge.
 
-Evidence boundary: this lane is **IMPLEMENTED but requires fresh exact-head CI after the latest coherent changes before it may be called GREEN or INTEGRATED**. Earlier green runs on older PR #40 heads do not prove the latest head.
+PF5 scope remains:
+- conservative deterministic Ukrainian + English ProductProject/Toolsmith command classification;
+- explicit ambiguity when product and capability-building intents overlap;
+- projection of integrated PF2 CoordinatorSnapshot/WorkRecord state into stable PF5 textual ProductStatusEntry contracts;
+- component/repository/base-SHA/attempt/allowed-path/review/QA/blocker evidence suitable for later semantic UI consumption;
+- focused command/presentation/accessibility-oriented tests;
+- no PF1 persistence, PF3 branch import or shared UI write.
 
-A real physical-Windows Foundry model inference has **not** been executed by automation here. SDK import, fake-manager tests and the physical-proof script are preparation/evidence infrastructure only. The exact model license remains a per-model human/release review item rather than being inferred from the MIT SDK license.
+## Shared/manual ownership
 
-## Expanded Full Product Vision
+Scheduled Product Factory workers do not edit active manual DEV01–DEV05/M10 production slices.
 
-Binding documents:
-- `docs/FULL_PRODUCT_VISION_2026-08-19.md`;
-- `docs/INTELLIGENCE_REUSE_2026-08-19.md`;
-- `docs/WORKSPACE_REUSE_CATALOG_2026-08-19.md`;
-- updated `docs/MASTER_SPEC.md`, `docs/ROADMAP.md` and `docs/ACCEPTANCE_GATES.md`.
+Current relevant open manual owners include:
+- DEV01 PR #86 — Research/Corpus exports;
+- DEV02 PR #72 — Windows worker containment proof;
+- DEV03 PR #67 — deterministic trader replay/accounting/risk;
+- DEV04 PR #78 — strict Windows UIA semantic vertical; shared Interaction/UIA ownership remains with DEV04 and its dedicated live proof is not green;
+- DEV05 PR #89 — stable subtitle acquisition;
+- M10 PR #61 and stacked R4 PR #62 — security-sensitive authorization/approval ownership.
 
-New/clarified end-state capability groups include:
-1. Deterministic Brain with no model at all;
-2. Embedded Brain with Microsoft Foundry Local primary and measured llama.cpp/ONNX Runtime GenAI alternatives;
-3. external local models such as Ollama;
-4. optional cloud/API models;
-5. Capability Escalation / Toolsmith that can safely obtain a missing tool and resume the original task;
-6. Product Journey gate from packaged accessible UI to real persisted backend and recovery;
-7. Universal Research Engine + reusable Corpus/Knowledge layer;
-8. Model Engineering Lab;
-9. real AI Trader workspace rather than merely generic experiment infrastructure;
-10. resource/power-aware local operation and shared accessible reports.
+PF5 does not edit their owned source without an explicit compatibility decision.
 
-Telegram is explicitly removed from active roadmap/workspace scope. Historical Telegram references are archival only.
+## Accessibility and UI truth
 
-## Progress accounting
+The primary user remains Windows/NVDA-first. Automated semantic/UIA/WebView2 tests never set `NVDA_VERIFIED=true`.
 
-Do not publish a new invented Full Product Vision percentage yet. First define/close the expanded capability gates and, if desired later, assign explicit weights.
+Shared Windows semantic UI is not PF5-owned while DEV04/shared UI ownership is active. PF5 advances framework-neutral textual presentation and command contracts only. Interaction priority remains:
+1. native/application API;
+2. DOM/UIA/accessibility semantics;
+3. named deterministic controls;
+4. vision/OCR fallback;
+5. coordinates last.
 
-Report instead:
-- which practical product journeys are integrated and green;
-- which are implemented but not integrated;
-- whether a current Windows candidate exists;
-- what remains human-only.
+## Product Factory acceptance truth
 
-## Current blockers
+Backend contracts are not Product Factory completion. PF11 still requires a representative product request from a clean packaged Windows Nika installation with research, durable ProductProject, product decision, acceptance criteria, dynamic team, repository connection/creation, isolated implementation, independent QA/accessibility evidence, build/package, release provenance, restart/resume and explicit human-only items.
 
-1. PR #37 requires complete current exact-head full-system evidence before integration/promotion if no newer live result supersedes the recorded cancelled M12 run.
-2. PR #40 requires fresh exact-head Ubuntu+Windows Core CI, the Foundry SDK dependency proof and applicable M12 full-system gate after the latest timeout/fallback/evidence changes.
-3. Even after Foundry adapter integration, a real physical-Windows embedded-model inference with exact model/version/license/resource evidence is still required before describing Foundry Local as hardware-proven.
-4. HUMAN_TESTED/NVDA_VERIFIED remain human-only.
+The representative expense application is an acceptance scenario, not code to hard-code into Nika Core.
 
-## Next large coherent batches
+## Release/package truth
 
-- finish exact-head CI and integration for the independent deterministic/embedded intelligence lane;
-- finish/re-run the complete Product Journey repair gate and integrate only if fully green/current-main-compatible;
-- after both are safely integrated, produce one fresh combined Windows candidate rather than promoting an intermediate ZIP;
-- then allow reserved manual lanes to advance Toolsmith/Capability Escalation, Universal Research/Corpus and other Full Product Vision work without AUTO02 source overlap.
+Do not build/promote a Product Factory Windows package merely because an isolated backend PR is green. Package/release work starts only at a meaningful integrated exact-SHA milestone. Any integrated behavior change supersedes older human-candidate artifacts until a fresh combined release gate succeeds.
+
+## Next dependency-ordered wave
+
+1. PF1 repairs current exact-head M12 failure on #91, refreshes compatibility and integrates only after fresh exact-head green evidence.
+2. PF3 refreshes #95 against current main and integrates only after current-main compatibility + exact required evidence.
+3. PF5 reruns fresh exact-head Core + M12 for #96 after this current-main/status reconciliation and merges only if still compatible.
+4. After PF1 integration, PF5 adds the real ProductProject create/inspect/update/decision adapter and restart-aware Product Journey tests.
+5. After PF3 integration, PF5 exposes node/build/staging/health/rollback/ops through the same stable presentation layer without credential material.
+6. Shared semantic UI wiring waits for ownership to be free and an explicit compatibility decision.
+7. PF11 packaging/release is attempted only after the representative end-to-end factory journey exists on integrated contracts.
+
+No invented Full Product Vision percentage is assigned. Progress is reported through exact executable acceptance states: IMPLEMENTED, GREEN, INTEGRATED, PACKAGED, HUMAN_TESTED and NVDA_VERIFIED.
