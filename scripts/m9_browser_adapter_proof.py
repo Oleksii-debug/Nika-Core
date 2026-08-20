@@ -21,8 +21,7 @@ def _exercise_form_and_spa(adapter: PlaywrightInteractionAdapter) -> None:
         "<label for='problem'>Опис проблеми</label>"
         "<input id='problem'>"
         "<label><input type='checkbox'> Увімкнути перевірку</label>"
-        "<button onclick=\"document.getElementById('status').textContent='Готово'\">"
-        "Виконати</button><p id='status' aria-live='polite'>Очікування</p></main>"
+        "<button onclick=\"this.textContent='Готово'\">Виконати</button></main>"
     )
     snapshot = adapter.observe()
     assert resolve_strict(snapshot, ControlLocator(role="heading", name="Доступне керування"))
@@ -51,7 +50,7 @@ def _exercise_form_and_spa(adapter: PlaywrightInteractionAdapter) -> None:
     adapter.act(button, InteractionAction.INVOKE, None)
     after = adapter.observe()
     assert adapter.verify(before, after, button, InteractionAction.INVOKE, None)
-    assert resolve_strict(after, ControlLocator(role="paragraph", name="Готово"))
+    assert resolve_strict(after, ControlLocator(role="button", name="Готово"))
 
 
 def _prove_ambiguity(adapter: PlaywrightInteractionAdapter) -> None:
