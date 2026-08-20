@@ -36,10 +36,14 @@ PRODUCT_PROJECT_MIGRATIONS: dict[int, tuple[str, ...]] = {
             PRIMARY KEY(project_id, package_id),
             FOREIGN KEY(project_id) REFERENCES product_projects(project_id)
         )""",
-        "CREATE INDEX IF NOT EXISTS idx_product_projects_status "
-        "ON product_projects(status, updated_at)",
-        "CREATE INDEX IF NOT EXISTS idx_product_project_specs_latest "
-        "ON product_project_specs(project_id, spec_version DESC)",
+        (
+            "CREATE INDEX IF NOT EXISTS idx_product_projects_status "
+            "ON product_projects(status, updated_at)"
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS idx_product_project_specs_latest "
+            "ON product_project_specs(project_id, spec_version DESC)"
+        ),
     ),
     2: (
         """CREATE TABLE IF NOT EXISTS product_decisions (
@@ -65,9 +69,13 @@ PRODUCT_PROJECT_MIGRATIONS: dict[int, tuple[str, ...]] = {
             created_at TEXT NOT NULL,
             FOREIGN KEY(project_id) REFERENCES product_projects(project_id)
         )""",
-        "CREATE INDEX IF NOT EXISTS idx_product_decisions_latest "
-        "ON product_decisions(project_id, decision_id, decision_version DESC)",
-        "CREATE INDEX IF NOT EXISTS idx_product_decisions_option "
-        "ON product_decisions(project_id, option_id, decision_version DESC)",
+        (
+            "CREATE INDEX IF NOT EXISTS idx_product_decisions_latest "
+            "ON product_decisions(project_id, decision_id, decision_version DESC)"
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS idx_product_decisions_option "
+            "ON product_decisions(project_id, option_id, decision_version DESC)"
+        ),
     ),
 }
