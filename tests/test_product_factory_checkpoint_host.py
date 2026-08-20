@@ -32,7 +32,7 @@ from nika_core.toolsmith.contracts import (
     ChangedFile,
     CodingResult,
     RecoveryState,
-    TestEvidence,
+    TestEvidence as WorkerTestEvidence,
 )
 
 SHA_A = "a" * 40
@@ -139,7 +139,7 @@ def test_worker_evidence_round_trips_without_self_promotion(tmp_path) -> None:
         job_id=request.work_id,
         changed_files=(ChangedFile("src/core/main.py", DIGEST_D, 123),),
         test_evidence=(
-            TestEvidence(("python", "-m", "pytest", "tests/core"), 0, DIGEST_E),
+            WorkerTestEvidence(("python", "-m", "pytest", "tests/core"), 0, DIGEST_E),
         ),
         artifacts=(ArtifactEvidence("report", DIGEST_D, "application/json"),),
         recovery_state=RecoveryState("completed", "opaque-worker-token"),
@@ -187,7 +187,7 @@ def test_repeated_save_is_idempotent_and_revision_regression_fails_closed(tmp_pa
 
     assert first.checkpoint_id == again.checkpoint_id
     assert second.checkpoint.coordinator.revision > first.checkpoint.coordinator.revision
-    with pytest.raises(ProductFactoryCheckpointError, match="revision regression"):
+    with pytest.raises(ProductFactoryCheckpointError, match="checkpoint revision regressed"):
         host.save(host_task_id=task_id, checkpoint=checkpoint_v1)
     with store.connection() as conn:
         count = conn.execute(
