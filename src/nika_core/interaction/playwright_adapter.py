@@ -13,7 +13,6 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
-from urllib.parse import urlsplit
 
 from .domain import (
     AmbiguousTargetError,
@@ -153,7 +152,7 @@ class PageRegistry:
                 current.document_generation += 1
 
         page.on("framenavigated", on_navigation)
-        page.on("close", lambda: self.remove(page_id))
+        page.on("close", lambda _page: self.remove(page_id))
         return page_id
 
     def remove(self, page_id: str) -> None:
@@ -231,7 +230,8 @@ class _SemanticDescriptor:
     node_id: str
     role: str
     name: str
-    ancestors: tuple[tuple[str, str], ...]
+    text: str | None
+    ancestors: tuple[tuple[str, str, str | None], ...]
 
 
 @dataclass(slots=True)
@@ -267,12 +267,8 @@ class PlaywrightInteractionAdapter:
             raise AmbiguousTargetError(f"Frame target is ambiguous: {len(frames)} matches")
         return frames[0]
 
-    def navigate(self, url: str) -> None:
-        if urlsplit(url).scheme not in {"http", "https"}:
-            raise UnsupportedInteractionError("browser navigation permits only http/https URLs")
-        self._record().page.goto(url, wait_until="domcontentloaded")
-
-    def set_content(self, html: str) -> None:
+    def load_inline_fixture(self, html: str) -> None:
+        """Load local proof/test HTML; this helper is not an agent navigation action surface."""
         record = self._record()
         record.page.set_content(html, wait_until="domcontentloaded")
         record.document_generation += 1
@@ -330,32 +326,35 @@ class PlaywrightInteractionAdapter:
     @staticmethod
     def _semantic_revision(snapshot_text: str, mutation_counter: int) -> int:
         normalized = snapshot_text.replace("[focused]", "")
-        digest = hashlib.sha256(
-            f"{mutation_counter}\0{normalized}".encode("utf-8")
-        ).digest()
+        digest = hashlib.sha256(f"{mutation_counter}\0{normalized}".encode("utf-8")).digest()
         return int.from_bytes(digest[:8], "big")
 
     @staticmethod
-    def _semantic_locator(scope: Any, role: str, name: str) -> Any:
+    def _semantic_locator(scope: Any, role: str, name: str, text: str | None = None) -> Any:
         kwargs: dict[str, Any] = {"exact": True}
         if name:
             kwargs["name"] = name
-        return scope.get_by_role(role, **kwargs)
+        locator = scope.get_by_role(role, **kwargs)
+        if not name and text is not None:
+            locator = locator.filter(has_text=re.compile(rf"^{re.escape(text)}$"))
+        return locator
 
     def _locator_for_descriptor(self, descriptor: _SemanticDescriptor, *, root: Any | None = None) -> Any:
         scope = self._root() if root is None else root
-        for role, name in descriptor.ancestors:
-            candidate = self._semantic_locator(scope, role, name)
+        for role, name, text in descriptor.ancestors:
+            candidate = self._semantic_locator(scope, role, name, text)
             if candidate.count() != 1:
                 break
             scope = candidate
-        return self._semantic_locator(scope, descriptor.role, descriptor.name)
+        return self._semantic_locator(scope, descriptor.role, descriptor.name, descriptor.text)
 
     def _parse_snapshot(self, snapshot: str) -> tuple[ControlNode, ...]:
         controls: list[ControlNode] = []
-        stack: list[tuple[int, str, str, str]] = []
+        stack: list[tuple[int, str, str, str | None, str]] = []
         descriptors: dict[str, _SemanticDescriptor] = {}
-        occurrences: dict[tuple[tuple[tuple[str, str], ...], str, str], int] = {}
+        occurrences: dict[
+            tuple[tuple[tuple[str, str, str | None], ...], str, str, str | None], int
+        ] = {}
         root = self._root()
         generation = self._record().document_generation
 
@@ -371,8 +370,9 @@ class PlaywrightInteractionAdapter:
             scalar = self._decode_scalar(match.group("scalar"))
             while stack and stack[-1][0] >= indent:
                 stack.pop()
-            ancestors = tuple((entry[1], entry[2]) for entry in stack)
-            semantic_key = (ancestors, role, name)
+            ancestor_semantics = tuple((entry[1], entry[2], entry[3]) for entry in stack)
+            descriptor_text = None if role in _FORM_ROLES or name else scalar
+            semantic_key = (ancestor_semantics, role, name, descriptor_text)
             ordinal = occurrences.get(semantic_key, 0) + 1
             occurrences[semantic_key] = ordinal
             node_id = "pw:" + hashlib.sha256(
@@ -382,7 +382,7 @@ class PlaywrightInteractionAdapter:
             attrs = list(self._state_attributes(match.group("state")))
             state = dict(attrs)
             if stack:
-                attrs.append(("ancestor_node_id", stack[-1][3]))
+                attrs.append(("ancestor_node_id", stack[-1][4]))
             if role in _FORM_ROLES:
                 if name:
                     attrs.append(("label", name))
@@ -393,7 +393,13 @@ class PlaywrightInteractionAdapter:
             elif scalar is not None:
                 attrs.append(("text", scalar))
 
-            descriptor = _SemanticDescriptor(node_id, role, name, ancestors)
+            descriptor = _SemanticDescriptor(
+                node_id=node_id,
+                role=role,
+                name=name,
+                text=descriptor_text,
+                ancestors=ancestor_semantics,
+            )
             descriptors[node_id] = descriptor
             locator = self._locator_for_descriptor(descriptor, root=root)
             bounds: tuple[int, int, int, int] | None = None
@@ -419,7 +425,7 @@ class PlaywrightInteractionAdapter:
                     attributes=tuple(attrs),
                 )
             )
-            stack.append((indent, role, name, node_id))
+            stack.append((indent, role, name, descriptor_text, node_id))
 
         self._node_descriptors = descriptors
         return tuple(controls)
