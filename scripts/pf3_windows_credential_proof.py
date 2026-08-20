@@ -62,7 +62,7 @@ def main() -> int:
     exact_windows_limit_material = "L" * 1280
     store: WindowsCredentialStore | None = None
     restarted: WindowsCredentialStore | None = None
-    proof_error: BaseException | None = None
+    proof_error: Exception | None = None
     cleanup_errors: list[str] = []
 
     try:
@@ -99,7 +99,7 @@ def main() -> int:
         restarted.provision_secret(secret_ref, 2, exact_windows_limit_material)
         if not restarted.contains(secret_ref, 2):
             raise RuntimeError("maximum-size Windows credential was not readable")
-    except BaseException as exc:
+    except Exception as exc:
         proof_error = exc
     finally:
         cleanup_errors.extend(_cleanup(restarted or store, secret_ref))

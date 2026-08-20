@@ -59,3 +59,7 @@ addopts = "-q"
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.ruff.lint.per-file-ignores]
+"src/nika_core/product_factory_windows_credentials.py" = ["BLE001"]
+"tests/test_product_factory_windows_credentials.py" = ["DTZ001"]
