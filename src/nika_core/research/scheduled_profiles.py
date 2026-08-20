@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -114,7 +115,13 @@ class ScheduledResearchProfileService:
 
         outstanding = self._outstanding_task(series_id)
         if outstanding is None:
-            task_id = self._runs.create_job(profile_id, version, series_id=series_id)
+            task_id = self._runs.create_job(profile_id, version)
+            with self._store.connection() as conn:
+                conn.execute(
+                    """INSERT INTO research_profile_series_tasks(series_id, task_id, created_at)
+                    VALUES (?, ?, ?)""",
+                    (series_id, task_id, datetime.now(UTC).isoformat()),
+                )
         else:
             task_id, state = outstanding
             if state is TaskState.PAUSED:
@@ -187,30 +194,22 @@ class ScheduledResearchProfileService:
         return "\n".join(lines).rstrip() + "\n"
 
     def _outstanding_task(self, series_id: str) -> tuple[str, TaskState] | None:
-        terminal = {TaskState.COMPLETED.value, TaskState.CANCELLED.value, TaskState.FAILED.value}
         with self._store.connection() as conn:
             rows = conn.execute(
-                """SELECT task_id, state, payload_json FROM tasks
-                WHERE agent_id=? ORDER BY created_at, task_id""",
-                (ResearchProfileRunService.AGENT_ID,),
+                """SELECT t.task_id, t.state, h.task_id AS history_task_id
+                FROM research_profile_series_tasks b
+                JOIN tasks t ON t.task_id=b.task_id
+                LEFT JOIN research_profile_run_history h ON h.task_id=t.task_id
+                WHERE b.series_id=?
+                ORDER BY b.created_at, t.task_id""",
+                (series_id,),
             ).fetchall()
-        import json
-
         for row in rows:
-            payload = json.loads(row["payload_json"])
-            if payload.get("series_id") != series_id:
-                continue
             state = TaskState(row["state"])
-            if state.value not in terminal:
+            if state not in {TaskState.COMPLETED, TaskState.CANCELLED, TaskState.FAILED}:
                 return row["task_id"], state
-            if state is TaskState.COMPLETED:
-                with self._store.connection() as conn:
-                    persisted = conn.execute(
-                        "SELECT 1 FROM research_profile_run_history WHERE task_id=?",
-                        (row["task_id"],),
-                    ).fetchone()
-                if persisted is None:
-                    return row["task_id"], state
+            if state is TaskState.COMPLETED and row["history_task_id"] is None:
+                return row["task_id"], state
         return None
 
     def _record_delta(
