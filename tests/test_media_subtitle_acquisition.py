@@ -107,6 +107,13 @@ def discovery_for(
     )
 
 
+def require_subtitle_parser() -> None:
+    pytest.importorskip(
+        "pysubs2",
+        reason="subtitle parsing is an explicit optional [media] component",
+    )
+
+
 def test_stable_track_projection_drops_ephemeral_signed_locator() -> None:
     raw = SubtitleTrack(
         track_id="subtitle-track:stable",
@@ -122,6 +129,7 @@ def test_stable_track_projection_drops_ephemeral_signed_locator() -> None:
 
 
 def test_manual_subtitle_is_rediscovered_downloaded_and_normalized(tmp_path: Path) -> None:
+    require_subtitle_parser()
     raw = SubtitleTrack(
         track_id="subtitle-track:stable",
         language="uk",
@@ -163,6 +171,7 @@ def test_manual_subtitle_is_rediscovered_downloaded_and_normalized(tmp_path: Pat
 
 
 def test_automatic_subtitle_keeps_quality_gate_and_auto_flag(tmp_path: Path) -> None:
+    require_subtitle_parser()
     raw = SubtitleTrack(
         track_id="subtitle-track:auto",
         language="uk",
