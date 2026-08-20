@@ -353,3 +353,76 @@ def test_attested_measurement_cannot_be_silently_downgraded_to_false_flag() -> N
     )
     with pytest.raises(ValueError, match="operator-attested"):
         MediaProofManifest(resource_measurement=measurement, target_machine_measured=False)
+
+
+def test_binary_evidence_rejects_local_or_secret_bearing_source_reference(tmp_path: Path) -> None:
+    binary = tmp_path / "ffprobe.exe"
+    binary.write_bytes(b"binary")
+
+    for reference in (
+        r"C:\\Users\\alex\\Downloads\\ffprobe.exe",
+        "file:///C:/Users/alex/ffprobe.exe",
+        "https://example.invalid/binary?token=secret",
+        "https://user:password@example.invalid/binary",
+    ):
+        with pytest.raises(ValueError):
+            binary_evidence(
+                component_id="ffprobe",
+                path=binary,
+                source_reference=reference,
+                license_classification="fixture",
+            )
+
+
+def test_model_evidence_rejects_private_source_and_license_references(tmp_path: Path) -> None:
+    model = tmp_path / "eng.traineddata"
+    model.write_bytes(b"model")
+    descriptor = ModelDescriptor(
+        model_id="eng",
+        engine_id="tesseract",
+        version="fixture",
+        license_reference="https://example.invalid/license?access_token=secret",
+    )
+    with pytest.raises(ValueError, match="license_reference"):
+        model_evidence(
+            descriptor=descriptor,
+            path=model,
+            source_reference="https://example.invalid/model",
+        )
+
+    descriptor = descriptor.model_copy(update={"license_reference": "Apache-2.0"})
+    with pytest.raises(ValueError, match="source_reference"):
+        model_evidence(
+            descriptor=descriptor,
+            path=model,
+            source_reference=r"C:\\private\\eng.traineddata",
+        )
+
+
+def test_manifest_rejects_secret_bearing_engine_source_reference() -> None:
+    engine = EngineDescriptor(
+        engine_id="ffprobe",
+        name="FFprobe",
+        version="fixture",
+        license_id="LGPL-2.1-or-later",
+        source_reference="https://example.invalid/source?token=secret",
+    )
+    with pytest.raises(ValueError, match="source_reference"):
+        MediaProofManifest(engines=(engine,))
+
+
+def test_resource_machine_label_rejects_path_or_endpoint_material() -> None:
+    observer = FakeObserver()
+    for label in (
+        r"C:\\Users\\alex\\nika",
+        "https://private-host.example.invalid",
+        "target/token=secret",
+    ):
+        with pytest.raises(ValueError, match="machine_label"):
+            resource_evidence(
+                observer=observer,
+                machine_label=label,
+                operator_attested_target=False,
+                sample_count=1,
+                sample_interval_seconds=0,
+            )
