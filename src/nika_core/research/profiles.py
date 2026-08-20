@@ -326,7 +326,7 @@ class ResearchProfileRepository:
     def _filters_from_json(raw: str) -> ResearchSearchFilters:
         payload = json.loads(raw)
         if not isinstance(payload, dict):
-            raise ValueError("stored research profile filters must be an object")
+            raise TypeError("stored research profile filters must be an object")
         allowed = {"freshness", "media_types", "source_kinds"}
         if set(payload) != allowed:
             raise ValueError("stored research profile filters have an unsupported schema")
@@ -334,9 +334,9 @@ class ResearchProfileRepository:
         media_types = payload["media_types"]
         source_kinds = payload["source_kinds"]
         if not all(isinstance(value, list) for value in (freshness, media_types, source_kinds)):
-            raise ValueError("stored research profile filters have invalid collection types")
+            raise TypeError("stored research profile filters have invalid collection types")
         if not all(isinstance(value, str) for value in (*freshness, *media_types, *source_kinds)):
-            raise ValueError("stored research profile filters contain non-string values")
+            raise TypeError("stored research profile filters contain non-string values")
         filters = ResearchSearchFilters(
             source_kinds=tuple(SourceKind(value) for value in source_kinds),
             media_types=tuple(media_types),
