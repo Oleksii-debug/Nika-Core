@@ -8,7 +8,11 @@ from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.task_state import TaskState, can_transition
 from nika_core.research.models import RefreshDisposition, SourceKind
 from nika_core.research.network_repository import NetworkResearchRepository
-from nika_core.research.profiles import ResearchProfile, ResearchProfileRepository, ResearchSourceSet
+from nika_core.research.profiles import (
+    ResearchProfile,
+    ResearchProfileRepository,
+    ResearchSourceSet,
+)
 from nika_core.research.query import (
     DeterministicResearchQueryService,
     ResearchQuerySpec,
