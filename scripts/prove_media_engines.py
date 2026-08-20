@@ -159,12 +159,14 @@ def main() -> int:
             binaries=(
                 binary_evidence(
                     component_id="ffprobe",
+                    engine_id=ffprobe_audit.descriptor.engine_id,
                     path=args.ffprobe,
                     source_reference="https://ffmpeg.org/",
                     license_classification=ffprobe_audit.license_classification,
                 ),
                 binary_evidence(
                     component_id="tesseract",
+                    engine_id=tesseract_descriptor.engine_id,
                     path=args.tesseract,
                     source_reference=args.tesseract_binary_source_reference,
                     license_classification=args.tesseract_binary_license,
