@@ -47,6 +47,10 @@ class ProductProjectCommandService:
     def inspect_project(self, project_id: str) -> ProductProjectDetail:
         return project_detail(self._repository.get(project_id))
 
+    def project_credential_refs(self, project_id: str) -> tuple[str, ...]:
+        """Return internal opaque credential references without projecting them to user detail."""
+        return self._repository.get(project_id).spec.credential_refs
+
     def update_project(
         self,
         project_id: str,
