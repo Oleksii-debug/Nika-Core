@@ -8,7 +8,6 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
-
 _SECRET_KEY = re.compile(
     r"(?:password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|oauth)",
     re.IGNORECASE,
