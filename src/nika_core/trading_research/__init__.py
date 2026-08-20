@@ -1,5 +1,6 @@
 """Causality-first contracts for the paper-only AI Trader Research Lab."""
 
+from .accounting import AccountSnapshot, PortfolioLedger, Position
 from .causality import (
     AvailabilityCache,
     FeatureLineage,
@@ -35,9 +36,24 @@ from .dataset import (
     ValidationReport,
     event_sort_key,
 )
-from .strategy import DecisionContext, Strategy, StrategyDecision
+from .orders import (
+    ExecutionPolicy,
+    OrderIntent,
+    OrderState,
+    OrderType,
+    RiskApprovedOrder,
+    Side,
+    SimulatedFill,
+    apply_slippage,
+    fee_for,
+)
+from .persistence import TradingStateRepository
+from .replay import OrderUpdate, ReplayBook, ReplayPhase, SimulationExecutionEngine, TimeSlice
+from .risk import RiskEngine, RiskLimits, RiskRejected, RiskState
+from .strategy import DecisionContext, OrderStrategy, Strategy, StrategyDecision
 
 __all__ = [
+    "AccountSnapshot",
     "AvailabilityCache",
     "Bar",
     "CausalityViolation",
@@ -46,6 +62,7 @@ __all__ = [
     "DatasetVersion",
     "DecisionContext",
     "EventTime",
+    "ExecutionPolicy",
     "FeatureLineage",
     "FeaturePoint",
     "FutureAccessError",
@@ -53,21 +70,42 @@ __all__ = [
     "Instrument",
     "MarketEvent",
     "OddsSnapshot",
+    "OrderIntent",
+    "OrderState",
+    "OrderStrategy",
+    "OrderType",
+    "OrderUpdate",
     "OutcomeSettlement",
     "Partition",
+    "PortfolioLedger",
+    "Position",
     "Provenance",
     "Quote",
+    "ReplayBook",
+    "ReplayPhase",
+    "RiskApprovedOrder",
+    "RiskEngine",
+    "RiskLimits",
+    "RiskRejected",
+    "RiskState",
+    "Side",
+    "SimulatedFill",
+    "SimulationExecutionEngine",
     "Strategy",
     "StrategyDecision",
     "TemporalView",
     "Tick",
+    "TimeSlice",
     "TradingResearchError",
+    "TradingStateRepository",
     "TrainOnlyStandardizer",
     "ValidationIssue",
     "ValidationReport",
     "Venue",
+    "apply_slippage",
     "causal_shift",
     "event_sort_key",
+    "fee_for",
     "fill_missing",
     "trailing_mean",
 ]
