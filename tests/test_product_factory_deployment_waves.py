@@ -29,7 +29,6 @@ from nika_core.product_factory_deployment_waves import (
     ServiceRolloutSpec,
 )
 
-
 SHA_A = "a" * 40
 DIGEST_A = "sha256:" + "1" * 64
 
