@@ -13,6 +13,8 @@ from nika_core.product_factory_orchestration import (
 )
 from nika_core.toolsmith.contracts import CodingResult, TestEvidence
 
+_PLAN_FINGERPRINT_SCHEMA = "nika-product-factory-attempt-one-plan-v1"
+
 
 class CoordinatorError(ValueError):
     """Raised when Product Factory orchestration invariants are violated."""
@@ -96,10 +98,40 @@ class WorkRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class AttemptOneRepositoryPlan:
+    repository_id: str
+    provider: str
+    locator: str
+    default_branch: str
+    case_sensitive_paths: bool
+    initial_base_sha: str
+
+
+@dataclass(frozen=True, slots=True)
+class AttemptOneComponentPlan:
+    component_id: str
+    repository_id: str
+    initial_goal: str
+    allowed_paths: tuple[str, ...]
+    dependencies: tuple[str, ...]
+    acceptance_commands: tuple[tuple[str, ...], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class AttemptOnePlanDescriptor:
+    project_id: str
+    permission_ceiling: frozenset[str]
+    repositories: tuple[AttemptOneRepositoryPlan, ...]
+    components: tuple[AttemptOneComponentPlan, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class CoordinatorSnapshot:
     project_id: str
     revision: int
     records: tuple[WorkRecord, ...]
+    attempt_one_plan: AttemptOnePlanDescriptor | None = None
+    plan_fingerprint: str | None = None
 
 
 class ComponentDispatcherPort(Protocol):
@@ -113,6 +145,18 @@ class ProductFactoryCoordinator:
     graph: ProductRepositoryGraph
     _records: dict[str, WorkRecord] = field(default_factory=dict, init=False, repr=False)
     _revision: int = field(default=0, init=False, repr=False)
+    _attempt_one_plan: AttemptOnePlanDescriptor | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _trusted_plan_fingerprint: str | None = field(default=None, init=False, repr=False)
+
+    @property
+    def plan_fingerprint(self) -> str:
+        if self._trusted_plan_fingerprint is None:
+            raise CoordinatorError("coordinator has no established trusted plan fingerprint")
+        return self._trusted_plan_fingerprint
 
     def plan(
         self,
@@ -125,22 +169,32 @@ class ProductFactoryCoordinator:
             raise CoordinatorError("coordinator is already planned")
         if not permission_ceiling:
             raise CoordinatorError("project permission ceiling must not be empty")
+
+        descriptor = _build_attempt_one_plan(
+            self.graph,
+            base_shas=base_shas,
+            goals=goals,
+            permission_ceiling=permission_ceiling,
+        )
+        self._attempt_one_plan = descriptor
+        self._trusted_plan_fingerprint = _plan_fingerprint(descriptor)
+
         components = self._components()
         repositories = self._repositories()
+        component_plans = {item.component_id: item for item in descriptor.components}
+        repository_plans = {item.repository_id: item for item in descriptor.repositories}
         for component_id in self.graph.dependency_order():
             component = components[component_id]
             repository = repositories[component.repository_id]
-            base_sha = base_shas.get(repository.repository_id)
-            goal = goals.get(component_id, "").strip()
-            if base_sha is None or not goal:
-                raise CoordinatorError(f"missing base SHA or goal for component {component_id}")
+            component_plan = component_plans[component_id]
+            repository_plan = repository_plans[repository.repository_id]
             request = ComponentWorkRequest(
                 work_id=_work_id(
                     project_id=self.graph.project_id,
                     component_id=component_id,
                     repository_id=repository.repository_id,
-                    goal=goal,
-                    base_sha=base_sha,
+                    goal=component_plan.initial_goal,
+                    base_sha=repository_plan.initial_base_sha,
                     allowed_paths=component.paths,
                     permission_ceiling=permission_ceiling,
                     acceptance_commands=component.test_commands,
@@ -149,8 +203,8 @@ class ProductFactoryCoordinator:
                 project_id=self.graph.project_id,
                 component_id=component_id,
                 repository_id=repository.repository_id,
-                goal=goal,
-                base_sha=base_sha,
+                goal=component_plan.initial_goal,
+                base_sha=repository_plan.initial_base_sha,
                 allowed_paths=component.paths,
                 permission_ceiling=permission_ceiling,
                 acceptance_commands=component.test_commands,
@@ -257,9 +311,16 @@ class ProductFactoryCoordinator:
             self.graph.project_id,
             self._revision,
             tuple(self._records[key] for key in sorted(self._records)),
+            self._attempt_one_plan,
+            self._trusted_plan_fingerprint,
         )
 
-    def restore(self, snapshot: CoordinatorSnapshot) -> None:
+    def restore(
+        self,
+        snapshot: CoordinatorSnapshot,
+        *,
+        trusted_plan_fingerprint: str | None = None,
+    ) -> None:
         if snapshot.project_id != self.graph.project_id:
             raise CoordinatorError("snapshot project does not match repository graph")
         if snapshot.revision < 0:
@@ -306,9 +367,108 @@ class ProductFactoryCoordinator:
             self._validate_restored_record(record)
 
         self._validate_restored_dependencies(snapshot.records)
+        descriptor, authority = self._require_restore_authority(
+            snapshot,
+            trusted_plan_fingerprint=trusted_plan_fingerprint,
+        )
+        self._validate_attempt_one_plan(descriptor, snapshot.records)
+
         self._records = {record.request.component_id: record for record in snapshot.records}
         self._revision = snapshot.revision
+        self._attempt_one_plan = descriptor
+        self._trusted_plan_fingerprint = authority
         self._advance_ready()
+
+    def _require_restore_authority(
+        self,
+        snapshot: CoordinatorSnapshot,
+        *,
+        trusted_plan_fingerprint: str | None,
+    ) -> tuple[AttemptOnePlanDescriptor, str]:
+        established = self._trusted_plan_fingerprint
+        if trusted_plan_fingerprint is not None:
+            _validate_digest(trusted_plan_fingerprint, "trusted_plan_fingerprint")
+            if established is not None and established != trusted_plan_fingerprint:
+                raise CoordinatorError("explicit plan authority conflicts with live coordinator authority")
+            authority = trusted_plan_fingerprint
+        else:
+            authority = established
+        if authority is None:
+            raise CoordinatorError("fresh restore requires an external trusted plan fingerprint")
+
+        descriptor = snapshot.attempt_one_plan
+        fingerprint = snapshot.plan_fingerprint
+        if descriptor is None or fingerprint is None:
+            raise CoordinatorError("snapshot is missing immutable attempt-one plan authority")
+        _validate_digest(fingerprint, "plan_fingerprint")
+        recomputed = _plan_fingerprint(descriptor)
+        if fingerprint != recomputed:
+            raise CoordinatorError("snapshot plan fingerprint does not match attempt-one plan descriptor")
+        if fingerprint != authority:
+            raise CoordinatorError("snapshot plan fingerprint does not match trusted external authority")
+        return descriptor, authority
+
+    def _validate_attempt_one_plan(
+        self,
+        descriptor: AttemptOnePlanDescriptor,
+        records: tuple[WorkRecord, ...],
+    ) -> None:
+        if descriptor.project_id != self.graph.project_id:
+            raise CoordinatorError("attempt-one plan project identity drifted")
+        if not descriptor.permission_ceiling:
+            raise CoordinatorError("attempt-one plan permission ceiling must not be empty")
+
+        repositories = self._repositories()
+        planned_repositories = {item.repository_id: item for item in descriptor.repositories}
+        if set(planned_repositories) != set(repositories):
+            raise CoordinatorError("attempt-one plan repository set drifted")
+        for repository_id, repository in repositories.items():
+            planned = planned_repositories[repository_id]
+            provider, locator = _physical_repository_identity(repository)
+            if (
+                planned.provider != provider
+                or planned.locator != locator
+                or planned.default_branch != repository.default_branch
+                or planned.case_sensitive_paths != repository.case_sensitive_paths
+            ):
+                raise CoordinatorError("attempt-one plan repository identity drifted")
+            _validate_sha(planned.initial_base_sha, "initial_base_sha")
+
+        components = self._components()
+        planned_components = {item.component_id: item for item in descriptor.components}
+        if set(planned_components) != set(components):
+            raise CoordinatorError("attempt-one plan component set drifted")
+        for component_id, component in components.items():
+            planned = planned_components[component_id]
+            if (
+                planned.repository_id != component.repository_id
+                or planned.allowed_paths != component.paths
+                or planned.dependencies != component.dependencies
+                or planned.acceptance_commands != component.test_commands
+                or not planned.initial_goal.strip()
+            ):
+                raise CoordinatorError("attempt-one plan component identity drifted")
+
+        for record in records:
+            request = record.request
+            planned_component = planned_components[request.component_id]
+            planned_repository = planned_repositories[planned_component.repository_id]
+            if request.permission_ceiling != descriptor.permission_ceiling:
+                raise CoordinatorError("snapshot permission ceiling drifted from trusted attempt-one plan")
+            if (
+                request.repository_id != planned_component.repository_id
+                or request.allowed_paths != planned_component.allowed_paths
+                or request.acceptance_commands != planned_component.acceptance_commands
+            ):
+                raise CoordinatorError("snapshot request drifted from trusted attempt-one plan")
+            if request.attempt == 1:
+                if (
+                    request.goal != planned_component.initial_goal
+                    or request.base_sha != planned_repository.initial_base_sha
+                ):
+                    raise CoordinatorError("attempt-one request drifted from trusted initial plan")
+            elif not request.goal.startswith(planned_component.initial_goal + "\nRepair:"):
+                raise CoordinatorError("repair request goal lost trusted initial-plan ancestry")
 
     def _validate_restored_record(self, record: WorkRecord) -> None:
         request = record.request
@@ -467,6 +627,102 @@ class ProductFactoryCoordinator:
 
     def _touch(self) -> None:
         self._revision += 1
+
+
+def _build_attempt_one_plan(
+    graph: ProductRepositoryGraph,
+    *,
+    base_shas: dict[str, str],
+    goals: dict[str, str],
+    permission_ceiling: frozenset[str],
+) -> AttemptOnePlanDescriptor:
+    repositories: list[AttemptOneRepositoryPlan] = []
+    for repository in sorted(graph.repositories, key=lambda item: item.repository_id):
+        base_sha = base_shas.get(repository.repository_id)
+        if base_sha is None:
+            raise CoordinatorError(
+                f"missing base SHA or goal for repository {repository.repository_id}"
+            )
+        _validate_sha(base_sha, "initial_base_sha")
+        provider, locator = _physical_repository_identity(repository)
+        repositories.append(
+            AttemptOneRepositoryPlan(
+                repository_id=repository.repository_id,
+                provider=provider,
+                locator=locator,
+                default_branch=repository.default_branch,
+                case_sensitive_paths=repository.case_sensitive_paths,
+                initial_base_sha=base_sha,
+            )
+        )
+
+    components: list[AttemptOneComponentPlan] = []
+    for component in sorted(graph.components, key=lambda item: item.component_id):
+        goal = goals.get(component.component_id, "").strip()
+        if not goal:
+            raise CoordinatorError(f"missing base SHA or goal for component {component.component_id}")
+        components.append(
+            AttemptOneComponentPlan(
+                component_id=component.component_id,
+                repository_id=component.repository_id,
+                initial_goal=goal,
+                allowed_paths=component.paths,
+                dependencies=component.dependencies,
+                acceptance_commands=component.test_commands,
+            )
+        )
+
+    return AttemptOnePlanDescriptor(
+        project_id=graph.project_id,
+        permission_ceiling=permission_ceiling,
+        repositories=tuple(repositories),
+        components=tuple(components),
+    )
+
+
+def _physical_repository_identity(repository: RepositoryRef) -> tuple[str, str]:
+    provider = repository.provider.strip().casefold()
+    locator = repository.locator.strip().rstrip("/")
+    if provider == "github":
+        locator = locator.casefold()
+    return provider, locator
+
+
+def _plan_fingerprint(descriptor: AttemptOnePlanDescriptor) -> str:
+    payload = {
+        "schema": _PLAN_FINGERPRINT_SCHEMA,
+        "project_id": descriptor.project_id,
+        "permission_ceiling": sorted(descriptor.permission_ceiling),
+        "repositories": [
+            {
+                "repository_id": item.repository_id,
+                "provider": item.provider,
+                "locator": item.locator,
+                "default_branch": item.default_branch,
+                "case_sensitive_paths": item.case_sensitive_paths,
+                "initial_base_sha": item.initial_base_sha,
+            }
+            for item in sorted(descriptor.repositories, key=lambda item: item.repository_id)
+        ],
+        "components": [
+            {
+                "component_id": item.component_id,
+                "repository_id": item.repository_id,
+                "initial_goal": item.initial_goal,
+                "allowed_paths": list(item.allowed_paths),
+                "dependencies": list(item.dependencies),
+                "acceptance_commands": [list(command) for command in item.acceptance_commands],
+            }
+            for item in sorted(descriptor.components, key=lambda item: item.component_id)
+        ],
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _commands_equivalent(
