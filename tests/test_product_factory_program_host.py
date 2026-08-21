@@ -16,8 +16,8 @@ from nika_core.product_factory_coding_worker_adapter import (
 )
 from nika_core.product_factory_coordinator import (
     ReviewDecision,
-    WorkerResultEnvelope,
     WorkState,
+    WorkerResultEnvelope,
 )
 from nika_core.product_factory_orchestration import (
     ProductComponent,
@@ -46,10 +46,12 @@ from nika_core.toolsmith.contracts import (
     ProcessPolicy,
     RecoveryState,
     ResourceBudget,
-    TestEvidence as WorkerTestEvidence,
     WorkerFailure,
     WorkerFailureKind,
     WorkspaceLease,
+)
+from nika_core.toolsmith.contracts import (
+    TestEvidence as WorkerTestEvidence,
 )
 
 PERMISSIONS = frozenset({"read_source", "write_source", "run_tests"})
@@ -938,3 +940,100 @@ def test_program_host_dispatches_through_existing_public_coding_worker_adapter(t
         "pytest",
         "tests/component-0",
     )
+
+
+def test_cancelled_parallel_dispatch_distinguishes_uncertain_from_pre_dispatch_after_restart(
+    tmp_path,
+) -> None:
+    store, _, binding, task_id, coordinator, graph = _setup(
+        tmp_path,
+        component_count=2,
+        repository_count=2,
+    )
+
+    class BlockingWorker(FakeProgramWorker):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started: asyncio.Event | None = None
+            self.release: asyncio.Event | None = None
+
+        async def dispatch(self, request):
+            self.dispatch_calls.append(request)
+            assert self.started is not None
+            assert self.release is not None
+            self.started.set()
+            await self.release.wait()
+            return _envelope(request)
+
+    async def cancel_after_first_reservation():
+        worker = BlockingWorker()
+        worker.started = asyncio.Event()
+        worker.release = asyncio.Event()
+        host = ProductFactoryProgramHost(store, worker)
+        pending = asyncio.create_task(
+            host.dispatch_ready(
+                host_task_id=task_id,
+                binding=binding,
+                coordinator=coordinator,
+                max_parallel=1,
+                max_count=2,
+            )
+        )
+        await worker.started.wait()
+
+        first = worker.dispatch_calls[0]
+        second = next(
+            record.request
+            for record in coordinator.snapshot().records
+            if record.request.work_id != first.work_id
+        )
+        ledger = IdempotencyLedger(store)
+        assert ledger.require(f"pf-worker:{first.work_id}").status is IdempotencyStatus.PENDING
+        assert ledger.get(f"pf-worker:{second.work_id}") is None
+        assert _record(coordinator, first.component_id).state is WorkState.RUNNING
+        assert _record(coordinator, second.component_id).state is WorkState.RUNNING
+
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+
+        assert ledger.require(f"pf-worker:{first.work_id}").status is IdempotencyStatus.UNCERTAIN
+        assert ledger.get(f"pf-worker:{second.work_id}") is None
+        assert [request.work_id for request in worker.dispatch_calls] == [first.work_id]
+        return first, second
+
+    first, second = _run(cancel_after_first_reservation())
+
+    restarted_store = SQLiteStore(store.path)
+    restarted_store.initialize()
+    project = ProductProjectRepository(restarted_store).get("project-1")
+    restarted_binding = ProductProjectCoordinatorBinding(project, graph)
+    recovery_worker = FakeProgramWorker()
+    recovery_worker.recovery_states[first.work_id] = RecoveryState(
+        "interrupted",
+        "resume-after-cancel",
+    )
+    restarted_host = ProductFactoryProgramHost(restarted_store, recovery_worker)
+    restored = restarted_host.restore_latest(
+        host_task_id=task_id,
+        binding=restarted_binding,
+    )
+
+    outcomes = _run(
+        restarted_host.recover_running(
+            host_task_id=task_id,
+            binding=restarted_binding,
+            coordinator=restored,
+            max_parallel=1,
+        )
+    )
+
+    assert recovery_worker.inspect_calls == [first.work_id]
+    assert [item[0].work_id for item in recovery_worker.recover_calls] == [first.work_id]
+    assert [request.work_id for request in recovery_worker.dispatch_calls] == [second.work_id]
+    assert {outcome.disposition for outcome in outcomes} == {
+        ProgramWorkDisposition.REVIEW_REQUIRED
+    }
+    ledger = IdempotencyLedger(restarted_store)
+    assert ledger.require(f"pf-worker:{first.work_id}").status is IdempotencyStatus.COMPLETED
+    assert ledger.require(f"pf-worker:{second.work_id}").status is IdempotencyStatus.COMPLETED
