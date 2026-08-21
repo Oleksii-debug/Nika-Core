@@ -172,6 +172,12 @@ class ProductProjectHistoricalIntegrityService:
             raise ProductProjectError(f"invalid JSON object for {label}")
         return parsed
 
+    @staticmethod
+    def _required_json_int(value: Any, *, minimum: int, label: str) -> int:
+        if type(value) is not int or value < minimum:
+            raise ProductProjectError(f"invalid integer identity for {label}")
+        return value
+
     def _package_times(self, rows: list[Any]) -> dict[str, datetime]:
         result: dict[str, datetime] = {}
         for row in rows:
@@ -261,6 +267,22 @@ class ProductProjectHistoricalIntegrityService:
                 row["spec_json"],
                 label=f"ProductProject spec version {version}",
             )
+            parent = raw.get("supersedes_spec_version")
+            if version == 1:
+                if parent is not None:
+                    raise ProductProjectError(
+                        "initial ProductProject spec must not have a supersession parent"
+                    )
+            else:
+                parent_version = self._required_json_int(
+                    parent,
+                    minimum=1,
+                    label=f"ProductProject spec {version} supersedes_spec_version",
+                )
+                if parent_version != version - 1:
+                    raise ProductProjectError(
+                        f"ProductProject spec {version} has incoherent supersession parent"
+                    )
             try:
                 spec = ProductProjectSpec.from_dict(raw)
             except (KeyError, TypeError, ValueError) as exc:
@@ -398,7 +420,12 @@ class ProductProjectHistoricalIntegrityService:
         if len(rows) != 1:
             raise ProductProjectError("ProductProject requires exactly one creation audit event")
         payload = self._json_object(rows[0]["payload_json"], label="ProductProject creation audit")
-        if int(payload.get("spec_version", 0)) != 1:
+        spec_version = self._required_json_int(
+            payload.get("spec_version"),
+            minimum=1,
+            label="ProductProject creation audit spec_version",
+        )
+        if spec_version != 1:
             raise ProductProjectError("invalid ProductProject creation audit spec version")
         self._time(rows[0]["created_at"], label="ProductProject creation audit")
 
@@ -423,11 +450,19 @@ class ProductProjectHistoricalIntegrityService:
         for row in audit_rows:
             payload = self._json_object(row["payload_json"], label="spec revision audit")
             try:
-                version = int(payload["spec_version"])
-                parent = int(payload["supersedes_spec_version"])
                 reason = str(payload["change_reason"])
-            except (KeyError, TypeError, ValueError) as exc:
+            except KeyError as exc:
                 raise ProductProjectError("invalid ProductProject spec revision audit") from exc
+            version = self._required_json_int(
+                payload.get("spec_version"),
+                minimum=2,
+                label="ProductProject spec revision audit spec_version",
+            )
+            parent = self._required_json_int(
+                payload.get("supersedes_spec_version"),
+                minimum=1,
+                label="ProductProject spec revision audit supersedes_spec_version",
+            )
             if version in audited or parent != version - 1 or not reason.strip():
                 raise ProductProjectError("invalid ProductProject spec revision audit")
             audited.add(version)
@@ -444,11 +479,17 @@ class ProductProjectHistoricalIntegrityService:
         for row in audit_rows:
             payload = self._json_object(row["payload_json"], label="product decision audit")
             try:
-                key = (str(payload["decision_id"]), int(payload["decision_version"]))
+                decision_id = str(payload["decision_id"])
                 state = ProductDecisionState(payload["state"])
                 evidence = tuple(payload["evidence_package_ids"])
             except (KeyError, TypeError, ValueError) as exc:
                 raise ProductProjectError("invalid product decision audit") from exc
+            decision_version = self._required_json_int(
+                payload.get("decision_version"),
+                minimum=1,
+                label="product decision audit decision_version",
+            )
+            key = (decision_id, decision_version)
             durable_row = durable.get(key)
             if durable_row is None or key in audited:
                 raise ProductProjectError("product decision audit has no unique durable decision")
@@ -486,13 +527,17 @@ class ProductProjectHistoricalIntegrityService:
         for row in rows:
             payload = self._json_object(row["payload_json"], label="ProductProject lifecycle audit")
             try:
-                row_version = int(payload["row_version"])
                 old_state = ProductProjectState(payload["previous_state"])
                 new_state = ProductProjectState(payload["new_state"])
                 reason = str(payload["reason"])
                 actor = str(payload["changed_by_ref"])
             except (KeyError, TypeError, ValueError) as exc:
                 raise ProductProjectError("invalid ProductProject lifecycle audit") from exc
+            row_version = self._required_json_int(
+                payload.get("row_version"),
+                minimum=1,
+                label="ProductProject lifecycle audit row_version",
+            )
             if (
                 row_version <= previous_row_version
                 or row_version > current_row_version
