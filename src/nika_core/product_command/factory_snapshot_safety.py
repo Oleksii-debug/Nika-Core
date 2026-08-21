@@ -71,17 +71,23 @@ def validate_operations_projection(
             )
 
         blocked = set(record.blocked_credentials)
+        service_credentials = set(service.credential_refs)
+        expected_blocked = service_credentials & revoked
         if len(blocked) != len(record.blocked_credentials):
             raise ProductFactorySnapshotIntegrityError(
                 "operations snapshot contains duplicate blocked credentials"
             )
-        if not blocked <= set(service.credential_refs):
+        if not blocked <= service_credentials:
             raise ProductFactorySnapshotIntegrityError(
                 "operations snapshot blocks a credential not declared by the service"
             )
         if not blocked <= revoked:
             raise ProductFactorySnapshotIntegrityError(
                 "operations snapshot credential blocker lacks revocation state"
+            )
+        if blocked != expected_blocked:
+            raise ProductFactorySnapshotIntegrityError(
+                "operations snapshot omits revoked service credential blocker"
             )
         if bool(blocked) != (record.health is ServiceHealth.BLOCKED):
             raise ProductFactorySnapshotIntegrityError(
@@ -105,38 +111,22 @@ def validate_operations_projection(
 
         rollback = record.rollback
         if rollback is not None:
-            expected_health = (
-                ServiceHealth.ROLLED_BACK if rollback.succeeded else ServiceHealth.FAILED
-            )
             if (
                 rollback.service_id != service.service_id
                 or rollback.failed_release_sha != service.release_sha
-                or record.health is not expected_health
             ):
                 raise ProductFactorySnapshotIntegrityError(
                     "operations rollback evidence disagrees with service state"
                 )
-            continue
-
-        if blocked:
-            continue
-        if observation is None:
-            if record.health is not ServiceHealth.PENDING:
+            if observation is None:
                 raise ProductFactorySnapshotIntegrityError(
-                    "operations service health lacks observation evidence"
+                    "operations rollback evidence lacks prior service observation"
                 )
-            continue
 
-        expected_health = _health_from_observation(
-            service.min_healthy_replicas,
-            len(service.replicas),
-            observation.healthy_replica_ids,
-            observation.failed_replica_ids,
-            record.node_loss,
-        )
-        if record.health is not expected_health:
+        expected_health = _expected_health_states(record)
+        if record.health not in expected_health:
             raise ProductFactorySnapshotIntegrityError(
-                "operations service health disagrees with normalized observation"
+                "operations service health disagrees with credential/observation/rollback state"
             )
 
     request_ids = [record.request.request_id for record in snapshot.maintenance_records]
@@ -153,6 +143,31 @@ def validate_operations_projection(
             raise ProductFactorySnapshotIntegrityError(
                 "durable maintenance record lacks explicit approval identity"
             )
+
+
+def _expected_health_states(record) -> set[ServiceHealth]:
+    if record.blocked_credentials:
+        return {ServiceHealth.BLOCKED}
+    observation = record.observation
+    if observation is None:
+        return {ServiceHealth.PENDING}
+
+    service = record.service
+    observed_health = _health_from_observation(
+        service.min_healthy_replicas,
+        len(service.replicas),
+        observation.healthy_replica_ids,
+        observation.failed_replica_ids,
+        record.node_loss,
+    )
+    expected = {observed_health}
+    if record.rollback is not None:
+        expected.add(
+            ServiceHealth.ROLLED_BACK
+            if record.rollback.succeeded
+            else ServiceHealth.FAILED
+        )
+    return expected
 
 
 def _health_from_observation(
