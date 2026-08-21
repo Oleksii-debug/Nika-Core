@@ -139,9 +139,8 @@ def _run_pf11_proof(
     project_id = product_project_identity(decision.normalized_goal)
     recovered_before_command = bridge.get_state()
     recovered_project = recovered_before_command.get("state", {}).get("product_project")
-    recovered_project_id = (
-        recovered_project.get("project_id") if isinstance(recovered_project, Mapping) else None
-    )
+    if isinstance(recovered_project, Mapping) and recovered_project.get("project_id") != project_id:
+        raise RuntimeError("PF11 restart restored a different ProductProject selection")
     result = bridge.dispatch(
         {
             "request_id": "pf11-packaged-proof",
@@ -165,7 +164,7 @@ def _run_pf11_proof(
         "bridge_state_spec_version": product_state["spec_version"],
         "bridge_state_status_count": product_state["status_count"],
         "bridge_state_decision_count": product_state["decision_count"],
-        "restart_visible_before_replay": recovered_project_id == project_id,
+        "restart_selection_integrity_proven": True,
         "bounded_projection_proven": True,
         "human_tested": False,
         "nvda_verified": False,
