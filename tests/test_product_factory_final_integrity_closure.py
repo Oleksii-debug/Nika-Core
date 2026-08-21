@@ -8,8 +8,8 @@ from nika_core.product_factory_coordinator import (
     CoordinatorError,
     CoordinatorSnapshot,
     ProductFactoryCoordinator,
-    WorkRecord,
     WorkerResultEnvelope,
+    WorkRecord,
 )
 from nika_core.product_factory_orchestration import (
     IntegrationDecision,
