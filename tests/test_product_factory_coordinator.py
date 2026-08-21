@@ -75,7 +75,9 @@ def _success(request, *, base_sha=SHA_A) -> WorkerResultEnvelope:
         diff_digest=DIGEST,
         coding_result=CodingResult(
             job_id=request.work_id,
-            test_evidence=(TestEvidence(("pytest",), 0, "ok"),),
+            test_evidence=tuple(
+                TestEvidence(command, 0, "ok") for command in request.acceptance_commands
+            ),
         ),
     )
 
