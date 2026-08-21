@@ -180,10 +180,24 @@ class ExecutionNodeRegistry:
     def restore(self, snapshot: ExecutionRegistrySnapshot) -> None:
         node_ids = [node.identity.node_id for node in snapshot.nodes]
         lease_ids = [lease.lease_id for lease in snapshot.leases]
+        leased_nodes = [lease.node_id for lease in snapshot.leases]
         if len(node_ids) != len(set(node_ids)) or len(lease_ids) != len(set(lease_ids)):
             raise DeploymentFabricError("snapshot contains duplicate identities")
-        if any(lease.node_id not in set(node_ids) for lease in snapshot.leases):
+        if len(leased_nodes) != len(set(leased_nodes)):
+            raise DeploymentFabricError("snapshot contains multiple active leases for one node")
+        known_nodes = set(node_ids)
+        if any(lease.node_id not in known_nodes for lease in snapshot.leases):
             raise DeploymentFabricError("snapshot lease references unknown node")
+        for lease in snapshot.leases:
+            if not all(
+                value.strip()
+                for value in (lease.lease_id, lease.project_id, lease.work_id, lease.node_id)
+            ):
+                raise DeploymentFabricError("snapshot lease identity must not be empty")
+            issued_at = _aware(lease.issued_at)
+            expires_at = _aware(lease.expires_at)
+            if expires_at <= issued_at:
+                raise DeploymentFabricError("snapshot lease expiry must be after issue time")
         if snapshot.next_lease < 1:
             raise DeploymentFabricError("snapshot next lease counter is invalid")
         self._nodes = {node.identity.node_id: node for node in snapshot.nodes}
@@ -212,6 +226,13 @@ class EnvironmentIdentity:
     project_id: str
     tier: EnvironmentTier
     provider_ref: str
+
+    def __post_init__(self) -> None:
+        if not all(
+            value.strip()
+            for value in (self.environment_id, self.project_id, self.provider_ref)
+        ):
+            raise DeploymentFabricError("environment identity fields must not be empty")
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,7 +338,7 @@ class DeploymentRecord:
 class DeploymentFabricSnapshot:
     records: tuple[DeploymentRecord, ...]
     healthy_staging: tuple[tuple[str, str], ...]
-    current_releases: tuple[tuple[str, str], ...]
+    current_releases: tuple[tuple[str, ...], ...]
 
 
 @dataclass(slots=True)
@@ -325,7 +346,9 @@ class DeploymentFabric:
     provider: DeploymentProviderPort
     _records: dict[str, DeploymentRecord] = field(default_factory=dict, init=False, repr=False)
     _healthy_staging: dict[str, str] = field(default_factory=dict, init=False, repr=False)
-    _current_releases: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _current_releases: dict[tuple[str, str], str] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     def deploy(self, intent: DeploymentIntent) -> DeploymentRecord:
         existing = self._records.get(intent.intent_id)
@@ -334,7 +357,8 @@ class DeploymentFabric:
                 raise DeploymentFabricError("deployment intent id conflicts with prior payload")
             return existing
         self._enforce_staging_first(intent)
-        previous = self._current_releases.get(intent.environment.environment_id)
+        environment_key = _environment_key(intent)
+        previous = self._current_releases.get(environment_key)
         result = self.provider.deploy(intent)
         if not result.evidence_refs:
             raise DeploymentFabricError("provider deploy result requires evidence refs")
@@ -396,19 +420,59 @@ class DeploymentFabric:
         return self._finish_health(record, health)
 
     def snapshot(self) -> DeploymentFabricSnapshot:
+        current_releases = tuple(
+            (project_id, environment_id, source_sha)
+            for (project_id, environment_id), source_sha in sorted(
+                self._current_releases.items()
+            )
+        )
         return DeploymentFabricSnapshot(
             tuple(self._records[key] for key in sorted(self._records)),
             tuple(sorted(self._healthy_staging.items())),
-            tuple(sorted(self._current_releases.items())),
+            current_releases,
         )
 
     def restore(self, snapshot: DeploymentFabricSnapshot) -> None:
         ids = [record.intent.intent_id for record in snapshot.records]
         if len(ids) != len(set(ids)):
             raise DeploymentFabricError("deployment snapshot contains duplicate intents")
+        for record in snapshot.records:
+            _validate_record(record)
+
+        healthy_staging: dict[str, str] = {}
+        for project_id, source_sha in snapshot.healthy_staging:
+            if not project_id.strip():
+                raise DeploymentFabricError("staging snapshot project identity must not be empty")
+            _validate_sha(source_sha)
+            if project_id in healthy_staging:
+                raise DeploymentFabricError("deployment snapshot contains duplicate staging state")
+            if not _has_healthy_staging_record(snapshot.records, project_id, source_sha):
+                raise DeploymentFabricError(
+                    "healthy staging snapshot is not backed by a healthy staging record"
+                )
+            healthy_staging[project_id] = source_sha
+
+        current_releases: dict[tuple[str, str], str] = {}
+        for entry in snapshot.current_releases:
+            project_id, environment_id, source_sha = _normalize_current_release_entry(
+                entry, snapshot.records
+            )
+            key = (project_id, environment_id)
+            if key in current_releases:
+                raise DeploymentFabricError(
+                    "deployment snapshot contains duplicate current release state"
+                )
+            if not _has_healthy_environment_record(
+                snapshot.records, project_id, environment_id, source_sha
+            ):
+                raise DeploymentFabricError(
+                    "current release snapshot is not backed by a healthy deployment record"
+                )
+            current_releases[key] = source_sha
+
         self._records = {record.intent.intent_id: record for record in snapshot.records}
-        self._healthy_staging = dict(snapshot.healthy_staging)
-        self._current_releases = dict(snapshot.current_releases)
+        self._healthy_staging = healthy_staging
+        self._current_releases = current_releases
 
     def _finish_health(
         self, record: DeploymentRecord, health: HealthEvidence
@@ -426,8 +490,7 @@ class DeploymentFabric:
                 health=health,
                 previous_release_sha=record.previous_release_sha,
             )
-            environment_id = intent.environment.environment_id
-            self._current_releases[environment_id] = intent.release.source_sha
+            self._current_releases[_environment_key(intent)] = intent.release.source_sha
             if intent.environment.tier is EnvironmentTier.STAGING:
                 self._healthy_staging[intent.project_id] = intent.release.source_sha
             return self._save(updated)
@@ -436,6 +499,10 @@ class DeploymentFabric:
             raise DeploymentFabricError("rollback evidence environment mismatch")
         if rollback.failed_release_sha != intent.release.source_sha:
             raise DeploymentFabricError("rollback evidence failed release mismatch")
+        if rollback.succeeded and rollback.restored_release_sha != record.previous_release_sha:
+            raise DeploymentFabricError(
+                "rollback success did not restore the recorded previous release"
+            )
         return self._save(
             DeploymentRecord(
                 intent,
@@ -485,6 +552,108 @@ def local_linux_node() -> ExecutionNode:
         ),
         ResourceEnvelope(2, 2048, 4096),
     )
+
+
+def _environment_key(intent: DeploymentIntent) -> tuple[str, str]:
+    return intent.project_id, intent.environment.environment_id
+
+
+def _normalize_current_release_entry(
+    entry: tuple[str, ...], records: tuple[DeploymentRecord, ...]
+) -> tuple[str, str, str]:
+    if len(entry) == 3:
+        project_id, environment_id, source_sha = entry
+        if not project_id.strip() or not environment_id.strip():
+            raise DeploymentFabricError("current release snapshot identity must not be empty")
+        _validate_sha(source_sha)
+        return project_id, environment_id, source_sha
+    if len(entry) == 2:
+        environment_id, source_sha = entry
+        if not environment_id.strip():
+            raise DeploymentFabricError("current release snapshot identity must not be empty")
+        _validate_sha(source_sha)
+        matches = {
+            record.intent.project_id
+            for record in records
+            if record.state is DeploymentState.HEALTHY
+            and record.intent.environment.environment_id == environment_id
+            and record.intent.release.source_sha == source_sha
+        }
+        if len(matches) != 1:
+            raise DeploymentFabricError(
+                "legacy current release snapshot is ambiguous or not backed by one project"
+            )
+        return next(iter(matches)), environment_id, source_sha
+    raise DeploymentFabricError("current release snapshot entry has invalid shape")
+
+
+def _has_healthy_staging_record(
+    records: tuple[DeploymentRecord, ...], project_id: str, source_sha: str
+) -> bool:
+    return any(
+        record.state is DeploymentState.HEALTHY
+        and record.intent.project_id == project_id
+        and record.intent.environment.tier is EnvironmentTier.STAGING
+        and record.intent.release.source_sha == source_sha
+        for record in records
+    )
+
+
+def _has_healthy_environment_record(
+    records: tuple[DeploymentRecord, ...],
+    project_id: str,
+    environment_id: str,
+    source_sha: str,
+) -> bool:
+    return any(
+        record.state is DeploymentState.HEALTHY
+        and record.intent.project_id == project_id
+        and record.intent.environment.environment_id == environment_id
+        and record.intent.release.source_sha == source_sha
+        for record in records
+    )
+
+
+def _validate_record(record: DeploymentRecord) -> None:
+    intent = record.intent
+    if record.previous_release_sha is not None:
+        _validate_sha(record.previous_release_sha)
+    if not record.provider_evidence_refs:
+        raise DeploymentFabricError("deployment snapshot record requires provider evidence refs")
+    if record.health is not None:
+        if record.health.environment_id != intent.environment.environment_id:
+            raise DeploymentFabricError("snapshot health evidence environment mismatch")
+        if record.health.release_sha != intent.release.source_sha:
+            raise DeploymentFabricError("snapshot health evidence release mismatch")
+    if record.rollback is not None:
+        if record.rollback.environment_id != intent.environment.environment_id:
+            raise DeploymentFabricError("snapshot rollback evidence environment mismatch")
+        if record.rollback.failed_release_sha != intent.release.source_sha:
+            raise DeploymentFabricError("snapshot rollback evidence failed release mismatch")
+        if (
+            record.rollback.succeeded
+            and record.rollback.restored_release_sha != record.previous_release_sha
+        ):
+            raise DeploymentFabricError(
+                "snapshot rollback success did not restore recorded previous release"
+            )
+
+    if record.state is DeploymentState.HEALTHY:
+        if record.health is None or not record.health.healthy or record.rollback is not None:
+            raise DeploymentFabricError("healthy snapshot record is semantically inconsistent")
+    elif record.state is DeploymentState.ROLLED_BACK:
+        if (
+            record.health is None
+            or record.health.healthy
+            or record.rollback is None
+            or not record.rollback.succeeded
+        ):
+            raise DeploymentFabricError("rolled-back snapshot record is semantically inconsistent")
+    elif record.state is DeploymentState.HEALTH_CHECK:
+        raise DeploymentFabricError("health-check state must not be serialized as durable")
+    elif record.state is DeploymentState.UNCERTAIN:
+        if record.health is not None or record.rollback is not None:
+            raise DeploymentFabricError("uncertain snapshot record has final evidence")
 
 
 def _aware(value: datetime) -> datetime:
