@@ -491,12 +491,7 @@ def _commands_equivalent(
 
     observed_target = _normalize_pytest_target(observed_pytest[0])
     declared_target = _normalize_pytest_target(declared_pytest[0])
-    if observed_target == declared_target:
-        return True
-
-    # Component identity is not proof of the declared filesystem target.
-    # A target may differ only by safe spelling, never by component aliasing.
-    return False
+    return observed_target == declared_target
 
 
 def _normalize_pytest_target(target: str) -> str:
