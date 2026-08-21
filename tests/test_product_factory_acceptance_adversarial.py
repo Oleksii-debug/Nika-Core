@@ -356,7 +356,7 @@ def test_pf3_integration_decision_must_name_the_actual_conflicting_active_lease(
     malformed = IntegrationDecision(
         "decision-malformed",
         IntegrationDecisionKind.RECONCILE,
-        ("lease-candidate", "lease-candidate"),
+        ("lease-candidate", "lease-unrelated"),
         "claim reconciliation without naming the conflicting owner",
         ("evidence:compare",),
     )
