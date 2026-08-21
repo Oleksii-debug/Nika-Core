@@ -10,7 +10,6 @@ from nika_core.product_project import ProductProjectError
 from nika_core.product_project_history_generations import ProductProjectHistoryGeneration
 from nika_core.product_project_history_sharded_commitments import (
     CommitmentShardSummary,
-    ProductProjectHistoryCommitmentIndex,
     ProductProjectHistoryShardedCommitmentService,
 )
 
