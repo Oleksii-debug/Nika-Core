@@ -12,19 +12,41 @@ $requiredNames = @('Nika Core', 'Що має зробити Nika?', 'Створ�
 $process = Start-Process -FilePath $ExePath -PassThru
 try {
     $root = [System.Windows.Automation.AutomationElement]::RootElement
+    $nameCondition = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::NameProperty,
+        $WindowTitle
+    )
+    $processCondition = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::ProcessIdProperty,
+        $process.Id
+    )
+    $windowCondition = [System.Windows.Automation.AndCondition]::new(
+        [System.Windows.Automation.Condition[]]@($nameCondition, $processCondition)
+    )
+
+    function Find-ExactWindow {
+        $matches = $root.FindAll(
+            [System.Windows.Automation.TreeScope]::Children,
+            $windowCondition
+        )
+        if ($matches.Count -gt 1) {
+            throw "Multiple Nika Core top-level UI Automation windows matched title '$WindowTitle' and process $($process.Id)."
+        }
+        if ($matches.Count -eq 1) { return $matches.Item(0) }
+        return $null
+    }
+
     $window = $null
     for ($attempt = 0; $attempt -lt 40 -and $null -eq $window; $attempt++) {
         Start-Sleep -Milliseconds 500
         if ($process.HasExited) {
             throw "Nika Core exited before the top-level UI Automation window appeared. Exit code: $($process.ExitCode)"
         }
-        $condition = New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::NameProperty,
-            $WindowTitle
-        )
-        $window = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $condition)
+        $window = Find-ExactWindow
     }
-    if ($null -eq $window) { throw "Nika Core top-level window '$WindowTitle' not found in UI Automation tree." }
+    if ($null -eq $window) {
+        throw "Nika Core top-level window '$WindowTitle' for process $($process.Id) not found in UI Automation tree."
+    }
 
     $names = @()
     $missing = $requiredNames
@@ -33,15 +55,22 @@ try {
         if ($process.HasExited) {
             throw "Nika Core exited while waiting for WebView2 accessibility descendants. Exit code: $($process.ExitCode)"
         }
-        $descendants = $window.FindAll(
-            [System.Windows.Automation.TreeScope]::Descendants,
-            [System.Windows.Automation.Condition]::TrueCondition
-        )
+        $window = Find-ExactWindow
+        if ($null -eq $window) { continue }
+        try {
+            $descendants = $window.FindAll(
+                [System.Windows.Automation.TreeScope]::Descendants,
+                [System.Windows.Automation.Condition]::TrueCondition
+            )
+        } catch [System.Windows.Automation.ElementNotAvailableException] {
+            $window = $null
+            continue
+        }
         $names = @()
         foreach ($element in $descendants) {
             try {
                 if ($element.Current.Name) { $names += $element.Current.Name }
-            } catch { }
+            } catch [System.Windows.Automation.ElementNotAvailableException] { }
         }
         $missing = @($requiredNames | Where-Object { $names -notcontains $_ })
     }
@@ -61,7 +90,16 @@ try {
             if ($process.HasExited) {
                 throw "Nika Core exited while waiting for '$Expected'. Exit code: $($process.ExitCode)"
             }
-            $element = $window.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
+            $currentWindow = Find-ExactWindow
+            if ($null -eq $currentWindow) { continue }
+            try {
+                $element = $currentWindow.FindFirst(
+                    [System.Windows.Automation.TreeScope]::Descendants,
+                    $condition
+                )
+            } catch [System.Windows.Automation.ElementNotAvailableException] {
+                continue
+            }
             if ($null -ne $element) { return $element }
         }
         throw "Expected UI Automation descendant '$Expected' did not appear."
