@@ -9,8 +9,13 @@ from nika_core.product_factory_deployment import (
     DeploymentFabricSnapshot,
     DeploymentRecord,
     DeploymentState,
+    EnvironmentTier,
     ExecutionRegistrySnapshot,
 )
+
+
+class DeploymentPresentationIntegrityError(ValueError):
+    """Raised when PF3 snapshot state is not safely presentable by PF5."""
 
 
 def execution_status_entries(
@@ -63,10 +68,84 @@ def deployment_status_entries(
     snapshot: DeploymentFabricSnapshot,
 ) -> tuple[ProductStatusEntry, ...]:
     """Project integrated PF3 deployment/health/rollback state without provider secrets."""
+    _validate_snapshot_backing(snapshot)
     entries: list[ProductStatusEntry] = []
     for record in snapshot.records:
         entries.extend(_record_entries(record))
     return tuple(entries)
+
+
+def _validate_snapshot_backing(snapshot: DeploymentFabricSnapshot) -> None:
+    """Mirror PF3 restore trust checks for release markers before presentation."""
+    staging_projects: set[str] = set()
+    for project_id, source_sha in snapshot.healthy_staging:
+        if project_id in staging_projects:
+            raise DeploymentPresentationIntegrityError(
+                "deployment snapshot contains duplicate healthy-staging state"
+            )
+        staging_projects.add(project_id)
+        if not any(
+            _is_healthy_record(
+                record,
+                project_id=project_id,
+                environment_id=None,
+                source_sha=source_sha,
+                require_staging=True,
+            )
+            for record in snapshot.records
+        ):
+            raise DeploymentPresentationIntegrityError(
+                "healthy staging marker is not backed by a healthy staging deployment"
+            )
+
+    current_keys: set[tuple[str, str]] = set()
+    for entry in snapshot.current_releases:
+        if len(entry) != 3:
+            raise DeploymentPresentationIntegrityError(
+                "presentation requires normalized project/environment current-release identity"
+            )
+        project_id, environment_id, source_sha = entry
+        key = (project_id, environment_id)
+        if key in current_keys:
+            raise DeploymentPresentationIntegrityError(
+                "deployment snapshot contains duplicate current-release state"
+            )
+        current_keys.add(key)
+        if not any(
+            _is_healthy_record(
+                record,
+                project_id=project_id,
+                environment_id=environment_id,
+                source_sha=source_sha,
+                require_staging=False,
+            )
+            for record in snapshot.records
+        ):
+            raise DeploymentPresentationIntegrityError(
+                "current release marker is not backed by a healthy deployment"
+            )
+
+
+def _is_healthy_record(
+    record: DeploymentRecord,
+    *,
+    project_id: str,
+    environment_id: str | None,
+    source_sha: str,
+    require_staging: bool,
+) -> bool:
+    intent = record.intent
+    if (
+        record.state is not DeploymentState.HEALTHY
+        or record.health is None
+        or not record.health.healthy
+        or intent.project_id != project_id
+        or intent.release.source_sha != source_sha
+    ):
+        return False
+    if environment_id is not None and intent.environment.environment_id != environment_id:
+        return False
+    return not require_staging or intent.environment.tier is EnvironmentTier.STAGING
 
 
 def _record_entries(record: DeploymentRecord) -> tuple[ProductStatusEntry, ...]:
