@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from .product_factory_coordinator import CoordinatorSnapshot, WorkRecord, WorkState
+from .product_factory_coordinator import CoordinatorSnapshot, WorkState
 from .product_factory_deployment import (
     DeploymentFabricSnapshot,
     DeploymentRecord,
