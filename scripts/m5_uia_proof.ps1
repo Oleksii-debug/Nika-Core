@@ -7,24 +7,148 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+
+public static class NikaUiaNative
+{
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    public static IntPtr[] GetDescendantWindows(IntPtr parent)
+    {
+        var handles = new List<IntPtr>();
+        EnumChildWindows(parent, delegate (IntPtr hWnd, IntPtr lParam) {
+            handles.Add(hWnd);
+            return true;
+        }, IntPtr.Zero);
+        return handles.ToArray();
+    }
+}
+'@
 
 $requiredNames = @('Nika Core', 'Що має зробити Nika?', 'Створити завдання', 'Клавіатура')
-$process = Start-Process -FilePath $ExePath -PassThru
+
+# WebView2 enables renderer accessibility on demand when assistive technology such
+# as a screen reader is detected. GitHub-hosted Windows runners do not run a
+# screen reader, so make the automated UIA proof deterministic by forcing the
+# renderer accessibility mode for this child process only. This does not set
+# HUMAN_TESTED/NVDA_VERIFIED and does not alter the shipped application config.
+$previousWebView2BrowserArgs = $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
+$forceRendererAccessibilityArg = '--force-renderer-accessibility'
+if ($previousWebView2BrowserArgs -match '(?i)(?:^|\s)--disable-renderer-accessibility(?:\s|$)') {
+    throw 'Automated UIA proof cannot run while WebView2 renderer accessibility is explicitly disabled.'
+}
+if ([string]::IsNullOrWhiteSpace($previousWebView2BrowserArgs)) {
+    $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = $forceRendererAccessibilityArg
+} elseif ($previousWebView2BrowserArgs -notmatch '(?i)(?:^|\s)--force-renderer-accessibility(?:\s|$)') {
+    $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "$previousWebView2BrowserArgs $forceRendererAccessibilityArg"
+}
+
+$process = $null
 try {
+    $process = Start-Process -FilePath $ExePath -PassThru
     $root = [System.Windows.Automation.AutomationElement]::RootElement
+    $nameCondition = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::NameProperty,
+        $WindowTitle
+    )
+    $processCondition = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::ProcessIdProperty,
+        $process.Id
+    )
+    $windowCondition = [System.Windows.Automation.AndCondition]::new(
+        [System.Windows.Automation.Condition[]]@($nameCondition, $processCondition)
+    )
+
+    function Find-ExactWindow {
+        $matches = $root.FindAll(
+            [System.Windows.Automation.TreeScope]::Children,
+            $windowCondition
+        )
+        if ($matches.Count -gt 1) {
+            throw "Multiple Nika Core top-level UI Automation windows matched title '$WindowTitle' and process $($process.Id)."
+        }
+        if ($matches.Count -eq 1) { return $matches.Item(0) }
+        return $null
+    }
+
+    # Chromium/WebView2 accessibility providers can appear below native child HWNDs
+    # even when the exact host window's initial UIA descendant query is empty. Walk
+    # only HWNDs that are descendants of the already PID+title-bound host window,
+    # convert them back into UIA elements, and query semantics there. This activates
+    # providers without coordinates, another process, relaunches, or a longer wait.
+    function Get-BoundSearchRoots([System.Windows.Automation.AutomationElement]$ExactWindow) {
+        $searchRoots = New-Object 'System.Collections.Generic.List[System.Windows.Automation.AutomationElement]'
+        $searchRoots.Add($ExactWindow)
+        $nativeHandleValue = $ExactWindow.Current.NativeWindowHandle
+        if ($nativeHandleValue -eq 0) { return $searchRoots }
+
+        $nativeHandle = [System.IntPtr]::new($nativeHandleValue)
+        foreach ($childHandle in [NikaUiaNative]::GetDescendantWindows($nativeHandle)) {
+            try {
+                $childElement = [System.Windows.Automation.AutomationElement]::FromHandle($childHandle)
+                if ($null -ne $childElement) { $searchRoots.Add($childElement) }
+            } catch [System.Windows.Automation.ElementNotAvailableException] { }
+        }
+        return $searchRoots
+    }
+
+    function Get-BoundDescendantNames([System.Windows.Automation.AutomationElement]$ExactWindow) {
+        $collected = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($searchRoot in (Get-BoundSearchRoots $ExactWindow)) {
+            try {
+                if ($searchRoot.Current.Name) { $collected.Add($searchRoot.Current.Name) }
+                $descendants = $searchRoot.FindAll(
+                    [System.Windows.Automation.TreeScope]::Descendants,
+                    [System.Windows.Automation.Condition]::TrueCondition
+                )
+                foreach ($element in $descendants) {
+                    try {
+                        if ($element.Current.Name) { $collected.Add($element.Current.Name) }
+                    } catch [System.Windows.Automation.ElementNotAvailableException] { }
+                }
+            } catch [System.Windows.Automation.ElementNotAvailableException] { }
+        }
+        return @($collected)
+    }
+
+    function Find-BoundDescendantName(
+        [System.Windows.Automation.AutomationElement]$ExactWindow,
+        [string]$Expected
+    ) {
+        $condition = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::NameProperty,
+            $Expected
+        )
+        foreach ($searchRoot in (Get-BoundSearchRoots $ExactWindow)) {
+            try {
+                if ($searchRoot.Current.Name -eq $Expected) { return $searchRoot }
+                $element = $searchRoot.FindFirst(
+                    [System.Windows.Automation.TreeScope]::Descendants,
+                    $condition
+                )
+                if ($null -ne $element) { return $element }
+            } catch [System.Windows.Automation.ElementNotAvailableException] { }
+        }
+        return $null
+    }
+
     $window = $null
     for ($attempt = 0; $attempt -lt 40 -and $null -eq $window; $attempt++) {
         Start-Sleep -Milliseconds 500
         if ($process.HasExited) {
             throw "Nika Core exited before the top-level UI Automation window appeared. Exit code: $($process.ExitCode)"
         }
-        $condition = New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::NameProperty,
-            $WindowTitle
-        )
-        $window = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $condition)
+        $window = Find-ExactWindow
     }
-    if ($null -eq $window) { throw "Nika Core top-level window '$WindowTitle' not found in UI Automation tree." }
+    if ($null -eq $window) {
+        throw "Nika Core top-level window '$WindowTitle' for process $($process.Id) not found in UI Automation tree."
+    }
 
     $names = @()
     $missing = $requiredNames
@@ -33,16 +157,9 @@ try {
         if ($process.HasExited) {
             throw "Nika Core exited while waiting for WebView2 accessibility descendants. Exit code: $($process.ExitCode)"
         }
-        $descendants = $window.FindAll(
-            [System.Windows.Automation.TreeScope]::Descendants,
-            [System.Windows.Automation.Condition]::TrueCondition
-        )
-        $names = @()
-        foreach ($element in $descendants) {
-            try {
-                if ($element.Current.Name) { $names += $element.Current.Name }
-            } catch { }
-        }
+        $window = Find-ExactWindow
+        if ($null -eq $window) { continue }
+        $names = Get-BoundDescendantNames $window
         $missing = @($requiredNames | Where-Object { $names -notcontains $_ })
     }
 
@@ -52,16 +169,14 @@ try {
     }
 
     function Wait-DescendantName([string]$Expected, [int]$Attempts = 40) {
-        $condition = New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::NameProperty,
-            $Expected
-        )
         for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
             Start-Sleep -Milliseconds 250
             if ($process.HasExited) {
                 throw "Nika Core exited while waiting for '$Expected'. Exit code: $($process.ExitCode)"
             }
-            $element = $window.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
+            $currentWindow = Find-ExactWindow
+            if ($null -eq $currentWindow) { continue }
+            $element = Find-BoundDescendantName $currentWindow $Expected
             if ($null -ne $element) { return $element }
         }
         throw "Expected UI Automation descendant '$Expected' did not appear."
@@ -96,5 +211,12 @@ try {
     Write-Host (($names | Select-Object -Unique | Select-Object -First 40) -join ' | ')
 }
 finally {
-    if (!$process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+    if ($null -ne $process -and !$process.HasExited) {
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    }
+    if ($null -eq $previousWebView2BrowserArgs) {
+        Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
+    } else {
+        $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = $previousWebView2BrowserArgs
+    }
 }

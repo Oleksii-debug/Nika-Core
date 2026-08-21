@@ -1,0 +1,74 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "scripts" / "m5_uia_proof.ps1"
+
+
+def _source() -> str:
+    return SCRIPT.read_text(encoding="utf-8")
+
+
+def test_m5_uia_proof_binds_top_level_window_to_launched_process() -> None:
+    source = _source()
+
+    assert "ProcessIdProperty" in source
+    assert "[System.Windows.Automation.AndCondition]::new" in source
+    assert "Find-ExactWindow" in source
+    assert "Multiple Nika Core top-level UI Automation windows matched" in source
+    assert "$root.FindFirst([System.Windows.Automation.TreeScope]::Children" not in source
+
+
+def test_m5_uia_proof_forces_renderer_accessibility_only_for_child_process() -> None:
+    source = _source()
+
+    env_name = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"
+    force_arg = "--force-renderer-accessibility"
+    disable_arg = "--disable-renderer-accessibility"
+
+    assert env_name in source
+    assert force_arg in source
+    assert disable_arg in source
+    assert "previousWebView2BrowserArgs" in source
+    assert f"Remove-Item Env:{env_name}" in source
+    assert source.index(force_arg) < source.index("Start-Process -FilePath $ExePath -PassThru")
+    assert "cannot run while WebView2 renderer accessibility is explicitly disabled" in source
+
+
+def test_m5_uia_proof_activates_uia_providers_only_below_exact_bound_window() -> None:
+    source = _source()
+
+    assert "GetDescendantWindows" in source
+    assert "EnumChildWindows" in source
+    assert "NativeWindowHandle" in source
+    assert "AutomationElement]::FromHandle" in source
+    assert "Get-BoundSearchRoots" in source
+    assert "Get-BoundDescendantNames" in source
+    assert "Find-BoundDescendantName" in source
+    assert source.index("Find-ExactWindow") < source.index("Get-BoundSearchRoots")
+    assert "another process, relaunches, or a longer wait" in source
+
+
+def test_m5_uia_proof_re_resolves_window_without_weakening_semantic_gate() -> None:
+    source = _source()
+
+    assert source.count("Find-ExactWindow") >= 4
+    assert "ElementNotAvailableException" in source
+    assert "Start-Process -FilePath $ExePath -PassThru" in source
+    assert "Stop-Process -Id $process.Id -Force" in source
+    for required_name in (
+        "Nika Core",
+        "Що має зробити Nika?",
+        "Створити завдання",
+        "Клавіатура",
+        "Nika Core готова до роботи.",
+        "Завдання",
+    ):
+        assert required_name in source
+
+    assert "SendKeys]::SendWait('%1')" in source
+    assert "SendKeys]::SendWait('^+p')" in source
+    assert "$attempt -lt 40" in source
+    assert "Start-Sleep -Milliseconds 500" in source
+    assert "Start-Sleep -Milliseconds 250" in source
