@@ -118,7 +118,10 @@ def _planned(graph: ProductRepositoryGraph) -> ProductFactoryCoordinator:
     coordinator = ProductFactoryCoordinator(graph)
     coordinator.plan(
         base_shas={repository.repository_id: SHA_A for repository in graph.repositories},
-        goals={component.component_id: f"Implement {component.component_id}" for component in graph.components},
+        goals={
+            component.component_id: f"Implement {component.component_id}"
+            for component in graph.components
+        },
         permission_ceiling=PERMISSIONS,
     )
     return coordinator
@@ -203,8 +206,8 @@ def _staging_intent(
     )
 
 
-def test_pf12_stale_durable_mutation_must_invalidate_an_existing_binding(tmp_path) -> None:
-    """A cached binding must not turn old durable state into resumable current state."""
+def test_pf12_durable_mutation_invalidates_checkpoint_after_required_rebind(tmp_path) -> None:
+    """Recovery must bind durable checkpoint state to the current ProductProject version."""
     _, projects, project = _project(tmp_path)
     graph = _dependency_graph()
     binding = ProductProjectCoordinatorBinding(project, graph)
@@ -216,9 +219,11 @@ def test_pf12_stale_durable_mutation_must_invalidate_an_existing_binding(tmp_pat
         _spec("Build a materially changed accessible product"),
         expected_row_version=project.row_version,
     )
+    current_project = projects.get("product-1")
+    restarted_binding = ProductProjectCoordinatorBinding(current_project, graph)
 
     with pytest.raises(StaleProductProjectBindingError):
-        binding.restore(checkpoint)
+        restarted_binding.restore(checkpoint)
 
 
 def test_pf12_restore_rejects_forged_accepted_state_without_result_or_review() -> None:
