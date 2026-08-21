@@ -107,6 +107,7 @@ class ProductProjectHistoryCommitmentRangeService:
 
     def upgrade_v1(self, descriptor_bytes: bytes) -> ProductProjectHistoryRangeCommitmentIndex:
         source = self.shards.verify_index(descriptor_bytes)
+        self._validate_source_v1_numeric_types(source)
         sections = tuple(self._section_root(section, source.shards) for section in _SECTIONS)
         payload = {
             "schema": _SCHEMA,
@@ -173,12 +174,14 @@ class ProductProjectHistoryCommitmentRangeService:
         stop_shard_index: int,
     ) -> ProductProjectHistoryShardRangeProof:
         source = self.shards.verify_index(source_v1_descriptor_bytes)
+        self._validate_source_v1_numeric_types(source)
         compact = self.upgrade_v1(source_v1_descriptor_bytes)
         items = tuple(item for item in source.shards if item.section == section)
         if section not in _SECTIONS:
             raise ProductProjectError("range proof section is invalid")
         if (
-            start_shard_index < 0
+            not self._is_int(start_shard_index, minimum=0)
+            or not self._is_int(stop_shard_index, minimum=0)
             or stop_shard_index <= start_shard_index
             or stop_shard_index > len(items)
         ):
@@ -267,6 +270,7 @@ class ProductProjectHistoryCommitmentRangeService:
 
         if not descendants:
             raise ProductProjectError("range proof has no descendant generations")
+        self._validate_descendant_numeric_types(descendants)
         generation_summaries = self.generations.verify_chain(descendants, require_genesis=False)
         first = generation_summaries[0]
         if first.project_id != compact.project_id:
@@ -329,6 +333,36 @@ class ProductProjectHistoryCommitmentRangeService:
         )
 
     @classmethod
+    def _validate_source_v1_numeric_types(cls, source: Any) -> None:
+        for key, minimum in (
+            ("generation", 1),
+            ("spec_version", 1),
+            ("row_version", 0),
+            ("target_records_per_shard", 1),
+            ("total_immutable_records", 0),
+        ):
+            if not cls._is_int(getattr(source, key, None), minimum=minimum):
+                raise ProductProjectError(f"source v1 commitment {key} is invalid")
+        for item in source.shards:
+            if not cls._is_int(item.shard_index, minimum=0):
+                raise ProductProjectError("source v1 commitment shard index is invalid")
+            if not cls._is_int(item.record_count, minimum=1):
+                raise ProductProjectError("source v1 commitment shard count is invalid")
+
+    @classmethod
+    def _validate_descendant_numeric_types(
+        cls,
+        descendants: Sequence[ProductProjectHistoryGeneration],
+    ) -> None:
+        for item in descendants:
+            if not cls._is_int(item.generation, minimum=1):
+                raise ProductProjectError("range proof descendant generation is invalid")
+            if not cls._is_int(item.spec_version, minimum=1):
+                raise ProductProjectError("range proof descendant spec version is invalid")
+            if not cls._is_int(item.row_version, minimum=0):
+                raise ProductProjectError("range proof descendant row version is invalid")
+
+    @classmethod
     def _section_root(
         cls,
         section: str,
@@ -377,9 +411,9 @@ class ProductProjectHistoryCommitmentRangeService:
         record_count = payload.get("record_count")
         if section not in _SECTIONS:
             raise ProductProjectError("range proof shard summary section is invalid")
-        if not isinstance(shard_index, int) or shard_index < 0:
+        if not cls._is_int(shard_index, minimum=0):
             raise ProductProjectError("range proof shard summary index is invalid")
-        if not isinstance(record_count, int) or record_count < 1:
+        if not cls._is_int(record_count, minimum=1):
             raise ProductProjectError("range proof shard summary count is invalid")
         for key in (
             "first_identity_digest_sha256",
@@ -481,9 +515,9 @@ class ProductProjectHistoryCommitmentRangeService:
             raise ProductProjectError("range commitment section is invalid")
         shard_count = payload.get("shard_count")
         record_count = payload.get("record_count")
-        if not isinstance(shard_count, int) or shard_count < 0:
+        if not cls._is_int(shard_count, minimum=0):
             raise ProductProjectError("range commitment shard count is invalid")
-        if not isinstance(record_count, int) or record_count < 0:
+        if not cls._is_int(record_count, minimum=0):
             raise ProductProjectError("range commitment record count is invalid")
         if not cls._is_digest(payload.get("merkle_root_sha256")):
             raise ProductProjectError("range commitment Merkle root is invalid")
@@ -511,13 +545,11 @@ class ProductProjectHistoryCommitmentRangeService:
         if not isinstance(payload.get("project_id"), str) or not payload["project_id"].strip():
             raise ProductProjectError("range commitment project identity is invalid")
         for key in ("generation", "spec_version"):
-            if not isinstance(payload.get(key), int) or payload[key] < 1:
+            if not cls._is_int(payload.get(key), minimum=1):
                 raise ProductProjectError(f"range commitment {key} is invalid")
-        if not isinstance(payload.get("row_version"), int) or payload["row_version"] < 0:
+        if not cls._is_int(payload.get("row_version"), minimum=0):
             raise ProductProjectError("range commitment row_version is invalid")
-        if not isinstance(payload.get("total_immutable_records"), int) or payload[
-            "total_immutable_records"
-        ] < 0:
+        if not cls._is_int(payload.get("total_immutable_records"), minimum=0):
             raise ProductProjectError("range commitment total is invalid")
         for key in (
             "archive_digest_sha256",
@@ -535,12 +567,12 @@ class ProductProjectHistoryCommitmentRangeService:
     def _validate_proof_payload(cls, payload: dict[str, Any]) -> None:
         if not isinstance(payload.get("project_id"), str) or not payload["project_id"].strip():
             raise ProductProjectError("range proof project identity is invalid")
-        if not isinstance(payload.get("generation"), int) or payload["generation"] < 1:
+        if not cls._is_int(payload.get("generation"), minimum=1):
             raise ProductProjectError("range proof generation is invalid")
         if payload.get("section") not in _SECTIONS:
             raise ProductProjectError("range proof section is invalid")
         for key in ("start_shard_index", "stop_shard_index", "record_count"):
-            if not isinstance(payload.get(key), int) or payload[key] < 0:
+            if not cls._is_int(payload.get(key), minimum=0):
                 raise ProductProjectError(f"range proof {key} is invalid")
         for key in (
             "source_v1_descriptor_digest_sha256",
@@ -559,7 +591,7 @@ class ProductProjectHistoryCommitmentRangeService:
             raise ProductProjectError("range proof shard project identity is invalid")
         for key in ("generation", "shard_index"):
             minimum = 1 if key == "generation" else 0
-            if not isinstance(payload.get(key), int) or payload[key] < minimum:
+            if not cls._is_int(payload.get(key), minimum=minimum):
                 raise ProductProjectError(f"range proof shard {key} is invalid")
         records = payload.get("records")
         if not isinstance(records, list) or not records:
@@ -645,6 +677,10 @@ class ProductProjectHistoryCommitmentRangeService:
         if _digest(payload) != digest:
             raise ProductProjectError(f"{kind} digest mismatch")
         return payload, digest
+
+    @staticmethod
+    def _is_int(value: Any, *, minimum: int) -> bool:
+        return type(value) is int and value >= minimum
 
     @staticmethod
     def _is_digest(value: Any) -> bool:
