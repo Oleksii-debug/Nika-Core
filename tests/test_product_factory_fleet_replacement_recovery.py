@@ -5,14 +5,14 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from pf3_fleet_replacement_support import _fixture, _plan, _sha
+
 from nika_core.product_factory_fleet_replacement import (
     FleetReplacementCoordinator,
     FleetReplacementError,
     FleetReplacementState,
     ReplicaReplacementState,
 )
-
-from pf3_fleet_replacement_support import _fixture, _plan, _sha
 
 
 def test_orphan_work_lease_after_restart_waits_until_expiry_then_reacquires() -> None:
