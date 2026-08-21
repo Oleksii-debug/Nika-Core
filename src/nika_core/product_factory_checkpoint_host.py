@@ -18,8 +18,10 @@ from nika_core.product_factory_coordinator import (
     WorkerResultEnvelope,
     WorkRecord,
     WorkState,
-    trusted_plan_fingerprint as compute_trusted_plan_fingerprint,
     validate_trusted_plan_snapshot,
+)
+from nika_core.product_factory_coordinator import (
+    trusted_plan_fingerprint as compute_trusted_plan_fingerprint,
 )
 from nika_core.product_factory_project_binding import (
     ProductProjectBindingError,
@@ -161,6 +163,7 @@ class ProductFactoryCheckpointHost:
                         "coordinator checkpoint disagrees with canonical host-task plan authority"
                     )
 
+            _validate_checkpoint_authority(checkpoint, host_authority)
             previous_record = None
             if previous is not None:
                 previous_record = self._row_to_record(previous)
@@ -393,6 +396,8 @@ class ProductFactoryCheckpointHost:
                 record.checkpoint,
                 trusted_plan_fingerprint=authority,
             )
+        except StaleProductProjectBindingError:
+            raise
         except ProductProjectBindingError as exc:
             raise ProductFactoryCheckpointError(
                 "durable Product Factory checkpoint failed trusted restore validation"
