@@ -223,7 +223,142 @@ class ProductProjectHistoryArchiveService:
         return payload, digest
 
     @staticmethod
+    def _required_int(value: Any, *, minimum: int, label: str = "versions") -> int:
+        if type(value) is not int or value < minimum:
+            raise ProductProjectError(f"ProductProject history archive has invalid {label}")
+        return value
+
+    @classmethod
+    def _validate_nested_numeric_identities(
+        cls,
+        history: dict[str, Any],
+        *,
+        project_id: str,
+        spec_version: int,
+    ) -> None:
+        for expected_version, row in enumerate(history["specs"], start=1):
+            if not isinstance(row, dict) or row.get("project_id") != project_id:
+                raise ProductProjectError("ProductProject history archive has invalid spec row")
+            actual_version = cls._required_int(
+                row.get("spec_version"),
+                minimum=1,
+                label="spec row version",
+            )
+            if actual_version != expected_version:
+                raise ProductProjectError(
+                    "ProductProject history archive spec row sequence is not contiguous"
+                )
+            spec = row.get("spec")
+            if not isinstance(spec, dict):
+                raise ProductProjectError("ProductProject history archive has invalid spec payload")
+            parent = spec.get("supersedes_spec_version")
+            if expected_version == 1:
+                if parent is not None:
+                    raise ProductProjectError(
+                        "ProductProject history archive genesis spec has a predecessor"
+                    )
+            else:
+                parent_version = cls._required_int(
+                    parent,
+                    minimum=1,
+                    label="spec supersession version",
+                )
+                if parent_version != expected_version - 1:
+                    raise ProductProjectError(
+                        "ProductProject history archive spec supersession is not contiguous"
+                    )
+        if len(history["specs"]) != spec_version:
+            raise ProductProjectError("ProductProject history archive is missing spec revisions")
+
+        latest_decision_versions: dict[str, int] = {}
+        for row in history["decisions"]:
+            if not isinstance(row, dict) or row.get("project_id") != project_id:
+                raise ProductProjectError("ProductProject history archive has invalid decision row")
+            decision_id = row.get("decision_id")
+            if not isinstance(decision_id, str) or not decision_id.strip():
+                raise ProductProjectError(
+                    "ProductProject history archive has invalid decision identity"
+                )
+            decision_version = cls._required_int(
+                row.get("decision_version"),
+                minimum=1,
+                label="decision version",
+            )
+            expected = latest_decision_versions.get(decision_id, 0) + 1
+            if decision_version != expected:
+                raise ProductProjectError(
+                    "ProductProject history archive decision history is not contiguous"
+                )
+            latest_decision_versions[decision_id] = decision_version
+
+        for row in history["mutation_idempotency"]:
+            if not isinstance(row, dict) or row.get("project_id") != project_id:
+                raise ProductProjectError(
+                    "ProductProject history archive has invalid mutation idempotency row"
+                )
+            cls._required_int(
+                row.get("entity_version"),
+                minimum=1,
+                label="mutation idempotency entity version",
+            )
+
+        for row in history["audit_events"]:
+            if not isinstance(row, dict):
+                raise ProductProjectError("ProductProject history archive has invalid audit row")
+            event_type = row.get("event_type")
+            payload = row.get("payload")
+            if event_type not in {
+                "product_project.created",
+                "product_project.spec_versioned",
+                "product_project.decision_recorded",
+                "product_project.status_changed",
+            }:
+                continue
+            if not isinstance(payload, dict):
+                raise ProductProjectError(
+                    "ProductProject history archive has invalid audit payload"
+                )
+            if event_type == "product_project.created":
+                created_version = cls._required_int(
+                    payload.get("spec_version"),
+                    minimum=1,
+                    label="creation audit spec version",
+                )
+                if created_version != 1:
+                    raise ProductProjectError(
+                        "ProductProject history archive has invalid creation audit version"
+                    )
+            elif event_type == "product_project.spec_versioned":
+                audited_version = cls._required_int(
+                    payload.get("spec_version"),
+                    minimum=2,
+                    label="spec audit version",
+                )
+                audited_parent = cls._required_int(
+                    payload.get("supersedes_spec_version"),
+                    minimum=1,
+                    label="spec audit parent version",
+                )
+                if audited_parent != audited_version - 1:
+                    raise ProductProjectError(
+                        "ProductProject history archive has invalid spec audit lineage"
+                    )
+            elif event_type == "product_project.decision_recorded":
+                cls._required_int(
+                    payload.get("decision_version"),
+                    minimum=1,
+                    label="decision audit version",
+                )
+            else:
+                cls._required_int(
+                    payload.get("row_version"),
+                    minimum=1,
+                    label="lifecycle audit row version",
+                )
+
+    @classmethod
     def _summary(
+        cls,
         payload: dict[str, Any],
         digest: str,
     ) -> ProductProjectHistoryArchiveSummary:
@@ -247,23 +382,24 @@ class ProductProjectHistoryArchiveService:
         project_id = payload.get("project_id")
         if not isinstance(project_id, str) or not project_id.strip():
             raise ProductProjectError("ProductProject history archive has invalid project_id")
-        try:
-            spec_version = int(payload["spec_version"])
-            row_version = int(payload["row_version"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ProductProjectError(
-                "ProductProject history archive has invalid versions"
-            ) from exc
-        if spec_version < 1 or row_version < 0:
-            raise ProductProjectError("ProductProject history archive has invalid versions")
+        spec_version = cls._required_int(payload.get("spec_version"), minimum=1)
+        row_version = cls._required_int(payload.get("row_version"), minimum=0)
         if project.get("project_id") != project_id:
             raise ProductProjectError("ProductProject history archive project identity mismatch")
-        if int(project.get("current_spec_version", 0)) != spec_version:
+        project_spec_version = cls._required_int(
+            project.get("current_spec_version"),
+            minimum=1,
+        )
+        project_row_version = cls._required_int(project.get("row_version"), minimum=0)
+        if project_spec_version != spec_version:
             raise ProductProjectError("ProductProject history archive spec identity mismatch")
-        if int(project.get("row_version", -1)) != row_version:
+        if project_row_version != row_version:
             raise ProductProjectError("ProductProject history archive row identity mismatch")
-        if len(history["specs"]) != spec_version:
-            raise ProductProjectError("ProductProject history archive is missing spec revisions")
+        cls._validate_nested_numeric_identities(
+            history,
+            project_id=project_id,
+            spec_version=spec_version,
+        )
         return ProductProjectHistoryArchiveSummary(
             project_id=project_id,
             spec_version=spec_version,
