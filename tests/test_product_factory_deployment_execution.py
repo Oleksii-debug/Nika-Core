@@ -350,7 +350,7 @@ def test_scale_many_services_remain_independent_across_restart() -> None:
     restored.restore(snapshot)
 
     for spec in specs[15:]:
-        assert restored.retry(spec.operation_id, now=NOW).state is OperationState.PREPARED
+        assert restored.prepare(spec.operation_id, now=NOW).state is OperationState.PREPARED
         assert restored.complete(spec.operation_id, now=NOW).state is OperationState.SUCCEEDED
 
     assert len(provider.deploy_calls) == 30
