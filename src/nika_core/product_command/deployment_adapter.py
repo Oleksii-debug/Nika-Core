@@ -9,8 +9,13 @@ from nika_core.product_factory_deployment import (
     DeploymentFabricSnapshot,
     DeploymentRecord,
     DeploymentState,
+    EnvironmentTier,
     ExecutionRegistrySnapshot,
 )
+
+
+class DeploymentPresentationIntegrityError(ValueError):
+    """Raised when PF3 snapshot state is not safely presentable by PF5."""
 
 
 def execution_status_entries(
@@ -63,10 +68,195 @@ def deployment_status_entries(
     snapshot: DeploymentFabricSnapshot,
 ) -> tuple[ProductStatusEntry, ...]:
     """Project integrated PF3 deployment/health/rollback state without provider secrets."""
+    _validate_snapshot_backing(snapshot)
     entries: list[ProductStatusEntry] = []
     for record in snapshot.records:
         entries.extend(_record_entries(record))
     return tuple(entries)
+
+
+def _validate_snapshot_backing(snapshot: DeploymentFabricSnapshot) -> None:
+    """Mirror PF3 restore integrity before projecting any deployment state."""
+    intent_ids = [record.intent.intent_id for record in snapshot.records]
+    if len(intent_ids) != len(set(intent_ids)):
+        raise DeploymentPresentationIntegrityError(
+            "deployment snapshot contains duplicate intent identities"
+        )
+    for record in snapshot.records:
+        _validate_record_semantics(record)
+
+    staging_projects: set[str] = set()
+    for project_id, source_sha in snapshot.healthy_staging:
+        if not project_id.strip() or not _is_sha(source_sha):
+            raise DeploymentPresentationIntegrityError(
+                "healthy staging marker identity/release SHA is invalid"
+            )
+        if project_id in staging_projects:
+            raise DeploymentPresentationIntegrityError(
+                "deployment snapshot contains duplicate healthy-staging state"
+            )
+        staging_projects.add(project_id)
+        if not any(
+            _is_healthy_record(
+                record,
+                project_id=project_id,
+                environment_id=None,
+                source_sha=source_sha,
+                require_staging=True,
+            )
+            for record in snapshot.records
+        ):
+            raise DeploymentPresentationIntegrityError(
+                "healthy staging marker is not backed by a healthy staging deployment"
+            )
+
+    current_keys: set[tuple[str, str]] = set()
+    for entry in snapshot.current_releases:
+        project_id, environment_id, source_sha = _normalize_current_release_entry(
+            entry,
+            snapshot.records,
+        )
+        key = (project_id, environment_id)
+        if key in current_keys:
+            raise DeploymentPresentationIntegrityError(
+                "deployment snapshot contains duplicate current-release state"
+            )
+        current_keys.add(key)
+        if not any(
+            _is_healthy_record(
+                record,
+                project_id=project_id,
+                environment_id=environment_id,
+                source_sha=source_sha,
+                require_staging=False,
+            )
+            for record in snapshot.records
+        ):
+            raise DeploymentPresentationIntegrityError(
+                "current release marker is not backed by a healthy deployment record"
+            )
+
+
+def _normalize_current_release_entry(
+    entry: tuple[str, ...],
+    records: tuple[DeploymentRecord, ...],
+) -> tuple[str, str, str]:
+    if len(entry) == 3:
+        project_id, environment_id, source_sha = entry
+    elif len(entry) == 2:
+        environment_id, source_sha = entry
+        projects = {
+            record.intent.project_id
+            for record in records
+            if record.state is DeploymentState.HEALTHY
+            and record.intent.environment.environment_id == environment_id
+            and record.intent.release.source_sha == source_sha
+        }
+        if len(projects) != 1:
+            raise DeploymentPresentationIntegrityError(
+                "legacy current release is ambiguous or not backed by one healthy project"
+            )
+        project_id = next(iter(projects))
+    else:
+        raise DeploymentPresentationIntegrityError(
+            "current-release identity must contain environment/release or "
+            "project/environment/release"
+        )
+    if not all(value.strip() for value in (project_id, environment_id, source_sha)):
+        raise DeploymentPresentationIntegrityError(
+            "current-release identity contains an empty field"
+        )
+    if not _is_sha(source_sha):
+        raise DeploymentPresentationIntegrityError(
+            "current-release identity contains an invalid release SHA"
+        )
+    return project_id, environment_id, source_sha
+
+
+def _validate_record_semantics(record: DeploymentRecord) -> None:
+    intent = record.intent
+    if record.previous_release_sha is not None and not _is_sha(record.previous_release_sha):
+        raise DeploymentPresentationIntegrityError(
+            "deployment record contains an invalid previous release SHA"
+        )
+    if not record.provider_evidence_refs:
+        raise DeploymentPresentationIntegrityError(
+            "deployment record requires provider evidence references"
+        )
+    if record.health is not None and (
+        record.health.environment_id != intent.environment.environment_id
+        or record.health.release_sha != intent.release.source_sha
+    ):
+        raise DeploymentPresentationIntegrityError(
+            "deployment health evidence does not match intent identity/release"
+        )
+    if record.rollback is not None:
+        if (
+            record.rollback.environment_id != intent.environment.environment_id
+            or record.rollback.failed_release_sha != intent.release.source_sha
+        ):
+            raise DeploymentPresentationIntegrityError(
+                "deployment rollback evidence does not match intent identity/release"
+            )
+        if (
+            record.rollback.succeeded
+            and record.rollback.restored_release_sha != record.previous_release_sha
+        ):
+            raise DeploymentPresentationIntegrityError(
+                "deployment rollback restored a release other than recorded previous release"
+            )
+
+    if record.state is DeploymentState.HEALTHY:
+        if record.health is None or not record.health.healthy or record.rollback is not None:
+            raise DeploymentPresentationIntegrityError(
+                "healthy deployment record is semantically inconsistent"
+            )
+    elif record.state is DeploymentState.ROLLED_BACK:
+        if (
+            record.health is None
+            or record.health.healthy
+            or record.rollback is None
+            or not record.rollback.succeeded
+        ):
+            raise DeploymentPresentationIntegrityError(
+                "rolled-back deployment record is semantically inconsistent"
+            )
+    elif record.state is DeploymentState.HEALTH_CHECK:
+        raise DeploymentPresentationIntegrityError(
+            "health-check deployment state must not be serialized as durable"
+        )
+    elif record.state is DeploymentState.UNCERTAIN and (
+        record.health is not None or record.rollback is not None
+    ):
+        raise DeploymentPresentationIntegrityError(
+            "uncertain deployment record contains final health/rollback evidence"
+        )
+
+
+def _is_sha(value: str) -> bool:
+    return len(value) == 40 and all(character in "0123456789abcdef" for character in value)
+
+
+def _is_healthy_record(
+    record: DeploymentRecord,
+    *,
+    project_id: str,
+    environment_id: str | None,
+    source_sha: str,
+    require_staging: bool,
+) -> bool:
+    intent = record.intent
+    if (
+        record.state is not DeploymentState.HEALTHY
+        or record.health is None
+        or not record.health.healthy
+        or intent.project_id != project_id
+        or intent.release.source_sha != source_sha
+    ):
+        return False
+    if environment_id is not None and intent.environment.environment_id != environment_id:
+        return False
+    return not require_staging or intent.environment.tier is EnvironmentTier.STAGING
 
 
 def _record_entries(record: DeploymentRecord) -> tuple[ProductStatusEntry, ...]:
