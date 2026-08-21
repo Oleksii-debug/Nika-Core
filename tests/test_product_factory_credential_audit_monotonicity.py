@@ -61,7 +61,10 @@ def _broker() -> tuple[CredentialBroker, _ProtectedStore]:
     return broker, store
 
 
-def _with_next_event(snapshot: CredentialBrokerSnapshot, next_event: int) -> CredentialBrokerSnapshot:
+def _with_next_event(
+    snapshot: CredentialBrokerSnapshot,
+    next_event: int,
+) -> CredentialBrokerSnapshot:
     return CredentialBrokerSnapshot(
         snapshot.secrets,
         snapshot.identities,
@@ -114,6 +117,40 @@ def test_restore_preserves_monotonic_audit_identity_after_restart() -> None:
         "credential-event-00000002",
     )
     assert restored.snapshot().next_event == 3
+
+
+def test_restore_accepts_canonical_audit_identity_beyond_eight_digits() -> None:
+    broker, store = _broker()
+    snapshot = broker.snapshot()
+    first = snapshot.audit_events[0]
+    late = CredentialAuditEvent(
+        "credential-event-100000000",
+        first.action,
+        first.project_id,
+        first.secret_ref,
+        first.at,
+        first.detail,
+    )
+    stretched = CredentialBrokerSnapshot(
+        snapshot.secrets,
+        snapshot.identities,
+        (late,),
+        snapshot.next_lease,
+        100000001,
+    )
+
+    restored = CredentialBroker(store)
+    restored.restore(stretched)
+    restored.revoke(
+        project_id=PROJECT_ID,
+        secret_ref=SECRET_REF,
+        now=NOW + timedelta(seconds=1),
+    )
+
+    assert tuple(event.event_id for event in restored.audit_events(PROJECT_ID)) == (
+        "credential-event-100000000",
+        "credential-event-100000001",
+    )
 
 
 def test_restore_rejects_noncanonical_or_nonmonotonic_audit_identities() -> None:
