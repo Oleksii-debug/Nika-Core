@@ -3,6 +3,13 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 
+from pf3_fleet_replacement_support import (
+    _fixture,
+    _node,
+    _plan,
+    _replacement_spec,
+)
+
 from nika_core.product_factory_deployment import (
     ExecutionRequest,
     NodeCapabilities,
@@ -14,13 +21,6 @@ from nika_core.product_factory_fleet_replacement import (
     FleetReplacementPlan,
     FleetReplacementState,
     ReplicaReplacementState,
-)
-
-from pf3_fleet_replacement_support import (
-    _fixture,
-    _node,
-    _plan,
-    _replacement_spec,
 )
 
 
