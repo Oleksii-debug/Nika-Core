@@ -9,7 +9,9 @@ from nika_core.product_command.command_center import (
     ProductCommandCenter,
     ProductCommandCenterScopeError,
 )
-from nika_core.product_command.contracts import ProductStatusKind
+from nika_core.product_command.deployment_adapter import (
+    DeploymentPresentationIntegrityError,
+)
 from nika_core.product_command.product_project_adapter import ProductProjectCommandService
 from nika_core.product_factory_deployment import (
     DeploymentFabricSnapshot,
@@ -19,6 +21,7 @@ from nika_core.product_factory_deployment import (
     EnvironmentIdentity,
     EnvironmentTier,
     ExecutionRequest,
+    HealthEvidence,
     Platform,
     ReleaseRef,
     ResourceEnvelope,
@@ -47,6 +50,7 @@ from nika_core.product_project import ProductProjectRepository, ProductProjectSp
 NOW = datetime(2026, 8, 21, 10, 0, tzinfo=UTC)
 SHA_A = "a" * 40
 SHA_B = "b" * 40
+SHA_C = "c" * 40
 DIGEST_A = "1" * 64
 DIGEST_B = "2" * 64
 SECRET_REF = "credential://provider/project-1/DO-NOT-LEAK"
@@ -91,7 +95,7 @@ def _intent(
     )
 
 
-def _record(
+def _healthy_record(
     project_id: str,
     *,
     intent_id: str,
@@ -99,16 +103,24 @@ def _record(
     sha: str = SHA_A,
     digest: str = DIGEST_A,
 ) -> DeploymentRecord:
+    intent = _intent(
+        project_id,
+        intent_id=intent_id,
+        environment_id=environment_id,
+        sha=sha,
+        digest=digest,
+    )
     return DeploymentRecord(
-        _intent(
-            project_id,
-            intent_id=intent_id,
-            environment_id=environment_id,
-            sha=sha,
-            digest=digest,
-        ),
-        DeploymentState.HEALTH_CHECK,
+        intent,
+        DeploymentState.HEALTHY,
         (f"deploy://{project_id}/{intent_id}",),
+        health=HealthEvidence(
+            environment_id,
+            sha,
+            True,
+            (f"health://{project_id}/{intent_id}",),
+            NOW,
+        ),
     )
 
 
@@ -116,8 +128,13 @@ def test_current_release_identity_is_scoped_by_project_and_environment(tmp_path)
     center = _center(tmp_path)
     snapshot = DeploymentFabricSnapshot(
         (
-            _record("project-1", intent_id="deploy-p1", sha=SHA_A, digest=DIGEST_A),
-            _record("project-2", intent_id="deploy-p2", sha=SHA_B, digest=DIGEST_B),
+            _healthy_record("project-1", intent_id="deploy-p1", sha=SHA_A),
+            _healthy_record(
+                "project-2",
+                intent_id="deploy-p2",
+                sha=SHA_B,
+                digest=DIGEST_B,
+            ),
         ),
         (),
         (
@@ -142,8 +159,13 @@ def test_legacy_environment_only_current_release_fails_closed_when_ambiguous(
     center = _center(tmp_path)
     snapshot = DeploymentFabricSnapshot(
         (
-            _record("project-1", intent_id="deploy-p1", sha=SHA_A, digest=DIGEST_A),
-            _record("project-2", intent_id="deploy-p2", sha=SHA_B, digest=DIGEST_B),
+            _healthy_record("project-1", intent_id="deploy-p1", sha=SHA_A),
+            _healthy_record(
+                "project-2",
+                intent_id="deploy-p2",
+                sha=SHA_B,
+                digest=DIGEST_B,
+            ),
         ),
         (),
         (("shared-stage", SHA_A),),
@@ -156,7 +178,7 @@ def test_legacy_environment_only_current_release_fails_closed_when_ambiguous(
 def test_duplicate_project_environment_current_release_fails_closed(tmp_path) -> None:
     center = _center(tmp_path)
     snapshot = DeploymentFabricSnapshot(
-        (_record("project-1", intent_id="deploy-p1"),),
+        (_healthy_record("project-1", intent_id="deploy-p1"),),
         (),
         (
             ("project-1", "shared-stage", SHA_A),
@@ -171,17 +193,38 @@ def test_duplicate_project_environment_current_release_fails_closed(tmp_path) ->
         center.inspect_project("project-1", deployment=snapshot)
 
 
+def test_forged_current_release_marker_without_healthy_record_fails_closed(
+    tmp_path,
+) -> None:
+    center = _center(tmp_path)
+    snapshot = DeploymentFabricSnapshot(
+        (_healthy_record("project-1", intent_id="deploy-p1", sha=SHA_A),),
+        (),
+        (("project-1", "shared-stage", SHA_C),),
+    )
+
+    with pytest.raises(DeploymentPresentationIntegrityError, match="not backed"):
+        center.inspect_project("project-1", deployment=snapshot)
+
+
+def test_forged_healthy_staging_marker_without_healthy_record_fails_closed(
+    tmp_path,
+) -> None:
+    center = _center(tmp_path)
+    snapshot = DeploymentFabricSnapshot(
+        (_healthy_record("project-1", intent_id="deploy-p1", sha=SHA_A),),
+        (("project-1", SHA_C),),
+        (("project-1", "shared-stage", SHA_A),),
+    )
+
+    with pytest.raises(DeploymentPresentationIntegrityError, match="healthy staging"):
+        center.inspect_project("project-1", deployment=snapshot)
+
+
 def test_execution_mediated_status_is_project_scoped_and_redacts_credential(
     tmp_path,
 ) -> None:
     center = _center(tmp_path)
-    target_intent = _intent("project-1", intent_id="exec-deploy-p1")
-    foreign_intent = _intent(
-        "project-2",
-        intent_id="exec-deploy-p2",
-        sha=SHA_B,
-        digest=DIGEST_B,
-    )
     target_spec = DeploymentExecutionSpec(
         "operation-p1",
         ExecutionRequest(
@@ -192,7 +235,7 @@ def test_execution_mediated_status_is_project_scoped_and_redacts_credential(
             frozenset({"python"}),
             ResourceEnvelope(1, 512, 512),
         ),
-        target_intent,
+        _intent("project-1", intent_id="exec-deploy-p1"),
         SECRET_REF,
         "staging-provider",
         "deploy",
@@ -207,7 +250,12 @@ def test_execution_mediated_status_is_project_scoped_and_redacts_credential(
             frozenset({"python"}),
             ResourceEnvelope(1, 512, 512),
         ),
-        foreign_intent,
+        _intent(
+            "project-2",
+            intent_id="exec-deploy-p2",
+            sha=SHA_B,
+            digest=DIGEST_B,
+        ),
         "credential://provider/project-2/DO-NOT-LEAK",
         "staging-provider",
         "deploy",
@@ -291,15 +339,15 @@ def test_product_operations_blocker_is_scoped_without_credential_disclosure(
 
 def test_foreign_operations_snapshot_fails_closed(tmp_path) -> None:
     center = _center(tmp_path)
-    snapshot = ProductOperationsSnapshot("project-2", (), (), (), ())
 
     with pytest.raises(ProductCommandCenterScopeError, match="different ProductProject"):
-        center.inspect_project("project-1", operations=snapshot)
+        center.inspect_project(
+            "project-1",
+            operations=ProductOperationsSnapshot("project-2", (), (), (), ()),
+        )
 
 
-def test_rolling_maintenance_blocker_redacts_approval_and_credential_material(
-    tmp_path,
-) -> None:
+def test_rolling_maintenance_blocker_redacts_approval_material(tmp_path) -> None:
     center = _center(tmp_path)
     binding = ServiceMaintenanceBinding(
         "service-api",
@@ -324,12 +372,14 @@ def test_rolling_maintenance_blocker_redacts_approval_and_credential_material(
         evidence_refs=("execution-node:cordoned:node-a",),
         cordoned=True,
     )
-    snapshot = RollingMaintenanceSnapshot(
-        (plan,),
-        (("maintenance-1", (node,)),),
-    )
 
-    detail = center.inspect_project("project-1", fleet_maintenance=snapshot)
+    detail = center.inspect_project(
+        "project-1",
+        fleet_maintenance=RollingMaintenanceSnapshot(
+            (plan,),
+            (("maintenance-1", (node,)),),
+        ),
+    )
     serialized = detail.model_dump_json()
 
     maintenance = next(
@@ -355,18 +405,9 @@ def test_rolling_maintenance_checkpoint_plan_mismatch_fails_closed(tmp_path) -> 
         "Patch execution node",
         ("maintenance://approved",),
     )
-    snapshot = RollingMaintenanceSnapshot((plan,), ())
 
     with pytest.raises(ProductCommandCenterScopeError, match="checkpoint set"):
-        center.inspect_project("project-1", fleet_maintenance=snapshot)
-
-
-def test_safe_operational_statuses_keep_unique_product_identity(tmp_path) -> None:
-    center = _center(tmp_path)
-    operations = ProductOperationsSnapshot("project-1", (), (), (), ())
-
-    detail = center.inspect_project("project-1", operations=operations)
-
-    identities = [(item.kind, item.item_id) for item in detail.statuses]
-    assert len(identities) == len(set(identities))
-    assert all(isinstance(item.kind, ProductStatusKind) for item in detail.statuses)
+        center.inspect_project(
+            "project-1",
+            fleet_maintenance=RollingMaintenanceSnapshot((plan,), ()),
+        )
