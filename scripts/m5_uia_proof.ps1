@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory=$true)][string]$ExePath,
-    [string]$WindowTitle = 'Nika Core M5 Proof'
+    [string]$WindowTitle = 'Nika Core M5 Proof',
+    [ValidateRange(30, 120)][int]$StartupTimeoutSeconds = 90
 )
 
 $ErrorActionPreference = 'Stop'
@@ -50,8 +51,11 @@ if ([string]::IsNullOrWhiteSpace($previousWebView2BrowserArgs)) {
 }
 
 $process = $null
+$startupWatch = $null
 try {
     $process = Start-Process -FilePath $ExePath -PassThru
+    $startupWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $startupTimeout = [System.TimeSpan]::FromSeconds($StartupTimeoutSeconds)
     $root = [System.Windows.Automation.AutomationElement]::RootElement
     $nameCondition = New-Object System.Windows.Automation.PropertyCondition(
         [System.Windows.Automation.AutomationElement]::NameProperty,
@@ -81,7 +85,9 @@ try {
     # even when the exact host window's initial UIA descendant query is empty. Walk
     # only HWNDs that are descendants of the already PID+title-bound host window,
     # convert them back into UIA elements, and query semantics there. This activates
-    # providers without coordinates, another process, relaunches, or a longer wait.
+    # providers without coordinates, another process, or a relaunch. Hosted cold
+    # starts are given one explicit bounded deadline rather than two brittle fixed
+    # attempt windows that can expire at the provider-startup boundary.
     function Get-BoundSearchRoots([System.Windows.Automation.AutomationElement]$ExactWindow) {
         $searchRoots = New-Object 'System.Collections.Generic.List[System.Windows.Automation.AutomationElement]'
         $searchRoots.Add($ExactWindow)
@@ -139,36 +145,42 @@ try {
     }
 
     $window = $null
-    for ($attempt = 0; $attempt -lt 40 -and $null -eq $window; $attempt++) {
-        Start-Sleep -Milliseconds 500
+    while ($startupWatch.Elapsed -lt $startupTimeout -and $null -eq $window) {
         if ($process.HasExited) {
             throw "Nika Core exited before the top-level UI Automation window appeared. Exit code: $($process.ExitCode)"
         }
         $window = Find-ExactWindow
+        if ($null -eq $window) { Start-Sleep -Milliseconds 250 }
     }
     if ($null -eq $window) {
-        throw "Nika Core top-level window '$WindowTitle' for process $($process.Id) not found in UI Automation tree."
+        $elapsed = [Math]::Round($startupWatch.Elapsed.TotalSeconds, 1)
+        throw "Nika Core top-level window '$WindowTitle' for process $($process.Id) was not found within the bounded $StartupTimeoutSeconds-second startup deadline (elapsed ${elapsed}s)."
     }
 
     $names = @()
     $missing = $requiredNames
-    for ($attempt = 0; $attempt -lt 40 -and $missing.Count -gt 0; $attempt++) {
-        Start-Sleep -Milliseconds 500
+    while ($startupWatch.Elapsed -lt $startupTimeout -and $missing.Count -gt 0) {
         if ($process.HasExited) {
             throw "Nika Core exited while waiting for WebView2 accessibility descendants. Exit code: $($process.ExitCode)"
         }
         $window = Find-ExactWindow
-        if ($null -eq $window) { continue }
-        $names = Get-BoundDescendantNames $window
-        $missing = @($requiredNames | Where-Object { $names -notcontains $_ })
+        if ($null -ne $window) {
+            $names = Get-BoundDescendantNames $window
+            $missing = @($requiredNames | Where-Object { $names -notcontains $_ })
+        }
+        if ($missing.Count -gt 0) { Start-Sleep -Milliseconds 500 }
     }
 
     if ($missing.Count -gt 0) {
+        $elapsed = [Math]::Round($startupWatch.Elapsed.TotalSeconds, 1)
         $preview = ($names | Select-Object -Unique | Select-Object -First 80) -join ' | '
-        throw "WebView2 UIA descendants were not discoverable. Missing: $($missing -join ', '). Seen: $preview"
+        throw "WebView2 UIA descendants were not discoverable within the bounded $StartupTimeoutSeconds-second startup deadline (elapsed ${elapsed}s). Missing: $($missing -join ', '). Seen: $preview"
     }
 
-    function Wait-DescendantName([string]$Expected, [int]$Attempts = 40) {
+    $semanticElapsed = [Math]::Round($startupWatch.Elapsed.TotalSeconds, 1)
+    Write-Host "Required packaged WebView2 UIA semantics became discoverable after ${semanticElapsed}s."
+
+    function Wait-DescendantName([string]$Expected, [int]$Attempts = 80) {
         for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
             Start-Sleep -Milliseconds 250
             if ($process.HasExited) {
@@ -211,6 +223,7 @@ try {
     Write-Host (($names | Select-Object -Unique | Select-Object -First 40) -join ' | ')
 }
 finally {
+    if ($null -ne $startupWatch) { $startupWatch.Stop() }
     if ($null -ne $process -and !$process.HasExited) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
     }
