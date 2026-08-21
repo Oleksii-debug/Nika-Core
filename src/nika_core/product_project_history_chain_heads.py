@@ -190,6 +190,10 @@ class ProductProjectHistoryChainHeadService:
         cls._validate_payload(payload)
         return payload, digest
 
+    @staticmethod
+    def _is_int(value: Any, *, minimum: int) -> bool:
+        return type(value) is int and value >= minimum
+
     @classmethod
     def _validate_payload(cls, payload: dict[str, Any]) -> None:
         project_id = payload.get("project_id")
@@ -198,11 +202,11 @@ class ProductProjectHistoryChainHeadService:
         row_version = payload.get("row_version")
         if not isinstance(project_id, str) or not project_id.strip():
             raise ProductProjectError("history chain-head project identity is invalid")
-        if not isinstance(generation, int) or generation < 1:
+        if not cls._is_int(generation, minimum=1):
             raise ProductProjectError("history chain-head generation is invalid")
-        if not isinstance(spec_version, int) or spec_version < 1:
+        if not cls._is_int(spec_version, minimum=1):
             raise ProductProjectError("history chain-head spec version is invalid")
-        if not isinstance(row_version, int) or row_version < 0:
+        if not cls._is_int(row_version, minimum=0):
             raise ProductProjectError("history chain-head row version is invalid")
         for key in (
             "archive_digest_sha256",
