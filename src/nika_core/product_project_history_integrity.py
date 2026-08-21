@@ -4,6 +4,7 @@ import json
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
+from itertools import pairwise
 from typing import Any
 
 from nika_core.product_project import (
@@ -16,7 +17,7 @@ from nika_core.product_project_integrity import (
     ProductProjectIntegrityReport,
     ProductProjectIntegrityService,
 )
-from nika_core.product_project_lifecycle import ProductProjectState, _ALLOWED_TRANSITIONS
+from nika_core.product_project_lifecycle import _ALLOWED_TRANSITIONS, ProductProjectState
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,7 +229,7 @@ class ProductProjectHistoricalIntegrityService:
                     f"product decision history is not contiguous: {decision_id}"
                 )
             times = tuple(item.created_at for item in history)
-            if any(later < earlier for earlier, later in zip(times, times[1:])):
+            if any(later < earlier for earlier, later in pairwise(times)):
                 raise ProductProjectError(
                     f"product decision timestamps move backwards: {decision_id}"
                 )
