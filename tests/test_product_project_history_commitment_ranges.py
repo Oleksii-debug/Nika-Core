@@ -207,12 +207,19 @@ def test_range_proof_cannot_omit_or_reorder_declared_shards(tmp_path) -> None:
         start_shard_index=4,
         stop_shard_index=7,
     )
+    shards = _shard_map(source.shard_bytes)
+    selected = tuple(shards[("research_handoffs", index)] for index in range(4, 7))
 
     envelope = json.loads(proof.proof_bytes)
-    envelope["payload"]["leaves"].pop(1)
+    envelope["payload"]["leaves"][1] = envelope["payload"]["leaves"][2]
     omitted = _rehash(envelope)
-    with pytest.raises(ProductProjectError, match="declared interval"):
-        service.verify_range_proof(compact.descriptor_bytes, omitted, (), (generation,))
+    with pytest.raises(ProductProjectError, match="not contiguous"):
+        service.verify_range_proof(
+            compact.descriptor_bytes,
+            omitted,
+            selected,
+            (generation,),
+        )
 
     envelope = json.loads(proof.proof_bytes)
     envelope["payload"]["leaves"][0], envelope["payload"]["leaves"][1] = (
@@ -220,8 +227,13 @@ def test_range_proof_cannot_omit_or_reorder_declared_shards(tmp_path) -> None:
         envelope["payload"]["leaves"][0],
     )
     reordered = _rehash(envelope)
-    with pytest.raises(ProductProjectError, match="declared interval|not contiguous"):
-        service.verify_range_proof(compact.descriptor_bytes, reordered, (), (generation,))
+    with pytest.raises(ProductProjectError, match="not contiguous"):
+        service.verify_range_proof(
+            compact.descriptor_bytes,
+            reordered,
+            selected,
+            (generation,),
+        )
 
 
 def test_wrong_shard_bytes_cannot_satisfy_valid_range_proof(tmp_path) -> None:
