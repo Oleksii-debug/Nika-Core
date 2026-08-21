@@ -95,7 +95,10 @@ def test_factory_projection_accepts_historical_successful_rollback_with_current_
     entries = product_operations_status_entries("project-1", snapshot)
 
     assert entries[0].state == "rollback_required"
-    assert any(item.kind == "rollback" for item in entries[0].evidence)
+    assert any(
+        item.reference == "rollback://service-api/restored"
+        for item in entries[0].evidence
+    )
 
 
 def test_factory_projection_accepts_rollback_history_after_later_credential_revocation() -> None:
