@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import hashlib
+from collections import Counter
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from nika_core.product_command.contracts import CommandRouteKind
-from nika_core.product_command.product_project_adapter import ProductProjectCommandService
+from nika_core.product_command.command_center import ProductCommandCenter
+from nika_core.product_command.contracts import CommandRouteKind, ProductProjectDetail
+from nika_core.product_command.product_project_adapter import (
+    ProductProjectCommandService,
+    ProductProjectPresentationConsistencyError,
+)
 from nika_core.product_command.routing import route_command
 from nika_core.product_project import ProductProjectSpec
 from nika_core.ui.bridge_models import UIResult
 
 OrdinaryCommandHandler = Callable[[Mapping[str, Any]], UIResult]
+DesktopStateProvider = Callable[[], Mapping[str, Any]]
 
 
 class PackagedProductJourneyError(ValueError):
@@ -41,6 +47,12 @@ class PackagedProductCommandRouter:
     ) -> None:
         self._products = products
         self._ordinary_handler = ordinary_handler
+        self._active_project_id: str | None = None
+
+    @property
+    def active_project_id(self) -> str | None:
+        """Return process-local presentation selection, never a durable authority record."""
+        return self._active_project_id
 
     def create(self, payload: Mapping[str, Any]) -> UIResult:
         command = str(payload.get("command", "")).strip()
@@ -76,6 +88,7 @@ class PackagedProductCommandRouter:
             spec=ProductProjectSpec(goal=goal, desired_outcome=goal),
             idempotency_key=f"packaged-product-route:{project_id}",
         )
+        self._active_project_id = project_id
         return UIResult(
             request_id="desktop-handler",
             status="completed",
@@ -85,6 +98,63 @@ class PackagedProductCommandRouter:
             ),
             focus_id="tasks-heading",
         )
+
+
+class PackagedProductStateProvider:
+    """Compose Desktop state with a bounded PF5 ProductCommandCenter projection.
+
+    The active project pointer is intentionally process-local. Durable ProductProject identity,
+    lifecycle and decisions remain owned by PF1/PF5 repositories. Replaying the same product
+    command after restart re-selects the same durable project rather than introducing a second
+    persisted selection mechanism.
+
+    Only bounded presentation fields are returned. Evidence references, credential references,
+    authorization material, provider sessions and protected-store handles are not serialized by
+    this adapter.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_state: DesktopStateProvider,
+        router: PackagedProductCommandRouter,
+        command_center: ProductCommandCenter,
+    ) -> None:
+        self._base_state = base_state
+        self._router = router
+        self._command_center = command_center
+
+    def __call__(self) -> dict[str, Any]:
+        state = dict(self._base_state())
+        project_id = self._router.active_project_id
+        state["product_project"] = None
+        if project_id is None:
+            return state
+        try:
+            detail = self._command_center.inspect_project(project_id)
+        except ProductProjectPresentationConsistencyError as exc:
+            raise PackagedProductJourneyError(
+                "ProductProject changed while packaged state was composed; refresh required."
+            ) from exc
+        state["product_project"] = _safe_product_project_state(detail)
+        return state
+
+
+def _safe_product_project_state(detail: ProductProjectDetail) -> dict[str, Any]:
+    status_counts = Counter(item.kind.value for item in detail.statuses)
+    decision_counts = Counter(item.state for item in detail.decisions)
+    return {
+        "project_id": detail.summary.project_id,
+        "spec_version": detail.summary.version,
+        "title": detail.summary.title,
+        "goal": detail.summary.goal,
+        "state": detail.summary.state,
+        "blocker_count": detail.summary.blocker_count,
+        "status_count": len(detail.statuses),
+        "status_counts": dict(sorted(status_counts.items())),
+        "decision_count": len(detail.decisions),
+        "decision_state_counts": dict(sorted(decision_counts.items())),
+    }
 
 
 def _project_title(goal: str) -> str:

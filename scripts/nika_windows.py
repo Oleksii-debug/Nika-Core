@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
@@ -13,10 +14,12 @@ from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.default_actions import build_default_action_registry
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.workspace_registry import WorkspaceRegistry
+from nika_core.product_command.command_center import ProductCommandCenter
 from nika_core.product_command.product_project_adapter import ProductProjectCommandService
 from nika_core.product_command.routing import route_command
 from nika_core.product_factory_packaged_journey import (
     PackagedProductCommandRouter,
+    PackagedProductStateProvider,
     product_project_identity,
 )
 from nika_core.product_project import ProductProjectRepository
@@ -53,6 +56,12 @@ def build_windows_bridge(
         products=products,
         ordinary_handler=backend.create_task,
     )
+    command_center = ProductCommandCenter(products)
+    product_state = PackagedProductStateProvider(
+        base_state=backend.snapshot,
+        router=product_router,
+        command_center=command_center,
+    )
     bridge = UIActionBridge(
         actions,
         keymap,
@@ -75,9 +84,44 @@ def build_windows_bridge(
                 "command-input", "Командне поле активне."
             ),
         },
-        state_provider=backend.snapshot,
+        state_provider=product_state,
     )
     return bridge, products
+
+
+def _require_product_state(
+    response: Mapping[str, Any],
+    *,
+    project_id: str,
+) -> Mapping[str, Any]:
+    if response.get("ok") is not True:
+        raise RuntimeError(f"PF11 packaged bridge state failed: {response}")
+    state = response.get("state")
+    if not isinstance(state, Mapping):
+        raise TypeError("PF11 packaged bridge did not return a state mapping")
+    product_state = state.get("product_project")
+    if not isinstance(product_state, Mapping):
+        raise TypeError("PF11 packaged bridge did not expose ProductCommandCenter state")
+    if (
+        product_state.get("project_id") != project_id
+        or product_state.get("spec_version") != 1
+        or not isinstance(product_state.get("status_count"), int)
+        or isinstance(product_state.get("status_count"), bool)
+        or not isinstance(product_state.get("decision_count"), int)
+        or isinstance(product_state.get("decision_count"), bool)
+    ):
+        raise RuntimeError("PF11 packaged ProductCommandCenter state identity is invalid")
+    forbidden_fields = {
+        "evidence",
+        "evidence_refs",
+        "credential_refs",
+        "authorization_ref",
+        "provider_session",
+        "protected_store_handle",
+    }
+    if forbidden_fields.intersection(product_state):
+        raise RuntimeError("PF11 packaged state exposed a forbidden authority/evidence field")
+    return product_state
 
 
 def _run_pf11_proof(
@@ -103,11 +147,18 @@ def _run_pf11_proof(
     detail = products.inspect_project(project_id)
     if detail.summary.project_id != project_id or detail.summary.version != 1:
         raise RuntimeError("PF11 packaged ProductProject identity/version proof failed")
+    product_state = _require_product_state(bridge.get_state(), project_id=project_id)
     payload = {
         "route": decision.route.value,
         "project_id": project_id,
         "spec_version": detail.summary.version,
         "state": detail.summary.state,
+        "command_center_state_proven": True,
+        "bridge_state_project_id": product_state["project_id"],
+        "bridge_state_spec_version": product_state["spec_version"],
+        "bridge_state_status_count": product_state["status_count"],
+        "bridge_state_decision_count": product_state["decision_count"],
+        "bounded_projection_proven": True,
         "human_tested": False,
         "nvda_verified": False,
         "production_release_ready": False,
