@@ -272,6 +272,7 @@ def test_execution_mediated_status_is_project_scoped_and_redacts_credential(
             DeploymentExecutionRecord(
                 foreign_spec,
                 OperationState.SUCCEEDED,
+                deployment_state=DeploymentState.HEALTHY,
                 evidence_refs=("execution://foreign",),
                 attempt=1,
                 updated_at=NOW,
