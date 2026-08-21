@@ -83,8 +83,8 @@ class ProductProjectHistoryShardedCommitmentService:
         *,
         target_records_per_shard: int = 256,
     ) -> ProductProjectHistoryCommitmentIndex:
-        if target_records_per_shard < 1:
-            raise ProductProjectError("target_records_per_shard must be positive")
+        if type(target_records_per_shard) is not int or target_records_per_shard < 1:
+            raise ProductProjectError("target_records_per_shard must be a positive integer")
         summary = self.semantic.generations.verify(generation)
         history = self.semantic._history_for_generation(generation)
         summaries: list[CommitmentShardSummary] = []
@@ -108,7 +108,7 @@ class ProductProjectHistoryShardedCommitmentService:
                 }
                 shard_digest = _digest(payload)
                 blob = _canonical(
-                    {"digest_sha256": shard_digest, "payload": payload}
+                    {"digest_sha256": shard_digest, "payload": segment_payload}
                 ).encode("utf-8")
                 summaries.append(
                     CommitmentShardSummary(
@@ -299,9 +299,9 @@ class ProductProjectHistoryShardedCommitmentService:
         record_count = payload.get("record_count")
         if section not in _IMMUTABLE_IDENTITIES:
             raise ProductProjectError("commitment shard summary section is invalid")
-        if not isinstance(shard_index, int) or shard_index < 0:
+        if not cls._is_int(shard_index, minimum=0):
             raise ProductProjectError("commitment shard summary index is invalid")
-        if not isinstance(record_count, int) or record_count < 1:
+        if not cls._is_int(record_count, minimum=1):
             raise ProductProjectError("commitment shard summary count is invalid")
         for key in (
             "first_identity_digest_sha256",
@@ -346,20 +346,24 @@ class ProductProjectHistoryShardedCommitmentService:
                 ):
                     raise ProductProjectError("commitment shard identity ranges overlap")
 
+    @staticmethod
+    def _is_int(value: Any, *, minimum: int) -> bool:
+        return type(value) is int and value >= minimum
+
     @classmethod
     def _validate_index_payload(cls, payload: dict[str, Any]) -> None:
         if not isinstance(payload.get("project_id"), str) or not payload["project_id"].strip():
             raise ProductProjectError("commitment index project identity is invalid")
         for key in ("generation", "spec_version"):
-            if not isinstance(payload.get(key), int) or payload[key] < 1:
+            if not cls._is_int(payload.get(key), minimum=1):
                 raise ProductProjectError(f"commitment index {key} is invalid")
-        if not isinstance(payload.get("row_version"), int) or payload["row_version"] < 0:
+        if not cls._is_int(payload.get("row_version"), minimum=0):
             raise ProductProjectError("commitment index row_version is invalid")
         target = payload.get("target_records_per_shard")
         total = payload.get("total_immutable_records")
-        if not isinstance(target, int) or target < 1:
+        if not cls._is_int(target, minimum=1):
             raise ProductProjectError("commitment index shard target is invalid")
-        if not isinstance(total, int) or total < 0:
+        if not cls._is_int(total, minimum=0):
             raise ProductProjectError("commitment index record total is invalid")
         for key in ("archive_digest_sha256", "generation_manifest_digest_sha256"):
             if not cls._is_digest(payload.get(key)):
@@ -373,10 +377,10 @@ class ProductProjectHistoryShardedCommitmentService:
             raise ProductProjectError("commitment shard section is invalid")
         if not isinstance(payload.get("project_id"), str) or not payload["project_id"].strip():
             raise ProductProjectError("commitment shard project identity is invalid")
-        for key in ("generation", "shard_index"):
-            minimum = 1 if key == "generation" else 0
-            if not isinstance(payload.get(key), int) or payload[key] < minimum:
-                raise ProductProjectError(f"commitment shard {key} is invalid")
+        if not cls._is_int(payload.get("generation"), minimum=1):
+            raise ProductProjectError("commitment shard generation is invalid")
+        if not cls._is_int(payload.get("shard_index"), minimum=0):
+            raise ProductProjectError("commitment shard shard_index is invalid")
         records = payload.get("records")
         if not isinstance(records, list) or not records:
             raise ProductProjectError("commitment shard records are invalid")
