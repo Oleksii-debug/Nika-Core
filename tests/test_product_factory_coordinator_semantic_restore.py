@@ -108,19 +108,26 @@ def _records(snapshot: CoordinatorSnapshot) -> dict[str, WorkRecord]:
     return {record.request.component_id: record for record in snapshot.records}
 
 
+def _forged(snapshot: CoordinatorSnapshot, records: tuple[WorkRecord, ...]) -> CoordinatorSnapshot:
+    return replace(snapshot, revision=snapshot.revision + 1, records=records)
+
+
+def _restore(coordinator: ProductFactoryCoordinator, snapshot: CoordinatorSnapshot) -> None:
+    ProductFactoryCoordinator(_graph()).restore(
+        snapshot,
+        trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
+    )
+
+
 def test_restore_rejects_forged_accepted_without_result_or_review() -> None:
     coordinator = _planned()
     snapshot = coordinator.snapshot()
     records = _records(snapshot)
     forged_core = WorkRecord(records["core"].request, WorkState.ACCEPTED)
-    forged = CoordinatorSnapshot(
-        snapshot.project_id,
-        snapshot.revision + 1,
-        (forged_core, records["ui"]),
-    )
+    forged = _forged(snapshot, (forged_core, records["ui"]))
 
     with pytest.raises(CoordinatorError):
-        ProductFactoryCoordinator(_graph()).restore(forged)
+        _restore(coordinator, forged)
 
 
 def test_restore_rejects_request_repository_identity_drift() -> None:
@@ -128,9 +135,8 @@ def test_restore_rejects_request_repository_identity_drift() -> None:
     snapshot = coordinator.snapshot()
     records = _records(snapshot)
     core = records["core"]
-    forged = CoordinatorSnapshot(
-        snapshot.project_id,
-        snapshot.revision + 1,
+    forged = _forged(
+        snapshot,
         (
             WorkRecord(replace(core.request, repository_id="repo-other"), core.state),
             records["ui"],
@@ -138,7 +144,7 @@ def test_restore_rejects_request_repository_identity_drift() -> None:
     )
 
     with pytest.raises(CoordinatorError):
-        ProductFactoryCoordinator(_graph()).restore(forged)
+        _restore(coordinator, forged)
 
 
 def test_restore_rejects_request_project_identity_drift() -> None:
@@ -146,9 +152,8 @@ def test_restore_rejects_request_project_identity_drift() -> None:
     snapshot = coordinator.snapshot()
     records = _records(snapshot)
     core = records["core"]
-    forged = CoordinatorSnapshot(
-        snapshot.project_id,
-        snapshot.revision + 1,
+    forged = _forged(
+        snapshot,
         (
             WorkRecord(replace(core.request, project_id="product-other"), core.state),
             records["ui"],
@@ -156,7 +161,7 @@ def test_restore_rejects_request_project_identity_drift() -> None:
     )
 
     with pytest.raises(CoordinatorError):
-        ProductFactoryCoordinator(_graph()).restore(forged)
+        _restore(coordinator, forged)
 
 
 def test_restore_rejects_path_scope_expansion() -> None:
@@ -164,9 +169,8 @@ def test_restore_rejects_path_scope_expansion() -> None:
     snapshot = coordinator.snapshot()
     records = _records(snapshot)
     core = records["core"]
-    forged = CoordinatorSnapshot(
-        snapshot.project_id,
-        snapshot.revision + 1,
+    forged = _forged(
+        snapshot,
         (
             WorkRecord(replace(core.request, allowed_paths=("src",)), core.state),
             records["ui"],
@@ -174,7 +178,7 @@ def test_restore_rejects_path_scope_expansion() -> None:
     )
 
     with pytest.raises(CoordinatorError):
-        ProductFactoryCoordinator(_graph()).restore(forged)
+        _restore(coordinator, forged)
 
 
 def test_restore_rejects_permission_ceiling_expansion() -> None:
@@ -182,9 +186,8 @@ def test_restore_rejects_permission_ceiling_expansion() -> None:
     snapshot = coordinator.snapshot()
     records = _records(snapshot)
     core = records["core"]
-    forged = CoordinatorSnapshot(
-        snapshot.project_id,
-        snapshot.revision + 1,
+    forged = _forged(
+        snapshot,
         (
             WorkRecord(
                 replace(
@@ -198,7 +201,7 @@ def test_restore_rejects_permission_ceiling_expansion() -> None:
     )
 
     with pytest.raises(CoordinatorError):
-        ProductFactoryCoordinator(_graph()).restore(forged)
+        _restore(coordinator, forged)
 
 
 def test_success_requires_every_declared_acceptance_command() -> None:
@@ -251,14 +254,10 @@ def test_restore_revalidates_acceptance_matrix_inside_accepted_record() -> None:
         incomplete_result,
         ReviewDecision("qa", True, "forged acceptance", ("evidence:forged",)),
     )
-    forged = CoordinatorSnapshot(
-        snapshot.project_id,
-        snapshot.revision + 1,
-        (forged_core, records["ui"]),
-    )
+    forged = _forged(snapshot, (forged_core, records["ui"]))
 
     with pytest.raises(CoordinatorError, match="every declared acceptance command"):
-        ProductFactoryCoordinator(_graph()).restore(forged)
+        _restore(coordinator, forged)
 
 
 def test_restore_rejects_failed_worker_result_hidden_under_accepted_review() -> None:
@@ -272,14 +271,10 @@ def test_restore_rejects_failed_worker_result_hidden_under_accepted_review() -> 
         _failed_envelope(request),
         ReviewDecision("qa", True, "forged acceptance", ("evidence:forged",)),
     )
-    forged = CoordinatorSnapshot(
-        snapshot.project_id,
-        snapshot.revision + 1,
-        (forged_core, records["ui"]),
-    )
+    forged = _forged(snapshot, (forged_core, records["ui"]))
 
     with pytest.raises(CoordinatorError, match="successful result"):
-        ProductFactoryCoordinator(_graph()).restore(forged)
+        _restore(coordinator, forged)
 
 
 def test_restore_rejects_work_id_that_does_not_match_component_attempt() -> None:
@@ -287,9 +282,8 @@ def test_restore_rejects_work_id_that_does_not_match_component_attempt() -> None
     snapshot = coordinator.snapshot()
     records = _records(snapshot)
     core = records["core"]
-    forged = CoordinatorSnapshot(
-        snapshot.project_id,
-        snapshot.revision + 1,
+    forged = _forged(
+        snapshot,
         (
             WorkRecord(
                 replace(core.request, work_id="work-" + "f" * 24),
@@ -300,16 +294,15 @@ def test_restore_rejects_work_id_that_does_not_match_component_attempt() -> None
     )
 
     with pytest.raises(CoordinatorError, match="work id"):
-        ProductFactoryCoordinator(_graph()).restore(forged)
+        _restore(coordinator, forged)
 
 
 def test_restore_rejects_ready_dependency_before_parent_acceptance() -> None:
     coordinator = _planned()
     snapshot = coordinator.snapshot()
     records = _records(snapshot)
-    forged = CoordinatorSnapshot(
-        snapshot.project_id,
-        snapshot.revision + 1,
+    forged = _forged(
+        snapshot,
         (
             records["core"],
             WorkRecord(records["ui"].request, WorkState.READY),
@@ -317,7 +310,7 @@ def test_restore_rejects_ready_dependency_before_parent_acceptance() -> None:
     )
 
     with pytest.raises(CoordinatorError, match="dependency acceptance"):
-        ProductFactoryCoordinator(_graph()).restore(forged)
+        _restore(coordinator, forged)
 
 
 def test_single_declared_pytest_accepts_equivalent_full_suite_evidence() -> None:
