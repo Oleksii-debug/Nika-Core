@@ -98,10 +98,10 @@ def _require_product_state(
         raise RuntimeError(f"PF11 packaged bridge state failed: {response}")
     state = response.get("state")
     if not isinstance(state, Mapping):
-        raise RuntimeError("PF11 packaged bridge did not return a state mapping")
+        raise TypeError("PF11 packaged bridge did not return a state mapping")
     product_state = state.get("product_project")
     if not isinstance(product_state, Mapping):
-        raise RuntimeError("PF11 packaged bridge did not expose ProductCommandCenter state")
+        raise TypeError("PF11 packaged bridge did not expose ProductCommandCenter state")
     if (
         product_state.get("project_id") != project_id
         or product_state.get("spec_version") != 1
