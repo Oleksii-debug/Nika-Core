@@ -37,15 +37,27 @@ def test_pf11_windows_composition_root_routes_product_commands_to_product_factor
 
 
 def test_pf11_m12_records_digest_of_the_actual_distributable_zip() -> None:
-    """Internal bundle hashes do not identify the outer ZIP shipped to the user."""
+    """The evidence JSON must bind the exact outer ZIP that is uploaded."""
     workflow = (
         ROOT / ".github" / "workflows" / "m12-prehuman-release-gate.yml"
     ).read_text(encoding="utf-8")
     lowered = workflow.casefold()
 
-    assert "compress-archive" in lowered
-    assert "get-filehash" in lowered or "sha256sum" in lowered
-    assert "zip_sha256" in lowered or "artifact_sha256" in lowered
+    compress_index = lowered.index("compress-archive")
+    hash_index = lowered.index("get-filehash")
+    evidence_index = lowered.index("record automated pre-human evidence")
+    upload_index = lowered.index("upload exact pre-human candidate evidence")
+
+    assert compress_index < hash_index < evidence_index < upload_index
+    assert "id: distributable" in lowered
+    assert "-algorithm sha256" in lowered
+    assert "^[0-9a-f]{64}$" in lowered
+    assert "zip_path=$zippath" in lowered
+    assert "zip_sha256=$zipsha256" in lowered
+    assert "distributable_zip_path" in lowered
+    assert "steps.distributable.outputs.zip_path" in lowered
+    assert "distributable_zip_sha256" in lowered
+    assert "steps.distributable.outputs.zip_sha256" in lowered
 
 
 def test_pf11_pre_human_evidence_cannot_claim_production_release_readiness() -> None:
