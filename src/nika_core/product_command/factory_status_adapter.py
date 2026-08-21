@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import hashlib
-
 from nika_core.product_command.contracts import (
     EvidenceReference,
     ProductStatusEntry,
     ProductStatusKind,
 )
+from nika_core.product_command.reference_safety import safe_evidence_reference
 from nika_core.product_factory_deployment_execution import (
     DeploymentExecutionSnapshot,
     OperationState,
@@ -20,7 +19,6 @@ from nika_core.product_factory_operations import ProductOperationsSnapshot
 from nika_core.product_factory_operations_contracts import ServiceHealth
 
 _MAX_EVIDENCE = 20
-_MAX_REFERENCE = 512
 
 
 def deployment_execution_status_entries(
@@ -213,15 +211,9 @@ def _evidence(kind: str, refs: tuple[str, ...]) -> tuple[EvidenceReference, ...]
     return tuple(
         EvidenceReference(
             kind=kind,
-            reference=_bounded_reference(ref),
+            reference=safe_evidence_reference(ref),
             label="Normalized Product Factory evidence",
         )
         for ref in refs[-_MAX_EVIDENCE:]
         if ref.strip()
     )
-
-
-def _bounded_reference(reference: str) -> str:
-    if len(reference) <= _MAX_REFERENCE:
-        return reference
-    return "evidence-sha256:" + hashlib.sha256(reference.encode("utf-8")).hexdigest()
