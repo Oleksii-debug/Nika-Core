@@ -18,6 +18,12 @@ _HISTORY_LIST_SECTIONS = (
     "mutation_idempotency",
     "audit_events",
 )
+_SORTED_IMMUTABLE_IDENTITIES: dict[str, tuple[str, ...]] = {
+    "research_handoffs": ("package_id",),
+    "decisions": ("decision_id", "decision_version"),
+    "creation_idempotency": ("operation_key",),
+    "mutation_idempotency": ("operation_key",),
+}
 
 
 def _canonical(value: Any) -> str:
@@ -307,10 +313,64 @@ class ProductProjectHistoryGenerationService:
                 )
             if len(newer_rows) < len(older_rows):
                 raise ProductProjectError(f"history generation archive truncated {section}")
-            if newer_rows[: len(older_rows)] != older_rows:
+            identity_fields = _SORTED_IMMUTABLE_IDENTITIES.get(section)
+            if identity_fields is None:
+                if newer_rows[: len(older_rows)] != older_rows:
+                    raise ProductProjectError(
+                        f"history generation archive rewrote prior {section}"
+                    )
+                continue
+            cls._require_immutable_rows_preserved(
+                section,
+                older_rows,
+                newer_rows,
+                identity_fields,
+            )
+
+    @classmethod
+    def _require_immutable_rows_preserved(
+        cls,
+        section: str,
+        older_rows: list[Any],
+        newer_rows: list[Any],
+        identity_fields: tuple[str, ...],
+    ) -> None:
+        older_by_identity = cls._rows_by_identity(section, older_rows, identity_fields)
+        newer_by_identity = cls._rows_by_identity(section, newer_rows, identity_fields)
+        for identity, older_row in older_by_identity.items():
+            newer_row = newer_by_identity.get(identity)
+            if newer_row is None:
+                raise ProductProjectError(
+                    f"history generation archive removed prior {section} record"
+                )
+            if newer_row != older_row:
                 raise ProductProjectError(
                     f"history generation archive rewrote prior {section}"
                 )
+
+    @staticmethod
+    def _rows_by_identity(
+        section: str,
+        rows: list[Any],
+        identity_fields: tuple[str, ...],
+    ) -> dict[tuple[Any, ...], dict[str, Any]]:
+        result: dict[tuple[Any, ...], dict[str, Any]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ProductProjectError(
+                    f"history generation archive has invalid {section} record"
+                )
+            identity = tuple(row.get(field) for field in identity_fields)
+            if any(value is None for value in identity):
+                raise ProductProjectError(
+                    f"history generation archive has incomplete {section} identity"
+                )
+            if identity in result:
+                raise ProductProjectError(
+                    f"history generation archive has duplicate {section} identity"
+                )
+            result[identity] = row
+        return result
 
     @staticmethod
     def _archive_payload(raw: bytes) -> dict[str, Any]:
