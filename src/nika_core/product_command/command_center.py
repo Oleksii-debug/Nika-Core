@@ -24,10 +24,17 @@ from nika_core.product_factory_deployment import (
     EnvironmentTier,
     ExecutionRegistrySnapshot,
 )
-from nika_core.product_factory_deployment_execution import DeploymentExecutionSnapshot
-from nika_core.product_factory_deployment_waves import DeploymentWaveSnapshot
+from nika_core.product_factory_deployment_execution import (
+    DeploymentExecutionSnapshot,
+    OperationState,
+)
+from nika_core.product_factory_deployment_waves import (
+    DeploymentWaveSnapshot,
+    RolloutState,
+)
 from nika_core.product_factory_fleet_maintenance import RollingMaintenanceSnapshot
 from nika_core.product_factory_operations import ProductOperationsSnapshot
+from nika_core.product_factory_operations_contracts import ServiceHealth
 
 
 class ProductCommandCenterScopeError(ValueError):
@@ -86,7 +93,7 @@ class ProductCommandCenter:
             _validate_operations_scope(project_id, operations)
             statuses.extend(product_operations_status_entries(project_id, operations))
         if fleet_maintenance is not None:
-            _validate_rolling_maintenance_snapshot(fleet_maintenance)
+            _validate_rolling_maintenance_snapshot(project_id, fleet_maintenance)
             statuses.extend(
                 rolling_maintenance_status_entries(project_id, fleet_maintenance)
             )
@@ -336,6 +343,12 @@ def _validate_deployment_execution_snapshot(
 ) -> None:
     operation_ids = [record.spec.operation_id for record in snapshot.records]
     _require_unique(operation_ids, "deployment operation")
+    terminal_deployment_state = {
+        OperationState.SUCCEEDED: DeploymentState.HEALTHY,
+        OperationState.REJECTED: DeploymentState.REJECTED,
+        OperationState.ROLLED_BACK: DeploymentState.ROLLED_BACK,
+        OperationState.RECONCILE_REQUIRED: DeploymentState.UNCERTAIN,
+    }
     for record in snapshot.records:
         spec = record.spec
         if (
@@ -350,27 +363,50 @@ def _validate_deployment_execution_snapshot(
             raise ProductCommandCenterScopeError(
                 "deployment execution contains an invalid attempt count"
             )
+        if record.state is OperationState.PREPARED or record.node_id is not None:
+            raise ProductCommandCenterScopeError(
+                "deployment execution snapshot serializes an active ephemeral lease"
+            )
+        expected_deployment_state = terminal_deployment_state.get(record.state)
+        if expected_deployment_state is None:
+            if record.deployment_state is not None:
+                raise ProductCommandCenterScopeError(
+                    "non-terminal deployment execution carries terminal deployment state"
+                )
+        elif record.deployment_state is not expected_deployment_state:
+            raise ProductCommandCenterScopeError(
+                "deployment execution state disagrees with deployment fabric state"
+            )
 
 
 def _validate_deployment_wave_snapshot(snapshot: DeploymentWaveSnapshot) -> None:
+    _validate_deployment_execution_snapshot(snapshot.execution)
     plan_ids = [record.plan.plan_id for record in snapshot.plans]
     _require_unique(plan_ids, "deployment wave plan")
-    execution_id_list = [
-        record.spec.operation_id for record in snapshot.execution.records
-    ]
-    _require_unique(execution_id_list, "deployment wave execution operation")
-    execution_ids = set(execution_id_list)
+    execution_records = {
+        record.spec.operation_id: record for record in snapshot.execution.records
+    }
     for record in snapshot.plans:
+        plan_service_ids = [service.service_id for service in record.plan.services]
         service_ids = [service.service_id for service in record.services]
         operation_ids = [service.operation_id for service in record.services]
+        _require_unique(plan_service_ids, "deployment wave planned service")
         _require_unique(service_ids, "deployment wave service")
         _require_unique(operation_ids, "deployment wave operation")
-        expected = {
+        if len(record.services) != len(record.plan.services):
+            raise ProductCommandCenterScopeError(
+                "deployment wave service set does not match submitted plan"
+            )
+        expected_operation_ids = {
             service.execution.operation_id for service in record.plan.services
         }
-        if set(operation_ids) != expected or not expected <= execution_ids:
+        if set(operation_ids) != expected_operation_ids:
             raise ProductCommandCenterScopeError(
-                "deployment wave snapshot does not match execution evidence"
+                "deployment wave snapshot operation set is inconsistent"
+            )
+        if not expected_operation_ids <= execution_records.keys():
+            raise ProductCommandCenterScopeError(
+                "deployment wave snapshot is missing execution state"
             )
         if any(
             service.execution.intent.project_id != record.plan.project_id
@@ -379,6 +415,54 @@ def _validate_deployment_wave_snapshot(snapshot: DeploymentWaveSnapshot) -> None
             raise ProductCommandCenterScopeError(
                 "deployment wave contains cross-project execution"
             )
+
+        planned_by_service = {
+            service.service_id: service for service in record.plan.services
+        }
+        for service_record in record.services:
+            planned = planned_by_service.get(service_record.service_id)
+            if planned is None or (
+                service_record.operation_id != planned.execution.operation_id
+                or service_record.wave != planned.wave
+            ):
+                raise ProductCommandCenterScopeError(
+                    "deployment wave service binding drifted from submitted plan"
+                )
+            execution_record = execution_records[service_record.operation_id]
+            if planned.execution != execution_record.spec:
+                raise ProductCommandCenterScopeError(
+                    "deployment wave plan execution payload disagrees with execution snapshot"
+                )
+            if (
+                service_record.state is not execution_record.state
+                or service_record.attempt != execution_record.attempt
+                or service_record.evidence_refs != execution_record.evidence_refs
+            ):
+                raise ProductCommandCenterScopeError(
+                    "deployment wave service record disagrees with execution snapshot"
+                )
+        if record.state is not _expected_rollout_state(record.services):
+            raise ProductCommandCenterScopeError(
+                "deployment wave summary state disagrees with service states"
+            )
+
+
+def _expected_rollout_state(services) -> RolloutState:
+    states = {item.state for item in services}
+    if states <= {OperationState.SUCCEEDED}:
+        return RolloutState.SUCCEEDED
+    if states & {OperationState.REJECTED, OperationState.ROLLED_BACK}:
+        return RolloutState.PARTIAL_FAILURE
+    if states & {
+        OperationState.WAITING_FOR_NODE,
+        OperationState.BLOCKED_CREDENTIAL,
+        OperationState.RECOVERY_REQUIRED,
+        OperationState.RECONCILE_REQUIRED,
+    }:
+        return RolloutState.PAUSED
+    if states == {OperationState.PENDING}:
+        return RolloutState.PENDING
+    return RolloutState.RUNNING
 
 
 def _validate_operations_scope(
@@ -395,13 +479,77 @@ def _validate_operations_scope(
     ]
     _require_unique(service_ids, "operations service")
     _require_unique(request_ids, "maintenance request")
+    _require_unique(snapshot.revoked_credentials, "revoked credential")
+    _require_unique(snapshot.unavailable_nodes, "unavailable node")
     known_services = set(service_ids)
+    revoked_credentials = set(snapshot.revoked_credentials)
+    unavailable_nodes = set(snapshot.unavailable_nodes)
+
     for record in snapshot.services:
         service = record.service
         if service.project_id != project_id:
             raise ProductCommandCenterScopeError(
                 "operations snapshot contains a cross-project service"
             )
+        if any(dependency not in known_services for dependency in service.dependencies):
+            raise ProductCommandCenterScopeError(
+                "operations snapshot service dependency is missing"
+            )
+
+        replica_ids = {replica.replica_id for replica in service.replicas}
+        expected_node_loss = {
+            replica.replica_id
+            for replica in service.replicas
+            if replica.node_id in unavailable_nodes
+        }
+        _require_unique(record.node_loss, "service node-loss replica")
+        if set(record.node_loss) != expected_node_loss:
+            raise ProductCommandCenterScopeError(
+                "operations snapshot node-loss evidence disagrees with unavailable nodes"
+            )
+
+        _require_unique(record.blocked_credentials, "blocked service credential")
+        blocked_credentials = set(record.blocked_credentials)
+        if not blocked_credentials <= set(service.credential_refs):
+            raise ProductCommandCenterScopeError(
+                "operations snapshot blocks a credential not declared by the service"
+            )
+        if not blocked_credentials <= revoked_credentials:
+            raise ProductCommandCenterScopeError(
+                "operations snapshot credential blocker lacks revocation state"
+            )
+        if bool(blocked_credentials) != (record.health is ServiceHealth.BLOCKED):
+            raise ProductCommandCenterScopeError(
+                "operations snapshot credential blocker disagrees with service health"
+            )
+
+        if record.observation is not None:
+            observation = record.observation
+            observed_replicas = set(observation.healthy_replica_ids) | set(
+                observation.failed_replica_ids
+            )
+            if (
+                observation.service_id != service.service_id
+                or observation.release_sha != service.release_sha
+                or not observed_replicas <= replica_ids
+            ):
+                raise ProductCommandCenterScopeError(
+                    "operations observation does not match service identity/release/replicas"
+                )
+        if record.rollback is not None:
+            rollback = record.rollback
+            expected_health = (
+                ServiceHealth.ROLLED_BACK if rollback.succeeded else ServiceHealth.FAILED
+            )
+            if (
+                rollback.service_id != service.service_id
+                or rollback.failed_release_sha != service.release_sha
+                or record.health is not expected_health
+            ):
+                raise ProductCommandCenterScopeError(
+                    "operations rollback evidence disagrees with service state"
+                )
+
     for record in snapshot.maintenance_records:
         if record.request.service_id not in known_services:
             raise ProductCommandCenterScopeError(
@@ -410,12 +558,17 @@ def _validate_operations_scope(
 
 
 def _validate_rolling_maintenance_snapshot(
+    project_id: str,
     snapshot: RollingMaintenanceSnapshot,
 ) -> None:
     plan_ids = [plan.plan_id for plan in snapshot.plans]
     record_plan_ids = [plan_id for plan_id, _records in snapshot.node_records]
     _require_unique(plan_ids, "rolling maintenance plan")
     _require_unique(record_plan_ids, "rolling maintenance checkpoint plan")
+    if any(plan.project_id != project_id for plan in snapshot.plans):
+        raise ProductCommandCenterScopeError(
+            "rolling maintenance snapshot belongs to a different ProductProject"
+        )
     plans = {plan.plan_id: plan for plan in snapshot.plans}
     if set(record_plan_ids) != set(plans):
         raise ProductCommandCenterScopeError(
@@ -435,9 +588,10 @@ def _validate_rolling_maintenance_snapshot(
                 or record.pending_request.project_id != plan.project_id
                 or record.pending_request.fleet_plan_id != plan.fleet_plan_id
                 or record.pending_request.node_id != record.node_id
+                or record.pending_request.bindings != record.bindings
             ):
                 raise ProductCommandCenterScopeError(
-                    "rolling maintenance pending request crosses plan identity"
+                    "rolling maintenance pending request crosses plan/binding identity"
                 )
 
 
