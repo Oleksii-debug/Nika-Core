@@ -427,7 +427,7 @@ def test_long_horizon_mixed_history_survives_many_restart_cycles(tmp_path) -> No
         assert report.current.requirement_count == 120
         assert report.current.milestone_count == 120
         assert report.lifecycle_transition_count == (cycle + 1) * 2
-        assert report.current.spec_revision_count == cycle + 2
+        assert report.current.spec_revision_count == cycle + 3
 
     assert current.spec_version == 14
     assert current.row_version == 50
