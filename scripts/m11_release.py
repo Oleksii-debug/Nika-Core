@@ -92,7 +92,7 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
             except (OSError, UnicodeError, json.JSONDecodeError) as exc:
                 raise RuntimeError("packaged PF11 proof did not emit valid JSON evidence") from exc
             if not isinstance(payload, dict):
-                raise RuntimeError("packaged PF11 proof evidence must be a JSON object")
+                raise TypeError("packaged PF11 proof evidence must be a JSON object")
             outputs.append(payload)
 
     first, second = outputs
