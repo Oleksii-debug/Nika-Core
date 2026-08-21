@@ -6,6 +6,8 @@ from enum import StrEnum
 from typing import Protocol
 
 _MAX_CREDENTIAL_LEASE_TTL_SECONDS = 900
+_AUDIT_EVENT_PREFIX = "credential-event-"
+_AUDIT_EVENT_DIGITS = 8
 
 
 class CredentialBrokerError(ValueError):
@@ -376,6 +378,14 @@ class CredentialBroker:
             raise CredentialBrokerError("credential broker snapshot contains duplicate identities")
         if len(audit_ids) != len(set(audit_ids)):
             raise CredentialBrokerError("credential broker snapshot contains duplicate audit events")
+        audit_sequences = [_audit_event_sequence(event_id) for event_id in audit_ids]
+        if any(
+            current <= previous
+            for previous, current in zip(audit_sequences, audit_sequences[1:], strict=False)
+        ):
+            raise CredentialBrokerError("credential broker snapshot audit events are not monotonic")
+        if audit_sequences and snapshot.next_event <= audit_sequences[-1]:
+            raise CredentialBrokerError("credential broker snapshot audit counter was rolled back")
         secrets = {secret.secret_ref: secret for secret in snapshot.secrets}
         for identity in snapshot.identities:
             bound = [secrets.get(secret_ref) for secret_ref in identity.secret_refs]
@@ -435,6 +445,18 @@ class CredentialBroker:
         event_id = f"credential-event-{self._next_event:08d}"
         self._next_event += 1
         return event_id
+
+
+def _audit_event_sequence(event_id: str) -> int:
+    if not event_id.startswith(_AUDIT_EVENT_PREFIX):
+        raise CredentialBrokerError("credential broker snapshot contains invalid audit event identity")
+    suffix = event_id[len(_AUDIT_EVENT_PREFIX) :]
+    if len(suffix) != _AUDIT_EVENT_DIGITS or not suffix.isascii() or not suffix.isdigit():
+        raise CredentialBrokerError("credential broker snapshot contains invalid audit event identity")
+    sequence = int(suffix)
+    if sequence < 1:
+        raise CredentialBrokerError("credential broker snapshot contains invalid audit event identity")
+    return sequence
 
 
 def _aware(value: datetime) -> datetime:
