@@ -150,26 +150,27 @@ def verify_third_party_notices(bundle_dir: Path) -> tuple[str, ...]:
     sections, duplicates = _sections(text)
     findings: list[str] = []
     if "Python runtime" in duplicates:
-        findings.append("notices:duplicate:pythonruntime")
+        findings.extend(("notices:pythonruntime", "notices:pythonruntime:duplicate"))
     python_body = sections.get("Python runtime")
     try:
         expected_python_body = _python_license()
     except RuntimeError:
-        findings.append("notices:pythonruntime:metadata")
+        findings.extend(("notices:pythonruntime", "notices:pythonruntime:metadata"))
     else:
         if python_body != expected_python_body:
             findings.append("notices:pythonruntime")
 
     for distribution_name in RUNTIME_DISTRIBUTIONS:
+        base_finding = f"notices:{distribution_name}"
         try:
             dist = metadata.distribution(distribution_name)
             title, expected_body = _distribution_section(distribution_name, dist)
         except (metadata.PackageNotFoundError, RuntimeError):
-            findings.append(f"notices:{distribution_name}:metadata")
+            findings.extend((base_finding, f"{base_finding}:metadata"))
             continue
         if title in duplicates:
-            findings.append(f"notices:{distribution_name}:duplicate")
+            findings.extend((base_finding, f"{base_finding}:duplicate"))
             continue
         if sections.get(title) != expected_body:
-            findings.append(f"notices:{distribution_name}")
-    return tuple(findings)
+            findings.append(base_finding)
+    return tuple(dict.fromkeys(findings))
