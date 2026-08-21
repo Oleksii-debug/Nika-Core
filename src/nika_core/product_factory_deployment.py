@@ -651,9 +651,10 @@ def _validate_record(record: DeploymentRecord) -> None:
             raise DeploymentFabricError("rolled-back snapshot record is semantically inconsistent")
     elif record.state is DeploymentState.HEALTH_CHECK:
         raise DeploymentFabricError("health-check state must not be serialized as durable")
-    elif record.state is DeploymentState.UNCERTAIN:
-        if record.health is not None or record.rollback is not None:
-            raise DeploymentFabricError("uncertain snapshot record has final evidence")
+    elif record.state is DeploymentState.UNCERTAIN and (
+        record.health is not None or record.rollback is not None
+    ):
+        raise DeploymentFabricError("uncertain snapshot record has final evidence")
 
 
 def _aware(value: datetime) -> datetime:
