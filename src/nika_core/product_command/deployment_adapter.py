@@ -76,7 +76,7 @@ def deployment_status_entries(
 
 
 def _validate_snapshot_backing(snapshot: DeploymentFabricSnapshot) -> None:
-    """Mirror PF3 restore trust checks for release markers before presentation."""
+    """Fail closed on forged release markers while retaining PF3 legacy compatibility."""
     staging_projects: set[str] = set()
     for project_id, source_sha in snapshot.healthy_staging:
         if project_id in staging_projects:
@@ -100,11 +100,10 @@ def _validate_snapshot_backing(snapshot: DeploymentFabricSnapshot) -> None:
 
     current_keys: set[tuple[str, str]] = set()
     for entry in snapshot.current_releases:
-        if len(entry) != 3:
-            raise DeploymentPresentationIntegrityError(
-                "presentation requires normalized project/environment current-release identity"
-            )
-        project_id, environment_id, source_sha = entry
+        project_id, environment_id, source_sha = _normalize_current_release_entry(
+            entry,
+            snapshot.records,
+        )
         key = (project_id, environment_id)
         if key in current_keys:
             raise DeploymentPresentationIntegrityError(
@@ -112,18 +111,74 @@ def _validate_snapshot_backing(snapshot: DeploymentFabricSnapshot) -> None:
             )
         current_keys.add(key)
         if not any(
-            _is_healthy_record(
+            _is_current_release_backing_record(
                 record,
                 project_id=project_id,
                 environment_id=environment_id,
                 source_sha=source_sha,
-                require_staging=False,
             )
             for record in snapshot.records
         ):
             raise DeploymentPresentationIntegrityError(
-                "current release marker is not backed by a healthy deployment"
+                "current release marker is not backed by deployment recovery evidence"
             )
+
+
+def _normalize_current_release_entry(
+    entry: tuple[str, ...],
+    records: tuple[DeploymentRecord, ...],
+) -> tuple[str, str, str]:
+    if len(entry) == 3:
+        project_id, environment_id, source_sha = entry
+    elif len(entry) == 2:
+        environment_id, source_sha = entry
+        projects = {
+            record.intent.project_id
+            for record in records
+            if record.intent.environment.environment_id == environment_id
+        }
+        if len(projects) != 1:
+            raise DeploymentPresentationIntegrityError(
+                "legacy current-release environment identity is ambiguous across projects"
+            )
+        project_id = next(iter(projects))
+    else:
+        raise DeploymentPresentationIntegrityError(
+            "current-release identity must contain environment/release or "
+            "project/environment/release"
+        )
+    if not all(value.strip() for value in (project_id, environment_id, source_sha)):
+        raise DeploymentPresentationIntegrityError(
+            "current-release identity contains an empty field"
+        )
+    return project_id, environment_id, source_sha
+
+
+def _is_current_release_backing_record(
+    record: DeploymentRecord,
+    *,
+    project_id: str,
+    environment_id: str,
+    source_sha: str,
+) -> bool:
+    if _is_healthy_record(
+        record,
+        project_id=project_id,
+        environment_id=environment_id,
+        source_sha=source_sha,
+        require_staging=False,
+    ):
+        return True
+    rollback = record.rollback
+    return bool(
+        record.intent.project_id == project_id
+        and record.intent.environment.environment_id == environment_id
+        and record.state is DeploymentState.ROLLED_BACK
+        and rollback is not None
+        and rollback.succeeded
+        and rollback.environment_id == environment_id
+        and rollback.restored_release_sha == source_sha
+    )
 
 
 def _is_healthy_record(
