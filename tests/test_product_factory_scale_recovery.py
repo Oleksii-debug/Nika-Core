@@ -143,7 +143,7 @@ def _successful_envelope(request, ordinal: int) -> WorkerResultEnvelope:
         job_id=request.work_id,
         test_evidence=(
             WorkerTestEvidence(
-                command=("python", "-m", "pytest", request.component_id),
+                command=request.acceptance_commands[0],
                 exit_code=0,
                 output_digest=_digest(ordinal + 1),
             ),

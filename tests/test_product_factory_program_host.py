@@ -159,7 +159,7 @@ def _envelope(request, ordinal: int = 1, *, failure: WorkerFailure | None = None
             if failure is not None
             else (
                 WorkerTestEvidence(
-                    ("python", "-m", "pytest", request.component_id),
+                    request.acceptance_commands[0],
                     0,
                     _digest(ordinal),
                 ),
