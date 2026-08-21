@@ -97,7 +97,7 @@ def test_operations_projection_rejects_forged_healthy_state() -> None:
 
     with pytest.raises(
         ProductFactorySnapshotIntegrityError,
-        match="health disagrees with normalized observation",
+        match="health disagrees with credential/observation/rollback state",
     ):
         product_operations_status_entries("project-1", snapshot)
 
