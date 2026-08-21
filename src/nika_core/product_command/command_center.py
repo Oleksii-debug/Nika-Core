@@ -481,7 +481,7 @@ def _validate_operations_scope(
     _require_unique(request_ids, "maintenance request")
     _require_unique(snapshot.revoked_credentials, "revoked credential")
     _require_unique(snapshot.unavailable_nodes, "unavailable node")
-    known_services = set(service_ids)
+    services = {record.service.service_id: record for record in snapshot.services}
     revoked_credentials = set(snapshot.revoked_credentials)
     unavailable_nodes = set(snapshot.unavailable_nodes)
 
@@ -491,10 +491,16 @@ def _validate_operations_scope(
             raise ProductCommandCenterScopeError(
                 "operations snapshot contains a cross-project service"
             )
-        if any(dependency not in known_services for dependency in service.dependencies):
-            raise ProductCommandCenterScopeError(
-                "operations snapshot service dependency is missing"
-            )
+        for dependency in service.dependencies:
+            dependency_record = services.get(dependency)
+            if dependency_record is None:
+                raise ProductCommandCenterScopeError(
+                    "operations snapshot service dependency is missing"
+                )
+            if dependency_record.service.wave >= service.wave:
+                raise ProductCommandCenterScopeError(
+                    "operations snapshot service dependency is not from an earlier wave"
+                )
 
         replica_ids = {replica.replica_id for replica in service.replicas}
         expected_node_loss = {
@@ -510,13 +516,19 @@ def _validate_operations_scope(
 
         _require_unique(record.blocked_credentials, "blocked service credential")
         blocked_credentials = set(record.blocked_credentials)
-        if not blocked_credentials <= set(service.credential_refs):
+        service_credentials = set(service.credential_refs)
+        expected_blocked_credentials = service_credentials & revoked_credentials
+        if not blocked_credentials <= service_credentials:
             raise ProductCommandCenterScopeError(
                 "operations snapshot blocks a credential not declared by the service"
             )
         if not blocked_credentials <= revoked_credentials:
             raise ProductCommandCenterScopeError(
                 "operations snapshot credential blocker lacks revocation state"
+            )
+        if blocked_credentials != expected_blocked_credentials:
+            raise ProductCommandCenterScopeError(
+                "operations snapshot omits revoked service credential blocker"
             )
         if bool(blocked_credentials) != (record.health is ServiceHealth.BLOCKED):
             raise ProductCommandCenterScopeError(
@@ -538,23 +550,73 @@ def _validate_operations_scope(
                 )
         if record.rollback is not None:
             rollback = record.rollback
-            expected_health = (
-                ServiceHealth.ROLLED_BACK if rollback.succeeded else ServiceHealth.FAILED
-            )
             if (
                 rollback.service_id != service.service_id
                 or rollback.failed_release_sha != service.release_sha
-                or record.health is not expected_health
             ):
                 raise ProductCommandCenterScopeError(
                     "operations rollback evidence disagrees with service state"
                 )
+            if record.observation is None:
+                raise ProductCommandCenterScopeError(
+                    "operations rollback evidence lacks prior service observation"
+                )
+
+        expected_health = _expected_operations_health_states(record, unavailable_nodes)
+        if record.health not in expected_health:
+            raise ProductCommandCenterScopeError(
+                "operations snapshot service health disagrees with "
+                "credential/observation/rollback state"
+            )
 
     for record in snapshot.maintenance_records:
-        if record.request.service_id not in known_services:
+        if record.request.service_id not in services:
             raise ProductCommandCenterScopeError(
                 "maintenance record references an unknown project service"
             )
+        if record.request.approval_ref is None:
+            raise ProductCommandCenterScopeError(
+                "maintenance record lacks explicit approval"
+            )
+
+
+def _expected_operations_health_states(
+    record,
+    unavailable_nodes: set[str],
+) -> set[ServiceHealth]:
+    if record.blocked_credentials:
+        return {ServiceHealth.BLOCKED}
+    observation = record.observation
+    if observation is None:
+        return {ServiceHealth.PENDING}
+
+    service = record.service
+    loss = {
+        replica.replica_id
+        for replica in service.replicas
+        if replica.node_id in unavailable_nodes
+    }
+    healthy = set(observation.healthy_replica_ids) - loss
+    failed = set(observation.failed_replica_ids) | loss
+    if len(healthy) >= service.min_healthy_replicas:
+        observed_health = (
+            ServiceHealth.DEGRADED
+            if failed or len(healthy) < len(service.replicas)
+            else ServiceHealth.HEALTHY
+        )
+    else:
+        observed_health = (
+            ServiceHealth.DEGRADED if healthy else ServiceHealth.ROLLBACK_REQUIRED
+        )
+
+    expected = {observed_health}
+    if record.rollback is not None:
+        expected.add(
+            ServiceHealth.ROLLED_BACK
+            if record.rollback.succeeded
+            else ServiceHealth.FAILED
+        )
+    return expected
 
 
 def _validate_rolling_maintenance_snapshot(
