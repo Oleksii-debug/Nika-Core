@@ -223,7 +223,14 @@ class ProductProjectHistoryArchiveService:
         return payload, digest
 
     @staticmethod
+    def _required_int(value: Any, *, minimum: int) -> int:
+        if type(value) is not int or value < minimum:
+            raise ProductProjectError("ProductProject history archive has invalid versions")
+        return value
+
+    @classmethod
     def _summary(
+        cls,
         payload: dict[str, Any],
         digest: str,
     ) -> ProductProjectHistoryArchiveSummary:
@@ -247,20 +254,18 @@ class ProductProjectHistoryArchiveService:
         project_id = payload.get("project_id")
         if not isinstance(project_id, str) or not project_id.strip():
             raise ProductProjectError("ProductProject history archive has invalid project_id")
-        try:
-            spec_version = int(payload["spec_version"])
-            row_version = int(payload["row_version"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ProductProjectError(
-                "ProductProject history archive has invalid versions"
-            ) from exc
-        if spec_version < 1 or row_version < 0:
-            raise ProductProjectError("ProductProject history archive has invalid versions")
+        spec_version = cls._required_int(payload.get("spec_version"), minimum=1)
+        row_version = cls._required_int(payload.get("row_version"), minimum=0)
         if project.get("project_id") != project_id:
             raise ProductProjectError("ProductProject history archive project identity mismatch")
-        if int(project.get("current_spec_version", 0)) != spec_version:
+        project_spec_version = cls._required_int(
+            project.get("current_spec_version"),
+            minimum=1,
+        )
+        project_row_version = cls._required_int(project.get("row_version"), minimum=0)
+        if project_spec_version != spec_version:
             raise ProductProjectError("ProductProject history archive spec identity mismatch")
-        if int(project.get("row_version", -1)) != row_version:
+        if project_row_version != row_version:
             raise ProductProjectError("ProductProject history archive row identity mismatch")
         if len(history["specs"]) != spec_version:
             raise ProductProjectError("ProductProject history archive is missing spec revisions")
