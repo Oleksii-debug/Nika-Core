@@ -186,7 +186,8 @@ class ProductProjectHistoryArchiveService:
     @staticmethod
     def _row(row: Any) -> dict[str, Any]:
         result: dict[str, Any] = {}
-        for key in row:
+        column_names = row.keys()
+        for key in column_names:
             value = row[key]
             mapped = _JSON_COLUMNS.get(key)
             if mapped is None:
