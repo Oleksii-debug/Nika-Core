@@ -47,7 +47,22 @@ def test_m5_uia_proof_activates_uia_providers_only_below_exact_bound_window() ->
     assert "Get-BoundDescendantNames" in source
     assert "Find-BoundDescendantName" in source
     assert source.index("Find-ExactWindow") < source.index("Get-BoundSearchRoots")
-    assert "another process, relaunches, or a longer wait" in source
+    assert "without coordinates, another process, or a relaunch" in source
+    assert source.count("Start-Process -FilePath $ExePath -PassThru") == 1
+
+
+def test_m5_uia_proof_uses_one_bounded_cold_start_deadline() -> None:
+    source = _source()
+
+    assert "[ValidateRange(30, 120)][int]$StartupTimeoutSeconds = 90" in source
+    assert "[System.Diagnostics.Stopwatch]::StartNew()" in source
+    assert "[System.TimeSpan]::FromSeconds($StartupTimeoutSeconds)" in source
+    assert source.count("$startupWatch.Elapsed -lt $startupTimeout") == 2
+    assert "Required packaged WebView2 UIA semantics became discoverable after" in source
+    assert "within the bounded $StartupTimeoutSeconds-second startup deadline" in source
+    assert "$startupWatch.Elapsed.TotalSeconds" in source
+    assert "for ($attempt = 0; $attempt -lt 40 -and $null -eq $window" not in source
+    assert "for ($attempt = 0; $attempt -lt 40 -and $missing.Count -gt 0" not in source
 
 
 def test_m5_uia_proof_re_resolves_window_without_weakening_semantic_gate() -> None:
@@ -69,6 +84,5 @@ def test_m5_uia_proof_re_resolves_window_without_weakening_semantic_gate() -> No
 
     assert "SendKeys]::SendWait('%1')" in source
     assert "SendKeys]::SendWait('^+p')" in source
-    assert "$attempt -lt 40" in source
     assert "Start-Sleep -Milliseconds 500" in source
     assert "Start-Sleep -Milliseconds 250" in source
