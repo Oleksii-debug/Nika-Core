@@ -8,6 +8,7 @@ import pytest
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.product_factory_checkpoint_host import (
+    ProductFactoryCheckpointError,
     ProductFactoryCheckpointHost,
     ProductFactoryRecoveryDisposition,
     ProductFactoryTrustedPlanAuthorityError,
@@ -219,7 +220,7 @@ def test_durable_restart_rejects_forged_descriptor_after_full_candidate_rehash(
     restarted_project = ProductProjectRepository(restarted_store).get(PROJECT_ID)
     restarted_binding = ProductProjectCoordinatorBinding(restarted_project, _graph())
 
-    with pytest.raises(Exception):
+    with pytest.raises(ProductFactoryCheckpointError):
         ProductFactoryCheckpointHost(restarted_store).restore_latest(
             host_task_id=task_id,
             binding=restarted_binding,
