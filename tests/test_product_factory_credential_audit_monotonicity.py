@@ -74,6 +74,36 @@ def _with_next_event(
     )
 
 
+def _with_next_lease(
+    snapshot: CredentialBrokerSnapshot,
+    next_lease: int,
+) -> CredentialBrokerSnapshot:
+    return CredentialBrokerSnapshot(
+        snapshot.secrets,
+        snapshot.identities,
+        snapshot.audit_events,
+        next_lease,
+        snapshot.next_event,
+    )
+
+
+@pytest.mark.parametrize(
+    ("next_lease", "next_event"),
+    [
+        (True, 1),
+        (1, True),
+        (1.5, 1),
+        (1, 1.5),
+    ],
+)
+def test_snapshot_counters_require_exact_positive_integers(
+    next_lease: object,
+    next_event: object,
+) -> None:
+    with pytest.raises(CredentialBrokerError, match="positive integers"):
+        CredentialBrokerSnapshot((), (), (), next_lease, next_event)  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize("next_event", [1])
 def test_restore_rejects_audit_counter_rollback_or_reuse(next_event: int) -> None:
     broker, store = _broker()
@@ -97,6 +127,48 @@ def test_restore_rejects_counter_equal_to_highest_persisted_event() -> None:
 
     with pytest.raises(CredentialBrokerError, match="counter was rolled back"):
         CredentialBroker(store).restore(_with_next_event(snapshot, 2))
+
+
+def test_restore_rejects_lease_counter_rollback_after_issued_lease() -> None:
+    broker, store = _broker()
+    first = broker.issue_lease(
+        project_id=PROJECT_ID,
+        secret_ref=SECRET_REF,
+        audience="github-api",
+        scopes=frozenset({"repo:read"}),
+        now=NOW + timedelta(seconds=1),
+    )
+    snapshot = broker.snapshot()
+    assert first.lease_id == "credential-lease-00000001"
+    assert snapshot.next_lease == 2
+
+    with pytest.raises(CredentialBrokerError, match="lease counter was rolled back"):
+        CredentialBroker(store).restore(_with_next_lease(snapshot, 1))
+
+
+def test_restart_never_reuses_a_persisted_lease_identity() -> None:
+    broker, store = _broker()
+    first = broker.issue_lease(
+        project_id=PROJECT_ID,
+        secret_ref=SECRET_REF,
+        audience="github-api",
+        scopes=frozenset({"repo:read"}),
+        now=NOW + timedelta(seconds=1),
+    )
+    snapshot = broker.snapshot()
+
+    restored = CredentialBroker(store)
+    restored.restore(snapshot)
+    second = restored.issue_lease(
+        project_id=PROJECT_ID,
+        secret_ref=SECRET_REF,
+        audience="github-api",
+        scopes=frozenset({"repo:read"}),
+        now=NOW + timedelta(seconds=2),
+    )
+
+    assert first.lease_id == "credential-lease-00000001"
+    assert second.lease_id == "credential-lease-00000002"
 
 
 def test_restore_preserves_monotonic_audit_identity_after_restart() -> None:
