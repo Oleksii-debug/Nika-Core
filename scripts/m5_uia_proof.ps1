@@ -9,8 +9,26 @@ Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Windows.Forms
 
 $requiredNames = @('Nika Core', 'Що має зробити Nika?', 'Створити завдання', 'Клавіатура')
-$process = Start-Process -FilePath $ExePath -PassThru
+
+# WebView2 enables renderer accessibility on demand when assistive technology such
+# as a screen reader is detected. GitHub-hosted Windows runners do not run a
+# screen reader, so make the automated UIA proof deterministic by forcing the
+# renderer accessibility mode for this child process only. This does not set
+# HUMAN_TESTED/NVDA_VERIFIED and does not alter the shipped application config.
+$previousWebView2BrowserArgs = $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
+$forceRendererAccessibilityArg = '--force-renderer-accessibility'
+if ($previousWebView2BrowserArgs -match '(?i)(?:^|\s)--disable-renderer-accessibility(?:\s|$)') {
+    throw 'Automated UIA proof cannot run while WebView2 renderer accessibility is explicitly disabled.'
+}
+if ([string]::IsNullOrWhiteSpace($previousWebView2BrowserArgs)) {
+    $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = $forceRendererAccessibilityArg
+} elseif ($previousWebView2BrowserArgs -notmatch '(?i)(?:^|\s)--force-renderer-accessibility(?:\s|$)') {
+    $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "$previousWebView2BrowserArgs $forceRendererAccessibilityArg"
+}
+
+$process = $null
 try {
+    $process = Start-Process -FilePath $ExePath -PassThru
     $root = [System.Windows.Automation.AutomationElement]::RootElement
     $nameCondition = New-Object System.Windows.Automation.PropertyCondition(
         [System.Windows.Automation.AutomationElement]::NameProperty,
@@ -134,5 +152,12 @@ try {
     Write-Host (($names | Select-Object -Unique | Select-Object -First 40) -join ' | ')
 }
 finally {
-    if (!$process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+    if ($null -ne $process -and !$process.HasExited) {
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    }
+    if ($null -eq $previousWebView2BrowserArgs) {
+        Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
+    } else {
+        $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = $previousWebView2BrowserArgs
+    }
 }
