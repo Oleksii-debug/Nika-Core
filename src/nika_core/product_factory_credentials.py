@@ -8,7 +8,6 @@ from typing import Protocol
 
 _MAX_CREDENTIAL_LEASE_TTL_SECONDS = 900
 _AUDIT_EVENT_PREFIX = "credential-event-"
-_AUDIT_EVENT_DIGITS = 8
 
 
 class CredentialBrokerError(ValueError):
@@ -449,10 +448,10 @@ def _audit_event_sequence(event_id: str) -> int:
     if not event_id.startswith(_AUDIT_EVENT_PREFIX):
         raise CredentialBrokerError("credential broker snapshot contains invalid audit event identity")
     suffix = event_id[len(_AUDIT_EVENT_PREFIX) :]
-    if len(suffix) != _AUDIT_EVENT_DIGITS or not suffix.isascii() or not suffix.isdigit():
+    if not suffix or not suffix.isascii() or not suffix.isdigit():
         raise CredentialBrokerError("credential broker snapshot contains invalid audit event identity")
     sequence = int(suffix)
-    if sequence < 1:
+    if sequence < 1 or event_id != f"{_AUDIT_EVENT_PREFIX}{sequence:08d}":
         raise CredentialBrokerError("credential broker snapshot contains invalid audit event identity")
     return sequence
 
