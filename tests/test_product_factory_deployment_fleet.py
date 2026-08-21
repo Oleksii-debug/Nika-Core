@@ -120,7 +120,7 @@ class FakeExecution:
 
 
 def _sha(seed: int) -> str:
-    return f"{seed:064x}"[-64:]
+    return f"{seed:040x}"[-40:]
 
 
 def _digest(seed: int) -> str:
