@@ -108,7 +108,7 @@ class ProductProjectHistoryShardedCommitmentService:
                 }
                 shard_digest = _digest(payload)
                 blob = _canonical(
-                    {"digest_sha256": shard_digest, "payload": segment_payload}
+                    {"digest_sha256": shard_digest, "payload": payload}
                 ).encode("utf-8")
                 summaries.append(
                     CommitmentShardSummary(
