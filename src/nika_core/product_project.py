@@ -620,12 +620,11 @@ class ProductProjectRepository:
                 "WHERE project_id=? ORDER BY spec_version",
                 (project_id,),
             ).fetchall()
-            if not rows:
-                if not conn.execute(
-                    "SELECT 1 FROM product_projects WHERE project_id=?",
-                    (project_id,),
-                ).fetchone():
-                    raise KeyError(project_id)
+            if not rows and not conn.execute(
+                "SELECT 1 FROM product_projects WHERE project_id=?",
+                (project_id,),
+            ).fetchone():
+                raise KeyError(project_id)
             revisions: list[ProductSpecRevision] = []
             for row in rows:
                 version = int(row["spec_version"])
