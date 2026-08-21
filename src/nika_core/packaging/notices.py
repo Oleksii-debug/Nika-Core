@@ -29,7 +29,6 @@ RUNTIME_DISTRIBUTIONS = (
 )
 
 _SECTION_RE = re.compile(r"^===== (?P<title>.+?) =====$")
-_LICENSE_FILE_RE = re.compile(r"^--- (?P<path>.+?) ---$")
 
 
 def _python_license() -> str:
@@ -71,6 +70,27 @@ def _license_texts(dist: metadata.Distribution) -> tuple[tuple[str, str], ...]:
     return tuple(sorted(collected))
 
 
+def _distribution_section(
+    distribution_name: str,
+    dist: metadata.Distribution,
+) -> tuple[str, str]:
+    package_name = dist.metadata.get("Name") or distribution_name
+    declared_license = _metadata_license(dist)
+    license_texts = _license_texts(dist)
+    if not declared_license and not license_texts:
+        raise RuntimeError(
+            f"No license evidence found for runtime distribution: {distribution_name}"
+        )
+    body: list[str] = []
+    if declared_license:
+        body.append(f"Declared license: {declared_license}")
+    for relative_path, text in license_texts:
+        if body:
+            body.append("")
+        body.extend([f"--- {relative_path} ---", text])
+    return f"{package_name} {dist.version}", "\n".join(body).strip()
+
+
 def build_third_party_notices(bundle_dir: Path) -> Path:
     sections = [
         "Nika Core third-party notices",
@@ -85,18 +105,8 @@ def build_third_party_notices(bundle_dir: Path) -> Path:
             raise RuntimeError(
                 f"Required runtime distribution is missing: {distribution_name}"
             ) from exc
-        package_name = dist.metadata.get("Name") or distribution_name
-        declared_license = _metadata_license(dist)
-        license_texts = _license_texts(dist)
-        if not declared_license and not license_texts:
-            raise RuntimeError(
-                f"No license evidence found for runtime distribution: {distribution_name}"
-            )
-        sections.extend(["", f"===== {package_name} {dist.version} ====="])
-        if declared_license:
-            sections.append(f"Declared license: {declared_license}")
-        for relative_path, text in license_texts:
-            sections.extend(["", f"--- {relative_path} ---", text])
+        title, body = _distribution_section(distribution_name, dist)
+        sections.extend(["", f"===== {title} =====", body])
     target = bundle_dir / "THIRD_PARTY_NOTICES.txt"
     target.write_text("\n".join(sections).rstrip() + "\n", encoding="utf-8")
     return target
@@ -131,24 +141,6 @@ def _sections(text: str) -> tuple[dict[str, str], tuple[str, ...]]:
     return parsed, tuple(duplicates)
 
 
-def _has_distribution_license_evidence(body: str) -> bool:
-    lines = body.splitlines()
-    for line in lines:
-        if line.startswith("Declared license:") and line.partition(":")[2].strip():
-            return True
-    for index, line in enumerate(lines):
-        if not _LICENSE_FILE_RE.fullmatch(line.strip()):
-            continue
-        if any(candidate.strip() for candidate in lines[index + 1 :]):
-            return True
-    return False
-
-
-def _has_python_license_evidence(body: str) -> bool:
-    normalized = " ".join(body.casefold().split())
-    return len(normalized) >= 100 and ("license" in normalized or "copyright" in normalized)
-
-
 def verify_third_party_notices(bundle_dir: Path) -> tuple[str, ...]:
     target = bundle_dir / "THIRD_PARTY_NOTICES.txt"
     if not target.is_file():
@@ -160,21 +152,24 @@ def verify_third_party_notices(bundle_dir: Path) -> tuple[str, ...]:
     if "Python runtime" in duplicates:
         findings.append("notices:duplicate:pythonruntime")
     python_body = sections.get("Python runtime")
-    if python_body is None or not _has_python_license_evidence(python_body):
-        findings.append("notices:pythonruntime")
+    try:
+        expected_python_body = _python_license()
+    except RuntimeError:
+        findings.append("notices:pythonruntime:metadata")
+    else:
+        if python_body != expected_python_body:
+            findings.append("notices:pythonruntime")
 
     for distribution_name in RUNTIME_DISTRIBUTIONS:
         try:
             dist = metadata.distribution(distribution_name)
-        except metadata.PackageNotFoundError:
+            title, expected_body = _distribution_section(distribution_name, dist)
+        except (metadata.PackageNotFoundError, RuntimeError):
             findings.append(f"notices:{distribution_name}:metadata")
             continue
-        package_name = dist.metadata.get("Name") or distribution_name
-        title = f"{package_name} {dist.version}"
         if title in duplicates:
             findings.append(f"notices:{distribution_name}:duplicate")
             continue
-        body = sections.get(title)
-        if body is None or not _has_distribution_license_evidence(body):
+        if sections.get(title) != expected_body:
             findings.append(f"notices:{distribution_name}")
     return tuple(findings)
