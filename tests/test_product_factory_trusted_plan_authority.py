@@ -72,7 +72,7 @@ def _planned():
         _recomputed_work_id(record.request) == record.request.work_id
         for record in snapshot.records
     ), "attacker framing must exactly reproduce legitimate production work IDs"
-    return graph, snapshot
+    return graph, coordinator, snapshot
 
 
 def _forge_request(request: ComponentWorkRequest, **changes: object) -> ComponentWorkRequest:
@@ -103,6 +103,20 @@ def _sibling_base_split(request: ComponentWorkRequest) -> ComponentWorkRequest:
     return _forge_request(request, base_sha=SHA_C)
 
 
+def test_legitimate_fresh_restore_succeeds_with_original_trusted_plan_authority() -> None:
+    graph, coordinator, snapshot = _planned()
+    trusted_plan_fingerprint = coordinator.trusted_plan_fingerprint
+
+    restored = ProductFactoryCoordinator(graph)
+    restored.restore(
+        snapshot,
+        trusted_plan_fingerprint=trusted_plan_fingerprint,
+    )
+
+    assert restored.snapshot() == snapshot
+    assert restored.trusted_plan_fingerprint == trusted_plan_fingerprint
+
+
 @pytest.mark.parametrize(
     "attack",
     (
@@ -115,7 +129,8 @@ def _sibling_base_split(request: ComponentWorkRequest) -> ComponentWorkRequest:
 def test_fresh_restore_rejects_plan_forgery_after_attacker_recomputes_work_ids(
     attack,
 ) -> None:
-    graph, snapshot = _planned()
+    graph, coordinator, snapshot = _planned()
+    trusted_plan_fingerprint = coordinator.trusted_plan_fingerprint
     forged = replace(
         snapshot,
         revision=snapshot.revision + 1,
@@ -126,4 +141,7 @@ def test_fresh_restore_rejects_plan_forgery_after_attacker_recomputes_work_ids(
     )
 
     with pytest.raises(CoordinatorError):
-        ProductFactoryCoordinator(graph).restore(forged)
+        ProductFactoryCoordinator(graph).restore(
+            forged,
+            trusted_plan_fingerprint=trusted_plan_fingerprint,
+        )
