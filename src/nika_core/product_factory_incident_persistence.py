@@ -4,6 +4,8 @@ import json
 from datetime import UTC, datetime
 from enum import StrEnum
 
+from .product_factory_coordinator import CoordinatorSnapshot
+from .product_factory_deployment import DeploymentFabricSnapshot
 from .product_factory_incident_contracts import (
     IncidentKind,
     IncidentLifecycleSnapshot,
@@ -33,8 +35,13 @@ def dump_incident_snapshot(snapshot: IncidentLifecycleSnapshot) -> str:
     return _canonical(payload).decode("utf-8")
 
 
-def load_incident_snapshot(payload: str) -> IncidentLifecycleSnapshot:
-    """Parse and fully validate canonical PF8 snapshot JSON before it is trusted."""
+def load_incident_snapshot(
+    payload: str,
+    *,
+    deployments: DeploymentFabricSnapshot | None = None,
+    review_authorities: tuple[CoordinatorSnapshot, ...] = (),
+) -> IncidentLifecycleSnapshot:
+    """Parse canonical PF8 JSON and revalidate external authority before trust."""
 
     if not isinstance(payload, str) or not payload.strip():
         raise ProductIncidentError("incident snapshot payload must be non-empty JSON text")
@@ -66,7 +73,11 @@ def load_incident_snapshot(payload: str) -> IncidentLifecycleSnapshot:
         tuple(_incident_from_payload(item) for item in incidents_raw),
         tuple(fingerprint_index),
     )
-    IncidentRepairReleaseCoordinator(snapshot.project_id).restore(snapshot)
+    IncidentRepairReleaseCoordinator(snapshot.project_id).restore(
+        snapshot,
+        deployments,
+        review_authorities,
+    )
     return snapshot
 
 
@@ -117,6 +128,7 @@ def _work_order_payload(order: RepairWorkOrder) -> dict[str, object]:
         "base_release_sha": order.base_release_sha,
         "goal": order.goal,
         "allowed_paths": list(order.allowed_paths),
+        "permission_ceiling": sorted(order.permission_ceiling),
         "acceptance_commands": [list(command) for command in order.acceptance_commands],
         "evidence_refs": list(order.evidence_refs),
         "created_at": _aware_json(order.created_at).isoformat(),
@@ -150,6 +162,8 @@ def _release_payload(release: ReleaseEvidence) -> dict[str, object]:
         "previous_release_sha": release.previous_release_sha,
         "candidate_release_sha": release.candidate_release_sha,
         "artifact_digest": release.artifact_digest,
+        "staging_intent_id": release.staging_intent_id,
+        "production_intent_id": release.production_intent_id,
         "disposition": release.disposition.value,
         "deployment_evidence_refs": list(release.deployment_evidence_refs),
         "health_evidence_refs": list(release.health_evidence_refs),
@@ -246,6 +260,7 @@ def _work_order_from_payload(raw: object) -> RepairWorkOrder:
             "base_release_sha",
             "goal",
             "allowed_paths",
+            "permission_ceiling",
             "acceptance_commands",
             "evidence_refs",
             "created_at",
@@ -267,6 +282,7 @@ def _work_order_from_payload(raw: object) -> RepairWorkOrder:
         _text(item["base_release_sha"], "work order base release"),
         _text(item["goal"], "work order goal"),
         _string_tuple(item["allowed_paths"], "work order allowed paths"),
+        frozenset(_string_tuple(item["permission_ceiling"], "work order permission ceiling")),
         tuple(_string_tuple(command, "repair acceptance command") for command in commands_raw),
         _string_tuple(item["evidence_refs"], "work order evidence"),
         _datetime(item["created_at"], "work order created_at"),
@@ -323,6 +339,8 @@ def _release_from_payload(raw: object) -> ReleaseEvidence:
             "previous_release_sha",
             "candidate_release_sha",
             "artifact_digest",
+            "staging_intent_id",
+            "production_intent_id",
             "disposition",
             "deployment_evidence_refs",
             "health_evidence_refs",
@@ -341,6 +359,8 @@ def _release_from_payload(raw: object) -> ReleaseEvidence:
         _text(item["previous_release_sha"], "previous release SHA"),
         _text(item["candidate_release_sha"], "candidate release SHA"),
         _text(item["artifact_digest"], "release artifact digest"),
+        _text(item["staging_intent_id"], "staging deployment intent id"),
+        _text(item["production_intent_id"], "production deployment intent id"),
         _enum(ReleaseDisposition, item["disposition"], "release disposition"),
         _string_tuple(item["deployment_evidence_refs"], "deployment evidence"),
         _string_tuple(item["health_evidence_refs"], "health evidence", allow_empty=True),

@@ -3,6 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from .product_factory_coordinator import CoordinatorSnapshot, WorkRecord, WorkState
+from .product_factory_deployment import (
+    DeploymentFabricSnapshot,
+    DeploymentRecord,
+    DeploymentState,
+    EnvironmentTier,
+)
 from .product_factory_incident_contracts import (
     INCIDENT_LIFECYCLE_SCHEMA,
     IncidentKind,
@@ -19,6 +26,7 @@ from .product_factory_incident_contracts import (
     ServiceRecordView,
     validate_digest,
 )
+from .toolsmith.contracts import AllowedPathPolicy
 
 
 @dataclass(slots=True)
@@ -81,6 +89,8 @@ class IncidentRepairReleaseCoordinator:
             raise ProductIncidentError("repair work order service does not match incident")
         if work_order.base_release_sha != record.trigger.release_sha:
             raise ProductIncidentError("repair work order base must equal incident release")
+        if work_order.created_at < record.trigger.observed_at:
+            raise ProductIncidentError("repair work order cannot predate the incident trigger")
         if not set(record.trigger.evidence_refs) <= set(work_order.evidence_refs):
             raise ProductIncidentError("repair work order must preserve incident evidence")
         advisory = record.trigger.advisory
@@ -126,7 +136,11 @@ class IncidentRepairReleaseCoordinator:
         self._incidents[record.incident_id] = updated
         return updated
 
-    def record_candidate(self, candidate: RepairCandidateEvidence) -> IncidentRecord:
+    def record_candidate(
+        self,
+        candidate: RepairCandidateEvidence,
+        review_authority: CoordinatorSnapshot,
+    ) -> IncidentRecord:
         record = self._require(candidate.incident_id)
         prior = {item.candidate_id: item for item in record.candidates}
         if candidate.candidate_id in prior:
@@ -141,6 +155,9 @@ class IncidentRepairReleaseCoordinator:
             raise ProductIncidentError("repair candidate work order does not match incident")
         if candidate.base_release_sha != record.trigger.release_sha:
             raise ProductIncidentError("repair candidate base release does not match incident")
+        if candidate.recorded_at < record.work_order.created_at:
+            raise ProductIncidentError("repair candidate cannot predate its work order")
+        self._validate_candidate_authority(record, candidate, review_authority)
         if any(item.result_sha == candidate.result_sha for item in record.candidates):
             raise ProductIncidentError("candidate release SHA is already recorded for incident")
         for other in self._incidents.values():
@@ -173,7 +190,11 @@ class IncidentRepairReleaseCoordinator:
         self._incidents[record.incident_id] = updated
         return updated
 
-    def record_release(self, evidence: ReleaseEvidence) -> IncidentRecord:
+    def record_release(
+        self,
+        evidence: ReleaseEvidence,
+        deployments: DeploymentFabricSnapshot,
+    ) -> IncidentRecord:
         record = self._require(evidence.incident_id)
         candidate = self._candidate(record, evidence.candidate_id)
         if not candidate.review_accepted:
@@ -184,6 +205,8 @@ class IncidentRepairReleaseCoordinator:
             raise ProductIncidentError("release artifact does not match accepted repair candidate")
         if evidence.previous_release_sha != record.trigger.release_sha:
             raise ProductIncidentError("release previous SHA does not match incident release")
+        if evidence.observed_at < candidate.recorded_at:
+            raise ProductIncidentError("release evidence cannot predate the accepted candidate")
 
         prior = {item.release_event_id: item for item in record.release_events}
         if evidence.release_event_id in prior:
@@ -206,6 +229,7 @@ class IncidentRepairReleaseCoordinator:
                 "uncertain release must be reconciled, not followed by a new release event"
             )
 
+        self._validate_release_authority(record, evidence, deployments)
         state = {
             ReleaseDisposition.HEALTHY: IncidentState.RESOLVED,
             ReleaseDisposition.ROLLED_BACK: IncidentState.ROLLED_BACK,
@@ -231,6 +255,7 @@ class IncidentRepairReleaseCoordinator:
         health_evidence_refs: tuple[str, ...],
         restored_release_sha: str | None,
         observed_at: datetime,
+        deployments: DeploymentFabricSnapshot,
     ) -> IncidentRecord:
         record = self._require(incident_id)
         if record.state is not IncidentState.RECONCILE_REQUIRED or not record.release_events:
@@ -242,6 +267,8 @@ class IncidentRepairReleaseCoordinator:
         uncertain = record.release_events[-1]
         if uncertain.disposition is not ReleaseDisposition.UNCERTAIN:
             raise ProductIncidentError("latest release evidence is not uncertain")
+        if observed_at < uncertain.observed_at:
+            raise ProductIncidentError("release reconciliation cannot predate uncertain evidence")
         reconciled = ReleaseEvidence(
             release_event_id=uncertain.release_event_id,
             incident_id=uncertain.incident_id,
@@ -249,6 +276,8 @@ class IncidentRepairReleaseCoordinator:
             previous_release_sha=uncertain.previous_release_sha,
             candidate_release_sha=uncertain.candidate_release_sha,
             artifact_digest=uncertain.artifact_digest,
+            staging_intent_id=uncertain.staging_intent_id,
+            production_intent_id=uncertain.production_intent_id,
             disposition=disposition,
             deployment_evidence_refs=uncertain.deployment_evidence_refs,
             health_evidence_refs=health_evidence_refs,
@@ -256,6 +285,7 @@ class IncidentRepairReleaseCoordinator:
             reconciliation_ref=reconciliation_ref,
             observed_at=observed_at,
         )
+        self._validate_release_authority(record, reconciled, deployments)
         state = (
             IncidentState.RESOLVED
             if disposition is ReleaseDisposition.HEALTHY
@@ -286,7 +316,12 @@ class IncidentRepairReleaseCoordinator:
             tuple(sorted(self._fingerprints.items())),
         )
 
-    def restore(self, snapshot: IncidentLifecycleSnapshot) -> None:
+    def restore(
+        self,
+        snapshot: IncidentLifecycleSnapshot,
+        deployments: DeploymentFabricSnapshot | None = None,
+        review_authorities: tuple[CoordinatorSnapshot, ...] = (),
+    ) -> None:
         if snapshot.project_id != self.project_id:
             raise ProductIncidentError("incident snapshot belongs to another project")
         incident_ids = [record.incident_id for record in snapshot.incidents]
@@ -324,15 +359,37 @@ class IncidentRepairReleaseCoordinator:
             raise ProductIncidentError("incident snapshot contains duplicate work-order ids")
         if len(candidate_ids) != len(set(candidate_ids)):
             raise ProductIncidentError("incident snapshot contains duplicate candidate ids")
+        if candidate_ids and not review_authorities:
+            raise ProductIncidentError(
+                "candidate-bearing incident snapshot requires independent review authority"
+            )
         if len(release_ids) != len(set(release_ids)):
             raise ProductIncidentError("incident snapshot contains duplicate release-event ids")
+        if release_ids and deployments is None:
+            raise ProductIncidentError(
+                "release-bearing incident snapshot requires deployment authority"
+            )
         for record in snapshot.incidents:
             self._validate_record(record)
+            for candidate in record.candidates:
+                matches = [
+                    authority
+                    for authority in review_authorities
+                    if self._authority_matches_candidate(record, candidate, authority)
+                ]
+                if len(matches) != 1:
+                    raise ProductIncidentError(
+                        "snapshot candidate requires exactly one independent review authority"
+                    )
+                self._validate_candidate_authority(record, candidate, matches[0])
             if record.trigger.project_id != self.project_id:
                 raise ProductIncidentError("incident snapshot crosses project boundary")
             expected = record.trigger.fingerprint
             if dict(fingerprint_pairs).get(expected) != record.incident_id:
                 raise ProductIncidentError("incident snapshot fingerprint mapping is corrupt")
+            if deployments is not None:
+                for release in record.release_events:
+                    self._validate_release_authority(record, release, deployments)
 
         self._incidents = incidents
         self._fingerprints = dict(fingerprint_pairs)
@@ -347,6 +404,8 @@ class IncidentRepairReleaseCoordinator:
                 raise ProductIncidentError("snapshot work order service binding is invalid")
             if record.work_order.base_release_sha != record.trigger.release_sha:
                 raise ProductIncidentError("snapshot work order base release is invalid")
+            if record.work_order.created_at < record.trigger.observed_at:
+                raise ProductIncidentError("snapshot work order predates incident trigger")
             advisory = record.trigger.advisory
             if advisory is None:
                 if (
@@ -378,6 +437,11 @@ class IncidentRepairReleaseCoordinator:
                 raise ProductIncidentError("snapshot candidate work-order binding is invalid")
             if candidate.base_release_sha != record.trigger.release_sha:
                 raise ProductIncidentError("snapshot candidate base release is invalid")
+            if (
+                record.work_order is not None
+                and candidate.recorded_at < record.work_order.created_at
+            ):
+                raise ProductIncidentError("snapshot candidate predates repair work order")
             if candidate.candidate_id in candidate_ids or candidate.result_sha in result_shas:
                 raise ProductIncidentError("snapshot contains duplicate repair candidate")
             candidate_ids.add(candidate.candidate_id)
@@ -410,10 +474,214 @@ class IncidentRepairReleaseCoordinator:
                 raise ProductIncidentError("snapshot release artifact differs from candidate")
             if release.previous_release_sha != record.trigger.release_sha:
                 raise ProductIncidentError("snapshot previous release differs from incident")
+            if release.observed_at < candidate.recorded_at:
+                raise ProductIncidentError("snapshot release predates accepted candidate")
 
         expected_state = self._derived_state(record)
         if record.state is not expected_state:
             raise ProductIncidentError("snapshot incident state is not derivable from evidence")
+
+    def _authority_matches_candidate(
+        self,
+        incident: IncidentRecord,
+        candidate: RepairCandidateEvidence,
+        authority: CoordinatorSnapshot,
+    ) -> bool:
+        work_order = incident.work_order
+        if work_order is None or authority.project_id != self.project_id:
+            return False
+        return any(
+            item.request.work_id == work_order.work_order_id
+            and item.result is not None
+            and item.result.result_sha == candidate.result_sha
+            for item in authority.records
+        )
+
+    def _validate_candidate_authority(
+        self,
+        incident: IncidentRecord,
+        candidate: RepairCandidateEvidence,
+        authority: CoordinatorSnapshot,
+    ) -> None:
+        work_order = incident.work_order
+        if work_order is None:
+            raise ProductIncidentError("repair candidate requires work-order authority")
+        if authority.project_id != self.project_id:
+            raise ProductIncidentError("review authority belongs to another project")
+        matches = [
+            item
+            for item in authority.records
+            if item.request.work_id == work_order.work_order_id
+        ]
+        if len(matches) != 1:
+            raise ProductIncidentError(
+                "review authority requires exactly one matching repair work record"
+            )
+        work = matches[0]
+        request = work.request
+        if (
+            request.project_id != self.project_id
+            or request.component_id != work_order.component_id
+            or request.repository_id != work_order.repository_id
+            or request.base_sha != work_order.base_release_sha
+        ):
+            raise ProductIncidentError("review authority work identity does not match repair order")
+        if request.goal != work_order.goal:
+            raise ProductIncidentError("review authority goal does not match repair order")
+        if request.allowed_paths != work_order.allowed_paths:
+            raise ProductIncidentError("review authority paths do not match repair order")
+        if request.permission_ceiling != work_order.permission_ceiling:
+            raise ProductIncidentError(
+                "review authority permission ceiling does not match repair order"
+            )
+        if request.acceptance_commands != work_order.acceptance_commands:
+            raise ProductIncidentError(
+                "review authority acceptance commands do not match repair order"
+            )
+        if work.result is None or work.review is None:
+            raise ProductIncidentError("repair candidate lacks worker result or independent review")
+        expected_state = (
+            WorkState.ACCEPTED if candidate.review_accepted else WorkState.REPAIR_REQUIRED
+        )
+        if work.state is not expected_state or work.review.accepted != candidate.review_accepted:
+            raise ProductIncidentError("candidate review outcome is not backed by review authority")
+        result = work.result
+        if (
+            result.work_id != work_order.work_order_id
+            or result.component_id != work_order.component_id
+            or result.repository_id != work_order.repository_id
+            or result.base_sha != work_order.base_release_sha
+            or result.result_sha != candidate.result_sha
+            or result.diff_digest != candidate.diff_digest
+        ):
+            raise ProductIncidentError("candidate result is not backed by exact worker evidence")
+        coding = result.coding_result
+        if coding.job_id != work_order.work_order_id or not coding.succeeded:
+            raise ProductIncidentError("candidate is not backed by a successful coding result")
+        if not coding.test_evidence or any(item.exit_code != 0 for item in coding.test_evidence):
+            raise ProductIncidentError("candidate lacks passing authoritative regression evidence")
+        test_digests = {item.output_digest for item in coding.test_evidence}
+        if set(candidate.regression_evidence_refs) != test_digests:
+            raise ProductIncidentError(
+                "candidate regression refs do not match authoritative test evidence digests"
+            )
+        artifact_digests = {item.digest for item in coding.artifacts}
+        if candidate.artifact_digest not in artifact_digests:
+            raise ProductIncidentError("candidate artifact is absent from worker artifact evidence")
+        allowed = AllowedPathPolicy(work_order.allowed_paths)
+        if any(not allowed.allows(item.path) for item in coding.changed_files):
+            raise ProductIncidentError("candidate changed file exceeds repair ownership")
+        if candidate.review_ref not in work.review.evidence_refs:
+            raise ProductIncidentError(
+                "candidate review ref is absent from independent review evidence"
+            )
+
+    def _validate_release_authority(
+        self,
+        incident: IncidentRecord,
+        evidence: ReleaseEvidence,
+        deployments: DeploymentFabricSnapshot,
+    ) -> None:
+        expected_state = {
+            ReleaseDisposition.HEALTHY: DeploymentState.HEALTHY,
+            ReleaseDisposition.ROLLED_BACK: DeploymentState.ROLLED_BACK,
+            ReleaseDisposition.UNCERTAIN: DeploymentState.UNCERTAIN,
+        }[evidence.disposition]
+        staging = _deployment_by_intent(deployments, evidence.staging_intent_id)
+        production = _deployment_by_intent(deployments, evidence.production_intent_id)
+        if (
+            staging.intent.project_id != self.project_id
+            or staging.intent.environment.tier is not EnvironmentTier.STAGING
+            or staging.intent.release.source_sha != evidence.candidate_release_sha
+            or staging.intent.release.artifact_digest != evidence.artifact_digest
+            or staging.state is not DeploymentState.HEALTHY
+        ):
+            raise ProductIncidentError(
+                "staging deployment authority does not match exact repair release"
+            )
+        if (
+            production.intent.project_id != self.project_id
+            or production.intent.environment.environment_id != incident.trigger.environment_id
+            or production.intent.environment.tier is not EnvironmentTier.PRODUCTION
+            or production.intent.release.source_sha != evidence.candidate_release_sha
+            or production.intent.release.artifact_digest != evidence.artifact_digest
+            or production.state is not expected_state
+        ):
+            raise ProductIncidentError(
+                "production deployment authority does not match exact repair release"
+            )
+        if production.previous_release_sha != incident.trigger.release_sha:
+            raise ProductIncidentError(
+                "production deployment previous release does not match incident release"
+            )
+        if staging.health is None or not staging.health.healthy:
+            raise ProductIncidentError("release authority lacks healthy staging evidence")
+        if (
+            staging.health.environment_id != staging.intent.environment.environment_id
+            or staging.health.release_sha != evidence.candidate_release_sha
+        ):
+            raise ProductIncidentError("staging health evidence identity mismatch")
+
+        authoritative_deploy_refs = set(staging.provider_evidence_refs) | set(
+            production.provider_evidence_refs
+        )
+        if not staging.provider_evidence_refs or not production.provider_evidence_refs:
+            raise ProductIncidentError("release authority requires staging and production evidence")
+        if set(evidence.deployment_evidence_refs) != authoritative_deploy_refs:
+            raise ProductIncidentError(
+                "release deployment refs are not the exact authoritative "
+                "staging/production evidence"
+            )
+
+        if evidence.disposition is ReleaseDisposition.UNCERTAIN:
+            if production.health is not None or production.rollback is not None:
+                raise ProductIncidentError(
+                    "uncertain deployment authority cannot claim terminal state"
+                )
+            return
+
+        if production.health is None:
+            raise ProductIncidentError(
+                "terminal release authority requires production health evidence"
+            )
+        if (
+            production.health.environment_id != incident.trigger.environment_id
+            or production.health.release_sha != evidence.candidate_release_sha
+        ):
+            raise ProductIncidentError("production health evidence identity mismatch")
+
+        if evidence.disposition is ReleaseDisposition.HEALTHY:
+            if not production.health.healthy or production.rollback is not None:
+                raise ProductIncidentError(
+                    "healthy release authority is not terminal healthy state"
+                )
+            authoritative_health_refs = set(production.health.evidence_refs)
+        else:
+            rollback = production.rollback
+            if production.health.healthy or rollback is None or not rollback.succeeded:
+                raise ProductIncidentError(
+                    "rollback release authority is not successful rollback state"
+                )
+            if (
+                rollback.environment_id != incident.trigger.environment_id
+                or rollback.failed_release_sha != evidence.candidate_release_sha
+                or rollback.restored_release_sha != incident.trigger.release_sha
+            ):
+                raise ProductIncidentError("rollback authority release identity mismatch")
+            authoritative_health_refs = set(production.health.evidence_refs) | set(
+                rollback.evidence_refs
+            )
+
+        if set(evidence.health_evidence_refs) != authoritative_health_refs:
+            raise ProductIncidentError(
+                "release health refs are not the exact authoritative health/rollback evidence"
+            )
+        if evidence.reconciliation_ref is not None and evidence.reconciliation_ref not in (
+            authoritative_health_refs | set(production.provider_evidence_refs)
+        ):
+            raise ProductIncidentError(
+                "release reconciliation ref is not backed by deployment inspection evidence"
+            )
 
     @staticmethod
     def _derived_state(record: IncidentRecord) -> IncidentState:
@@ -446,6 +714,22 @@ class IncidentRepairReleaseCoordinator:
             if candidate.candidate_id == candidate_id:
                 return candidate
         raise ProductIncidentError("unknown repair candidate")
+
+
+def _deployment_by_intent(
+    deployments: DeploymentFabricSnapshot,
+    intent_id: str,
+) -> DeploymentRecord:
+    matches = [
+        record
+        for record in deployments.records
+        if record.intent.intent_id == intent_id
+    ]
+    if len(matches) != 1:
+        raise ProductIncidentError(
+            "release authority requires exactly one referenced deployment intent"
+        )
+    return matches[0]
 
 
 def _service_from_operations(

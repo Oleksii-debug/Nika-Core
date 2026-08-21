@@ -182,6 +182,7 @@ class RepairWorkOrder:
     base_release_sha: str
     goal: str
     allowed_paths: tuple[str, ...]
+    permission_ceiling: frozenset[str]
     acceptance_commands: tuple[tuple[str, ...], ...]
     evidence_refs: tuple[str, ...]
     created_at: datetime
@@ -204,6 +205,10 @@ class RepairWorkOrder:
         _refs(self.allowed_paths, "allowed paths")
         for path in self.allowed_paths:
             _relative_path(path)
+        if not self.permission_ceiling or any(
+            not permission.strip() for permission in self.permission_ceiling
+        ):
+            raise ProductIncidentError("repair work order requires a permission ceiling")
         _refs(self.evidence_refs, "repair work-order evidence")
         if self.advisory_id is not None and not self.advisory_id.strip():
             raise ProductIncidentError("work-order advisory_id must be non-empty when supplied")
@@ -258,6 +263,8 @@ class ReleaseEvidence:
     previous_release_sha: str
     candidate_release_sha: str
     artifact_digest: str
+    staging_intent_id: str
+    production_intent_id: str
     disposition: ReleaseDisposition
     deployment_evidence_refs: tuple[str, ...]
     health_evidence_refs: tuple[str, ...]
@@ -270,11 +277,15 @@ class ReleaseEvidence:
             self.release_event_id,
             self.incident_id,
             self.candidate_id,
+            self.staging_intent_id,
+            self.production_intent_id,
             label="release evidence identity",
         )
         _sha(self.previous_release_sha, "previous_release_sha")
         _sha(self.candidate_release_sha, "candidate_release_sha")
         _digest(self.artifact_digest, "artifact_digest")
+        if self.staging_intent_id == self.production_intent_id:
+            raise ProductIncidentError("release requires distinct staging and production intents")
         _refs(self.deployment_evidence_refs, "deployment evidence")
         _aware(self.observed_at)
 
