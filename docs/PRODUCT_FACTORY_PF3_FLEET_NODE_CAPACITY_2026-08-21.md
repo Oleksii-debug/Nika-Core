@@ -5,6 +5,7 @@
 This successor extends the integrated PF3 execution-mediated deployment, wave and promotion stack with provider-neutral fleet placement semantics for independently deployable services with multiple replicas. It is additive: no manual DEV01–DEV05/M10 source, shared UI, provider playbook, credential-store implementation or release workflow is modified.
 
 Starting technical base: `8e0fd432740f4087243f864b3dc297e03fcfd130`.
+Current compatibility base after non-overlapping PF1 drift: `a3deb41af34e0e974f0e49aa2c42212ffcb397c0`.
 
 ## REUSE → ADAPT → CUSTOM(thin)
 
@@ -59,6 +60,8 @@ Focused tests cover:
 - dependency gating and failed-parent isolation;
 - snapshot/restart exact-spec binding and duplicate snapshot-plan rejection;
 - social/messenger-scale fixture with 60 independently deployable services × 3 replicas = 180 replica operations across three waves, snapshot/restart after wave 1, exact-SHA provenance per service and deterministic completion after restart.
+
+The first repository acceptance run exposed one PF3-owned fixture family before fleet behavior ran: the test `_sha()` helper emitted a 64-character artifact-digest-shaped value while the integrated `ReleaseRef.source_sha` contract requires 40 lowercase hexadecimal characters. The repair changes only the test helper to 40 characters; `_digest()` remains 64 characters and production validation is unchanged.
 
 This complements the already integrated 60-service/120-stage multi-environment promotion qualification rather than replacing it.
 
