@@ -16,15 +16,16 @@ class CommandRouteKind(StrEnum):
 class ProductStatusKind(StrEnum):
     REQUIREMENT = "requirement"
     MILESTONE = "milestone"
+    ARCHITECTURE_DECISION = "architecture_decision"
     TEAM_ROLE = "team_role"
     REPOSITORY = "repository"
     COMPONENT = "component"
     QA = "qa"
     BUILD = "build"
     RELEASE = "release"
+    CREDENTIAL = "credential"
     DEPLOYMENT = "deployment"
     INCIDENT = "incident"
-    CREDENTIAL = "credential"
     BLOCKER = "blocker"
 
 

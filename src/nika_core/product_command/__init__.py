@@ -27,6 +27,7 @@ from nika_core.product_command.factory_status_adapter import (
 from nika_core.product_command.product_project_adapter import (
     ProductProjectCommandService,
     ProductProjectDecisionUnavailableError,
+    ProductProjectPresentationConsistencyError,
     project_detail,
 )
 
@@ -39,6 +40,7 @@ __all__ = [
     "ProductProjectCommandService",
     "ProductProjectDecisionUnavailableError",
     "ProductProjectDetail",
+    "ProductProjectPresentationConsistencyError",
     "ProductProjectSummary",
     "ProductStatusEntry",
     "ProductStatusKind",

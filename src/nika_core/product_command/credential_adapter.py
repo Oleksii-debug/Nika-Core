@@ -18,7 +18,6 @@ from nika_core.product_factory_credentials import (
 _MAX_AUDIT_EVIDENCE_PER_CREDENTIAL = 20
 _MAX_STATUS_LABEL = 240
 _MAX_STATUS_DETAIL = 4000
-_MAX_EVIDENCE_REFERENCE = 512
 _MAX_EVIDENCE_LABEL = 240
 
 
@@ -137,8 +136,6 @@ def _audit_evidence(
 
 
 def _evidence_reference(event_id: str) -> str:
-    if len(event_id) <= _MAX_EVIDENCE_REFERENCE:
-        return event_id
     digest = hashlib.sha256(event_id.encode("utf-8")).hexdigest()
     return f"credential-audit-sha256:{digest}"
 
