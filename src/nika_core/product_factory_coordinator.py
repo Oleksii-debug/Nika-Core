@@ -295,9 +295,11 @@ class ProductFactoryCoordinator:
                 raise CoordinatorError(
                     "review_required snapshot work requires result and no completed review"
                 )
-        elif record.state in {WorkState.PLANNED, WorkState.READY, WorkState.RUNNING}:
-            if record.result is not None or record.review is not None:
-                raise CoordinatorError("pre-review snapshot work cannot contain result or review")
+        elif (
+            record.state in {WorkState.PLANNED, WorkState.READY, WorkState.RUNNING}
+            and (record.result is not None or record.review is not None)
+        ):
+            raise CoordinatorError("pre-review snapshot work cannot contain result or review")
 
     @staticmethod
     def _validate_result_identity(
