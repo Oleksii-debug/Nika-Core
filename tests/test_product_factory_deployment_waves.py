@@ -30,7 +30,7 @@ from nika_core.product_factory_deployment_waves import (
 )
 
 SHA_A = "a" * 40
-DIGEST_A = "sha256:" + "1" * 64
+DIGEST_A = "1" * 64
 
 
 def _execution(service: str, *, project: str = "social", wave: int = 0) -> ServiceRolloutSpec:
