@@ -150,8 +150,12 @@ class CredentialBrokerSnapshot:
     next_event: int
 
     def __post_init__(self) -> None:
-        if self.next_lease < 1 or self.next_event < 1:
-            raise CredentialBrokerError("credential broker counters must be positive")
+        counters = (self.next_lease, self.next_event)
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 1
+            for value in counters
+        ):
+            raise CredentialBrokerError("credential broker counters must be positive integers")
 
 
 class ProtectedSecretStorePort(Protocol):
@@ -383,6 +387,9 @@ class CredentialBroker:
             raise CredentialBrokerError("credential broker snapshot audit events are not monotonic")
         if audit_sequences and snapshot.next_event <= audit_sequences[-1]:
             raise CredentialBrokerError("credential broker snapshot audit counter was rolled back")
+        lease_event_count = sum(event.action == "lease" for event in snapshot.audit_events)
+        if snapshot.next_lease <= lease_event_count:
+            raise CredentialBrokerError("credential broker snapshot lease counter was rolled back")
         secrets = {secret.secret_ref: secret for secret in snapshot.secrets}
         for identity in snapshot.identities:
             bound = [secrets.get(secret_ref) for secret_ref in identity.secret_refs]
