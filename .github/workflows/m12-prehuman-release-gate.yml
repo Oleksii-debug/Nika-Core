@@ -146,6 +146,22 @@ jobs:
       - name: Create distributable ZIP
         shell: pwsh
         run: Compress-Archive -Path ./dist/NikaCore/* -DestinationPath ./dist/NikaCore-${{ steps.release.outputs.version }}-windows-x64.zip -Force
+      - name: Hash exact distributable ZIP
+        id: distributable
+        shell: pwsh
+        run: |
+          $zipPath = './dist/NikaCore-${{ steps.release.outputs.version }}-windows-x64.zip'
+          if (-not (Test-Path -LiteralPath $zipPath -PathType Leaf)) {
+            throw "Final distributable ZIP does not exist: $zipPath"
+          }
+          $zipItem = Get-Item -LiteralPath $zipPath
+          $zipSha256 = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($zipSha256 -notmatch '^[0-9a-f]{64}$') {
+            throw "Invalid final distributable SHA-256: $zipSha256"
+          }
+          "zip_path=$zipPath" >> $env:GITHUB_OUTPUT
+          "zip_sha256=$zipSha256" >> $env:GITHUB_OUTPUT
+          "zip_size=$($zipItem.Length)" >> $env:GITHUB_OUTPUT
       - name: Record automated pre-human evidence
         shell: pwsh
         run: |
@@ -153,6 +169,9 @@ jobs:
             schema_version = 3
             product_version = '${{ steps.release.outputs.version }}'
             commit_sha = '${{ env.NIKA_CANDIDATE_SHA }}'
+            distributable_zip_path = '${{ steps.distributable.outputs.zip_path }}'
+            distributable_zip_sha256 = '${{ steps.distributable.outputs.zip_sha256 }}'
+            distributable_zip_size = [int64]'${{ steps.distributable.outputs.zip_size }}'
             release_manifest_source_sha_bound = $true
             exact_checkout_sha_verified = $true
             core_ci_equivalent = $true
@@ -178,6 +197,13 @@ jobs:
             production_release_ready = $false
           }
           $evidence | ConvertTo-Json | Set-Content -Encoding UTF8 ./dist/m12-prehuman-evidence.json
+      - name: Verify exact final distributable evidence binding
+        run: >-
+          python scripts/m12_release_evidence.py
+          --artifact '${{ steps.distributable.outputs.zip_path }}'
+          --artifact-reference '${{ steps.distributable.outputs.zip_path }}'
+          --evidence ./dist/m12-prehuman-evidence.json
+          --source-sha '${{ env.NIKA_CANDIDATE_SHA }}'
       - name: Upload exact pre-human candidate evidence
         uses: actions/upload-artifact@v4
         with:

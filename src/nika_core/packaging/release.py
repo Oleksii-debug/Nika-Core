@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,4 +113,57 @@ def verify_release_manifest(bundle_dir: Path, manifest: ReleaseManifest) -> tupl
             continue
         if _sha256(path) != entry.sha256:
             findings.append(f"sha256:{relative_path}")
+    return tuple(findings)
+
+
+def _read_evidence_object(evidence_path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(evidence_path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def verify_distributable_evidence(
+    artifact_path: Path,
+    evidence_path: Path,
+    *,
+    source_sha: str,
+    artifact_reference: str,
+) -> tuple[str, ...]:
+    """Verify that pre-human evidence binds the exact uploaded distributable.
+
+    The evidence is intentionally outside the ZIP: embedding its own digest would be
+    recursive. The verifier therefore binds an immutable outer artifact by path,
+    byte size, SHA-256, and exact source commit immediately before upload.
+    """
+    findings: list[str] = []
+    normalized_source_sha = source_sha.strip().casefold()
+    if not _SOURCE_SHA_RE.fullmatch(normalized_source_sha):
+        return ("distributable:source-sha-format",)
+    if not artifact_path.is_file():
+        return ("distributable:missing-artifact",)
+
+    payload = _read_evidence_object(evidence_path)
+    if payload is None:
+        return ("distributable:invalid-evidence",)
+
+    if payload.get("commit_sha") != normalized_source_sha:
+        findings.append("distributable:source-sha")
+    if payload.get("distributable_zip_path") != artifact_reference:
+        findings.append("distributable:path")
+
+    expected_size = payload.get("distributable_zip_size")
+    if type(expected_size) is not int or expected_size < 0:
+        findings.append("distributable:size-format")
+    elif artifact_path.stat().st_size != expected_size:
+        findings.append("distributable:size")
+
+    expected_sha256 = payload.get("distributable_zip_sha256")
+    if not isinstance(expected_sha256, str) or not _SHA256_RE.fullmatch(expected_sha256):
+        findings.append("distributable:sha256-format")
+    elif _sha256(artifact_path) != expected_sha256:
+        findings.append("distributable:sha256")
     return tuple(findings)
