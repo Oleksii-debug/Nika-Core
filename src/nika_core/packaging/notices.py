@@ -77,6 +77,14 @@ def _python_license() -> tuple[str, str]:
     raise RuntimeError("Python runtime license file was not found")
 
 
+def _distribution_evidence(dist: metadata.Distribution, requested_name: str) -> tuple[str, str, str]:
+    package_name = dist.metadata.get("Name") or requested_name
+    version = dist.version.strip()
+    if not version:
+        raise RuntimeError(f"runtime distribution has no version: {package_name}")
+    return package_name, version, f"{package_name}=={version}"
+
+
 def build_third_party_notices(bundle_dir: Path) -> Path:
     """Create deterministic third-party notices for the shipped Windows runtime closure."""
 
@@ -96,14 +104,14 @@ def build_third_party_notices(bundle_dir: Path) -> Path:
                 f"required runtime distribution is missing from release environment: {requested_name}"
             ) from exc
 
-        package_name = dist.metadata.get("Name") or requested_name
-        version = dist.version
+        package_name, version, provenance = _distribution_evidence(dist, requested_name)
         declared_license = _metadata_license(dist)
         license_texts = _license_texts(dist)
         if not declared_license and not license_texts:
             raise RuntimeError(f"no license metadata/text found for runtime distribution: {package_name}")
 
         sections.append(f"===== {package_name} {version} =====")
+        sections.append(f"Distribution provenance: {provenance}")
         if declared_license:
             sections.append(f"Declared license: {declared_license}")
         if license_texts:
@@ -117,15 +125,43 @@ def build_third_party_notices(bundle_dir: Path) -> Path:
 
 
 def verify_third_party_notices(bundle_dir: Path) -> tuple[str, ...]:
+    """Validate exact version/license/provenance evidence, not package names alone."""
+
     target = bundle_dir / "THIRD_PARTY_NOTICES.txt"
     if not target.is_file():
         return ("missing:THIRD_PARTY_NOTICES.txt",)
     text = target.read_text(encoding="utf-8", errors="replace")
-    normalized_text = _normalized_name(text)
     findings: list[str] = []
-    if "pythonruntime" not in normalized_text:
+    if "===== Python runtime =====" not in text:
         findings.append("notices:python-runtime")
-    for name in RUNTIME_DISTRIBUTIONS:
-        if _normalized_name(name) not in normalized_text:
-            findings.append(f"notices:{name}")
+
+    for requested_name in RUNTIME_DISTRIBUTIONS:
+        try:
+            dist = metadata.distribution(requested_name)
+        except metadata.PackageNotFoundError:
+            findings.append(f"notices-provenance-unverifiable:{requested_name}")
+            continue
+
+        package_name, version, provenance = _distribution_evidence(dist, requested_name)
+        section_header = f"===== {package_name} {version} ====="
+        if section_header not in text:
+            findings.append(f"notices-version:{requested_name}")
+            continue
+        section_start = text.index(section_header) + len(section_header)
+        next_section = text.find("\n===== ", section_start)
+        section = text[section_start:] if next_section < 0 else text[section_start:next_section]
+
+        if f"Distribution provenance: {provenance}" not in section:
+            findings.append(f"notices-provenance:{requested_name}")
+
+        declared_license = _metadata_license(dist)
+        license_texts = _license_texts(dist)
+        license_evidence = False
+        if declared_license and f"Declared license: {declared_license}" in section:
+            license_evidence = True
+        if any(f"--- {relative_path} ---" in section and text_value for relative_path, text_value in license_texts):
+            license_evidence = True
+        if not license_evidence:
+            findings.append(f"notices-license:{requested_name}")
+
     return tuple(findings)
