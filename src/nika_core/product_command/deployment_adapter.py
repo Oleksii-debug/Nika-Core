@@ -76,9 +76,21 @@ def deployment_status_entries(
 
 
 def _validate_snapshot_backing(snapshot: DeploymentFabricSnapshot) -> None:
-    """Fail closed on forged release markers while retaining PF3 legacy compatibility."""
+    """Mirror PF3 restore integrity before projecting any deployment state."""
+    intent_ids = [record.intent.intent_id for record in snapshot.records]
+    if len(intent_ids) != len(set(intent_ids)):
+        raise DeploymentPresentationIntegrityError(
+            "deployment snapshot contains duplicate intent identities"
+        )
+    for record in snapshot.records:
+        _validate_record_semantics(record)
+
     staging_projects: set[str] = set()
     for project_id, source_sha in snapshot.healthy_staging:
+        if not project_id.strip() or not _is_sha(source_sha):
+            raise DeploymentPresentationIntegrityError(
+                "healthy staging marker identity/release SHA is invalid"
+            )
         if project_id in staging_projects:
             raise DeploymentPresentationIntegrityError(
                 "deployment snapshot contains duplicate healthy-staging state"
@@ -111,16 +123,17 @@ def _validate_snapshot_backing(snapshot: DeploymentFabricSnapshot) -> None:
             )
         current_keys.add(key)
         if not any(
-            _is_current_release_backing_record(
+            _is_healthy_record(
                 record,
                 project_id=project_id,
                 environment_id=environment_id,
                 source_sha=source_sha,
+                require_staging=False,
             )
             for record in snapshot.records
         ):
             raise DeploymentPresentationIntegrityError(
-                "current release marker is not backed by deployment recovery evidence"
+                "current release marker is not backed by a healthy deployment record"
             )
 
 
@@ -135,11 +148,13 @@ def _normalize_current_release_entry(
         projects = {
             record.intent.project_id
             for record in records
-            if record.intent.environment.environment_id == environment_id
+            if record.state is DeploymentState.HEALTHY
+            and record.intent.environment.environment_id == environment_id
+            and record.intent.release.source_sha == source_sha
         }
         if len(projects) != 1:
             raise DeploymentPresentationIntegrityError(
-                "legacy current-release environment identity is ambiguous across projects"
+                "legacy current release is ambiguous or not backed by one healthy project"
             )
         project_id = next(iter(projects))
     else:
@@ -151,34 +166,75 @@ def _normalize_current_release_entry(
         raise DeploymentPresentationIntegrityError(
             "current-release identity contains an empty field"
         )
+    if not _is_sha(source_sha):
+        raise DeploymentPresentationIntegrityError(
+            "current-release identity contains an invalid release SHA"
+        )
     return project_id, environment_id, source_sha
 
 
-def _is_current_release_backing_record(
-    record: DeploymentRecord,
-    *,
-    project_id: str,
-    environment_id: str,
-    source_sha: str,
-) -> bool:
-    if _is_healthy_record(
-        record,
-        project_id=project_id,
-        environment_id=environment_id,
-        source_sha=source_sha,
-        require_staging=False,
+def _validate_record_semantics(record: DeploymentRecord) -> None:
+    intent = record.intent
+    if record.previous_release_sha is not None and not _is_sha(record.previous_release_sha):
+        raise DeploymentPresentationIntegrityError(
+            "deployment record contains an invalid previous release SHA"
+        )
+    if not record.provider_evidence_refs:
+        raise DeploymentPresentationIntegrityError(
+            "deployment record requires provider evidence references"
+        )
+    if record.health is not None and (
+        record.health.environment_id != intent.environment.environment_id
+        or record.health.release_sha != intent.release.source_sha
     ):
-        return True
-    rollback = record.rollback
-    return bool(
-        record.intent.project_id == project_id
-        and record.intent.environment.environment_id == environment_id
-        and record.state is DeploymentState.ROLLED_BACK
-        and rollback is not None
-        and rollback.succeeded
-        and rollback.environment_id == environment_id
-        and rollback.restored_release_sha == source_sha
-    )
+        raise DeploymentPresentationIntegrityError(
+            "deployment health evidence does not match intent identity/release"
+        )
+    if record.rollback is not None:
+        if (
+            record.rollback.environment_id != intent.environment.environment_id
+            or record.rollback.failed_release_sha != intent.release.source_sha
+        ):
+            raise DeploymentPresentationIntegrityError(
+                "deployment rollback evidence does not match intent identity/release"
+            )
+        if (
+            record.rollback.succeeded
+            and record.rollback.restored_release_sha != record.previous_release_sha
+        ):
+            raise DeploymentPresentationIntegrityError(
+                "deployment rollback restored a release other than recorded previous release"
+            )
+
+    if record.state is DeploymentState.HEALTHY:
+        if record.health is None or not record.health.healthy or record.rollback is not None:
+            raise DeploymentPresentationIntegrityError(
+                "healthy deployment record is semantically inconsistent"
+            )
+    elif record.state is DeploymentState.ROLLED_BACK:
+        if (
+            record.health is None
+            or record.health.healthy
+            or record.rollback is None
+            or not record.rollback.succeeded
+        ):
+            raise DeploymentPresentationIntegrityError(
+                "rolled-back deployment record is semantically inconsistent"
+            )
+    elif record.state is DeploymentState.HEALTH_CHECK:
+        raise DeploymentPresentationIntegrityError(
+            "health-check deployment state must not be serialized as durable"
+        )
+    elif record.state is DeploymentState.UNCERTAIN and (
+        record.health is not None or record.rollback is not None
+    ):
+        raise DeploymentPresentationIntegrityError(
+            "uncertain deployment record contains final health/rollback evidence"
+        )
+
+
+def _is_sha(value: str) -> bool:
+    return len(value) == 40 and all(character in "0123456789abcdef" for character in value)
 
 
 def _is_healthy_record(
