@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import Counter
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
@@ -169,12 +170,7 @@ class ProductFactoryCoordinator:
         if record.state is not WorkState.RUNNING:
             raise CoordinatorError("worker result is only valid for a running component")
         request = record.request
-        if envelope.work_id != request.work_id or envelope.repository_id != request.repository_id:
-            raise CoordinatorError("worker result identity does not match active request")
-        if envelope.base_sha != request.base_sha:
-            raise CoordinatorError("stale worker result base SHA does not match active request")
-        if envelope.coding_result.job_id != request.work_id:
-            raise CoordinatorError("coding result job id does not match Product Factory work id")
+        self._validate_result_identity(request, envelope)
         if not envelope.coding_result.succeeded:
             blocker = envelope.coding_result.failure.message if envelope.coding_result.failure else None
             updated = WorkRecord(request, WorkState.REPAIR_REQUIRED, envelope, blocker=blocker)
@@ -182,6 +178,12 @@ class ProductFactoryCoordinator:
             evidence = envelope.coding_result.test_evidence
             if not evidence or any(item.exit_code != 0 for item in evidence):
                 raise CoordinatorError("successful worker result requires passing test evidence")
+            required = Counter(request.acceptance_commands)
+            observed = Counter(item.command for item in evidence)
+            if any(observed[command] < count for command, count in required.items()):
+                raise CoordinatorError(
+                    "successful worker result must prove every declared acceptance command"
+                )
             updated = WorkRecord(request, WorkState.REVIEW_REQUIRED, envelope)
         self._records[envelope.component_id] = updated
         self._touch()
@@ -248,13 +250,70 @@ class ProductFactoryCoordinator:
     def restore(self, snapshot: CoordinatorSnapshot) -> None:
         if snapshot.project_id != self.graph.project_id:
             raise CoordinatorError("snapshot project does not match repository graph")
-        expected = set(self._components())
+        if snapshot.revision < 0:
+            raise CoordinatorError("snapshot revision must be non-negative")
+        components = self._components()
+        repositories = self._repositories()
+        expected = set(components)
         actual = [record.request.component_id for record in snapshot.records]
         if set(actual) != expected or len(actual) != len(set(actual)):
             raise CoordinatorError("snapshot component set does not match repository graph")
+
+        permission_ceilings = {record.request.permission_ceiling for record in snapshot.records}
+        if len(permission_ceilings) != 1:
+            raise CoordinatorError("snapshot work requests disagree on project permission ceiling")
+
+        for record in snapshot.records:
+            request = record.request
+            component = components[request.component_id]
+            repository = repositories[component.repository_id]
+            if request.project_id != self.graph.project_id:
+                raise CoordinatorError("snapshot work request project identity drifted")
+            if request.repository_id != repository.repository_id:
+                raise CoordinatorError("snapshot work request repository identity drifted")
+            if request.allowed_paths != component.paths:
+                raise CoordinatorError("snapshot work request path scope drifted")
+            if request.acceptance_commands != component.test_commands:
+                raise CoordinatorError("snapshot acceptance command scope drifted")
+            self._validate_restored_record(record)
+
         self._records = {record.request.component_id: record for record in snapshot.records}
         self._revision = snapshot.revision
         self._advance_ready()
+
+    def _validate_restored_record(self, record: WorkRecord) -> None:
+        request = record.request
+        if record.result is not None:
+            self._validate_result_identity(request, record.result)
+        if record.state is WorkState.ACCEPTED:
+            if record.result is None or record.review is None or not record.review.accepted:
+                raise CoordinatorError(
+                    "accepted snapshot work requires worker result and accepted independent review"
+                )
+        elif record.state is WorkState.REVIEW_REQUIRED:
+            if record.result is None or record.review is not None:
+                raise CoordinatorError(
+                    "review_required snapshot work requires result and no completed review"
+                )
+        elif (
+            record.state in {WorkState.PLANNED, WorkState.READY, WorkState.RUNNING}
+            and (record.result is not None or record.review is not None)
+        ):
+            raise CoordinatorError("pre-review snapshot work cannot contain result or review")
+
+    @staticmethod
+    def _validate_result_identity(
+        request: ComponentWorkRequest,
+        envelope: WorkerResultEnvelope,
+    ) -> None:
+        if envelope.component_id != request.component_id:
+            raise CoordinatorError("worker result component does not match active request")
+        if envelope.work_id != request.work_id or envelope.repository_id != request.repository_id:
+            raise CoordinatorError("worker result identity does not match active request")
+        if envelope.base_sha != request.base_sha:
+            raise CoordinatorError("stale worker result base SHA does not match active request")
+        if envelope.coding_result.job_id != request.work_id:
+            raise CoordinatorError("coding result job id does not match Product Factory work id")
 
     def _advance_ready(self) -> None:
         accepted = {key for key, item in self._records.items() if item.state is WorkState.ACCEPTED}
