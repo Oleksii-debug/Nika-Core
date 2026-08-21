@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
@@ -108,11 +110,29 @@ def test_decision_requires_exact_unambiguous_recorded_option(tmp_path) -> None:
     assert projects.get("p1").row_version == 0
 
 
-def test_decision_rejects_option_with_missing_evidence_package(tmp_path) -> None:
-    _, projects, decisions = _repos(tmp_path)
-    _handoff(projects, extra_package_ids=("research-missing",))
+def test_decision_rejects_corrupt_handoff_with_missing_evidence_package(tmp_path) -> None:
+    store, projects, decisions = _repos(tmp_path)
+    _handoff(projects)
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM product_research_handoffs "
+            "WHERE project_id=? AND package_id=?",
+            ("p1", "research-1"),
+        ).fetchone()
+        payload = json.loads(row["payload_json"])
+        payload["options"][0]["evidence_package_ids"].append("research-missing")
+        conn.execute(
+            "UPDATE product_research_handoffs SET payload_json=? "
+            "WHERE project_id=? AND package_id=?",
+            (json.dumps(payload), "p1", "research-1"),
+        )
     with pytest.raises(ProductProjectError, match="unknown evidence package"):
-        decisions.record("p1", _decision(), expected_row_version=0, idempotency_key="decision:missing-evidence")
+        decisions.record(
+            "p1",
+            _decision(),
+            expected_row_version=0,
+            idempotency_key="decision:missing-evidence",
+        )
     assert projects.get("p1").row_version == 0
 
 
