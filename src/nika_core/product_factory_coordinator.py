@@ -402,7 +402,11 @@ class ProductFactoryCoordinator:
                 (
                     index
                     for index, item in enumerate(remaining)
-                    if _commands_equivalent(item.command, declared)
+                    if _commands_equivalent(
+                        item.command,
+                        declared,
+                        component_id=request.component_id,
+                    )
                 ),
                 None,
             )
@@ -439,7 +443,12 @@ class ProductFactoryCoordinator:
         self._revision += 1
 
 
-def _commands_equivalent(observed: tuple[str, ...], declared: tuple[str, ...]) -> bool:
+def _commands_equivalent(
+    observed: tuple[str, ...],
+    declared: tuple[str, ...],
+    *,
+    component_id: str,
+) -> bool:
     if observed == declared:
         return True
 
@@ -454,13 +463,19 @@ def _commands_equivalent(observed: tuple[str, ...], declared: tuple[str, ...]) -
     if len(observed_pytest) != 1 or len(declared_pytest) != 1:
         return False
 
-    observed_target = observed_pytest[0].replace("\\", "/").removeprefix("./")
-    declared_target = declared_pytest[0].replace("\\", "/").removeprefix("./")
-    return (
-        observed_target == declared_target
-        or f"tests/{observed_target}" == declared_target
-        or observed_target == f"tests/{declared_target}"
-    )
+    observed_target = _normalize_pytest_target(observed_pytest[0])
+    declared_target = _normalize_pytest_target(declared_pytest[0])
+    if observed_target == declared_target:
+        return True
+
+    component_target = _normalize_pytest_target(component_id)
+    component_test_target = component_target.replace("-", "_")
+    component_aliases = {component_target, component_test_target}
+    return observed_target in component_aliases and declared_target in component_aliases
+
+
+def _normalize_pytest_target(target: str) -> str:
+    return target.replace("\\", "/").removeprefix("./").removeprefix("tests/")
 
 
 def _pytest_args(command: tuple[str, ...]) -> tuple[str, ...] | None:
