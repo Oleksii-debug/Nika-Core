@@ -206,7 +206,7 @@ def test_large_commitment_set_survives_restart_and_selective_verification(tmp_pa
     generations = ProductProjectHistoryGenerationService(store)
     generation_1 = generations.build("project-1", target_entries_per_segment=37)
     service = ProductProjectHistoryShardedCommitmentService(store)
-    index = service.export(generation_1, target_records_per_shard=128)
+    index = service.export(generation_1, target_records_per_shard=64)
 
     _research(projects, 300, start=1200)
     generation_2 = generations.build(
