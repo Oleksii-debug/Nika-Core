@@ -238,6 +238,7 @@ def _validate_maintenance_record(plan, record) -> None:
         NodeMaintenanceState.PENDING: 0,
         NodeMaintenanceState.CORDONED: 0,
         NodeMaintenanceState.BLOCKED_ACTIVE_LEASE: 0,
+        NodeMaintenanceState.BLOCKED_QUORUM: 0,
         NodeMaintenanceState.DRAINED: 1,
         NodeMaintenanceState.RESTARTED: 2,
         NodeMaintenanceState.VERIFIED: 3,
@@ -256,6 +257,12 @@ def _validate_maintenance_record(plan, record) -> None:
     } and len(completed) >= len(_ACTION_ORDER):
         raise ProductFactorySnapshotIntegrityError(
             "rolling maintenance non-success state carries completed plan"
+        )
+
+    expected_cordoned = _expected_cordoned_state(record.state, completed)
+    if expected_cordoned is not None and record.cordoned is not expected_cordoned:
+        raise ProductFactorySnapshotIntegrityError(
+            "rolling maintenance cordon state disagrees with durable maintenance state"
         )
 
     pending = record.pending_request
@@ -293,6 +300,19 @@ def _validate_maintenance_record(plan, record) -> None:
         raise ProductFactorySnapshotIntegrityError(
             "rolling maintenance pending request lost submitted plan evidence"
         )
+
+
+def _expected_cordoned_state(
+    state: NodeMaintenanceState,
+    completed: tuple[NodeMaintenanceAction, ...],
+) -> bool | None:
+    if state in {NodeMaintenanceState.PENDING, NodeMaintenanceState.SUCCEEDED}:
+        return False
+    if state is NodeMaintenanceState.BLOCKED_QUORUM:
+        return None
+    if state is NodeMaintenanceState.BLOCKED_CREDENTIAL and not completed:
+        return None
+    return True
 
 
 _ACTION_ORDER = (
