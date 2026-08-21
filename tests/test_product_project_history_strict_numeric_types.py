@@ -7,8 +7,11 @@ from dataclasses import replace
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.product_decisions import ProductDecisionRepository
 from nika_core.product_project import (
     EvidenceRef,
+    ProductDecision,
+    ProductDecisionState,
     ProductOption,
     ProductProjectError,
     ProductProjectRepository,
@@ -24,6 +27,9 @@ from nika_core.product_project_history_generations import (
     ProductProjectHistoryGenerationRetentionPolicy,
     ProductProjectHistoryGenerationService,
 )
+from nika_core.product_project_history_integrity import (
+    ProductProjectHistoricalIntegrityService,
+)
 from nika_core.product_project_history_segments import (
     ProductProjectHistoryRetentionPolicy,
     ProductProjectHistorySegmentService,
@@ -33,6 +39,10 @@ from nika_core.product_project_history_semantic_continuity import (
 )
 from nika_core.product_project_history_sharded_commitments import (
     ProductProjectHistoryShardedCommitmentService,
+)
+from nika_core.product_project_lifecycle import (
+    ProductProjectLifecycleService,
+    ProductProjectState,
 )
 
 
@@ -90,6 +100,46 @@ def _research(projects: ProductProjectRepository, count: int, *, start: int = 0)
         )
 
 
+def _rich_history(store: SQLiteStore, projects: ProductProjectRepository) -> None:
+    _research(projects, 1)
+    current = projects.get("project-1")
+    ProductDecisionRepository(store).record(
+        "project-1",
+        ProductDecision(
+            decision_id="decision-1",
+            option_id="option-0000",
+            state=ProductDecisionState.REJECTED,
+            rationale="Reject this researched option",
+            decided_by_ref="policy://product-owner",
+        ),
+        expected_row_version=current.row_version,
+        idempotency_key="decision:decision-1:rejected",
+    )
+    current = projects.get("project-1")
+    current = projects.update_spec(
+        "project-1",
+        replace(current.spec, hypothesis="strict numeric revision"),
+        expected_row_version=current.row_version,
+        change_reason="strict numeric lineage qualification",
+    )
+    ProductProjectLifecycleService(store).transition(
+        "project-1",
+        ProductProjectState.PAUSED,
+        expected_row_version=current.row_version,
+        idempotency_key="status:pause:strict-numeric",
+        reason="Validate portable history lineage",
+        changed_by_ref="policy://product-owner",
+    )
+
+
+def _audit_payload(history: dict, event_type: str) -> dict:
+    return next(
+        row["payload"]
+        for row in history["audit_events"]
+        if row["event_type"] == event_type
+    )
+
+
 def _replace_segment_digest(manifest_bytes: bytes, digest: str) -> bytes:
     envelope = json.loads(manifest_bytes)
     envelope["payload"]["segments"][0]["digest_sha256"] = digest
@@ -114,6 +164,117 @@ def test_archive_versions_require_exact_json_integers(tmp_path) -> None:
         envelope["payload"]["history"]["project"]["row_version"] = bad
         with pytest.raises(ProductProjectError, match="invalid versions"):
             service.verify(_rehash(envelope))
+
+
+def test_archive_nested_numeric_identities_reject_rehashed_type_confusion(tmp_path) -> None:
+    store, projects = _project(tmp_path)
+    _rich_history(store, projects)
+    service = ProductProjectHistoryArchiveService(store)
+    archive = service.build("project-1")
+
+    def mutate_spec_row(history: dict) -> None:
+        history["specs"][0]["spec_version"] = "1"
+
+    def mutate_spec_parent(history: dict) -> None:
+        history["specs"][1]["spec"]["supersedes_spec_version"] = True
+
+    def mutate_decision(history: dict) -> None:
+        history["decisions"][0]["decision_version"] = True
+
+    def mutate_idempotency(history: dict) -> None:
+        history["mutation_idempotency"][0]["entity_version"] = "1"
+
+    def mutate_creation_audit(history: dict) -> None:
+        _audit_payload(history, "product_project.created")["spec_version"] = True
+
+    def mutate_spec_audit(history: dict) -> None:
+        _audit_payload(history, "product_project.spec_versioned")[
+            "supersedes_spec_version"
+        ] = "1"
+
+    def mutate_decision_audit(history: dict) -> None:
+        _audit_payload(history, "product_project.decision_recorded")[
+            "decision_version"
+        ] = True
+
+    def mutate_lifecycle_audit(history: dict) -> None:
+        _audit_payload(history, "product_project.status_changed")["row_version"] = True
+
+    mutations = (
+        mutate_spec_row,
+        mutate_spec_parent,
+        mutate_decision,
+        mutate_idempotency,
+        mutate_creation_audit,
+        mutate_spec_audit,
+        mutate_decision_audit,
+        mutate_lifecycle_audit,
+    )
+    for mutate in mutations:
+        envelope = json.loads(archive.bytes)
+        mutate(envelope["payload"]["history"])
+        with pytest.raises(ProductProjectError):
+            service.verify(_rehash(envelope))
+
+
+def test_live_historical_integrity_rejects_type_confused_json_versions(tmp_path) -> None:
+    store, projects = _project(tmp_path)
+    _rich_history(store, projects)
+    service = ProductProjectHistoricalIntegrityService(store)
+    assert service.validate("project-1").current.row_version == 3
+
+    audit_cases = (
+        ("product_project.created", "spec_version", True),
+        ("product_project.spec_versioned", "spec_version", "2"),
+        ("product_project.spec_versioned", "supersedes_spec_version", True),
+        ("product_project.decision_recorded", "decision_version", "1"),
+        ("product_project.status_changed", "row_version", True),
+    )
+    for event_type, key, bad in audit_cases:
+        with store.connection() as conn:
+            row = conn.execute(
+                "SELECT event_id,payload_json FROM audit_events "
+                "WHERE entity_type='product_project' AND entity_id='project-1' "
+                "AND event_type=? ORDER BY event_id LIMIT 1",
+                (event_type,),
+            ).fetchone()
+            original = row["payload_json"]
+            payload = json.loads(original)
+            payload[key] = bad
+            conn.execute(
+                "UPDATE audit_events SET payload_json=? WHERE event_id=?",
+                (_canonical(payload), row["event_id"]),
+            )
+        with pytest.raises(ProductProjectError, match="invalid integer identity"):
+            service.validate("project-1")
+        with store.connection() as conn:
+            conn.execute(
+                "UPDATE audit_events SET payload_json=? WHERE event_id=?",
+                (original, row["event_id"]),
+            )
+
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT spec_json FROM product_project_specs "
+            "WHERE project_id='project-1' AND spec_version=2"
+        ).fetchone()
+        original_spec = row["spec_json"]
+        spec = json.loads(original_spec)
+        spec["supersedes_spec_version"] = True
+        conn.execute(
+            "UPDATE product_project_specs SET spec_json=? "
+            "WHERE project_id='project-1' AND spec_version=2",
+            (_canonical(spec),),
+        )
+    with pytest.raises(ProductProjectError, match="supersedes_spec_version"):
+        service.validate("project-1")
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE product_project_specs SET spec_json=? "
+            "WHERE project_id='project-1' AND spec_version=2",
+            (original_spec,),
+        )
+    assert service.validate("project-1").current.row_version == 3
 
 
 def test_segment_payload_sequence_and_record_ordinal_reject_booleans(tmp_path) -> None:
