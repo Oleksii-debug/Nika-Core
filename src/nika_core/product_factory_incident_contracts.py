@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Protocol
 
+from .toolsmith.contracts import AcceptanceCommand, normalize_relative_path
+
 INCIDENT_LIFECYCLE_SCHEMA = "nika-pf3-incident-repair-release-v1"
 
 
@@ -206,9 +208,12 @@ class RepairWorkOrder:
         for path in self.allowed_paths:
             _relative_path(path)
         if not self.permission_ceiling or any(
-            not permission.strip() for permission in self.permission_ceiling
+            not permission.strip() or permission != permission.strip()
+            for permission in self.permission_ceiling
         ):
-            raise ProductIncidentError("repair work order requires a permission ceiling")
+            raise ProductIncidentError(
+                "repair work order requires normalized non-empty permission ceiling"
+            )
         _refs(self.evidence_refs, "repair work-order evidence")
         if self.advisory_id is not None and not self.advisory_id.strip():
             raise ProductIncidentError("work-order advisory_id must be non-empty when supplied")
@@ -219,8 +224,7 @@ class RepairWorkOrder:
         if not self.acceptance_commands:
             raise ProductIncidentError("repair work order requires acceptance commands")
         for command in self.acceptance_commands:
-            if not command or any(not part.strip() for part in command):
-                raise ProductIncidentError("repair acceptance command must not be empty")
+            _acceptance_command(command)
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,6 +255,8 @@ class RepairCandidateEvidence:
         _digest(self.artifact_digest, "artifact_digest")
         _digest(self.diff_digest, "diff_digest")
         _refs(self.regression_evidence_refs, "regression evidence")
+        for evidence_digest in self.regression_evidence_refs:
+            _digest(evidence_digest, "regression evidence digest")
         _refs(self.provenance_evidence_refs, "candidate provenance evidence")
         _aware(self.recorded_at)
 
@@ -372,14 +378,27 @@ def _optional_ref(value: str | None, label: str) -> None:
 
 
 def _relative_path(value: str) -> None:
-    normalized = value.replace("\\", "/")
-    parts = normalized.split("/")
-    if (
-        normalized.startswith("/")
-        or ":" in parts[0]
-        or any(part in {"", ".", ".."} for part in parts)
-    ):
-        raise ProductIncidentError("allowed path must be normalized project-relative path")
+    if value != value.strip():
+        raise ProductIncidentError(
+            "allowed path must be normalized project-relative non-.git scope"
+        )
+    try:
+        normalize_relative_path(value)
+    except ValueError as exc:
+        raise ProductIncidentError(
+            "allowed path must be normalized project-relative non-.git scope"
+        ) from exc
+
+
+def _acceptance_command(command: tuple[str, ...]) -> None:
+    if not command or any(not part.strip() or part != part.strip() for part in command):
+        raise ProductIncidentError("repair acceptance command must be normalized and non-empty")
+    try:
+        AcceptanceCommand(command)
+    except ValueError as exc:
+        raise ProductIncidentError(
+            "repair acceptance command must use a non-shell Toolsmith entrypoint"
+        ) from exc
 
 
 def _sha(value: str, label: str) -> None:
