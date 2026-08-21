@@ -5,6 +5,10 @@ from nika_core.product_command.contracts import (
     ProductStatusEntry,
     ProductStatusKind,
 )
+from nika_core.product_command.factory_snapshot_safety import (
+    validate_operations_projection,
+    validate_rolling_maintenance_projection,
+)
 from nika_core.product_command.reference_safety import safe_evidence_reference
 from nika_core.product_factory_deployment_execution import (
     DeploymentExecutionSnapshot,
@@ -96,8 +100,7 @@ def product_operations_status_entries(
     project_id: str,
     snapshot: ProductOperationsSnapshot,
 ) -> tuple[ProductStatusEntry, ...]:
-    if snapshot.project_id != project_id:
-        return ()
+    validate_operations_projection(project_id, snapshot)
     entries: list[ProductStatusEntry] = []
     for record in snapshot.services:
         service = record.service
@@ -148,11 +151,10 @@ def rolling_maintenance_status_entries(
     project_id: str,
     snapshot: RollingMaintenanceSnapshot,
 ) -> tuple[ProductStatusEntry, ...]:
+    validate_rolling_maintenance_projection(project_id, snapshot)
     record_map = dict(snapshot.node_records)
     entries: list[ProductStatusEntry] = []
     for plan in snapshot.plans:
-        if plan.project_id != project_id:
-            continue
         nodes = record_map.get(plan.plan_id, ())
         states = tuple(record.state for record in nodes)
         state = _maintenance_plan_state(states)
