@@ -14,10 +14,10 @@ from nika_core.product_factory_orchestration import (
 )
 from nika_core.toolsmith.contracts import (
     CodingResult,
-    TestEvidence,
     WorkerFailure,
     WorkerFailureKind,
 )
+from nika_core.toolsmith.contracts import TestEvidence as WorkerTestEvidence
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
@@ -76,7 +76,8 @@ def _success(request, *, base_sha=SHA_A) -> WorkerResultEnvelope:
         coding_result=CodingResult(
             job_id=request.work_id,
             test_evidence=tuple(
-                TestEvidence(command, 0, "ok") for command in request.acceptance_commands
+                WorkerTestEvidence(command, 0, "ok")
+                for command in request.acceptance_commands
             ),
         ),
     )

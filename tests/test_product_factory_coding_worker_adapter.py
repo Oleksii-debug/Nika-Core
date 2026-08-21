@@ -148,7 +148,10 @@ class FakeWorker:
         return CodingResult(
             job_id=job.job_id,
             changed_files=(ChangedFile("src/core/item.py", DIGEST, 10),),
-            test_evidence=(WorkerTestEvidence(("python", "-m", "pytest"), 0, "tests-ok"),),
+            test_evidence=tuple(
+                WorkerTestEvidence(command.argv, 0, "tests-ok")
+                for command in job.acceptance_commands
+            ),
         )
 
 

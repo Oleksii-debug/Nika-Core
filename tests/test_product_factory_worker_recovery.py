@@ -20,10 +20,10 @@ from nika_core.product_factory_worker_recovery import (
 from nika_core.toolsmith.contracts import (
     CodingResult,
     RecoveryState,
-    TestEvidence,
     WorkerFailure,
     WorkerFailureKind,
 )
+from nika_core.toolsmith.contracts import TestEvidence as WorkerTestEvidence
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
@@ -92,7 +92,10 @@ class FakeRecoveryPort:
             job_id=request.work_id,
             test_evidence=()
             if self.failure is not None
-            else (TestEvidence(("pytest",), 0, "tests-ok"),),
+            else tuple(
+                WorkerTestEvidence(command, 0, "tests-ok")
+                for command in request.acceptance_commands
+            ),
             recovery_state=state,
             failure=self.failure,
         )

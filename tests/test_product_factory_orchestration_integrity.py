@@ -27,7 +27,8 @@ from nika_core.product_factory_orchestration import (
     TeamCompositionError,
     TeamCompositionRequest,
 )
-from nika_core.toolsmith.contracts import CodingResult, TestEvidence
+from nika_core.toolsmith.contracts import CodingResult
+from nika_core.toolsmith.contracts import TestEvidence as WorkerTestEvidence
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
@@ -82,7 +83,7 @@ def _success(request, commands=None) -> WorkerResultEnvelope:
         coding_result=CodingResult(
             job_id=request.work_id,
             test_evidence=tuple(
-                TestEvidence(command, 0, f"ok-{index}")
+                WorkerTestEvidence(command, 0, f"ok-{index}")
                 for index, command in enumerate(evidence_commands, start=1)
             ),
         ),

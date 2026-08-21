@@ -141,12 +141,13 @@ def _record(coordinator: ProductFactoryCoordinator, component_id: str):
 def _successful_envelope(request, ordinal: int) -> WorkerResultEnvelope:
     result = CodingResult(
         job_id=request.work_id,
-        test_evidence=(
+        test_evidence=tuple(
             WorkerTestEvidence(
-                command=("python", "-m", "pytest", request.component_id),
+                command=command,
                 exit_code=0,
-                output_digest=_digest(ordinal + 1),
-            ),
+                output_digest=_digest(ordinal + index + 1),
+            )
+            for index, command in enumerate(request.acceptance_commands)
         ),
     )
     return WorkerResultEnvelope(
