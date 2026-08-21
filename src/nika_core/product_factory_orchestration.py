@@ -174,9 +174,16 @@ class DynamicTeamComposer:
         capability = specialization.strip().casefold()
         if not capability:
             raise TeamCompositionError("specialization must not be empty")
+        if not reason.strip():
+            raise TeamCompositionError("specialist reason must not be empty")
         component_tuple = tuple(sorted(set(component_ids)))
         if not component_tuple:
             raise TeamCompositionError("specialist must own at least one component")
+        known_components = {component_id for role in plan.roles for component_id in role.component_ids}
+        unknown_components = set(component_tuple) - known_components
+        if unknown_components:
+            unknown = ", ".join(sorted(unknown_components))
+            raise TeamCompositionError(f"specialist references unknown component(s): {unknown}")
         requested = frozenset(requested_permissions)
         permissions = requested & plan.permission_ceiling
         role_id = _stable_id("team-role", plan.project_id, capability, component_tuple, len(plan.roles))
@@ -272,10 +279,16 @@ class RepositoryRef:
     case_sensitive_paths: bool = True
 
     def __post_init__(self) -> None:
-        if not self.repository_id.strip() or not self.locator.strip() or not self.default_branch.strip():
+        if not all(
+            value.strip()
+            for value in (self.repository_id, self.provider, self.locator, self.default_branch)
+        ):
             raise RepositoryGraphError("repository identity fields must not be empty")
-        if self.credential_ref is not None and not self.credential_ref.startswith("credref:"):
-            raise RepositoryGraphError("repository credentials must use opaque credref: references")
+        if self.credential_ref is not None:
+            if self.credential_ref != self.credential_ref.strip():
+                raise RepositoryGraphError("repository credential reference must not contain edge whitespace")
+            if not self.credential_ref.startswith("credref:") or not self.credential_ref[8:].strip():
+                raise RepositoryGraphError("repository credentials must use non-empty opaque credref: references")
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,6 +300,10 @@ class ProductComponent:
     build_commands: tuple[tuple[str, ...], ...] = ()
     test_commands: tuple[tuple[str, ...], ...] = ()
     release_identity: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.component_id.strip() or not self.repository_id.strip():
+            raise RepositoryGraphError("component identity fields must not be empty")
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,8 +332,12 @@ class IntegrationDecision:
     evidence_refs: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if not self.reason.strip() or not self.evidence_refs:
-            raise RepositoryGraphError("integration decisions require reason and evidence")
+        if not self.decision_id.strip() or not self.reason.strip() or not self.evidence_refs:
+            raise RepositoryGraphError("integration decisions require identity, reason and evidence")
+        if len(self.lease_ids) != 2 or len(set(self.lease_ids)) != 2:
+            raise RepositoryGraphError("integration decisions require two distinct leases")
+        if any(not lease_id.strip() for lease_id in self.lease_ids):
+            raise RepositoryGraphError("integration decision lease identity must not be empty")
 
 
 @dataclass(frozen=True, slots=True)
@@ -342,8 +363,11 @@ class ProductRepositoryGraph:
     _components_by_id: dict[str, ProductComponent] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        if not self.project_id.strip():
+            raise RepositoryGraphError("project_id must not be empty")
         self._repositories_by_id = _unique_by(self.repositories, "repository_id")
         self._components_by_id = _unique_by(self.components, "component_id")
+        self._validate_physical_repository_identity()
         self._validate_components()
         self._validate_acyclic()
         self._validate_component_overlap()
@@ -371,7 +395,11 @@ class ProductRepositoryGraph:
     ) -> LeaseAssessment:
         candidate_paths = self._lease_paths(candidate)
         conflicts: list[OwnershipConflict] = []
-        active_by_id = {lease.lease_id: lease for lease in active_leases}
+        active_tuple = tuple(active_leases)
+        active_ids = [lease.lease_id for lease in active_tuple]
+        if len(active_ids) != len(set(active_ids)):
+            raise RepositoryGraphError("active lease ids must be unique")
+        active_by_id = {lease.lease_id: lease for lease in active_tuple}
         for active in active_by_id.values():
             active_paths = self._lease_paths(active)
             for repo_id, candidate_path in candidate_paths:
@@ -396,12 +424,27 @@ class ProductRepositoryGraph:
             )
         )
         if decision is not None:
-            involved = {candidate.lease_id} | {item.active_lease_id for item in unique_conflicts}
-            if set(decision.lease_ids) - involved:
-                raise RepositoryGraphError("integration decision references unrelated lease")
-            if candidate.lease_id not in decision.lease_ids:
-                raise RepositoryGraphError("integration decision must include candidate lease")
+            expected = {candidate.lease_id} | {item.active_lease_id for item in unique_conflicts}
+            if set(decision.lease_ids) != expected:
+                raise RepositoryGraphError(
+                    "integration decision must cover candidate and every conflicting active lease"
+                )
         return LeaseAssessment(conflicts=unique_conflicts, decision=decision)
+
+    def _validate_physical_repository_identity(self) -> None:
+        seen: dict[tuple[str, str], str] = {}
+        for repository in self.repositories:
+            key = (
+                repository.provider.strip().casefold(),
+                repository.locator.strip().rstrip("/"),
+            )
+            previous = seen.get(key)
+            if previous is not None and previous != repository.repository_id:
+                raise RepositoryGraphError(
+                    "physical repository is aliased by multiple repository ids: "
+                    f"{previous}, {repository.repository_id}"
+                )
+            seen[key] = repository.repository_id
 
     def _validate_components(self) -> None:
         for component in self.components:
@@ -415,6 +458,8 @@ class ProductRepositoryGraph:
             normalized = [_normalize_repo_path(path) for path in component.paths]
             if len(normalized) != len(set(normalized)):
                 raise RepositoryGraphError(f"component {component.component_id} repeats an owned path")
+            if len(component.dependencies) != len(set(component.dependencies)):
+                raise RepositoryGraphError(f"component {component.component_id} repeats a dependency")
             for dependency in component.dependencies:
                 if dependency == component.component_id or dependency not in self._components_by_id:
                     raise RepositoryGraphError(
@@ -451,6 +496,8 @@ class ProductRepositoryGraph:
             raise RepositoryGraphError("lease identity must not be empty")
         if not lease.component_ids or not lease.allowed_paths:
             raise RepositoryGraphError("lease requires components and allowed paths")
+        if len(lease.component_ids) != len(set(lease.component_ids)):
+            raise RepositoryGraphError("lease component ids must be unique")
         components = []
         for component_id in lease.component_ids:
             component = self._components_by_id.get(component_id)
@@ -465,7 +512,11 @@ class ProductRepositoryGraph:
                 component
                 for component in components
                 if any(
-                    _path_within(path, _normalize_repo_path(root), self._repositories_by_id[component.repository_id].case_sensitive_paths)
+                    _path_within(
+                        path,
+                        _normalize_repo_path(root),
+                        self._repositories_by_id[component.repository_id].case_sensitive_paths,
+                    )
                     for root in component.paths
                 )
             ]
