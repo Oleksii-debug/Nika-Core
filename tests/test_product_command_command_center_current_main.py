@@ -9,9 +9,6 @@ from nika_core.product_command.command_center import (
     ProductCommandCenter,
     ProductCommandCenterScopeError,
 )
-from nika_core.product_command.deployment_adapter import (
-    DeploymentPresentationIntegrityError,
-)
 from nika_core.product_command.product_project_adapter import ProductProjectCommandService
 from nika_core.product_factory_deployment import (
     DeploymentFabricSnapshot,
@@ -163,7 +160,7 @@ def test_legacy_environment_only_current_release_fails_closed_when_ambiguous(
             _healthy_record(
                 "project-2",
                 intent_id="deploy-p2",
-                sha=SHA_B,
+                sha=SHA_A,
                 digest=DIGEST_B,
             ),
         ),
@@ -171,7 +168,10 @@ def test_legacy_environment_only_current_release_fails_closed_when_ambiguous(
         (("shared-stage", SHA_A),),
     )
 
-    with pytest.raises(ProductCommandCenterScopeError, match="ambiguous across projects"):
+    with pytest.raises(
+        ProductCommandCenterScopeError,
+        match="ambiguous or not backed by one project",
+    ):
         center.inspect_project("project-1", deployment=snapshot)
 
 
@@ -203,7 +203,7 @@ def test_forged_current_release_marker_without_healthy_record_fails_closed(
         (("project-1", "shared-stage", SHA_C),),
     )
 
-    with pytest.raises(DeploymentPresentationIntegrityError, match="not backed"):
+    with pytest.raises(ProductCommandCenterScopeError, match="current-release snapshot is not backed"):
         center.inspect_project("project-1", deployment=snapshot)
 
 
@@ -217,7 +217,7 @@ def test_forged_healthy_staging_marker_without_healthy_record_fails_closed(
         (("project-1", "shared-stage", SHA_A),),
     )
 
-    with pytest.raises(DeploymentPresentationIntegrityError, match="healthy staging"):
+    with pytest.raises(ProductCommandCenterScopeError, match="healthy-staging snapshot is not backed"):
         center.inspect_project("project-1", deployment=snapshot)
 
 
