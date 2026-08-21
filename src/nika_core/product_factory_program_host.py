@@ -430,7 +430,7 @@ class ProductFactoryProgramHost:
         try:
             updated = coordinator.record_result(envelope)
             self._save(host_task_id, binding, coordinator)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - preserve uncertain external-side-effect state
             coordinator.restore(before)
             self._mark_uncertain(operation_key)
             return _outcome(
