@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections import Counter
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
@@ -12,7 +11,7 @@ from nika_core.product_factory_orchestration import (
     ProductRepositoryGraph,
     RepositoryRef,
 )
-from nika_core.toolsmith.contracts import CodingResult
+from nika_core.toolsmith.contracts import CodingResult, TestEvidence
 
 
 class CoordinatorError(ValueError):
@@ -175,15 +174,7 @@ class ProductFactoryCoordinator:
             blocker = envelope.coding_result.failure.message if envelope.coding_result.failure else None
             updated = WorkRecord(request, WorkState.REPAIR_REQUIRED, envelope, blocker=blocker)
         else:
-            evidence = envelope.coding_result.test_evidence
-            if not evidence or any(item.exit_code != 0 for item in evidence):
-                raise CoordinatorError("successful worker result requires passing test evidence")
-            required = Counter(request.acceptance_commands)
-            observed = Counter(item.command for item in evidence)
-            if any(observed[command] < count for command, count in required.items()):
-                raise CoordinatorError(
-                    "successful worker result must prove every declared acceptance command"
-                )
+            self._validate_success_evidence(request, envelope.coding_result.test_evidence)
             updated = WorkRecord(request, WorkState.REVIEW_REQUIRED, envelope)
         self._records[envelope.component_id] = updated
         self._touch()
@@ -259,14 +250,25 @@ class ProductFactoryCoordinator:
         if set(actual) != expected or len(actual) != len(set(actual)):
             raise CoordinatorError("snapshot component set does not match repository graph")
 
-        permission_ceilings = {record.request.permission_ceiling for record in snapshot.records}
-        if len(permission_ceilings) != 1:
-            raise CoordinatorError("snapshot work requests disagree on project permission ceiling")
+        if snapshot.records:
+            permission_ceilings = {record.request.permission_ceiling for record in snapshot.records}
+            if len(permission_ceilings) != 1:
+                raise CoordinatorError(
+                    "snapshot work requests disagree on project permission ceiling"
+                )
 
         for record in snapshot.records:
             request = record.request
             component = components[request.component_id]
             repository = repositories[component.repository_id]
+            expected_work_id = _stable_id(
+                "work",
+                self.graph.project_id,
+                component.component_id,
+                request.attempt,
+            )
+            if request.work_id != expected_work_id:
+                raise CoordinatorError("snapshot work id does not match component attempt")
             if request.project_id != self.graph.project_id:
                 raise CoordinatorError("snapshot work request project identity drifted")
             if request.repository_id != repository.repository_id:
@@ -277,29 +279,100 @@ class ProductFactoryCoordinator:
                 raise CoordinatorError("snapshot acceptance command scope drifted")
             self._validate_restored_record(record)
 
+        self._validate_restored_dependencies(snapshot.records)
         self._records = {record.request.component_id: record for record in snapshot.records}
         self._revision = snapshot.revision
         self._advance_ready()
 
     def _validate_restored_record(self, record: WorkRecord) -> None:
         request = record.request
-        if record.result is not None:
-            self._validate_result_identity(request, record.result)
+        result = record.result
+        review = record.review
+        blocker = record.blocker
+
+        if result is not None:
+            self._validate_result_identity(request, result)
+
+        if record.state in {WorkState.PLANNED, WorkState.READY, WorkState.RUNNING}:
+            if result is not None or review is not None or blocker is not None:
+                raise CoordinatorError("pre-result snapshot work contains terminal evidence")
+            return
+
+        if record.state is WorkState.REVIEW_REQUIRED:
+            if (
+                result is None
+                or not result.coding_result.succeeded
+                or review is not None
+                or blocker is not None
+            ):
+                raise CoordinatorError(
+                    "review_required snapshot work requires one successful result only"
+                )
+            self._validate_success_evidence(request, result.coding_result.test_evidence)
+            return
+
         if record.state is WorkState.ACCEPTED:
-            if record.result is None or record.review is None or not record.review.accepted:
+            if (
+                result is None
+                or not result.coding_result.succeeded
+                or review is None
+                or not review.accepted
+                or blocker is not None
+            ):
                 raise CoordinatorError(
-                    "accepted snapshot work requires worker result and accepted independent review"
+                    "accepted snapshot work requires successful result and accepted review"
                 )
-        elif record.state is WorkState.REVIEW_REQUIRED:
-            if record.result is None or record.review is not None:
+            self._validate_success_evidence(request, result.coding_result.test_evidence)
+            return
+
+        if record.state is WorkState.REPAIR_REQUIRED:
+            if result is None or not blocker:
                 raise CoordinatorError(
-                    "review_required snapshot work requires result and no completed review"
+                    "repair_required snapshot work requires result evidence and blocker"
                 )
-        elif (
-            record.state in {WorkState.PLANNED, WorkState.READY, WorkState.RUNNING}
-            and (record.result is not None or record.review is not None)
-        ):
-            raise CoordinatorError("pre-review snapshot work cannot contain result or review")
+            if result.coding_result.succeeded:
+                if review is None or review.accepted or blocker != review.reason:
+                    raise CoordinatorError(
+                        "review-rejected repair snapshot is internally inconsistent"
+                    )
+                self._validate_success_evidence(request, result.coding_result.test_evidence)
+            elif review is not None:
+                raise CoordinatorError(
+                    "worker-failed repair snapshot cannot contain review evidence"
+                )
+            return
+
+        if record.state is WorkState.BLOCKED:
+            if result is not None or review is not None or not blocker:
+                raise CoordinatorError(
+                    "blocked snapshot work requires blocker without terminal evidence"
+                )
+            return
+
+        raise CoordinatorError("snapshot contains unknown work state")
+
+    def _validate_restored_dependencies(self, records: tuple[WorkRecord, ...]) -> None:
+        accepted = {
+            record.request.component_id
+            for record in records
+            if record.state is WorkState.ACCEPTED
+        }
+        components = self._components()
+        states_requiring_accepted_dependencies = {
+            WorkState.READY,
+            WorkState.RUNNING,
+            WorkState.REVIEW_REQUIRED,
+            WorkState.ACCEPTED,
+            WorkState.REPAIR_REQUIRED,
+        }
+        for record in records:
+            if record.state not in states_requiring_accepted_dependencies:
+                continue
+            dependencies = set(components[record.request.component_id].dependencies)
+            if not dependencies <= accepted:
+                raise CoordinatorError(
+                    "snapshot component state bypasses dependency acceptance"
+                )
 
     @staticmethod
     def _validate_result_identity(
@@ -314,6 +387,30 @@ class ProductFactoryCoordinator:
             raise CoordinatorError("stale worker result base SHA does not match active request")
         if envelope.coding_result.job_id != request.work_id:
             raise CoordinatorError("coding result job id does not match Product Factory work id")
+
+    @staticmethod
+    def _validate_success_evidence(
+        request: ComponentWorkRequest,
+        evidence: tuple[TestEvidence, ...],
+    ) -> None:
+        if not evidence or any(item.exit_code != 0 for item in evidence):
+            raise CoordinatorError("successful worker result requires passing test evidence")
+
+        remaining = list(evidence)
+        for declared in request.acceptance_commands:
+            match_index = next(
+                (
+                    index
+                    for index, item in enumerate(remaining)
+                    if _commands_equivalent(item.command, declared)
+                ),
+                None,
+            )
+            if match_index is None:
+                raise CoordinatorError(
+                    "successful worker result must prove every declared acceptance command"
+                )
+            remaining.pop(match_index)
 
     def _advance_ready(self) -> None:
         accepted = {key for key, item in self._records.items() if item.state is WorkState.ACCEPTED}
@@ -340,6 +437,46 @@ class ProductFactoryCoordinator:
 
     def _touch(self) -> None:
         self._revision += 1
+
+
+def _commands_equivalent(observed: tuple[str, ...], declared: tuple[str, ...]) -> bool:
+    if observed == declared:
+        return True
+
+    observed_pytest = _pytest_args(observed)
+    declared_pytest = _pytest_args(declared)
+    if observed_pytest is None or declared_pytest is None:
+        return False
+    if not observed_pytest:
+        return True
+    if observed_pytest == declared_pytest:
+        return True
+    if len(observed_pytest) != 1 or len(declared_pytest) != 1:
+        return False
+
+    observed_target = observed_pytest[0].replace("\\", "/").removeprefix("./")
+    declared_target = declared_pytest[0].replace("\\", "/").removeprefix("./")
+    return (
+        observed_target == declared_target
+        or f"tests/{observed_target}" == declared_target
+        or observed_target == f"tests/{declared_target}"
+    )
+
+
+def _pytest_args(command: tuple[str, ...]) -> tuple[str, ...] | None:
+    if not command:
+        return None
+    executable = command[0].casefold()
+    if executable in {"pytest", "pytest.exe"}:
+        return command[1:]
+    if (
+        len(command) >= 3
+        and executable in {"py", "py.exe", "python", "python.exe", "python3", "python3.exe"}
+        and command[1] == "-m"
+        and command[2].casefold() == "pytest"
+    ):
+        return command[3:]
+    return None
 
 
 def _stable_id(prefix: str, *parts: object) -> str:
