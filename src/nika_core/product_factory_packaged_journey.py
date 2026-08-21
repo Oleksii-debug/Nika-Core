@@ -5,6 +5,7 @@ from collections import Counter
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_command.command_center import ProductCommandCenter
 from nika_core.product_command.contracts import CommandRouteKind, ProductProjectDetail
 from nika_core.product_command.product_project_adapter import (
@@ -31,6 +32,48 @@ def product_project_identity(normalized_goal: str) -> str:
     return f"product-{digest}"
 
 
+class PackagedProductSelectionStore:
+    """Durable presentation-only selection for the packaged ProductCommandCenter.
+
+    This record is not ProductProject authority. It stores only the opaque project identity needed
+    to restore the last visible ProductProject after an application/process restart.
+    """
+
+    def __init__(self, store: SQLiteStore) -> None:
+        self._store = store
+        with self._store.connection() as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS packaged_product_selection ("
+                "slot INTEGER PRIMARY KEY CHECK(slot = 1), "
+                "project_id TEXT NOT NULL CHECK(length(trim(project_id)) > 0))"
+            )
+
+    def load(self) -> str | None:
+        with self._store.connection() as conn:
+            row = conn.execute(
+                "SELECT project_id FROM packaged_product_selection WHERE slot = 1"
+            ).fetchone()
+        if row is None:
+            return None
+        project_id = str(row["project_id"]).strip()
+        return project_id or None
+
+    def select(self, project_id: str) -> None:
+        normalized = project_id.strip()
+        if not normalized:
+            raise PackagedProductJourneyError("selected ProductProject id must not be empty")
+        with self._store.connection() as conn:
+            conn.execute(
+                "INSERT INTO packaged_product_selection(slot, project_id) VALUES (1, ?) "
+                "ON CONFLICT(slot) DO UPDATE SET project_id = excluded.project_id",
+                (normalized,),
+            )
+
+    def clear(self) -> None:
+        with self._store.connection() as conn:
+            conn.execute("DELETE FROM packaged_product_selection WHERE slot = 1")
+
+
 class PackagedProductCommandRouter:
     """Route packaged command input to durable ProductProject or ordinary task handling.
 
@@ -44,15 +87,22 @@ class PackagedProductCommandRouter:
         *,
         products: ProductProjectCommandService,
         ordinary_handler: OrdinaryCommandHandler,
+        selection_store: PackagedProductSelectionStore | None = None,
     ) -> None:
         self._products = products
         self._ordinary_handler = ordinary_handler
-        self._active_project_id: str | None = None
+        self._selection_store = selection_store
+        self._active_project_id = selection_store.load() if selection_store is not None else None
 
     @property
     def active_project_id(self) -> str | None:
-        """Return process-local presentation selection, never a durable authority record."""
+        """Return presentation selection; durable authority remains in ProductProject state."""
         return self._active_project_id
+
+    def clear_stale_selection(self) -> None:
+        self._active_project_id = None
+        if self._selection_store is not None:
+            self._selection_store.clear()
 
     def create(self, payload: Mapping[str, Any]) -> UIResult:
         command = str(payload.get("command", "")).strip()
@@ -88,6 +138,8 @@ class PackagedProductCommandRouter:
             spec=ProductProjectSpec(goal=goal, desired_outcome=goal),
             idempotency_key=f"packaged-product-route:{project_id}",
         )
+        if self._selection_store is not None:
+            self._selection_store.select(project_id)
         self._active_project_id = project_id
         return UIResult(
             request_id="desktop-handler",
@@ -103,10 +155,9 @@ class PackagedProductCommandRouter:
 class PackagedProductStateProvider:
     """Compose Desktop state with a bounded PF5 ProductCommandCenter projection.
 
-    The active project pointer is intentionally process-local. Durable ProductProject identity,
-    lifecycle and decisions remain owned by PF1/PF5 repositories. Replaying the same product
-    command after restart re-selects the same durable project rather than introducing a second
-    persisted selection mechanism.
+    Durable ProductProject identity, lifecycle and decisions remain owned by PF1/PF5 repositories.
+    The separate packaged selection record contains only the opaque project id needed to restore
+    the last visible project after restart; it is never accepted as project authority.
 
     Only bounded presentation fields are returned. Evidence references, credential references,
     authorization material, provider sessions and protected-store handles are not serialized by
@@ -132,6 +183,9 @@ class PackagedProductStateProvider:
             return state
         try:
             detail = self._command_center.inspect_project(project_id)
+        except KeyError:
+            self._router.clear_stale_selection()
+            return state
         except ProductProjectPresentationConsistencyError as exc:
             raise PackagedProductJourneyError(
                 "ProductProject changed while packaged state was composed; refresh required."
