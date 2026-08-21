@@ -118,7 +118,7 @@ class ProductProjectHistoryArchiveService:
             )
             audit = self._rows(
                 conn.execute(
-                    "SELECT event_id,event_type,entity_type,entity_id,payload_json,created_at "
+                    "SELECT event_type,entity_type,entity_id,payload_json,created_at "
                     "FROM audit_events WHERE entity_type='product_project' AND entity_id=? "
                     "ORDER BY event_id",
                     (project_id,),
