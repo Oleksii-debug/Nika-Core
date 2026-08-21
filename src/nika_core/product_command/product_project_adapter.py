@@ -10,7 +10,9 @@ from nika_core.product_command.contracts import (
     ProductStatusEntry,
     ProductStatusKind,
 )
+from nika_core.product_decisions import ProductDecisionRepository, StoredProductDecision
 from nika_core.product_project import (
+    ProductDecision,
     ProductProject,
     ProductProjectRepository,
     ProductProjectSpec,
@@ -19,7 +21,7 @@ from nika_core.product_project import (
 
 
 class ProductProjectDecisionUnavailableError(RuntimeError):
-    """Raised when PF5 is asked to persist a decision without an integrated PF1 API."""
+    """Compatibility exception retained for callers of the pre-PF1 decision adapter."""
 
 
 class ProductProjectCommandService:
@@ -27,6 +29,7 @@ class ProductProjectCommandService:
 
     def __init__(self, repository: ProductProjectRepository) -> None:
         self._repository = repository
+        self._decisions = ProductDecisionRepository(repository.store)
 
     def create_project(
         self,
@@ -45,7 +48,15 @@ class ProductProjectCommandService:
         return project_detail(project)
 
     def inspect_project(self, project_id: str) -> ProductProjectDetail:
-        return project_detail(self._repository.get(project_id))
+        detail, _credential_refs = self.inspect_project_context(project_id)
+        return detail
+
+    def inspect_project_context(
+        self,
+        project_id: str,
+    ) -> tuple[ProductProjectDetail, tuple[str, ...]]:
+        project = self._repository.get(project_id)
+        return project_detail(project), project.spec.credential_refs
 
     def update_project(
         self,
@@ -82,14 +93,31 @@ class ProductProjectCommandService:
         )
         return project_detail(updated)
 
-    def persist_decision(self, project_id: str, decision_id: str) -> None:
-        self._repository.get(project_id)
-        if not decision_id.strip():
-            raise ValueError("decision_id must not be empty")
-        raise ProductProjectDecisionUnavailableError(
-            "integrated PF1 does not expose a durable decision-write API; "
-            "PF5 will not bypass ProductProject ownership with direct SQL"
+    def persist_decision(
+        self,
+        project_id: str,
+        decision: ProductDecision,
+        *,
+        expected_row_version: int,
+        idempotency_key: str,
+    ) -> StoredProductDecision:
+        """Persist a PF1 decision only through the integrated public repository."""
+        return self._decisions.record(
+            project_id,
+            decision,
+            expected_row_version=expected_row_version,
+            idempotency_key=idempotency_key,
         )
+
+    def list_decisions(self, project_id: str) -> tuple[StoredProductDecision, ...]:
+        return self._decisions.list(project_id)
+
+    def decision_history(
+        self,
+        project_id: str,
+        decision_id: str,
+    ) -> tuple[StoredProductDecision, ...]:
+        return self._decisions.history(project_id, decision_id)
 
 
 def project_detail(project: ProductProject) -> ProductProjectDetail:

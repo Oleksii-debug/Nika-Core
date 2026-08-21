@@ -4,15 +4,17 @@ import pytest
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_command.contracts import ProductStatusKind
-from nika_core.product_command.product_project_adapter import (
-    ProductProjectCommandService,
-    ProductProjectDecisionUnavailableError,
-)
+from nika_core.product_command.product_project_adapter import ProductProjectCommandService
 from nika_core.product_command.routing import route_command
 from nika_core.product_project import (
+    EvidenceRef,
+    ProductDecision,
+    ProductDecisionState,
+    ProductOption,
     ProductProjectRepository,
     ProductProjectSpec,
     ProductRequirement,
+    ResearchEvidencePackage,
     StaleProjectVersionError,
 )
 
@@ -156,14 +158,65 @@ def test_presentation_never_exposes_credential_refs(tmp_path) -> None:
     assert "research-expense-1" in serialized
 
 
-def test_decision_write_fails_closed_without_integrated_pf1_decision_api(tmp_path) -> None:
-    service, _store = _service(tmp_path)
+def test_decision_write_uses_integrated_pf1_api_and_survives_restart(tmp_path) -> None:
+    service, store = _service(tmp_path)
     service.create_project(
         project_id="p1",
         name="Expense",
         spec=_spec(),
         idempotency_key="create:p1",
     )
+    projects = ProductProjectRepository(store)
+    package = ResearchEvidencePackage(
+        "research-expense-1",
+        (
+            EvidenceRef(
+                "evidence-1",
+                "research://expense/claim/1",
+                "Keyboard design option evidence",
+            ),
+        ),
+    )
+    projects.record_research_handoff(
+        "p1",
+        package,
+        (
+            ProductOption(
+                "option-1",
+                "Keyboard-first design",
+                "Use native semantic controls",
+                ("research-expense-1",),
+            ),
+        ),
+    )
+    decision = ProductDecision(
+        "decision-1",
+        "option-1",
+        ProductDecisionState.APPROVED,
+        "Evidence supports the accessible option",
+        "user://owner",
+    )
 
-    with pytest.raises(ProductProjectDecisionUnavailableError, match="durable decision-write API"):
-        service.persist_decision("p1", "decision-1")
+    stored = service.persist_decision(
+        "p1",
+        decision,
+        expected_row_version=0,
+        idempotency_key="decision:p1:approve",
+    )
+    replay = service.persist_decision(
+        "p1",
+        decision,
+        expected_row_version=0,
+        idempotency_key="decision:p1:approve",
+    )
+
+    assert replay == stored
+    assert stored.decision_version == 1
+
+    restarted_store = SQLiteStore(store.path)
+    restarted_store.initialize()
+    restarted = ProductProjectCommandService(
+        ProductProjectRepository(restarted_store)
+    )
+    assert restarted.list_decisions("p1") == (stored,)
+    assert restarted.decision_history("p1", "decision-1") == (stored,)

@@ -24,6 +24,7 @@ class ProductStatusKind(StrEnum):
     RELEASE = "release"
     DEPLOYMENT = "deployment"
     INCIDENT = "incident"
+    CREDENTIAL = "credential"
     BLOCKER = "blocker"
 
 
