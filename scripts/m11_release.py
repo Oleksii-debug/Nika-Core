@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
+import subprocess
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -15,6 +18,7 @@ from nika_core.packaging.release import (
 from nika_core.packaging.windows import default_windows_plan
 
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_PF11_EVIDENCE_NAME = "pf11-packaged-product-journey.json"
 
 
 def project_version(project_root: Path) -> str:
@@ -34,7 +38,8 @@ def resolve_release_version(project_root: Path, requested: str | None) -> str:
     canonical = project_version(project_root)
     if requested is not None and requested != canonical:
         raise ValueError(
-            f"requested release version {requested!r} does not match pyproject version {canonical!r}"
+            f"requested release version {requested!r} does not match "
+            f"pyproject version {canonical!r}"
         )
     return canonical
 
@@ -50,6 +55,85 @@ def resolve_source_sha(requested: str | None) -> str:
     return candidate
 
 
+def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path:
+    """Run the packaged executable twice and persist restart-bound PF11 evidence."""
+    executable = bundle_dir / "NikaCore.exe"
+    if not executable.is_file():
+        raise RuntimeError(f"packaged PF11 proof executable is missing: {executable}")
+    if not _FULL_SHA_RE.fullmatch(source_sha):
+        raise ValueError("packaged PF11 proof requires exact source SHA")
+
+    with tempfile.TemporaryDirectory(prefix="nika-pf11-proof-") as temporary:
+        root = Path(temporary)
+        database = root / "product-journey.db"
+        outputs: list[dict[str, object]] = []
+        environment = dict(os.environ)
+        environment["NIKA_DB_PATH"] = str(database)
+        for attempt in (1, 2):
+            output = root / f"proof-{attempt}.json"
+            completed = subprocess.run(
+                [
+                    str(executable),
+                    "--pf11-proof",
+                    "--pf11-proof-output",
+                    str(output),
+                ],
+                check=False,
+                env=environment,
+                timeout=60,
+            )
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    f"packaged PF11 ProductProject proof failed on attempt {attempt}: "
+                    f"exit {completed.returncode}"
+                )
+            try:
+                payload = json.loads(output.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise RuntimeError("packaged PF11 proof did not emit valid JSON evidence") from exc
+            if not isinstance(payload, dict):
+                raise TypeError("packaged PF11 proof evidence must be a JSON object")
+            outputs.append(payload)
+
+    first, second = outputs
+    if first != second:
+        raise RuntimeError("packaged PF11 ProductProject restart replay changed durable identity")
+    if (
+        first.get("route") != "product_project"
+        or first.get("spec_version") != 1
+        or not isinstance(first.get("project_id"), str)
+        or not str(first["project_id"]).strip()
+    ):
+        raise RuntimeError("packaged PF11 ProductProject proof returned invalid route evidence")
+    for forbidden_true in (
+        "human_tested",
+        "nvda_verified",
+        "production_release_ready",
+    ):
+        if first.get(forbidden_true) is not False:
+            raise RuntimeError(f"packaged PF11 proof may not set {forbidden_true}=true")
+
+    target = bundle_dir / _PF11_EVIDENCE_NAME
+    evidence = {
+        "schema_version": 1,
+        "source_sha": source_sha,
+        "route": first["route"],
+        "product_project_id": first["project_id"],
+        "product_project_spec_version": first["spec_version"],
+        "product_project_state": first.get("state"),
+        "packaged_executable_proven": True,
+        "restart_replay_proven": True,
+        "human_tested": False,
+        "nvda_verified": False,
+        "production_release_ready": False,
+    }
+    target.write_text(
+        json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return target
+
+
 def build(
     project_root: Path,
     version: str | None,
@@ -62,6 +146,7 @@ def build(
     plan = default_windows_plan(project_root)
     PyInstaller.__main__.run(list(plan.pyinstaller_args()))
 
+    prove_packaged_product_journey(plan.bundle_dir, source_sha=exact_source_sha)
     build_third_party_notices(plan.bundle_dir)
     notice_findings = verify_third_party_notices(plan.bundle_dir)
     if notice_findings:
