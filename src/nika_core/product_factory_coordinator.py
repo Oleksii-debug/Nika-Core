@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import Counter
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
@@ -169,19 +170,12 @@ class ProductFactoryCoordinator:
         if record.state is not WorkState.RUNNING:
             raise CoordinatorError("worker result is only valid for a running component")
         request = record.request
-        if envelope.work_id != request.work_id or envelope.repository_id != request.repository_id:
-            raise CoordinatorError("worker result identity does not match active request")
-        if envelope.base_sha != request.base_sha:
-            raise CoordinatorError("stale worker result base SHA does not match active request")
-        if envelope.coding_result.job_id != request.work_id:
-            raise CoordinatorError("coding result job id does not match Product Factory work id")
+        self._validate_result_identity(request, envelope)
         if not envelope.coding_result.succeeded:
             blocker = envelope.coding_result.failure.message if envelope.coding_result.failure else None
             updated = WorkRecord(request, WorkState.REPAIR_REQUIRED, envelope, blocker=blocker)
         else:
-            evidence = envelope.coding_result.test_evidence
-            if not evidence or any(item.exit_code != 0 for item in evidence):
-                raise CoordinatorError("successful worker result requires passing test evidence")
+            self._validate_success_evidence(request, envelope.coding_result)
             updated = WorkRecord(request, WorkState.REVIEW_REQUIRED, envelope)
         self._records[envelope.component_id] = updated
         self._touch()
@@ -248,13 +242,113 @@ class ProductFactoryCoordinator:
     def restore(self, snapshot: CoordinatorSnapshot) -> None:
         if snapshot.project_id != self.graph.project_id:
             raise CoordinatorError("snapshot project does not match repository graph")
-        expected = set(self._components())
+        if snapshot.revision < 0:
+            raise CoordinatorError("snapshot revision must not be negative")
+        components = self._components()
+        expected = set(components)
         actual = [record.request.component_id for record in snapshot.records]
         if set(actual) != expected or len(actual) != len(set(actual)):
             raise CoordinatorError("snapshot component set does not match repository graph")
+        permission_ceilings = {record.request.permission_ceiling for record in snapshot.records}
+        if len(permission_ceilings) > 1:
+            raise CoordinatorError("snapshot permission ceiling is inconsistent across components")
+        for record in snapshot.records:
+            self._validate_restored_record(record, components[record.request.component_id])
         self._records = {record.request.component_id: record for record in snapshot.records}
         self._revision = snapshot.revision
         self._advance_ready()
+
+    def _validate_restored_record(self, record: WorkRecord, component: ProductComponent) -> None:
+        request = record.request
+        if request.project_id != self.graph.project_id:
+            raise CoordinatorError("snapshot work request project does not match repository graph")
+        if request.component_id != component.component_id:
+            raise CoordinatorError("snapshot work request component identity does not match graph")
+        if request.repository_id != component.repository_id:
+            raise CoordinatorError("snapshot work request repository does not match component ownership")
+        if request.allowed_paths != component.paths:
+            raise CoordinatorError("snapshot work request paths exceed component ownership")
+        if request.acceptance_commands != component.test_commands:
+            raise CoordinatorError("snapshot acceptance commands do not match component contract")
+        expected_work_id = _stable_id(
+            "work", self.graph.project_id, component.component_id, request.attempt
+        )
+        if request.work_id != expected_work_id:
+            raise CoordinatorError("snapshot work id does not match deterministic attempt identity")
+
+        if record.result is not None:
+            self._validate_result_identity(request, record.result)
+            if record.result.coding_result.succeeded:
+                self._validate_success_evidence(request, record.result.coding_result)
+
+        if record.state in {WorkState.PLANNED, WorkState.READY, WorkState.RUNNING}:
+            if record.result is not None or record.review is not None or record.blocker is not None:
+                raise CoordinatorError("pre-result work state contains impossible result/review data")
+            return
+        if record.state is WorkState.REVIEW_REQUIRED:
+            if (
+                record.result is None
+                or not record.result.coding_result.succeeded
+                or record.review is not None
+                or record.blocker is not None
+            ):
+                raise CoordinatorError("review_required snapshot record is internally inconsistent")
+            return
+        if record.state is WorkState.ACCEPTED:
+            if (
+                record.result is None
+                or not record.result.coding_result.succeeded
+                or record.review is None
+                or not record.review.accepted
+                or record.blocker is not None
+            ):
+                raise CoordinatorError("accepted snapshot record lacks accepted result and review")
+            return
+        if record.state is WorkState.REPAIR_REQUIRED:
+            self._validate_repair_record(record)
+            return
+        if record.state is WorkState.BLOCKED:
+            if record.result is not None or record.review is not None or not _nonempty(record.blocker):
+                raise CoordinatorError("blocked snapshot record requires only a durable blocker")
+            return
+        raise CoordinatorError(f"unsupported snapshot work state: {record.state}")
+
+    def _validate_repair_record(self, record: WorkRecord) -> None:
+        result = record.result
+        if result is None:
+            raise CoordinatorError("repair_required snapshot record must retain worker/review evidence")
+        if not result.coding_result.succeeded:
+            if record.review is not None:
+                raise CoordinatorError("failed worker result cannot carry an independent review")
+            return
+        if record.review is None or record.review.accepted or not _nonempty(record.blocker):
+            raise CoordinatorError("successful repair_required result requires a rejected review")
+
+    def _validate_result_identity(
+        self, request: ComponentWorkRequest, envelope: WorkerResultEnvelope
+    ) -> None:
+        if (
+            envelope.work_id != request.work_id
+            or envelope.component_id != request.component_id
+            or envelope.repository_id != request.repository_id
+        ):
+            raise CoordinatorError("worker result identity does not match active request")
+        if envelope.base_sha != request.base_sha:
+            raise CoordinatorError("stale worker result base SHA does not match active request")
+        if envelope.coding_result.job_id != request.work_id:
+            raise CoordinatorError("coding result job id does not match Product Factory work id")
+
+    def _validate_success_evidence(
+        self, request: ComponentWorkRequest, coding_result: CodingResult
+    ) -> None:
+        evidence = coding_result.test_evidence
+        if not evidence or any(item.exit_code != 0 for item in evidence):
+            raise CoordinatorError("successful worker result requires passing test evidence")
+        required = Counter(request.acceptance_commands)
+        observed = Counter(item.command for item in evidence)
+        missing = required - observed
+        if missing:
+            raise CoordinatorError("successful worker result is missing declared acceptance evidence")
 
     def _advance_ready(self) -> None:
         accepted = {key for key, item in self._records.items() if item.state is WorkState.ACCEPTED}
@@ -296,3 +390,7 @@ def _validate_sha(value: str, label: str) -> None:
 def _validate_digest(value: str, label: str) -> None:
     if len(value) != 64 or any(char not in "0123456789abcdef" for char in value.casefold()):
         raise CoordinatorError(f"{label} must be a 64-character hexadecimal digest")
+
+
+def _nonempty(value: str | None) -> bool:
+    return value is not None and bool(value.strip())
