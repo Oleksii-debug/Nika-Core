@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -323,6 +324,100 @@ def test_empty_section_and_invalid_ranges_fail_closed(tmp_path) -> None:
             section="unknown",
             start_shard_index=0,
             stop_shard_index=1,
+        )
+
+
+def test_v2_boundaries_reject_boolean_indices_and_versions(tmp_path) -> None:
+    store, projects = _project(tmp_path)
+    _research(projects, 40)
+    generations = ProductProjectHistoryGenerationService(store)
+    generation_1 = generations.build("project-1")
+    source = ProductProjectHistoryShardedCommitmentService(store).export(
+        generation_1,
+        target_records_per_shard=10,
+    )
+    service = ProductProjectHistoryCommitmentRangeService(store)
+    compact = service.upgrade_v1(source.descriptor_bytes)
+    proof = service.build_range_proof(
+        source.descriptor_bytes,
+        section="research_handoffs",
+        start_shard_index=0,
+        stop_shard_index=1,
+    )
+
+    with pytest.raises(ProductProjectError, match="interval"):
+        service.build_range_proof(
+            source.descriptor_bytes,
+            section="research_handoffs",
+            start_shard_index=False,
+            stop_shard_index=1,
+        )
+
+    compact_envelope = json.loads(compact.descriptor_bytes)
+    compact_envelope["payload"]["row_version"] = False
+    with pytest.raises(ProductProjectError, match="row_version"):
+        service.verify_index(_rehash(compact_envelope))
+
+    proof_envelope = json.loads(proof.proof_bytes)
+    proof_envelope["payload"]["start_shard_index"] = False
+    with pytest.raises(ProductProjectError, match="start_shard_index"):
+        service.verify_range_proof(
+            compact.descriptor_bytes,
+            _rehash(proof_envelope),
+            (),
+            (),
+        )
+
+
+def test_v1_upgrade_rejects_boolean_numeric_fields_missed_by_v1_parser(tmp_path) -> None:
+    store, projects = _project(tmp_path)
+    _research(projects, 30)
+    generation = ProductProjectHistoryGenerationService(store).build("project-1")
+    source = ProductProjectHistoryShardedCommitmentService(store).export(
+        generation,
+        target_records_per_shard=10,
+    )
+    service = ProductProjectHistoryCommitmentRangeService(store)
+
+    envelope = json.loads(source.descriptor_bytes)
+    envelope["payload"]["generation"] = True
+    with pytest.raises(ProductProjectError, match="source v1 commitment generation"):
+        service.upgrade_v1(_rehash(envelope))
+
+    envelope = json.loads(source.descriptor_bytes)
+    envelope["payload"]["shards"][0]["shard_index"] = False
+    with pytest.raises(ProductProjectError, match="source v1 commitment shard index"):
+        service.upgrade_v1(_rehash(envelope))
+
+
+def test_range_verifier_rejects_boolean_descendant_versions_before_chain_use(tmp_path) -> None:
+    store, projects = _project(tmp_path)
+    _research(projects, 50)
+    generations = ProductProjectHistoryGenerationService(store)
+    generation_1 = generations.build("project-1")
+    source = ProductProjectHistoryShardedCommitmentService(store).export(
+        generation_1,
+        target_records_per_shard=10,
+    )
+    service = ProductProjectHistoryCommitmentRangeService(store)
+    compact = service.upgrade_v1(source.descriptor_bytes)
+    proof = service.build_range_proof(
+        source.descriptor_bytes,
+        section="research_handoffs",
+        start_shard_index=0,
+        stop_shard_index=1,
+    )
+    shard = _shard_map(source.shard_bytes)[("research_handoffs", 0)]
+
+    _research(projects, 1, start=50)
+    generation_2 = generations.build("project-1", previous=generation_1)
+    forged = replace(generation_2, generation=True)
+    with pytest.raises(ProductProjectError, match="descendant generation"):
+        service.verify_range_proof(
+            compact.descriptor_bytes,
+            proof.proof_bytes,
+            (shard,),
+            (forged,),
         )
 
 
