@@ -1,3 +1,7 @@
+from nika_core.product_command.command_center import (
+    ProductCommandCenter,
+    ProductCommandCenterScopeError,
+)
 from nika_core.product_command.contracts import (
     CommandRouteDecision,
     CommandRouteKind,
@@ -24,10 +28,6 @@ from nika_core.product_command.product_project_adapter import (
     ProductProjectCommandService,
     ProductProjectDecisionUnavailableError,
     project_detail,
-)
-from nika_core.product_command.command_center import (
-    ProductCommandCenter,
-    ProductCommandCenterScopeError,
 )
 
 __all__ = [
