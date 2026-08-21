@@ -327,15 +327,15 @@ class OwnershipConflict:
 class IntegrationDecision:
     decision_id: str
     kind: IntegrationDecisionKind
-    lease_ids: tuple[str, str]
+    lease_ids: tuple[str, ...]
     reason: str
     evidence_refs: tuple[str, ...]
 
     def __post_init__(self) -> None:
         if not self.decision_id.strip() or not self.reason.strip() or not self.evidence_refs:
             raise RepositoryGraphError("integration decisions require identity, reason and evidence")
-        if len(self.lease_ids) != 2 or len(set(self.lease_ids)) != 2:
-            raise RepositoryGraphError("integration decisions require two distinct leases")
+        if len(self.lease_ids) < 2 or len(set(self.lease_ids)) != len(self.lease_ids):
+            raise RepositoryGraphError("integration decisions require distinct involved leases")
         if any(not lease_id.strip() for lease_id in self.lease_ids):
             raise RepositoryGraphError("integration decision lease identity must not be empty")
 
@@ -434,10 +434,11 @@ class ProductRepositoryGraph:
     def _validate_physical_repository_identity(self) -> None:
         seen: dict[tuple[str, str], str] = {}
         for repository in self.repositories:
-            key = (
-                repository.provider.strip().casefold(),
-                repository.locator.strip().rstrip("/"),
-            )
+            provider = repository.provider.strip().casefold()
+            locator = repository.locator.strip().rstrip("/")
+            if provider == "github":
+                locator = locator.casefold()
+            key = (provider, locator)
             previous = seen.get(key)
             if previous is not None and previous != repository.repository_id:
                 raise RepositoryGraphError(
