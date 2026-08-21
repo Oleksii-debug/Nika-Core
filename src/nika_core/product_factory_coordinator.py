@@ -135,7 +135,17 @@ class ProductFactoryCoordinator:
             if base_sha is None or not goal:
                 raise CoordinatorError(f"missing base SHA or goal for component {component_id}")
             request = ComponentWorkRequest(
-                work_id=_stable_id("work", self.graph.project_id, component_id, 1),
+                work_id=_work_id(
+                    project_id=self.graph.project_id,
+                    component_id=component_id,
+                    repository_id=repository.repository_id,
+                    goal=goal,
+                    base_sha=base_sha,
+                    allowed_paths=component.paths,
+                    permission_ceiling=permission_ceiling,
+                    acceptance_commands=component.test_commands,
+                    attempt=1,
+                ),
                 project_id=self.graph.project_id,
                 component_id=component_id,
                 repository_id=repository.repository_id,
@@ -204,12 +214,23 @@ class ProductFactoryCoordinator:
         if not reason.strip():
             raise CoordinatorError("repair reason must not be empty")
         attempt = record.request.attempt + 1
+        goal = f"{record.request.goal}\nRepair: {reason}"
         request = ComponentWorkRequest(
-            work_id=_stable_id("work", self.graph.project_id, component_id, attempt),
+            work_id=_work_id(
+                project_id=self.graph.project_id,
+                component_id=component_id,
+                repository_id=record.request.repository_id,
+                goal=goal,
+                base_sha=base_sha,
+                allowed_paths=record.request.allowed_paths,
+                permission_ceiling=record.request.permission_ceiling,
+                acceptance_commands=record.request.acceptance_commands,
+                attempt=attempt,
+            ),
             project_id=record.request.project_id,
             component_id=component_id,
             repository_id=record.request.repository_id,
-            goal=f"{record.request.goal}\nRepair: {reason}",
+            goal=goal,
             base_sha=base_sha,
             allowed_paths=record.request.allowed_paths,
             permission_ceiling=record.request.permission_ceiling,
@@ -261,14 +282,19 @@ class ProductFactoryCoordinator:
             request = record.request
             component = components[request.component_id]
             repository = repositories[component.repository_id]
-            expected_work_id = _stable_id(
-                "work",
-                self.graph.project_id,
-                component.component_id,
-                request.attempt,
+            expected_work_id = _work_id(
+                project_id=self.graph.project_id,
+                component_id=component.component_id,
+                repository_id=repository.repository_id,
+                goal=request.goal,
+                base_sha=request.base_sha,
+                allowed_paths=request.allowed_paths,
+                permission_ceiling=request.permission_ceiling,
+                acceptance_commands=request.acceptance_commands,
+                attempt=request.attempt,
             )
             if request.work_id != expected_work_id:
-                raise CoordinatorError("snapshot work id does not match component attempt")
+                raise CoordinatorError("snapshot work id does not match durable request identity")
             if request.project_id != self.graph.project_id:
                 raise CoordinatorError("snapshot work request project identity drifted")
             if request.repository_id != repository.repository_id:
@@ -492,6 +518,32 @@ def _pytest_args(command: tuple[str, ...]) -> tuple[str, ...] | None:
     ):
         return command[3:]
     return None
+
+
+def _work_id(
+    *,
+    project_id: str,
+    component_id: str,
+    repository_id: str,
+    goal: str,
+    base_sha: str,
+    allowed_paths: tuple[str, ...],
+    permission_ceiling: frozenset[str],
+    acceptance_commands: tuple[tuple[str, ...], ...],
+    attempt: int,
+) -> str:
+    return _stable_id(
+        "work",
+        project_id,
+        component_id,
+        repository_id,
+        goal,
+        base_sha,
+        allowed_paths,
+        tuple(sorted(permission_ceiling)),
+        acceptance_commands,
+        attempt,
+    )
 
 
 def _stable_id(prefix: str, *parts: object) -> str:
