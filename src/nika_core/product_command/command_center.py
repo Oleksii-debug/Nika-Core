@@ -21,6 +21,7 @@ from nika_core.product_factory_credentials import CredentialBrokerSnapshot
 from nika_core.product_factory_deployment import (
     DeploymentFabricSnapshot,
     DeploymentState,
+    EnvironmentTier,
     ExecutionRegistrySnapshot,
 )
 from nika_core.product_factory_deployment_execution import DeploymentExecutionSnapshot
@@ -226,6 +227,16 @@ def _validate_deployment_snapshot(
                 "rolled-back deployment state lacks successful rollback evidence"
             )
 
+    for project_id, source_sha in snapshot.healthy_staging:
+        if not project_id.strip() or not source_sha.strip():
+            raise ProductCommandCenterScopeError(
+                "healthy-staging snapshot contains an empty identity field"
+            )
+        if not _has_healthy_staging_record(snapshot.records, project_id, source_sha):
+            raise ProductCommandCenterScopeError(
+                "healthy-staging snapshot is not backed by healthy deployment evidence"
+            )
+
     normalized = tuple(
         _normalize_current_release_entry(entry, snapshot.records)
         for entry in snapshot.current_releases
@@ -234,6 +245,16 @@ def _validate_deployment_snapshot(
         [(project_id, environment_id) for project_id, environment_id, _sha in normalized],
         "current-release project/environment",
     )
+    for project_id, environment_id, source_sha in normalized:
+        if not _has_healthy_environment_record(
+            snapshot.records,
+            project_id,
+            environment_id,
+            source_sha,
+        ):
+            raise ProductCommandCenterScopeError(
+                "current-release snapshot is not backed by healthy deployment evidence"
+            )
     return normalized
 
 
@@ -248,11 +269,13 @@ def _normalize_current_release_entry(
         projects = {
             record.intent.project_id
             for record in records
-            if record.intent.environment.environment_id == environment_id
+            if record.state is DeploymentState.HEALTHY
+            and record.intent.environment.environment_id == environment_id
+            and record.intent.release.source_sha == release_sha
         }
         if len(projects) != 1:
             raise ProductCommandCenterScopeError(
-                "legacy current-release environment identity is ambiguous across projects"
+                "legacy current-release snapshot is ambiguous or not backed by one project"
             )
         project_id = next(iter(projects))
     else:
@@ -264,6 +287,31 @@ def _normalize_current_release_entry(
             "current-release identity contains an empty field"
         )
     return project_id, environment_id, release_sha
+
+
+def _has_healthy_staging_record(records, project_id: str, source_sha: str) -> bool:
+    return any(
+        record.state is DeploymentState.HEALTHY
+        and record.intent.project_id == project_id
+        and record.intent.environment.tier is EnvironmentTier.STAGING
+        and record.intent.release.source_sha == source_sha
+        for record in records
+    )
+
+
+def _has_healthy_environment_record(
+    records,
+    project_id: str,
+    environment_id: str,
+    source_sha: str,
+) -> bool:
+    return any(
+        record.state is DeploymentState.HEALTHY
+        and record.intent.project_id == project_id
+        and record.intent.environment.environment_id == environment_id
+        and record.intent.release.source_sha == source_sha
+        for record in records
+    )
 
 
 def _scope_deployment(
