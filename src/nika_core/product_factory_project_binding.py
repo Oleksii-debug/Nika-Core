@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from nika_core.product_factory_coordinator import (
+    CoordinatorError,
     CoordinatorSnapshot,
     ProductFactoryCoordinator,
 )
@@ -24,6 +25,7 @@ class ProductProjectCoordinatorCheckpoint:
     spec_version: int
     row_version: int
     coordinator: CoordinatorSnapshot
+    trusted_plan_fingerprint: str | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(slots=True)
@@ -83,15 +85,26 @@ class ProductProjectCoordinatorBinding:
             spec_version=self.project.spec_version,
             row_version=self.project.row_version,
             coordinator=snapshot,
+            trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
         )
 
     def restore(
         self,
         checkpoint: ProductProjectCoordinatorCheckpoint,
+        *,
+        trusted_plan_fingerprint: str | None = None,
     ) -> ProductFactoryCoordinator:
         self._validate_checkpoint(checkpoint)
         coordinator = ProductFactoryCoordinator(self.graph)
-        coordinator.restore(checkpoint.coordinator)
+        try:
+            coordinator.restore(
+                checkpoint.coordinator,
+                trusted_plan_fingerprint=trusted_plan_fingerprint,
+            )
+        except CoordinatorError as exc:
+            raise ProductProjectBindingError(
+                "coordinator checkpoint failed trusted-plan validation"
+            ) from exc
         return coordinator
 
     def _validate_checkpoint(
