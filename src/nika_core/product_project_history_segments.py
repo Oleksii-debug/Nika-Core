@@ -66,8 +66,8 @@ class ProductProjectHistoryRetentionPolicy:
     allow_destructive_delete: bool = False
 
     def __post_init__(self) -> None:
-        if self.hot_segment_count < 0:
-            raise ProductProjectError("hot_segment_count must be non-negative")
+        if type(self.hot_segment_count) is not int or self.hot_segment_count < 0:
+            raise ProductProjectError("hot_segment_count must be a non-negative integer")
         if self.allow_destructive_delete:
             raise ProductProjectError(
                 "PF1 history retention cannot authorize destructive deletion"
@@ -97,8 +97,8 @@ class ProductProjectHistorySegmentService:
         expected_spec_version: int | None = None,
         expected_row_version: int | None = None,
     ) -> ProductProjectHistorySegmentBundle:
-        if target_entries_per_segment < 1:
-            raise ProductProjectError("target_entries_per_segment must be positive")
+        if type(target_entries_per_segment) is not int or target_entries_per_segment < 1:
+            raise ProductProjectError("target_entries_per_segment must be a positive integer")
         archive = self.archives.build(
             project_id,
             expected_spec_version=expected_spec_version,
@@ -219,7 +219,8 @@ class ProductProjectHistorySegmentService:
                 raise ProductProjectError("history segment project identity mismatch")
             if payload.get("archive_digest_sha256") != archive_digest:
                 raise ProductProjectError("history segment archive identity mismatch")
-            if payload.get("sequence") != expected_sequence:
+            payload_sequence = payload.get("sequence")
+            if type(payload_sequence) is not int or payload_sequence != expected_sequence:
                 raise ProductProjectError("history segment payload sequence mismatch")
             if payload.get("previous_segment_digest_sha256") != previous_digest:
                 raise ProductProjectError("history segment payload chain is broken")
@@ -356,7 +357,7 @@ class ProductProjectHistorySegmentService:
                 raise ProductProjectError("history segment record is invalid")
             section = record.get("section")
             ordinal = record.get("ordinal")
-            if section not in _HISTORY_SECTIONS or not isinstance(ordinal, int) or ordinal < 0:
+            if section not in _HISTORY_SECTIONS or type(ordinal) is not int or ordinal < 0:
                 raise ProductProjectError("history segment record identity is invalid")
             identity = (section, ordinal)
             if identity in seen:
@@ -430,7 +431,7 @@ class ProductProjectHistorySegmentService:
     @staticmethod
     def _required_int(value: dict[str, Any], key: str, *, minimum: int) -> int:
         item = value.get(key)
-        if not isinstance(item, int) or isinstance(item, bool) or item < minimum:
+        if type(item) is not int or item < minimum:
             raise ProductProjectError(f"history segment manifest has invalid {key}")
         return item
 
@@ -442,7 +443,7 @@ class ProductProjectHistorySegmentService:
         for section in _HISTORY_SECTIONS:
             count = value.get(section)
             minimum = 1 if section == "project" else 0
-            if not isinstance(count, int) or isinstance(count, bool) or count < minimum:
+            if type(count) is not int or count < minimum:
                 raise ProductProjectError("history segment manifest has invalid section_counts")
             counts.append((section, count))
         if dict(counts)["project"] != 1:
