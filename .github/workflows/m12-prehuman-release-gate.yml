@@ -240,7 +240,7 @@ jobs:
       - name: Verify exact integrated checkout identity
         env:
           NIKA_CANDIDATE_SHA: ${{ github.sha }}
-        run: python scripts/qa_assert_checkout_identity.py
+        run: python ./scripts/qa_assert_checkout_identity.py
       - name: Install minimal release-verification package
         run: python -m pip install --no-deps -e .
       - name: Resolve canonical project version
