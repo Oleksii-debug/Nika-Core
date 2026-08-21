@@ -58,16 +58,20 @@ class ProductProjectHistoryArchiveService:
         expected_spec_version: int | None = None,
         expected_row_version: int | None = None,
     ) -> ProductProjectHistoryArchive:
-        historical = ProductProjectHistoricalIntegrityService(self.store).validate(
-            project_id,
-            expected_spec_version=expected_spec_version,
-            expected_row_version=expected_row_version,
-        )
-        spec_version = historical.current.spec_version
-        row_version = historical.current.row_version
-
+        # Hold SQLite's writer reservation across integrity validation and extraction.
+        # Some PF1 history mutations (notably research handoffs) deliberately do not
+        # advance ProductProject.row_version, so version checks alone cannot detect a
+        # concurrent writer between those two phases.
         with self.store.connection() as conn:
-            conn.execute("BEGIN")
+            conn.execute("BEGIN IMMEDIATE")
+            historical = ProductProjectHistoricalIntegrityService(self.store).validate(
+                project_id,
+                expected_spec_version=expected_spec_version,
+                expected_row_version=expected_row_version,
+            )
+            spec_version = historical.current.spec_version
+            row_version = historical.current.row_version
+
             project_row = conn.execute(
                 "SELECT project_id,name,current_spec_version,row_version,status,created_at,"
                 "updated_at FROM product_projects WHERE project_id=?",
