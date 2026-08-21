@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from nika_core.product_command.reference_safety import safe_evidence_reference
 
 
 class CommandRouteKind(StrEnum):
@@ -36,6 +38,13 @@ class EvidenceReference(BaseModel):
     reference: str = Field(min_length=1, max_length=512)
     sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     label: str = Field(min_length=1, max_length=240)
+
+    @field_validator("reference", mode="before")
+    @classmethod
+    def sanitize_reference(cls, value: object) -> object:
+        if isinstance(value, str):
+            return safe_evidence_reference(value)
+        return value
 
 
 class ProductStatusEntry(BaseModel):
