@@ -146,6 +146,20 @@ jobs:
       - name: Create distributable ZIP
         shell: pwsh
         run: Compress-Archive -Path ./dist/NikaCore/* -DestinationPath ./dist/NikaCore-${{ steps.release.outputs.version }}-windows-x64.zip -Force
+      - name: Hash exact distributable ZIP
+        id: distributable
+        shell: pwsh
+        run: |
+          $zipPath = './dist/NikaCore-${{ steps.release.outputs.version }}-windows-x64.zip'
+          if (-not (Test-Path -LiteralPath $zipPath -PathType Leaf)) {
+            throw "Distributable ZIP is missing: $zipPath"
+          }
+          $zipSha256 = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($zipSha256 -notmatch '^[0-9a-f]{64}$') {
+            throw 'Distributable ZIP SHA-256 is not a 64-character hexadecimal digest'
+          }
+          "zip_path=$zipPath" >> $env:GITHUB_OUTPUT
+          "zip_sha256=$zipSha256" >> $env:GITHUB_OUTPUT
       - name: Record automated pre-human evidence
         shell: pwsh
         run: |
@@ -155,6 +169,8 @@ jobs:
             commit_sha = '${{ env.NIKA_CANDIDATE_SHA }}'
             release_manifest_source_sha_bound = $true
             exact_checkout_sha_verified = $true
+            distributable_zip_path = '${{ steps.distributable.outputs.zip_path }}'
+            distributable_zip_sha256 = '${{ steps.distributable.outputs.zip_sha256 }}'
             core_ci_equivalent = $true
             full_test_suite = $true
             runtime_restart_recovery = $true
