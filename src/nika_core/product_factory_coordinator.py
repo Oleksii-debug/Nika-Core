@@ -494,14 +494,13 @@ def _commands_equivalent(
     if observed_target == declared_target:
         return True
 
-    component_target = _normalize_pytest_target(component_id)
-    component_test_target = component_target.replace("-", "_")
-    component_aliases = {component_target, component_test_target}
-    return observed_target in component_aliases and declared_target in component_aliases
+    # Component identity is not proof of the declared filesystem target.
+    # A target may differ only by safe spelling, never by component aliasing.
+    return False
 
 
 def _normalize_pytest_target(target: str) -> str:
-    return target.replace("\\", "/").removeprefix("./").removeprefix("tests/")
+    return target.replace("\\", "/").removeprefix("./")
 
 
 def _pytest_args(command: tuple[str, ...]) -> tuple[str, ...] | None:
