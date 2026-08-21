@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
 from nika_core.product_project import ProductProjectError
-from nika_core.product_project_history_archive import (
-    ProductProjectHistoryArchiveService,
-    ProductProjectHistoryArchiveSummary,
-)
+from nika_core.product_project_history_archive import ProductProjectHistoryArchiveService
 
 _SEGMENT_SCHEMA = "nika-product-project-history-segment-v1"
 _MANIFEST_SCHEMA = "nika-product-project-history-segment-manifest-v1"
