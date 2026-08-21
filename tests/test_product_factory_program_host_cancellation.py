@@ -27,7 +27,10 @@ from nika_core.product_project import (
     ProductRequirement,
 )
 from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
-from nika_core.toolsmith.contracts import CodingResult, RecoveryState, TestEvidence
+from nika_core.toolsmith.contracts import CodingResult, RecoveryState
+from nika_core.toolsmith.contracts import (
+    TestEvidence as WorkerTestEvidence,
+)
 
 PERMISSIONS = frozenset({"read_source", "write_source", "run_tests"})
 BASE_SHA_0 = "1" * 40
@@ -114,7 +117,7 @@ def _envelope(request, ordinal: int) -> WorkerResultEnvelope:
         coding_result=CodingResult(
             job_id=request.work_id,
             test_evidence=(
-                TestEvidence(
+                WorkerTestEvidence(
                     ("python", "-m", "pytest", request.component_id),
                     0,
                     TEST_DIGEST,
@@ -252,3 +255,129 @@ def test_cancelled_dispatch_keeps_reserved_work_uncertain_and_pre_dispatch_work_
     ledger = IdempotencyLedger(restarted_store)
     assert ledger.require(f"pf-worker:{first.work_id}").status is IdempotencyStatus.COMPLETED
     assert ledger.require(f"pf-worker:{second.work_id}").status is IdempotencyStatus.COMPLETED
+
+
+class FailingDispatchWorker:
+    async def dispatch(self, request):
+        raise OSError(f"simulated worker transport loss for {request.work_id}")
+
+    async def inspect(self, work_id):
+        raise AssertionError(f"unexpected inspect before restart: {work_id}")
+
+    async def recover(self, request, state):
+        raise AssertionError(f"unexpected recover before restart: {request.work_id}: {state}")
+
+
+class BlockingRecoveryWorker:
+    def __init__(self, work_id: str) -> None:
+        self.work_id = work_id
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.inspect_calls = []
+        self.recover_calls = []
+        self.dispatch_calls = []
+
+    async def dispatch(self, request):
+        self.dispatch_calls.append(request)
+        raise AssertionError(f"uncertain recovery must not redispatch: {request.work_id}")
+
+    async def inspect(self, work_id):
+        self.inspect_calls.append(work_id)
+        assert work_id == self.work_id
+        return RecoveryState("interrupted", "resume-before-second-cancel")
+
+    async def recover(self, request, state):
+        self.recover_calls.append((request, state))
+        assert request.work_id == self.work_id
+        self.started.set()
+        await self.release.wait()
+        return _envelope(request, 301)
+
+
+def test_cancelled_recovery_remains_uncertain_until_exact_work_is_recovered_after_restart(
+    tmp_path,
+) -> None:
+    store, binding, task_id, coordinator, graph = _setup(tmp_path)
+    first_host = ProductFactoryProgramHost(store, FailingDispatchWorker())
+
+    first_outcomes = asyncio.run(
+        first_host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_count=1,
+        )
+    )
+    assert first_outcomes[0].disposition is ProgramWorkDisposition.UNCERTAIN
+    request = _record(coordinator, "component-0").request
+    assert (
+        IdempotencyLedger(store).require(f"pf-worker:{request.work_id}").status
+        is IdempotencyStatus.UNCERTAIN
+    )
+
+    restarted_store = SQLiteStore(store.path)
+    restarted_store.initialize()
+    project = ProductProjectRepository(restarted_store).get(graph.project_id)
+    restarted_binding = ProductProjectCoordinatorBinding(project, graph)
+    restored = ProductFactoryProgramHost(
+        restarted_store,
+        RecoveryWorker(request.work_id),
+    ).restore_latest(
+        host_task_id=task_id,
+        binding=restarted_binding,
+    )
+
+    async def cancel_during_recovery() -> tuple[list[str], list[tuple[object, object]]]:
+        worker = BlockingRecoveryWorker(request.work_id)
+        host = ProductFactoryProgramHost(restarted_store, worker)
+        pending = asyncio.create_task(
+            host.recover_running(
+                host_task_id=task_id,
+                binding=restarted_binding,
+                coordinator=restored,
+                max_parallel=1,
+            )
+        )
+        await worker.started.wait()
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        return worker.inspect_calls, worker.recover_calls
+
+    inspect_calls, recover_calls = asyncio.run(cancel_during_recovery())
+    assert inspect_calls == [request.work_id]
+    assert [item[0].work_id for item in recover_calls] == [request.work_id]
+    assert _record(restored, request.component_id).state is WorkState.RUNNING
+    assert (
+        IdempotencyLedger(restarted_store).require(f"pf-worker:{request.work_id}").status
+        is IdempotencyStatus.UNCERTAIN
+    )
+
+    second_store = SQLiteStore(restarted_store.path)
+    second_store.initialize()
+    project = ProductProjectRepository(second_store).get(graph.project_id)
+    second_binding = ProductProjectCoordinatorBinding(project, graph)
+    final_worker = RecoveryWorker(request.work_id)
+    final_host = ProductFactoryProgramHost(second_store, final_worker)
+    final_coordinator = final_host.restore_latest(
+        host_task_id=task_id,
+        binding=second_binding,
+    )
+
+    final_outcomes = asyncio.run(
+        final_host.recover_running(
+            host_task_id=task_id,
+            binding=second_binding,
+            coordinator=final_coordinator,
+            max_parallel=1,
+        )
+    )
+
+    assert final_worker.dispatch_calls == []
+    assert final_worker.inspect_calls == [request.work_id]
+    assert [item[0].work_id for item in final_worker.recover_calls] == [request.work_id]
+    assert final_outcomes[0].disposition is ProgramWorkDisposition.REVIEW_REQUIRED
+    assert (
+        IdempotencyLedger(second_store).require(f"pf-worker:{request.work_id}").status
+        is IdempotencyStatus.COMPLETED
+    )
