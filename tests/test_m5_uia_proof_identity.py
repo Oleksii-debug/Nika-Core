@@ -20,6 +20,22 @@ def test_m5_uia_proof_binds_top_level_window_to_launched_process() -> None:
     assert "$root.FindFirst([System.Windows.Automation.TreeScope]::Children" not in source
 
 
+def test_m5_uia_proof_forces_renderer_accessibility_only_for_child_process() -> None:
+    source = _source()
+
+    env_name = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"
+    force_arg = "--force-renderer-accessibility"
+    disable_arg = "--disable-renderer-accessibility"
+
+    assert env_name in source
+    assert force_arg in source
+    assert disable_arg in source
+    assert "previousWebView2BrowserArgs" in source
+    assert f"Remove-Item Env:{env_name}" in source
+    assert source.index(force_arg) < source.index("Start-Process -FilePath $ExePath -PassThru")
+    assert "cannot run while WebView2 renderer accessibility is explicitly disabled" in source
+
+
 def test_m5_uia_proof_re_resolves_window_without_weakening_semantic_gate() -> None:
     source = _source()
 
@@ -39,3 +55,6 @@ def test_m5_uia_proof_re_resolves_window_without_weakening_semantic_gate() -> No
 
     assert "SendKeys]::SendWait('%1')" in source
     assert "SendKeys]::SendWait('^+p')" in source
+    assert "$attempt -lt 40" in source
+    assert "Start-Sleep -Milliseconds 500" in source
+    assert "Start-Sleep -Milliseconds 250" in source
