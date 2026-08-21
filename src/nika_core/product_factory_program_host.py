@@ -16,9 +16,9 @@ from nika_core.product_factory_coordinator import (
     ComponentWorkRequest,
     ProductFactoryCoordinator,
     ReviewDecision,
-    WorkerResultEnvelope,
     WorkRecord,
     WorkState,
+    WorkerResultEnvelope,
 )
 from nika_core.product_factory_project_binding import ProductProjectCoordinatorBinding
 from nika_core.runtime.idempotency import (
