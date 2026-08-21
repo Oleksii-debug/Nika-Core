@@ -40,6 +40,10 @@ from nika_core.product_factory_orchestration import (
     TeamCompositionError,
     TeamCompositionRequest,
 )
+from nika_core.product_factory_windows_credentials import (
+    ProtectedCredentialStoreError,
+    WindowsCredentialStore,
+)
 from nika_core.product_project import (
     EvidenceRef,
     ProductOption,
@@ -90,6 +94,23 @@ class _ProtectedStore:
             if value == (secret_ref, generation)
         ]:
             del self.handles[handle]
+
+
+@dataclass(slots=True)
+class _FakeWinVaultBackend:
+    persist: object = "local machine"
+    passwords: dict[tuple[str, str], str] = field(default_factory=dict)
+
+    def get_password(self, service: str, username: str) -> str | None:
+        return self.passwords.get((service, username))
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        self.passwords[(service, username)] = password
+
+    def delete_password(self, service: str, username: str) -> None:
+        if (service, username) not in self.passwords:
+            raise KeyError("missing")
+        del self.passwords[(service, username)]
 
 
 class _RollbackMismatchProvider:
@@ -308,10 +329,12 @@ def test_pf6_restore_rejects_current_release_not_backed_by_snapshot_record() -> 
         DeploymentFabric(provider).restore(corrupt)
 
 
-def test_pf7_restart_invalidates_protected_handles_from_pre_restart_leases() -> None:
-    store = _ProtectedStore()
-    store.material.add(("secret-a", 1))
-    broker = CredentialBroker(store)
+def test_pf7_restart_invalidates_broker_lease_and_process_handle() -> None:
+    """A process restart keeps OS material but restores neither broker leases nor handles."""
+    backend = _FakeWinVaultBackend()
+    first_store = WindowsCredentialStore(backend)
+    first_store.provision_secret("secret-a", 1, "test-secret-material")
+    broker = CredentialBroker(first_store)
     broker.register_secret(
         SecretRef(
             "secret-a",
@@ -332,9 +355,25 @@ def test_pf7_restart_invalidates_protected_handles_from_pre_restart_leases() -> 
     )
     snapshot = broker.snapshot()
 
-    assert lease.handle_ref in store.handles
-    CredentialBroker(store).restore(snapshot)
-    assert lease.handle_ref not in store.handles
+    restarted_store = WindowsCredentialStore(backend)
+    restarted_broker = CredentialBroker(restarted_store)
+    restarted_broker.restore(snapshot)
+
+    with pytest.raises(CredentialBrokerError, match="unknown or invalidated"):
+        restarted_broker.authorize_use(
+            lease_id=lease.lease_id,
+            project_id="project-a",
+            scope="repo:read",
+            now=NOW + timedelta(seconds=1),
+        )
+    with pytest.raises(ProtectedCredentialStoreError, match="unknown or invalidated"):
+        restarted_store.validate_handle(
+            handle_ref=lease.handle_ref,
+            project_id="project-a",
+            audience="github-api",
+            scope="repo:read",
+            now=NOW + timedelta(seconds=1),
+        )
 
 
 def test_pf7_restore_rejects_audit_counter_rollback() -> None:
