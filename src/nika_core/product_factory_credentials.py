@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from itertools import pairwise
 from typing import Protocol
 
 _MAX_CREDENTIAL_LEASE_TTL_SECONDS = 900
@@ -379,10 +380,7 @@ class CredentialBroker:
         if len(audit_ids) != len(set(audit_ids)):
             raise CredentialBrokerError("credential broker snapshot contains duplicate audit events")
         audit_sequences = [_audit_event_sequence(event_id) for event_id in audit_ids]
-        if any(
-            current <= previous
-            for previous, current in zip(audit_sequences, audit_sequences[1:], strict=False)
-        ):
+        if any(current <= previous for previous, current in pairwise(audit_sequences)):
             raise CredentialBrokerError("credential broker snapshot audit events are not monotonic")
         if audit_sequences and snapshot.next_event <= audit_sequences[-1]:
             raise CredentialBrokerError("credential broker snapshot audit counter was rolled back")
