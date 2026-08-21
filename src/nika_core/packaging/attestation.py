@@ -29,7 +29,7 @@ class ReleaseAttestationEvidence:
     predicate_type: str
     attestation_id: str
     attestation_url: str
-    cryptographic_verification_completed: bool
+    verification_result_bound: bool
     human_tested: bool
     nvda_verified: bool
     production_release_ready: bool
@@ -145,7 +145,7 @@ def build_release_attestation_evidence(
         predicate_type=_SLSA_PROVENANCE_V1,
         attestation_id=attestation_id,
         attestation_url=attestation_url,
-        cryptographic_verification_completed=True,
+        verification_result_bound=True,
         human_tested=False,
         nvda_verified=False,
         production_release_ready=False,

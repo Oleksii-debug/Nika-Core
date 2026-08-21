@@ -103,7 +103,7 @@ def test_exact_verified_attestation_builds_non_human_sidecar(tmp_path: Path) -> 
     assert evidence.commit_sha == SOURCE_SHA
     assert evidence.artifact_sha256 == hashlib.sha256(artifact.read_bytes()).hexdigest()
     assert evidence.artifact_size == artifact.stat().st_size
-    assert evidence.cryptographic_verification_completed is True
+    assert evidence.verification_result_bound is True
     assert evidence.human_tested is False
     assert evidence.nvda_verified is False
     assert evidence.production_release_ready is False
