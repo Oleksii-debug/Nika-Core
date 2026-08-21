@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
+from itertools import pairwise
 
 import pytest
 
@@ -276,7 +277,7 @@ def test_long_horizon_mixed_history_across_many_checkpoint_generations(tmp_path)
     assert summaries[-1].row_version == 56
     assert all(
         left.archive_digest_sha256 != right.archive_digest_sha256
-        for left, right in zip(summaries, summaries[1:])
+        for left, right in pairwise(summaries)
     )
 
 
