@@ -36,6 +36,20 @@ def test_m5_uia_proof_forces_renderer_accessibility_only_for_child_process() -> 
     assert "cannot run while WebView2 renderer accessibility is explicitly disabled" in source
 
 
+def test_m5_uia_proof_activates_uia_providers_only_below_exact_bound_window() -> None:
+    source = _source()
+
+    assert "GetDescendantWindows" in source
+    assert "EnumChildWindows" in source
+    assert "NativeWindowHandle" in source
+    assert "AutomationElement]::FromHandle" in source
+    assert "Get-BoundSearchRoots" in source
+    assert "Get-BoundDescendantNames" in source
+    assert "Find-BoundDescendantName" in source
+    assert source.index("Find-ExactWindow") < source.index("Get-BoundSearchRoots")
+    assert "another process, relaunches, or a longer wait" in source
+
+
 def test_m5_uia_proof_re_resolves_window_without_weakening_semantic_gate() -> None:
     source = _source()
 

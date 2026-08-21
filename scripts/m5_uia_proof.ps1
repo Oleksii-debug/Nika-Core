@@ -7,6 +7,29 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+
+public static class NikaUiaNative
+{
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    public static IntPtr[] GetDescendantWindows(IntPtr parent)
+    {
+        var handles = new List<IntPtr>();
+        EnumChildWindows(parent, delegate (IntPtr hWnd, IntPtr lParam) {
+            handles.Add(hWnd);
+            return true;
+        }, IntPtr.Zero);
+        return handles.ToArray();
+    }
+}
+'@
 
 $requiredNames = @('Nika Core', 'Що має зробити Nika?', 'Створити завдання', 'Клавіатура')
 
@@ -54,6 +77,67 @@ try {
         return $null
     }
 
+    # Chromium/WebView2 accessibility providers can appear below native child HWNDs
+    # even when the exact host window's initial UIA descendant query is empty. Walk
+    # only HWNDs that are descendants of the already PID+title-bound host window,
+    # convert them back into UIA elements, and query semantics there. This activates
+    # providers without coordinates, another process, relaunches, or a longer wait.
+    function Get-BoundSearchRoots([System.Windows.Automation.AutomationElement]$ExactWindow) {
+        $searchRoots = New-Object 'System.Collections.Generic.List[System.Windows.Automation.AutomationElement]'
+        $searchRoots.Add($ExactWindow)
+        $nativeHandleValue = $ExactWindow.Current.NativeWindowHandle
+        if ($nativeHandleValue -eq 0) { return $searchRoots }
+
+        $nativeHandle = [System.IntPtr]::new($nativeHandleValue)
+        foreach ($childHandle in [NikaUiaNative]::GetDescendantWindows($nativeHandle)) {
+            try {
+                $childElement = [System.Windows.Automation.AutomationElement]::FromHandle($childHandle)
+                if ($null -ne $childElement) { $searchRoots.Add($childElement) }
+            } catch [System.Windows.Automation.ElementNotAvailableException] { }
+        }
+        return $searchRoots
+    }
+
+    function Get-BoundDescendantNames([System.Windows.Automation.AutomationElement]$ExactWindow) {
+        $collected = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($searchRoot in (Get-BoundSearchRoots $ExactWindow)) {
+            try {
+                if ($searchRoot.Current.Name) { $collected.Add($searchRoot.Current.Name) }
+                $descendants = $searchRoot.FindAll(
+                    [System.Windows.Automation.TreeScope]::Descendants,
+                    [System.Windows.Automation.Condition]::TrueCondition
+                )
+                foreach ($element in $descendants) {
+                    try {
+                        if ($element.Current.Name) { $collected.Add($element.Current.Name) }
+                    } catch [System.Windows.Automation.ElementNotAvailableException] { }
+                }
+            } catch [System.Windows.Automation.ElementNotAvailableException] { }
+        }
+        return @($collected)
+    }
+
+    function Find-BoundDescendantName(
+        [System.Windows.Automation.AutomationElement]$ExactWindow,
+        [string]$Expected
+    ) {
+        $condition = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::NameProperty,
+            $Expected
+        )
+        foreach ($searchRoot in (Get-BoundSearchRoots $ExactWindow)) {
+            try {
+                if ($searchRoot.Current.Name -eq $Expected) { return $searchRoot }
+                $element = $searchRoot.FindFirst(
+                    [System.Windows.Automation.TreeScope]::Descendants,
+                    $condition
+                )
+                if ($null -ne $element) { return $element }
+            } catch [System.Windows.Automation.ElementNotAvailableException] { }
+        }
+        return $null
+    }
+
     $window = $null
     for ($attempt = 0; $attempt -lt 40 -and $null -eq $window; $attempt++) {
         Start-Sleep -Milliseconds 500
@@ -75,21 +159,7 @@ try {
         }
         $window = Find-ExactWindow
         if ($null -eq $window) { continue }
-        try {
-            $descendants = $window.FindAll(
-                [System.Windows.Automation.TreeScope]::Descendants,
-                [System.Windows.Automation.Condition]::TrueCondition
-            )
-        } catch [System.Windows.Automation.ElementNotAvailableException] {
-            $window = $null
-            continue
-        }
-        $names = @()
-        foreach ($element in $descendants) {
-            try {
-                if ($element.Current.Name) { $names += $element.Current.Name }
-            } catch [System.Windows.Automation.ElementNotAvailableException] { }
-        }
+        $names = Get-BoundDescendantNames $window
         $missing = @($requiredNames | Where-Object { $names -notcontains $_ })
     }
 
@@ -99,10 +169,6 @@ try {
     }
 
     function Wait-DescendantName([string]$Expected, [int]$Attempts = 40) {
-        $condition = New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::NameProperty,
-            $Expected
-        )
         for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
             Start-Sleep -Milliseconds 250
             if ($process.HasExited) {
@@ -110,14 +176,7 @@ try {
             }
             $currentWindow = Find-ExactWindow
             if ($null -eq $currentWindow) { continue }
-            try {
-                $element = $currentWindow.FindFirst(
-                    [System.Windows.Automation.TreeScope]::Descendants,
-                    $condition
-                )
-            } catch [System.Windows.Automation.ElementNotAvailableException] {
-                continue
-            }
+            $element = Find-BoundDescendantName $currentWindow $Expected
             if ($null -ne $element) { return $element }
         }
         throw "Expected UI Automation descendant '$Expected' did not appear."
