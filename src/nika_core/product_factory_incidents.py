@@ -3,7 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from .product_factory_coordinator import CoordinatorSnapshot, WorkState
+from .product_factory_coordinator import (
+    CoordinatorError,
+    CoordinatorSnapshot,
+    WorkState,
+    validate_trusted_plan_snapshot,
+)
 from .product_factory_deployment import (
     DeploymentFabricSnapshot,
     DeploymentRecord,
@@ -27,6 +32,17 @@ from .product_factory_incident_contracts import (
     validate_digest,
 )
 from .toolsmith.contracts import AllowedPathPolicy
+
+
+@dataclass(frozen=True, slots=True)
+class TrustedReviewAuthority:
+    """PF2 review snapshot paired with an independently trusted plan anchor."""
+
+    snapshot: CoordinatorSnapshot
+    trusted_plan_fingerprint: str
+
+    def __post_init__(self) -> None:
+        validate_digest(self.trusted_plan_fingerprint, "review trusted plan fingerprint")
 
 
 @dataclass(slots=True)
@@ -139,7 +155,7 @@ class IncidentRepairReleaseCoordinator:
     def record_candidate(
         self,
         candidate: RepairCandidateEvidence,
-        review_authority: CoordinatorSnapshot,
+        review_authority: TrustedReviewAuthority,
     ) -> IncidentRecord:
         record = self._require(candidate.incident_id)
         prior = {item.candidate_id: item for item in record.candidates}
@@ -320,7 +336,7 @@ class IncidentRepairReleaseCoordinator:
         self,
         snapshot: IncidentLifecycleSnapshot,
         deployments: DeploymentFabricSnapshot | None = None,
-        review_authorities: tuple[CoordinatorSnapshot, ...] = (),
+        review_authorities: tuple[TrustedReviewAuthority, ...] = (),
     ) -> None:
         if snapshot.project_id != self.project_id:
             raise ProductIncidentError("incident snapshot belongs to another project")
@@ -362,6 +378,12 @@ class IncidentRepairReleaseCoordinator:
         if candidate_ids and not review_authorities:
             raise ProductIncidentError(
                 "candidate-bearing incident snapshot requires independent review authority"
+            )
+        if review_authorities and any(
+            not isinstance(authority, TrustedReviewAuthority) for authority in review_authorities
+        ):
+            raise ProductIncidentError(
+                "review authority requires an external trusted plan fingerprint"
             )
         if len(release_ids) != len(set(release_ids)):
             raise ProductIncidentError("incident snapshot contains duplicate release-event ids")
@@ -485,32 +507,47 @@ class IncidentRepairReleaseCoordinator:
         self,
         incident: IncidentRecord,
         candidate: RepairCandidateEvidence,
-        authority: CoordinatorSnapshot,
+        authority: TrustedReviewAuthority,
     ) -> bool:
         work_order = incident.work_order
-        if work_order is None or authority.project_id != self.project_id:
+        if work_order is None or authority.snapshot.project_id != self.project_id:
             return False
         return any(
             item.request.work_id == work_order.work_order_id
             and item.result is not None
             and item.result.result_sha == candidate.result_sha
-            for item in authority.records
+            for item in authority.snapshot.records
         )
 
     def _validate_candidate_authority(
         self,
         incident: IncidentRecord,
         candidate: RepairCandidateEvidence,
-        authority: CoordinatorSnapshot,
+        authority: TrustedReviewAuthority,
     ) -> None:
+        if not isinstance(authority, TrustedReviewAuthority):
+            raise ProductIncidentError(
+                "review authority requires an external trusted plan fingerprint"
+            )
+        try:
+            validate_trusted_plan_snapshot(
+                authority.snapshot,
+                authority.trusted_plan_fingerprint,
+            )
+        except CoordinatorError as exc:
+            raise ProductIncidentError(
+                "review authority does not match external trusted plan authority"
+            ) from exc
+
         work_order = incident.work_order
         if work_order is None:
             raise ProductIncidentError("repair candidate requires work-order authority")
-        if authority.project_id != self.project_id:
+        snapshot = authority.snapshot
+        if snapshot.project_id != self.project_id:
             raise ProductIncidentError("review authority belongs to another project")
         matches = [
             item
-            for item in authority.records
+            for item in snapshot.records
             if item.request.work_id == work_order.work_order_id
         ]
         if len(matches) != 1:
