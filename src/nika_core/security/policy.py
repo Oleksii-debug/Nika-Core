@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from threading import RLock
 
 from nika_core.tools import ToolRisk
 
@@ -182,8 +184,9 @@ class ExecutionBudgetLedger:
     write_bytes: int = 0
     network_calls: int = 0
     process_launches: int = 0
+    _lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
 
-    def reserve(self, intent: ActionIntent) -> None:
+    def _next_usage_unlocked(self, intent: ActionIntent) -> tuple[int, int, int]:
         next_write = self.write_bytes + intent.write_bytes
         next_network = self.network_calls + int(intent.network_host is not None)
         next_process = self.process_launches + int(intent.executable is not None)
@@ -193,9 +196,14 @@ class ExecutionBudgetLedger:
             raise PermissionError("network call budget exceeded")
         if next_process > self.budget.max_process_launches:
             raise PermissionError("process launch budget exceeded")
-        self.write_bytes = next_write
-        self.network_calls = next_network
-        self.process_launches = next_process
+        return next_write, next_network, next_process
+
+    def _commit_usage_unlocked(self, usage: tuple[int, int, int]) -> None:
+        self.write_bytes, self.network_calls, self.process_launches = usage
+
+    def reserve(self, intent: ActionIntent) -> None:
+        with self._lock:
+            self._commit_usage_unlocked(self._next_usage_unlocked(intent))
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,19 +228,23 @@ class ActionIntent:
 
     @property
     def approval_fingerprint(self) -> str:
-        payload = "\x1f".join(
+        payload = json.dumps(
             (
+                "nika-action-intent-v1",
                 self.action_id,
                 self.tool_id,
                 self.risk.value,
                 self.target,
-                self.write_path or "",
-                str(self.write_bytes),
-                self.network_host or "",
-                self.executable or "",
-            )
+                self.write_path,
+                self.write_bytes,
+                self.network_host,
+                self.executable,
+                self.approval_required,
+            ),
+            ensure_ascii=True,
+            separators=(",", ":"),
         )
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        return hashlib.sha256(payload.encode("ascii")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,14 +266,15 @@ class ApprovalEvidence:
 @dataclass(slots=True)
 class ApprovalLedger:
     _used: set[str] = field(default_factory=set)
+    _lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
 
-    def consume(
+    def _validate_unlocked(
         self,
         intent: ActionIntent,
         approval: ApprovalEvidence | None,
         *,
         now: datetime | None = None,
-    ) -> None:
+    ) -> ApprovalEvidence:
         if approval is None:
             raise PermissionError("explicit approval is required")
         current = now or datetime.now(UTC)
@@ -273,7 +286,21 @@ class ApprovalLedger:
             raise PermissionError("approval does not match the exact action")
         if current < approval.approved_at or current >= approval.expires_at:
             raise PermissionError("approval is not currently valid")
+        return approval
+
+    def _mark_used_unlocked(self, approval: ApprovalEvidence) -> None:
         self._used.add(approval.approval_id)
+
+    def consume(
+        self,
+        intent: ActionIntent,
+        approval: ApprovalEvidence | None,
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        with self._lock:
+            validated = self._validate_unlocked(intent, approval, now=now)
+            self._mark_used_unlocked(validated)
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,10 +339,16 @@ def authorize_action(
         policy.sandbox.authorize_executable(intent.executable)
 
     requires_approval = intent.approval_required or intent.risk is ToolRisk.HIGH_IMPACT
-    if requires_approval:
-        approvals.consume(intent, approval, now=now)
+    with approvals._lock, budgets._lock:
+        next_usage = budgets._next_usage_unlocked(intent)
+        validated_approval: ApprovalEvidence | None = None
+        if requires_approval:
+            validated_approval = approvals._validate_unlocked(intent, approval, now=now)
 
-    budgets.reserve(intent)
+        budgets._commit_usage_unlocked(next_usage)
+        if validated_approval is not None:
+            approvals._mark_used_unlocked(validated_approval)
+
     return SecurityDecision(
         action_id=intent.action_id,
         approved=True,
