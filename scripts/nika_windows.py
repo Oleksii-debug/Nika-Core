@@ -19,6 +19,7 @@ from nika_core.product_command.product_project_adapter import ProductProjectComm
 from nika_core.product_command.routing import route_command
 from nika_core.product_factory_packaged_journey import (
     PackagedProductCommandRouter,
+    PackagedProductSelectionStore,
     PackagedProductStateProvider,
     product_project_identity,
 )
@@ -55,6 +56,7 @@ def build_windows_bridge(
     product_router = PackagedProductCommandRouter(
         products=products,
         ordinary_handler=backend.create_task,
+        selection_store=PackagedProductSelectionStore(store),
     )
     command_center = ProductCommandCenter(products)
     product_state = PackagedProductStateProvider(
@@ -134,6 +136,11 @@ def _run_pf11_proof(
     decision = route_command(command)
     if decision.normalized_goal is None:
         raise RuntimeError("PF11 proof command did not produce a normalized ProductProject goal")
+    project_id = product_project_identity(decision.normalized_goal)
+    recovered_before_command = bridge.get_state()
+    recovered_project = recovered_before_command.get("state", {}).get("product_project")
+    if isinstance(recovered_project, Mapping) and recovered_project.get("project_id") != project_id:
+        raise RuntimeError("PF11 restart restored a different ProductProject selection")
     result = bridge.dispatch(
         {
             "request_id": "pf11-packaged-proof",
@@ -143,7 +150,6 @@ def _run_pf11_proof(
     )
     if result.get("status") != "completed":
         raise RuntimeError(f"PF11 packaged ProductProject route failed: {result}")
-    project_id = product_project_identity(decision.normalized_goal)
     detail = products.inspect_project(project_id)
     if detail.summary.project_id != project_id or detail.summary.version != 1:
         raise RuntimeError("PF11 packaged ProductProject identity/version proof failed")
@@ -158,6 +164,7 @@ def _run_pf11_proof(
         "bridge_state_spec_version": product_state["spec_version"],
         "bridge_state_status_count": product_state["status_count"],
         "bridge_state_decision_count": product_state["decision_count"],
+        "restart_selection_integrity_proven": True,
         "bounded_projection_proven": True,
         "human_tested": False,
         "nvda_verified": False,
