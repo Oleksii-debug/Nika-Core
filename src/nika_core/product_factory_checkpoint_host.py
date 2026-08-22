@@ -11,12 +11,17 @@ from typing import Any
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_factory_coordinator import (
     ComponentWorkRequest,
+    CoordinatorError,
     CoordinatorSnapshot,
     ProductFactoryCoordinator,
     ReviewDecision,
     WorkerResultEnvelope,
     WorkRecord,
     WorkState,
+    validate_trusted_plan_snapshot,
+)
+from nika_core.product_factory_coordinator import (
+    trusted_plan_fingerprint as compute_trusted_plan_fingerprint,
 )
 from nika_core.product_factory_project_binding import (
     ProductProjectBindingError,
@@ -37,6 +42,7 @@ from nika_core.toolsmith.contracts import (
 _CHECKPOINT_SCHEMA = "nika-product-factory-checkpoint-v1"
 _CHECKPOINT_STAGE = "product_factory.coordinator.v1"
 _HOST_KIND = "product_factory"
+_TRUSTED_PLAN_KEY = "trusted_plan_fingerprint"
 
 
 class ProductFactoryCheckpointError(ValueError):
@@ -47,11 +53,16 @@ class ProductFactoryCheckpointIntegrityError(ProductFactoryCheckpointError):
     """Raised when persisted PF2 checkpoint bytes cannot be trusted."""
 
 
+class ProductFactoryTrustedPlanAuthorityError(ProductFactoryCheckpointError):
+    """Raised when a durable PF2 checkpoint has no independent plan authority."""
+
+
 class ProductFactoryRecoveryDisposition(StrEnum):
     RESUMABLE = "resumable"
     MISSING = "missing"
     STALE_PROJECT = "stale_project"
     INVALID_HOST_TASK = "invalid_host_task"
+    MISSING_TRUSTED_PLAN = "missing_trusted_plan"
     CORRUPT = "corrupt"
 
 
@@ -84,14 +95,19 @@ class ProductFactoryCheckpointHost:
         *,
         host_task_id: str,
         checkpoint: ProductProjectCoordinatorCheckpoint,
+        trusted_plan_fingerprint: str | None = None,
     ) -> PersistedProductFactoryCheckpoint:
         payload = _encode_checkpoint(checkpoint)
         canonical = _canonical(payload)
         checksum = _sha256(canonical)
         checkpoint_id = _checkpoint_id(host_task_id, checkpoint, checksum)
+        candidate_authority = _checkpoint_trusted_plan_fingerprint(checkpoint)
+        supplied_authority = trusted_plan_fingerprint or checkpoint.trusted_plan_fingerprint
+        if supplied_authority is not None:
+            _validate_fingerprint(supplied_authority)
         now = datetime.now(UTC).isoformat()
         with self._store.connection() as conn:
-            self._require_host_task(
+            host_payload = self._require_host_task(
                 conn,
                 host_task_id=host_task_id,
                 project_id=checkpoint.project_id,
@@ -106,9 +122,52 @@ class ProductFactoryCheckpointHost:
                 """,
                 (host_task_id, _CHECKPOINT_STAGE),
             ).fetchone()
+            host_authority = _host_task_trusted_plan(host_payload, required=False)
+            if host_authority is None:
+                if previous is not None:
+                    raise ProductFactoryTrustedPlanAuthorityError(
+                        "legacy Product Factory checkpoint has no trusted plan authority; "
+                        "explicit reconciliation is required"
+                    )
+                if supplied_authority is None:
+                    raise ProductFactoryTrustedPlanAuthorityError(
+                        "first Product Factory checkpoint requires live trusted plan authority"
+                    )
+                if supplied_authority != candidate_authority:
+                    raise ProductFactoryCheckpointIntegrityError(
+                        "live trusted plan authority disagrees with coordinator checkpoint"
+                    )
+                host_payload = dict(host_payload)
+                host_payload[_TRUSTED_PLAN_KEY] = supplied_authority
+                conn.execute(
+                    "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+                    (_canonical(host_payload), host_task_id),
+                )
+                host_authority = supplied_authority
+                self._audit(
+                    conn,
+                    event_type="product_factory.trusted_plan_bound",
+                    entity_id=checkpoint.project_id,
+                    payload={
+                        "host_task_id": host_task_id,
+                        "trusted_plan_fingerprint": host_authority,
+                    },
+                )
+            else:
+                if supplied_authority is not None and supplied_authority != host_authority:
+                    raise ProductFactoryTrustedPlanAuthorityError(
+                        "live trusted plan authority disagrees with canonical host-task anchor"
+                    )
+                if candidate_authority != host_authority:
+                    raise ProductFactoryCheckpointIntegrityError(
+                        "coordinator checkpoint disagrees with canonical host-task plan authority"
+                    )
+
+            _validate_checkpoint_authority(checkpoint, host_authority)
             previous_record = None
             if previous is not None:
                 previous_record = self._row_to_record(previous)
+                _validate_checkpoint_authority(previous_record.checkpoint, host_authority)
                 if (
                     previous_record.checkpoint.coordinator.revision
                     > checkpoint.coordinator.revision
@@ -189,11 +248,13 @@ class ProductFactoryCheckpointHost:
             record = self._row_to_record(row)
             if host_task_id is not None and record.host_task_id != host_task_id:
                 raise ProductFactoryCheckpointError("checkpoint does not belong to host task")
-            self._require_host_task(
+            host_payload = self._require_host_task(
                 conn,
                 host_task_id=record.host_task_id,
                 project_id=record.checkpoint.project_id,
             )
+            authority = _host_task_trusted_plan(host_payload, required=True)
+            _validate_checkpoint_authority(record.checkpoint, authority)
         return record
 
     def latest(
@@ -203,7 +264,11 @@ class ProductFactoryCheckpointHost:
         project_id: str,
     ) -> PersistedProductFactoryCheckpoint | None:
         with self._store.connection() as conn:
-            self._require_host_task(conn, host_task_id=host_task_id, project_id=project_id)
+            host_payload = self._require_host_task(
+                conn,
+                host_task_id=host_task_id,
+                project_id=project_id,
+            )
             row = conn.execute(
                 """
                 SELECT checkpoint_id, task_id, stage, payload_json, checksum_sha256, created_at
@@ -216,11 +281,13 @@ class ProductFactoryCheckpointHost:
             ).fetchone()
             if row is None:
                 return None
+            authority = _host_task_trusted_plan(host_payload, required=True)
             record = self._row_to_record(row)
             if record.checkpoint.project_id != project_id:
                 raise ProductFactoryCheckpointIntegrityError(
                     "durable checkpoint project does not match host task project"
                 )
+            _validate_checkpoint_authority(record.checkpoint, authority)
         return record
 
     def inspect_latest(
@@ -232,6 +299,14 @@ class ProductFactoryCheckpointHost:
         project_id = binding.project.project_id
         try:
             record = self.latest(host_task_id=host_task_id, project_id=project_id)
+        except ProductFactoryTrustedPlanAuthorityError as exc:
+            return ProductFactoryRecoveryCandidate(
+                host_task_id,
+                project_id,
+                None,
+                ProductFactoryRecoveryDisposition.MISSING_TRUSTED_PLAN,
+                str(exc),
+            )
         except ProductFactoryCheckpointIntegrityError as exc:
             return ProductFactoryRecoveryCandidate(
                 host_task_id,
@@ -257,7 +332,22 @@ class ProductFactoryCheckpointHost:
                 "no durable Product Factory checkpoint exists for host task",
             )
         try:
-            binding.restore(record.checkpoint)
+            authority = self._read_host_trusted_plan(
+                host_task_id=host_task_id,
+                project_id=project_id,
+            )
+            binding.restore(
+                record.checkpoint,
+                trusted_plan_fingerprint=authority,
+            )
+        except ProductFactoryTrustedPlanAuthorityError as exc:
+            return ProductFactoryRecoveryCandidate(
+                host_task_id,
+                project_id,
+                record.checkpoint_id,
+                ProductFactoryRecoveryDisposition.MISSING_TRUSTED_PLAN,
+                str(exc),
+            )
         except StaleProductProjectBindingError as exc:
             return ProductFactoryRecoveryCandidate(
                 host_task_id,
@@ -279,7 +369,7 @@ class ProductFactoryCheckpointHost:
             project_id,
             record.checkpoint_id,
             ProductFactoryRecoveryDisposition.RESUMABLE,
-            "durable checkpoint matches current ProductProject and repository graph",
+            "durable checkpoint matches current ProductProject, trusted plan and repository graph",
         )
 
     def restore_latest(
@@ -288,15 +378,30 @@ class ProductFactoryCheckpointHost:
         host_task_id: str,
         binding: ProductProjectCoordinatorBinding,
     ) -> ProductFactoryCoordinator:
+        project_id = binding.project.project_id
         record = self.latest(
             host_task_id=host_task_id,
-            project_id=binding.project.project_id,
+            project_id=project_id,
         )
         if record is None:
             raise ProductFactoryCheckpointError(
                 "no durable Product Factory checkpoint exists for host task"
             )
-        return binding.restore(record.checkpoint)
+        authority = self._read_host_trusted_plan(
+            host_task_id=host_task_id,
+            project_id=project_id,
+        )
+        try:
+            return binding.restore(
+                record.checkpoint,
+                trusted_plan_fingerprint=authority,
+            )
+        except StaleProductProjectBindingError:
+            raise
+        except ProductProjectBindingError as exc:
+            raise ProductFactoryCheckpointError(
+                "durable Product Factory checkpoint failed trusted restore validation"
+            ) from exc
 
     def clear(self, *, host_task_id: str, project_id: str) -> int:
         with self._store.connection() as conn:
@@ -334,8 +439,22 @@ class ProductFactoryCheckpointHost:
             created_at=str(row["created_at"]),
         )
 
+    def _read_host_trusted_plan(self, *, host_task_id: str, project_id: str) -> str:
+        with self._store.connection() as conn:
+            payload = self._require_host_task(
+                conn,
+                host_task_id=host_task_id,
+                project_id=project_id,
+            )
+            return _host_task_trusted_plan(payload, required=True)
+
     @staticmethod
-    def _require_host_task(conn: Any, *, host_task_id: str, project_id: str) -> None:
+    def _require_host_task(
+        conn: Any,
+        *,
+        host_task_id: str,
+        project_id: str,
+    ) -> dict[str, Any]:
         row = conn.execute(
             "SELECT payload_json FROM tasks WHERE task_id = ?",
             (host_task_id,),
@@ -354,6 +473,7 @@ class ProductFactoryCheckpointHost:
             raise ProductFactoryCheckpointError(
                 "host task ProductProject identity does not match checkpoint project"
             )
+        return payload
 
     @staticmethod
     def _audit(
@@ -376,6 +496,57 @@ class ProductFactoryCheckpointHost:
                 _canonical(payload),
                 datetime.now(UTC).isoformat(),
             ),
+        )
+
+
+def _host_task_trusted_plan(payload: dict[str, Any], *, required: bool) -> str | None:
+    value = payload.get(_TRUSTED_PLAN_KEY)
+    if value is None:
+        if required:
+            raise ProductFactoryTrustedPlanAuthorityError(
+                "Product Factory host task has no trusted plan authority; explicit reconciliation is required"
+            )
+        return None
+    if not isinstance(value, str):
+        raise ProductFactoryTrustedPlanAuthorityError(
+            "Product Factory host task trusted plan authority is malformed"
+        )
+    _validate_fingerprint(value)
+    return value
+
+
+def _checkpoint_trusted_plan_fingerprint(
+    checkpoint: ProductProjectCoordinatorCheckpoint,
+) -> str:
+    plan = checkpoint.coordinator.trusted_plan
+    if plan is None:
+        raise ProductFactoryCheckpointIntegrityError(
+            "checkpoint is missing immutable trusted plan descriptor"
+        )
+    try:
+        return compute_trusted_plan_fingerprint(plan)
+    except CoordinatorError as exc:
+        raise ProductFactoryCheckpointIntegrityError(
+            "checkpoint trusted plan descriptor is invalid"
+        ) from exc
+
+
+def _validate_checkpoint_authority(
+    checkpoint: ProductProjectCoordinatorCheckpoint,
+    authority: str,
+) -> None:
+    try:
+        validate_trusted_plan_snapshot(checkpoint.coordinator, authority)
+    except CoordinatorError as exc:
+        raise ProductFactoryCheckpointIntegrityError(
+            "checkpoint state disagrees with canonical host-task trusted plan authority"
+        ) from exc
+
+
+def _validate_fingerprint(value: str) -> None:
+    if len(value) != 64 or any(char not in "0123456789abcdef" for char in value.casefold()):
+        raise ProductFactoryTrustedPlanAuthorityError(
+            "trusted plan fingerprint must be a 64-character hexadecimal digest"
         )
 
 
@@ -428,6 +599,11 @@ def _encode_coordinator(snapshot: CoordinatorSnapshot) -> dict[str, object]:
         "project_id": snapshot.project_id,
         "revision": snapshot.revision,
         "records": [_encode_record(record) for record in snapshot.records],
+        "trusted_plan": (
+            None
+            if snapshot.trusted_plan is None
+            else [_encode_request(request) for request in snapshot.trusted_plan]
+        ),
     }
 
 
@@ -436,10 +612,18 @@ def _decode_coordinator(payload: Any) -> CoordinatorSnapshot:
     records = data.get("records")
     if not isinstance(records, list):
         raise TypeError("coordinator records must be a list")
+    trusted_plan = data.get("trusted_plan")
+    if trusted_plan is not None and not isinstance(trusted_plan, list):
+        raise TypeError("coordinator trusted plan must be a list or null")
     return CoordinatorSnapshot(
         project_id=_text(data, "project_id"),
         revision=_nonnegative_int(data, "revision"),
         records=tuple(_decode_record(item) for item in records),
+        trusted_plan=(
+            None
+            if trusted_plan is None
+            else tuple(_decode_request(item) for item in trusted_plan)
+        ),
     )
 
 

@@ -100,6 +100,7 @@ class CoordinatorSnapshot:
     project_id: str
     revision: int
     records: tuple[WorkRecord, ...]
+    trusted_plan: tuple[ComponentWorkRequest, ...] | None = None
 
 
 class ComponentDispatcherPort(Protocol):
@@ -113,6 +114,18 @@ class ProductFactoryCoordinator:
     graph: ProductRepositoryGraph
     _records: dict[str, WorkRecord] = field(default_factory=dict, init=False, repr=False)
     _revision: int = field(default=0, init=False, repr=False)
+    _trusted_plan: tuple[ComponentWorkRequest, ...] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _trusted_plan_fingerprint: str | None = field(default=None, init=False, repr=False)
+
+    @property
+    def trusted_plan_fingerprint(self) -> str:
+        if self._trusted_plan_fingerprint is None:
+            raise CoordinatorError("coordinator has no established trusted plan authority")
+        return self._trusted_plan_fingerprint
 
     def plan(
         self,
@@ -121,7 +134,7 @@ class ProductFactoryCoordinator:
         goals: dict[str, str],
         permission_ceiling: frozenset[str],
     ) -> CoordinatorSnapshot:
-        if self._records:
+        if self._records or self._trusted_plan is not None:
             raise CoordinatorError("coordinator is already planned")
         if not permission_ceiling:
             raise CoordinatorError("project permission ceiling must not be empty")
@@ -156,6 +169,10 @@ class ProductFactoryCoordinator:
                 acceptance_commands=component.test_commands,
             )
             self._records[component_id] = WorkRecord(request=request, state=WorkState.PLANNED)
+        self._trusted_plan = tuple(
+            self._records[component_id].request for component_id in sorted(self._records)
+        )
+        self._trusted_plan_fingerprint = trusted_plan_fingerprint(self._trusted_plan)
         self._advance_ready()
         return self.snapshot()
 
@@ -257,9 +274,21 @@ class ProductFactoryCoordinator:
             self.graph.project_id,
             self._revision,
             tuple(self._records[key] for key in sorted(self._records)),
+            self._trusted_plan,
         )
 
-    def restore(self, snapshot: CoordinatorSnapshot) -> None:
+    def restore(
+        self,
+        snapshot: CoordinatorSnapshot,
+        *,
+        trusted_plan_fingerprint: str | None = None,
+    ) -> None:
+        authority = trusted_plan_fingerprint or self._trusted_plan_fingerprint
+        if authority is None:
+            raise CoordinatorError("fresh coordinator restore requires external trusted plan authority")
+        _validate_digest(authority, "trusted_plan_fingerprint")
+        validate_trusted_plan_snapshot(snapshot, authority)
+
         if snapshot.project_id != self.graph.project_id:
             raise CoordinatorError("snapshot project does not match repository graph")
         if snapshot.revision < 0:
@@ -270,6 +299,24 @@ class ProductFactoryCoordinator:
         actual = [record.request.component_id for record in snapshot.records]
         if set(actual) != expected or len(actual) != len(set(actual)):
             raise CoordinatorError("snapshot component set does not match repository graph")
+
+        plan = snapshot.trusted_plan
+        if plan is None:
+            raise CoordinatorError("snapshot is missing immutable trusted plan descriptor")
+        plan_by_component = {request.component_id: request for request in plan}
+        if set(plan_by_component) != expected:
+            raise CoordinatorError("trusted plan component set does not match repository graph")
+        for component_id, initial in plan_by_component.items():
+            component = components[component_id]
+            repository = repositories[component.repository_id]
+            if initial.project_id != self.graph.project_id:
+                raise CoordinatorError("trusted plan project identity drifted")
+            if initial.repository_id != repository.repository_id:
+                raise CoordinatorError("trusted plan repository identity drifted")
+            if initial.allowed_paths != component.paths:
+                raise CoordinatorError("trusted plan path scope drifted")
+            if initial.acceptance_commands != component.test_commands:
+                raise CoordinatorError("trusted plan acceptance command scope drifted")
 
         if snapshot.records:
             permission_ceilings = {record.request.permission_ceiling for record in snapshot.records}
@@ -282,19 +329,6 @@ class ProductFactoryCoordinator:
             request = record.request
             component = components[request.component_id]
             repository = repositories[component.repository_id]
-            expected_work_id = _work_id(
-                project_id=self.graph.project_id,
-                component_id=component.component_id,
-                repository_id=repository.repository_id,
-                goal=request.goal,
-                base_sha=request.base_sha,
-                allowed_paths=request.allowed_paths,
-                permission_ceiling=request.permission_ceiling,
-                acceptance_commands=request.acceptance_commands,
-                attempt=request.attempt,
-            )
-            if request.work_id != expected_work_id:
-                raise CoordinatorError("snapshot work id does not match durable request identity")
             if request.project_id != self.graph.project_id:
                 raise CoordinatorError("snapshot work request project identity drifted")
             if request.repository_id != repository.repository_id:
@@ -308,6 +342,8 @@ class ProductFactoryCoordinator:
         self._validate_restored_dependencies(snapshot.records)
         self._records = {record.request.component_id: record for record in snapshot.records}
         self._revision = snapshot.revision
+        self._trusted_plan = plan
+        self._trusted_plan_fingerprint = authority
         self._advance_ready()
 
     def _validate_restored_record(self, record: WorkRecord) -> None:
@@ -467,6 +503,111 @@ class ProductFactoryCoordinator:
 
     def _touch(self) -> None:
         self._revision += 1
+
+
+def trusted_plan_fingerprint(plan: tuple[ComponentWorkRequest, ...]) -> str:
+    if not plan:
+        raise CoordinatorError("trusted plan descriptor must not be empty")
+    payload = tuple(
+        (
+            request.project_id,
+            request.component_id,
+            request.repository_id,
+            request.goal,
+            request.base_sha,
+            request.allowed_paths,
+            tuple(sorted(request.permission_ceiling)),
+            request.acceptance_commands,
+        )
+        for request in sorted(plan, key=lambda item: item.component_id)
+    )
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def validate_trusted_plan_snapshot(
+    snapshot: CoordinatorSnapshot,
+    authority_fingerprint: str,
+) -> None:
+    _validate_digest(authority_fingerprint, "trusted_plan_fingerprint")
+    plan = snapshot.trusted_plan
+    if plan is None or not plan:
+        raise CoordinatorError("snapshot is missing immutable trusted plan descriptor")
+    if trusted_plan_fingerprint(plan) != authority_fingerprint:
+        raise CoordinatorError("snapshot trusted plan does not match external authority")
+
+    plan_ids = [request.component_id for request in plan]
+    if len(plan_ids) != len(set(plan_ids)):
+        raise CoordinatorError("trusted plan repeats component identity")
+    plan_by_component = {request.component_id: request for request in plan}
+    record_ids = [record.request.component_id for record in snapshot.records]
+    if set(record_ids) != set(plan_by_component) or len(record_ids) != len(set(record_ids)):
+        raise CoordinatorError("snapshot work set does not match trusted plan descriptor")
+
+    for initial in plan:
+        if initial.project_id != snapshot.project_id:
+            raise CoordinatorError("trusted plan project identity does not match snapshot")
+        if initial.attempt != 1:
+            raise CoordinatorError("trusted plan descriptor must contain attempt-one requests")
+        expected_initial_work_id = _work_id(
+            project_id=initial.project_id,
+            component_id=initial.component_id,
+            repository_id=initial.repository_id,
+            goal=initial.goal,
+            base_sha=initial.base_sha,
+            allowed_paths=initial.allowed_paths,
+            permission_ceiling=initial.permission_ceiling,
+            acceptance_commands=initial.acceptance_commands,
+            attempt=1,
+        )
+        if initial.work_id != expected_initial_work_id:
+            raise CoordinatorError("trusted plan contains invalid attempt-one work identity")
+
+    for record in snapshot.records:
+        request = record.request
+        initial = plan_by_component[request.component_id]
+        if request.project_id != initial.project_id:
+            raise CoordinatorError("work request project identity drifted from trusted plan")
+        if request.repository_id != initial.repository_id:
+            raise CoordinatorError("work request repository identity drifted from trusted plan")
+        if request.allowed_paths != initial.allowed_paths:
+            raise CoordinatorError("work request path scope drifted from trusted plan")
+        if request.permission_ceiling != initial.permission_ceiling:
+            raise CoordinatorError("work request permission ceiling drifted from trusted plan")
+        if request.acceptance_commands != initial.acceptance_commands:
+            raise CoordinatorError("work request acceptance commands drifted from trusted plan")
+        if request.attempt == 1:
+            if request.goal != initial.goal:
+                raise CoordinatorError("attempt-one work goal drifted from trusted plan")
+            if request.base_sha != initial.base_sha:
+                raise CoordinatorError("attempt-one base SHA drifted from trusted plan")
+        elif not _valid_repair_goal(initial.goal, request.goal, request.attempt):
+            raise CoordinatorError("repair work goal is not derived from trusted attempt-one plan")
+
+        expected_work_id = _work_id(
+            project_id=request.project_id,
+            component_id=request.component_id,
+            repository_id=request.repository_id,
+            goal=request.goal,
+            base_sha=request.base_sha,
+            allowed_paths=request.allowed_paths,
+            permission_ceiling=request.permission_ceiling,
+            acceptance_commands=request.acceptance_commands,
+            attempt=request.attempt,
+        )
+        if request.work_id != expected_work_id:
+            raise CoordinatorError("snapshot work id does not match durable request identity")
+
+
+def _valid_repair_goal(initial_goal: str, current_goal: str, attempt: int) -> bool:
+    if attempt <= 1 or not current_goal.startswith(initial_goal):
+        return False
+    suffix = current_goal[len(initial_goal) :]
+    marker = "\nRepair: "
+    if not suffix.startswith(marker):
+        return False
+    reasons = suffix.split(marker)[1:]
+    return len(reasons) == attempt - 1 and all(reason.strip() for reason in reasons)
 
 
 def _commands_equivalent(

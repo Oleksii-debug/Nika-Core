@@ -98,8 +98,12 @@ def test_checkpoint_round_trip_preserves_coordinator_state(tmp_path) -> None:
         permission_ceiling=PERMISSIONS,
     )
     started = coordinator.start("core")
+    checkpoint = binding.checkpoint(coordinator)
 
-    restored = binding.restore(binding.checkpoint(coordinator))
+    restored = binding.restore(
+        checkpoint,
+        trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
+    )
 
     snapshot = restored.snapshot()
     core = next(record for record in snapshot.records if record.request.component_id == "core")
