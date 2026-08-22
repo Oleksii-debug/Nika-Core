@@ -67,8 +67,8 @@ class ProductProjectHistoryGenerationRetentionPolicy:
     allow_destructive_delete: bool = False
 
     def __post_init__(self) -> None:
-        if self.hot_generation_count < 0:
-            raise ProductProjectError("hot_generation_count must be non-negative")
+        if type(self.hot_generation_count) is not int or self.hot_generation_count < 0:
+            raise ProductProjectError("hot_generation_count must be a non-negative integer")
         if self.allow_destructive_delete:
             raise ProductProjectError(
                 "PF1 history generation retention cannot authorize destructive deletion"
@@ -162,6 +162,7 @@ class ProductProjectHistoryGenerationService:
         self,
         generation: ProductProjectHistoryGeneration,
     ) -> ProductProjectHistoryGenerationSummary:
+        self._validate_generation_identity(generation)
         payload, manifest_digest = self._decode_generation_manifest(
             generation.generation_manifest_bytes
         )
@@ -383,7 +384,25 @@ class ProductProjectHistoryGenerationService:
         return envelope["payload"]
 
     @staticmethod
-    def _decode_generation_manifest(raw: bytes) -> tuple[dict[str, Any], str]:
+    def _is_int(value: Any, *, minimum: int) -> bool:
+        return type(value) is int and value >= minimum
+
+    @classmethod
+    def _validate_generation_identity(
+        cls,
+        generation: ProductProjectHistoryGeneration,
+    ) -> None:
+        if not cls._is_int(generation.generation, minimum=1):
+            raise ProductProjectError("history generation number is invalid")
+        if not cls._is_int(generation.spec_version, minimum=1):
+            raise ProductProjectError("history generation spec version is invalid")
+        if not cls._is_int(generation.row_version, minimum=0):
+            raise ProductProjectError("history generation row version is invalid")
+        if not isinstance(generation.project_id, str) or not generation.project_id.strip():
+            raise ProductProjectError("history generation project identity is invalid")
+
+    @classmethod
+    def _decode_generation_manifest(cls, raw: bytes) -> tuple[dict[str, Any], str]:
         try:
             envelope = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -402,11 +421,11 @@ class ProductProjectHistoryGenerationService:
         spec_version = payload.get("spec_version")
         row_version = payload.get("row_version")
         project_id = payload.get("project_id")
-        if not isinstance(generation, int) or generation < 1:
+        if not cls._is_int(generation, minimum=1):
             raise ProductProjectError("history generation number is invalid")
-        if not isinstance(spec_version, int) or spec_version < 1:
+        if not cls._is_int(spec_version, minimum=1):
             raise ProductProjectError("history generation spec version is invalid")
-        if not isinstance(row_version, int) or row_version < 0:
+        if not cls._is_int(row_version, minimum=0):
             raise ProductProjectError("history generation row version is invalid")
         if not isinstance(project_id, str) or not project_id.strip():
             raise ProductProjectError("history generation project identity is invalid")

@@ -55,6 +55,13 @@ def resolve_source_sha(requested: str | None) -> str:
     return candidate
 
 
+def _require_exact_nonnegative_int(payload: dict[str, object], field: str) -> int:
+    value = payload.get(field)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RuntimeError(f"packaged PF11 proof returned invalid {field}")
+    return value
+
+
 def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path:
     """Run the packaged executable twice and persist restart-bound PF11 evidence."""
     executable = bundle_dir / "NikaCore.exe"
@@ -98,13 +105,20 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
     first, second = outputs
     if first != second:
         raise RuntimeError("packaged PF11 ProductProject restart replay changed durable identity")
+    project_id = first.get("project_id")
     if (
         first.get("route") != "product_project"
         or first.get("spec_version") != 1
-        or not isinstance(first.get("project_id"), str)
-        or not str(first["project_id"]).strip()
+        or not isinstance(project_id, str)
+        or not project_id.strip()
+        or first.get("command_center_state_proven") is not True
+        or first.get("bounded_projection_proven") is not True
+        or first.get("bridge_state_project_id") != project_id
+        or first.get("bridge_state_spec_version") != 1
     ):
         raise RuntimeError("packaged PF11 ProductProject proof returned invalid route evidence")
+    status_count = _require_exact_nonnegative_int(first, "bridge_state_status_count")
+    decision_count = _require_exact_nonnegative_int(first, "bridge_state_decision_count")
     for forbidden_true in (
         "human_tested",
         "nvda_verified",
@@ -115,12 +129,17 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
 
     target = bundle_dir / _PF11_EVIDENCE_NAME
     evidence = {
-        "schema_version": 1,
+        "schema_version": 2,
         "source_sha": source_sha,
         "route": first["route"],
-        "product_project_id": first["project_id"],
+        "product_project_id": project_id,
         "product_project_spec_version": first["spec_version"],
         "product_project_state": first.get("state"),
+        "product_command_center_proven": True,
+        "packaged_bridge_state_proven": True,
+        "bounded_projection_proven": True,
+        "bridge_state_status_count": status_count,
+        "bridge_state_decision_count": decision_count,
         "packaged_executable_proven": True,
         "restart_replay_proven": True,
         "human_tested": False,

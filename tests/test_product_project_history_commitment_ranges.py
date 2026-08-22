@@ -369,7 +369,7 @@ def test_v2_boundaries_reject_boolean_indices_and_versions(tmp_path) -> None:
         )
 
 
-def test_v1_upgrade_rejects_boolean_numeric_fields_missed_by_v1_parser(tmp_path) -> None:
+def test_v1_upgrade_rejects_boolean_numeric_fields_at_strict_v1_boundary(tmp_path) -> None:
     store, projects = _project(tmp_path)
     _research(projects, 30)
     generation = ProductProjectHistoryGenerationService(store).build("project-1")
@@ -381,12 +381,12 @@ def test_v1_upgrade_rejects_boolean_numeric_fields_missed_by_v1_parser(tmp_path)
 
     envelope = json.loads(source.descriptor_bytes)
     envelope["payload"]["generation"] = True
-    with pytest.raises(ProductProjectError, match="source v1 commitment generation"):
+    with pytest.raises(ProductProjectError, match="commitment index generation"):
         service.upgrade_v1(_rehash(envelope))
 
     envelope = json.loads(source.descriptor_bytes)
     envelope["payload"]["shards"][0]["shard_index"] = False
-    with pytest.raises(ProductProjectError, match="source v1 commitment shard index"):
+    with pytest.raises(ProductProjectError, match="commitment shard summary index"):
         service.upgrade_v1(_rehash(envelope))
 
 

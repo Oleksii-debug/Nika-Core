@@ -414,15 +414,19 @@ class ProductProjectHistorySemanticContinuityService:
         cls._validate_payload(payload)
         return payload, digest
 
+    @staticmethod
+    def _is_int(value: Any, *, minimum: int) -> bool:
+        return type(value) is int and value >= minimum
+
     @classmethod
     def _validate_payload(cls, payload: dict[str, Any]) -> None:
         if not isinstance(payload.get("project_id"), str) or not payload["project_id"].strip():
             raise ProductProjectError("semantic anchor project identity is invalid")
-        if not isinstance(payload.get("generation"), int) or payload["generation"] < 1:
+        if not cls._is_int(payload.get("generation"), minimum=1):
             raise ProductProjectError("semantic anchor generation is invalid")
-        if not isinstance(payload.get("spec_version"), int) or payload["spec_version"] < 1:
+        if not cls._is_int(payload.get("spec_version"), minimum=1):
             raise ProductProjectError("semantic anchor spec version is invalid")
-        if not isinstance(payload.get("row_version"), int) or payload["row_version"] < 0:
+        if not cls._is_int(payload.get("row_version"), minimum=0):
             raise ProductProjectError("semantic anchor row version is invalid")
         for key in ("archive_digest_sha256", "generation_manifest_digest_sha256"):
             if not cls._is_digest(payload.get(key)):
@@ -441,7 +445,7 @@ class ProductProjectHistorySemanticContinuityService:
         digest = payload.get("prefix_digest_sha256")
         if section not in _ORDERED_SECTIONS:
             raise ProductProjectError("semantic ordered commitment section is invalid")
-        if not isinstance(count, int) or count < 0 or not cls._is_digest(digest):
+        if not cls._is_int(count, minimum=0) or not cls._is_digest(digest):
             raise ProductProjectError("semantic ordered commitment value is invalid")
         return OrderedSectionCommitment(section, count, digest)
 
@@ -455,7 +459,7 @@ class ProductProjectHistorySemanticContinuityService:
         commitment_digest = payload.get("commitment_digest_sha256")
         if section not in _IMMUTABLE_IDENTITIES:
             raise ProductProjectError("semantic immutable commitment section is invalid")
-        if not isinstance(count, int) or count < 0 or not isinstance(raw_records, list):
+        if not cls._is_int(count, minimum=0) or not isinstance(raw_records, list):
             raise ProductProjectError("semantic immutable commitment value is invalid")
         records: list[ImmutableRecordCommitment] = []
         seen: set[str] = set()

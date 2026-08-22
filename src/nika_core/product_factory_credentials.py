@@ -3,9 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from itertools import pairwise
 from typing import Protocol
 
 _MAX_CREDENTIAL_LEASE_TTL_SECONDS = 900
+_AUDIT_EVENT_PREFIX = "credential-event-"
 
 
 class CredentialBrokerError(ValueError):
@@ -148,8 +150,12 @@ class CredentialBrokerSnapshot:
     next_event: int
 
     def __post_init__(self) -> None:
-        if self.next_lease < 1 or self.next_event < 1:
-            raise CredentialBrokerError("credential broker counters must be positive")
+        counters = (self.next_lease, self.next_event)
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 1
+            for value in counters
+        ):
+            raise CredentialBrokerError("credential broker counters must be positive integers")
 
 
 class ProtectedSecretStorePort(Protocol):
@@ -376,6 +382,14 @@ class CredentialBroker:
             raise CredentialBrokerError("credential broker snapshot contains duplicate identities")
         if len(audit_ids) != len(set(audit_ids)):
             raise CredentialBrokerError("credential broker snapshot contains duplicate audit events")
+        audit_sequences = [_audit_event_sequence(event_id) for event_id in audit_ids]
+        if any(current <= previous for previous, current in pairwise(audit_sequences)):
+            raise CredentialBrokerError("credential broker snapshot audit events are not monotonic")
+        if audit_sequences and snapshot.next_event <= audit_sequences[-1]:
+            raise CredentialBrokerError("credential broker snapshot audit counter was rolled back")
+        lease_event_count = sum(event.action == "lease" for event in snapshot.audit_events)
+        if snapshot.next_lease <= lease_event_count:
+            raise CredentialBrokerError("credential broker snapshot lease counter was rolled back")
         secrets = {secret.secret_ref: secret for secret in snapshot.secrets}
         for identity in snapshot.identities:
             bound = [secrets.get(secret_ref) for secret_ref in identity.secret_refs]
@@ -435,6 +449,18 @@ class CredentialBroker:
         event_id = f"credential-event-{self._next_event:08d}"
         self._next_event += 1
         return event_id
+
+
+def _audit_event_sequence(event_id: str) -> int:
+    if not event_id.startswith(_AUDIT_EVENT_PREFIX):
+        raise CredentialBrokerError("credential broker snapshot contains invalid audit event identity")
+    suffix = event_id[len(_AUDIT_EVENT_PREFIX) :]
+    if not suffix or not suffix.isascii() or not suffix.isdigit():
+        raise CredentialBrokerError("credential broker snapshot contains invalid audit event identity")
+    sequence = int(suffix)
+    if sequence < 1 or event_id != f"{_AUDIT_EVENT_PREFIX}{sequence:08d}":
+        raise CredentialBrokerError("credential broker snapshot contains invalid audit event identity")
+    return sequence
 
 
 def _aware(value: datetime) -> datetime:
