@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -13,6 +14,7 @@ from nika_core.product_factory_coordinator import (
     WorkerResultEnvelope,
     WorkRecord,
     WorkState,
+    trusted_plan_fingerprint,
 )
 from nika_core.product_factory_deployment import (
     DeploymentFabricSnapshot,
@@ -41,7 +43,10 @@ from nika_core.product_factory_incident_persistence import (
     dump_incident_snapshot,
     load_incident_snapshot,
 )
-from nika_core.product_factory_incidents import IncidentRepairReleaseCoordinator
+from nika_core.product_factory_incidents import (
+    IncidentRepairReleaseCoordinator,
+    TrustedReviewAuthority,
+)
 from nika_core.product_factory_operations import ProductOperationsCoordinator
 from nika_core.product_factory_operations_contracts import (
     DeployableService,
@@ -66,6 +71,33 @@ TEST_DIGEST = "e" * 64
 NOW = datetime(2026, 8, 21, 10, 0, tzinfo=UTC)
 PERMISSIONS = frozenset({"repo.read", "repo.write", "tests.run"})
 DEPLOY_REFS = ("deploy://staging/green", "deploy://production/attempt")
+
+
+def _work_id(
+    *,
+    project_id: str,
+    component_id: str,
+    repository_id: str,
+    goal: str,
+    base_sha: str,
+    allowed_paths: tuple[str, ...],
+    permission_ceiling: frozenset[str],
+    acceptance_commands: tuple[tuple[str, ...], ...],
+    attempt: int = 1,
+) -> str:
+    payload = (
+        project_id,
+        component_id,
+        repository_id,
+        goal,
+        base_sha,
+        allowed_paths,
+        tuple(sorted(permission_ceiling)),
+        acceptance_commands,
+        attempt,
+    )
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return f"work-{hashlib.sha256(canonical.encode()).hexdigest()[:24]}"
 
 
 def operations(service: str = "api", project: str = "project-a") -> ProductOperationsCoordinator:
@@ -115,18 +147,34 @@ def order(
     advisory_id: str | None = None,
     fixed: str | None = None,
 ) -> RepairWorkOrder:
+    project_id = "project-a"
+    repository_id = "repo-a"
+    component_id = f"component-{service}"
+    goal = f"Repair incident {incident} without widening component ownership."
+    allowed_paths = (f"src/{service}.py", f"tests/test_{service}.py")
+    acceptance_commands = (("python", "-m", "pytest", f"tests/test_{service}.py"),)
+    work_order_id = _work_id(
+        project_id=project_id,
+        component_id=component_id,
+        repository_id=repository_id,
+        goal=goal,
+        base_sha=OLD_SHA,
+        allowed_paths=allowed_paths,
+        permission_ceiling=PERMISSIONS,
+        acceptance_commands=acceptance_commands,
+    )
     return RepairWorkOrder(
-        f"repair:{incident}",
+        work_order_id,
         incident,
-        "project-a",
+        project_id,
         service,
-        "repo-a",
-        f"component-{service}",
+        repository_id,
+        component_id,
         OLD_SHA,
-        "Repair the incident without widening component ownership.",
-        (f"src/{service}.py", f"tests/test_{service}.py"),
+        goal,
+        allowed_paths,
         PERMISSIONS,
-        (("python", "-m", "pytest", f"tests/test_{service}.py"),),
+        acceptance_commands,
         evidence or (f"health://{service}/degraded",),
         NOW + timedelta(minutes=1),
         advisory_id,
@@ -144,7 +192,7 @@ def candidate(
     return RepairCandidateEvidence(
         f"candidate:{incident}:{result_sha[:8]}",
         incident,
-        f"repair:{incident}",
+        order(incident).work_order_id,
         OLD_SHA,
         result_sha,
         ARTIFACT,
@@ -165,8 +213,8 @@ def authority(
     result_sha: str | None = None,
     artifact_digest: str | None = None,
     review_refs: tuple[str, ...] | None = None,
-) -> CoordinatorSnapshot:
-    request = ComponentWorkRequest(
+) -> TrustedReviewAuthority:
+    initial_request = ComponentWorkRequest(
         work.work_order_id,
         work.project_id,
         work.component_id,
@@ -174,8 +222,13 @@ def authority(
         work.goal,
         work.base_release_sha,
         work.allowed_paths,
-        work.permission_ceiling if permission_ceiling is None else permission_ceiling,
+        work.permission_ceiling,
         work.acceptance_commands,
+    )
+    request = (
+        initial_request
+        if permission_ceiling is None
+        else replace(initial_request, permission_ceiling=permission_ceiling)
     )
     coding = CodingResult(
         work.work_order_id,
@@ -205,7 +258,16 @@ def authority(
         (item.review_ref,) if review_refs is None else review_refs,
     )
     state = WorkState.ACCEPTED if item.review_accepted else WorkState.REPAIR_REQUIRED
-    return CoordinatorSnapshot(work.project_id, 1, (WorkRecord(request, state, result, review),))
+    snapshot = CoordinatorSnapshot(
+        work.project_id,
+        1,
+        (WorkRecord(request, state, result, review),),
+        (initial_request,),
+    )
+    return TrustedReviewAuthority(
+        snapshot,
+        trusted_plan_fingerprint((initial_request,)),
+    )
 
 
 def deployments(
@@ -317,7 +379,7 @@ def reviewed(
     IncidentRepairReleaseCoordinator,
     RepairWorkOrder,
     RepairCandidateEvidence,
-    CoordinatorSnapshot,
+    TrustedReviewAuthority,
 ]:
     value, work = planned()
     item = candidate(accepted=accepted, result_sha=result_sha)
@@ -361,7 +423,10 @@ def test_candidate_requires_exact_worker_test_artifact_review_and_permission_aut
     assert value.record_candidate(item, authority(work, item)).state is IncidentState.RELEASE_READY
 
     mutations = (
-        (authority(work, item, permission_ceiling=frozenset({"repo.read"})), "permission ceiling"),
+        (
+            authority(work, item, permission_ceiling=frozenset({"repo.read"})),
+            "external trusted plan authority|permission ceiling",
+        ),
         (authority(work, item, result_sha=OTHER_SHA), "exact worker evidence"),
         (authority(work, item, artifact_digest=OTHER_ARTIFACT), "artifact"),
         (authority(work, item, review_refs=("review://forged",)), "review ref"),
@@ -370,6 +435,47 @@ def test_candidate_requires_exact_worker_test_artifact_review_and_permission_aut
         other, _ = planned()
         with pytest.raises(ProductIncidentError, match=message):
             other.record_candidate(item, proof)
+
+
+def test_candidate_review_requires_external_trusted_plan_anchor() -> None:
+    value, work = planned()
+    item = candidate()
+    proof = authority(work, item)
+
+    with pytest.raises(ProductIncidentError, match="external trusted plan fingerprint"):
+        value.record_candidate(item, proof.snapshot)  # type: ignore[arg-type]
+
+    initial = proof.snapshot.trusted_plan
+    assert initial is not None
+    attacker_goal = work.goal + " Attacker expands the repair objective."
+    attacker_id = _work_id(
+        project_id=work.project_id,
+        component_id=work.component_id,
+        repository_id=work.repository_id,
+        goal=attacker_goal,
+        base_sha=work.base_release_sha,
+        allowed_paths=work.allowed_paths,
+        permission_ceiling=work.permission_ceiling,
+        acceptance_commands=work.acceptance_commands,
+    )
+    forged_initial = replace(initial[0], work_id=attacker_id, goal=attacker_goal)
+    forged_request = replace(
+        proof.snapshot.records[0].request,
+        work_id=attacker_id,
+        goal=attacker_goal,
+    )
+    forged_record = replace(proof.snapshot.records[0], request=forged_request)
+    forged_snapshot = replace(
+        proof.snapshot,
+        records=(forged_record,),
+        trusted_plan=(forged_initial,),
+    )
+    forged_authority = TrustedReviewAuthority(
+        forged_snapshot,
+        proof.trusted_plan_fingerprint,
+    )
+    with pytest.raises(ProductIncidentError, match="external trusted plan authority"):
+        value.record_candidate(item, forged_authority)
 
 
 def test_rejected_candidate_cannot_release_but_later_accepted_candidate_can() -> None:
