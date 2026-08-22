@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections import Counter
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -18,6 +19,14 @@ from nika_core.ui.bridge_models import UIResult
 
 OrdinaryCommandHandler = Callable[[Mapping[str, Any]], UIResult]
 DesktopStateProvider = Callable[[], Mapping[str, Any]]
+_PRODUCT_PROJECT_ID = re.compile(r"product-[0-9a-f]{64}", re.IGNORECASE)
+_REOPEN_PREFIXES = (
+    "open productproject",
+    "reopen productproject",
+    "відкрий productproject",
+    "відкрити productproject",
+    "перейди до productproject",
+)
 
 
 class PackagedProductJourneyError(ValueError):
@@ -30,6 +39,26 @@ def product_project_identity(normalized_goal: str) -> str:
         raise PackagedProductJourneyError("product goal must not be empty")
     digest = hashlib.sha256(goal.encode("utf-8")).hexdigest()
     return f"product-{digest}"
+
+
+def packaged_product_reopen_target(command: str) -> str | None:
+    """Return a strict ProductProject id for an explicit keyboard reopen command.
+
+    Ordinary text containing a project id is deliberately not intercepted. This keeps the
+    existing command classifier authoritative unless the user explicitly asks to open/reopen a
+    ProductProject. The accepted id is canonicalized to lowercase before durable lookup.
+    """
+    normalized = " ".join(command.split())
+    lowered = normalized.casefold()
+    prefix = next((item for item in _REOPEN_PREFIXES if lowered.startswith(item)), None)
+    if prefix is None:
+        return None
+    remainder = normalized[len(prefix) :].strip(" :#")
+    if not remainder or _PRODUCT_PROJECT_ID.fullmatch(remainder) is None:
+        raise PackagedProductJourneyError(
+            "Вкажіть повний ProductProject ID у форматі product- і 64 hex-символи."
+        )
+    return remainder.lower()
 
 
 class PackagedProductSelectionStore:
@@ -104,12 +133,40 @@ class PackagedProductCommandRouter:
         if self._selection_store is not None:
             self._selection_store.clear()
 
+    def _select_existing_project(self, project_id: str) -> UIResult:
+        try:
+            detail = self._products.inspect_project(project_id)
+        except KeyError as exc:
+            raise PackagedProductJourneyError(
+                f"ProductProject не знайдено: {project_id}. Поточний вибір не змінено."
+            ) from exc
+        except ProductProjectPresentationConsistencyError as exc:
+            raise PackagedProductJourneyError(
+                "ProductProject changed while packaged state was read; retry the reopen command."
+            ) from exc
+        if self._selection_store is not None:
+            self._selection_store.select(project_id)
+        self._active_project_id = project_id
+        return UIResult(
+            request_id="desktop-handler",
+            status="completed",
+            message=(
+                f"ProductProject відкрито: {project_id}; "
+                f"spec version {detail.summary.version}; state {detail.summary.state}."
+            ),
+            focus_id="tasks-heading",
+        )
+
     def create(self, payload: Mapping[str, Any]) -> UIResult:
         command = str(payload.get("command", "")).strip()
         if not command:
             raise PackagedProductJourneyError(
                 "Введіть команду перед створенням завдання."
             )
+
+        reopen_target = packaged_product_reopen_target(command)
+        if reopen_target is not None:
+            return self._select_existing_project(reopen_target)
 
         decision = route_command(command)
         if decision.route is CommandRouteKind.AGENT_TASK:
