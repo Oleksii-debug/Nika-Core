@@ -62,10 +62,10 @@ def _planned() -> tuple[ProductRepositoryGraph, ProductFactoryCoordinator, Coord
 
 
 def _replace_requests(snapshot: CoordinatorSnapshot, transform) -> CoordinatorSnapshot:
-    return CoordinatorSnapshot(
-        snapshot.project_id,
-        snapshot.revision + 1,
-        tuple(
+    return replace(
+        snapshot,
+        revision=snapshot.revision + 1,
+        records=tuple(
             WorkRecord(
                 transform(record.request),
                 record.state,
@@ -106,7 +106,7 @@ def test_github_owner_repository_identity_is_case_insensitive_without_path_case_
 
 
 def test_restore_rejects_uniform_permission_base_and_goal_rebinding() -> None:
-    graph, _coordinator, snapshot = _planned()
+    graph, coordinator, snapshot = _planned()
     attacks = (
         lambda request: replace(
             request,
@@ -117,24 +117,30 @@ def test_restore_rejects_uniform_permission_base_and_goal_rebinding() -> None:
     )
     for attack in attacks:
         forged = _replace_requests(snapshot, attack)
-        with pytest.raises(CoordinatorError, match="durable request identity"):
-            ProductFactoryCoordinator(graph).restore(forged)
+        with pytest.raises(CoordinatorError, match="trusted plan"):
+            ProductFactoryCoordinator(graph).restore(
+                forged,
+                trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
+            )
 
 
 def test_restore_rejects_attempt_one_sibling_base_split() -> None:
-    graph, _coordinator, snapshot = _planned()
-    forged = CoordinatorSnapshot(
-        snapshot.project_id,
-        snapshot.revision + 1,
-        tuple(
+    graph, coordinator, snapshot = _planned()
+    forged = replace(
+        snapshot,
+        revision=snapshot.revision + 1,
+        records=tuple(
             replace(record, request=replace(record.request, base_sha=SHA_C))
             if record.request.component_id == "core"
             else record
             for record in snapshot.records
         ),
     )
-    with pytest.raises(CoordinatorError, match="durable request identity"):
-        ProductFactoryCoordinator(graph).restore(forged)
+    with pytest.raises(CoordinatorError, match="trusted plan"):
+        ProductFactoryCoordinator(graph).restore(
+            forged,
+            trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
+        )
 
 
 def test_legitimate_attempt_two_repair_can_advance_one_component_base_and_restart() -> None:
@@ -172,7 +178,10 @@ def test_legitimate_attempt_two_repair_can_advance_one_component_base_and_restar
     assert by_component["docs"].base_sha == SHA_A
 
     restored = ProductFactoryCoordinator(graph)
-    restored.restore(snapshot)
+    restored.restore(
+        snapshot,
+        trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
+    )
     assert restored.snapshot() == snapshot
 
 
