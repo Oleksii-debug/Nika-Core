@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import timedelta
+from threading import Event, Lock
 from typing import get_type_hints
 
 import pytest
@@ -23,6 +25,27 @@ from nika_core.product_factory_incidents import (
     IncidentRepairReleaseCoordinator,
     TrustedReviewAuthority,
 )
+
+
+class _RacingFingerprintMap(dict[str, str]):
+    """Force two unsynchronized callers to capture the same pre-write lookup value."""
+
+    def __init__(self, values: dict[str, str]) -> None:
+        super().__init__(values)
+        self._calls = 0
+        self._guard = Lock()
+        self._second_lookup = Event()
+
+    def get(self, key: str, default: str | None = None) -> str | None:
+        captured = super().get(key, default)
+        with self._guard:
+            self._calls += 1
+            call = self._calls
+            if call == 2:
+                self._second_lookup.set()
+        if call == 1:
+            self._second_lookup.wait(timeout=0.2)
+        return captured
 
 
 def _rolled_back_first_occurrence():
@@ -102,6 +125,47 @@ def test_terminal_stale_retry_is_suppressed_but_later_repeat_is_isolated() -> No
     assert repeat.trigger.fingerprint == terminal.trigger.fingerprint
     assert len(coordinator.list_incidents()) == 2
     assert dict(coordinator.snapshot().fingerprint_index)[repeat.trigger.fingerprint] == "incident-2"
+
+
+def test_concurrent_later_repeat_creates_exactly_one_new_occurrence() -> None:
+    coordinator, review, deployment, terminal = _rolled_back_first_occurrence()
+    coordinator._fingerprints = _RacingFingerprintMap(dict(coordinator._fingerprints))
+    repeat_trigger = replace(
+        baseline.trigger(),
+        approval_ref="approval://incident/concurrent-repeat",
+        observed_at=baseline.NOW + timedelta(minutes=4),
+    )
+    operations = baseline.operations().snapshot()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(
+            coordinator.open_incident,
+            "incident-concurrent-a",
+            repeat_trigger,
+            operations,
+        )
+        second = pool.submit(
+            coordinator.open_incident,
+            "incident-concurrent-b",
+            repeat_trigger,
+            operations,
+        )
+        results = (first.result(timeout=2), second.result(timeout=2))
+
+    assert len({item.incident_id for item in results}) == 1
+    assert len(coordinator.list_incidents()) == 2
+    latest = results[0]
+    assert latest.state is IncidentState.OPEN
+    assert latest.trigger.fingerprint == terminal.trigger.fingerprint
+    assert dict(coordinator.snapshot().fingerprint_index)[latest.trigger.fingerprint] == latest.incident_id
+
+    restarted = IncidentRepairReleaseCoordinator("project-a")
+    restarted.restore(
+        coordinator.snapshot(),
+        deployments=deployment,
+        review_authorities=(review,),
+    )
+    assert restarted.snapshot() == coordinator.snapshot()
 
 
 def test_repeat_occurrence_remains_active_dedup_target() -> None:
