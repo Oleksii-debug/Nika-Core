@@ -46,6 +46,12 @@ class _ToolExecutionFailure:
     message: str
 
 
+@dataclass(frozen=True, slots=True)
+class _StateObservationFailure:
+    code: DeterministicErrorCode
+    message: str
+
+
 class DeterministicBrain:
     """Plan, validate, re-plan and execute explicit workflows without a language model."""
 
@@ -74,6 +80,7 @@ class DeterministicBrain:
         max_steps: int = 100,
         max_replans: int = 8,
         planning_timeout_seconds: float = 30.0,
+        observation_timeout_seconds: float = 10.0,
     ) -> DeterministicBrainResult:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
@@ -83,6 +90,8 @@ class DeterministicBrain:
             raise ValueError("max_replans must be non-negative")
         if planning_timeout_seconds <= 0:
             raise ValueError("planning_timeout_seconds must be greater than zero")
+        if observation_timeout_seconds <= 0:
+            raise ValueError("observation_timeout_seconds must be greater than zero")
         if self._effect_journal is not None and (task_id is None or not task_id.strip()):
             raise ValueError("task_id is required when effect_journal is configured")
 
@@ -195,7 +204,22 @@ class DeterministicBrain:
             replan_requested = False
             for index, step in enumerate(plan.steps):
                 if state_observer is not None:
-                    observed = await state_observer.observe()
+                    observed, observation_failure = await self._observe_state(
+                        state_observer,
+                        timeout_seconds=observation_timeout_seconds,
+                    )
+                    if observation_failure is not None:
+                        return self._failure(
+                            plan=plan,
+                            completed=completed,
+                            state=current_state,
+                            history=history,
+                            replans=replans,
+                            code=observation_failure.code,
+                            message=observation_failure.message,
+                        )
+                    if observed is None:  # pragma: no cover - helper invariant
+                        raise AssertionError("state observation returned no state or failure")
                     if observed != current_state:
                         current_state = observed
                         if self._goal_satisfied(current_state, goal):
@@ -280,7 +304,22 @@ class DeterministicBrain:
                 continue
 
             if state_observer is not None:
-                observed = await state_observer.observe()
+                observed, observation_failure = await self._observe_state(
+                    state_observer,
+                    timeout_seconds=observation_timeout_seconds,
+                )
+                if observation_failure is not None:
+                    return self._failure(
+                        plan=plan,
+                        completed=completed,
+                        state=current_state,
+                        history=history,
+                        replans=replans,
+                        code=observation_failure.code,
+                        message=observation_failure.message,
+                    )
+                if observed is None:  # pragma: no cover - helper invariant
+                    raise AssertionError("state observation returned no state or failure")
                 if observed != current_state:
                     current_state = observed
                     if not self._goal_satisfied(current_state, goal):
@@ -454,6 +493,34 @@ class DeterministicBrain:
             journal.mark_uncertain(operation_key)
         except Exception:  # noqa: BLE001 - PENDING reservation still blocks automatic replay.
             return
+
+    @staticmethod
+    async def _observe_state(
+        observer: WorldStateObserver,
+        *,
+        timeout_seconds: float,
+    ) -> tuple[WorldState | None, _StateObservationFailure | None]:
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                observed = await observer.observe()
+        except TimeoutError:
+            return None, _StateObservationFailure(
+                DeterministicErrorCode.STATE_OBSERVATION_TIMEOUT,
+                "world-state observation timed out",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - normalize observer adapter failures.
+            return None, _StateObservationFailure(
+                DeterministicErrorCode.STATE_OBSERVATION_FAILED,
+                f"world-state observation failed: {type(exc).__name__}",
+            )
+        if not isinstance(observed, WorldState):
+            return None, _StateObservationFailure(
+                DeterministicErrorCode.STATE_OBSERVATION_FAILED,
+                "world-state observer returned an invalid state type",
+            )
+        return observed, None
 
     async def _plan(
         self,
