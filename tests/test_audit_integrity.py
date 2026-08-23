@@ -9,7 +9,6 @@ import pytest
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditIntegrityError, AuditLog
 
-
 _INTEGRITY_KEY = "_nika_audit_integrity"
 _REDACTED = "[REDACTED]"
 
@@ -349,15 +348,14 @@ def test_append_with_connection_rolls_back_with_outer_transaction(
     store = _store(tmp_path)
     audit = AuditLog(store)
 
-    with pytest.raises(RuntimeError, match="force rollback"):
-        with store.connection() as conn:
-            audit.append_with_connection(
-                conn,
-                event_type="transient",
-                entity_type="task",
-                entity_id="task-1",
-            )
-            raise RuntimeError("force rollback")
+    with pytest.raises(RuntimeError, match="force rollback"), store.connection() as conn:
+        audit.append_with_connection(
+            conn,
+            event_type="transient",
+            entity_type="task",
+            entity_id="task-1",
+        )
+        raise RuntimeError("force rollback")
 
     assert audit.verify_integrity().event_count == 0
 
