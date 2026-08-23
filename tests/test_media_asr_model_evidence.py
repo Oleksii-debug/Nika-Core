@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 
@@ -20,7 +21,7 @@ from nika_core.media.transcribers import (
 
 
 class FakeWhisperModel:
-    calls: list[dict[str, object]] = []
+    calls: ClassVar[list[dict[str, object]]] = []
 
     def __init__(
         self,
@@ -41,7 +42,7 @@ class FakeWhisperModel:
 
 
 class FakeOfflineRecognizer:
-    calls: list[dict[str, object]] = []
+    calls: ClassVar[list[dict[str, object]]] = []
 
     @classmethod
     def from_whisper(cls, **kwargs):
