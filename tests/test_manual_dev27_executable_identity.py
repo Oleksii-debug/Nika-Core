@@ -17,3 +17,12 @@ def test_posix_executable_identity_is_case_sensitive() -> None:
 def test_windows_executable_identity_normalizes_case_and_separators() -> None:
     argv = (r"C:\Python\python.exe", "-c", "pass")
     assert validate_typed_argv(argv, {"c:/python/PYTHON.EXE"}) == argv
+
+
+@pytest.mark.parametrize("suffix", (".bat", ".cmd", ".BAT", ".CMD"))
+def test_windows_batch_entrypoints_are_forbidden_even_when_exactly_allowlisted(
+    suffix: str,
+) -> None:
+    executable = rf"C:\worker\trusted{suffix}"
+    with pytest.raises(WorkspaceSecurityError, match="batch"):
+        validate_typed_argv((executable, "untrusted&whoami"), {executable})

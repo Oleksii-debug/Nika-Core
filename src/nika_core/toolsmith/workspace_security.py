@@ -33,6 +33,7 @@ _SHELL_EXECUTABLES = frozenset(
         "wsl.exe",
     }
 )
+_WINDOWS_BATCH_SUFFIXES = frozenset({".bat", ".cmd"})
 _GIT_CREDENTIAL_VARIABLES = frozenset(
     {
         "GIT_ASKPASS",
@@ -377,9 +378,10 @@ def validate_typed_argv(
     if not argv or any(not argument or "\x00" in argument for argument in argv):
         raise WorkspaceSecurityError("argv must contain non-empty NUL-free arguments")
     executable = argv[0]
-    basename = pathlib.PureWindowsPath(executable).name.casefold()
-    if basename in _SHELL_EXECUTABLES:
-        raise WorkspaceSecurityError("generic shell entrypoints are forbidden")
+    windows_path = pathlib.PureWindowsPath(executable)
+    basename = windows_path.name.casefold()
+    if basename in _SHELL_EXECUTABLES or windows_path.suffix.casefold() in _WINDOWS_BATCH_SUFFIXES:
+        raise WorkspaceSecurityError("generic shell and Windows batch entrypoints are forbidden")
 
     allowlist = {
         _executable_identity_key(item)
