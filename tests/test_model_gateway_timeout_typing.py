@@ -36,7 +36,7 @@ class _HardCancellableProvider(DeterministicMockProvider):
     @property
     def capabilities(self) -> ProviderCapabilities:
         return ProviderCapabilities(
-            provider_id=self._provider_id,
+            provider_id=self._capabilities.provider_id,
             kind=ProviderKind.LOCAL,
             supports_private_data=True,
             supports_hard_cancellation=True,
