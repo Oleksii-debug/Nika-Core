@@ -236,8 +236,8 @@ class ModelResponse:
                 raise ValueError(f"{name} must not be empty")
             if value != value.strip():
                 raise ValueError(f"{name} must not contain surrounding whitespace")
-        if not self.text.strip():
-            raise ValueError("response text must not be empty")
+        if not isinstance(self.text, str):
+            raise TypeError("response text must be a string")
         if not isinstance(self.provider_kind, ProviderKind):
             raise TypeError("provider_kind must be a ProviderKind")
         if not isinstance(self.usage, ModelUsage):
