@@ -39,13 +39,24 @@ Additional invariants:
   duplicate result contracts and non-text contract keys fail closed;
 - Nika evidence is a deterministic SHA-256 reference over normalized result identity, not raw output;
 - failed/timed-out deployment is `uncertain=True`, because a remote mutation may have partially occurred;
+- once a provider reports `applied=True`, health transport failure, malformed health evidence, or exact
+  release mismatch is persisted by `DeploymentFabric` as durable `UNCERTAIN`; retrying the same intent
+  returns that durable record instead of replaying the deployment mutation;
+- any unresolved deployment effect blocks a different intent targeting the same project/environment until
+  explicit `inspect()` reconciliation resolves the effect;
+- an unresolved staging effect invalidates prior healthy staging authority for that project, so stale
+  staging proof cannot authorize production while the staging environment is unknown;
+- restart rejects a snapshot that tries to combine healthy staging authority with an unresolved staging
+  effect for the same project;
 - failed inspection raises and therefore preserves the existing uncertain deployment record rather than
   inventing a release state;
 - health must prove the exact intended release version + source SHA + artifact digest and a timezone-aware
   observation time before the fabric may treat that `ReleaseRef` as healthy staging authority;
 - inspect/reconcile must prove the same complete exact release identity whenever a release is reported;
   same-SHA/different-artifact or different-version evidence is rejected and uncertainty is preserved;
-- successful rollback must report the exact requested previous release SHA.
+- successful rollback must report the exact requested previous release SHA;
+- rollback transport failure, invalid rollback evidence, or `succeeded=False` after an applied deployment
+  remains durable `UNCERTAIN`; it is not converted into a terminal safe rejection and requires inspection.
 
 ## Runner-side contract
 
@@ -70,6 +81,11 @@ inspect identities must equal the exact `ReleaseRef` supplied by the deployment 
 This tightens the original SHA-only adapter contract. Operator-controlled health/inspect playbooks that
 still emit only `release_sha` must be upgraded before they can be used with this adapter; missing version
 or artifact-digest evidence fails closed rather than being inferred from the requested intent.
+
+The existing rollback provider contract still identifies the previous/restored release by SHA only. This
+batch therefore does **not** claim exact-artifact rollback identity when two release artifacts share the
+same source SHA. Extending rollback to a full `ReleaseRef` is a shared-contract compatibility decision and
+must be handled as a separate PF6 batch rather than silently changing provider interfaces here.
 
 Playbooks that handle credentials must use the backend's own protected credential mechanism and Ansible
 `no_log` discipline. Raw credentials must never be returned in `nika_pf3`, passed in ProductProject, or
@@ -96,11 +112,17 @@ The test suite covers:
 - safe extravars with exact release version/SHA/digest and no password/token/secret fields;
 - timeout/failure -> uncertain deployment;
 - explicit deploy result requirement;
+- applied deployment followed by health failure/mismatch -> durable `UNCERTAIN` with same-intent and
+  restart idempotency, never blind deploy replay;
+- unresolved same-environment effects blocking new mutation until reconciliation;
+- unresolved staging invalidating staging authority and corrupt restart state with stale authority failing
+  closed;
+- failed rollback -> durable `UNCERTAIN` rather than false terminal success/rejection;
+- no-release inspection resolving uncertainty and permitting later fresh work;
 - exact version/SHA/digest health binding, incomplete identity rejection and health transport failure;
 - exact previous-SHA rollback and false rollback rejection;
 - exact version/SHA/digest inspect normalization and uncertainty preservation;
 - same-SHA/different-artifact uncertain reconciliation rejection;
-- failed exact-release health never creating durable staging authority;
 - duplicate normalized Runner result contracts failing closed;
 - secret-shaped authorization reference rejection;
 - playbook traversal and untrusted relative private-data path rejection;
