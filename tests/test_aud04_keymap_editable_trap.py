@@ -69,15 +69,17 @@ def _import_binding_is_rejected(tmp_path: Path, binding: str) -> bool:
 def _editable_controls_are_excluded_from_global_dispatch() -> bool:
     source = APP_JS.read_text(encoding="utf-8")
     marker = 'document.addEventListener("keydown", (event) => {'
+    end_marker = 'window.addEventListener("pywebviewready"'
     assert marker in source, "global keyboard dispatch handler is missing"
-    handler = source.split(marker, 1)[1].split("});", 1)[0]
-    dispatch_marker = "const binding = bindingFromEvent(event);"
-    assert dispatch_marker in handler, "global keyboard binding resolution is missing"
-    before_dispatch = handler.split(dispatch_marker, 1)[0]
+    assert end_marker in source, "could not bound global keyboard dispatch handler"
+    handler = source.split(marker, 1)[1].split(end_marker, 1)[0]
+    prevent_default = "event.preventDefault();"
+    assert prevent_default in handler, "global keyboard dispatch no longer exposes preventDefault path"
+    before_prevent_default = handler.split(prevent_default, 1)[0]
     return bool(
         re.search(
-            r"if\s*\(\s*isEditable\(event\.target\)\s*\)\s*\{\s*return;?\s*\}",
-            before_dispatch,
+            r"if\s*\(\s*isEditable\(event\.target\)\s*\)\s*(?:\{\s*)?return;?",
+            before_prevent_default,
             flags=re.DOTALL,
         )
     )
