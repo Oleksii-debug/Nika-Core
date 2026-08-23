@@ -72,15 +72,17 @@ def evaluate_fts_retrieval(
 ) -> RetrievalEvaluationReport:
     if not cases:
         raise ValueError("at least one retrieval evaluation case is required")
-    if limit < 1 or limit > 100:
-        raise ValueError("limit must be between 1 and 100")
+    if type(limit) is not int or limit < 1 or limit > 100:
+        raise ValueError("limit must be an integer between 1 and 100")
     if len({case.case_id for case in cases}) != len(cases):
         raise ValueError("retrieval evaluation case_id values must be unique")
 
     results: list[RetrievalEvaluationCaseResult] = []
     for case in cases:
         hits = corpus.search(case.scope, case.query, limit=limit)
-        retrieved = tuple(hit.provenance.artifact_key for hit in hits)
+        retrieved = tuple(
+            dict.fromkeys(hit.provenance.artifact_key for hit in hits)
+        )
         expected = set(case.expected_artifact_keys)
         matched = tuple(key for key in retrieved if key in expected)
         results.append(
