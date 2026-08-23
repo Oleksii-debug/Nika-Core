@@ -63,6 +63,18 @@ class SQLiteStore:
 
     @staticmethod
     def _initialize_m3_extension_schema(conn: sqlite3.Connection) -> None:
+        prerequisite_tables = {"resource_budgets", "scheduled_jobs"}
+        rows = conn.execute(
+            """SELECT name FROM sqlite_master
+            WHERE type = 'table' AND name IN ('resource_budgets', 'scheduled_jobs')"""
+        ).fetchall()
+        present = {row["name"] for row in rows}
+        if not present:
+            return
+        if present != prerequisite_tables:
+            missing = ", ".join(sorted(prerequisite_tables - present))
+            raise RuntimeError(f"M3 extension prerequisite table missing: {missing}")
+
         conn.execute(
             "CREATE TABLE IF NOT EXISTS m3_extension_schema_migrations ("
             "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
