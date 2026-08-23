@@ -108,10 +108,23 @@ class ModelRequest:
             raise ValueError("fallback provider IDs must be unique")
         if self.provider_id is not None and self.provider_id in self.fallback_provider_ids:
             raise ValueError("primary provider cannot also be a fallback provider")
+        if isinstance(self.timeout_seconds, bool) or not isinstance(
+            self.timeout_seconds, (int, float)
+        ):
+            raise TypeError("timeout_seconds must be numeric")
+        if not math.isfinite(float(self.timeout_seconds)):
+            raise ValueError("timeout_seconds must be finite")
         if self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be greater than zero")
-        if self.temperature is not None and not 0 <= self.temperature <= 2:
-            raise ValueError("temperature must be between 0 and 2")
+        if self.temperature is not None:
+            if isinstance(self.temperature, bool) or not isinstance(
+                self.temperature, (int, float)
+            ):
+                raise TypeError("temperature must be numeric")
+            if not math.isfinite(float(self.temperature)):
+                raise ValueError("temperature must be finite")
+            if not 0 <= self.temperature <= 2:
+                raise ValueError("temperature must be between 0 and 2")
 
 
 @dataclass(frozen=True, slots=True)
