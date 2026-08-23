@@ -191,6 +191,7 @@ class WorkspaceActivationRepository:
                     field="active workspace generation",
                 )
                 if active_generation == generation:
+                    self._validate_current_plugin_binding(candidate)
                     return candidate
                 if active_generation > generation:
                     raise PermissionError(
@@ -202,17 +203,7 @@ class WorkspaceActivationRepository:
                     f"cannot activate workspace candidate in status {candidate.status}"
                 )
 
-            current_plugins = dict(self._plugin_manifests())
-            self._catalog.validate(candidate.workspace, current_plugins)
-            expected_plugins = tuple(
-                current_plugins[item.plugin_id]
-                for item in candidate.workspace.required_plugins
-            )
-            if candidate.plugins != expected_plugins:
-                raise PermissionError(
-                    "plugin manifest changed after workspace candidate review"
-                )
-
+            current_plugins = self._validate_current_plugin_binding(candidate)
             high_impact_ids = self._catalog.high_impact_ids(
                 candidate.workspace,
                 current_plugins,
@@ -268,7 +259,9 @@ class WorkspaceActivationRepository:
             row["generation"],
             field="active workspace generation",
         )
-        return self._decode_and_validate(workspace_id, generation, row)
+        stored = self._decode_and_validate(workspace_id, generation, row)
+        self._validate_current_plugin_binding(stored)
+        return stored
 
     def get(
         self,
@@ -312,6 +305,22 @@ class WorkspaceActivationRepository:
                 "stored workspace plugin review set differs from manifest requirements"
             )
         return stored
+
+    def _validate_current_plugin_binding(
+        self,
+        stored: StoredWorkspaceActivation,
+    ) -> dict[str, PluginManifest]:
+        current_plugins = dict(self._plugin_manifests())
+        self._catalog.validate(stored.workspace, current_plugins)
+        expected_plugins = tuple(
+            current_plugins[item.plugin_id]
+            for item in stored.workspace.required_plugins
+        )
+        if stored.plugins != expected_plugins:
+            raise PermissionError(
+                "plugin manifest changed after workspace candidate review"
+            )
+        return current_plugins
 
 
 def _canonical_json(payload: object) -> str:

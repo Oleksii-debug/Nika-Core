@@ -105,14 +105,17 @@ order declared by `WorkspaceManifest.required_plugins`; removing, adding or subs
 plugin metadata fails closed. The stored manifest-version column must also equal the decoded
 WorkspaceManifest version.
 
-Before activation, the current host plugin manifests are compared with the exact reviewed plugin
-objects, so version/content drift after review cannot silently activate. Durable activation
-`generation` and extension-schema versions use strict integer identity rather than coercion.
+Before first activation, the current host plugin manifests are compared with the exact reviewed
+plugin objects. `active()` performs that same current-plugin compatibility/binding check after
+restart, so an installed plugin upgrade, removal or capability drift cannot leave the workspace
+reported as usable under stale reviewed authority. Historical `get()` remains a durable evidence
+read and does not relabel an old candidate as currently usable.
 
-Manifest `version` remains the workspace-owned opaque version. A separate monotonic integer
-activation `generation` is assigned by the repository. Reusing one manifest version with different
-content is rejected. A previously active newer generation cannot be replaced by an older candidate
-after restart.
+Durable activation `generation` and extension-schema versions use strict integer identity rather
+than coercion. Manifest `version` remains the workspace-owned opaque version. A separate monotonic
+integer activation `generation` is assigned by the repository. Reusing one manifest version with
+different content is rejected. A previously active newer generation cannot be replaced by an older
+candidate after restart.
 
 Therefore the AUD03 #198 family
 
@@ -150,7 +153,8 @@ Focused deterministic regressions cover:
 - active-plugin permission widening rejection;
 - explicit plugin upgrade compare-and-swap;
 - workspace permission/action/plugin-declaration containment;
-- exact current plugin-manifest drift before workspace activation;
+- exact current plugin-manifest drift before workspace activation and after active restart;
+- active restart with a missing required plugin;
 - persisted workspace effective-permission widening before activation and after restart;
 - persisted workspace reviewed-plugin-set corruption;
 - stored workspace manifest-version identity mismatch;
