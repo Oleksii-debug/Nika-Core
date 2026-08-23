@@ -41,6 +41,8 @@ ADAPT:
 - the child environment is filtered again at the process boundary;
 - TEMP/TMP/TMPDIR are pinned into the declared worker workspace;
 - cwd is required to remain below the declared worker workspace root;
+- a cancellation already in force returns before temp setup or process creation, with a second
+  cancellation check immediately before `Popen`;
 - workspace, evidence and process-temp roots are rejected when the root object itself is a
   symlink or Windows reparse point;
 - production repository and job workspace roots must be fully disjoint in both directions;
@@ -66,15 +68,18 @@ fail-closed validation. No alternate generic sandbox framework is introduced.
    overrides are not inherited.
 6. Process TEMP/TMP/TMPDIR point into the declared workspace, not a host-supplied temp path.
 7. A declared process cwd outside its workspace root fails closed before process launch.
-8. Guarded workspace, evidence and temp roots fail closed if the root itself is a symlink or
+8. A cancellation already set before execution cannot launch the child process or create the
+   worker process-temp tree; cancellation is checked again after environment preparation and
+   immediately before `Popen`.
+9. Guarded workspace, evidence and temp roots fail closed if the root itself is a symlink or
    Windows reparse point; evidence collection must not resolve an attacker-replaced worktree root
    into an external tree before validating the root object.
-9. A job root cannot be inside the production repository, equal to it, or contain it.
-10. Cleanup does not recursively delete the job root and refuses symlink/reparse content before
+10. A job root cannot be inside the production repository, equal to it, or contain it.
+11. Cleanup does not recursively delete the job root and refuses symlink/reparse content before
     removing the canonical private Git and worktree roots.
-11. Output delta evidence detects additions, modifications, and deletions deterministically,
+12. Output delta evidence detects additions, modifications, and deletions deterministically,
     enforces allowed path scope, and enforces the changed-file budget.
-12. `.github/workflows` and `.github/actions` mutations are denied by default by the output
+13. `.github/workflows` and `.github/actions` mutations are denied by default by the output
     provenance boundary unless a trusted higher-level control-plane approval explicitly opts in.
 
 ## AUD02 executable-indirection repair
@@ -123,6 +128,28 @@ is reused by guarded workspace paths, process temp roots and tree-evidence colle
 regressions prove that a symlinked evidence root, workspace root and process-temp root all fail
 closed. Physical Windows junction evidence owned by PR #72 remains separate and is not copied into
 this lane.
+
+## Pre-launch cancellation repair
+
+A third DEV27 self-audit found a deterministic side-effect race in the old process runner. When a
+`cancellation_event` was already set before `run_typed_process()` was called, the runner still
+created the child with `Popen` and only noticed the cancellation in its post-launch polling loop.
+A short-lived command could therefore perform an immediate filesystem or external side effect even
+though cancellation authority already existed before dispatch.
+
+The runner now checks cancellation after trusted argv/cwd/workspace validation but before process
+environment/temp preparation, and checks it a second time immediately after environment setup and
+before `Popen`. A pre-cancelled request returns a typed failed/cancelled `ProcessExecutionResult`
+without creating the worker temp directory or launching the child. The focused regression uses an
+immediate marker-writing Python command and proves both the marker and `_nika_process_tmp` remain
+absent.
+
+This does not claim a mathematically atomic cancellation-to-process-creation transaction. A new
+cancellation can still race in the very small interval after the final check and before the OS
+creates the process; once a process exists, existing Job Object/process-group termination remains
+the containment mechanism. Eliminating that residual launch race requires a stronger OS-specific
+suspended-process/dispatch primitive or a remote sandbox transaction, not an inaccurate Python
+object-level claim.
 
 ## Isolation truth and non-goals
 
