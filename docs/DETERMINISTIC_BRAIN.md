@@ -49,8 +49,8 @@ A deterministic run receives:
 - caller budgets for maximum executed steps, maximum re-plans, and total planning wall time;
 - optionally, a `WorldStateObserver` for authoritative state drift detection;
 - optionally, ordered `previously_completed_action_ids` recovered from a durable checkpoint;
-- for durable non-read-only tool execution, a `DeterministicEffectJournal` plus stable `task_id`
-  and `execution_id` supplied by the owning runtime/task lifecycle.
+- for durable non-read-only tool execution, a `DeterministicEffectJournal` plus the stable
+  `task_id` owned by the runtime/task lifecycle.
 
 Before the first tool action in each returned plan, Nika simulates the entire plan against the
 current state. Unknown action IDs, planner/tool identity mismatch, repeated completed actions,
@@ -80,19 +80,22 @@ For a registered tool whose `ToolRisk` is not `READ_ONLY`:
 
 1. execution fails closed with `SIDE_EFFECT_JOURNAL_REQUIRED` if no durable effect journal exists;
 2. the journal commits a `PENDING` reservation **before** `ToolExecutor` may invoke the handler;
-3. the operation key is stable for `(task_id, execution_id, action_id)` and the ledger input
-   fingerprint binds tool ID, arguments, preconditions and deterministic effects;
-4. a planner-selected action still enters `ToolExecutor` with `approved=False`;
-5. approval denial or another proven-before-handler rejection releases the unused reservation;
-6. a normal successful handler call is durably changed to `COMPLETED` before deterministic state
+3. the operation key is stable for `(task_id, action_id)` and the ledger input fingerprint binds
+   tool ID, arguments, preconditions and deterministic effects;
+4. `action_id` is the durable generation identity inside one task, the same identity already used
+   by `previously_completed_action_ids`; a logically new effect in that task must use a new
+   `action_id` rather than changing a separate caller-controlled generation token;
+5. a planner-selected action still enters `ToolExecutor` with `approved=False`;
+6. approval denial or another proven-before-handler rejection releases the unused reservation;
+7. a normal successful handler call is durably changed to `COMPLETED` before deterministic state
    is advanced in memory;
-7. timeout, cancellation or an adapter failure with uncertain external outcome becomes
+8. timeout, cancellation or an adapter failure with uncertain external outcome becomes
    `UNCERTAIN`; abrupt process loss can leave the already-durable reservation `PENDING`;
-8. an existing `PENDING` or `UNCERTAIN` reservation blocks the action with
+9. an existing `PENDING` or `UNCERTAIN` reservation blocks the action with
    `SIDE_EFFECT_RECONCILIATION_REQUIRED` and the handler is not replayed;
-9. an existing matching `COMPLETED` reservation lets restart reconstruct the declared
-   deterministic action effects without calling the handler again;
-10. changing the tool/arguments/effect semantics while reusing the same durable execution/action
+10. an existing matching `COMPLETED` reservation lets restart reconstruct the declared
+    deterministic action effects without calling the handler again;
+11. changing the tool/arguments/effect semantics while reusing the same `(task_id, action_id)`
     identity fails closed as `SIDE_EFFECT_IDENTITY_CONFLICT`.
 
 The existing `RuntimeRecoveryService` already classifies any task with `PENDING` or `UNCERTAIN`
