@@ -110,6 +110,13 @@ def test_handoff_rejects_duplicate_model_identity_before_dict_collapse() -> None
         validate_artifact_for_handoff(artifact)
 
 
+def test_handoff_preserves_ocr_model_engine_mismatch_semantics() -> None:
+    artifact = _artifact(models=(_model(engine_id="different-engine"),))
+
+    with pytest.raises(ValueError, match="OCR model and OCR engine identity mismatch"):
+        validate_artifact_for_handoff(artifact)
+
+
 def test_handoff_rejects_unreferenced_model_with_missing_engine_evidence() -> None:
     artifact = _artifact(
         models=(
