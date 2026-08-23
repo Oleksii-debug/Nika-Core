@@ -73,7 +73,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "RefreshResult": ("nika_core.research.models", "RefreshResult"),
     "ResearchEvidence": ("nika_core.research.models", "ResearchEvidence"),
     "ResearchFetchFailureClass": (
-        "nika_core.research.http",
+        "nika_core.research.models",
         "ResearchFetchFailureClass",
     ),
     "ResearchProfile": ("nika_core.research.profiles", "ResearchProfile"),
