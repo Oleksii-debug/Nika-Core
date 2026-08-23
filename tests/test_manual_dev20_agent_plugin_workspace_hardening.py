@@ -362,6 +362,106 @@ def test_agent_activation_rejects_persisted_risk_downgrade(tmp_path: Path) -> No
     assert authority.calls == []
 
 
+def test_workspace_active_read_rejects_persisted_permission_widening(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    manifest = _plugin()
+    authority = _Authority()
+    repository = WorkspaceActivationRepository(
+        store,
+        _workspace_catalog(),
+        lambda: {"research.plugin": manifest},
+        activation_authority=authority,
+    )
+    candidate = repository.save_candidate(_workspace(version="1.0.0"))
+    repository.activate(
+        candidate.workspace.workspace_id,
+        candidate.generation,
+        approval_refs=("approval://trusted",),
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE workspace_activation_versions "
+            "SET effective_permissions_json = ? "
+            "WHERE workspace_id = ? AND generation = ?",
+            (
+                json.dumps(["workspace.read", "workspace.write"]),
+                candidate.workspace.workspace_id,
+                candidate.generation,
+            ),
+        )
+        conn.commit()
+
+    restarted = WorkspaceActivationRepository(
+        SQLiteStore(store.path),
+        _workspace_catalog(),
+        lambda: {"research.plugin": manifest},
+        activation_authority=authority,
+    )
+    with pytest.raises(RuntimeError, match="differ from manifest selection"):
+        restarted.active(candidate.workspace.workspace_id)
+
+
+def test_workspace_activation_rejects_corrupt_reviewed_plugin_set(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    manifest = _plugin()
+    authority = _Authority()
+    repository = WorkspaceActivationRepository(
+        store,
+        _workspace_catalog(),
+        lambda: {"research.plugin": manifest},
+        activation_authority=authority,
+    )
+    candidate = repository.save_candidate(_workspace(version="1.0.0"))
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE workspace_activation_versions SET plugins_json = '[]' "
+            "WHERE workspace_id = ? AND generation = ?",
+            (candidate.workspace.workspace_id, candidate.generation),
+        )
+        conn.commit()
+
+    with pytest.raises(RuntimeError, match="plugin review set"):
+        repository.activate(
+            candidate.workspace.workspace_id,
+            candidate.generation,
+            approval_refs=("approval://trusted",),
+        )
+    assert authority.calls == []
+
+
+def test_agent_active_read_rejects_persisted_r4_metadata_downgrade(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    authority = _Authority()
+    definition, compiler = _dangerous_agent()
+    repository = AgentDefinitionRepository(store, activation_authority=authority)
+    repository.save_draft(compiler.compile(definition))
+    repository.activate(definition, approval_refs=("approval://trusted",))
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE agent_definitions SET required_approvals_json = '[]' "
+            "WHERE agent_id = ? AND version = ?",
+            (definition.agent_id, definition.version),
+        )
+        conn.commit()
+
+    restarted = AgentDefinitionRepository(
+        SQLiteStore(store.path),
+        activation_authority=authority,
+    )
+    with pytest.raises(PermissionError, match="high-impact approval metadata"):
+        restarted.active(definition.agent_id)
+
+
 def test_workspace_activation_future_schema_fails_closed(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "nika.db")
     with store.connection() as conn:

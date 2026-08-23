@@ -117,7 +117,10 @@ class AgentDefinitionRepository:
                 (definition.agent_id,),
             ).fetchone()
             if active_row is not None:
-                active_version = int(active_row["version"])
+                active_version = _exact_nonnegative_int(
+                    active_row["version"],
+                    field="active agent version",
+                )
                 if active_version == definition.version:
                     return
                 if active_version > definition.version:
@@ -128,28 +131,16 @@ class AgentDefinitionRepository:
             if row["status"] != "draft":
                 raise ValueError(f"cannot activate definition in status {row['status']}")
 
-            required = tuple(
-                str(item) for item in json.loads(row["required_approvals_json"])
+            required = _decode_required_approvals(row["required_approvals_json"])
+            highest_risk = _exact_nonnegative_int(
+                row["highest_risk"],
+                field="persisted highest risk",
             )
-            declared_highest = max(
-                (grant.max_risk for grant in definition.tool_grants),
-                default=0,
+            _validate_authority_metadata(
+                definition,
+                required=required,
+                highest_risk=highest_risk,
             )
-            if int(row["highest_risk"]) != declared_highest:
-                raise PermissionError(
-                    "persisted risk metadata does not match immutable agent definition"
-                )
-            declared_high_impact = tuple(
-                sorted(
-                    grant.tool_id
-                    for grant in definition.tool_grants
-                    if grant.max_risk == 4
-                )
-            )
-            if required != declared_high_impact:
-                raise PermissionError(
-                    "persisted high-impact approval metadata does not match definition"
-                )
             if required:
                 if self._activation_authority is None:
                     raise PermissionError(
@@ -184,7 +175,7 @@ class AgentDefinitionRepository:
                     "agent_id": definition.agent_id,
                     "version": definition.version,
                     "approval_reference_count": len(approval_refs),
-                    "highest_risk": int(row["highest_risk"]),
+                    "highest_risk": highest_risk,
                 },
             )
 
@@ -221,17 +212,72 @@ class AgentDefinitionRepository:
 
     @staticmethod
     def _decode(row) -> StoredAgentDefinition:
-        payload = json.loads(row["definition_json"])
-        required = tuple(
-            str(item) for item in json.loads(row["required_approvals_json"])
+        definition = AgentDefinition.model_validate_json(row["definition_json"])
+        required = _decode_required_approvals(row["required_approvals_json"])
+        highest_risk = _exact_nonnegative_int(
+            row["highest_risk"],
+            field="persisted highest risk",
+        )
+        _validate_authority_metadata(
+            definition,
+            required=required,
+            highest_risk=highest_risk,
         )
         return StoredAgentDefinition(
-            definition=AgentDefinition.model_validate(payload),
+            definition=definition,
             status=str(row["status"]),
             required_human_approvals=required,
-            highest_risk=int(row["highest_risk"]),
+            highest_risk=highest_risk,
             created_at=str(row["created_at"]),
             activated_at=(
                 str(row["activated_at"]) if row["activated_at"] is not None else None
             ),
+        )
+
+
+def _decode_required_approvals(payload: object) -> tuple[str, ...]:
+    try:
+        raw = json.loads(str(payload))
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise PermissionError("persisted high-impact approval metadata is invalid") from exc
+    if not isinstance(raw, list) or any(
+        not isinstance(item, str) or not item for item in raw
+    ):
+        raise PermissionError("persisted high-impact approval metadata is invalid")
+    required = tuple(raw)
+    if required != tuple(sorted(set(required))):
+        raise PermissionError("persisted high-impact approval metadata is not canonical")
+    return required
+
+
+def _exact_nonnegative_int(value: object, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise PermissionError(f"{field} must be an exact non-negative integer")
+    return value
+
+
+def _validate_authority_metadata(
+    definition: AgentDefinition,
+    *,
+    required: tuple[str, ...],
+    highest_risk: int,
+) -> None:
+    declared_highest = max(
+        (grant.max_risk for grant in definition.tool_grants),
+        default=0,
+    )
+    if highest_risk != declared_highest:
+        raise PermissionError(
+            "persisted risk metadata does not match immutable agent definition"
+        )
+    declared_high_impact = tuple(
+        sorted(
+            grant.tool_id
+            for grant in definition.tool_grants
+            if grant.max_risk == 4
+        )
+    )
+    if required != declared_high_impact:
+        raise PermissionError(
+            "persisted high-impact approval metadata does not match definition"
         )

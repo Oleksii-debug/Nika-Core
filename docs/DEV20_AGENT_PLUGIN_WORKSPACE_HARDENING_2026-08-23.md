@@ -45,12 +45,13 @@ High-impact AgentDefinition activation does not accept caller-supplied tool IDs 
 A host-injected `ActivationAuthorityPort` verifies opaque approval references against an exact
 Nika-owned activation subject. Without a trusted verifier, R4 activation fails closed.
 
-The repository also re-derives the highest risk and required R4 tool IDs from the immutable
-AgentDefinition immediately before activation. If persisted `highest_risk` or
-`required_approvals_json` metadata was downgraded or corrupted, activation fails before the trusted
-verifier is consulted. An older version cannot replace a newer active version, including after
-restart.
+The repository re-derives the highest risk and required R4 tool IDs from the immutable
+AgentDefinition immediately before activation. It performs the same derivation on later
+`get()`/`active()` reads. Therefore persisted `highest_risk` or `required_approvals_json` corruption
+cannot become plausible restart authority after an earlier legitimate activation. Numeric durable
+identity is also strict: Boolean/REAL/string coercions are not accepted as integer authority.
 
+An older AgentDefinition version cannot replace a newer active version, including after restart.
 Agent configuration approval remains distinct from execution-time R4 approval. Activating a
 definition only exposes an approved configuration; each later high-impact effect remains governed
 by the normal M10/ToolExecutor boundary.
@@ -96,11 +97,17 @@ The extension schema is initialized under SQLite `BEGIN IMMEDIATE`, serializing 
 creation without consuming the shared core migration number. Future unsupported extension-schema
 versions fail closed.
 
-At activation the repository re-runs `WorkspaceCatalog` against the current plugin manifests and
-recomputes effective permissions from the immutable WorkspaceManifest. Persisted
-`effective_permissions_json` is evidence, not authority. If those bytes have been widened,
-narrowed, reordered into a noncanonical identity, or otherwise disagree with the manifest-derived
-selection, activation fails before approval.
+Both activation and restart reads validate durable evidence against the immutable workspace
+manifest. `effective_permissions_json` is evidence, not authority: the repository recomputes the
+selected permission set through `WorkspaceCatalog` and rejects any widened, narrowed or otherwise
+changed persisted value. The persisted reviewed plugin list must exactly match the plugin IDs and
+order declared by `WorkspaceManifest.required_plugins`; removing, adding or substituting reviewed
+plugin metadata fails closed. The stored manifest-version column must also equal the decoded
+WorkspaceManifest version.
+
+Before activation, the current host plugin manifests are compared with the exact reviewed plugin
+objects, so version/content drift after review cannot silently activate. Durable activation
+`generation` and extension-schema versions use strict integer identity rather than coercion.
 
 Manifest `version` remains the workspace-owned opaque version. A separate monotonic integer
 activation `generation` is assigned by the repository. Reusing one manifest version with different
@@ -135,7 +142,7 @@ Focused deterministic regressions cover:
 - removal of the raw caller-provided tool-ID approval bypass;
 - AgentDefinition permission-catalog drift before activation;
 - stale AgentDefinition activation after a newer active version;
-- persisted Agent Builder risk/R4 metadata downgrade rejection;
+- persisted Agent Builder risk/R4 metadata downgrade before activation and after restart;
 - provider-neutral metadata-only plugin/workspace discovery;
 - isolated invalid plugin registration and duplicate plugin identity;
 - plugin permission/action catalog validation;
@@ -143,8 +150,11 @@ Focused deterministic regressions cover:
 - active-plugin permission widening rejection;
 - explicit plugin upgrade compare-and-swap;
 - workspace permission/action/plugin-declaration containment;
-- exact plugin-manifest drift before workspace activation;
-- persisted workspace effective-permission widening rejection;
+- exact current plugin-manifest drift before workspace activation;
+- persisted workspace effective-permission widening before activation and after restart;
+- persisted workspace reviewed-plugin-set corruption;
+- stored workspace manifest-version identity mismatch;
+- strict durable activation-generation identity;
 - SQLite restart preservation without adapter construction;
 - stale workspace generation rollback rejection;
 - future workspace-activation schema rejection.

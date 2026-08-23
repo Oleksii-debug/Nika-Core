@@ -54,7 +54,10 @@ class WorkspaceActivationRepository:
             row = conn.execute(
                 "SELECT MAX(version) AS version FROM workspace_activation_schema_migrations"
             ).fetchone()
-            current = int(row["version"] or 0)
+            current = _exact_nonnegative_int(
+                row["version"] or 0,
+                field="workspace activation schema version",
+            )
             if current > WORKSPACE_ACTIVATION_SCHEMA_VERSION:
                 raise RuntimeError(
                     "workspace activation schema is newer than this Nika version"
@@ -91,7 +94,10 @@ class WorkspaceActivationRepository:
                 "WHERE workspace_id = ?",
                 (workspace_id,),
             ).fetchone()
-        return int(row["generation"] or 0) + 1
+        return _exact_nonnegative_int(
+            row["generation"] or 0,
+            field="workspace activation generation",
+        ) + 1
 
     def save_candidate(self, workspace: WorkspaceManifest) -> StoredWorkspaceActivation:
         available = dict(self._plugin_manifests())
@@ -125,7 +131,10 @@ class WorkspaceActivationRepository:
                 "WHERE workspace_id = ?",
                 (workspace.workspace_id,),
             ).fetchone()
-            generation = int(row["generation"] or 0) + 1
+            generation = _exact_nonnegative_int(
+                row["generation"] or 0,
+                field="workspace activation generation",
+            ) + 1
             conn.execute(
                 "INSERT INTO workspace_activation_versions("
                 "workspace_id, generation, manifest_version, manifest_json, plugins_json, "
@@ -153,20 +162,23 @@ class WorkspaceActivationRepository:
         *,
         approval_refs: tuple[str, ...] = (),
     ) -> StoredWorkspaceActivation:
-        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
-            raise ValueError("workspace activation generation must be a positive integer")
+        generation = _exact_positive_int(
+            generation,
+            field="workspace activation generation",
+        )
 
         with self._store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT manifest_json, plugins_json, effective_permissions_json, status, "
-                "created_at, activated_at FROM workspace_activation_versions "
+                "SELECT manifest_version, manifest_json, plugins_json, "
+                "effective_permissions_json, status, created_at, activated_at "
+                "FROM workspace_activation_versions "
                 "WHERE workspace_id = ? AND generation = ?",
                 (workspace_id, generation),
             ).fetchone()
             if row is None:
                 raise KeyError("workspace activation candidate does not exist")
-            candidate = _decode_row(workspace_id, generation, row)
+            candidate = self._decode_and_validate(workspace_id, generation, row)
 
             active_row = conn.execute(
                 "SELECT generation FROM workspace_activation_versions "
@@ -174,7 +186,10 @@ class WorkspaceActivationRepository:
                 (workspace_id,),
             ).fetchone()
             if active_row is not None:
-                active_generation = int(active_row["generation"])
+                active_generation = _exact_positive_int(
+                    active_row["generation"],
+                    field="active workspace generation",
+                )
                 if active_generation == generation:
                     return candidate
                 if active_generation > generation:
@@ -189,17 +204,14 @@ class WorkspaceActivationRepository:
 
             current_plugins = dict(self._plugin_manifests())
             self._catalog.validate(candidate.workspace, current_plugins)
-            expected_permissions = self._catalog.effective_permission_ids(candidate.workspace)
-            if candidate.effective_permission_ids != expected_permissions:
-                raise RuntimeError(
-                    "stored workspace effective permissions differ from manifest selection"
+            expected_plugins = tuple(
+                current_plugins[item.plugin_id]
+                for item in candidate.workspace.required_plugins
+            )
+            if candidate.plugins != expected_plugins:
+                raise PermissionError(
+                    "plugin manifest changed after workspace candidate review"
                 )
-            for persisted_plugin in candidate.plugins:
-                current = current_plugins.get(persisted_plugin.plugin_id)
-                if current != persisted_plugin:
-                    raise PermissionError(
-                        "plugin manifest changed after workspace candidate review"
-                    )
 
             high_impact_ids = self._catalog.high_impact_ids(
                 candidate.workspace,
@@ -215,7 +227,7 @@ class WorkspaceActivationRepository:
                         item.model_dump(mode="json") for item in candidate.plugins
                     ],
                 },
-                permission_ids=expected_permissions,
+                permission_ids=candidate.effective_permission_ids,
                 high_impact_ids=high_impact_ids,
             )
             if subject.requires_authority:
@@ -244,7 +256,7 @@ class WorkspaceActivationRepository:
     def active(self, workspace_id: str) -> StoredWorkspaceActivation | None:
         with self._store.connection() as conn:
             row = conn.execute(
-                "SELECT generation, manifest_json, plugins_json, "
+                "SELECT generation, manifest_version, manifest_json, plugins_json, "
                 "effective_permissions_json, status, created_at, activated_at "
                 "FROM workspace_activation_versions "
                 "WHERE workspace_id = ? AND status = 'active'",
@@ -252,23 +264,54 @@ class WorkspaceActivationRepository:
             ).fetchone()
         if row is None:
             return None
-        return _decode_row(workspace_id, int(row["generation"]), row)
+        generation = _exact_positive_int(
+            row["generation"],
+            field="active workspace generation",
+        )
+        return self._decode_and_validate(workspace_id, generation, row)
 
     def get(
         self,
         workspace_id: str,
         generation: int,
     ) -> StoredWorkspaceActivation | None:
+        generation = _exact_positive_int(
+            generation,
+            field="workspace activation generation",
+        )
         with self._store.connection() as conn:
             row = conn.execute(
-                "SELECT manifest_json, plugins_json, effective_permissions_json, status, "
-                "created_at, activated_at FROM workspace_activation_versions "
+                "SELECT manifest_version, manifest_json, plugins_json, "
+                "effective_permissions_json, status, created_at, activated_at "
+                "FROM workspace_activation_versions "
                 "WHERE workspace_id = ? AND generation = ?",
                 (workspace_id, generation),
             ).fetchone()
         if row is None:
             return None
-        return _decode_row(workspace_id, generation, row)
+        return self._decode_and_validate(workspace_id, generation, row)
+
+    def _decode_and_validate(
+        self,
+        workspace_id: str,
+        generation: int,
+        row: sqlite3.Row,
+    ) -> StoredWorkspaceActivation:
+        stored = _decode_row(workspace_id, generation, row)
+        expected_permissions = self._catalog.effective_permission_ids(stored.workspace)
+        if stored.effective_permission_ids != expected_permissions:
+            raise RuntimeError(
+                "stored workspace effective permissions differ from manifest selection"
+            )
+        required_plugin_ids = tuple(
+            requirement.plugin_id for requirement in stored.workspace.required_plugins
+        )
+        persisted_plugin_ids = tuple(plugin.plugin_id for plugin in stored.plugins)
+        if persisted_plugin_ids != required_plugin_ids:
+            raise RuntimeError(
+                "stored workspace plugin review set differs from manifest requirements"
+            )
+        return stored
 
 
 def _canonical_json(payload: object) -> str:
@@ -286,13 +329,24 @@ def _decode_row(
     workspace = WorkspaceManifest.model_validate(json.loads(str(manifest_json)))
     if workspace.workspace_id != workspace_id:
         raise RuntimeError("stored workspace identity does not match activation key")
-    plugins = tuple(
-        PluginManifest.model_validate(item) for item in json.loads(str(plugins_json))
-    )
-    permissions = tuple(str(item) for item in json.loads(str(permissions_json)))
+    if workspace.version != str(row["manifest_version"]):
+        raise RuntimeError("stored workspace manifest version does not match row identity")
+
+    raw_plugins = json.loads(str(plugins_json))
+    if not isinstance(raw_plugins, list):
+        raise RuntimeError("stored workspace plugin review metadata is invalid")
+    plugins = tuple(PluginManifest.model_validate(item) for item in raw_plugins)
+
+    raw_permissions = json.loads(str(permissions_json))
+    if not isinstance(raw_permissions, list) or any(
+        not isinstance(item, str) or not item for item in raw_permissions
+    ):
+        raise RuntimeError("stored workspace effective permissions are invalid")
+    permissions = tuple(raw_permissions)
     expected_permissions = tuple(sorted(set(permissions)))
     if permissions != expected_permissions:
         raise RuntimeError("stored workspace effective permissions are not canonical")
+
     return StoredWorkspaceActivation(
         workspace=workspace,
         generation=generation,
@@ -306,3 +360,15 @@ def _decode_row(
             else None
         ),
     )
+
+
+def _exact_nonnegative_int(value: object, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RuntimeError(f"{field} must be an exact non-negative integer")
+    return value
+
+
+def _exact_positive_int(value: object, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{field} must be a positive exact integer")
+    return value
