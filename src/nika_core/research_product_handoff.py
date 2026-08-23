@@ -20,6 +20,8 @@ from nika_core.research.network_repository import NetworkResearchRepository
 _SEAL_EVENT_TYPE = "product_project.research_product_handoff_sealed"
 _SEAL_ENTITY_TYPE = "product_project"
 _FORMAL_REF_PREFIX = "research-result-set://"
+_FORMAL_AUTH_OPERATION_KIND = "research_product_handoff.formal_authority"
+_FORMAL_AUTH_KEY_PREFIX = "research-product-formal:"
 
 
 def _now() -> str:
@@ -124,6 +126,84 @@ def _is_formal_handoff_payload(payload: dict[str, Any]) -> bool:
         and item["provenance_ref"].startswith(_FORMAL_REF_PREFIX)
         for item in evidence
     )
+
+
+def _formal_authority_key(project_id: str, package_id: str) -> str:
+    identity = {
+        "project_id": project_id,
+        "package_id": package_id,
+    }
+    return f"{_FORMAL_AUTH_KEY_PREFIX}{_sha256_json(identity)}"
+
+
+def _formal_authority_fingerprint(
+    *,
+    project_id: str,
+    package_id: str,
+    result_set_id: str,
+    workspace_id: str,
+    result_set_sha256: str,
+    handoff_payload_sha256: str,
+) -> str:
+    return _sha256_json(
+        {
+            "project_id": project_id,
+            "package_id": package_id,
+            "result_set_id": result_set_id,
+            "workspace_id": workspace_id,
+            "result_set_sha256": result_set_sha256,
+            "handoff_payload_sha256": handoff_payload_sha256,
+        }
+    )
+
+
+def _formal_authority_rows_conn(
+    conn: Any,
+    project_id: str,
+    package_id: str,
+) -> list[Any]:
+    return conn.execute(
+        "SELECT operation_key,project_id,operation_kind,entity_id,entity_version,"
+        "input_fingerprint FROM product_project_mutation_idempotency "
+        "WHERE project_id=? AND operation_kind=? AND entity_id=? ORDER BY operation_key",
+        (project_id, _FORMAL_AUTH_OPERATION_KIND, package_id),
+    ).fetchall()
+
+
+def _validate_formal_authority_rows(
+    rows: list[Any],
+    *,
+    project_id: str,
+    package_id: str,
+    expected_fingerprint: str | None = None,
+) -> bool:
+    if not rows:
+        return False
+    if len(rows) != 1:
+        raise ProductProjectError(
+            f"conflicting formal research handoff authority: {package_id}"
+        )
+    row = rows[0]
+    if (
+        row["operation_key"] != _formal_authority_key(project_id, package_id)
+        or row["project_id"] != project_id
+        or row["operation_kind"] != _FORMAL_AUTH_OPERATION_KIND
+        or row["entity_id"] != package_id
+        or type(row["entity_version"]) is not int
+        or row["entity_version"] != 1
+    ):
+        raise ProductProjectError(
+            f"formal research handoff authority is malformed: {package_id}"
+        )
+    fingerprint = _required_text(
+        row["input_fingerprint"],
+        label="formal research handoff authority fingerprint",
+    )
+    if expected_fingerprint is not None and fingerprint != expected_fingerprint:
+        raise ProductProjectError(
+            f"formal research handoff authority mismatch: {package_id}"
+        )
+    return True
 
 
 def _research_result_payload_conn(conn: Any, result_set_id: str) -> dict[str, Any]:
@@ -268,9 +348,15 @@ def verify_sealed_handoffs_conn(
             raise ProductProjectError(
                 f"research handoff package identity mismatch: {package_id}"
             )
+        authority_rows = _formal_authority_rows_conn(conn, project_id, package_id)
+        authority_present = _validate_formal_authority_rows(
+            authority_rows,
+            project_id=project_id,
+            package_id=package_id,
+        )
         seals = _seal_rows_conn(conn, project_id, package_id)
         if not seals:
-            if _is_formal_handoff_payload(payload):
+            if authority_present or _is_formal_handoff_payload(payload):
                 raise ProductProjectError(
                     f"formal research handoff integrity seal is missing: {package_id}"
                 )
@@ -312,7 +398,26 @@ def verify_sealed_handoffs_conn(
             raise ProductProjectError(
                 f"research handoff integrity seal is missing: {package_id}"
             )
-        result_set_id, workspace_id, result_set_sha256, _ = expected_seal
+        result_set_id, workspace_id, result_set_sha256, handoff_payload_sha256 = (
+            expected_seal
+        )
+        authority_fingerprint = _formal_authority_fingerprint(
+            project_id=project_id,
+            package_id=package_id,
+            result_set_id=result_set_id,
+            workspace_id=workspace_id,
+            result_set_sha256=result_set_sha256,
+            handoff_payload_sha256=handoff_payload_sha256,
+        )
+        if not _validate_formal_authority_rows(
+            authority_rows,
+            project_id=project_id,
+            package_id=package_id,
+            expected_fingerprint=authority_fingerprint,
+        ):
+            raise ProductProjectError(
+                f"formal research handoff authority is missing: {package_id}"
+            )
         research_payload = _research_result_payload_conn(conn, result_set_id)
         if research_payload["workspace_id"] != workspace_id:
             raise ProductProjectError(
@@ -391,12 +496,20 @@ class ResearchProductHandoffService:
         option_ids = tuple(option.option_id for option in options)
 
         existing = self._read_handoff_payload(project_id, package_id)
-        if existing is not None:
-            if existing != expected_payload:
-                raise ProductProjectError(
-                    "evidence package id already exists with different handoff payload"
-                )
-        else:
+        if existing is not None and existing != expected_payload:
+            raise ProductProjectError(
+                "evidence package id already exists with different handoff payload"
+            )
+
+        self._ensure_formal_authority(
+            project_id=project_id,
+            package_id=package_id,
+            result_set_id=result_set.result_set_id,
+            workspace_id=result_set.workspace_id,
+            result_set_sha256=result_set_sha256,
+            handoff_payload_sha256=handoff_payload_sha256,
+        )
+        if existing is None:
             try:
                 self.projects.record_research_handoff(project_id, package, options)
             except sqlite3.IntegrityError:
@@ -507,6 +620,80 @@ class ResearchProductHandoffService:
                 f"research handoff package identity mismatch: {package_id}"
             )
         return payload
+
+    def _ensure_formal_authority(
+        self,
+        *,
+        project_id: str,
+        package_id: str,
+        result_set_id: str,
+        workspace_id: str,
+        result_set_sha256: str,
+        handoff_payload_sha256: str,
+    ) -> None:
+        operation_key = _formal_authority_key(project_id, package_id)
+        fingerprint = _formal_authority_fingerprint(
+            project_id=project_id,
+            package_id=package_id,
+            result_set_id=result_set_id,
+            workspace_id=workspace_id,
+            result_set_sha256=result_set_sha256,
+            handoff_payload_sha256=handoff_payload_sha256,
+        )
+        with self.store.connection() as conn:
+            if not conn.execute(
+                "SELECT 1 FROM product_projects WHERE project_id=?",
+                (project_id,),
+            ).fetchone():
+                raise KeyError(project_id)
+
+            rows = _formal_authority_rows_conn(conn, project_id, package_id)
+            if rows:
+                _validate_formal_authority_rows(
+                    rows,
+                    project_id=project_id,
+                    package_id=package_id,
+                    expected_fingerprint=fingerprint,
+                )
+                return
+
+            conn.execute(
+                "INSERT OR IGNORE INTO product_project_mutation_idempotency("
+                "operation_key,project_id,operation_kind,entity_id,entity_version,"
+                "input_fingerprint,created_at"
+                ") VALUES (?,?,?,?,?,?,?)",
+                (
+                    operation_key,
+                    project_id,
+                    _FORMAL_AUTH_OPERATION_KIND,
+                    package_id,
+                    1,
+                    fingerprint,
+                    _now(),
+                ),
+            )
+            rows = _formal_authority_rows_conn(conn, project_id, package_id)
+            if _validate_formal_authority_rows(
+                rows,
+                project_id=project_id,
+                package_id=package_id,
+                expected_fingerprint=fingerprint,
+            ):
+                return
+
+            collision = conn.execute(
+                "SELECT project_id,operation_kind,entity_id,entity_version,"
+                "input_fingerprint FROM product_project_mutation_idempotency "
+                "WHERE operation_key=?",
+                (operation_key,),
+            ).fetchone()
+            if collision is not None:
+                raise ProductProjectError(
+                    f"formal research handoff authority key conflict: {package_id}"
+                )
+            raise ProductProjectError(
+                f"formal research handoff authority was not persisted: {package_id}"
+            )
 
     def _ensure_seal(
         self,
