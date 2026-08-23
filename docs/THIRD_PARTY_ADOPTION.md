@@ -31,10 +31,13 @@ Nika owns stable task/agent/workspace identity, lifecycle, permissions, approval
 ## Intelligence and Model Gateway
 Nika now treats model-free planning, embedded models, external local model servers and cloud APIs as separate replaceable capabilities.
 
-### Deterministic Brain — ADAPT Unified Planning
-- ADAPT — `unified-planning` 1.3.x with a small compatible engine such as Pyperplan for explicit Boolean/state/action planning.
-- Nika owns `WorldState`, goal/action and planner contracts; Unified Planning types stay inside the adapter.
-- Planned actions execute through the existing guarded ToolExecutor and therefore do not bypass approval/security policy.
+### Deterministic Brain — ADAPT Unified Planning + Aries
+- ADAPT / INTEGRATED — `unified-planning>=1.3,<2` behind Nika's framework-neutral deterministic-planning contracts.
+- REUSE OPTIONAL / PINNED — `up-aries==0.5.0` is the adopted optional engine for the current proof path. Unified Planning is Apache-2.0; the adopted `up-aries` plugin and Aries v0.5.0 source are MIT-licensed.
+- REJECT FOR ADOPTED DEFAULT — Pyperplan 2.1 is GPLv3+. Although the `up-pyperplan` wrapper is Apache-2.0, wrapper metadata does not change the engine license; Pyperplan therefore must not be pulled into Nika's adopted planning extra by default.
+- Nika owns `WorldState`, goal/action/plan/error contracts, plan validation, bounded re-planning, restart identity and approval boundaries; Unified Planning/Aries types stay inside the adapter.
+- The `planning` extra is optional and must not bloat the base Windows package. Other planner engines require their own exact version/source/license/transitive/runtime/Windows review before adoption.
+- Planned actions execute through the existing guarded `ToolExecutor`; planner output never manufactures approval or bypasses R0–R4 policy.
 - REUSE — SQLite FTS5 and ordinary deterministic libraries/search before adding semantic models.
 - REUSE — scikit-learn only for measured classical ML tasks with explicit datasets/metrics.
 
