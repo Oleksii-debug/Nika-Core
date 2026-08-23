@@ -9,6 +9,7 @@ from nika_core.product_factory_coding_worker_adapter import (
     CodingWorkerDispatchContext,
     CodingWorkerExecutionEvidence,
     ComponentWorkerDisposition,
+    RepositoryPathIdentity,
 )
 from nika_core.product_factory_coordinator import ProductFactoryCoordinator, WorkState
 from nika_core.product_factory_orchestration import (
@@ -64,6 +65,9 @@ def _coordinator() -> ProductFactoryCoordinator:
 
 
 class Contexts:
+    def __init__(self, path_identity: RepositoryPathIdentity | None = None) -> None:
+        self.path_identity = path_identity
+
     async def context_for(self, _request):
         return CodingWorkerDispatchContext(
             repository_tree_digest="tree-v1",
@@ -75,7 +79,8 @@ class Contexts:
             ),
             process_policy=ProcessPolicy(("python",)),
             network_policy=NetworkPolicy(),
-            resource_budget=ResourceBudget(300, 1_000_000, 2),
+            resource_budget=ResourceBudget(300, 1_000_000, 3),
+            path_identity=self.path_identity,
         )
 
 
@@ -129,6 +134,19 @@ def _failure(kind, *, retryable):
         )
 
     return factory
+
+
+def _case_variant_result(job):
+    return CodingResult(
+        job_id=job.job_id,
+        changed_files=(
+            ChangedFile("src/core/Item.py", DIGEST, 10),
+            ChangedFile("src\\core\\item.py", "e" * 64, 11),
+        ),
+        test_evidence=(
+            TestEvidence(("python", "-m", "pytest", "tests/core"), 0, "ok"),
+        ),
+    )
 
 
 def test_retryable_process_failure_is_classified_without_auto_retry() -> None:
@@ -234,22 +252,60 @@ def test_cancel_race_that_already_completed_still_requires_independent_review() 
     assert outcome.record.state is WorkState.REVIEW_REQUIRED
 
 
-def test_case_variant_duplicate_changed_file_identity_is_rejected() -> None:
-    def duplicate(job):
+def test_case_insensitive_workspace_rejects_case_variant_duplicate_identity() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    adapter = CodingWorkerComponentAdapter(
+        Worker(_case_variant_result),
+        Contexts(RepositoryPathIdentity.CASE_INSENSITIVE),
+        Evidence(),
+    )
+
+    with pytest.raises(CodingWorkerAdapterError, match="repeats changed-file identity"):
+        _run(adapter.dispatch(request))
+
+
+def test_case_sensitive_workspace_allows_distinct_case_variant_paths() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    adapter = CodingWorkerComponentAdapter(
+        Worker(_case_variant_result),
+        Contexts(RepositoryPathIdentity.CASE_SENSITIVE),
+        Evidence(),
+    )
+
+    envelope = _run(adapter.dispatch(request))
+
+    assert envelope.work_id == request.work_id
+    assert len(envelope.coding_result.changed_files) == 2
+
+
+def test_undeclared_path_semantics_fail_closed_for_case_variant_evidence() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    adapter = CodingWorkerComponentAdapter(Worker(_case_variant_result), Contexts(), Evidence())
+
+    with pytest.raises(CodingWorkerAdapterError, match="path identity semantics must be declared"):
+        _run(adapter.dispatch(request))
+
+
+def test_separator_alias_is_duplicate_even_for_case_sensitive_workspace() -> None:
+    def separator_alias(job):
         return CodingResult(
             job_id=job.job_id,
             changed_files=(
-                ChangedFile("src/core/Item.py", DIGEST, 10),
+                ChangedFile("src/core/item.py", DIGEST, 10),
                 ChangedFile("src\\core\\item.py", "e" * 64, 11),
-            ),
-            test_evidence=(
-                TestEvidence(("python", "-m", "pytest", "tests/core"), 0, "ok"),
             ),
         )
 
     coordinator = _coordinator()
     request = coordinator.start("core")
-    adapter = CodingWorkerComponentAdapter(Worker(duplicate), Contexts(), Evidence())
+    adapter = CodingWorkerComponentAdapter(
+        Worker(separator_alias),
+        Contexts(RepositoryPathIdentity.CASE_SENSITIVE),
+        Evidence(),
+    )
 
     with pytest.raises(CodingWorkerAdapterError, match="repeats changed-file identity"):
         _run(adapter.dispatch(request))
@@ -263,6 +319,7 @@ def test_changed_file_budget_is_enforced_before_evidence_collection() -> None:
                 ChangedFile("src/core/a.py", DIGEST, 1),
                 ChangedFile("src/core/b.py", "e" * 64, 1),
                 ChangedFile("src/core/c.py", "f" * 64, 1),
+                ChangedFile("src/core/d.py", "1" * 64, 1),
             ),
         )
 

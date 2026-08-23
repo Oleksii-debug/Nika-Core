@@ -26,6 +26,7 @@ from nika_core.toolsmith.contracts import (
     WorkerFailure,
     WorkerFailureKind,
     WorkspaceLease,
+    normalize_relative_path,
 )
 
 
@@ -43,19 +44,38 @@ class ComponentWorkerDisposition(StrEnum):
     CANCEL_RECOVERY_UNAVAILABLE = "cancel_recovery_unavailable"
 
 
+class RepositoryPathIdentity(StrEnum):
+    """Trusted repository path case semantics for changed-file identity checks."""
+
+    CASE_SENSITIVE = "case_sensitive"
+    CASE_INSENSITIVE = "case_insensitive"
+
+
 @dataclass(frozen=True, slots=True)
 class CodingWorkerDispatchContext:
-    """Trusted host-provided execution context for one bounded component job."""
+    """Trusted host-provided execution context for one bounded component job.
+
+    ``path_identity`` is intentionally owned by the Product Factory host boundary rather
+    than inferred from the machine running Nika. A remote or containerized worker may
+    use different repository semantics from the coordinator host. ``None`` remains
+    backward-compatible for results without case-variant ambiguity, but case-variant
+    evidence fails closed until the host declares the authoritative semantic.
+    """
 
     repository_tree_digest: str
     lease: WorkspaceLease
     process_policy: ProcessPolicy
     network_policy: NetworkPolicy
     resource_budget: ResourceBudget
+    path_identity: RepositoryPathIdentity | None = None
 
     def __post_init__(self) -> None:
         if not self.repository_tree_digest.strip():
             raise CodingWorkerAdapterError("repository tree digest must not be empty")
+        if self.path_identity is not None and not isinstance(
+            self.path_identity, RepositoryPathIdentity
+        ):
+            raise CodingWorkerAdapterError("repository path identity semantics are invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,9 +146,9 @@ class CodingWorkerComponentAdapter:
     evidence: CodingWorkerEvidencePort
 
     async def dispatch(self, request: ComponentWorkRequest) -> WorkerResultEnvelope:
-        job = await self._job_for(request)
+        job, context = await self._job_for(request)
         result = await self.worker.execute(job)
-        return await self._envelope(request, job, result)
+        return await self._envelope(request, job, result, context=context)
 
     async def cancel(self, work_id: str) -> None:
         if not work_id.strip():
@@ -145,9 +165,9 @@ class CodingWorkerComponentAdapter:
         request: ComponentWorkRequest,
         state: RecoveryState,
     ) -> WorkerResultEnvelope:
-        job = await self._job_for(request)
+        job, context = await self._job_for(request)
         result = await self.worker.recover(job, state)
-        return await self._envelope(request, job, result)
+        return await self._envelope(request, job, result, context=context)
 
     async def run_component(
         self,
@@ -246,11 +266,14 @@ class CodingWorkerComponentAdapter:
             reason=reason,
         )
 
-    async def _job_for(self, request: ComponentWorkRequest) -> CodingJob:
+    async def _job_for(
+        self,
+        request: ComponentWorkRequest,
+    ) -> tuple[CodingJob, CodingWorkerDispatchContext]:
         context = await self.contexts.context_for(request)
         try:
             commands = tuple(AcceptanceCommand(argv=argv) for argv in request.acceptance_commands)
-            return CodingJob(
+            job = CodingJob(
                 job_id=request.work_id,
                 task_id=component_task_id(request),
                 goal=request.goal,
@@ -267,6 +290,7 @@ class CodingWorkerComponentAdapter:
                 acceptance_commands=commands,
                 permission_ceiling=request.permission_ceiling,
             )
+            return job, context
         except ValueError as exc:
             raise CodingWorkerAdapterError(f"invalid coding job mapping: {exc}") from exc
 
@@ -275,6 +299,8 @@ class CodingWorkerComponentAdapter:
         request: ComponentWorkRequest,
         job: CodingJob,
         result: CodingResult,
+        *,
+        context: CodingWorkerDispatchContext,
     ) -> WorkerResultEnvelope:
         if result.job_id != request.work_id:
             raise CodingWorkerAdapterError(
@@ -283,18 +309,31 @@ class CodingWorkerComponentAdapter:
         if len(result.changed_files) > job.resource_budget.max_changed_files:
             raise CodingWorkerAdapterError("coding result exceeded component changed-file budget")
 
-        seen_paths: set[str] = set()
+        seen_exact: set[str] = set()
+        seen_folded: set[str] = set()
         for changed_file in result.changed_files:
             if not job.allowed_paths.allows(changed_file.path):
                 raise CodingWorkerAdapterError(
                     f"changed file is outside component allowed paths: {changed_file.path}"
                 )
-            identity = _changed_path_identity(changed_file.path)
-            if identity in seen_paths:
+            canonical = _canonical_changed_path(changed_file.path)
+            folded = canonical.casefold()
+            if canonical in seen_exact:
                 raise CodingWorkerAdapterError(
                     f"coding result repeats changed-file identity: {changed_file.path}"
                 )
-            seen_paths.add(identity)
+            if folded in seen_folded:
+                if context.path_identity is None:
+                    raise CodingWorkerAdapterError(
+                        "repository path identity semantics must be declared for "
+                        "case-variant changed files"
+                    )
+                if context.path_identity is RepositoryPathIdentity.CASE_INSENSITIVE:
+                    raise CodingWorkerAdapterError(
+                        f"coding result repeats changed-file identity: {changed_file.path}"
+                    )
+            seen_exact.add(canonical)
+            seen_folded.add(folded)
 
         exact = await self.evidence.collect(request, job, result)
         if exact.work_id != request.work_id or exact.repository_id != request.repository_id:
@@ -364,8 +403,11 @@ def _failure_is_repairable(failure: WorkerFailure) -> bool:
     return failure.retryable and failure.kind in _REPAIRABLE_FAILURE_KINDS
 
 
-def _changed_path_identity(value: str) -> str:
-    return value.strip().replace("\\", "/").casefold()
+def _canonical_changed_path(value: str) -> str:
+    try:
+        return normalize_relative_path(value).as_posix()
+    except ValueError as exc:
+        raise CodingWorkerAdapterError("changed-file identity is not repository-relative") from exc
 
 
 def _validate_sha(value: str, label: str) -> None:
