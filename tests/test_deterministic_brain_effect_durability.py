@@ -42,6 +42,9 @@ class _CrashAfterCompleteJournal:
     def __init__(self, delegate: RuntimeIdempotencyEffectJournal) -> None:
         self._delegate = delegate
 
+    def unresolved_operation_keys(self, *, task_id):
+        return self._delegate.unresolved_operation_keys(task_id=task_id)
+
     def reserve(self, *, task_id, action):
         return self._delegate.reserve(task_id=task_id, action=action)
 
@@ -180,6 +183,40 @@ def test_process_loss_after_tool_effect_leaves_pending_and_blocks_replay(tmp_pat
     assert effects == 1
 
 
+def test_unresolved_effect_blocks_alternative_plan_before_planner_runs(tmp_path) -> None:
+    store = _store(tmp_path)
+    task_id = _task_id(store)
+    journal = RuntimeIdempotencyEffectJournal(IdempotencyLedger(store))
+    journal.reserve(task_id=task_id, action=_action())
+    planner_calls = 0
+
+    class AlternativePlanner:
+        def plan(self, *, state, goal, actions):
+            nonlocal planner_calls
+            del state, goal, actions
+            planner_calls += 1
+            return DeterministicPlan(steps=(PlanStep(action_id="alternative"),))
+
+    brain = DeterministicBrain(
+        planner=AlternativePlanner(),
+        tools=ToolExecutor(),
+        effect_journal=journal,
+    )
+    result = asyncio.run(
+        brain.run(
+            run_id="restart-alternative",
+            task_id=task_id,
+            state=WorldState(),
+            goal=DeterministicGoal(required=frozenset({"done"})),
+            actions=(DeterministicAction(action_id="alternative", adds=frozenset({"done"})),),
+        )
+    )
+
+    assert result.error_code == DeterministicErrorCode.SIDE_EFFECT_RECONCILIATION_REQUIRED
+    assert result.completed_actions == ()
+    assert planner_calls == 0
+
+
 def test_completed_effect_survives_loss_before_brain_applies_state(tmp_path) -> None:
     store = _store(tmp_path)
     task_id = _task_id(store)
@@ -284,17 +321,40 @@ def test_approval_denial_releases_unused_effect_reservation(tmp_path) -> None:
     assert ledger.list_for_task(task_id)[0].status == IdempotencyStatus.COMPLETED
 
 
-def test_changed_effect_arguments_cannot_rebind_pending_identity(tmp_path) -> None:
+def test_pending_effect_takes_reconciliation_precedence_over_changed_arguments(tmp_path) -> None:
+    store = _store(tmp_path)
+    task_id = _task_id(store)
+    journal = RuntimeIdempotencyEffectJournal(IdempotencyLedger(store))
+    journal.reserve(
+        task_id=task_id,
+        action=_action(arguments={"target": "first.txt"}),
+    )
+
+    changed = _run(
+        _brain(tools=ToolExecutor(), journal=journal),
+        _action(arguments={"target": "other.txt"}),
+        task_id=task_id,
+    )
+
+    assert changed.error_code == DeterministicErrorCode.SIDE_EFFECT_RECONCILIATION_REQUIRED
+
+
+def test_completed_effect_identity_cannot_be_rebound_to_changed_arguments(tmp_path) -> None:
     store = _store(tmp_path)
     task_id = _task_id(store)
     ledger = IdempotencyLedger(store)
     journal = RuntimeIdempotencyEffectJournal(ledger)
+    reservation = journal.reserve(
+        task_id=task_id,
+        action=_action(arguments={"target": "first.txt"}),
+    )
+    journal.complete(reservation.operation_key)
     calls = 0
 
-    async def effect_then_die(_arguments: dict[str, object]) -> object:
+    async def must_not_run(_arguments: dict[str, object]) -> object:
         nonlocal calls
         calls += 1
-        raise _SimulatedProcessLoss()
+        return "unexpected"
 
     tools = ToolExecutor()
     tools.register(
@@ -303,24 +363,16 @@ def test_changed_effect_arguments_cannot_rebind_pending_identity(tmp_path) -> No
             description="write",
             risk=ToolRisk.LOCAL_WRITE,
         ),
-        effect_then_die,
+        must_not_run,
     )
-    try:
-        _run(
-            _brain(tools=tools, journal=journal),
-            _action(arguments={"target": "first.txt"}),
-            task_id=task_id,
-        )
-    except _SimulatedProcessLoss:
-        pass
-
     changed = _run(
         _brain(tools=tools, journal=journal),
         _action(arguments={"target": "other.txt"}),
         task_id=task_id,
     )
+
     assert changed.error_code == DeterministicErrorCode.SIDE_EFFECT_IDENTITY_CONFLICT
-    assert calls == 1
+    assert calls == 0
 
 
 def test_effect_journal_requires_stable_task_identity(tmp_path) -> None:
