@@ -52,6 +52,23 @@ _FORBIDDEN_YT_DLP_OPTIONS = frozenset(
         "-u",
     }
 )
+_SAFE_ENV_KEYS = frozenset(
+    {
+        "LANG",
+        "LC_ALL",
+        "PATH",
+        "PATHEXT",
+        "PYTHONIOENCODING",
+        "PYTHONUTF8",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "WINDIR",
+    }
+)
 _SUBTITLE_LANGUAGE_ALLOWED = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
 )
@@ -119,7 +136,7 @@ def stable_subtitle_track(track: SubtitleTrack) -> SubtitleTrack:
 
     basis = {
         "kind": track.kind.value,
-        "language": track.language.strip().lower().replace("_", "-"),
+        "language": _normalize_language(track.language),
         "format": track.format.strip().lower(),
         "name": track.name.strip(),
         "source_label": track.source_label.strip(),
@@ -173,7 +190,14 @@ class _HardenedYtDlpRunner:
                 raise ValueError(f"forbidden yt-dlp option: {option}")
         remaining = tuple(part for part in normalized[3:] if part not in _HARDENED_YT_DLP_ARGS)
         hardened_argv = expected_prefix + _HARDENED_YT_DLP_ARGS + remaining
-        hardened_env = dict(os.environ if env is None else env)
+        source_env = os.environ if env is None else env
+        hardened_env = {
+            key: value
+            for key, value in source_env.items()
+            if key.upper() in _SAFE_ENV_KEYS
+        }
+        hardened_env["PYTHONNOUSERSITE"] = "1"
+        hardened_env["PYTHONSAFEPATH"] = "1"
         hardened_env["YTDLP_NO_PLUGINS"] = "1"
         return self._delegate.run(
             hardened_argv,
@@ -229,13 +253,12 @@ class _StagingMonitor:
                 return
 
     def _inspect(self) -> None:
-        files = _validated_staging_files(
+        _validated_staging_files(
             self.staging,
             root=self.root,
             max_bytes=self.max_bytes,
             max_files=self.max_files,
         )
-        del files
 
 
 class YtDlpSubtitleAcquirer:
@@ -300,6 +323,7 @@ class YtDlpSubtitleAcquirer:
                 MediaErrorCode.UNSUPPORTED_SOURCE,
                 "translated subtitle materialization is not supported by this acquisition path",
             )
+        self._require_unique_materialization_selector(fresh.subtitles, refreshed)
         self._validate_language(refreshed.language)
         self._validate_format(refreshed.format)
 
@@ -411,6 +435,7 @@ class YtDlpSubtitleAcquirer:
                 policy=subtitle_policy,
             )
             os.replace(candidate, partial_path)
+            shutil.rmtree(staging)
             promoted = promote_partial_file(
                 partial_path,
                 final_path,
@@ -437,9 +462,10 @@ class YtDlpSubtitleAcquirer:
                 rediscovered_track=refreshed,
             )
         finally:
-            shutil.rmtree(staging, ignore_errors=True)
+            if staging.exists():
+                shutil.rmtree(staging)
             if partial_path.exists():
-                partial_path.unlink(missing_ok=True)
+                partial_path.unlink()
 
     @staticmethod
     def _validate_expected_track(track: SubtitleTrack) -> SubtitleTrack:
@@ -462,6 +488,19 @@ class YtDlpSubtitleAcquirer:
             raise MediaError(
                 MediaErrorCode.INVALID_METADATA,
                 "remote media version changed during subtitle rediscovery",
+            )
+
+    @staticmethod
+    def _require_unique_materialization_selector(
+        tracks: tuple[SubtitleTrack, ...],
+        expected: SubtitleTrack,
+    ) -> None:
+        selector = _materialization_selector(expected)
+        matches = [track for track in tracks if _materialization_selector(track) == selector]
+        if len(matches) != 1:
+            raise MediaError(
+                MediaErrorCode.INVALID_METADATA,
+                "subtitle materialization selector is ambiguous after rediscovery",
             )
 
     @staticmethod
@@ -502,6 +541,18 @@ class YtDlpSubtitleAcquirer:
             "ssa": "text/x-ssa",
             "ttml": "application/ttml+xml",
         }.get(format_name.lower(), "text/plain")
+
+
+def _normalize_language(value: str) -> str:
+    return value.strip().lower().replace("_", "-")
+
+
+def _materialization_selector(track: SubtitleTrack) -> tuple[SubtitleKind, str, str]:
+    return (
+        track.kind,
+        _normalize_language(track.language),
+        track.format.strip().lower(),
+    )
 
 
 def _validated_staging_files(
