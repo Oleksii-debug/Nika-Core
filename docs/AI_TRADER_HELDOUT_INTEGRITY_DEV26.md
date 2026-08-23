@@ -1,77 +1,86 @@
 # AI Trader DEV26 — held-out evidence integrity hardening
 
 Lane: `MANUAL-DEV26`.
-Current compatibility baseline during this cycle: `8e2e0eb3f0f65b75e1d23b0f36ab2bf09a8477ba`.
+Compatibility baseline for this repair: `e8743566ffc673d6f8d272e88de0e027c23ab277`.
 
-This dossier records two adversarial API-integrity families found before DEV26 acceptance.
-Neither repair adds real-money authority, a dependency, or an execution route.
+This dossier records the adversarial integrity boundaries that promotion evidence must survive.
+No repair adds execution, broker, account, network, or real-money authority.
 
-## Family 1 — unvalidated evidence construction
+## 1. Factory-only promotion authority
 
-A caller could originally construct `SelectionDecision` directly and present chronology or
-universe-cutoff state that had not passed `select_validation_candidate()`.
+`SelectionDecision` can only be produced by `select_validation_candidate()`.
+`HeldOutAssessment` can only be produced by `bind_held_out_test()`.
 
-The repair makes selection and assessment evidence factory-created and adds repeated identity
-validation:
+Public raw score/result records are revalidated at each authority boundary. Canonical identity
+fields reject whitespace variants, malformed SHA-256 values, non-Decimal metrics, non-finite
+metrics, malformed timestamps, and invalid enum/policy values.
 
-- `SelectionDecision` is created through validated candidate selection;
-- `HeldOutAssessment` is created through held-out binding;
-- strategy and metric identities are canonical non-empty strings;
-- dataset, universe, and protocol hashes are canonical lowercase SHA-256;
-- metric evidence is a finite `Decimal` when present;
-- metric direction must be an actual boolean;
-- dirty data-quality evidence cannot be smuggled into selection state;
-- fixed-universe membership must predate validation.
+## 2. Exact quality and metric identity
 
-## Family 2 — post-bind chronology corruption
+Data quality is not represented only by issue counts. `ReplayDataQuality.from_report()` hashes the
+exact duplicate/conflict/gap issue evidence. Selection and held-out binding require equality of the
+counts and evidence hash in addition to the dataset semantic hash.
 
-A later self-review found a second fail-closed gap. After a valid bind, low-level mutation of
-`selected_at` or held-out result timestamps could survive `require_promotion_metric()` because the
-assessment no longer retained the protocol windows needed to repeat chronology checks.
+Metric identity is a canonical name plus an exact metric-definition SHA-256. A same-named metric
+with changed sampling/rate/formula assumptions cannot be substituted by keeping only the display
+name.
 
-The repair binds a validated protocol snapshot into `HeldOutAssessment`. Every promotion-metric
-read now revalidates:
+## 3. Immutable strategy artifact
 
-- protocol structure and fingerprint;
-- validation completion before selection;
-- selection no later than held-out test start;
-- fixed-universe cutoff strictly before validation;
-- selected strategy, metric, dataset, universe, and quality identities;
-- held-out fit cutoff no later than test start;
-- held-out universe cutoff consistency;
-- held-out metric finalization no earlier than test completion.
+A selected strategy is not merely `strategy_id`. The selected fitted artifact is sealed by
+version, algorithm/configuration/feature-pipeline/fitted-state digests, deterministic seed, fit
+cutoff, and creation time.
 
-A dedicated adversarial test mutates `selected_at` and `evaluated_at` after a successful bind and
-requires fail-closed rejection at promotion-metric access.
+Each raw candidate/result also records the artifact fingerprint established at construction.
+Changing the nested artifact later is rejected before selection/binding.
 
-## Preserved protocol semantics
+## 4. Protocol and refit authority
 
-The protocol keeps half-open boundary compatibility: selection at the exact shared
-`validation.end_at == test.start_at` instant is allowed, while any later selection is rejected.
-No test score participates in candidate selection. Missing held-out metric evidence cannot become
-promotion evidence.
+The protocol fingerprint includes train/validation/test windows and `RefitPolicy`.
 
-## Ruff repair lineage
+`NO_REFIT` requires the exact validation-selected fitted artifact in held-out evaluation.
 
-Earlier exact Ubuntu/Windows Core verification exposed four DEV26-owned findings: `FLY002`,
-`I001`, `RUF007`, and `PLR1730`. They were repaired without ignores or gate weakening using an
-equivalent f-string protocol payload, canonical imports, `itertools.pairwise()`, and `max()`.
-Protocol fingerprint compatibility was checked across that repair.
+`REFIT_TRAIN_VALIDATION` permits only a post-selection, pre-test artifact with unchanged strategy
+definition and fit cutoff exactly equal to validation end. A fit cutoff after validation end is
+treated as future/test leakage.
 
-## Local evidence before final exact-head CI
+## 5. Post-construction mutation cannot rewrite promotion chronology
 
-- prior complete focused DEV26 family: 21 tests passed;
-- deterministic metric property matrix: 500 equity paths passed;
-- candidate tie-order permutations: 6 of 6 passed;
-- new chronology-integrity harness: 7 tests passed;
-- changed source and integrity test compile successfully;
-- AST unused-import check is clean;
-- maximum changed line length is 100 characters;
-- local Git blob hashes matched the source/test blobs committed to GitHub.
+Held-out binding reconstructs validated snapshots of the protocol, selection, result, strategy
+artifact, and quality evidence. The assessment stores an authority fingerprint over those snapshots.
 
-Exact-head Core CI and complete M12 remain authoritative for repository Ruff, compile, import,
-full-suite, Ubuntu, and Windows acceptance. Independent AUD03 replay is still required before
-integration. Automated evidence does not set human accessibility truth.
+Therefore:
+
+- mutating the original selection/result/protocol after binding does not alter the assessment;
+- mutating `selected_at`, held-out `evaluated_at`, metric value, metric identity, universe, quality,
+  protocol, or strategy artifact inside the bound snapshots invalidates the authority seal;
+- `require_promotion_metric()` revalidates the full identity and chronology before returning a
+  Decimal;
+- unavailable held-out metrics are never promotion evidence.
+
+This closes the earlier class where a valid object could be mutated after construction/binding and
+then reused as if its original chronology still applied.
+
+## 6. Sampling-grid attack
+
+A caller cannot claim `periods_per_year` independently of timestamps. Regular annualization
+requires a sealed sampling spec and exact cadence. Irregular observations return typed annualization
+unavailability rather than an apparently valid annualized ratio.
+
+## 7. No execution authority
+
+The DEV26 production modules import only standard-library numerical/identity utilities and existing
+Trader contracts/dataset evidence. The focused structural test rejects network/broker import
+surfaces. There is no order placement, funding, broker SDK, account mutation, risk bypass, or
+real-money path.
+
+PR #67 retains ownership of execution/accounting/risk source and is intentionally untouched.
+
+## Evidence truth
+
+Focused reconstructed DEV26 evidence before hosted CI: `32/32 PASS`, plus compile success.
+Exact-head GitHub Core and M12 are authoritative. Independent AUD03 exact-head replay is required
+before DEV26 may be described as audited/integration-ready.
 
 `REAL_MONEY_AUTHORITY=false`.
 `HUMAN_TESTED=false`.
