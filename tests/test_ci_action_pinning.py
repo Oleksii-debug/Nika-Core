@@ -5,7 +5,6 @@ import re
 
 import pytest
 
-
 _WORKFLOWS = (
     ".github/workflows/ci.yml",
     ".github/workflows/m11-windows-release.yml",
