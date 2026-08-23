@@ -93,6 +93,32 @@ class _UnsafeTransientRuntime(_TransientDurableRuntime):
         )
 
 
+class _ResumeLosesCursorRuntime(_TransientDurableRuntime):
+    runtime_id = "resume-loses-cursor-proof"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.side_effects = 0
+
+    async def run(self, request: RuntimeRequest) -> RuntimeResult:
+        self.run_calls += 1
+        self.side_effects += 1
+        return RuntimeResult(
+            outcome=RuntimeOutcome.FAILED,
+            error="checkpointed effect needs durable continuation",
+            error_code=RuntimeErrorCode.TRANSIENT,
+            resume_token=request.thread_id,
+        )
+
+    async def resume(self, request: RuntimeResumeRequest) -> RuntimeResult:
+        self.resume_calls += 1
+        return RuntimeResult(
+            outcome=RuntimeOutcome.FAILED,
+            error="resume failed and no safe cursor remains",
+            error_code=RuntimeErrorCode.TRANSIENT,
+        )
+
+
 def _ready_task(tmp_path):
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
@@ -192,6 +218,42 @@ def test_retry_policy_fails_closed_without_resume_token(tmp_path) -> None:
     assert runtime.run_calls == 1
     assert runtime.resume_calls == 0
     assert _task_state(store, task_id) == TaskState.FAILED
+
+
+def test_fresh_retry_is_blocked_after_claimed_resume_loses_cursor(tmp_path) -> None:
+    store, queue, task_id = _ready_task(tmp_path)
+    audit = AuditLog(store)
+    runtime = _ResumeLosesCursorRuntime()
+    policy = RetryPolicy(
+        max_retries=3,
+        retryable_error_codes=frozenset({RuntimeErrorCode.TRANSIENT}),
+        allow_fresh_retry=True,
+    )
+
+    result = asyncio.run(
+        TaskRuntimeCoordinator(queue, audit).start(
+            runtime,
+            RuntimeRequest(task_id, "thread-no-replay"),
+            retry_policy=policy,
+        )
+    )
+
+    assert result.outcome == RuntimeOutcome.FAILED
+    assert runtime.run_calls == 1
+    assert runtime.resume_calls == 1
+    assert runtime.side_effects == 1
+    assert _task_state(store, task_id) == TaskState.FAILED
+    event_types = [
+        event.event_type for event in audit.list_for(entity_type="task", entity_id=task_id)
+    ]
+    assert event_types == [
+        "runtime.started",
+        "runtime.session_bound",
+        "runtime.retry_scheduled",
+        "runtime.retry_started",
+        "runtime.retry_blocked_unsafe_fresh_replay",
+        "runtime.finished",
+    ]
 
 
 def test_retry_policy_backoff_is_bounded() -> None:

@@ -133,6 +133,21 @@ class TaskRuntimeCoordinator:
         retries_used = 0
         resume_claim: _RuntimeResumeClaim | None = None
         while policy.should_retry(result, retries_used=retries_used):
+            if resume_claim is not None and result.resume_token is None:
+                self._audit.append(
+                    event_type="runtime.retry_blocked_unsafe_fresh_replay",
+                    entity_type="task",
+                    entity_id=request.task_id,
+                    payload={
+                        "runtime_id": runtime.runtime_id,
+                        "thread_id": request.thread_id,
+                        "retry_number": retries_used + 1,
+                        "error": result.error,
+                        "error_code": result.error_code.value if result.error_code else None,
+                        "reason": "durable resume lost its safe cursor",
+                    },
+                )
+                break
             retries_used += 1
             delay = policy.delay_seconds(retry_number=retries_used)
             self._queue.transition(request.task_id, TaskState.RETRYING)
