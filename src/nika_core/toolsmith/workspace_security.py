@@ -185,6 +185,19 @@ def _is_reparse_point(file_stat: os.stat_result) -> bool:
     )
 
 
+def _guard_real_directory_root(root: pathlib.Path, *, label: str) -> pathlib.Path:
+    try:
+        root_stat = root.lstat()
+    except OSError as exc:
+        raise WorkspaceSecurityError(f"{label} must exist") from exc
+    if stat.S_ISLNK(root_stat.st_mode) or _is_reparse_point(root_stat):
+        raise WorkspaceSecurityError(f"{label} must not be a symbolic link or reparse point")
+    resolved = root.resolve(strict=True)
+    if not resolved.is_dir():
+        raise WorkspaceSecurityError(f"{label} must be a directory")
+    return resolved
+
+
 def _paths_overlap(first: pathlib.Path, second: pathlib.Path) -> bool:
     return first == second or first in second.parents or second in first.parents
 
@@ -249,7 +262,7 @@ def ensure_path_policy(
     if not policy.allows(normalized.as_posix()):
         raise WorkspaceSecurityError("path is outside the allowed workspace roots")
 
-    root_resolved = root.resolve(strict=True)
+    root_resolved = _guard_real_directory_root(root, label="workspace root")
     candidate = root_resolved.joinpath(*normalized.parts)
     if must_exist:
         candidate.resolve(strict=True)
@@ -300,9 +313,7 @@ def sterile_process_environment(
     *,
     temp_root: pathlib.Path,
 ) -> dict[str, str]:
-    resolved_temp = temp_root.resolve(strict=True)
-    if not resolved_temp.is_dir():
-        raise WorkspaceSecurityError("worker temp root must be an existing directory")
+    resolved_temp = _guard_real_directory_root(temp_root, label="worker temp root")
     environment = sterile_git_environment(source)
     for key in tuple(environment):
         if key.upper() in {"TEMP", "TMP", "TMPDIR"}:
@@ -413,9 +424,7 @@ def collect_tree_evidence(
     max_file_bytes: int = 32 * 1024 * 1024,
     max_total_bytes: int = 256 * 1024 * 1024,
 ) -> TreeEvidence:
-    root = root.resolve(strict=True)
-    if not root.is_dir():
-        raise WorkspaceSecurityError("tree evidence root must be a directory")
+    root = _guard_real_directory_root(root, label="tree evidence root")
 
     records: list[FileEvidence] = []
     total_bytes = 0
