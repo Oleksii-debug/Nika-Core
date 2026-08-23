@@ -7,6 +7,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from nika_core.data.schema import MIGRATIONS, SCHEMA_VERSION
+from nika_core.m3_extension_schema import (
+    M3_EXTENSION_MIGRATIONS,
+    M3_EXTENSION_SCHEMA_VERSION,
+)
 from nika_core.product_project_schema import (
     PRODUCT_PROJECT_MIGRATIONS,
     PRODUCT_PROJECT_SCHEMA_VERSION,
@@ -54,7 +58,34 @@ class SQLiteStore:
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (version, datetime.now(UTC).isoformat()),
                 )
+            self._initialize_m3_extension_schema(conn)
             self._initialize_product_project_schema(conn)
+
+    @staticmethod
+    def _initialize_m3_extension_schema(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS m3_extension_schema_migrations ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        row = conn.execute(
+            "SELECT MAX(version) AS version FROM m3_extension_schema_migrations"
+        ).fetchone()
+        current = int(row["version"] or 0)
+        if current > M3_EXTENSION_SCHEMA_VERSION:
+            raise RuntimeError(
+                "M3 extension database schema "
+                f"{current} is newer than supported schema {M3_EXTENSION_SCHEMA_VERSION}"
+            )
+        for version in range(current + 1, M3_EXTENSION_SCHEMA_VERSION + 1):
+            statements = M3_EXTENSION_MIGRATIONS.get(version)
+            if statements is None:
+                raise RuntimeError(f"missing M3 extension migration {version}")
+            for statement in statements:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO m3_extension_schema_migrations(version, applied_at) VALUES (?, ?)",
+                (version, datetime.now(UTC).isoformat()),
+            )
 
     @staticmethod
     def _initialize_product_project_schema(conn: sqlite3.Connection) -> None:
