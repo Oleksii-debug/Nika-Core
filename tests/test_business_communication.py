@@ -75,23 +75,36 @@ def _draft(snapshot: BusinessFactorySnapshot):
     )
 
 
-def test_approval_required_communication_records_durable_authority_and_result() -> None:
+def test_approval_required_communication_records_durable_authority_and_result(
+    business_authority,
+) -> None:
     snapshot = _snapshot()
     draft = _draft(snapshot)
     assert draft.state is CommunicationState.DRAFT
     assert draft.row_version == 1
     assert draft.authorization_ref is None
+    assert draft.authorization_fingerprint is None
 
     with pytest.raises(BusinessCommunicationError, match="approval_ref"):
         BusinessCommunicationCoordinator.authorize(draft, snapshot)
 
+    with pytest.raises(BusinessCommunicationError, match="trusted communication approval"):
+        BusinessCommunicationCoordinator.authorize(
+            draft,
+            snapshot,
+            approval_ref="caller:self-minted-communication-approval",
+        )
+
+    business_authority.allow_once("approval:communication:1")
     authorized = BusinessCommunicationCoordinator.authorize(
         draft,
         snapshot,
         approval_ref="approval:communication:1",
+        approval_authority=business_authority,
     )
     assert authorized.state is CommunicationState.AUTHORIZED
     assert authorized.authorization_ref == "approval:communication:1"
+    assert authorized.authorization_fingerprint
     assert authorized.row_version == 2
 
     sent = BusinessCommunicationCoordinator.record_provider_result(
@@ -112,31 +125,56 @@ def test_approval_required_communication_records_durable_authority_and_result() 
         )
 
 
-def test_draft_only_policy_never_creates_send_authority() -> None:
+def test_draft_only_policy_never_creates_send_authority(business_authority) -> None:
     snapshot = _snapshot(CommunicationAuthority.DRAFT_ONLY)
     draft = _draft(snapshot)
+    business_authority.allow_once("approval:must-not-override-policy")
     with pytest.raises(BusinessCommunicationError, match="draft-only policy"):
         BusinessCommunicationCoordinator.authorize(
             draft,
             snapshot,
             approval_ref="approval:must-not-override-policy",
+            approval_authority=business_authority,
         )
     assert draft.state is CommunicationState.DRAFT
     assert draft.authorization_ref is None
 
 
-def test_standing_policy_authorization_is_bound_to_exact_policy_reference() -> None:
+def test_standing_policy_authorization_is_trusted_scoped_and_revocable(
+    business_authority,
+) -> None:
+    standing_ref = "standing-policy:communication:test:1"
     snapshot = _snapshot(
         CommunicationAuthority.STANDING_POLICY,
-        standing_policy_ref="standing-policy:communication:test:1",
+        standing_policy_ref=standing_ref,
     )
     draft = _draft(snapshot)
-    authorized = BusinessCommunicationCoordinator.authorize(draft, snapshot)
-    assert authorized.authorization_ref == "standing-policy:communication:test:1"
-    assert communication_policy_ref(snapshot.policy) == "standing-policy:communication:test:1"
+    with pytest.raises(BusinessCommunicationError, match="trusted communication approval"):
+        BusinessCommunicationCoordinator.authorize(draft, snapshot)
+
+    business_authority.allow_standing(standing_ref)
+    authorized = BusinessCommunicationCoordinator.authorize(
+        draft,
+        snapshot,
+        approval_authority=business_authority,
+    )
+    assert authorized.authorization_ref == standing_ref
+    assert authorized.authorization_fingerprint
+    assert communication_policy_ref(snapshot.policy) == standing_ref
+
+    business_authority.revoke(standing_ref)
+    other = replace(draft, message_id="message-revoked")
+    with pytest.raises(BusinessCommunicationError, match="trusted communication approval"):
+        BusinessCommunicationCoordinator.authorize(
+            other,
+            snapshot,
+            approval_authority=business_authority,
+        )
 
 
-def test_policy_or_lead_change_requires_redraft_before_authorization() -> None:
+def test_policy_or_lead_change_requires_redraft_before_authorization(
+    business_authority,
+) -> None:
     snapshot = _snapshot()
     draft = _draft(snapshot)
     changed_policy = BusinessPolicy(
@@ -145,15 +183,19 @@ def test_policy_or_lead_change_requires_redraft_before_authorization() -> None:
         communication_authority=CommunicationAuthority.APPROVAL_REQUIRED,
     )
     changed_snapshot = replace(snapshot, policy=changed_policy)
+    business_authority.allow_once("approval:communication:2")
     with pytest.raises(BusinessCommunicationError, match="policy changed"):
         BusinessCommunicationCoordinator.authorize(
             draft,
             changed_snapshot,
             approval_ref="approval:communication:2",
+            approval_authority=business_authority,
         )
 
 
-def test_provider_result_requires_authorization_and_exactly_one_outcome() -> None:
+def test_provider_result_requires_authorization_and_exactly_one_outcome(
+    business_authority,
+) -> None:
     snapshot = _snapshot()
     draft = _draft(snapshot)
     with pytest.raises(BusinessCommunicationError, match="authorized communication"):
@@ -163,10 +205,12 @@ def test_provider_result_requires_authorization_and_exactly_one_outcome() -> Non
             failure_ref="provider:sandbox:failure:before-authorization",
         )
 
+    business_authority.allow_once("approval:communication:1")
     authorized = BusinessCommunicationCoordinator.authorize(
         draft,
         snapshot,
         approval_ref="approval:communication:1",
+        approval_authority=business_authority,
     )
     with pytest.raises(BusinessCommunicationError, match="exactly one"):
         BusinessCommunicationCoordinator.record_provider_result(authorized, snapshot)
@@ -187,7 +231,10 @@ def test_provider_result_requires_authorization_and_exactly_one_outcome() -> Non
     assert failed.failure_ref == "provider:sandbox:failure:1"
 
 
-def test_communication_repository_survives_restart_and_rejects_stale_writer(tmp_path) -> None:
+def test_communication_repository_survives_restart_and_rejects_stale_writer(
+    tmp_path,
+    business_authority,
+) -> None:
     database_path = tmp_path / "nika.sqlite"
     store = SQLiteStore(database_path)
     store.initialize()
@@ -200,17 +247,21 @@ def test_communication_repository_survives_restart_and_rejects_stale_writer(tmp_
     loaded = repository.load("message-1")
     assert loaded == draft
 
+    business_authority.allow_once("approval:communication:1")
     authorized = BusinessCommunicationCoordinator.authorize(
         loaded,
         snapshot,
         approval_ref="approval:communication:1",
+        approval_authority=business_authority,
     )
     repository.save(authorized, expected_row_version=draft.row_version)
 
+    business_authority.allow_once("approval:communication:stale")
     stale_authorized = BusinessCommunicationCoordinator.authorize(
         draft,
         snapshot,
         approval_ref="approval:communication:stale",
+        approval_authority=business_authority,
     )
     with pytest.raises(StaleCommunicationStateError, match="row version changed"):
         repository.save(stale_authorized, expected_row_version=draft.row_version)
@@ -232,6 +283,21 @@ def test_communication_repository_survives_restart_and_rejects_stale_writer(tmp_
         expected_row_version=restored.row_version,
     )
     assert restarted_repository.load("message-1") == failed
+
+
+def test_authorization_fingerprint_rejects_message_scope_tamper(business_authority) -> None:
+    snapshot = _snapshot()
+    draft = _draft(snapshot)
+    business_authority.allow_once("approval:communication:scope")
+    authorized = BusinessCommunicationCoordinator.authorize(
+        draft,
+        snapshot,
+        approval_ref="approval:communication:scope",
+        approval_authority=business_authority,
+    )
+    forged = replace(authorized, payload_ref="artifact:attacker-replaced-payload")
+    with pytest.raises(BusinessCommunicationError, match="fingerprint does not match"):
+        dump_business_communication(forged)
 
 
 def test_corrupt_persisted_communication_fails_closed(tmp_path) -> None:
