@@ -45,6 +45,8 @@ ADAPT:
   cancellation check immediately before `Popen`;
 - workspace, evidence and process-temp roots are rejected when the root object itself is a
   symlink or Windows reparse point;
+- the private-Git job root is a pre-created trusted directory whose root identity is validated
+  before Git preparation and again before destructive cleanup;
 - production repository and job workspace roots must be fully disjoint in both directions;
 - cleanup removes only canonical private Git/worktree roots and refuses reparse/symlink
   content;
@@ -74,12 +76,15 @@ fail-closed validation. No alternate generic sandbox framework is introduced.
 9. Guarded workspace, evidence and temp roots fail closed if the root itself is a symlink or
    Windows reparse point; evidence collection must not resolve an attacker-replaced worktree root
    into an external tree before validating the root object.
-10. A job root cannot be inside the production repository, equal to it, or contain it.
-11. Cleanup does not recursively delete the job root and refuses symlink/reparse content before
+10. Private-Git prepare/cleanup require the declared job root itself to remain a real directory;
+    replacing the job root with a symlink/reparse point fails closed before Git execution or
+    recursive deletion can be redirected into an external tree.
+11. A job root cannot be inside the production repository, equal to it, or contain it.
+12. Cleanup does not recursively delete the job root and refuses symlink/reparse content before
     removing the canonical private Git and worktree roots.
-12. Output delta evidence detects additions, modifications, and deletions deterministically,
+13. Output delta evidence detects additions, modifications, and deletions deterministically,
     enforces allowed path scope, and enforces the changed-file budget.
-13. `.github/workflows` and `.github/actions` mutations are denied by default by the output
+14. `.github/workflows` and `.github/actions` mutations are denied by default by the output
     provenance boundary unless a trusted higher-level control-plane approval explicitly opts in.
 
 ## AUD02 executable-indirection repair
@@ -124,10 +129,40 @@ collected from the wrong filesystem authority.
 
 The shared low-level root guard now performs `lstat()` on the supplied root before canonical
 resolution, rejects symbolic links and Windows reparse points, requires an actual directory, and
-is reused by guarded workspace paths, process temp roots and tree-evidence collection. Focused
-regressions prove that a symlinked evidence root, workspace root and process-temp root all fail
-closed. Physical Windows junction evidence owned by PR #72 remains separate and is not copied into
-this lane.
+is reused by guarded workspace paths, process workspace/temp roots and tree-evidence collection.
+Focused regressions prove that a symlinked evidence root, workspace root and process-temp root all
+fail closed. Physical Windows junction evidence owned by PR #72 remains separate and is not copied
+into this lane.
+
+## Private-Git job-root replacement repair
+
+A later DEV27 self-audit extended the same root-identity attack family to host-side Git preparation
+and cleanup. The previous cleanup implementation canonicalized
+`plan.private_git_dir.parent.resolve(...)` before proving the job-root object was still the trusted
+root. If the entire job root were replaced by a symlink/reparse point after plan creation, the
+private paths could resolve into an attacker-selected external tree. That is especially serious for
+cleanup because the trusted host calls `shutil.rmtree()` on the private Git/worktree roots.
+
+The repair centralizes job-root validation through the same real-directory primitive and applies it
+before private-Git preparation and destructive cleanup. `prepare_private_git_workspace()` now
+requires the job root to have been created by the trusted orchestrator before the call; it no longer
+creates a missing job root through an unresolved path. The canonical plan shape is checked so both
+`_nika_private_git` and `worktree` remain direct children of that same declared root. Cleanup
+revalidates the job-root identity after read-only tree checks and again immediately before each
+recursive deletion.
+
+Portable destructive-marker regressions replace the declared job root with a directory symlink to
+an external tree. Preparation must fail before invoking Git or creating private paths in the
+external tree. Cleanup must fail while preserving external `_nika_private_git` and `worktree`
+markers. Physical Windows junction/reparse proof remains with PR #72 rather than being duplicated
+here.
+
+This remains path-identity hardening rather than a race-free filesystem transaction. A hostile
+actor able to replace the trusted job-root directory in the tiny interval after the final
+revalidation and before an OS filesystem operation can still create a TOCTOU race. The required
+operational invariant is therefore that worker descendants are terminated before cleanup and that
+the trusted host owns the job-root parent. Stronger hostile-concurrent-filesystem guarantees require
+handle-relative/OS sandbox primitives rather than false Python-level claims.
 
 ## Pre-launch cancellation repair
 
@@ -172,7 +207,8 @@ not a substitute for OS isolation.
 
 ## Required integration sequence for a real coding-worker adapter
 
-1. Create a dedicated job root fully disjoint from production source and metadata.
+1. The trusted host creates a dedicated real-directory job root fully disjoint from production
+   source and metadata. Do not pass a missing/symlink/reparse job root to private-Git preparation.
 2. Create private Git metadata/worktree with `make_sterile_git_plan` and
    `prepare_private_git_workspace`.
 3. Capture the initial `TreeEvidence`.
