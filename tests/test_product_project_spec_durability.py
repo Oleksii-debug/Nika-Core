@@ -11,8 +11,8 @@ from nika_core.product_project import (
     ProductProjectSpec,
     StaleProjectVersionError,
 )
-from nika_core.product_project_spec_durability import ProductProjectSpecDurabilityService
 from nika_core.product_project_schema import PRODUCT_PROJECT_SCHEMA_VERSION
+from nika_core.product_project_spec_durability import ProductProjectSpecDurabilityService
 
 
 def _spec(goal: str) -> ProductProjectSpec:
@@ -199,13 +199,17 @@ def test_replay_remains_stable_after_later_project_mutations(tmp_path) -> None:
             "digest does not match durable specification",
         ),
         (
-            "UPDATE product_project_spec_idempotency SET result_row_version=9 "
-            "WHERE operation_key='spec:p1:v2'",
+            (
+                "UPDATE product_project_spec_idempotency SET result_row_version=9 "
+                "WHERE operation_key='spec:p1:v2'"
+            ),
             "row-version lineage",
         ),
         (
-            "UPDATE product_project_spec_idempotency SET result_spec_version=9 "
-            "WHERE operation_key='spec:p1:v2'",
+            (
+                "UPDATE product_project_spec_idempotency SET result_spec_version=9 "
+                "WHERE operation_key='spec:p1:v2'"
+            ),
             "version lineage",
         ),
     ],
