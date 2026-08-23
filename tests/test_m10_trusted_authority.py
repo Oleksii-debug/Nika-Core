@@ -121,7 +121,7 @@ def test_wrong_issuer_and_restart_secret_fail_closed(tmp_path: Path) -> None:
             now=_NOW,
         )
 
-    restarted = _authority(b"b" * 32)
+    restarted = _authority(b"a" * 32)
     with pytest.raises(PermissionError, match="signature is invalid"):
         authorize_action(
             intent,
@@ -164,6 +164,32 @@ def test_denied_expired_and_reused_action_approvals_are_rejected(tmp_path: Path)
             policy,
             ExecutionBudgetLedger(policy.budget),
             ledger,
+            approval=evidence,
+            now=_NOW,
+        )
+
+
+def test_fresh_caller_ledger_cannot_replay_host_used_approval(tmp_path: Path) -> None:
+    authority = _authority()
+    intent = _intent("host-replay")
+    evidence = _approved(authority, intent)
+    policy = _policy(tmp_path, authority)
+
+    authorize_action(
+        intent,
+        policy,
+        ExecutionBudgetLedger(policy.budget),
+        ApprovalLedger(),
+        approval=evidence,
+        now=_NOW,
+    )
+
+    with pytest.raises(PermissionError, match="trusted host"):
+        authorize_action(
+            intent,
+            policy,
+            ExecutionBudgetLedger(policy.budget),
+            ApprovalLedger(),
             approval=evidence,
             now=_NOW,
         )
@@ -298,14 +324,15 @@ def test_review_evidence_is_host_owned_exact_and_not_replacement_authority() -> 
 
 
 def test_project_purpose_adapter_rejects_wrong_project_purpose_and_forged_ref() -> None:
+    current = datetime.now(UTC)
     authority = _authority()
     subject = project_purpose_review_subject(
         subject_kind="pf10-compliance",
         project_id="project-a",
         purpose="license-disposition:component-a",
     )
-    request = authority.request_review(subject, reason="legal review", now=_NOW)
-    evidence = authority.approve_review(request.request_id, now=_NOW)
+    request = authority.request_review(subject, reason="legal review", now=current)
+    evidence = authority.approve_review(request.request_id, now=current)
     adapter = authority.project_purpose_review_verifier(subject_kind="pf10-compliance")
 
     assert adapter.verify(
@@ -365,5 +392,5 @@ def test_review_denial_expiry_and_restart_fail_closed() -> None:
 
     request = authority.request_review(subject, reason="review", now=_NOW)
     evidence = authority.approve_review(request.request_id, now=_NOW)
-    restarted = _authority(b"b" * 32)
+    restarted = _authority(b"a" * 32)
     assert restarted.verify_review(subject, evidence.evidence_ref, now=_NOW) is False
