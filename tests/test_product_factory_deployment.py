@@ -72,7 +72,12 @@ class FakeDeploymentProvider(DeploymentProviderPort):
 
     def inspect(self, intent: DeploymentIntent) -> ProviderInspection:
         if self.inspection is None:
-            return ProviderInspection(intent.release.source_sha, True, ("inspect://fake",))
+            return ProviderInspection(
+                intent.release.source_sha,
+                True,
+                ("inspect://fake",),
+                release=intent.release,
+            )
         return self.inspection
 
 
@@ -273,7 +278,12 @@ def test_uncertain_deployment_reconciles_to_healthy() -> None:
         ProviderDeploymentResult(
             applied=False, uncertain=True, evidence_refs=("deploy://timeout",)
         ),
-        inspection=ProviderInspection(SHA_A, True, ("inspect://healthy",)),
+        inspection=ProviderInspection(
+            SHA_A,
+            True,
+            ("inspect://healthy",),
+            release=_release(SHA_A),
+        ),
     )
     fabric = DeploymentFabric(provider)
     intent = _intent(EnvironmentTier.STAGING, intent_id="stage-uncertain")
