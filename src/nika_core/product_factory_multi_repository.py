@@ -572,7 +572,7 @@ class MultiRepositoryProductFactoryHost:
                 )
                 for item in payload["dependency_edges"]
             )
-        except (KeyError, TypeError, ValueError, RepositoryGraphError) as exc:
+        except (AttributeError, KeyError, TypeError, ValueError, RepositoryGraphError) as exc:
             raise RepositoryGraphIntegrityError(
                 "repository graph checkpoint payload is invalid"
             ) from exc
@@ -1096,6 +1096,7 @@ def _graph_authority_fingerprint(
             }
         )
     )
+
 
 def _canonical(value: Any) -> str:
     return json.dumps(
