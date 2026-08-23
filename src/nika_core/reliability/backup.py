@@ -18,6 +18,7 @@ from nika_core.kernel.audit import AuditLog
 
 _MANIFEST_VERSION = 1
 _RESTORE_MARKER_VERSION = 1
+_RESTORE_STATE_VERSION = b"nika-sqlite-restore-state-v1\x00"
 
 
 class BackupRecoveryError(RuntimeError):
@@ -205,6 +206,7 @@ class SQLiteRecoveryManager:
         self._ensure_no_interrupted_restore()
         backup = self.verify_backup(backup_path)
         target = self._store.path.resolve()
+        self._ensure_restore_family_coherent(target)
         if target == backup.database_path:
             raise ValueError("restore source must differ from the live database")
         current_exists = target.exists()
@@ -230,10 +232,18 @@ class SQLiteRecoveryManager:
                 "current_schema_version": current_schema,
             },
         )
+        self._ensure_restore_family_coherent(target)
         current_exists = target.exists()
         current_sha = self._sha256_file(target) if current_exists else None
+        current_state_sha = (
+            self._restore_state_sha256(target) if current_exists else None
+        )
         fingerprint = self._restore_fingerprint(
-            backup.sha256, target, current_exists, current_sha
+            backup.sha256,
+            target,
+            current_exists,
+            current_sha,
+            current_state_sha,
         )
         return RestorePlan(
             backup,
@@ -260,10 +270,23 @@ class SQLiteRecoveryManager:
         target = self._store.path.resolve()
         if target != plan.target_path:
             raise RestorePlanStaleError("restore target changed after preview")
-        current_exists = target.exists()
-        current_sha = self._sha256_file(target) if current_exists else None
+        try:
+            self._ensure_restore_family_coherent(target)
+            current_exists = target.exists()
+            current_sha = self._sha256_file(target) if current_exists else None
+            current_state_sha = (
+                self._restore_state_sha256(target) if current_exists else None
+            )
+        except (OSError, BackupRecoveryError) as exc:
+            raise RestorePlanStaleError(
+                "live database changed after restore preview"
+            ) from exc
         fingerprint = self._restore_fingerprint(
-            backup.sha256, target, current_exists, current_sha
+            backup.sha256,
+            target,
+            current_exists,
+            current_sha,
+            current_state_sha,
         )
         if not self._equal(fingerprint, plan.confirmation_fingerprint):
             raise RestorePlanStaleError("live database changed after restore preview")
@@ -697,6 +720,49 @@ class SQLiteRecoveryManager:
             )
 
     @classmethod
+    def _ensure_restore_family_coherent(cls, target: Path) -> None:
+        wal = cls._wal_path(target)
+        shm = cls._shm_path(target)
+        if target.exists() and not target.is_file():
+            raise RestoreSafetyError("restore target is not a regular database file")
+        for sidecar in (wal, shm):
+            if sidecar.is_symlink():
+                raise RestoreSafetyError("SQLite restore sidecar must not be a symbolic link")
+            if sidecar.exists() and not sidecar.is_file():
+                raise RestoreSafetyError("SQLite restore sidecar is not a regular file")
+        if not target.exists() and (wal.exists() or shm.exists()):
+            raise RestoreSafetyError(
+                "live database is missing while SQLite sidecars remain"
+            )
+
+    @classmethod
+    def _restore_state_sha256(cls, target: Path) -> str:
+        """Hash durable SQLite bytes relevant to restore-preview authority.
+
+        Committed WAL transactions can change logical state without changing the main
+        database file. The confirmation fingerprint therefore binds both the main file
+        and the WAL representation. SHM is intentionally excluded because it is
+        transient coordination state rather than durable database content.
+        """
+        cls._ensure_restore_family_coherent(target)
+        digest = hashlib.sha256()
+        digest.update(_RESTORE_STATE_VERSION)
+        for label, path in ((b"main", target), (b"wal", cls._wal_path(target))):
+            digest.update(label)
+            digest.update(b"\x00")
+            if not path.exists():
+                digest.update(b"missing\x00")
+                continue
+            digest.update(b"present\x00")
+            size = path.stat().st_size
+            digest.update(str(size).encode("ascii"))
+            digest.update(b"\x00")
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        return digest.hexdigest()
+
+    @classmethod
     def _validate_database(cls, path: Path, *, require_supported: bool) -> int:
         try:
             conn = sqlite3.connect(path, timeout=1.0)
@@ -845,12 +911,14 @@ class SQLiteRecoveryManager:
         target: Path,
         current_exists: bool,
         current_sha: str | None,
+        current_state_sha: str | None,
     ) -> str:
         payload = json.dumps(
             {
                 "backup_sha256": backup_sha,
                 "current_exists": current_exists,
                 "current_sha256": current_sha,
+                "current_state_sha256": current_state_sha,
                 "target": str(target),
             },
             ensure_ascii=False,
