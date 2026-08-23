@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import nika_core.packaging.recovery as recovery_module
 from nika_core.packaging.recovery import (
     DatabaseRecoveryError,
     create_database_snapshot,
@@ -258,3 +259,29 @@ def test_snapshot_rejects_wrong_release_identity(tmp_path: Path) -> None:
         verify_database_snapshot(snapshot, expected_source_release_sha=SHA_NEW)
     with pytest.raises(ValueError, match="exact 40-character"):
         create_database_snapshot(database, tmp_path / "bad", source_release_sha="deadbeef")
+
+
+def test_snapshot_rejects_unexpected_directory_entries(tmp_path: Path) -> None:
+    database = tmp_path / "state.db"
+    make_db(database, "old")
+    snapshot = tmp_path / "snapshot"
+    create_database_snapshot(database, snapshot, source_release_sha=SHA_OLD)
+    (snapshot / "unexpected.txt").write_text("extra", encoding="utf-8")
+
+    with pytest.raises(DatabaseRecoveryError, match="contents do not match schema"):
+        verify_database_snapshot(snapshot)
+
+
+def test_restore_fails_closed_when_recovery_lock_is_already_held(tmp_path: Path) -> None:
+    database = tmp_path / "state.db"
+    make_db(database, "old")
+    snapshot = tmp_path / "snapshot"
+    create_database_snapshot(database, snapshot, source_release_sha=SHA_OLD)
+
+    with recovery_module._database_recovery_lock(database):
+        with pytest.raises(DatabaseRecoveryError, match="recovery operation is active"):
+            restore_database_snapshot(
+                snapshot,
+                database,
+                expected_source_release_sha=SHA_OLD,
+            )
