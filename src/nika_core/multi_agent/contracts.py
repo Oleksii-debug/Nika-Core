@@ -63,6 +63,15 @@ class TeamQuota:
     max_parallel: int = 4
 
     def __post_init__(self) -> None:
+        values = {
+            "max_depth": self.max_depth,
+            "max_children_per_parent": self.max_children_per_parent,
+            "max_total_agents": self.max_total_agents,
+            "max_parallel": self.max_parallel,
+        }
+        for name, value in values.items():
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{name} must be an integer")
         if self.max_depth < 1:
             raise ValueError("max_depth must be at least 1")
         if self.max_children_per_parent < 1:
@@ -151,6 +160,8 @@ class CancellationEffect:
         )
         if any(not value.strip() for value in values):
             raise ValueError("cancellation effect identity must be complete")
+        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int):
+            raise ValueError("cancellation effect sequence must be an integer")
         if self.sequence < 0:
             raise ValueError("cancellation effect sequence must not be negative")
 
@@ -160,11 +171,18 @@ class CancellationOperation:
     operation_id: str
     team_id: str
     state: CancellationOperationState
+    expected_effect_count: int
     effects: tuple[CancellationEffect, ...]
 
     def __post_init__(self) -> None:
         if not self.operation_id.strip() or not self.team_id.strip():
             raise ValueError("cancellation operation identity must be complete")
+        if isinstance(self.expected_effect_count, bool) or not isinstance(
+            self.expected_effect_count, int
+        ):
+            raise ValueError("cancellation expected effect count must be an integer")
+        if self.expected_effect_count < 0:
+            raise ValueError("cancellation expected effect count must not be negative")
 
 
 @dataclass(frozen=True, slots=True)
