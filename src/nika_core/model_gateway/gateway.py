@@ -49,6 +49,13 @@ _NO_FALLBACK_CODES = frozenset(
         ModelErrorCode.RESOURCE_LIMIT,
     }
 )
+_SAFE_FALLBACK_CODES = frozenset(
+    {
+        ModelErrorCode.UNAVAILABLE,
+        ModelErrorCode.RATE_LIMITED,
+        ModelErrorCode.TIMEOUT,
+    }
+)
 
 
 class ModelGateway:
@@ -293,6 +300,13 @@ class ModelGateway:
                 provider_id=provider_id,
                 retryable=False,
             )
+        if not isinstance(error.retryable, bool):
+            return ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                "model provider returned an invalid retryable flag",
+                provider_id=provider_id,
+                retryable=False,
+            )
         if error.provider_id is not None and error.provider_id != provider_id:
             return ModelGatewayError(
                 ModelErrorCode.PROVIDER_ERROR,
@@ -327,6 +341,8 @@ class ModelGateway:
             raise ValueError("provider response provider identity does not match")
         if response.provider_kind is not capabilities.kind:
             raise ValueError("provider response provider kind does not match")
+        if request.model is not None and response.model != request.model:
+            raise ValueError("provider response model identity does not match requested model")
 
     @staticmethod
     def _can_fallback(
@@ -335,6 +351,8 @@ class ModelGateway:
         if index + 1 >= len(providers):
             return False
         if error.code in _NO_FALLBACK_CODES:
+            return False
+        if error.code not in _SAFE_FALLBACK_CODES:
             return False
         if not error.retryable:
             return False
