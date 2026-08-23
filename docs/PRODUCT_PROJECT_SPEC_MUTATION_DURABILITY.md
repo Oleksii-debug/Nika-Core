@@ -20,7 +20,7 @@ The receipt binds project identity, expected row version, previous/result specif
 
 The public mutation result is bound to the revision owned by that exact operation. A new write materializes its `ProductProject` result while the authoritative writer transaction still owns the exact specification and row-version transition. An idempotent replay materializes the result from the durable receipt plus the exact immutable specification row, rather than from whatever revision happens to be current later.
 
-A later valid writer may therefore commit immediately after the first writer without changing what the first writer returns. Likewise, replaying operation A after operation B has advanced the project returns A's exact specification/version identity and does not masquerade B's current state as A's result. A post-commit current-state read may be used as a non-authoritative integrity probe, but it is never the source of the mutation return value.
+A later valid writer may therefore commit immediately after the first writer without changing what the first writer returns. Likewise, replaying operation A after operation B has advanced the project returns A's exact specification/version identity and does not masquerade B's current state as A's result. The canonical mutation path performs no post-commit current-state read before returning, so an already committed mutation cannot be converted into an apparent failure by unrelated later-state read I/O.
 
 When replay reconstructs an older result after later lifecycle changes, status is derived from canonical status-change audit evidence at the receipt's exact row version. This keeps the returned historical snapshot coherent instead of combining an old specification version with a later lifecycle status.
 
