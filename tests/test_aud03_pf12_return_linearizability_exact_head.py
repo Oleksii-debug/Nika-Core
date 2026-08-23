@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-import threading
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_project import ProductProjectRepository, ProductProjectSpec
