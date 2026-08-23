@@ -226,6 +226,31 @@ def test_model_preflight_rejects_filesystem_indirection_portably(
     assert caught.value.code == MediaErrorCode.PATH_ESCAPE
 
 
+def test_model_preflight_rejects_parent_indirection_portably(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    model_root = parent / "model"
+    model_root.mkdir()
+    (model_root / "model.bin").write_bytes(b"fixture")
+    parent = parent.absolute()
+    original = Path.is_symlink
+
+    def fake_is_symlink(path: Path) -> bool:
+        if path == parent:
+            return True
+        return original(path)
+
+    monkeypatch.setattr(Path, "is_symlink", fake_is_symlink)
+
+    with pytest.raises(MediaError) as caught:
+        inspect_model_directory(model_root, compute_sha256=False)
+
+    assert caught.value.code == MediaErrorCode.PATH_ESCAPE
+
+
 def test_empty_model_directory_is_explicit_component_failure(tmp_path: Path) -> None:
     model_root = tmp_path / "empty"
     model_root.mkdir()

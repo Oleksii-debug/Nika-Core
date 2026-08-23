@@ -150,17 +150,19 @@ def _require_local_directory(path: Path) -> Path:
 
 
 def _reject_filesystem_indirection(path: Path, *, label: str) -> None:
-    if path.is_symlink():
-        raise MediaError(
-            MediaErrorCode.PATH_ESCAPE,
-            f"{label} must not be a symbolic link",
-        )
-    is_junction = getattr(path, "is_junction", None)
-    if callable(is_junction) and is_junction():
-        raise MediaError(
-            MediaErrorCode.PATH_ESCAPE,
-            f"{label} must not be a junction",
-        )
+    lexical = path.absolute()
+    for candidate in (lexical, *lexical.parents):
+        if candidate.is_symlink():
+            raise MediaError(
+                MediaErrorCode.PATH_ESCAPE,
+                f"{label} must not traverse a symbolic link",
+            )
+        is_junction = getattr(candidate, "is_junction", None)
+        if callable(is_junction) and is_junction():
+            raise MediaError(
+                MediaErrorCode.PATH_ESCAPE,
+                f"{label} must not traverse a junction",
+            )
 
 
 def _hash_entries(entries: list[tuple[str, Path]]) -> str:
