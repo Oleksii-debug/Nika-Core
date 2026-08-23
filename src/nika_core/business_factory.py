@@ -7,6 +7,11 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
+from nika_core.business_authority import (
+    BusinessAuthorizationAuthorityPort,
+    BusinessAuthorizationIntent,
+    trusted_business_authorization,
+)
 from nika_core.product_compliance import ProductComplianceDecision
 from nika_core.product_project import (
     EvidenceRef,
@@ -144,6 +149,7 @@ class BusinessProposal:
     scope_summary: str
     state: ProposalState = ProposalState.DRAFT
     approval_ref: str | None = None
+    approval_fingerprint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +158,7 @@ class BusinessWorkOrder:
     proposal_id: str
     scope: str
     authorization_ref: str
+    authorization_fingerprint: str
     product_project_id: str | None = None
 
 
@@ -168,6 +175,7 @@ class DeliveryRecord:
     project_id: str
     artifact_ref: str
     authorization_ref: str
+    authorization_fingerprint: str
     compliance_evidence_refs: tuple[str, ...]
 
 
@@ -218,18 +226,30 @@ class BusinessFactorySnapshot:
 class BusinessFactory:
     """PF9 lifecycle coordinator with no external-send, contract-signing or money executor."""
 
-    def __init__(self, snapshot: BusinessFactorySnapshot) -> None:
+    def __init__(
+        self,
+        snapshot: BusinessFactorySnapshot,
+        *,
+        approval_authority: BusinessAuthorizationAuthorityPort | None = None,
+    ) -> None:
         _validate_snapshot(snapshot)
         self._snapshot = snapshot
+        self._approval_authority = approval_authority
 
     @classmethod
-    def start(cls, *, objective: BusinessObjective, policy: BusinessPolicy) -> BusinessFactory:
+    def start(
+        cls,
+        *,
+        objective: BusinessObjective,
+        policy: BusinessPolicy,
+        approval_authority: BusinessAuthorizationAuthorityPort | None = None,
+    ) -> BusinessFactory:
         snapshot = BusinessFactorySnapshot(
             schema=BUSINESS_FACTORY_SCHEMA,
             objective=objective,
             policy=policy,
         )
-        factory = cls(snapshot)
+        factory = cls(snapshot, approval_authority=approval_authority)
         factory._record(
             "objective.created",
             objective.objective_id,
@@ -238,8 +258,13 @@ class BusinessFactory:
         return factory
 
     @classmethod
-    def restore(cls, snapshot: BusinessFactorySnapshot) -> BusinessFactory:
-        return cls(snapshot)
+    def restore(
+        cls,
+        snapshot: BusinessFactorySnapshot,
+        *,
+        approval_authority: BusinessAuthorizationAuthorityPort | None = None,
+    ) -> BusinessFactory:
+        return cls(snapshot, approval_authority=approval_authority)
 
     def snapshot(self) -> BusinessFactorySnapshot:
         return self._snapshot
@@ -323,7 +348,17 @@ class BusinessFactory:
         _text(approval_ref, "proposal approval_ref")
         if proposal.state is not ProposalState.DRAFT:
             raise BusinessFactoryError("only a draft proposal can be approved")
-        proposal = replace(proposal, state=ProposalState.APPROVED, approval_ref=approval_ref)
+        intent = _proposal_authorization_intent(
+            self._snapshot.objective.objective_id,
+            proposal,
+        )
+        self._require_authorization(intent, approval_ref)
+        proposal = replace(
+            proposal,
+            state=ProposalState.APPROVED,
+            approval_ref=approval_ref,
+            approval_fingerprint=intent.fingerprint,
+        )
         self._snapshot = replace(self._snapshot, proposal=proposal)
         self._record("proposal.approved", proposal.proposal_id, approval_ref)
         return proposal
@@ -353,7 +388,20 @@ class BusinessFactory:
         _text(work_order_id, "work_order_id")
         _text(scope, "work order scope")
         _text(authorization_ref, "work order authorization_ref")
-        order = BusinessWorkOrder(work_order_id, proposal.proposal_id, scope, authorization_ref)
+        intent = _work_order_authorization_intent(
+            self._snapshot.objective.objective_id,
+            proposal,
+            work_order_id=work_order_id,
+            scope=scope,
+        )
+        self._require_authorization(intent, authorization_ref)
+        order = BusinessWorkOrder(
+            work_order_id,
+            proposal.proposal_id,
+            scope,
+            authorization_ref,
+            intent.fingerprint,
+        )
         self._snapshot = replace(self._snapshot, work_order=order)
         self._record("work_order.authorized", work_order_id, authorization_ref)
         return order
@@ -410,6 +458,7 @@ class BusinessFactory:
             {
                 "business_work_order_ref": order.work_order_id,
                 "business_work_order_authorization_ref": order.authorization_ref,
+                "business_work_order_authorization_fingerprint": order.authorization_fingerprint,
                 "business_objective_ref": objective_id,
                 "business_handoff_request_key": idempotency_key,
             }
@@ -463,11 +512,21 @@ class BusinessFactory:
         _text(delivery_id, "delivery_id")
         _text(artifact_ref, "delivery artifact_ref")
         _text(authorization_ref, "delivery authorization_ref")
+        intent = _delivery_authorization_intent(
+            self._snapshot.objective.objective_id,
+            delivery_id=delivery_id,
+            project_id=project_id,
+            artifact_ref=artifact_ref,
+            qa_evidence_ref=qa.evidence_ref,
+            compliance_evidence_refs=compliance.evidence_refs,
+        )
+        self._require_authorization(intent, authorization_ref)
         delivery = DeliveryRecord(
             delivery_id,
             project_id,
             artifact_ref,
             authorization_ref,
+            intent.fingerprint,
             compliance.evidence_refs,
         )
         self._snapshot = replace(self._snapshot, delivery=delivery)
@@ -531,6 +590,20 @@ class BusinessFactory:
             self._record("support.resolved", case_id, resolution_ref)
             return updated
         raise BusinessFactoryError("unknown support case_id")
+
+    def _require_authorization(
+        self,
+        intent: BusinessAuthorizationIntent,
+        evidence_ref: str,
+    ) -> None:
+        if not trusted_business_authorization(
+            self._approval_authority,
+            intent=intent,
+            evidence_ref=evidence_ref,
+        ):
+            raise BusinessFactoryError(
+                "trusted business approval authority rejected or could not verify the action"
+            )
 
     def _record(self, event_type: str, subject_id: str, evidence_ref: str) -> None:
         event = BusinessAuditEvent(
@@ -737,8 +810,17 @@ def _validate_snapshot(snapshot: BusinessFactorySnapshot) -> None:
     _text(proposal.scope_summary, "proposal scope_summary")
     if proposal.lead_id != lead.lead_id or not lead.qualified:
         raise BusinessFactoryError("proposal requires the qualified restored lead")
-    if proposal.state is ProposalState.APPROVED and not proposal.approval_ref:
-        raise BusinessFactoryError("approved proposal is missing approval_ref")
+    if proposal.state is ProposalState.APPROVED:
+        if not proposal.approval_ref or not proposal.approval_fingerprint:
+            raise BusinessFactoryError("approved proposal is missing trusted approval evidence")
+        expected = _proposal_authorization_intent(
+            snapshot.objective.objective_id,
+            proposal,
+        ).fingerprint
+        if proposal.approval_fingerprint != expected:
+            raise BusinessFactoryError("proposal approval fingerprint does not match approved scope")
+    elif proposal.approval_fingerprint is not None:
+        raise BusinessFactoryError("non-approved proposal cannot carry approval fingerprint")
     if proposal.approval_ref is not None:
         _text(proposal.approval_ref, "proposal approval_ref")
 
@@ -753,6 +835,15 @@ def _validate_snapshot(snapshot: BusinessFactorySnapshot) -> None:
     _text(order.work_order_id, "work_order_id")
     _text(order.scope, "work order scope")
     _text(order.authorization_ref, "work order authorization_ref")
+    _text(order.authorization_fingerprint, "work order authorization fingerprint")
+    expected_order_fingerprint = _work_order_authorization_intent(
+        snapshot.objective.objective_id,
+        proposal,
+        work_order_id=order.work_order_id,
+        scope=order.scope,
+    ).fingerprint
+    if order.authorization_fingerprint != expected_order_fingerprint:
+        raise BusinessFactoryError("work order authorization fingerprint does not match scope")
     if order.product_project_id is not None:
         _text(order.product_project_id, "product_project_id")
 
@@ -771,11 +862,22 @@ def _validate_snapshot(snapshot: BusinessFactorySnapshot) -> None:
         _text(delivery.delivery_id, "delivery_id")
         _text(delivery.artifact_ref, "delivery artifact_ref")
         _text(delivery.authorization_ref, "delivery authorization_ref")
+        _text(delivery.authorization_fingerprint, "delivery authorization fingerprint")
         _unique(
             delivery.compliance_evidence_refs,
             "delivery compliance evidence_ref",
             allow_empty=True,
         )
+        expected_delivery_fingerprint = _delivery_authorization_intent(
+            snapshot.objective.objective_id,
+            delivery_id=delivery.delivery_id,
+            project_id=delivery.project_id,
+            artifact_ref=delivery.artifact_ref,
+            qa_evidence_ref=qa.evidence_ref,
+            compliance_evidence_refs=delivery.compliance_evidence_refs,
+        ).fingerprint
+        if delivery.authorization_fingerprint != expected_delivery_fingerprint:
+            raise BusinessFactoryError("delivery authorization fingerprint does not match artifact")
 
     payment = snapshot.payment
     if payment is not None:
@@ -796,6 +898,68 @@ def _validate_snapshot(snapshot: BusinessFactorySnapshot) -> None:
         _text(case.evidence_ref, "support evidence_ref")
         if case.state is SupportCaseState.RESOLVED and not case.resolution_ref:
             raise BusinessFactoryError("resolved support case requires resolution_ref")
+
+
+def _proposal_authorization_intent(
+    objective_id: str,
+    proposal: BusinessProposal,
+) -> BusinessAuthorizationIntent:
+    return BusinessAuthorizationIntent(
+        objective_id=objective_id,
+        purpose="proposal.approve",
+        subject_id=proposal.proposal_id,
+        bindings=(
+            ("lead_id", proposal.lead_id),
+            ("scope_summary", proposal.scope_summary),
+        ),
+    )
+
+
+def _work_order_authorization_intent(
+    objective_id: str,
+    proposal: BusinessProposal,
+    *,
+    work_order_id: str,
+    scope: str,
+) -> BusinessAuthorizationIntent:
+    _text(proposal.approval_fingerprint, "proposal approval fingerprint")
+    return BusinessAuthorizationIntent(
+        objective_id=objective_id,
+        purpose="work_order.authorize",
+        subject_id=work_order_id,
+        bindings=(
+            ("proposal_id", proposal.proposal_id),
+            ("proposal_approval_fingerprint", proposal.approval_fingerprint),
+            ("scope", scope),
+        ),
+    )
+
+
+def _delivery_authorization_intent(
+    objective_id: str,
+    *,
+    delivery_id: str,
+    project_id: str,
+    artifact_ref: str,
+    qa_evidence_ref: str,
+    compliance_evidence_refs: tuple[str, ...],
+) -> BusinessAuthorizationIntent:
+    compliance_payload = json.dumps(
+        list(compliance_evidence_refs),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return BusinessAuthorizationIntent(
+        objective_id=objective_id,
+        purpose="delivery.authorize",
+        subject_id=delivery_id,
+        bindings=(
+            ("artifact_ref", artifact_ref),
+            ("compliance_evidence_refs", compliance_payload),
+            ("project_id", project_id),
+            ("qa_evidence_ref", qa_evidence_ref),
+        ),
+    )
 
 
 def _opportunity(raw: object) -> MarketOpportunity | None:
@@ -833,6 +997,7 @@ def _proposal(raw: object) -> BusinessProposal | None:
         _value(item, "scope_summary", "proposal"),
         _enum(ProposalState, item.get("state"), "proposal state"),
         _optional_value(item, "approval_ref", "proposal"),
+        _optional_value(item, "approval_fingerprint", "proposal"),
     )
 
 
@@ -845,6 +1010,7 @@ def _work_order(raw: object) -> BusinessWorkOrder | None:
         _value(item, "proposal_id", "work order"),
         _value(item, "scope", "work order"),
         _value(item, "authorization_ref", "work order"),
+        _value(item, "authorization_fingerprint", "work order"),
         _optional_value(item, "product_project_id", "work order"),
     )
 
@@ -869,6 +1035,7 @@ def _delivery(raw: object) -> DeliveryRecord | None:
         _value(item, "project_id", "delivery"),
         _value(item, "artifact_ref", "delivery"),
         _value(item, "authorization_ref", "delivery"),
+        _value(item, "authorization_fingerprint", "delivery"),
         _strings(item, "compliance_evidence_refs", "delivery"),
     )
 
