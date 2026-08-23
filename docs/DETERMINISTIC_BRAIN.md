@@ -24,9 +24,12 @@ verified; wrapper metadata alone is not sufficient distribution provenance.
 
 Aries is selected as the current first proof engine because it is a maintained official Unified
 Planning integration with permissive source/plugin licensing and packaged Windows/Linux support.
-It is not claimed to prove every unsatisfiable action-planning problem. Nika therefore keeps
-`GOAL_UNREACHABLE` distinct from `NO_PLAN_FOUND` and treats either as a clean non-success rather
-than manufacturing a plan.
+It is not claimed to prove every unsatisfiable action-planning problem. Before engine invocation,
+Nika performs a sound thin reachability precheck for the obvious cases its own explicit contract
+can prove: a missing required fact that no registered action can add, or a present forbidden fact
+that no registered action can remove. Those goals fail immediately as `GOAL_UNREACHABLE` without
+starting a planner process. Harder unsatisfiable cases remain the planner's responsibility, so
+`GOAL_UNREACHABLE` stays distinct from `NO_PLAN_FOUND`.
 
 No Unified Planning problem, fluent, action, plan, result, Aries, or gRPC type is exposed by the
 Nika deterministic planning contracts.
