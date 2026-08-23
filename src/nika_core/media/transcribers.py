@@ -8,6 +8,11 @@ from pathlib import Path
 
 from nika_core.media.contracts import EngineDescriptor, ModelDescriptor, Segment
 from nika_core.media.errors import MediaError, MediaErrorCode
+from nika_core.media.model_evidence import (
+    bind_model_evidence,
+    inspect_model_directory,
+    inspect_model_files,
+)
 from nika_core.media.transcription import TranscriptionRequest, TranscriptionResult
 
 
@@ -40,12 +45,12 @@ class FasterWhisperTranscriber:
         device: str = "cpu",
         compute_type: str = "int8",
     ) -> None:
+        requested_model_path = Path(model_path)
         self._model_path = _require_local_path(
-            model_path,
+            requested_model_path,
             label="faster-whisper model directory",
             directory=True,
         )
-        self._model_descriptor = model
         try:
             version = importlib.metadata.version("faster-whisper")
         except importlib.metadata.PackageNotFoundError as exc:
@@ -62,6 +67,11 @@ class FasterWhisperTranscriber:
         )
         if model.engine_id != self._engine.engine_id:
             raise ValueError("model descriptor must belong to faster-whisper")
+        evidence = inspect_model_directory(
+            requested_model_path,
+            compute_sha256=model.sha256 is not None,
+        )
+        self._model_descriptor = bind_model_evidence(model, evidence)
         module = importlib.import_module("faster_whisper")
         self._runtime = module.WhisperModel(
             str(self._model_path),
@@ -122,10 +132,15 @@ class SherpaOnnxWhisperTranscriber:
         language: str = "auto",
         num_threads: int = 2,
     ) -> None:
+        requested_files = {
+            "decoder": Path(decoder),
+            "encoder": Path(encoder),
+            "tokens": Path(tokens),
+        }
         paths = (
-            _require_local_path(encoder, label="sherpa-onnx encoder"),
-            _require_local_path(decoder, label="sherpa-onnx decoder"),
-            _require_local_path(tokens, label="sherpa-onnx tokens"),
+            _require_local_path(requested_files["encoder"], label="sherpa-onnx encoder"),
+            _require_local_path(requested_files["decoder"], label="sherpa-onnx decoder"),
+            _require_local_path(requested_files["tokens"], label="sherpa-onnx tokens"),
         )
         try:
             version = importlib.metadata.version("sherpa-onnx")
@@ -143,7 +158,11 @@ class SherpaOnnxWhisperTranscriber:
         )
         if model.engine_id != self._engine.engine_id:
             raise ValueError("model descriptor must belong to sherpa-onnx")
-        self._model_descriptor = model
+        evidence = inspect_model_files(
+            requested_files,
+            compute_sha256=model.sha256 is not None,
+        )
+        self._model_descriptor = bind_model_evidence(model, evidence)
         module = importlib.import_module("sherpa_onnx")
         self._recognizer = module.OfflineRecognizer.from_whisper(
             encoder=str(paths[0]),
