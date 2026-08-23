@@ -4,18 +4,18 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from pf3_fleet_replacement_support import (
+    _authorized_plan,
+    _fixture,
+    _sha,
+    _submit,
+)
 
 from nika_core.product_factory_fleet_replacement import (
     FleetReplacementCoordinator,
     FleetReplacementError,
     FleetReplacementState,
     ReplicaReplacementState,
-)
-from pf3_fleet_replacement_support import (
-    _authorized_plan,
-    _fixture,
-    _sha,
-    _submit,
 )
 
 

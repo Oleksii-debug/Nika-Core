@@ -4,6 +4,13 @@ from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
+from pf3_fleet_replacement_support import (
+    REVIEW_REF,
+    _authorized_plan,
+    _fixture,
+    _node,
+    _submit,
+)
 
 from nika_core.product_factory_deployment import (
     ExecutionRequest,
@@ -16,13 +23,6 @@ from nika_core.product_factory_fleet_replacement import (
     FleetReplacementState,
     ReplicaReplacementState,
     fleet_replacement_plan_fingerprint,
-)
-from pf3_fleet_replacement_support import (
-    REVIEW_REF,
-    _authorized_plan,
-    _fixture,
-    _node,
-    _submit,
 )
 
 
