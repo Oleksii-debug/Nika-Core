@@ -17,6 +17,10 @@ from nika_core.research.models import (
     SourceKind,
     SourceSpec,
 )
+from nika_core.research.source_identity import (
+    ResearchSourceIdentityError,
+    canonical_http_locator,
+)
 
 
 def _now() -> str:
@@ -36,6 +40,8 @@ class NetworkResearchRepository:
             raise ValueError("network repository only accepts HTTP sources")
         if not source.source_id.strip() or not source.workspace_id.strip() or not source.locator.strip():
             raise ValueError("source_id, workspace_id and URL are required")
+
+        locator = canonical_http_locator(source.locator)
         now = _now()
         with self._store.connection() as conn:
             collision = conn.execute(
@@ -43,11 +49,31 @@ class NetworkResearchRepository:
                 (source.source_id,),
             ).fetchone()
             if collision is not None:
-                raise ValueError("source_id is already owned by a local source")
+                raise ResearchSourceIdentityError(
+                    "source_kind_conflict",
+                    "source_id is already owned by a local source",
+                )
+
             existing = conn.execute(
-                "SELECT url FROM research_http_sources WHERE source_id=?",
+                "SELECT workspace_id, url FROM research_http_sources WHERE source_id=?",
                 (source.source_id,),
             ).fetchone()
+            candidates = conn.execute(
+                """SELECT source_id, url FROM research_http_sources
+                WHERE workspace_id=? AND source_id<>?""",
+                (source.workspace_id, source.source_id),
+            ).fetchall()
+            for candidate in candidates:
+                try:
+                    candidate_locator = canonical_http_locator(candidate["url"])
+                except ResearchSourceIdentityError:
+                    continue
+                if candidate_locator == locator:
+                    raise ResearchSourceIdentityError(
+                        "source_duplicate",
+                        "HTTP source locator is already registered in this workspace",
+                    )
+
             if existing is None:
                 conn.execute(
                     """INSERT INTO research_http_sources(
@@ -56,33 +82,34 @@ class NetworkResearchRepository:
                     (
                         source.source_id,
                         source.workspace_id,
-                        source.locator,
+                        locator,
                         FreshnessState.UNKNOWN.value,
                         now,
                         now,
                     ),
-                )
-            elif existing["url"] == source.locator:
-                conn.execute(
-                    """UPDATE research_http_sources
-                    SET workspace_id=?, updated_at=? WHERE source_id=?""",
-                    (source.workspace_id, now, source.source_id),
                 )
             else:
+                if existing["workspace_id"] != source.workspace_id:
+                    raise ResearchSourceIdentityError(
+                        "source_workspace_conflict",
+                        "HTTP source_id is permanently bound to its original workspace",
+                    )
+                try:
+                    existing_locator = canonical_http_locator(existing["url"])
+                except ResearchSourceIdentityError as exc:
+                    raise ResearchSourceIdentityError(
+                        "source_identity_corrupt",
+                        "stored HTTP source identity is invalid and cannot be rebound",
+                    ) from exc
+                if existing_locator != locator:
+                    raise ResearchSourceIdentityError(
+                        "source_locator_conflict",
+                        "HTTP source_id is permanently bound to its original locator; use a new source_id",
+                    )
                 conn.execute(
-                    """UPDATE research_http_sources SET
-                        workspace_id=?, url=?, final_url=NULL, etag=NULL, last_modified=NULL,
-                        current_raw_sha256=NULL, freshness=?, last_attempt_at=NULL,
-                        last_success_at=NULL, last_status_code=NULL, last_error_code=NULL,
-                        last_error_message=NULL, updated_at=?
-                    WHERE source_id=?""",
-                    (
-                        source.workspace_id,
-                        source.locator,
-                        FreshnessState.UNKNOWN.value,
-                        now,
-                        source.source_id,
-                    ),
+                    """UPDATE research_http_sources
+                    SET url=?, updated_at=? WHERE source_id=?""",
+                    (locator, now, source.source_id),
                 )
         return self.get_source(source.source_id)
 
@@ -355,10 +382,7 @@ class NetworkResearchRepository:
     ) -> ResearchResultSet:
         result_set_id = uuid4().hex
         created_at = _now()
-        prepared = [
-            (hit, self.evidence_for_document(hit.document_id))
-            for hit in hits
-        ]
+        prepared = [(hit, self.evidence_for_document(hit.document_id)) for hit in hits]
         items: list[ResearchResultItem] = []
         with self._store.connection() as conn:
             conn.execute(
