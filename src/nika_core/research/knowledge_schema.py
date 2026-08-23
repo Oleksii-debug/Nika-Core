@@ -29,6 +29,10 @@ KNOWLEDGE_MIGRATION_1 = (
         source_locator TEXT NOT NULL,
         parser_name TEXT NOT NULL,
         parser_version TEXT NOT NULL,
+        normalization_version TEXT NOT NULL,
+        chunker_version TEXT NOT NULL,
+        chunk_max_chars INTEGER NOT NULL CHECK(chunk_max_chars > 0),
+        chunk_overlap_chars INTEGER NOT NULL CHECK(chunk_overlap_chars >= 0),
         approved_by TEXT NOT NULL,
         normalized_text TEXT NOT NULL,
         created_at TEXT NOT NULL,
@@ -138,8 +142,9 @@ def _backfill_legacy_corpus(conn: sqlite3.Connection) -> None:
             """INSERT INTO knowledge_versions(
                 workspace_id, artifact_key, version, normalized_sha256, raw_sha256,
                 title, media_type, source_id, source_locator, parser_name, parser_version,
+                normalization_version, chunker_version, chunk_max_chars, chunk_overlap_chars,
                 approved_by, normalized_text, created_at
-            ) VALUES (?, ?, 1, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, 1, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(workspace_id, artifact_key, version) DO NOTHING""",
             (
                 document["workspace_id"],
@@ -151,6 +156,10 @@ def _backfill_legacy_corpus(conn: sqlite3.Connection) -> None:
                 source_locator,
                 "nika-legacy-corpus",
                 "v9",
+                "legacy-normalization-v9",
+                "legacy-single-chunk-v1",
+                max(1, len(document["normalized_text"])),
+                0,
                 "migration:legacy-corpus-v9",
                 document["normalized_text"],
                 document["created_at"],
