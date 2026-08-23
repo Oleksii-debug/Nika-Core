@@ -3,8 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 
-from nika_core.kernel.audit import AuditLog
-
+from ..kernel.audit import AuditLog
 from .contracts import (
     ModelErrorCode,
     ModelGatewayError,
