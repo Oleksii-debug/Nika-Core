@@ -14,7 +14,6 @@ from nika_core.product_project import (
     ResearchEvidencePackage,
 )
 
-
 BUSINESS_FACTORY_SCHEMA = "nika.business_factory.v1"
 
 
