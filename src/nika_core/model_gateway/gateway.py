@@ -11,7 +11,21 @@ from nika_core.model_gateway.contracts import (
     ModelRequest,
     ModelResponse,
     PrivacyClass,
+    ProviderCapabilities,
+    ProviderCostClass,
     ProviderKind,
+    ProviderResourceClass,
+)
+
+
+_NO_FALLBACK_CODES = frozenset(
+    {
+        ModelErrorCode.INVALID_REQUEST,
+        ModelErrorCode.CANCELLED,
+        ModelErrorCode.AUTHENTICATION,
+        ModelErrorCode.POLICY_DENIED,
+        ModelErrorCode.RESOURCE_LIMIT,
+    }
 )
 
 
@@ -22,19 +36,31 @@ class ModelGateway:
         self._audit_log = audit_log
 
     def register(self, provider: ModelProvider, *, default: bool = False) -> None:
-        provider_id = provider.capabilities.provider_id
+        capabilities = provider.capabilities
+        provider_id = capabilities.provider_id
         if provider_id in self._providers:
             raise ValueError(f"duplicate provider_id: {provider_id}")
+        if default and capabilities.kind in self._defaults:
+            existing = self._defaults[capabilities.kind]
+            raise ValueError(
+                f"default provider already registered for {capabilities.kind.value}: {existing}"
+            )
         self._providers[provider_id] = provider
         if default:
-            self._defaults[provider.capabilities.kind] = provider_id
+            self._defaults[capabilities.kind] = provider_id
 
     def providers(self) -> tuple[str, ...]:
         return tuple(sorted(self._providers))
 
+    def provider_capabilities(self) -> tuple[ProviderCapabilities, ...]:
+        return tuple(
+            self._providers[provider_id].capabilities
+            for provider_id in sorted(self._providers)
+        )
+
     async def complete(self, request: ModelRequest) -> ModelResponse:
         providers = self._select_candidates(request)
-        self._validate_privacy_route(request, providers)
+        self._validate_route(request, providers)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + request.timeout_seconds
 
@@ -44,7 +70,7 @@ class ModelGateway:
             if remaining <= 0:
                 error = ModelGatewayError(
                     ModelErrorCode.TIMEOUT,
-                    "model request exceeded its deadline",
+                    "model request exceeded its total deadline",
                     provider_id=capabilities.provider_id,
                     retryable=False,
                 )
@@ -58,6 +84,8 @@ class ModelGateway:
                 fallback_provider_ids=(),
                 timeout_seconds=remaining,
             )
+            cost_class = self._effective_cost_class(capabilities)
+            resource_class = self._effective_resource_class(capabilities)
             self._audit(
                 event_type="model.requested",
                 request=request,
@@ -67,6 +95,8 @@ class ModelGateway:
                     "privacy": request.privacy.value,
                     "model": request.model or "default",
                     "attempt": index + 1,
+                    "cost_class": cost_class.value,
+                    "resource_class": resource_class.value,
                 },
             )
 
@@ -78,7 +108,7 @@ class ModelGateway:
                 retryable = capabilities.supports_hard_cancellation
                 error = ModelGatewayError(
                     ModelErrorCode.TIMEOUT,
-                    "model request exceeded its deadline",
+                    "model request exceeded its total deadline",
                     provider_id=capabilities.provider_id,
                     retryable=retryable,
                 )
@@ -94,12 +124,36 @@ class ModelGateway:
                     payload={"provider_id": capabilities.provider_id},
                 )
                 raise
-            except ModelGatewayError as error:
+            except ModelGatewayError as raw_error:
+                error = self._normalize_provider_error(raw_error, capabilities.provider_id)
                 self._audit_failure(request, capabilities.provider_id, error)
                 if self._can_fallback(error=error, index=index, providers=providers):
                     self._audit_fallback(request, provider, providers[index + 1], error)
                     continue
-                raise
+                if error is raw_error:
+                    raise
+                raise error from raw_error
+            except Exception as exc:
+                error = ModelGatewayError(
+                    ModelErrorCode.PROVIDER_ERROR,
+                    "model provider failed without a typed Nika error",
+                    provider_id=capabilities.provider_id,
+                    retryable=False,
+                )
+                self._audit_failure(request, capabilities.provider_id, error)
+                raise error from exc
+
+            try:
+                self._validate_response(request, capabilities, response)
+            except (TypeError, ValueError) as exc:
+                error = ModelGatewayError(
+                    ModelErrorCode.PROVIDER_ERROR,
+                    "model provider returned an invalid normalized response",
+                    provider_id=capabilities.provider_id,
+                    retryable=False,
+                )
+                self._audit_failure(request, capabilities.provider_id, error)
+                raise error from exc
 
             self._audit(
                 event_type="model.completed",
@@ -112,6 +166,8 @@ class ModelGateway:
                     "total_tokens": response.usage.total_tokens,
                     "latency_ms": response.latency_ms,
                     "attempt": index + 1,
+                    "cost_class": cost_class.value,
+                    "resource_class": resource_class.value,
                 },
             )
             return response
@@ -119,7 +175,7 @@ class ModelGateway:
         raise ModelGatewayError(
             ModelErrorCode.UNAVAILABLE,
             "model fallback route was exhausted",
-            retryable=True,
+            retryable=False,
         )
 
     def _select_candidates(self, request: ModelRequest) -> tuple[ModelProvider, ...]:
@@ -144,30 +200,128 @@ class ModelGateway:
             seen.add(provider_id)
         return tuple(candidates)
 
-    def _validate_privacy_route(
+    def _validate_route(
         self, request: ModelRequest, providers: tuple[ModelProvider, ...]
     ) -> None:
-        if request.privacy is not PrivacyClass.SENSITIVE:
-            return
         for provider in providers:
             capabilities = provider.capabilities
-            if not capabilities.supports_private_data:
+            provider_id = capabilities.provider_id
+            if (
+                request.privacy in {PrivacyClass.PRIVATE, PrivacyClass.SENSITIVE}
+                and not capabilities.supports_private_data
+            ):
                 raise ModelGatewayError(
-                    ModelErrorCode.INVALID_REQUEST,
-                    "sensitive data cannot be routed to this provider",
-                    provider_id=capabilities.provider_id,
+                    ModelErrorCode.POLICY_DENIED,
+                    "private data cannot be routed to this provider",
+                    provider_id=provider_id,
+                    retryable=False,
                 )
+            if request.route_policy.local_only and capabilities.kind is ProviderKind.CLOUD:
+                raise ModelGatewayError(
+                    ModelErrorCode.POLICY_DENIED,
+                    "model route is restricted to local providers",
+                    provider_id=provider_id,
+                    retryable=False,
+                )
+
+            cost_class = self._effective_cost_class(capabilities)
+            if not request.route_policy.allow_metered and cost_class in {
+                ProviderCostClass.METERED,
+                ProviderCostClass.UNKNOWN,
+            }:
+                raise ModelGatewayError(
+                    ModelErrorCode.POLICY_DENIED,
+                    "model route does not allow metered or unknown-cost providers",
+                    provider_id=provider_id,
+                    retryable=False,
+                )
+
+            allowed_resources = request.route_policy.allowed_resource_classes
+            resource_class = self._effective_resource_class(capabilities)
+            if allowed_resources and resource_class not in allowed_resources:
+                raise ModelGatewayError(
+                    ModelErrorCode.RESOURCE_LIMIT,
+                    "model provider resource class is not allowed for this request",
+                    provider_id=provider_id,
+                    retryable=False,
+                )
+
+    @staticmethod
+    def _normalize_provider_error(
+        error: ModelGatewayError, provider_id: str
+    ) -> ModelGatewayError:
+        if not isinstance(error.code, ModelErrorCode):
+            return ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                "model provider returned an invalid error code",
+                provider_id=provider_id,
+                retryable=False,
+            )
+        if error.provider_id is not None and error.provider_id != provider_id:
+            return ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                "model provider returned an error for another provider identity",
+                provider_id=provider_id,
+                retryable=False,
+            )
+        if error.provider_id is None:
+            return ModelGatewayError(
+                error.code,
+                str(error),
+                provider_id=provider_id,
+                retryable=error.retryable,
+            )
+        return error
+
+    @staticmethod
+    def _validate_response(
+        request: ModelRequest,
+        capabilities: ProviderCapabilities,
+        response: ModelResponse,
+    ) -> None:
+        if not isinstance(response, ModelResponse):
+            raise TypeError("provider response must be ModelResponse")
+        if response.request_id != request.request_id:
+            raise ValueError("provider response request identity does not match")
+        if response.provider_id != capabilities.provider_id:
+            raise ValueError("provider response provider identity does not match")
+        if response.provider_kind is not capabilities.kind:
+            raise ValueError("provider response provider kind does not match")
 
     @staticmethod
     def _can_fallback(
         *, error: ModelGatewayError, index: int, providers: tuple[ModelProvider, ...]
     ) -> bool:
-        if not error.retryable or index + 1 >= len(providers):
+        if index + 1 >= len(providers):
+            return False
+        if error.code in _NO_FALLBACK_CODES:
+            return False
+        if not error.retryable:
             return False
         return not (
             error.code is ModelErrorCode.TIMEOUT
             and not providers[index].capabilities.supports_hard_cancellation
         )
+
+    @staticmethod
+    def _effective_cost_class(capabilities: ProviderCapabilities) -> ProviderCostClass:
+        if capabilities.cost_class is not None:
+            return capabilities.cost_class
+        if capabilities.kind is ProviderKind.NO_LLM:
+            return ProviderCostClass.NONE
+        if capabilities.kind is ProviderKind.LOCAL:
+            return ProviderCostClass.LOCAL_RESOURCE
+        return ProviderCostClass.UNKNOWN
+
+    @staticmethod
+    def _effective_resource_class(
+        capabilities: ProviderCapabilities,
+    ) -> ProviderResourceClass:
+        if capabilities.resource_class is not None:
+            return capabilities.resource_class
+        if capabilities.kind is ProviderKind.NO_LLM:
+            return ProviderResourceClass.NONE
+        return ProviderResourceClass.UNKNOWN
 
     def _audit_failure(
         self, request: ModelRequest, provider_id: str, error: ModelGatewayError
