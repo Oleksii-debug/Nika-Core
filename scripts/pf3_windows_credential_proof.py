@@ -66,11 +66,17 @@ def main() -> int:
     secret_ref = "pf3-proof-" + uuid.uuid4().hex
     raw_secret = secrets.token_urlsafe(48)
     exact_windows_limit_material = "L" * 1280
-    authority_1 = hashlib.sha256(b"pf3-proof-authority-generation-1").hexdigest()
-    authority_2 = hashlib.sha256(b"pf3-proof-authority-generation-2").hexdigest()
+    authority_1_active = hashlib.sha256(
+        b"pf3-proof-authority-generation-1-active"
+    ).hexdigest()
+    authority_1_retired = hashlib.sha256(
+        b"pf3-proof-authority-generation-1-revoked"
+    ).hexdigest()
+    authority_2 = hashlib.sha256(b"pf3-proof-authority-generation-2-active").hexdigest()
     operation_id = "pf3-proof-operation-" + uuid.uuid4().hex
     store: WindowsCredentialStore | None = None
     restarted: WindowsCredentialStore | None = None
+    retired_restart: WindowsCredentialStore | None = None
     proof_error: Exception | None = None
     cleanup_errors: list[str] = []
 
@@ -82,12 +88,12 @@ def main() -> int:
         store.bind_authority(
             secret_ref=secret_ref,
             generation=1,
-            authority_fingerprint=authority_1,
+            authority_fingerprint=authority_1_active,
         )
         if not store.authority_matches(
             secret_ref=secret_ref,
             generation=1,
-            authority_fingerprint=authority_1,
+            authority_fingerprint=authority_1_active,
         ):
             raise RuntimeError("protected credential authority binding was not persisted")
 
@@ -139,7 +145,7 @@ def main() -> int:
         if not restarted.authority_matches(
             secret_ref=secret_ref,
             generation=1,
-            authority_fingerprint=authority_1,
+            authority_fingerprint=authority_1_active,
         ):
             raise RuntimeError("credential authority did not survive adapter restart")
         restarted.provision_secret(secret_ref, 1, raw_secret)
@@ -156,15 +162,41 @@ def main() -> int:
         ) is not None:
             raise RuntimeError("process-ephemeral operation authority survived adapter restart")
 
-        restarted.provision_secret(secret_ref, 2, exact_windows_limit_material)
-        restarted.bind_authority(
+        restarted.retire_authority(
+            secret_ref=secret_ref,
+            generation=1,
+            current_authority_fingerprint=authority_1_active,
+            retired_authority_fingerprint=authority_1_retired,
+        )
+        restarted.retire_authority(
+            secret_ref=secret_ref,
+            generation=1,
+            current_authority_fingerprint=authority_1_active,
+            retired_authority_fingerprint=authority_1_retired,
+        )
+        retired_restart = create_windows_credential_store()
+        if retired_restart.authority_matches(
+            secret_ref=secret_ref,
+            generation=1,
+            authority_fingerprint=authority_1_active,
+        ):
+            raise RuntimeError("retired credential authority reverted to active after restart")
+        if not retired_restart.authority_matches(
+            secret_ref=secret_ref,
+            generation=1,
+            authority_fingerprint=authority_1_retired,
+        ):
+            raise RuntimeError("retired credential authority did not survive adapter restart")
+
+        retired_restart.provision_secret(secret_ref, 2, exact_windows_limit_material)
+        retired_restart.bind_authority(
             secret_ref=secret_ref,
             generation=2,
             authority_fingerprint=authority_2,
         )
-        if not restarted.contains(secret_ref, 2):
+        if not retired_restart.contains(secret_ref, 2):
             raise RuntimeError("maximum-size Windows credential was not readable")
-        if not restarted.authority_matches(
+        if not retired_restart.authority_matches(
             secret_ref=secret_ref,
             generation=2,
             authority_fingerprint=authority_2,
@@ -173,8 +205,10 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001
         proof_error = exc
     finally:
-        cleanup_errors.extend(_cleanup(restarted or store, secret_ref))
-        if restarted is not None and store is not None and restarted is not store:
+        cleanup_errors.extend(_cleanup(retired_restart or restarted or store, secret_ref))
+        if restarted is not None and restarted is not retired_restart:
+            cleanup_errors.extend(_cleanup(restarted, secret_ref))
+        if store is not None and store is not restarted and store is not retired_restart:
             cleanup_errors.extend(_cleanup(store, secret_ref))
 
     raw_secret = ""
@@ -190,6 +224,7 @@ def main() -> int:
         json.dumps(
             {
                 "authority_binding_restart": "verified",
+                "authority_retirement_restart": "verified",
                 "backend": "python-keyring WinVaultKeyring",
                 "cleanup": "verified",
                 "credential_blob_2560_bytes": "verified",
