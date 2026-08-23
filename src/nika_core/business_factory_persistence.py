@@ -10,15 +10,16 @@ from nika_core.business_factory import (
     load_business_snapshot,
 )
 
-
 BUSINESS_FACTORY_SCHEMA_VERSION = 1
 BUSINESS_FACTORY_MIGRATIONS = {
     1: (
-        "CREATE TABLE IF NOT EXISTS business_factory_snapshots ("
-        "objective_id TEXT PRIMARY KEY, "
-        "row_version INTEGER NOT NULL, "
-        "payload_json TEXT NOT NULL, "
-        "updated_at TEXT NOT NULL)",
+        (
+            "CREATE TABLE IF NOT EXISTS business_factory_snapshots ("
+            "objective_id TEXT PRIMARY KEY, "
+            "row_version INTEGER NOT NULL, "
+            "payload_json TEXT NOT NULL, "
+            "updated_at TEXT NOT NULL)"
+        ),
     ),
 }
 
