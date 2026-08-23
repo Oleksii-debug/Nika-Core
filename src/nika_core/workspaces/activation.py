@@ -343,7 +343,7 @@ def _decode_row(
 
     raw_plugins = json.loads(str(plugins_json))
     if not isinstance(raw_plugins, list):
-        raise RuntimeError("stored workspace plugin review metadata is invalid")
+        raise TypeError("stored workspace plugin review metadata is invalid")
     plugins = tuple(PluginManifest.model_validate(item) for item in raw_plugins)
 
     raw_permissions = json.loads(str(permissions_json))
