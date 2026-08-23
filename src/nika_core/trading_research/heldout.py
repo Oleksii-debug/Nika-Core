@@ -215,6 +215,7 @@ class PartitionResult:
 
 @dataclass(frozen=True, slots=True, init=False)
 class HeldOutAssessment:
+    protocol: HeldOutProtocol
     selection: SelectionDecision
     test_result: PartitionResult
 
@@ -225,9 +226,13 @@ class HeldOutAssessment:
 
     @classmethod
     def _create(
-        cls, selection: SelectionDecision, test_result: PartitionResult
+        cls,
+        protocol: HeldOutProtocol,
+        selection: SelectionDecision,
+        test_result: PartitionResult,
     ) -> HeldOutAssessment:
         obj = object.__new__(cls)
+        object.__setattr__(obj, "protocol", protocol)
         object.__setattr__(obj, "selection", selection)
         object.__setattr__(obj, "test_result", test_result)
         _validate_assessment_identity(obj)
@@ -323,13 +328,14 @@ def bind_held_out_test(
 ) -> HeldOutAssessment:
     selected_at, universe_cutoff_at = _validate_selection_identity(selection)
     _validate_partition_result_identity(result)
-    if selection.protocol_fingerprint != protocol.fingerprint:
+    validated_protocol = _validated_protocol(protocol)
+    if selection.protocol_fingerprint != validated_protocol.fingerprint:
         raise TradingResearchError("selection belongs to a different held-out protocol")
-    if selected_at < protocol.validation.end_at:
+    if selected_at < validated_protocol.validation.end_at:
         raise CausalityViolation("selection predates validation completion")
-    if selected_at > protocol.test.start_at:
+    if selected_at > validated_protocol.test.start_at:
         raise CausalityViolation("selection occurred after held-out test began")
-    if universe_cutoff_at >= protocol.validation.start_at:
+    if universe_cutoff_at >= validated_protocol.validation.start_at:
         raise CausalityViolation("selection universe was not fixed before validation")
     if result.partition is not Partition.TEST:
         raise CausalityViolation("held-out assessment requires the test partition")
@@ -349,22 +355,31 @@ def bind_held_out_test(
         raise CausalityViolation("held-out result changes the fixed validation universe")
     if result.universe_cutoff_at != selection.universe_cutoff_at:
         raise CausalityViolation("held-out result changes the fixed universe cutoff")
-    if result.fit_cutoff_at > protocol.test.start_at:
+    if result.fit_cutoff_at > validated_protocol.test.start_at:
         raise CausalityViolation("held-out strategy fit includes test/future data")
-    if result.universe_cutoff_at > protocol.test.start_at:
+    if result.universe_cutoff_at > validated_protocol.test.start_at:
         raise CausalityViolation("held-out universe uses future membership information")
-    if result.evaluated_at < protocol.test.end_at:
+    if result.evaluated_at < validated_protocol.test.end_at:
         raise CausalityViolation("held-out metric was finalized before the test window ended")
-    return HeldOutAssessment._create(selection, result)
+    return HeldOutAssessment._create(validated_protocol, selection, result)
 
 
 def _validate_assessment_identity(assessment: HeldOutAssessment) -> None:
     if not isinstance(assessment, HeldOutAssessment):
         raise TradingResearchError("assessment must be HeldOutAssessment evidence")
-    _validate_selection_identity(assessment.selection)
+    protocol = _validated_protocol(assessment.protocol)
+    selected_at, universe_cutoff_at = _validate_selection_identity(assessment.selection)
     _validate_partition_result_identity(assessment.test_result)
     result = assessment.test_result
     selection = assessment.selection
+    if selection.protocol_fingerprint != protocol.fingerprint:
+        raise TradingResearchError("held-out assessment protocol identity changed")
+    if selected_at < protocol.validation.end_at:
+        raise CausalityViolation("held-out assessment selection predates validation completion")
+    if selected_at > protocol.test.start_at:
+        raise CausalityViolation("held-out assessment selection follows held-out test start")
+    if universe_cutoff_at >= protocol.validation.start_at:
+        raise CausalityViolation("held-out assessment universe was not fixed before validation")
     if result.partition is not Partition.TEST:
         raise CausalityViolation("held-out assessment requires the test partition")
     if result.strategy_id != selection.strategy_id:
@@ -379,6 +394,37 @@ def _validate_assessment_identity(assessment: HeldOutAssessment) -> None:
         raise CausalityViolation("held-out assessment universe identity changed")
     if result.universe_cutoff_at != selection.universe_cutoff_at:
         raise CausalityViolation("held-out assessment universe cutoff changed")
+    if result.fit_cutoff_at > protocol.test.start_at:
+        raise CausalityViolation("held-out assessment fit includes test/future data")
+    if result.universe_cutoff_at > protocol.test.start_at:
+        raise CausalityViolation("held-out assessment universe uses future membership information")
+    if result.evaluated_at < protocol.test.end_at:
+        raise CausalityViolation("held-out assessment metric predates test completion")
+
+
+def _validated_protocol(protocol: HeldOutProtocol) -> HeldOutProtocol:
+    if not isinstance(protocol, HeldOutProtocol):
+        raise TradingResearchError("protocol must be HeldOutProtocol evidence")
+    windows = (protocol.train, protocol.validation, protocol.test)
+    if any(not isinstance(window, PartitionWindow) for window in windows):
+        raise TradingResearchError("protocol windows must be PartitionWindow evidence")
+    return HeldOutProtocol(
+        PartitionWindow(
+            protocol.train.partition,
+            protocol.train.start_at,
+            protocol.train.end_at,
+        ),
+        PartitionWindow(
+            protocol.validation.partition,
+            protocol.validation.start_at,
+            protocol.validation.end_at,
+        ),
+        PartitionWindow(
+            protocol.test.partition,
+            protocol.test.start_at,
+            protocol.test.end_at,
+        ),
+    )
 
 
 def _validate_selection_identity(

@@ -171,3 +171,21 @@ def test_promotion_metric_revalidates_assessment_identity_after_corruption() -> 
     object.__setattr__(result, "dataset_semantic_hash", "c" * 64)
     with pytest.raises(TradingResearchError, match="dataset identity changed"):
         assessment.require_promotion_metric()
+
+
+def test_promotion_metric_revalidates_chronology_after_corruption() -> None:
+    p = protocol()
+    selected = select_validation_candidate(
+        p, (score(),), selected_at=p.validation.end_at
+    )
+    result = result_for(selected)
+    assessment = bind_held_out_test(p, selected, result)
+
+    object.__setattr__(selected, "selected_at", p.validation.end_at - timedelta(seconds=1))
+    with pytest.raises(CausalityViolation, match="validation completion"):
+        assessment.require_promotion_metric()
+
+    object.__setattr__(selected, "selected_at", p.validation.end_at)
+    object.__setattr__(result, "evaluated_at", p.test.end_at - timedelta(seconds=1))
+    with pytest.raises(CausalityViolation, match="test completion"):
+        assessment.require_promotion_metric()
