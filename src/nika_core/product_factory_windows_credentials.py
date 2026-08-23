@@ -134,6 +134,36 @@ class WindowsCredentialStore:
                 return False
             return hmac.compare_digest(_fingerprint(existing), fingerprint)
 
+    def retire_authority(
+        self,
+        *,
+        secret_ref: str,
+        generation: int,
+        current_authority_fingerprint: str,
+        retired_authority_fingerprint: str,
+    ) -> None:
+        target = self._authority_target(secret_ref, generation)
+        current = _fingerprint(current_authority_fingerprint)
+        retired = _fingerprint(retired_authority_fingerprint)
+        if hmac.compare_digest(current, retired):
+            raise ProtectedCredentialStoreError(
+                "credential authority retirement requires a state transition"
+            )
+        with self._lock:
+            existing = self._read_password(target)
+            if existing is None:
+                raise ProtectedCredentialStoreError(
+                    "credential authority binding is unavailable for retirement"
+                )
+            existing_fingerprint = _fingerprint(existing)
+            if hmac.compare_digest(existing_fingerprint, retired):
+                return
+            if not hmac.compare_digest(existing_fingerprint, current):
+                raise ProtectedCredentialStoreError(
+                    "credential authority retirement conflicts with protected metadata"
+                )
+            self._set_password(target, retired)
+
     def issue_handle(
         self,
         *,
