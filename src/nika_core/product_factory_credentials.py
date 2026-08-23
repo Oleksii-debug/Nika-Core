@@ -451,7 +451,6 @@ class CredentialBroker:
             if secret.state is CredentialState.REVOKED:
                 self._require_authority(secret)
                 return
-            self._require_authority(secret)
             revoked = SecretRef(
                 secret.secret_ref,
                 secret.project_id,
@@ -462,13 +461,30 @@ class CredentialBroker:
                 secret.generation,
                 CredentialState.REVOKED,
             )
-            self._invalidate_generation(secret)
-            self.store.retire_authority(
+            active_fingerprint = _secret_authority_fingerprint(secret)
+            retired_fingerprint = _secret_authority_fingerprint(revoked)
+            if self.store.authority_matches(
                 secret_ref=secret.secret_ref,
                 generation=secret.generation,
-                current_authority_fingerprint=_secret_authority_fingerprint(secret),
-                retired_authority_fingerprint=_secret_authority_fingerprint(revoked),
-            )
+                authority_fingerprint=active_fingerprint,
+            ):
+                self._invalidate_generation(secret)
+                self.store.retire_authority(
+                    secret_ref=secret.secret_ref,
+                    generation=secret.generation,
+                    current_authority_fingerprint=active_fingerprint,
+                    retired_authority_fingerprint=retired_fingerprint,
+                )
+            elif self.store.authority_matches(
+                secret_ref=secret.secret_ref,
+                generation=secret.generation,
+                authority_fingerprint=retired_fingerprint,
+            ):
+                self._invalidate_generation(secret)
+            else:
+                raise CredentialBrokerError(
+                    "protected store credential authority does not match reference metadata"
+                )
             self._secrets[secret_ref] = revoked
             self._record("revoke", project_id, secret_ref, instant, "reference revoked")
 
