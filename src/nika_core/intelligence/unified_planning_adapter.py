@@ -28,6 +28,16 @@ class UnifiedPlanningAdapter:
         goal: DeterministicGoal,
         actions: tuple[DeterministicAction, ...],
     ) -> DeterministicPlan:
+        if self._goal_satisfied(state, goal):
+            return DeterministicPlan(steps=())
+
+        unreachable_fact = self._obviously_unreachable_fact(state, goal, actions)
+        if unreachable_fact is not None:
+            raise DeterministicPlanningError(
+                f"goal fact is unreachable from registered deterministic actions: {unreachable_fact}",
+                code=DeterministicErrorCode.GOAL_UNREACHABLE,
+            )
+
         try:
             up = self._shortcuts()
         except (ImportError, ModuleNotFoundError) as exc:
@@ -35,9 +45,6 @@ class UnifiedPlanningAdapter:
                 "Unified Planning is not installed; install the 'planning' optional component",
                 code=DeterministicErrorCode.DEPENDENCY_UNAVAILABLE,
             ) from exc
-
-        if self._goal_satisfied(state, goal):
-            return DeterministicPlan(steps=())
 
         all_facts = set(state.facts) | set(goal.required) | set(goal.forbidden)
         for action in actions:
@@ -144,6 +151,29 @@ class UnifiedPlanningAdapter:
             f"deterministic planner failed with status: {status_name}",
             code=DeterministicErrorCode.PLANNER_FAILURE,
         )
+
+    @staticmethod
+    def _obviously_unreachable_fact(
+        state: WorldState,
+        goal: DeterministicGoal,
+        actions: tuple[DeterministicAction, ...],
+    ) -> str | None:
+        addable: set[str] = set()
+        removable: set[str] = set()
+        for action in actions:
+            addable.update(action.adds)
+            removable.update(action.removes)
+
+        missing_required = goal.required - state.facts
+        unreachable_required = sorted(missing_required - addable)
+        if unreachable_required:
+            return unreachable_required[0]
+
+        present_forbidden = goal.forbidden & state.facts
+        unreachable_forbidden = sorted(present_forbidden - removable)
+        if unreachable_forbidden:
+            return unreachable_forbidden[0]
+        return None
 
     @staticmethod
     def _goal_satisfied(state: WorldState, goal: DeterministicGoal) -> bool:
