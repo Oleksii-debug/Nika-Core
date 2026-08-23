@@ -18,6 +18,7 @@ class DeterministicErrorCode(StrEnum):
     REPLAN_LIMIT = "replan_limit"
     ACTION_UNAVAILABLE = "action_unavailable"
     TOOL_EXECUTION_FAILED = "tool_execution_failed"
+    SIDE_EFFECT_JOURNAL_REQUIRED = "side_effect_journal_required"
     SIDE_EFFECT_IDENTITY_CONFLICT = "side_effect_identity_conflict"
     SIDE_EFFECT_RECONCILIATION_REQUIRED = "side_effect_reconciliation_required"
     SIDE_EFFECT_RECORD_FAILED = "side_effect_record_failed"
