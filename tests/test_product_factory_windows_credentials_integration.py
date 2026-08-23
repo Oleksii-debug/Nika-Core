@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -196,3 +197,81 @@ def test_broker_and_windows_store_restart_preserve_reference_not_lease() -> None
     ).generation == 1
     assert RAW_SECRET not in repr(snapshot)
     assert restarted_store.delete_secret("secret-a", 1) is True
+
+
+def test_windows_authority_binding_is_durable_conflict_safe_and_retirable() -> None:
+    backend = FakePersistentWinVault()
+    store = WindowsCredentialStore(backend)
+    store.provision_secret("secret-a", 1, RAW_SECRET)
+    authority = hashlib.sha256(b"project-a-authority").hexdigest()
+    conflicting = hashlib.sha256(b"project-b-authority").hexdigest()
+
+    store.bind_authority(
+        secret_ref="secret-a",
+        generation=1,
+        authority_fingerprint=authority,
+    )
+    restarted = WindowsCredentialStore(backend)
+
+    assert restarted.authority_matches(
+        secret_ref="secret-a",
+        generation=1,
+        authority_fingerprint=authority,
+    )
+    assert not restarted.authority_matches(
+        secret_ref="secret-a",
+        generation=1,
+        authority_fingerprint=conflicting,
+    )
+    with pytest.raises(ProtectedCredentialStoreError, match="authority binding conflicts"):
+        restarted.bind_authority(
+            secret_ref="secret-a",
+            generation=1,
+            authority_fingerprint=conflicting,
+        )
+    with pytest.raises(ProtectedCredentialStoreError, match="cannot be retired"):
+        restarted.delete_authority("secret-a", 1)
+
+    assert restarted.delete_secret("secret-a", 1) is True
+    assert restarted.authority_matches(
+        secret_ref="secret-a",
+        generation=1,
+        authority_fingerprint=authority,
+    )
+    assert restarted.delete_authority("secret-a", 1) is True
+    assert not restarted.authority_matches(
+        secret_ref="secret-a",
+        generation=1,
+        authority_fingerprint=authority,
+    )
+
+
+def test_windows_handle_operation_is_idempotent_and_reconcilable() -> None:
+    backend = FakePersistentWinVault()
+    store = WindowsCredentialStore(backend)
+    store.provision_secret("secret-a", 1, RAW_SECRET)
+    expires_at = NOW + timedelta(minutes=5)
+    request = dict(
+        operation_id="credential-lease-00000001",
+        secret_ref="secret-a",
+        generation=1,
+        project_id=PROJECT,
+        audience="github-api",
+        scopes=frozenset({"repo:read"}),
+        expires_at=expires_at,
+    )
+
+    first = store.issue_handle(**request)
+    second = store.issue_handle(**request)
+    reconciled = store.reconcile_handle(**request)
+
+    assert second == first
+    assert reconciled == first
+    assert len(store._handles) == 1
+    with pytest.raises(ProtectedCredentialStoreError, match="operation identity conflicts"):
+        store.issue_handle(
+            **{**request, "scopes": frozenset({"checks:read"})}
+        )
+
+    store.revoke_handles("secret-a", 1)
+    assert store.reconcile_handle(**request) is None
