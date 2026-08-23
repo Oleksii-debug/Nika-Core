@@ -19,6 +19,7 @@ from nika_core.product_compliance import (
     ProductComplianceDecision,
     ProductComplianceError,
     ProductComplianceGate,
+    ProductComplianceInventory,
 )
 from nika_core.product_project import (
     EvidenceRef,
@@ -61,6 +62,13 @@ def _scope_gate(project_id: str, review_ref: str) -> ProductComplianceGate:
     )
 
 
+def _scope_inventory(project_id: str, review_ref: str) -> ProductComplianceInventory:
+    return ProductComplianceInventory(
+        project_id=project_id,
+        scope_review_ref=review_ref,
+    )
+
+
 def test_caller_constructed_positive_decision_has_no_release_authority() -> None:
     forged = ProductComplianceDecision(
         project_id="project-1",
@@ -74,25 +82,24 @@ def test_caller_constructed_positive_decision_has_no_release_authority() -> None
         ProductComplianceGate().require_release_allowed(forged)
 
 
-def test_gate_issued_positive_decision_has_process_local_authority() -> None:
+def test_gate_issued_positive_decision_requires_exact_current_inventory() -> None:
     review_ref = "review:compliance-scope:project-1"
-    decision = _scope_gate("project-1", review_ref).evaluate(
-        project_id="project-1",
-        scope_review_ref=review_ref,
-    )
+    gate = _scope_gate("project-1", review_ref)
+    inventory = _scope_inventory("project-1", review_ref)
+    decision = gate.evaluate_inventory(inventory)
 
     assert decision.allowed is True
     assert decision.findings == ()
     assert review_ref in decision.evidence_refs
-    ProductComplianceGate().require_release_allowed(decision)
+    assert decision.inventory_digest == inventory.digest
+    gate.require_release_allowed(decision, inventory=inventory)
 
 
 def test_positive_decision_tamper_invalidates_authority() -> None:
     review_ref = "review:compliance-scope:project-1"
-    decision = _scope_gate("project-1", review_ref).evaluate(
-        project_id="project-1",
-        scope_review_ref=review_ref,
-    )
+    gate = _scope_gate("project-1", review_ref)
+    inventory = _scope_inventory("project-1", review_ref)
+    decision = gate.evaluate_inventory(inventory)
     assert decision.allowed is True
 
     project_substitution = replace(decision, project_id="project-2")
@@ -100,13 +107,17 @@ def test_positive_decision_tamper_invalidates_authority() -> None:
         decision,
         evidence_refs=("review:attacker-substitution",),
     )
+    digest_substitution = replace(decision, inventory_digest="a" * 64)
 
     assert project_substitution.allowed is False
     assert evidence_substitution.allowed is False
+    assert digest_substitution.allowed is False
     with pytest.raises(ProductComplianceError, match="decision:untrusted-origin"):
-        ProductComplianceGate().require_release_allowed(project_substitution)
+        gate.require_release_allowed(project_substitution, inventory=inventory)
     with pytest.raises(ProductComplianceError, match="decision:untrusted-origin"):
-        ProductComplianceGate().require_release_allowed(evidence_substitution)
+        gate.require_release_allowed(evidence_substitution, inventory=inventory)
+    with pytest.raises(ProductComplianceError, match="decision:untrusted-origin"):
+        gate.require_release_allowed(digest_substitution, inventory=inventory)
 
 
 def test_missing_compliance_scope_review_blocks_empty_inventory_false_green() -> None:
@@ -137,29 +148,31 @@ def test_opaque_dependency_review_text_is_not_license_authority() -> None:
                 component_id="component-aud05",
                 package_name="example-package",
                 version="1.0.0",
-                source_ref="source:example-package",
+                source_ref="source:example-package:1.0.0",
+                source_integrity_ref="sha256:" + "1" * 64,
                 provenance_ref="provenance:example-package",
                 license_expression="MIT",
                 license_disposition=LicenseDisposition.APPROVED,
                 review_ref="caller:claims-license-review-happened",
             ),
         ),
+        scope_review_ref="caller:claims-scope-review-happened",
     )
 
     assert decision.allowed is False
     assert "license:untrusted-review-authority:component-aud05" in decision.findings
+    assert "compliance-scope:untrusted-review-authority" in decision.findings
 
 
 def test_explicit_trusted_review_can_authorize_empty_compliance_inventory() -> None:
     project_id = "project-no-third-party-components"
     review_ref = "review:compliance-scope:empty-inventory:1"
-    reviewed = _scope_gate(project_id, review_ref).evaluate(
-        project_id=project_id,
-        scope_review_ref=review_ref,
-    )
+    gate = _scope_gate(project_id, review_ref)
+    inventory = _scope_inventory(project_id, review_ref)
+    reviewed = gate.evaluate_inventory(inventory)
 
     assert reviewed.allowed is True
-    ProductComplianceGate().require_release_allowed(reviewed)
+    gate.require_release_allowed(reviewed, inventory=inventory)
 
 
 def test_review_authority_failure_is_fail_closed() -> None:
