@@ -277,6 +277,7 @@ class RepositoryRef:
     default_branch: str
     credential_ref: str | None = None
     case_sensitive_paths: bool = True
+    windows_path_semantics: bool = False
 
     def __post_init__(self) -> None:
         if not all(
@@ -458,7 +459,13 @@ class ProductRepositoryGraph:
                 )
             if not component.paths:
                 raise RepositoryGraphError(f"component {component.component_id} requires owned paths")
-            normalized = [_normalize_repo_path(path) for path in component.paths]
+            normalized = [
+                _normalize_repo_path(
+                    path,
+                    windows_path_semantics=repository.windows_path_semantics,
+                )
+                for path in component.paths
+            ]
             if len(normalized) != len(set(normalized)):
                 raise RepositoryGraphError(f"component {component.component_id} repeats an owned path")
             if len(component.dependencies) != len(set(component.dependencies)):
@@ -478,9 +485,16 @@ class ProductRepositoryGraph:
     def _validate_component_overlap(self) -> None:
         by_repo: dict[str, list[tuple[str, str]]] = {}
         for component in self.components:
+            repository = self._repositories_by_id[component.repository_id]
             for path in component.paths:
                 by_repo.setdefault(component.repository_id, []).append(
-                    (component.component_id, _normalize_repo_path(path))
+                    (
+                        component.component_id,
+                        _normalize_repo_path(
+                            path,
+                            windows_path_semantics=repository.windows_path_semantics,
+                        ),
+                    )
                 )
         for repository_id, entries in by_repo.items():
             repository = self._repositories_by_id[repository_id]
@@ -528,20 +542,64 @@ class ProductRepositoryGraph:
             matching_repos = {component.repository_id for component in matches}
             if len(matching_repos) != 1:
                 raise RepositoryGraphError(f"lease path {path} is ambiguous across repositories")
-            result.append((next(iter(matching_repos)), path))
+            repository_id = next(iter(matching_repos))
+            repository = self._repositories_by_id[repository_id]
+            path = _normalize_repo_path(
+                raw_path,
+                windows_path_semantics=repository.windows_path_semantics,
+            )
+            result.append((repository_id, path))
         if not {repo_id for repo_id, _ in result}.issubset(repos):
             raise RepositoryGraphError("lease path repository mismatch")
         return tuple(result)
 
 
-def _normalize_repo_path(path: str) -> str:
-    candidate = path.replace("\\", "/").strip()
+def _normalize_repo_path(path: str, *, windows_path_semantics: bool = False) -> str:
+    raw_candidate = path.replace("\\", "/")
+    if windows_path_semantics and raw_candidate.endswith((" ", ".")):
+        raise RepositoryGraphError(f"Windows repository path has unsafe trailing identity: {path!r}")
+    candidate = raw_candidate.strip()
     if not candidate or candidate.startswith("/") or ":" in candidate.split("/", 1)[0]:
         raise RepositoryGraphError(f"repository path must be relative: {path!r}")
     normalized = posixpath.normpath(candidate)
     if normalized in {".", ".."} or normalized.startswith("../"):
         raise RepositoryGraphError(f"repository path escapes root: {path!r}")
-    return normalized.rstrip("/")
+    normalized = normalized.rstrip("/")
+    if windows_path_semantics:
+        _validate_windows_repo_path(normalized, original=path)
+    return normalized
+
+
+def _validate_windows_repo_path(path: str, *, original: str) -> None:
+    reserved_stems = {
+        "aux",
+        "con",
+        "nul",
+        "prn",
+        *(f"com{index}" for index in range(1, 10)),
+        *(f"lpt{index}" for index in range(1, 10)),
+        "com¹",
+        "com²",
+        "com³",
+        "lpt¹",
+        "lpt²",
+        "lpt³",
+    }
+    invalid_characters = frozenset('<>:"|?*')
+    for component in path.split("/"):
+        if component.endswith((" ", ".")):
+            raise RepositoryGraphError(
+                f"Windows repository path component has unsafe trailing identity: {original!r}"
+            )
+        if any(character in invalid_characters or ord(character) < 32 for character in component):
+            raise RepositoryGraphError(
+                f"Windows repository path component contains reserved syntax: {original!r}"
+            )
+        stem = component.split(".", 1)[0].casefold()
+        if stem in reserved_stems:
+            raise RepositoryGraphError(
+                f"Windows repository path component uses a reserved device name: {original!r}"
+            )
 
 
 def _path_within(path: str, root: str, case_sensitive: bool) -> bool:

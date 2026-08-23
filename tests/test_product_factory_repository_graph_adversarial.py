@@ -15,7 +15,11 @@ from nika_core.product_factory_orchestration import (
 )
 
 
-def _single_repo_graph(*, case_sensitive: bool = True) -> ProductRepositoryGraph:
+def _single_repo_graph(
+    *,
+    case_sensitive: bool = True,
+    windows_path_semantics: bool = False,
+) -> ProductRepositoryGraph:
     return ProductRepositoryGraph(
         project_id="project:graph-adversarial",
         repositories=(
@@ -25,6 +29,7 @@ def _single_repo_graph(*, case_sensitive: bool = True) -> ProductRepositoryGraph
                 "owner/app",
                 "main",
                 case_sensitive_paths=case_sensitive,
+                windows_path_semantics=windows_path_semantics,
             ),
         ),
         components=(ProductComponent("app", "repo:app", ("src",)),),
@@ -210,3 +215,80 @@ def test_lease_paths_fail_closed_on_escape_or_absolute_identity(unsafe_path: str
 
     with pytest.raises(RepositoryGraphError):
         graph.assess_lease(candidate, ())
+
+
+@pytest.mark.parametrize(
+    "unsafe_path",
+    (
+        "src/api.",
+        "src/api ",
+        "src/bad /child",
+        "src/NUL.txt",
+        "src/COM1.log",
+        "src/file:stream",
+        "src/what?now",
+        "src/control\x01",
+    ),
+)
+def test_windows_repository_rejects_nonportable_component_identity(unsafe_path: str) -> None:
+    repository = RepositoryRef(
+        "repo",
+        "github",
+        "owner/repo",
+        "main",
+        windows_path_semantics=True,
+    )
+
+    with pytest.raises(RepositoryGraphError, match="Windows repository path"):
+        ProductRepositoryGraph(
+            project_id="project:windows-paths",
+            repositories=(repository,),
+            components=(ProductComponent("app", "repo", (unsafe_path,)),),
+        )
+
+
+def test_windows_repository_rejects_ads_lease_under_broad_component_root() -> None:
+    graph = _single_repo_graph(windows_path_semantics=True)
+    candidate = OwnershipLease(
+        "lease:ads",
+        "worker:a",
+        ("app",),
+        ("src/api.py:review",),
+    )
+
+    with pytest.raises(RepositoryGraphError, match="Windows repository path"):
+        graph.assess_lease(candidate, ())
+
+
+def test_windows_repository_accepts_normal_dotted_paths() -> None:
+    graph = _single_repo_graph(
+        case_sensitive=True,
+        windows_path_semantics=True,
+    )
+    candidate = OwnershipLease(
+        "lease:normal",
+        "worker:a",
+        ("app",),
+        ("src/api.v2/client.py",),
+    )
+
+    assessment = graph.assess_lease(candidate, ())
+
+    assert assessment.grantable
+    assert assessment.conflicts == ()
+
+
+def test_non_windows_repository_preserves_existing_posix_path_semantics() -> None:
+    graph = ProductRepositoryGraph(
+        project_id="project:posix-paths",
+        repositories=(RepositoryRef("repo", "github", "owner/repo", "main"),),
+        components=(
+            ProductComponent(
+                "app",
+                "repo",
+                ("src/file:stream", "src/trailing."),
+            ),
+        ),
+    )
+
+    assert graph.dependency_order() == ("app",)
