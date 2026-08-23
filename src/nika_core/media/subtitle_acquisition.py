@@ -132,20 +132,22 @@ class RemoteSubtitleResult:
 
 
 def stable_subtitle_track(track: SubtitleTrack) -> SubtitleTrack:
-    """Return a persistence-safe identity that excludes ephemeral subtitle locators."""
+    """Return minimal persistence-safe authority, excluding ephemeral/cosmetic fields."""
 
+    canonical_source_label = _canonical_source_label(track.kind)
     basis = {
         "kind": track.kind.value,
         "language": _normalize_language(track.language),
         "format": track.format.strip().lower(),
-        "name": track.name.strip(),
-        "source_label": track.source_label.strip(),
-        "is_default": track.is_default,
+        "source_label": canonical_source_label,
     }
     return track.model_copy(
         update={
             "track_id": f"{_STABLE_TRACK_PREFIX}{sha256_json(basis)[:32]}",
+            "name": "",
             "url": None,
+            "is_default": False,
+            "source_label": canonical_source_label,
         }
     )
 
@@ -469,14 +471,10 @@ class YtDlpSubtitleAcquirer:
 
     @staticmethod
     def _validate_expected_track(track: SubtitleTrack) -> SubtitleTrack:
-        if track.url is not None:
-            raise ValueError(
-                "expected_track must be persistence-safe; ephemeral subtitle URL is not replay authority"
-            )
         projected = stable_subtitle_track(track)
-        if projected.track_id != track.track_id:
+        if projected != track:
             raise ValueError(
-                "expected_track.track_id is not bound to its durable subtitle identity fields"
+                "expected_track must be canonical persistence-safe subtitle authority"
             )
         return track
 
@@ -518,6 +516,7 @@ class YtDlpSubtitleAcquirer:
     def _validate_language(value: str) -> None:
         if (
             not value
+            or not value[0].isalnum()
             or len(value) > 40
             or any(character not in _SUBTITLE_LANGUAGE_ALLOWED for character in value)
         ):
@@ -527,6 +526,7 @@ class YtDlpSubtitleAcquirer:
     def _validate_format(value: str) -> None:
         if (
             not value
+            or not value[0].isalnum()
             or len(value) > 40
             or any(character not in _SUBTITLE_FORMAT_ALLOWED for character in value)
         ):
@@ -541,6 +541,14 @@ class YtDlpSubtitleAcquirer:
             "ssa": "text/x-ssa",
             "ttml": "application/ttml+xml",
         }.get(format_name.lower(), "text/plain")
+
+
+def _canonical_source_label(kind: SubtitleKind) -> str:
+    return {
+        SubtitleKind.MANUAL: "subtitles",
+        SubtitleKind.AUTOMATIC: "automatic_captions",
+        SubtitleKind.TRANSLATED: "translated_subtitles",
+    }[kind]
 
 
 def _normalize_language(value: str) -> str:
