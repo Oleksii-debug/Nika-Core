@@ -184,6 +184,7 @@ class ProductFactoryCheckpointHost:
                             "same coordinator revision has different durable state"
                         )
                     return previous_record
+                _validate_checkpoint_transition(previous_record.checkpoint, checkpoint)
             try:
                 conn.execute(
                     """
@@ -541,6 +542,116 @@ def _validate_checkpoint_authority(
         raise ProductFactoryCheckpointIntegrityError(
             "checkpoint state disagrees with canonical host-task trusted plan authority"
         ) from exc
+
+
+def _validate_checkpoint_transition(
+    previous: ProductProjectCoordinatorCheckpoint,
+    current: ProductProjectCoordinatorCheckpoint,
+) -> None:
+    if (
+        previous.project_id != current.project_id
+        or previous.spec_version != current.spec_version
+        or previous.row_version != current.row_version
+    ):
+        raise ProductFactoryCheckpointIntegrityError(
+            "checkpoint ProductProject binding changed inside one host-task lineage"
+        )
+
+    previous_records = {
+        record.request.component_id: record for record in previous.coordinator.records
+    }
+    current_records = {
+        record.request.component_id: record for record in current.coordinator.records
+    }
+    if previous_records.keys() != current_records.keys():
+        raise ProductFactoryCheckpointIntegrityError(
+            "checkpoint component identity changed inside durable lineage"
+        )
+
+    allowed_same_attempt = {
+        WorkState.PLANNED: frozenset({WorkState.PLANNED, WorkState.READY, WorkState.BLOCKED}),
+        WorkState.READY: frozenset({WorkState.READY, WorkState.RUNNING, WorkState.BLOCKED}),
+        WorkState.RUNNING: frozenset(
+            {
+                WorkState.RUNNING,
+                WorkState.REVIEW_REQUIRED,
+                WorkState.REPAIR_REQUIRED,
+                WorkState.BLOCKED,
+            }
+        ),
+        WorkState.REVIEW_REQUIRED: frozenset(
+            {
+                WorkState.REVIEW_REQUIRED,
+                WorkState.ACCEPTED,
+                WorkState.REPAIR_REQUIRED,
+                WorkState.BLOCKED,
+            }
+        ),
+        WorkState.ACCEPTED: frozenset({WorkState.ACCEPTED}),
+        WorkState.REPAIR_REQUIRED: frozenset(
+            {WorkState.REPAIR_REQUIRED, WorkState.BLOCKED}
+        ),
+        WorkState.BLOCKED: frozenset({WorkState.BLOCKED}),
+    }
+
+    for component_id, previous_record in previous_records.items():
+        current_record = current_records[component_id]
+        previous_request = previous_record.request
+        current_request = current_record.request
+        attempt_delta = current_request.attempt - previous_request.attempt
+
+        if attempt_delta == 0:
+            if current_request != previous_request:
+                raise ProductFactoryCheckpointIntegrityError(
+                    "same-attempt work request changed inside durable checkpoint lineage"
+                )
+            if current_record.state not in allowed_same_attempt[previous_record.state]:
+                raise ProductFactoryCheckpointIntegrityError(
+                    "checkpoint work state regressed or bypassed a durable transition"
+                )
+            continue
+
+        if attempt_delta != 1:
+            raise ProductFactoryCheckpointIntegrityError(
+                "checkpoint work attempt skipped or regressed inside durable lineage"
+            )
+        if previous_record.state is not WorkState.REPAIR_REQUIRED:
+            raise ProductFactoryCheckpointIntegrityError(
+                "repair attempt requires a prior durable repair_required checkpoint"
+            )
+        if current_record.state is WorkState.PLANNED:
+            raise ProductFactoryCheckpointIntegrityError(
+                "repair attempt cannot return to planned state"
+            )
+        _validate_repair_request_transition(previous_request, current_request)
+
+
+def _validate_repair_request_transition(
+    previous: ComponentWorkRequest,
+    current: ComponentWorkRequest,
+) -> None:
+    if (
+        current.project_id != previous.project_id
+        or current.component_id != previous.component_id
+        or current.repository_id != previous.repository_id
+        or current.allowed_paths != previous.allowed_paths
+        or current.permission_ceiling != previous.permission_ceiling
+        or current.acceptance_commands != previous.acceptance_commands
+    ):
+        raise ProductFactoryCheckpointIntegrityError(
+            "repair attempt changed immutable work authority"
+        )
+    marker = "\nRepair: "
+    expected_prefix = previous.goal + marker
+    if not current.goal.startswith(expected_prefix):
+        raise ProductFactoryCheckpointIntegrityError(
+            "repair attempt goal is not derived from the prior durable attempt"
+        )
+    reason = current.goal[len(expected_prefix) :]
+    if not reason.strip() or marker in reason:
+        raise ProductFactoryCheckpointIntegrityError(
+            "repair attempt must append exactly one non-empty durable repair reason"
+        )
 
 
 def _validate_fingerprint(value: str) -> None:
