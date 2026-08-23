@@ -51,7 +51,6 @@ def test_planner_action_id_cannot_manufacture_high_impact_approval(tmp_path) -> 
         brain.run(
             run_id="planner-approval-bypass",
             task_id="task-planner-approval-bypass",
-            execution_id="execution-planner-approval-bypass",
             state=WorldState(),
             goal=DeterministicGoal(required=frozenset({"published"})),
             actions=(action,),
