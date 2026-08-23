@@ -595,19 +595,42 @@ class ProductProjectRepository:
                 "WHERE project_id=? ORDER BY spec_version",
                 (project_id,),
             ).fetchall()
-            if not rows and not conn.execute(
-                "SELECT 1 FROM product_projects WHERE project_id=?",
-                (project_id,),
-            ).fetchone():
-                raise KeyError(project_id)
+            if not rows:
+                exists = conn.execute(
+                    "SELECT 1 FROM product_projects WHERE project_id=?",
+                    (project_id,),
+                ).fetchone()
+                if exists is None:
+                    raise KeyError(project_id)
+                raise ProductProjectError("ProductProject specification history is missing")
             revisions: list[ProductSpecRevision] = []
             for row in rows:
                 version = _durable_int(
                     row["spec_version"],
-                    label="ProductProject specification version",
+                    label="ProductProject spec_version",
                     minimum=1,
                 )
-                spec = ProductProjectSpec.from_dict(json.loads(row["spec_json"]))
+                raw_spec = row["spec_json"]
+                if type(raw_spec) is not str:
+                    raise ProductProjectError(
+                        f"invalid ProductProject specification version {version} payload type"
+                    )
+                try:
+                    parsed_spec = json.loads(raw_spec)
+                except json.JSONDecodeError as exc:
+                    raise ProductProjectError(
+                        f"invalid ProductProject specification version {version} JSON"
+                    ) from exc
+                if type(parsed_spec) is not dict:
+                    raise ProductProjectError(
+                        f"invalid ProductProject specification version {version}: expected object"
+                    )
+                try:
+                    spec = ProductProjectSpec.from_dict(parsed_spec)
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ProductProjectError(
+                        f"invalid ProductProject specification version {version}"
+                    ) from exc
                 parent = spec.supersedes_spec_version
                 reason = spec.revision_reason
                 if version > 1 and parent is None:
@@ -715,19 +738,19 @@ class ProductProjectRepository:
             )
         raw_spec = spec_row["spec_json"]
         if type(raw_spec) is not str:
-            raise ProductProjectError("invalid durable ProductProject specification payload type")
+            raise ProductProjectError("invalid current ProductProject specification payload type")
         try:
             parsed_spec = json.loads(raw_spec)
         except json.JSONDecodeError as exc:
-            raise ProductProjectError("invalid durable ProductProject specification JSON") from exc
+            raise ProductProjectError("invalid current ProductProject specification JSON") from exc
         if type(parsed_spec) is not dict:
             raise ProductProjectError(
-                "invalid durable ProductProject specification: expected object"
+                "invalid current ProductProject specification: expected object"
             )
         try:
             spec = ProductProjectSpec.from_dict(parsed_spec)
         except (KeyError, TypeError, ValueError) as exc:
-            raise ProductProjectError("invalid durable ProductProject specification") from exc
+            raise ProductProjectError("invalid current ProductProject specification") from exc
         return ProductProject(
             row["project_id"],
             row["name"],
