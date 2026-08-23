@@ -247,6 +247,27 @@ def _prepare_process_environment(
     return sterile_process_environment(source, temp_root=temp_root)
 
 
+def _process_isolation_class() -> toolsmith_contracts.IsolationClass:
+    return (
+        toolsmith_contracts.IsolationClass.PROCESS_CONTAINED
+        if os.name == "nt"
+        else toolsmith_contracts.IsolationClass.POLICY_ONLY
+    )
+
+
+def _cancelled_before_launch(typed_argv: tuple[str, ...]) -> ProcessExecutionResult:
+    return ProcessExecutionResult(
+        argv=typed_argv,
+        returncode=1,
+        stdout="",
+        stderr="",
+        timed_out=False,
+        cancelled=True,
+        output_limit_exceeded=False,
+        isolation_class=_process_isolation_class(),
+    )
+
+
 def run_typed_process(
     argv: collections.abc.Sequence[str],
     *,
@@ -268,10 +289,14 @@ def run_typed_process(
         cwd.relative_to(workspace_root)
     except ValueError as exc:
         raise ProcessExecutionError("process cwd escapes declared workspace root") from exc
+    if cancellation_event is not None and cancellation_event.is_set():
+        return _cancelled_before_launch(typed_argv)
     process_environment = _prepare_process_environment(
         source=environment,
         workspace_root=workspace_root,
     )
+    if cancellation_event is not None and cancellation_event.is_set():
+        return _cancelled_before_launch(typed_argv)
 
     limit = resource_budget.max_output_bytes
     output = {"stdout": bytearray(), "stderr": bytearray()}
@@ -361,11 +386,6 @@ def run_typed_process(
         # Never report an orchestrator-forced termination as process success.
         returncode = 1
 
-    isolation_class = (
-        toolsmith_contracts.IsolationClass.PROCESS_CONTAINED
-        if os.name == "nt"
-        else toolsmith_contracts.IsolationClass.POLICY_ONLY
-    )
     return ProcessExecutionResult(
         argv=typed_argv,
         returncode=returncode,
@@ -374,7 +394,7 @@ def run_typed_process(
         timed_out=timed_out,
         cancelled=cancelled,
         output_limit_exceeded=overflow.is_set(),
-        isolation_class=isolation_class,
+        isolation_class=_process_isolation_class(),
     )
 
 
