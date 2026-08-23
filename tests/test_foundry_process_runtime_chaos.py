@@ -7,7 +7,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from nika_core.model_gateway.contracts import ModelMessage, ModelRequest, PrivacyClass
+from nika_core.model_gateway.contracts import (
+    ModelMessage,
+    ModelRequest,
+    PrivacyClass,
+)
 from nika_core.model_gateway.foundry_local import FoundryLocalProvider
 
 
