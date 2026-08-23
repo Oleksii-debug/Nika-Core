@@ -6,6 +6,7 @@ import json
 import secrets
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Protocol
 
 
 _DECISION_AUTHORITY_KEY = secrets.token_bytes(32)
@@ -19,6 +20,18 @@ class LicenseDisposition(StrEnum):
     APPROVED = "approved"
     REVIEW_REQUIRED = "review_required"
     BLOCKED = "blocked"
+
+
+class ComplianceReviewAuthorityPort(Protocol):
+    """Trusted resolver for PF10 review/legal/permission evidence references."""
+
+    def verify(
+        self,
+        *,
+        project_id: str,
+        evidence_ref: str,
+        purpose: str,
+    ) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,12 +122,7 @@ class CompetitorResearchEvidence:
 
 @dataclass(frozen=True, slots=True)
 class ProductComplianceDecision:
-    """PF10 decision result whose positive authority is issued only by this process's gate.
-
-    The proof prevents an ordinary caller from turning an arbitrary dataclass into an allowed
-    release decision. It is deliberately process-local and is not a signature or durable trust
-    anchor. A decision that is copied or modified loses positive authority and reads as blocked.
-    """
+    """PF10 result whose positive authority is issued only by this process's gate."""
 
     project_id: str
     allowed: bool
@@ -146,13 +154,14 @@ class ProductComplianceDecision:
 
 
 class ProductComplianceGate:
-    """PF10 fail-closed adoption/release policy over recorded evidence.
+    """PF10 fail-closed adoption/release policy over authority-resolved evidence."""
 
-    This gate does not invent legal conclusions. License disposition and proprietary reuse
-    authorization must already come from an authorized review/policy process. A product with no
-    other review-bearing evidence needs an explicit scope_review_ref to prove that an empty
-    compliance inventory was reviewed rather than silently omitted.
-    """
+    def __init__(
+        self,
+        *,
+        review_authority: ComplianceReviewAuthorityPort | None = None,
+    ) -> None:
+        self._review_authority = review_authority
 
     def evaluate(
         self,
@@ -172,12 +181,19 @@ class ProductComplianceGate:
 
         findings: list[str] = []
         evidence_refs: list[str] = []
-        scope_review_refs: set[str] = set()
+        trusted_scope_refs: set[str] = set()
         component_ids: set[str] = set()
 
         if scope_review_ref is not None:
             evidence_refs.append(scope_review_ref)
-            scope_review_refs.add(scope_review_ref)
+            if self._review_allowed(
+                project_id=project_id,
+                evidence_ref=scope_review_ref,
+                purpose="compliance-scope",
+            ):
+                trusted_scope_refs.add(scope_review_ref)
+            else:
+                findings.append("compliance-scope:untrusted-review-authority")
 
         obligations: dict[tuple[str, str], DistributionObligationEvidence] = {}
         for item in obligation_evidence:
@@ -205,13 +221,25 @@ class ProductComplianceGate:
             evidence_refs.extend((dependency.source_ref, dependency.provenance_ref))
             if dependency.review_ref:
                 evidence_refs.append(dependency.review_ref)
-                scope_review_refs.add(dependency.review_ref)
             evidence_refs.extend(dependency.notice_refs)
 
             if dependency.license_disposition is LicenseDisposition.BLOCKED:
                 findings.append(f"license:blocked:{dependency.component_id}")
             elif dependency.license_disposition is LicenseDisposition.REVIEW_REQUIRED:
                 findings.append(f"license:review-required:{dependency.component_id}")
+            elif dependency.review_ref is not None:
+                purpose = f"license-disposition:{dependency.component_id}"
+                if self._review_allowed(
+                    project_id=project_id,
+                    evidence_ref=dependency.review_ref,
+                    purpose=purpose,
+                ):
+                    trusted_scope_refs.add(dependency.review_ref)
+                else:
+                    findings.append(
+                        f"license:untrusted-review-authority:{dependency.component_id}"
+                    )
+
             for obligation in dependency.distribution_obligations:
                 if (dependency.component_id, obligation) not in obligations:
                     findings.append(
@@ -237,23 +265,56 @@ class ProductComplianceGate:
                 continue
             evidence_ids.add(evidence.evidence_id)
             evidence_refs.extend((evidence.source_ref, evidence.provenance_ref))
+
             if evidence.permission_basis_ref:
                 evidence_refs.append(evidence.permission_basis_ref)
-                scope_review_refs.add(evidence.permission_basis_ref)
             if evidence.legal_basis_ref:
                 evidence_refs.append(evidence.legal_basis_ref)
-                scope_review_refs.add(evidence.legal_basis_ref)
             if evidence.reuse_authorization_ref:
                 evidence_refs.append(evidence.reuse_authorization_ref)
-                scope_review_refs.add(evidence.reuse_authorization_ref)
 
             if evidence.proprietary_material:
                 if not evidence.legal_basis_ref or not evidence.reuse_authorization_ref:
                     findings.append(f"proprietary-reuse:not-authorized:{evidence.evidence_id}")
-            elif not evidence.permitted_public_evidence:
+                else:
+                    legal_ok = self._review_allowed(
+                        project_id=project_id,
+                        evidence_ref=evidence.legal_basis_ref,
+                        purpose=f"proprietary-legal-basis:{evidence.evidence_id}",
+                    )
+                    reuse_ok = self._review_allowed(
+                        project_id=project_id,
+                        evidence_ref=evidence.reuse_authorization_ref,
+                        purpose=f"proprietary-reuse-authorization:{evidence.evidence_id}",
+                    )
+                    if legal_ok and reuse_ok:
+                        trusted_scope_refs.update(
+                            (evidence.legal_basis_ref, evidence.reuse_authorization_ref)
+                        )
+                    else:
+                        findings.append(
+                            f"proprietary-reuse:untrusted-authority:{evidence.evidence_id}"
+                        )
+            elif evidence.permitted_public_evidence:
+                permission_ref = evidence.permission_basis_ref
+                if permission_ref is None:
+                    findings.append(
+                        f"research-source:untrusted-permission-authority:{evidence.evidence_id}"
+                    )
+                elif self._review_allowed(
+                    project_id=project_id,
+                    evidence_ref=permission_ref,
+                    purpose=f"public-source-permission:{evidence.evidence_id}",
+                ):
+                    trusted_scope_refs.add(permission_ref)
+                else:
+                    findings.append(
+                        f"research-source:untrusted-permission-authority:{evidence.evidence_id}"
+                    )
+            else:
                 findings.append(f"research-source:not-permitted:{evidence.evidence_id}")
 
-        if not scope_review_refs:
+        if not trusted_scope_refs:
             findings.append("compliance-scope:unreviewed")
 
         normalized_findings = tuple(dict.fromkeys(findings))
@@ -275,6 +336,26 @@ class ProductComplianceGate:
                 findings = (*findings, "decision:untrusted-origin")
             joined = ", ".join(dict.fromkeys(findings))
             raise ProductComplianceError(f"release blocked by PF10 compliance gate: {joined}")
+
+    def _review_allowed(
+        self,
+        *,
+        project_id: str,
+        evidence_ref: str,
+        purpose: str,
+    ) -> bool:
+        authority = self._review_authority
+        if authority is None:
+            return False
+        try:
+            result = authority.verify(
+                project_id=project_id,
+                evidence_ref=evidence_ref,
+                purpose=purpose,
+            )
+        except (LookupError, PermissionError, RuntimeError, TypeError, ValueError):
+            return False
+        return result is True
 
 
 def _issue_decision(
