@@ -24,10 +24,11 @@ from nika_core.media.contracts import (
     Transcript,
     TranscriptMethod,
 )
-from nika_core.media.handoff import (
+from nika_core.media.handoff_v2 import (
     build_corpus_media_handoff_v2,
     dump_corpus_media_handoff_v2,
     load_corpus_media_handoff_v2,
+    require_corpus_media_handoff_v2_matches_artifact,
 )
 
 _SHA_A = "a" * 64
@@ -294,7 +295,7 @@ def test_v2_checkpoint_rejects_wrong_schema_version() -> None:
         load_corpus_media_handoff_v2(json.dumps(payload))
 
 
-def test_v2_checkpoint_rejects_ocr_model_engine_tamper_even_with_recomputed_shape() -> None:
+def test_v2_checkpoint_rejects_ocr_model_engine_tamper() -> None:
     payload = json.loads(dump_corpus_media_handoff_v2(build_corpus_media_handoff_v2(_artifact())))
     assert payload["ocr"] is not None
     payload["ocr"]["engine_id"] = "z-engine"
@@ -337,3 +338,19 @@ def test_v2_canonical_identity_order_is_stable() -> None:
     assert second.models == first.models
     assert second.artifact_provenance_sha256 == first.artifact_provenance_sha256
     assert second.handoff_sha256 == first.handoff_sha256
+
+
+def test_trusted_artifact_match_rejects_recomputed_but_foreign_valid_handoff() -> None:
+    trusted_artifact = _artifact()
+    trusted_handoff = build_corpus_media_handoff_v2(trusted_artifact)
+    require_corpus_media_handoff_v2_matches_artifact(trusted_handoff, trusted_artifact)
+
+    foreign_source = trusted_artifact.source.model_copy(update={"source_id": "source-foreign"})
+    foreign_version = trusted_artifact.version.model_copy(update={"source_id": "source-foreign"})
+    foreign_artifact = trusted_artifact.model_copy(
+        update={"source": foreign_source, "version": foreign_version}
+    )
+    foreign_handoff = build_corpus_media_handoff_v2(foreign_artifact)
+
+    with pytest.raises(ValueError, match="trusted artifact"):
+        require_corpus_media_handoff_v2_matches_artifact(foreign_handoff, trusted_artifact)
