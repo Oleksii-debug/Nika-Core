@@ -24,8 +24,10 @@ COMMUNICATION_MIGRATIONS = {
             "payload_json TEXT NOT NULL, "
             "updated_at TEXT NOT NULL)"
         ),
-        "CREATE INDEX IF NOT EXISTS idx_business_communications_objective "
-        "ON business_communications(objective_id)",
+        (
+            "CREATE INDEX IF NOT EXISTS idx_business_communications_objective "
+            "ON business_communications(objective_id)"
+        ),
     ),
 }
 
