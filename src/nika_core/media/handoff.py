@@ -118,10 +118,24 @@ def validate_artifact_for_handoff(artifact: StructuredMediaArtifact) -> None:
     if artifact.ocr_document is not None and artifact.ocr_document.version_id != artifact.version_id:
         raise ValueError("OCR document must belong to the artifact version")
 
-    engine_ids = {engine.engine_id for engine in artifact.engines}
-    model_by_id = {model.model_id: model for model in artifact.models}
+    engine_by_id = {}
+    for engine in artifact.engines:
+        if engine.engine_id in engine_by_id:
+            raise ValueError(f"duplicate media engine identity: {engine.engine_id}")
+        engine_by_id[engine.engine_id] = engine
+
+    model_by_id = {}
+    for model in artifact.models:
+        if model.model_id in model_by_id:
+            raise ValueError(f"duplicate media model identity: {model.model_id}")
+        if model.engine_id not in engine_by_id:
+            raise ValueError(
+                f"media model {model.model_id} references an engine missing from artifact evidence"
+            )
+        model_by_id[model.model_id] = model
+
     if artifact.ocr_document is not None:
-        if artifact.ocr_document.engine_id not in engine_ids:
+        if artifact.ocr_document.engine_id not in engine_by_id:
             raise ValueError("OCR document references an engine missing from artifact evidence")
         if artifact.ocr_document.model_id is not None:
             model = model_by_id.get(artifact.ocr_document.model_id)
