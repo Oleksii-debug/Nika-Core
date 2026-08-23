@@ -281,6 +281,8 @@ class OllamaProvider:
         try:
             if not isinstance(body, dict):
                 raise TypeError("response body must be an object")
+            if body.get("done") is not True:
+                raise ValueError("non-streaming Ollama response must be complete")
             raw_message = body["message"]
             if not isinstance(raw_message, dict):
                 raise TypeError("message must be an object")
@@ -343,8 +345,8 @@ def _normalize_ollama_think(value: bool | str) -> bool | str:
     if not isinstance(value, str):
         raise TypeError("think must be a boolean or an Ollama thinking level")
     level = value.strip().lower()
-    if level not in {"low", "medium", "high"}:
-        raise ValueError("think level must be one of: low, medium, high")
+    if level not in {"low", "medium", "high", "max"}:
+        raise ValueError("think level must be one of: low, medium, high, max")
     return level
 
 
