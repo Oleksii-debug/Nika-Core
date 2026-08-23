@@ -27,9 +27,9 @@ class BusinessAuthorizationIntent:
         _text(self.purpose, "business authorization purpose")
         _text(self.subject_id, "business authorization subject_id")
         if not isinstance(self.use, BusinessAuthorizationUse):
-            raise ValueError("business authorization use is invalid")
+            raise TypeError("business authorization use is invalid")
         if not isinstance(self.bindings, tuple):
-            raise ValueError("business authorization bindings must be a tuple")
+            raise TypeError("business authorization bindings must be a tuple")
         normalized: list[tuple[str, str]] = []
         names: set[str] = set()
         for item in self.bindings:
