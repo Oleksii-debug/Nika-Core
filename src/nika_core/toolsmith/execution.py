@@ -161,6 +161,59 @@ def _terminate_process_tree(process: subprocess.Popen[bytes], job: _WindowsJob) 
     process.kill()
 
 
+def _resolution_chain_key(path: pathlib.Path) -> str:
+    value = os.path.abspath(os.fspath(path))
+    return value.casefold() if os.name == "nt" else value
+
+
+def _resolve_pinned_executable(
+    executable: pathlib.Path,
+    arguments: tuple[str, ...],
+) -> pathlib.Path:
+    """Resolve an allowlisted executable without losing shell-policy evidence.
+
+    Every named symlink hop is policy-checked before dereferencing it. The caller then
+    launches only the final canonical path, so changing an allowlisted alias after
+    resolution cannot redirect the Popen call through that alias.
+    """
+
+    current = executable
+    seen: set[str] = set()
+    for _ in range(64):
+        key = _resolution_chain_key(current)
+        if key in seen:
+            raise ProcessExecutionError("pinned runtime executable symlink chain contains a loop")
+        seen.add(key)
+
+        # Reuse the same generic-shell rule for every named hop. In particular, an
+        # allowlisted alias -> /bin/sh must fail before /bin/sh is dereferenced again.
+        validate_typed_argv((str(current), *arguments), (str(current),))
+        try:
+            current.lstat()
+        except OSError as exc:
+            raise ProcessExecutionError("pinned runtime executable does not exist") from exc
+        if not current.is_symlink():
+            break
+        try:
+            target = pathlib.Path(os.readlink(current))
+        except OSError as exc:
+            raise ProcessExecutionError("unable to inspect pinned executable symlink") from exc
+        current = target if target.is_absolute() else current.parent / target
+    else:
+        raise ProcessExecutionError("pinned runtime executable symlink chain is too deep")
+
+    try:
+        resolved = current.resolve(strict=True)
+    except OSError as exc:
+        raise ProcessExecutionError("pinned runtime executable does not exist") from exc
+    # Re-apply shell policy to the final canonical identity as well. This also covers
+    # non-symlink reparse/junction resolution where pathlib returns a different target.
+    validate_typed_argv((str(resolved), *arguments), (str(resolved),))
+    if not resolved.is_file():
+        raise ProcessExecutionError("pinned runtime executable must be a regular file")
+    return resolved
+
+
 def _pinned_runtime_argv(
     argv: collections.abc.Sequence[str],
     allowed_executables: collections.abc.Iterable[str],
@@ -171,12 +224,7 @@ def _pinned_runtime_argv(
         raise ProcessExecutionError(
             "runtime executable must be an absolute pinned path; PATH/CWD search is forbidden"
         )
-    try:
-        resolved = executable.resolve(strict=True)
-    except OSError as exc:
-        raise ProcessExecutionError("pinned runtime executable does not exist") from exc
-    if not resolved.is_file():
-        raise ProcessExecutionError("pinned runtime executable must be a regular file")
+    resolved = _resolve_pinned_executable(executable, typed[1:])
     return (str(resolved), *typed[1:])
 
 
