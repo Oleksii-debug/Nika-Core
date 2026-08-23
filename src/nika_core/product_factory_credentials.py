@@ -182,7 +182,7 @@ class ProtectedSecretStorePort(Protocol):
 
 @dataclass(slots=True)
 class CredentialBroker:
-    store: ProtectedSecretStorePort
+    store: ProtectedSecretStorePort = field(repr=False)
     _secrets: dict[str, SecretRef] = field(default_factory=dict, init=False, repr=False)
     _identities: dict[str, IdentityRef] = field(default_factory=dict, init=False, repr=False)
     _leases: dict[str, CredentialLease] = field(default_factory=dict, init=False, repr=False)
