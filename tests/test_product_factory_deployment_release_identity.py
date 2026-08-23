@@ -11,6 +11,7 @@ from nika_core.product_factory_deployment import (
     DeploymentFabricSnapshot,
     DeploymentIntent,
     DeploymentProviderPort,
+    DeploymentState,
     EnvironmentIdentity,
     EnvironmentTier,
     HealthEvidence,
@@ -29,16 +30,33 @@ NOW = datetime(2026, 8, 23, 14, 0, tzinfo=UTC)
 @dataclass
 class _Provider(DeploymentProviderPort):
     deploy_calls: int = 0
+    health_calls: int = 0
+    rollback_calls: int = 0
+    deploy_uncertain: bool = False
+    health_error: bool = False
+    healthy: bool = True
+    rollback_error: bool = False
+    rollback_succeeds: bool = True
+    inspection: ProviderInspection | None = None
 
     def deploy(self, intent: DeploymentIntent) -> ProviderDeploymentResult:
         self.deploy_calls += 1
+        if self.deploy_uncertain:
+            return ProviderDeploymentResult(
+                False,
+                True,
+                ("deploy://uncertain",),
+            )
         return ProviderDeploymentResult(True, False, ("deploy://ok",))
 
     def health(self, intent: DeploymentIntent) -> HealthEvidence:
+        self.health_calls += 1
+        if self.health_error:
+            raise RuntimeError("health transport unavailable")
         return HealthEvidence(
             intent.environment.environment_id,
             intent.release.source_sha,
-            True,
+            self.healthy,
             ("health://ok",),
             NOW,
         )
@@ -48,16 +66,25 @@ class _Provider(DeploymentProviderPort):
         intent: DeploymentIntent,
         previous_release_sha: str | None,
     ) -> RollbackEvidence:
+        self.rollback_calls += 1
+        if self.rollback_error:
+            raise RuntimeError("rollback transport unavailable")
         return RollbackEvidence(
             intent.environment.environment_id,
             intent.release.source_sha,
-            previous_release_sha,
-            True,
-            ("rollback://ok",),
+            previous_release_sha if self.rollback_succeeds else None,
+            self.rollback_succeeds,
+            ("rollback://result",),
         )
 
     def inspect(self, intent: DeploymentIntent) -> ProviderInspection:
-        return ProviderInspection(intent.release.source_sha, True, ("inspect://ok",))
+        if self.inspection is not None:
+            return self.inspection
+        return ProviderInspection(
+            intent.release.source_sha,
+            True,
+            ("inspect://ok",),
+        )
 
 
 def _intent(
@@ -187,3 +214,144 @@ def test_exact_staging_snapshot_requires_backing_healthy_record() -> None:
     restarted = DeploymentFabric(provider)
     with pytest.raises(DeploymentFabricError, match="not backed by a healthy staging record"):
         restarted.restore(corrupted)
+
+
+def test_health_failure_after_applied_effect_is_durable_and_idempotent() -> None:
+    provider = _Provider(health_error=True)
+    fabric = DeploymentFabric(provider)
+    intent = _intent(EnvironmentTier.STAGING, "stage-uncertain")
+
+    uncertain = fabric.deploy(intent)
+    assert uncertain.state is DeploymentState.UNCERTAIN
+    assert provider.deploy_calls == 1
+    assert provider.health_calls == 1
+    assert fabric.snapshot().healthy_staging == ()
+
+    duplicate = fabric.deploy(intent)
+    assert duplicate == uncertain
+    assert provider.deploy_calls == 1
+
+    restarted = DeploymentFabric(provider)
+    restarted.restore(fabric.snapshot())
+    after_restart = restarted.deploy(intent)
+    assert after_restart.state is DeploymentState.UNCERTAIN
+    assert provider.deploy_calls == 1
+
+
+def test_unresolved_staging_effect_invalidates_authority_and_blocks_new_work() -> None:
+    provider = _Provider()
+    fabric = DeploymentFabric(provider)
+    release_a = _intent(EnvironmentTier.STAGING, "stage-a")
+    fabric.deploy(release_a)
+    assert fabric.snapshot().healthy_staging
+
+    provider.deploy_uncertain = True
+    release_b = _intent(
+        EnvironmentTier.STAGING,
+        "stage-b",
+        version="2.0.0",
+        digest=DIGEST_B,
+    )
+    uncertain = fabric.deploy(release_b)
+    assert uncertain.state is DeploymentState.UNCERTAIN
+    assert fabric.snapshot().healthy_staging == ()
+    assert provider.deploy_calls == 2
+
+    with pytest.raises(DeploymentFabricError, match="exact release"):
+        fabric.deploy(_intent(EnvironmentTier.PRODUCTION, "prod-a"))
+    assert provider.deploy_calls == 2
+
+    with pytest.raises(DeploymentFabricError, match="unresolved deployment effect"):
+        fabric.deploy(
+            _intent(
+                EnvironmentTier.STAGING,
+                "stage-c",
+                version="3.0.0",
+            )
+        )
+    assert provider.deploy_calls == 2
+
+
+def test_restore_rejects_stale_authority_over_unresolved_staging_effect() -> None:
+    provider = _Provider()
+    fabric = DeploymentFabric(provider)
+    fabric.deploy(_intent(EnvironmentTier.STAGING, "stage-a"))
+    provider.deploy_uncertain = True
+    fabric.deploy(
+        _intent(
+            EnvironmentTier.STAGING,
+            "stage-b",
+            version="2.0.0",
+            digest=DIGEST_B,
+        )
+    )
+    snapshot = fabric.snapshot()
+    corrupted = replace(
+        snapshot,
+        healthy_staging=(("project-1", "1.0.0", SHA_A, DIGEST_A),),
+    )
+
+    restarted = DeploymentFabric(provider)
+    with pytest.raises(
+        DeploymentFabricError,
+        match="conflicts with unresolved staging effect",
+    ):
+        restarted.restore(corrupted)
+
+
+def test_failed_rollback_stays_uncertain_and_blocks_redeployment() -> None:
+    provider = _Provider()
+    fabric = DeploymentFabric(provider)
+    fabric.deploy(_intent(EnvironmentTier.STAGING, "stage-a"))
+
+    provider.healthy = False
+    provider.rollback_succeeds = False
+    failed = fabric.deploy(
+        _intent(
+            EnvironmentTier.STAGING,
+            "stage-b",
+            version="2.0.0",
+            digest=DIGEST_B,
+        )
+    )
+    assert failed.state is DeploymentState.UNCERTAIN
+    assert provider.rollback_calls == 1
+    assert fabric.snapshot().healthy_staging == ()
+
+    with pytest.raises(DeploymentFabricError, match="unresolved deployment effect"):
+        fabric.deploy(
+            _intent(
+                EnvironmentTier.STAGING,
+                "stage-c",
+                version="3.0.0",
+            )
+        )
+
+
+def test_missing_release_reconciliation_clears_uncertainty_for_next_intent() -> None:
+    provider = _Provider(health_error=True)
+    fabric = DeploymentFabric(provider)
+    uncertain = fabric.deploy(
+        _intent(EnvironmentTier.STAGING, "stage-uncertain")
+    )
+    assert uncertain.state is DeploymentState.UNCERTAIN
+
+    provider.inspection = ProviderInspection(
+        None,
+        None,
+        ("inspect://missing",),
+    )
+    resolved = fabric.reconcile("stage-uncertain")
+    assert resolved.state is DeploymentState.REJECTED
+
+    provider.health_error = False
+    provider.inspection = None
+    healthy = fabric.deploy(
+        _intent(
+            EnvironmentTier.STAGING,
+            "stage-next",
+            version="2.0.0",
+            digest=DIGEST_B,
+        )
+    )
+    assert healthy.state is DeploymentState.HEALTHY
