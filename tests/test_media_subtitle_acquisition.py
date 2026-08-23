@@ -157,13 +157,26 @@ def initial_and_fresh(
     return initial, fresh, stable
 
 
-def test_stable_track_identity_ignores_ephemeral_url_and_discovery_ordinal_id() -> None:
+def test_stable_track_identity_ignores_ephemeral_and_cosmetic_discovery_fields() -> None:
     _initial, fresh, expected = initial_and_fresh()
-    rediscovered = stable_subtitle_tracks(fresh)[0]
+    cosmetic = fresh.subtitles[0].model_copy(
+        update={
+            "track_id": "another-ephemeral-id",
+            "name": "Renamed upstream display label",
+            "is_default": True,
+            "url": "https://cdn.example.test/caption.vtt?sig=third-secret",
+        }
+    )
+    rediscovered = stable_subtitle_tracks(discovery_for(cosmetic))[0]
     assert expected.track_id.startswith("subtitle-track-stable:")
     assert rediscovered.track_id == expected.track_id
     assert expected.url is None
     assert rediscovered.url is None
+    assert expected.name == ""
+    assert rediscovered.name == ""
+    assert expected.is_default is False
+    assert rediscovered.is_default is False
+    assert expected.source_label == "subtitles"
     assert "secret" not in expected.model_dump_json()
     assert stable_subtitle_track(expected) == expected
 
@@ -174,12 +187,16 @@ def test_ambiguous_durable_track_identity_fails_closed() -> None:
         language="uk",
         kind=SubtitleKind.MANUAL,
         format="vtt",
-        name="same",
+        name="first name",
         source_label="subtitles",
         url="https://cdn.example.test/a",
     )
     second = first.model_copy(
-        update={"track_id": "second", "url": "https://cdn.example.test/b"}
+        update={
+            "track_id": "second",
+            "name": "second name",
+            "url": "https://cdn.example.test/b",
+        }
     )
     with pytest.raises(MediaError) as caught:
         stable_subtitle_tracks(discovery_for(first, subtitles=(first, second)))
@@ -211,6 +228,37 @@ def test_ambiguous_cli_materialization_selector_fails_before_download(tmp_path: 
             output_root=tmp_path,
         )
     assert caught.value.code == MediaErrorCode.INVALID_METADATA
+    assert runner.calls == []
+
+
+def test_option_like_language_and_format_fail_before_subprocess(tmp_path: Path) -> None:
+    base = SubtitleTrack(
+        track_id="raw",
+        language="--exec",
+        kind=SubtitleKind.MANUAL,
+        format="vtt",
+        source_label="subtitles",
+    )
+    bad_language_discovery = discovery_for(base)
+    runner = SubtitleWritingRunner()
+    with pytest.raises(ValueError, match="language"):
+        YtDlpSubtitleAcquirer(runner, StaticDiscovery(bad_language_discovery)).acquire_subtitle(
+            bad_language_discovery.source.locator,
+            expected_version=bad_language_discovery.version,
+            expected_track=stable_subtitle_track(base),
+            output_root=tmp_path,
+        )
+    assert runner.calls == []
+
+    bad_format = base.model_copy(update={"language": "uk", "format": "--exec"})
+    bad_format_discovery = discovery_for(bad_format)
+    with pytest.raises(ValueError, match="format"):
+        YtDlpSubtitleAcquirer(runner, StaticDiscovery(bad_format_discovery)).acquire_subtitle(
+            bad_format_discovery.source.locator,
+            expected_version=bad_format_discovery.version,
+            expected_track=stable_subtitle_track(bad_format),
+            output_root=tmp_path,
+        )
     assert runner.calls == []
 
 
