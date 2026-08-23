@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import re
 from pathlib import Path
+import re
 
 
 SCRIPT = Path("scripts/m5_uia_proof.ps1")
