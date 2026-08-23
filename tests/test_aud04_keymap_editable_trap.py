@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -9,9 +10,24 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.action_registry import ActionDefinition, ActionRegistry, Keymap
 
 APP_JS = Path("src/nika_core/ui/web/app.js")
+EDITING_SENSITIVE_BINDINGS = (
+    "a",
+    "backspace",
+    "delete",
+    "arrowleft",
+    "arrowright",
+    "home",
+    "end",
+    "ctrl+backspace",
+    "ctrl+delete",
+    "ctrl+arrowleft",
+    "ctrl+arrowright",
+    "shift+arrowleft",
+    "shift+arrowright",
+)
 
 
-def _plain_binding_is_rejected(tmp_path: Path, binding: str) -> bool:
+def _keymap(tmp_path: Path) -> Keymap:
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
     actions = ActionRegistry()
@@ -23,7 +39,11 @@ def _plain_binding_is_rejected(tmp_path: Path, binding: str) -> bool:
             default_binding="ctrl+shift+f12",
         )
     )
-    keymap = Keymap(store, actions)
+    return Keymap(store, actions)
+
+
+def _set_binding_is_rejected(tmp_path: Path, binding: str) -> bool:
+    keymap = _keymap(tmp_path)
     try:
         keymap.set_binding("audit.probe", binding)
     except ValueError:
@@ -31,31 +51,49 @@ def _plain_binding_is_rejected(tmp_path: Path, binding: str) -> bool:
     return False
 
 
-def _editable_unmodified_keys_are_guarded() -> bool:
+def _import_binding_is_rejected(tmp_path: Path, binding: str) -> bool:
+    keymap = _keymap(tmp_path)
+    payload = json.dumps(
+        {
+            "format_version": keymap.FORMAT_VERSION,
+            "bindings": {"audit.probe": binding},
+        }
+    )
+    try:
+        keymap.import_json(payload)
+    except ValueError:
+        return True
+    return False
+
+
+def _editable_controls_are_excluded_from_global_dispatch() -> bool:
     source = APP_JS.read_text(encoding="utf-8")
     marker = 'document.addEventListener("keydown", (event) => {'
     assert marker in source, "global keyboard dispatch handler is missing"
     handler = source.split(marker, 1)[1].split("});", 1)[0]
+    dispatch_marker = "const binding = bindingFromEvent(event);"
+    assert dispatch_marker in handler, "global keyboard binding resolution is missing"
+    before_dispatch = handler.split(dispatch_marker, 1)[0]
     return bool(
         re.search(
-            r"isEditable\(event\.target\).*?"
-            r"!event\.ctrlKey.*?!event\.altKey.*?!event\.metaKey.*?return",
-            handler,
+            r"if\s*\(\s*isEditable\(event\.target\)\s*\)\s*\{\s*return;?\s*\}",
+            before_dispatch,
             flags=re.DOTALL,
         )
     )
 
 
-@pytest.mark.parametrize("binding", ["a", "backspace", "delete", "arrowleft"])
+@pytest.mark.parametrize("binding", EDITING_SENSITIVE_BINDINGS)
 def test_user_keymap_cannot_break_native_editing_in_editable_controls(
     tmp_path: Path,
     binding: str,
 ) -> None:
-    rejected_by_policy = _plain_binding_is_rejected(tmp_path, binding)
-    guarded_in_editable_controls = _editable_unmodified_keys_are_guarded()
+    editable_dispatch_blocked = _editable_controls_are_excluded_from_global_dispatch()
+    set_rejected = _set_binding_is_rejected(tmp_path / "set", binding)
+    import_rejected = _import_binding_is_rejected(tmp_path / "import", binding)
 
-    assert rejected_by_policy or guarded_in_editable_controls, (
-        f"binding {binding!r} is accepted by Keymap while global keydown dispatch has no "
-        "unmodified-editable guard; typing/navigation can be preventDefault()'ed and routed "
-        "to a Nika action inside an input/textarea/contenteditable control"
+    assert editable_dispatch_blocked or (set_rejected and import_rejected), (
+        f"editing-sensitive binding {binding!r} is accepted by a keymap write path while global "
+        "keydown dispatch can still reach preventDefault() inside an input/textarea/"
+        "contenteditable control"
     )
