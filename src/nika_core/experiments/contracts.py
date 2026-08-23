@@ -26,6 +26,22 @@ class DatasetSplit(StrEnum):
     HELD_OUT = "held_out"
 
 
+def _require_text(value: object, name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string")
+    if not value.strip():
+        raise ValueError(f"{name} must not be empty")
+    return value
+
+
+def _require_number(value: object, name: str) -> int | float:
+    if type(value) not in (int, float):
+        raise TypeError(f"{name} must be numeric")
+    if not isfinite(float(value)):
+        raise ValueError(f"{name} must be finite")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class StrategyRef:
     candidate_id: str
@@ -42,9 +58,12 @@ class StrategyRef:
             (self.artifact_ref, "artifact_ref"),
             (self.permission_fingerprint, "permission_fingerprint"),
         ):
-            if not value.strip():
-                raise ValueError(f"{name} must not be empty")
+            _require_text(value, name)
+        if not isinstance(self.artifact_kind, ArtifactKind):
+            raise TypeError("artifact_kind must be an ArtifactKind")
         fingerprints = self.training_dataset_fingerprints
+        if not isinstance(fingerprints, tuple):
+            raise TypeError("training dataset fingerprints must be a tuple")
         if any(not isinstance(item, str) for item in fingerprints):
             raise TypeError("training dataset fingerprints must be strings")
         if any(not item.strip() for item in fingerprints):
@@ -65,23 +84,25 @@ class ReplayCase:
     data_end_at: datetime | None = None
 
     def __post_init__(self) -> None:
-        if (
-            not self.replay_id.strip()
-            or not self.dataset_ref.strip()
-            or not self.dataset_version.strip()
-        ):
-            raise ValueError("replay identity must be complete")
+        _require_text(self.replay_id, "replay_id")
+        _require_text(self.dataset_ref, "dataset_ref")
+        _require_text(self.dataset_version, "dataset_version")
         if not isinstance(self.split, DatasetSplit):
             raise TypeError("replay split must be a DatasetSplit")
         if self.split is DatasetSplit.TRAINING:
             raise ValueError("promotion replay cannot use the training split")
         if self.dataset_fingerprint is not None:
+            if not isinstance(self.dataset_fingerprint, str):
+                raise TypeError("dataset_fingerprint must be a string when provided")
             if not self.dataset_fingerprint.strip():
                 raise ValueError("dataset_fingerprint must not be empty when provided")
             if self.dataset_fingerprint != self.dataset_fingerprint.strip():
                 raise ValueError("dataset_fingerprint must be canonical without whitespace")
-        if self.data_end_at is not None and self.data_end_at.tzinfo is None:
-            raise ValueError("data_end_at must be timezone-aware")
+        if self.data_end_at is not None:
+            if not isinstance(self.data_end_at, datetime):
+                raise TypeError("data_end_at must be a datetime when provided")
+            if self.data_end_at.tzinfo is None:
+                raise ValueError("data_end_at must be timezone-aware")
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,10 +113,10 @@ class MetricObservation:
     value: float
 
     def __post_init__(self) -> None:
-        if not self.candidate_id.strip() or not self.replay_id.strip() or not self.metric.strip():
-            raise ValueError("metric observation identifiers must not be empty")
-        if not isfinite(float(self.value)):
-            raise ValueError("metric observation must be finite")
+        _require_text(self.candidate_id, "candidate_id")
+        _require_text(self.replay_id, "replay_id")
+        _require_text(self.metric, "metric")
+        _require_number(self.value, "metric observation value")
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,12 +126,12 @@ class MetricRule:
     max_regression: float = 0.0
 
     def __post_init__(self) -> None:
-        if not self.metric.strip():
-            raise ValueError("metric must not be empty")
+        _require_text(self.metric, "metric")
         if type(self.higher_is_better) is not bool:
             raise TypeError("higher_is_better must be a boolean")
-        if not isfinite(float(self.max_regression)) or self.max_regression < 0:
-            raise ValueError("max_regression must be finite and non-negative")
+        _require_number(self.max_regression, "max_regression")
+        if self.max_regression < 0:
+            raise ValueError("max_regression must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,14 +143,18 @@ class PromotionPolicy:
     primary_higher_is_better: bool = True
 
     def __post_init__(self) -> None:
-        if not self.primary_metric.strip():
-            raise ValueError("primary_metric must not be empty")
-        if not isfinite(float(self.minimum_improvement)) or self.minimum_improvement < 0:
-            raise ValueError("minimum_improvement must be finite and non-negative")
+        _require_text(self.primary_metric, "primary_metric")
+        _require_number(self.minimum_improvement, "minimum_improvement")
+        if self.minimum_improvement < 0:
+            raise ValueError("minimum_improvement must be non-negative")
         if type(self.minimum_replays) is not int:
             raise TypeError("minimum_replays must be an integer")
         if self.minimum_replays < 1:
             raise ValueError("minimum_replays must be at least 1")
+        if not isinstance(self.guardrails, tuple):
+            raise TypeError("guardrails must be a tuple")
+        if any(not isinstance(rule, MetricRule) for rule in self.guardrails):
+            raise TypeError("guardrails must contain MetricRule values")
         if type(self.primary_higher_is_better) is not bool:
             raise TypeError("primary_higher_is_better must be a boolean")
         names = [rule.metric for rule in self.guardrails]
@@ -149,8 +174,19 @@ class ExperimentDefinition:
     evaluation_cutoff: datetime | None = None
 
     def __post_init__(self) -> None:
-        if not self.experiment_id.strip():
-            raise ValueError("experiment_id must not be empty")
+        _require_text(self.experiment_id, "experiment_id")
+        if not isinstance(self.champion, StrategyRef):
+            raise TypeError("champion must be a StrategyRef")
+        if not isinstance(self.challengers, tuple) or any(
+            not isinstance(item, StrategyRef) for item in self.challengers
+        ):
+            raise TypeError("challengers must be a tuple of StrategyRef values")
+        if not isinstance(self.replays, tuple) or any(
+            not isinstance(item, ReplayCase) for item in self.replays
+        ):
+            raise TypeError("replays must be a tuple of ReplayCase values")
+        if not isinstance(self.policy, PromotionPolicy):
+            raise TypeError("policy must be a PromotionPolicy")
         if not self.challengers:
             raise ValueError("at least one challenger is required")
         if not self.replays:
@@ -170,8 +206,11 @@ class ExperimentDefinition:
             for candidate in self.challengers
         ):
             raise PermissionError("experiment candidates may not widen or alter permissions")
-        if self.evaluation_cutoff is not None and self.evaluation_cutoff.tzinfo is None:
-            raise ValueError("evaluation_cutoff must be timezone-aware")
+        if self.evaluation_cutoff is not None:
+            if not isinstance(self.evaluation_cutoff, datetime):
+                raise TypeError("evaluation_cutoff must be a datetime when provided")
+            if self.evaluation_cutoff.tzinfo is None:
+                raise ValueError("evaluation_cutoff must be timezone-aware")
 
         training_fingerprints = {
             fingerprint
@@ -221,3 +260,19 @@ class ExperimentSnapshot:
     observations: tuple[MetricObservation, ...] = ()
     selected_candidate_id: str | None = None
     previous_champion_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.definition, ExperimentDefinition):
+            raise TypeError("definition must be an ExperimentDefinition")
+        if not isinstance(self.status, ExperimentStatus):
+            raise TypeError("status must be an ExperimentStatus")
+        if not isinstance(self.observations, tuple) or any(
+            not isinstance(item, MetricObservation) for item in self.observations
+        ):
+            raise TypeError("observations must be a tuple of MetricObservation values")
+        for value, name in (
+            (self.selected_candidate_id, "selected_candidate_id"),
+            (self.previous_champion_id, "previous_champion_id"),
+        ):
+            if value is not None:
+                _require_text(value, name)
