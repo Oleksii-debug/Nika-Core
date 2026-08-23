@@ -590,26 +590,38 @@ class ProductProjectRepository:
 
     def spec_history(self, project_id: str) -> tuple[ProductSpecRevision, ...]:
         with self.store.connection() as conn:
+            project_row = conn.execute(
+                "SELECT current_spec_version FROM product_projects WHERE project_id=?",
+                (project_id,),
+            ).fetchone()
+            if project_row is None:
+                raise KeyError(project_id)
+            current_spec_version = _durable_int(
+                project_row["current_spec_version"],
+                label="ProductProject current_spec_version",
+                minimum=1,
+            )
             rows = conn.execute(
                 "SELECT spec_version,spec_json,created_at FROM product_project_specs "
                 "WHERE project_id=? ORDER BY spec_version",
                 (project_id,),
             ).fetchall()
-            if not rows:
-                exists = conn.execute(
-                    "SELECT 1 FROM product_projects WHERE project_id=?",
-                    (project_id,),
-                ).fetchone()
-                if exists is None:
-                    raise KeyError(project_id)
-                raise ProductProjectError("ProductProject specification history is missing")
-            revisions: list[ProductSpecRevision] = []
-            for row in rows:
-                version = _durable_int(
+            versions = tuple(
+                _durable_int(
                     row["spec_version"],
                     label="ProductProject spec_version",
                     minimum=1,
                 )
+                for row in rows
+            )
+            expected_versions = tuple(range(1, current_spec_version + 1))
+            if versions != expected_versions:
+                raise ProductProjectError(
+                    "ProductProject specification history is not contiguous through "
+                    "current version"
+                )
+            revisions: list[ProductSpecRevision] = []
+            for row, version in zip(rows, versions, strict=True):
                 raw_spec = row["spec_json"]
                 if type(raw_spec) is not str:
                     raise ProductProjectError(
@@ -633,9 +645,24 @@ class ProductProjectRepository:
                     ) from exc
                 parent = spec.supersedes_spec_version
                 reason = spec.revision_reason
-                if version > 1 and parent is None:
+                if version == 1:
+                    if parent is not None:
+                        raise ProductProjectError(
+                            "initial ProductProject specification has a parent"
+                        )
+                elif parent is None:
                     parent = version - 1
                     reason = reason or "legacy sequential specification"
+                else:
+                    if parent != version - 1:
+                        raise ProductProjectError(
+                            f"specification version {version} supersedes {parent}, "
+                            f"expected {version - 1}"
+                        )
+                    if not reason.strip():
+                        raise ProductProjectError(
+                            f"specification version {version} has no revision reason"
+                        )
                 revisions.append(
                     ProductSpecRevision(
                         spec_version=version,

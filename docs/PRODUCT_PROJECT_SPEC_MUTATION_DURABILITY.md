@@ -24,11 +24,13 @@ A later valid writer may therefore commit immediately after the first writer wit
 
 When replay reconstructs an older result after later lifecycle changes, status is derived from canonical status-change audit evidence at the receipt's exact row version. This keeps the returned historical snapshot coherent instead of combining an old specification version with a later lifecycle status.
 
-## Fail-closed replay
+## Fail-closed replay and specification history
 
 Replay is rejected on key/input drift, non-exact durable integer identity, invalid timestamps, broken version lineage, receipt state ahead of the durable project, missing or malformed specification rows, digest mismatch, lineage/reason mismatch, or missing/forged/duplicate canonical audit evidence.
 
 `ProductProjectRepository.get()` also distinguishes a missing project from a project whose declared current specification row is missing and rejects malformed current durable specification payloads instead of converting them to not-found.
+
+`ProductProjectRepository.spec_history()` treats durable `current_spec_version` as authority. The stored revision identities must be exactly the contiguous sequence `1..current_spec_version`; a missing current revision, an internal gap, or an extra revision ahead of the current pointer fails closed. Explicit lineage must point to the immediately preceding version and carry a non-empty revision reason. Historical rows without explicit parent metadata remain readable only as legacy sequential lineage after the complete durable sequence has been proven contiguous.
 
 ## Compatibility decision
 
