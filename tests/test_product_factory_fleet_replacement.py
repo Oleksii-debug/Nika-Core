@@ -48,6 +48,7 @@ def test_external_trusted_review_authority_is_required_before_provider_side_effe
     request = port.requests[0]
     assert request.review_ref == REVIEW_REF
     assert request.plan_fingerprint == fleet_replacement_plan_fingerprint(plan)
+    assert request.release_version == "1.0.0"
     assert f"fleet-replacement-plan:{request.plan_fingerprint}" in request.evidence_refs
 
 
@@ -62,6 +63,21 @@ def test_caller_authored_approval_ref_cannot_reauthorize_mutated_plan() -> None:
             mutated,
             review_authority=authority,
             review_ref=review_ref,
+        )
+    assert port.calls == []
+
+
+def test_provider_effect_fails_closed_without_durable_dispatch_journal() -> None:
+    coordinator, _, _, _, port, placements = _fixture(service_count=1)
+    key = ("service-000", "service-000-replica-0")
+    plan, authority, review_ref = _authorized_plan(placements, (key,))
+    _submit(coordinator, plan, authority, review_ref)
+    coordinator.dispatch_journal = None
+
+    with pytest.raises(FleetReplacementError, match="durable dispatch journal"):
+        coordinator.advance(
+            plan.plan_id,
+            now=datetime(2026, 8, 23, 12, tzinfo=UTC),
         )
     assert port.calls == []
 

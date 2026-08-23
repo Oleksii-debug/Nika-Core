@@ -25,6 +25,7 @@ from nika_core.product_factory_operations import ProductOperationsCoordinator, S
 from nika_core.product_factory_operations_contracts import ServiceHealth
 
 FLEET_REPLACEMENT_SCHEMA = "nika-pf3-fleet-replacement-v2"
+FLEET_REPLACEMENT_DISPATCH_SCHEMA = "nika-pf3-fleet-replacement-dispatch-v1"
 
 
 class FleetReplacementError(ValueError):
@@ -148,6 +149,7 @@ class ReplicaReplacementRequest:
     deployment_operation_id: str
     source_node_id: str
     target_node_id: str
+    release_version: str
     release_sha: str
     artifact_digest: str
     reason: str
@@ -169,6 +171,7 @@ class ReplicaReplacementRequest:
             self.deployment_operation_id,
             self.source_node_id,
             self.target_node_id,
+            self.release_version,
             self.reason,
             self.approval_ref,
             self.authorization_work_id,
@@ -189,6 +192,7 @@ class ReplicaReplacementResult:
     uncertain: bool
     evidence_refs: tuple[str, ...]
     observed_node_id: str | None = None
+    release_version: str | None = None
     release_sha: str | None = None
     artifact_digest: str | None = None
     healthy: bool | None = None
@@ -196,7 +200,12 @@ class ReplicaReplacementResult:
     def __post_init__(self) -> None:
         if not self.evidence_refs or (self.applied and self.uncertain):
             raise FleetReplacementError("replacement provider result is invalid")
-        for value in (self.observed_node_id, self.release_sha, self.artifact_digest):
+        for value in (
+            self.observed_node_id,
+            self.release_version,
+            self.release_sha,
+            self.artifact_digest,
+        ):
             if value is not None and not value.strip():
                 raise FleetReplacementError("replacement provider evidence identity is empty")
         if self.release_sha is not None:
@@ -215,9 +224,58 @@ class FleetViewPort(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class DurableReplacementDispatch:
+    request: ReplicaReplacementRequest
+    attempt: int
+    source_was_enabled: bool
+    request_checksum_sha256: str
+    terminal_result: ReplicaReplacementResult | None = None
+    result_checksum_sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.attempt <= 0:
+            raise FleetReplacementError("durable replacement dispatch attempt must be positive")
+        if not isinstance(self.source_was_enabled, bool):
+            raise FleetReplacementError(
+                "durable replacement dispatch source-cordon provenance is invalid"
+            )
+        _validate_digest(self.request_checksum_sha256)
+        if self.terminal_result is None:
+            if self.result_checksum_sha256 is not None:
+                raise FleetReplacementError(
+                    "durable replacement dispatch result checksum has no terminal result"
+                )
+        else:
+            if self.terminal_result.uncertain or self.result_checksum_sha256 is None:
+                raise FleetReplacementError(
+                    "durable replacement terminal evidence is incomplete or uncertain"
+                )
+            _validate_digest(self.result_checksum_sha256)
+
+
+class FleetReplacementDispatchJournal(Protocol):
+    def prepare(
+        self,
+        request: ReplicaReplacementRequest,
+        *,
+        attempt: int,
+        source_was_enabled: bool,
+    ) -> DurableReplacementDispatch: ...
+
+    def record_terminal(
+        self,
+        request: ReplicaReplacementRequest,
+        result: ReplicaReplacementResult,
+    ) -> DurableReplacementDispatch: ...
+
+    def list_plan(self, plan_id: str) -> tuple[DurableReplacementDispatch, ...]: ...
+
+
+@dataclass(frozen=True, slots=True)
 class ReplicaReplacementBinding:
     spec: ReplicaReplacementSpec
     environment_id: str
+    release_version: str
     release_sha: str
     artifact_digest: str
 
@@ -241,9 +299,23 @@ class ReplicaReplacementRecord:
                 ReplicaReplacementState.RECONCILE_REQUIRED,
             }:
                 raise FleetReplacementError("pending provider request requires recovery state")
-            if self.pending_request.replica_id != self.binding.spec.replica_id:
-                raise FleetReplacementError("pending provider request belongs to another replica")
-            if self.target_node_id != self.pending_request.target_node_id:
+            request = self.pending_request
+            spec = self.binding.spec
+            if (
+                request.project_id != spec.request.project_id
+                or request.service_id != spec.service_id
+                or request.replica_id != spec.replica_id
+                or request.deployment_operation_id != spec.deployment_operation_id
+                or request.source_node_id != spec.source_node_id
+                or request.environment_id != self.binding.environment_id
+                or request.release_version != self.binding.release_version
+                or request.release_sha != self.binding.release_sha
+                or request.artifact_digest != self.binding.artifact_digest
+            ):
+                raise FleetReplacementError(
+                    "pending provider request disagrees with exact replacement binding"
+                )
+            if self.target_node_id != request.target_node_id:
                 raise FleetReplacementError("pending provider request target is inconsistent")
         elif self.state in {
             ReplicaReplacementState.DISPATCHING,
@@ -278,6 +350,10 @@ _BLOCKED_STATES = {
     ReplicaReplacementState.BLOCKED_BUDGET,
     ReplicaReplacementState.BLOCKED_CREDENTIAL,
 }
+_TERMINAL_STATES = {
+    ReplicaReplacementState.SUCCEEDED,
+    ReplicaReplacementState.FAILED,
+}
 
 
 @dataclass(slots=True)
@@ -286,6 +362,7 @@ class FleetReplacementCoordinator:
     operations: ProductOperationsCoordinator
     nodes: ExecutionNodeRegistry
     port: ReplicaReplacementPort
+    dispatch_journal: FleetReplacementDispatchJournal | None = None
     _plans: dict[str, FleetReplacementPlan] = field(default_factory=dict, init=False, repr=False)
     _records: dict[str, dict[tuple[str, str], ReplicaReplacementRecord]] = field(
         default_factory=dict,
@@ -344,14 +421,12 @@ class FleetReplacementCoordinator:
         authority, review_ref = self._authority(plan_id)
         self._validate_authority(plan, authority, review_ref)
         records = self._records[plan_id]
+        self._recover_durable_dispatches(plan, records)
         self._cleanup_terminal_leases(records)
 
         for key in self._ordered_keys(plan):
             record = records[key]
-            if record.state in {
-                ReplicaReplacementState.SUCCEEDED,
-                ReplicaReplacementState.FAILED,
-            }:
+            if record.state in _TERMINAL_STATES:
                 continue
             if record.state in _ACTIVE_STATES:
                 records[key] = self._reconcile(plan, record)
@@ -360,10 +435,7 @@ class FleetReplacementCoordinator:
 
         for key in self._ordered_keys(plan):
             record = records[key]
-            if record.state in {
-                ReplicaReplacementState.SUCCEEDED,
-                ReplicaReplacementState.FAILED,
-            }:
+            if record.state in _TERMINAL_STATES:
                 continue
             spec = record.binding.spec
             self._validate_live_binding(plan, record.binding)
@@ -411,6 +483,7 @@ class FleetReplacementCoordinator:
                 evidence_refs=record.evidence_refs + (f"lease:{lease.node_id}",),
             )
             records[key] = checkpoint
+            self._persist_dispatch(checkpoint)
             try:
                 result = self.port.apply(request)
             except Exception:  # noqa: BLE001 - external side-effect boundary must reconcile.
@@ -528,6 +601,7 @@ class FleetReplacementCoordinator:
         self._authorities = authorities
         self._review_refs = review_refs
         for plan_id, mapped in records.items():
+            self._recover_durable_dispatches(self._plans[plan_id], mapped)
             self._validate_pending_leases(self._plans[plan_id], mapped)
             self._cleanup_terminal_leases(mapped)
 
@@ -638,10 +712,23 @@ class FleetReplacementCoordinator:
             (item for item in fleet.services if item.service_id == spec.service_id),
             None,
         )
-        if service is None:
+        service_spec = next(
+            (item for item in fleet.plan.services if item.service_id == spec.service_id),
+            None,
+        )
+        if service is None or service_spec is None:
             raise FleetReplacementError("replacement service is missing from fleet")
         if service.state not in {FleetState.HEALTHY, FleetState.DEGRADED}:
             raise FleetReplacementError("replacement requires healthy/degraded fleet service")
+        if (
+            service_spec.project_id != plan.project_id
+            or service_spec.environment_id != service.environment_id
+            or service_spec.release.source_sha != service.release_sha
+            or service_spec.release.artifact_digest != service.artifact_digest
+        ):
+            raise FleetReplacementError(
+                "fleet summary disagrees with exact release/environment identity"
+            )
         fleet_replica = next(
             (
                 item
@@ -650,7 +737,20 @@ class FleetReplacementCoordinator:
             ),
             None,
         )
-        if fleet_replica is None or fleet_replica.node_id != spec.source_node_id:
+        exact_replica_spec = next(
+            (
+                item
+                for item in service_spec.replicas
+                if item.operation_id == spec.deployment_operation_id
+            ),
+            None,
+        )
+        if (
+            fleet_replica is None
+            or exact_replica_spec is None
+            or fleet_replica.node_id != spec.source_node_id
+            or exact_replica_spec.request.work_id != fleet_replica.work_id
+        ):
             raise FleetReplacementError("deployment replica source placement does not match plan")
         operations = self._service(spec.service_id)
         ops_replica = next(
@@ -672,6 +772,7 @@ class FleetReplacementCoordinator:
         return ReplicaReplacementBinding(
             spec,
             service.environment_id,
+            service_spec.release.version,
             service.release_sha,
             service.artifact_digest,
         )
@@ -789,10 +890,7 @@ class FleetReplacementCoordinator:
         spec = binding.spec
         fingerprint = fleet_replacement_plan_fingerprint(plan)
         return ReplicaReplacementRequest(
-            request_id=(
-                f"{plan.plan_id}:{spec.service_id}:{spec.replica_id}:"
-                f"replace:{record.attempt + 1}"
-            ),
+            request_id=_replacement_request_id(plan, spec, record.attempt + 1),
             plan_id=plan.plan_id,
             project_id=plan.project_id,
             fleet_plan_id=plan.fleet_plan_id,
@@ -802,6 +900,7 @@ class FleetReplacementCoordinator:
             deployment_operation_id=spec.deployment_operation_id,
             source_node_id=spec.source_node_id,
             target_node_id=lease.node_id,
+            release_version=binding.release_version,
             release_sha=binding.release_sha,
             artifact_digest=binding.artifact_digest,
             reason=plan.reason,
@@ -826,16 +925,17 @@ class FleetReplacementCoordinator:
                 state=ReplicaReplacementState.RECONCILE_REQUIRED,
                 evidence_refs=evidence,
             )
+        if result.applied:
+            self._validate_applied_result(request, result)
+        self._persist_terminal_result(request, result)
+        self._release_work(request.project_id, record.binding.spec.request.work_id)
         if not result.applied:
-            self._release_work(request.project_id, record.binding.spec.request.work_id)
             return replace(
                 record,
                 state=ReplicaReplacementState.FAILED,
                 evidence_refs=evidence,
                 pending_request=None,
             )
-        self._validate_applied_result(request, result)
-        self._release_work(request.project_id, record.binding.spec.request.work_id)
         return replace(
             record,
             state=ReplicaReplacementState.SUCCEEDED,
@@ -870,6 +970,225 @@ class FleetReplacementCoordinator:
             )
         return self._consume_result(record, request, result)
 
+    def _persist_dispatch(self, record: ReplicaReplacementRecord) -> None:
+        request = record.pending_request
+        if request is None or record.source_was_enabled is None:
+            raise FleetReplacementError(
+                "replacement dispatch checkpoint lacks exact request/source provenance"
+            )
+        journal = self._journal()
+        try:
+            durable = journal.prepare(
+                request,
+                attempt=record.attempt,
+                source_was_enabled=record.source_was_enabled,
+            )
+        except Exception as exc:  # noqa: BLE001 - durable boundary may fail independently.
+            if isinstance(exc, FleetReplacementError):
+                raise
+            raise FleetReplacementError(
+                "durable replacement dispatch checkpoint failed; provider was not called"
+            ) from exc
+        if (
+            durable.request != request
+            or durable.attempt != record.attempt
+            or durable.source_was_enabled is not record.source_was_enabled
+            or durable.request_checksum_sha256 != fleet_replacement_request_fingerprint(request)
+            or durable.terminal_result is not None
+        ):
+            raise FleetReplacementError(
+                "durable replacement dispatch acknowledgement does not match exact request"
+            )
+
+    def _persist_terminal_result(
+        self,
+        request: ReplicaReplacementRequest,
+        result: ReplicaReplacementResult,
+    ) -> None:
+        try:
+            durable = self._journal().record_terminal(request, result)
+        except Exception as exc:  # noqa: BLE001 - post-effect durability must reconcile.
+            if isinstance(exc, FleetReplacementError):
+                raise
+            raise FleetReplacementError(
+                "replacement terminal evidence was not durably acknowledged; inspection required"
+            ) from exc
+        if (
+            durable.request != request
+            or durable.terminal_result != result
+            or durable.request_checksum_sha256 != fleet_replacement_request_fingerprint(request)
+            or durable.result_checksum_sha256 != fleet_replacement_result_fingerprint(result)
+        ):
+            raise FleetReplacementError(
+                "durable replacement terminal acknowledgement disagrees with provider evidence"
+            )
+
+    def _recover_durable_dispatches(
+        self,
+        plan: FleetReplacementPlan,
+        records: dict[tuple[str, str], ReplicaReplacementRecord],
+    ) -> None:
+        journal = self._journal()
+        try:
+            durable_records = journal.list_plan(plan.plan_id)
+        except Exception as exc:  # noqa: BLE001 - corrupt durable state must fail closed.
+            if isinstance(exc, FleetReplacementError):
+                raise
+            raise FleetReplacementError(
+                "durable replacement dispatch journal could not be inspected"
+            ) from exc
+        seen: set[tuple[str, str]] = set()
+        for durable in durable_records:
+            request = durable.request
+            key = (request.service_id, request.replica_id)
+            if key in seen:
+                raise FleetReplacementError(
+                    "durable replacement journal contains multiple effects for one replica"
+                )
+            seen.add(key)
+            record = records.get(key)
+            if record is None:
+                raise FleetReplacementError(
+                    "durable replacement dispatch references replica outside trusted plan"
+                )
+            self._validate_durable_dispatch(plan, record.binding, durable)
+            if record.attempt > durable.attempt:
+                raise FleetReplacementError(
+                    "replacement snapshot is ahead of durable dispatch authority"
+                )
+            if durable.terminal_result is not None:
+                terminal = self._terminal_from_durable(record, durable)
+                if record.attempt == durable.attempt and record.state in _TERMINAL_STATES:
+                    if (
+                        record.state != terminal.state
+                        or record.target_node_id != terminal.target_node_id
+                        or record.pending_request is not None
+                    ):
+                        raise FleetReplacementError(
+                            "replacement snapshot terminal state conflicts with durable evidence"
+                        )
+                    continue
+                records[key] = terminal
+                continue
+
+            if record.state in _TERMINAL_STATES and record.attempt >= durable.attempt:
+                raise FleetReplacementError(
+                    "replacement snapshot claims terminal effect without durable provider evidence"
+                )
+            if (
+                record.attempt == durable.attempt
+                and record.pending_request is not None
+                and record.pending_request != request
+            ):
+                raise FleetReplacementError(
+                    "replacement snapshot pending request conflicts with durable dispatch"
+                )
+            self._cordon_source(request.source_node_id, durable.source_was_enabled)
+            evidence = record.evidence_refs
+            lease_ref = f"lease:{request.target_node_id}"
+            if lease_ref not in evidence:
+                evidence += (lease_ref,)
+            records[key] = replace(
+                record,
+                state=ReplicaReplacementState.RECONCILE_REQUIRED,
+                attempt=durable.attempt,
+                target_node_id=request.target_node_id,
+                pending_request=request,
+                source_was_enabled=durable.source_was_enabled,
+                evidence_refs=evidence,
+            )
+
+    def _validate_durable_dispatch(
+        self,
+        plan: FleetReplacementPlan,
+        binding: ReplicaReplacementBinding,
+        durable: DurableReplacementDispatch,
+    ) -> None:
+        request = durable.request
+        spec = binding.spec
+        if durable.request_checksum_sha256 != fleet_replacement_request_fingerprint(request):
+            raise FleetReplacementError("durable replacement request checksum is invalid")
+        if (
+            request.request_id != _replacement_request_id(plan, spec, durable.attempt)
+            or request.plan_id != plan.plan_id
+            or request.project_id != plan.project_id
+            or request.fleet_plan_id != plan.fleet_plan_id
+            or request.plan_fingerprint != fleet_replacement_plan_fingerprint(plan)
+            or request.environment_id != binding.environment_id
+            or request.service_id != spec.service_id
+            or request.replica_id != spec.replica_id
+            or request.deployment_operation_id != spec.deployment_operation_id
+            or request.source_node_id != spec.source_node_id
+            or request.release_version != binding.release_version
+            or request.release_sha != binding.release_sha
+            or request.artifact_digest != binding.artifact_digest
+        ):
+            raise FleetReplacementError(
+                "durable replacement dispatch disagrees with exact trusted fleet identity"
+            )
+        self._validate_live_binding(plan, binding)
+        leases = self._matching_leases(plan.project_id, spec.request.work_id)
+        if len(leases) > 1:
+            raise FleetReplacementError("durable replacement dispatch has duplicate work leases")
+        if leases and leases[0].node_id != request.target_node_id:
+            raise FleetReplacementError(
+                "durable replacement dispatch target disagrees with active work lease"
+            )
+        if durable.terminal_result is not None:
+            if (
+                durable.result_checksum_sha256
+                != fleet_replacement_result_fingerprint(durable.terminal_result)
+            ):
+                raise FleetReplacementError(
+                    "durable replacement terminal result checksum is invalid"
+                )
+            if durable.terminal_result.applied:
+                self._validate_applied_result(request, durable.terminal_result)
+
+    def _terminal_from_durable(
+        self,
+        record: ReplicaReplacementRecord,
+        durable: DurableReplacementDispatch,
+    ) -> ReplicaReplacementRecord:
+        result = durable.terminal_result
+        assert result is not None
+        request = durable.request
+        evidence = record.evidence_refs
+        lease_ref = f"lease:{request.target_node_id}"
+        if lease_ref not in evidence:
+            evidence += (lease_ref,)
+        for evidence_ref in result.evidence_refs:
+            if evidence_ref not in evidence:
+                evidence += (evidence_ref,)
+        self._release_work(request.project_id, record.binding.spec.request.work_id)
+        if result.applied:
+            self._validate_applied_result(request, result)
+            return replace(
+                record,
+                state=ReplicaReplacementState.SUCCEEDED,
+                attempt=durable.attempt,
+                target_node_id=request.target_node_id,
+                evidence_refs=evidence,
+                pending_request=None,
+                source_was_enabled=durable.source_was_enabled,
+            )
+        return replace(
+            record,
+            state=ReplicaReplacementState.FAILED,
+            attempt=durable.attempt,
+            target_node_id=request.target_node_id,
+            evidence_refs=evidence,
+            pending_request=None,
+            source_was_enabled=durable.source_was_enabled,
+        )
+
+    def _journal(self) -> FleetReplacementDispatchJournal:
+        if self.dispatch_journal is None:
+            raise FleetReplacementError(
+                "replacement provider side effect requires a durable dispatch journal"
+            )
+        return self.dispatch_journal
+
     @staticmethod
     def _validate_applied_result(
         request: ReplicaReplacementRequest,
@@ -877,6 +1196,7 @@ class FleetReplacementCoordinator:
     ) -> None:
         if (
             result.observed_node_id != request.target_node_id
+            or result.release_version != request.release_version
             or result.release_sha != request.release_sha
             or result.artifact_digest != request.artifact_digest
             or result.healthy is not True
@@ -924,10 +1244,7 @@ class FleetReplacementCoordinator:
         records: dict[tuple[str, str], ReplicaReplacementRecord],
     ) -> None:
         for record in records.values():
-            if record.state in {
-                ReplicaReplacementState.SUCCEEDED,
-                ReplicaReplacementState.FAILED,
-            }:
+            if record.state in _TERMINAL_STATES:
                 self._release_work(
                     record.binding.spec.request.project_id,
                     record.binding.spec.request.work_id,
@@ -1066,6 +1383,59 @@ def fleet_replacement_plan_fingerprint(plan: FleetReplacementPlan) -> str:
     }
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def fleet_replacement_request_fingerprint(request: ReplicaReplacementRequest) -> str:
+    payload = {
+        "schema": FLEET_REPLACEMENT_DISPATCH_SCHEMA,
+        "request_id": request.request_id,
+        "plan_id": request.plan_id,
+        "project_id": request.project_id,
+        "fleet_plan_id": request.fleet_plan_id,
+        "environment_id": request.environment_id,
+        "service_id": request.service_id,
+        "replica_id": request.replica_id,
+        "deployment_operation_id": request.deployment_operation_id,
+        "source_node_id": request.source_node_id,
+        "target_node_id": request.target_node_id,
+        "release_version": request.release_version,
+        "release_sha": request.release_sha,
+        "artifact_digest": request.artifact_digest,
+        "reason": request.reason,
+        "approval_ref": request.approval_ref,
+        "authorization_work_id": request.authorization_work_id,
+        "review_ref": request.review_ref,
+        "plan_fingerprint": request.plan_fingerprint,
+        "evidence_refs": request.evidence_refs,
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def fleet_replacement_result_fingerprint(result: ReplicaReplacementResult) -> str:
+    payload = {
+        "schema": FLEET_REPLACEMENT_DISPATCH_SCHEMA,
+        "applied": result.applied,
+        "uncertain": result.uncertain,
+        "evidence_refs": result.evidence_refs,
+        "observed_node_id": result.observed_node_id,
+        "release_version": result.release_version,
+        "release_sha": result.release_sha,
+        "artifact_digest": result.artifact_digest,
+        "healthy": result.healthy,
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _replacement_request_id(
+    plan: FleetReplacementPlan,
+    spec: ReplicaReplacementSpec,
+    attempt: int,
+) -> str:
+    if attempt <= 0:
+        raise FleetReplacementError("replacement request attempt must be positive")
+    return f"{plan.plan_id}:{spec.service_id}:{spec.replica_id}:replace:{attempt}"
 
 
 def _authority_binding_ref(plan: FleetReplacementPlan) -> str:

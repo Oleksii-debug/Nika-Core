@@ -33,12 +33,16 @@ from nika_core.product_factory_deployment_fleet import (
     ServiceFleetSpec,
 )
 from nika_core.product_factory_fleet_replacement import (
+    DurableReplacementDispatch,
     EnvironmentReplacementBudget,
     FleetReplacementCoordinator,
+    FleetReplacementError,
     FleetReplacementPlan,
     ReplicaReplacementResult,
     ReplicaReplacementSpec,
     fleet_replacement_plan_fingerprint,
+    fleet_replacement_request_fingerprint,
+    fleet_replacement_result_fingerprint,
 )
 from nika_core.product_factory_incidents import TrustedReviewAuthority
 from nika_core.product_factory_operations import ProductOperationsCoordinator
@@ -73,6 +77,56 @@ class FakeFleet:
         return self.record
 
 
+class FakeDispatchJournal:
+    def __init__(self) -> None:
+        self.records: dict[tuple[str, str, str], DurableReplacementDispatch] = {}
+
+    def prepare(self, request, *, attempt: int, source_was_enabled: bool):
+        key = (request.plan_id, request.service_id, request.replica_id)
+        candidate = DurableReplacementDispatch(
+            request=request,
+            attempt=attempt,
+            source_was_enabled=source_was_enabled,
+            request_checksum_sha256=fleet_replacement_request_fingerprint(request),
+        )
+        existing = self.records.get(key)
+        if existing is not None:
+            if (
+                existing.request != candidate.request
+                or existing.attempt != candidate.attempt
+                or existing.source_was_enabled is not candidate.source_was_enabled
+            ):
+                raise FleetReplacementError("fake durable dispatch conflicts with prior effect")
+            return existing
+        self.records[key] = candidate
+        return candidate
+
+    def record_terminal(self, request, result):
+        key = (request.plan_id, request.service_id, request.replica_id)
+        existing = self.records.get(key)
+        if existing is None or existing.request != request:
+            raise FleetReplacementError("fake terminal result has no durable dispatch")
+        candidate = DurableReplacementDispatch(
+            request=request,
+            attempt=existing.attempt,
+            source_was_enabled=existing.source_was_enabled,
+            request_checksum_sha256=existing.request_checksum_sha256,
+            terminal_result=result,
+            result_checksum_sha256=fleet_replacement_result_fingerprint(result),
+        )
+        if existing.terminal_result is not None and existing != candidate:
+            raise FleetReplacementError("fake terminal result conflicts with prior evidence")
+        self.records[key] = candidate
+        return candidate
+
+    def list_plan(self, plan_id: str):
+        return tuple(
+            self.records[key]
+            for key in sorted(self.records)
+            if key[0] == plan_id
+        )
+
+
 class FakeReplacementPort:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
@@ -97,28 +151,43 @@ class FakeReplacementPort:
     def _result(request, mode: str):
         if mode == "raise":
             raise RuntimeError("provider transport detail must not become durable evidence")
+        if mode == "hard-crash":
+            raise SystemExit("simulated process death after provider effect")
         if mode == "uncertain":
             return ReplicaReplacementResult(False, True, ("provider:uncertain",))
         if mode == "reject":
             return ReplicaReplacementResult(False, False, ("provider:rejected",))
         if mode == "wrong-release":
             return ReplicaReplacementResult(
-                True,
-                False,
-                ("provider:wrong-release",),
-                request.target_node_id,
-                _sha(999_999),
-                request.artifact_digest,
-                True,
+                applied=True,
+                uncertain=False,
+                evidence_refs=("provider:wrong-release",),
+                observed_node_id=request.target_node_id,
+                release_version=request.release_version,
+                release_sha=_sha(999_999),
+                artifact_digest=request.artifact_digest,
+                healthy=True,
+            )
+        if mode == "wrong-version":
+            return ReplicaReplacementResult(
+                applied=True,
+                uncertain=False,
+                evidence_refs=("provider:wrong-version",),
+                observed_node_id=request.target_node_id,
+                release_version="9.9.9",
+                release_sha=request.release_sha,
+                artifact_digest=request.artifact_digest,
+                healthy=True,
             )
         return ReplicaReplacementResult(
-            True,
-            False,
-            ("provider:replacement:healthy",),
-            request.target_node_id,
-            request.release_sha,
-            request.artifact_digest,
-            True,
+            applied=True,
+            uncertain=False,
+            evidence_refs=("provider:replacement:healthy",),
+            observed_node_id=request.target_node_id,
+            release_version=request.release_version,
+            release_sha=request.release_sha,
+            artifact_digest=request.artifact_digest,
+            healthy=True,
         )
 
 
@@ -190,6 +259,7 @@ def _fixture(
     replica_count: int = 3,
     node_count: int = 6,
     environments: tuple[str, ...] = ("prod-eu", "prod-us"),
+    dispatch_journal=None,
 ):
     project_id = "project-social"
     nodes = ExecutionNodeRegistry()
@@ -284,7 +354,8 @@ def _fixture(
         )
     )
     port = FakeReplacementPort()
-    coordinator = FleetReplacementCoordinator(fleet, operations, nodes, port)
+    journal = FakeDispatchJournal() if dispatch_journal is None else dispatch_journal
+    coordinator = FleetReplacementCoordinator(fleet, operations, nodes, port, journal)
     return coordinator, fleet, operations, nodes, port, placements
 
 
