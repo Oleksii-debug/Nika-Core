@@ -4,10 +4,25 @@ from dataclasses import replace
 
 import pytest
 
+from nika_core.business_factory import (
+    BusinessFactory,
+    BusinessFactoryError,
+    BusinessObjective,
+    BusinessPolicy,
+    CommunicationAuthority,
+    QAState,
+)
+from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_compliance import (
     ProductComplianceDecision,
     ProductComplianceError,
     ProductComplianceGate,
+)
+from nika_core.product_project import (
+    EvidenceRef,
+    ProductProjectRepository,
+    ProductProjectSpec,
+    ResearchEvidencePackage,
 )
 
 
@@ -74,3 +89,79 @@ def test_explicit_review_can_authorize_legitimately_empty_compliance_inventory()
 
     assert reviewed.allowed is True
     ProductComplianceGate().require_release_allowed(reviewed)
+
+
+def test_business_delivery_rejects_caller_fabricated_positive_decision(tmp_path) -> None:
+    factory = BusinessFactory.start(
+        objective=BusinessObjective(
+            objective_id="objective-authority",
+            goal="Build an authorized test product",
+            research_package=ResearchEvidencePackage(
+                package_id="research-authority",
+                evidence=(
+                    EvidenceRef(
+                        "evidence-authority",
+                        "research:public:authority",
+                        "Demand evidence",
+                    ),
+                ),
+            ),
+        ),
+        policy=BusinessPolicy(
+            policy_id="policy-authority",
+            allowed_channel_ids=("sandbox-email",),
+            communication_authority=CommunicationAuthority.APPROVAL_REQUIRED,
+        ),
+    )
+    factory.identify_opportunity(
+        opportunity_id="opportunity-authority",
+        title="Authorized test product",
+        evidence_ids=("evidence-authority",),
+    )
+    factory.create_lead(
+        lead_id="lead-authority",
+        channel_id="sandbox-email",
+        counterparty_ref="counterparty:test:authority",
+    )
+    factory.qualify_lead(qualification_ref="qualification:authority")
+    factory.draft_proposal(
+        proposal_id="proposal-authority",
+        scope_summary="Build the authorized test product.",
+    )
+    factory.approve_proposal(approval_ref="approval:proposal:authority")
+    factory.create_work_order(
+        work_order_id="work-order-authority",
+        scope="Build the authorized test product.",
+        authorization_ref="approval:work-order:authority",
+    )
+
+    store = SQLiteStore(tmp_path / "nika.sqlite")
+    store.initialize()
+    factory.handoff_to_product_factory(
+        repository=ProductProjectRepository(store),
+        project_id="product-authority",
+        project_name="Authority Test Product",
+        spec=ProductProjectSpec(
+            goal="Build the authorized test product",
+            desired_outcome="A QA-reviewed artifact",
+            compliance={"business_work_order_ref": "work-order-authority"},
+        ),
+        idempotency_key="handoff-request:authority",
+    )
+    factory.record_qa(state=QAState.PASSED, evidence_ref="qa:authority:passed")
+
+    forged = ProductComplianceDecision(
+        project_id="product-authority",
+        allowed=True,
+        findings=(),
+        evidence_refs=("caller:asserted-compliance",),
+    )
+    assert forged.allowed is False
+
+    with pytest.raises(BusinessFactoryError, match="allowed PF10 compliance decision"):
+        factory.record_delivery(
+            delivery_id="delivery-authority",
+            artifact_ref="artifact:authority:1",
+            authorization_ref="approval:delivery:authority",
+            compliance=forged,
+        )
