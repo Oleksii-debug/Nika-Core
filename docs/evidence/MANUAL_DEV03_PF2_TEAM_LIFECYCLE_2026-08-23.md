@@ -67,6 +67,30 @@ The adapter reuses the already-integrated `DynamicTeamComposer`, `TeamCompositio
 14. Replacing an unavailable worker does not overwrite the original blocked/failed reason or
     evidence. The terminal historical assignment retains unavailable evidence while the new
     assignment carries replacement-decision evidence, and the separation survives restart.
+15. Every durable assignment identity is re-derived from `(project_id, role_id, generation)` on
+    restore. Candidate/corrupt state cannot substitute a generation-zero assignment ID or rewrite
+    a complete predecessor/replacement ID chain while remaining internally self-consistent.
+
+## Independent audit repair — AUD01 / AUD03 identity forgery
+
+AUD01 reviewed exact head `3641801ea024711b000050f4987ff654baeb5351` and classified it
+`BLOCK`: `_assignment_id()` was deterministic when Nika created an assignment, but restart
+validation accepted any non-empty unique candidate-supplied `assignment_id` so long as the
+predecessor chain was internally consistent. QA-only PRs #171/#187 captured the same adversarial
+family.
+
+MANUAL-DEV03 repaired the owned production slice without weakening or importing the QA vehicle:
+
+- `_validate_snapshot()` now re-derives the expected assignment ID from the durable project ID,
+  role ID and generation and rejects any mismatch;
+- the DEV03 regression suite now includes the exact generation-zero substitution attack;
+- the DEV03 regression suite also consistently rewrites generation-zero and generation-one IDs
+  plus `replaces_assignment_id`, proving internal self-consistency cannot bypass canonical ID
+  derivation;
+- legitimate generation/replacement round trips remain covered by existing positive tests.
+
+Independent auditor replay/reclassification is still required before integration credit. DEV03
+does not self-certify the prior auditor BLOCK as cleared.
 
 ## Scale evidence
 
@@ -80,14 +104,14 @@ coordinator scheduling and checkpoint recovery. This PR does not duplicate or we
 
 ## Validation truth
 
-Before the final audit-evidence defect was found, a live-signature-compatible local harness had
-reported `19 passed`, and a superseded exact-head Core run had already proved dependency
-consistency, Ruff, and compile before its full pytest run was cancelled by a newer push at 68%
-with no failures observed to that point.
+Superseded head `3641801ea024711b000050f4987ff654baeb5351` had Core CI #1082
+terminal `SUCCESS`. M12 #850 passed complete source/recovery verification on both platforms and
+passed the Windows semantic interaction proof, but the Ubuntu job failed in the unrelated browser
+semantic-interaction re-proof; therefore M12 was `FAILURE` and received no acceptance credit.
 
-Those results are lineage/diagnostic evidence only. The subsequent audit fix changed production
-source and added two regression tests, so no local success count is claimed for the final source.
-Only repository GitHub Actions on the final exact PR head count for merge readiness.
+That head is additionally invalidated by the later assignment-identity repair. Earlier local
+harness counts and pre-repair CI are lineage/diagnostic evidence only. Only fresh repository
+GitHub Actions on the post-repair exact PR head count for merge readiness.
 
 ## DEPENDENCY_REQUEST
 
