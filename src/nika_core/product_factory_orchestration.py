@@ -574,6 +574,8 @@ def _validate_windows_repo_path(path: str, *, original: str) -> None:
     reserved_stems = {
         "aux",
         "con",
+        "conin$",
+        "conout$",
         "nul",
         "prn",
         *(f"com{index}" for index in range(1, 10)),
