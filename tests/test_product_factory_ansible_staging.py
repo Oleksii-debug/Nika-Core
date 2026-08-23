@@ -398,17 +398,18 @@ def test_inspect_returns_only_exact_release_health_and_evidence() -> None:
         },
     ],
 )
-def test_inspection_rejects_exact_release_substitution(
+def test_inspection_reports_complete_different_exact_release_for_fabric_reconciliation(
     contract: dict[str, object],
 ) -> None:
     adapter, _ = _adapter(
         _execution("inspect", contract)
     )
-    with pytest.raises(
-        StagingAdapterError,
-        match="different exact release identity",
-    ):
-        adapter.inspect(_intent())
+    inspection = adapter.inspect(_intent())
+    assert inspection.release is not None
+    assert inspection.release.version == contract["release_version"]
+    assert inspection.release.source_sha == contract["release_sha"]
+    assert inspection.release.artifact_digest == contract["artifact_digest"]
+    assert inspection.healthy is True
 
 
 def test_inspection_missing_release_has_no_partial_identity() -> None:
@@ -468,8 +469,8 @@ def test_uncertain_reconcile_rejects_same_sha_wrong_artifact() -> None:
     assert uncertain.state is DeploymentState.UNCERTAIN
 
     with pytest.raises(
-        StagingAdapterError,
-        match="different exact release identity",
+        DeploymentFabricError,
+        match="different exact release",
     ):
         fabric.reconcile(intent.intent_id)
 
