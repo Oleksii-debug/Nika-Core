@@ -25,7 +25,7 @@ The implementation deliberately does **not** provide autonomous external-message
 - Research evidence IDs are constrained to the exact objective research package before an opportunity can be created.
 - ProductProject handoff is bound to an authorized WorkOrder and a PF9-derived durable operation identity.
 - Communication policy is adapted into durable `DRAFT -> AUTHORIZED -> SENT/FAILED` evidence without adding a sender to PF9 core.
-- PF10 dependency records add the project-level source/version/license/provenance and distribution-obligation decision needed before delivery.
+- PF10 dependency records add the project-level source/version/license/provenance, authorized review evidence and distribution-obligation decision needed before delivery.
 
 ### CUSTOM (thin)
 
@@ -84,11 +84,11 @@ An already-linked WorkOrder also rechecks that the durable ProductProject exists
 - recorded license expression;
 - license disposition from an authorized review/policy process.
 
-The gate does not infer whether a license is acceptable. `REVIEW_REQUIRED` and `BLOCKED` remain release-blocking until an authorized process records an approved disposition.
+An `APPROVED` license disposition is release-allowing and therefore requires a durable `review_ref`; a bare caller-supplied enum is not sufficient evidence. `REVIEW_REQUIRED` and `BLOCKED` remain release-blocking.
 
-Every declared distribution obligation must have matching fulfillment evidence. A component marked as requiring notices must carry notice references. Missing/unacceptable provenance, license disposition, obligations, or notice evidence blocks the compliance decision and therefore blocks PF9 delivery.
+Every declared distribution obligation must have matching fulfillment evidence. Duplicate fulfillment records for the same component/obligation are ambiguous and block; fulfillment evidence for an undeclared component is orphan evidence and blocks. A component marked as requiring notices must carry notice references. Missing/unacceptable provenance, license disposition, obligations, or notice evidence blocks the compliance decision and therefore blocks PF9 delivery.
 
-Competitor evidence is permitted only when it is recorded as permitted public evidence, or when proprietary material carries both a legal-basis reference and an explicit reuse-authorization reference. Possession or access alone is not treated as copying permission.
+Competitor evidence is permitted only when it is recorded as permitted public evidence with a durable permission/terms-policy basis reference, or when proprietary material carries both a legal-basis reference and an explicit reuse-authorization reference. Possession, public visibility or access alone is not treated as permission to copy/reuse.
 
 ## Persistence and restart integrity
 
@@ -124,8 +124,9 @@ Focused regressions cover:
 - QA and exact-project PF10 delivery gate;
 - forged snapshot and stale-writer rejection;
 - missing dependency version/provenance rejection;
+- missing approved-license review evidence;
 - blocked/review-required license rejection;
-- missing notices and distribution fulfillment;
-- unpermissioned competitor evidence and proprietary-copy authorization boundaries.
+- missing/duplicate/orphan distribution fulfillment and missing notices;
+- public competitor permission-basis evidence and proprietary-copy authorization boundaries.
 
 Exact-head CI remains the acceptance evidence source. This document does not assign `HUMAN_TESTED` or `NVDA_VERIFIED` and does not claim that any real external business provider has been exercised.
