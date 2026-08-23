@@ -356,6 +356,7 @@ class DeploymentFabric:
             if existing.intent != intent:
                 raise DeploymentFabricError("deployment intent id conflicts with prior payload")
             return existing
+        self._enforce_no_unresolved_effect(intent)
         self._enforce_staging_first(intent)
         environment_key = _environment_key(intent)
         previous = self._current_releases.get(environment_key)
@@ -363,7 +364,7 @@ class DeploymentFabric:
         if not result.evidence_refs:
             raise DeploymentFabricError("provider deploy result requires evidence refs")
         if result.uncertain:
-            return self._save(
+            return self._mark_uncertain(
                 DeploymentRecord(
                     intent,
                     DeploymentState.UNCERTAIN,
@@ -386,7 +387,14 @@ class DeploymentFabric:
             result.evidence_refs,
             previous_release_sha=previous,
         )
-        return self._finish_health(record, self.provider.health(intent))
+        try:
+            health = self.provider.health(intent)
+        except Exception:
+            return self._mark_uncertain(record)
+        try:
+            return self._finish_health(record, health)
+        except DeploymentFabricError:
+            return self._mark_uncertain(record, health.evidence_refs)
 
     def reconcile(self, intent_id: str) -> DeploymentRecord:
         record = self._record(intent_id)
@@ -396,6 +404,7 @@ class DeploymentFabric:
         if not inspection.evidence_refs:
             raise DeploymentFabricError("provider inspection requires evidence refs")
         if inspection.release_sha is None:
+            self._current_releases.pop(_environment_key(record.intent), None)
             return self._save(
                 DeploymentRecord(
                     record.intent,
@@ -405,11 +414,12 @@ class DeploymentFabric:
                 )
             )
         if inspection.release_sha != record.intent.release.source_sha:
+            self._mark_uncertain(record, inspection.evidence_refs)
             raise DeploymentFabricError(
                 "provider reports a different release for uncertain deployment"
             )
         if inspection.healthy is None:
-            return record
+            return self._mark_uncertain(record, inspection.evidence_refs)
         health = HealthEvidence(
             record.intent.environment.environment_id,
             record.intent.release.source_sha,
@@ -457,6 +467,10 @@ class DeploymentFabric:
                 raise DeploymentFabricError(
                     "healthy staging snapshot is not backed by a healthy staging record"
                 )
+            if _has_unresolved_staging_record(snapshot.records, project_id):
+                raise DeploymentFabricError(
+                    "healthy staging snapshot conflicts with unresolved staging effect"
+                )
             healthy_staging[project_id] = release
 
         current_releases: dict[tuple[str, str], str] = {}
@@ -501,7 +515,10 @@ class DeploymentFabric:
             if intent.environment.tier is EnvironmentTier.STAGING:
                 self._healthy_staging[intent.project_id] = intent.release
             return self._save(updated)
-        rollback = self.provider.rollback(intent, record.previous_release_sha)
+        try:
+            rollback = self.provider.rollback(intent, record.previous_release_sha)
+        except Exception:
+            return self._mark_uncertain(record, health.evidence_refs)
         if rollback.environment_id != intent.environment.environment_id:
             raise DeploymentFabricError("rollback evidence environment mismatch")
         if rollback.failed_release_sha != intent.release.source_sha:
@@ -510,16 +527,32 @@ class DeploymentFabric:
             raise DeploymentFabricError(
                 "rollback success did not restore the recorded previous release"
             )
+        if not rollback.succeeded:
+            return self._mark_uncertain(
+                record,
+                health.evidence_refs + rollback.evidence_refs,
+            )
         return self._save(
             DeploymentRecord(
                 intent,
-                DeploymentState.ROLLED_BACK if rollback.succeeded else DeploymentState.REJECTED,
+                DeploymentState.ROLLED_BACK,
                 record.provider_evidence_refs,
                 health=health,
                 rollback=rollback,
                 previous_release_sha=record.previous_release_sha,
             )
         )
+
+    def _enforce_no_unresolved_effect(self, intent: DeploymentIntent) -> None:
+        environment_key = _environment_key(intent)
+        if any(
+            record.state is DeploymentState.UNCERTAIN
+            and _environment_key(record.intent) == environment_key
+            for record in self._records.values()
+        ):
+            raise DeploymentFabricError(
+                "environment has an unresolved deployment effect"
+            )
 
     def _enforce_staging_first(self, intent: DeploymentIntent) -> None:
         if (
@@ -529,6 +562,22 @@ class DeploymentFabric:
             raise DeploymentFabricError(
                 "production deploy requires healthy staging proof for exact release"
             )
+
+    def _mark_uncertain(
+        self,
+        record: DeploymentRecord,
+        evidence_refs: tuple[str, ...] = (),
+    ) -> DeploymentRecord:
+        if record.intent.environment.tier is EnvironmentTier.STAGING:
+            self._healthy_staging.pop(record.intent.project_id, None)
+        return self._save(
+            DeploymentRecord(
+                record.intent,
+                DeploymentState.UNCERTAIN,
+                record.provider_evidence_refs + evidence_refs,
+                previous_release_sha=record.previous_release_sha,
+            )
+        )
 
     def _record(self, intent_id: str) -> DeploymentRecord:
         try:
@@ -630,6 +679,18 @@ def _has_healthy_staging_record(
         and record.intent.project_id == release.project_id
         and record.intent.environment.tier is EnvironmentTier.STAGING
         and record.intent.release == release
+        for record in records
+    )
+
+
+def _has_unresolved_staging_record(
+    records: tuple[DeploymentRecord, ...],
+    project_id: str,
+) -> bool:
+    return any(
+        record.state is DeploymentState.UNCERTAIN
+        and record.intent.project_id == project_id
+        and record.intent.environment.tier is EnvironmentTier.STAGING
         for record in records
     )
 
