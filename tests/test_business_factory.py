@@ -21,6 +21,7 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_compliance import (
     CompetitorResearchEvidence,
     DependencyAdoption,
+    DependencyNoticeEvidence,
     DistributionObligationEvidence,
     LicenseDisposition,
     ProductComplianceDecision,
@@ -102,6 +103,10 @@ class _ReviewAuthority:
             return False
         expected = {
             (
+                "review:compliance-scope:product",
+                "compliance-scope",
+            ),
+            (
                 "review:license:httpx-0.28.1",
                 "license-disposition:component-httpx",
             ),
@@ -114,6 +119,7 @@ class _ReviewAuthority:
 
 
 def _allowed_compliance(project_id: str) -> ProductComplianceDecision:
+    notice_ref = "artifact:THIRD_PARTY_NOTICES.txt#httpx"
     return ProductComplianceGate(review_authority=_ReviewAuthority(project_id)).evaluate(
         project_id=project_id,
         dependencies=(
@@ -123,12 +129,13 @@ def _allowed_compliance(project_id: str) -> ProductComplianceDecision:
                 package_name="httpx",
                 version="0.28.1",
                 source_ref="registry:pypi:httpx:0.28.1",
+                source_integrity_ref="sha256:" + "1" * 64,
                 provenance_ref="hash:sha256:httpx-fixture",
                 license_expression="BSD-3-Clause",
                 license_disposition=LicenseDisposition.APPROVED,
                 distribution_obligations=("retain-license-notice",),
                 notice_required=True,
-                notice_refs=("artifact:THIRD_PARTY_NOTICES.txt#httpx",),
+                notice_refs=(notice_ref,),
                 review_ref="review:license:httpx-0.28.1",
             ),
         ),
@@ -137,7 +144,18 @@ def _allowed_compliance(project_id: str) -> ProductComplianceDecision:
                 project_id=project_id,
                 component_id="component-httpx",
                 obligation="retain-license-notice",
-                fulfillment_ref="artifact:THIRD_PARTY_NOTICES.txt#httpx",
+                fulfillment_ref=notice_ref,
+            ),
+        ),
+        notice_evidence=(
+            DependencyNoticeEvidence(
+                project_id=project_id,
+                component_id="component-httpx",
+                notice_ref=notice_ref,
+                package_name="httpx",
+                version="0.28.1",
+                section_title="httpx 0.28.1",
+                section_sha256="a" * 64,
             ),
         ),
         competitor_evidence=(
@@ -150,6 +168,7 @@ def _allowed_compliance(project_id: str) -> ProductComplianceDecision:
                 permission_basis_ref="terms-review:public-source:competitor-1",
             ),
         ),
+        scope_review_ref="review:compliance-scope:product",
     )
 
 
