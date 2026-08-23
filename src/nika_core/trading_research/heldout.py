@@ -104,12 +104,12 @@ class CandidateScore:
     evaluated_at: datetime
 
     def __post_init__(self) -> None:
-        if not self.strategy_id.strip() or not self.metric_name.strip():
-            raise TradingResearchError("candidate score requires strategy and metric identity")
+        _require_identity(self.strategy_id, "strategy_id")
+        _require_identity(self.metric_name, "metric_name")
         _require_digest(self.dataset_semantic_hash, "dataset_semantic_hash")
         _require_digest(self.universe_fingerprint, "universe_fingerprint")
-        if self.metric_value is not None and not self.metric_value.is_finite():
-            raise TradingResearchError("candidate metric must be finite when supplied")
+        _require_data_quality(self.data_quality)
+        _require_metric(self.metric_value, "candidate metric", allow_none=True)
         object.__setattr__(
             self,
             "fit_cutoff_at",
@@ -127,7 +127,7 @@ class CandidateScore:
         )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class SelectionDecision:
     strategy_id: str
     metric_name: str
@@ -141,24 +141,46 @@ class SelectionDecision:
     higher_is_better: bool
     source_partition: Partition = Partition.VALIDATION
 
-    def __post_init__(self) -> None:
-        if self.source_partition is not Partition.VALIDATION:
-            raise CausalityViolation("strategy selection must use validation results only")
-        if not self.metric_value.is_finite():
-            raise TradingResearchError("selection metric must be finite")
-        _require_digest(self.dataset_semantic_hash, "dataset_semantic_hash")
-        _require_digest(self.universe_fingerprint, "universe_fingerprint")
-        _require_digest(self.protocol_fingerprint, "protocol_fingerprint")
-        object.__setattr__(
-            self,
-            "universe_cutoff_at",
-            require_aware_utc(self.universe_cutoff_at, "universe_cutoff_at"),
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        raise TypeError(
+            "SelectionDecision instances are created only by select_validation_candidate()"
         )
-        object.__setattr__(
-            self,
-            "selected_at",
-            require_aware_utc(self.selected_at, "selected_at"),
-        )
+
+    @classmethod
+    def _create(
+        cls,
+        *,
+        strategy_id: str,
+        metric_name: str,
+        metric_value: Decimal,
+        dataset_semantic_hash: str,
+        data_quality: ReplayDataQuality,
+        universe_fingerprint: str,
+        universe_cutoff_at: datetime,
+        selected_at: datetime,
+        protocol_fingerprint: str,
+        higher_is_better: bool,
+    ) -> SelectionDecision:
+        obj = object.__new__(cls)
+        values = {
+            "strategy_id": strategy_id,
+            "metric_name": metric_name,
+            "metric_value": metric_value,
+            "dataset_semantic_hash": dataset_semantic_hash,
+            "data_quality": data_quality,
+            "universe_fingerprint": universe_fingerprint,
+            "universe_cutoff_at": require_aware_utc(
+                universe_cutoff_at, "universe_cutoff_at"
+            ),
+            "selected_at": require_aware_utc(selected_at, "selected_at"),
+            "protocol_fingerprint": protocol_fingerprint,
+            "higher_is_better": higher_is_better,
+            "source_partition": Partition.VALIDATION,
+        }
+        for name, value in values.items():
+            object.__setattr__(obj, name, value)
+        _validate_selection_identity(obj)
+        return obj
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,12 +197,12 @@ class PartitionResult:
     evaluated_at: datetime
 
     def __post_init__(self) -> None:
-        if not self.strategy_id.strip() or not self.metric_name.strip():
-            raise TradingResearchError("partition result requires strategy and metric identity")
+        _require_identity(self.strategy_id, "strategy_id")
+        _require_identity(self.metric_name, "metric_name")
         _require_digest(self.dataset_semantic_hash, "dataset_semantic_hash")
         _require_digest(self.universe_fingerprint, "universe_fingerprint")
-        if self.metric_value is not None and not self.metric_value.is_finite():
-            raise TradingResearchError("partition metric must be finite when supplied")
+        _require_data_quality(self.data_quality)
+        _require_metric(self.metric_value, "partition metric", allow_none=True)
         object.__setattr__(
             self,
             "fit_cutoff_at",
@@ -198,12 +220,28 @@ class PartitionResult:
         )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class HeldOutAssessment:
     selection: SelectionDecision
     test_result: PartitionResult
 
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        raise TypeError(
+            "HeldOutAssessment instances are created only by bind_held_out_test()"
+        )
+
+    @classmethod
+    def _create(
+        cls, selection: SelectionDecision, test_result: PartitionResult
+    ) -> HeldOutAssessment:
+        obj = object.__new__(cls)
+        object.__setattr__(obj, "selection", selection)
+        object.__setattr__(obj, "test_result", test_result)
+        _validate_assessment_identity(obj)
+        return obj
+
     def require_promotion_metric(self) -> Decimal:
+        _validate_assessment_identity(self)
         if self.test_result.metric_value is None:
             raise TradingResearchError(
                 "held-out metric is unavailable; promotion evidence is forbidden"
@@ -220,6 +258,8 @@ def select_validation_candidate(
 ) -> SelectionDecision:
     if not scores:
         raise TradingResearchError("at least one validation score is required")
+    if not isinstance(higher_is_better, bool):
+        raise TradingResearchError("higher_is_better must be a boolean")
     selected_at = require_aware_utc(selected_at, "selected_at")
     if selected_at < protocol.validation.end_at:
         raise CausalityViolation("strategy cannot be selected before validation finishes")
@@ -256,8 +296,8 @@ def select_validation_candidate(
             raise TradingResearchError("candidate score is missing its selection metric")
         if score.fit_cutoff_at > protocol.train.end_at:
             raise CausalityViolation("validation candidate was fit using validation/future data")
-        if score.universe_cutoff_at > protocol.validation.start_at:
-            raise CausalityViolation("validation universe uses future membership information")
+        if score.universe_cutoff_at >= protocol.validation.start_at:
+            raise CausalityViolation("validation universe must be fixed before validation starts")
         if score.evaluated_at < protocol.validation.end_at:
             raise CausalityViolation("validation metric was finalized before validation ended")
         if score.evaluated_at > selected_at:
@@ -269,7 +309,7 @@ def select_validation_candidate(
         (score for score in scores if score.metric_value == best_value),
         key=lambda score: score.strategy_id,
     )
-    return SelectionDecision(
+    return SelectionDecision._create(
         strategy_id=best.strategy_id,
         metric_name=metric_name,
         metric_value=best_value,
@@ -288,10 +328,16 @@ def bind_held_out_test(
     selection: SelectionDecision,
     result: PartitionResult,
 ) -> HeldOutAssessment:
+    selected_at, universe_cutoff_at = _validate_selection_identity(selection)
+    _validate_partition_result_identity(result)
     if selection.protocol_fingerprint != protocol.fingerprint:
         raise TradingResearchError("selection belongs to a different held-out protocol")
-    if selection.selected_at > protocol.test.start_at:
-        raise CausalityViolation("selection must predate held-out test start")
+    if selected_at < protocol.validation.end_at:
+        raise CausalityViolation("selection predates validation completion")
+    if selected_at > protocol.test.start_at:
+        raise CausalityViolation("selection occurred after held-out test began")
+    if universe_cutoff_at >= protocol.validation.start_at:
+        raise CausalityViolation("selection universe was not fixed before validation")
     if result.partition is not Partition.TEST:
         raise CausalityViolation("held-out assessment requires the test partition")
     if result.strategy_id != selection.strategy_id:
@@ -316,15 +362,96 @@ def bind_held_out_test(
         raise CausalityViolation("held-out universe uses future membership information")
     if result.evaluated_at < protocol.test.end_at:
         raise CausalityViolation("held-out metric was finalized before the test window ended")
-    return HeldOutAssessment(selection=selection, test_result=result)
+    return HeldOutAssessment._create(selection, result)
+
+
+def _validate_assessment_identity(assessment: HeldOutAssessment) -> None:
+    if not isinstance(assessment, HeldOutAssessment):
+        raise TradingResearchError("assessment must be HeldOutAssessment evidence")
+    _validate_selection_identity(assessment.selection)
+    _validate_partition_result_identity(assessment.test_result)
+    result = assessment.test_result
+    selection = assessment.selection
+    if result.partition is not Partition.TEST:
+        raise CausalityViolation("held-out assessment requires the test partition")
+    if result.strategy_id != selection.strategy_id:
+        raise CausalityViolation("held-out assessment strategy identity changed")
+    if result.metric_name != selection.metric_name:
+        raise TradingResearchError("held-out assessment metric identity changed")
+    if result.dataset_semantic_hash != selection.dataset_semantic_hash:
+        raise TradingResearchError("held-out assessment dataset identity changed")
+    if result.data_quality != selection.data_quality or not result.data_quality.is_clean:
+        raise TradingResearchError("held-out assessment data-quality evidence changed")
+    if result.universe_fingerprint != selection.universe_fingerprint:
+        raise CausalityViolation("held-out assessment universe identity changed")
+    if result.universe_cutoff_at != selection.universe_cutoff_at:
+        raise CausalityViolation("held-out assessment universe cutoff changed")
+
+
+def _validate_selection_identity(
+    selection: SelectionDecision,
+) -> tuple[datetime, datetime]:
+    if not isinstance(selection, SelectionDecision):
+        raise TradingResearchError("selection must be SelectionDecision evidence")
+    _require_identity(selection.strategy_id, "strategy_id")
+    _require_identity(selection.metric_name, "metric_name")
+    _require_metric(selection.metric_value, "selection metric")
+    _require_digest(selection.dataset_semantic_hash, "dataset_semantic_hash")
+    _require_digest(selection.universe_fingerprint, "universe_fingerprint")
+    _require_digest(selection.protocol_fingerprint, "protocol_fingerprint")
+    _require_data_quality(selection.data_quality)
+    if selection.source_partition is not Partition.VALIDATION:
+        raise CausalityViolation("strategy selection must use validation results only")
+    if not isinstance(selection.higher_is_better, bool):
+        raise TradingResearchError("higher_is_better must be a boolean")
+    if not selection.data_quality.is_clean:
+        raise TradingResearchError("selection cannot carry dirty dataset quality evidence")
+    selected_at = require_aware_utc(selection.selected_at, "selected_at")
+    universe_cutoff_at = require_aware_utc(
+        selection.universe_cutoff_at, "universe_cutoff_at"
+    )
+    return selected_at, universe_cutoff_at
+
+
+def _validate_partition_result_identity(result: PartitionResult) -> None:
+    if not isinstance(result, PartitionResult):
+        raise TradingResearchError("result must be PartitionResult evidence")
+    _require_identity(result.strategy_id, "strategy_id")
+    _require_identity(result.metric_name, "metric_name")
+    _require_metric(result.metric_value, "partition metric", allow_none=True)
+    _require_digest(result.dataset_semantic_hash, "dataset_semantic_hash")
+    _require_digest(result.universe_fingerprint, "universe_fingerprint")
+    _require_data_quality(result.data_quality)
+    require_aware_utc(result.fit_cutoff_at, "fit_cutoff_at")
+    require_aware_utc(result.universe_cutoff_at, "universe_cutoff_at")
+    require_aware_utc(result.evaluated_at, "evaluated_at")
+
+
+def _require_data_quality(value: ReplayDataQuality) -> None:
+    if not isinstance(value, ReplayDataQuality):
+        raise TradingResearchError("data_quality must be ReplayDataQuality evidence")
+
+
+def _require_identity(value: str, field_name: str) -> None:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise TradingResearchError(f"{field_name} must be a canonical non-empty identity")
+
+
+def _require_metric(
+    value: Decimal | None, field_name: str, *, allow_none: bool = False
+) -> None:
+    if value is None:
+        if allow_none:
+            return
+        raise TradingResearchError(f"{field_name} must be present")
+    if not isinstance(value, Decimal) or not value.is_finite():
+        raise TradingResearchError(f"{field_name} must be a finite Decimal")
 
 
 def _require_digest(value: str, field_name: str) -> None:
-    if len(value) != 64:
-        raise TradingResearchError(f"{field_name} must be a SHA-256 hex digest")
-    try:
-        int(value, 16)
-    except ValueError as exc:
-        raise TradingResearchError(
-            f"{field_name} must be a SHA-256 hex digest"
-        ) from exc
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise TradingResearchError(f"{field_name} must be a canonical lowercase SHA-256 digest")
