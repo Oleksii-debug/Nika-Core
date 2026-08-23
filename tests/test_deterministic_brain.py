@@ -33,7 +33,7 @@ def test_deterministic_brain_plans_and_executes_without_model_gateway() -> None:
     tools.register(ToolSpec(tool_id="research.fetch", description="fetch"), fetch)
     tools.register(ToolSpec(tool_id="research.filter", description="filter"), filter_pages)
     brain = DeterministicBrain(
-        planner=UnifiedPlanningAdapter(engine_name="pyperplan"),
+        planner=UnifiedPlanningAdapter(),
         tools=tools,
     )
     actions = (
@@ -67,7 +67,7 @@ def test_deterministic_brain_plans_and_executes_without_model_gateway() -> None:
 
 
 def test_deterministic_planner_fails_cleanly_for_impossible_goal() -> None:
-    planner = UnifiedPlanningAdapter(engine_name="pyperplan")
+    planner = UnifiedPlanningAdapter()
 
     with pytest.raises(DeterministicPlanningError):
         planner.plan(
@@ -78,7 +78,7 @@ def test_deterministic_planner_fails_cleanly_for_impossible_goal() -> None:
 
 
 def test_replanning_from_changed_state_skips_already_completed_work() -> None:
-    planner = UnifiedPlanningAdapter(engine_name="pyperplan")
+    planner = UnifiedPlanningAdapter()
     actions = (
         DeterministicAction(
             action_id="fetch-pages",
@@ -119,7 +119,7 @@ def test_deterministic_brain_cannot_bypass_high_impact_tool_approval() -> None:
         publish,
     )
     brain = DeterministicBrain(
-        planner=UnifiedPlanningAdapter(engine_name="pyperplan"),
+        planner=UnifiedPlanningAdapter(),
         tools=tools,
     )
     action = DeterministicAction(
@@ -219,7 +219,7 @@ def test_deterministic_brain_times_out_slow_planner() -> None:
 
 def test_deterministic_brain_rejects_invalid_budget_values() -> None:
     brain = DeterministicBrain(
-        planner=UnifiedPlanningAdapter(engine_name="pyperplan"),
+        planner=UnifiedPlanningAdapter(),
         tools=ToolExecutor(),
     )
 
