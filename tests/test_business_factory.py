@@ -100,6 +100,7 @@ def _allowed_compliance(project_id: str) -> ProductComplianceDecision:
                 distribution_obligations=("retain-license-notice",),
                 notice_required=True,
                 notice_refs=("artifact:THIRD_PARTY_NOTICES.txt#httpx",),
+                review_ref="review:license:httpx-0.28.1",
             ),
         ),
         obligation_evidence=(
@@ -117,6 +118,7 @@ def _allowed_compliance(project_id: str) -> ProductComplianceDecision:
                 source_ref="public:https://example.test/product",
                 provenance_ref="research:source:public:competitor-1",
                 permitted_public_evidence=True,
+                permission_basis_ref="terms-review:public-source:competitor-1",
             ),
         ),
     )
@@ -239,7 +241,11 @@ def test_delivery_requires_qa_and_matching_allowed_compliance(tmp_path) -> None:
         repository=ProductProjectRepository(store),
         project_id="product-project-1",
         project_name="Expense App Test Product",
-        spec=ProductProjectSpec(goal="Build test product", desired_outcome="Verified output"),
+        spec=ProductProjectSpec(
+            goal="Build test product",
+            desired_outcome="Verified output",
+            compliance={"business_work_order_ref": "work-order-1"},
+        ),
         idempotency_key="work-order-1",
     )
 
