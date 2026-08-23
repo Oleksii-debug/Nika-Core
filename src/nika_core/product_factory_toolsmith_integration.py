@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -46,7 +47,12 @@ class ComponentCapabilityGap:
     def __post_init__(self) -> None:
         if not all(
             value.strip()
-            for value in (self.work_id, self.component_id, self.task_id, self.capability_id)
+            for value in (
+                self.work_id,
+                self.component_id,
+                self.task_id,
+                self.capability_id,
+            )
         ):
             raise ProductFactoryToolsmithError(
                 "component capability gap identity must not be empty"
@@ -80,17 +86,22 @@ class ComponentCapabilityResume:
 class CapabilityEscalationPort(Protocol):
     def begin(self, gap: CapabilityGap) -> tuple[int, CandidateState]: ...
 
-    def reconcile_resume(self, *, task_id: str, capability_id: str) -> dict[str, str] | None: ...
+    def reconcile_resume(
+        self,
+        *,
+        task_id: str,
+        capability_id: str,
+    ) -> dict[str, str] | None: ...
 
 
 @dataclass(slots=True)
 class ProductFactoryToolsmithBridge:
     """Component-scoped Product Factory ↔ Toolsmith integration.
 
-    ``begin_gap`` / ``resume_registered_gap`` preserve the original in-memory compatibility
-    surface. Production restart-safe composition uses ``begin_durable_gap`` and
-    ``resume_durable_registered_gap`` with the canonical Product Factory host task and the
-    same SQLite store used by Toolsmith and Product Factory checkpoints.
+    ``begin_gap`` / ``resume_registered_gap`` preserve the original in-memory
+    compatibility surface for non-persistent callers. Production restart-safe
+    composition supplies ``store`` and must use ``begin_durable_gap`` plus
+    ``resume_durable_registered_gap`` with the canonical Product Factory host task.
     """
 
     escalation: CapabilityEscalationPort
@@ -121,6 +132,10 @@ class ProductFactoryToolsmithBridge:
         attempted_methods: tuple[str, ...] = (),
     ) -> ComponentCapabilityGap:
         """Compatibility primitive whose checkpoint must remain with the caller."""
+        if self.store is not None:
+            raise ProductFactoryToolsmithError(
+                "configured durable bridge requires begin_durable_gap(host_task_id=...)"
+            )
         _validate_gap_input(capability_id, reason)
         task_id = component_task_id(request)
         gap = _gap_for_request(
@@ -131,7 +146,12 @@ class ProductFactoryToolsmithBridge:
             attempted_methods=attempted_methods,
         )
         version, state = self.escalation.begin(gap)
-        return _component_gap(request, gap, version=version, state=state)
+        return _component_gap(
+            request,
+            gap,
+            version=version,
+            state=state,
+        )
 
     def begin_durable_gap(
         self,
@@ -171,8 +191,7 @@ class ProductFactoryToolsmithBridge:
                 )
             except ProductFactoryToolsmithBindingError as exc:
                 raise ProductFactoryToolsmithError(str(exc)) from exc
-        checkpoint = _component_gap_from_binding(durable)
-        return checkpoint
+        return _component_gap_from_binding(durable)
 
     def resume_registered_gap(
         self,
@@ -180,13 +199,19 @@ class ProductFactoryToolsmithBridge:
         checkpoint: ComponentCapabilityGap,
     ) -> ComponentCapabilityResume | None:
         """Compatibility primitive for a caller-retained gap checkpoint."""
+        if self.store is not None:
+            raise ProductFactoryToolsmithError(
+                "configured durable bridge requires resume_durable_registered_gap"
+            )
         record = _record_for_component(coordinator, checkpoint.component_id)
         if record.request.work_id != checkpoint.work_id:
             raise ProductFactoryToolsmithError(
                 "capability-gap checkpoint belongs to a stale component attempt"
             )
         if component_task_id(record.request) != checkpoint.task_id:
-            raise ProductFactoryToolsmithError("component task identity drifted before gap resume")
+            raise ProductFactoryToolsmithError(
+                "component task identity drifted before gap resume"
+            )
         _require_repair_required(record)
 
         registered = self.escalation.reconcile_resume(
@@ -257,8 +282,13 @@ class ProductFactoryToolsmithBridge:
                 )
 
         before = coordinator.snapshot()
+        checkpoint_saved = False
         try:
-            resume = self._prepare_resume(coordinator, checkpoint, registered)
+            resume = self._prepare_resume(
+                coordinator,
+                checkpoint,
+                registered,
+            )
             if durable.state is ComponentCapabilityBindingState.RESUME_PREPARED:
                 if resume.next_request.work_id != durable.next_work_id:
                     raise ProductFactoryToolsmithError(
@@ -275,13 +305,14 @@ class ProductFactoryToolsmithBridge:
                 host_task_id=host_task_id,
                 checkpoint=binding.checkpoint(coordinator),
             )
-        except Exception:
-            coordinator.restore(before)
-            raise
+            checkpoint_saved = True
+        finally:
+            if not checkpoint_saved:
+                coordinator.restore(before)
 
         try:
             bindings.mark_consumed(durable)
-        except Exception as exc:
+        except (ProductFactoryToolsmithBindingError, sqlite3.Error) as exc:
             raise ProductFactoryToolsmithError(
                 "Product Factory repair checkpoint is durable but Toolsmith binding "
                 "finalization requires restart reconciliation"
@@ -318,10 +349,12 @@ class ProductFactoryToolsmithBridge:
                 "durably resumed component is not in the expected ready state"
             )
         if not durable.pinned_version or not durable.pinned_digest:
-            raise ProductFactoryToolsmithError("prepared resume lost pinned capability evidence")
+            raise ProductFactoryToolsmithError(
+                "prepared resume lost pinned capability evidence"
+            )
         try:
             bindings.mark_consumed(durable)
-        except Exception as exc:
+        except (ProductFactoryToolsmithBindingError, sqlite3.Error) as exc:
             raise ProductFactoryToolsmithError(
                 "prepared capability resume could not finalize durable binding"
             ) from exc
@@ -344,7 +377,10 @@ class ProductFactoryToolsmithBridge:
             next_request = self.worker_adapter.prepare_safe_repair(
                 coordinator,
                 checkpoint.component_id,
-                reason=_repair_reason(checkpoint.capability_id, registered),
+                reason=_repair_reason(
+                    checkpoint.capability_id,
+                    registered,
+                ),
             )
         except (CodingWorkerAdapterError, CoordinatorError) as exc:
             raise ProductFactoryToolsmithError(
@@ -397,18 +433,28 @@ def _validate_registered_identity(
 ) -> None:
     required = {"task_id", "capability_id", "version", "digest"}
     if set(registered) != required:
-        raise ProductFactoryToolsmithError("Toolsmith resume identity has unexpected fields")
+        raise ProductFactoryToolsmithError(
+            "Toolsmith resume identity has unexpected fields"
+        )
     if registered["task_id"] != checkpoint.task_id:
-        raise ProductFactoryToolsmithError("Toolsmith resumed a different task identity")
+        raise ProductFactoryToolsmithError(
+            "Toolsmith resumed a different task identity"
+        )
     if registered["capability_id"] != checkpoint.capability_id:
-        raise ProductFactoryToolsmithError("Toolsmith resumed a different capability identity")
+        raise ProductFactoryToolsmithError(
+            "Toolsmith resumed a different capability identity"
+        )
     if not registered["version"].strip() or not registered["digest"].strip():
-        raise ProductFactoryToolsmithError("Toolsmith resume lost pinned version or digest")
+        raise ProductFactoryToolsmithError(
+            "Toolsmith resume lost pinned version or digest"
+        )
 
 
 def _validate_gap_input(capability_id: str, reason: str) -> None:
     if not capability_id.strip() or not reason.strip():
-        raise ProductFactoryToolsmithError("capability id and gap reason must not be empty")
+        raise ProductFactoryToolsmithError(
+            "capability id and gap reason must not be empty"
+        )
 
 
 def _gap_for_request(
@@ -499,12 +545,17 @@ def _consumed_resume(
     record: WorkRecord,
     durable: ComponentCapabilityBinding,
 ) -> ComponentCapabilityResume:
-    if record.request.work_id != durable.next_work_id or record.state is not WorkState.READY:
+    if (
+        record.request.work_id != durable.next_work_id
+        or record.state is not WorkState.READY
+    ):
         raise ProductFactoryToolsmithError(
             "consumed capability binding no longer matches resumed Product Factory request"
         )
     if not durable.pinned_version or not durable.pinned_digest:
-        raise ProductFactoryToolsmithError("consumed binding lost pinned capability evidence")
+        raise ProductFactoryToolsmithError(
+            "consumed binding lost pinned capability evidence"
+        )
     return ComponentCapabilityResume(
         component_id=record.request.component_id,
         previous_work_id=durable.work_id,
@@ -515,7 +566,10 @@ def _consumed_resume(
     )
 
 
-def _repair_reason(capability_id: str, registered: dict[str, str]) -> str:
+def _repair_reason(
+    capability_id: str,
+    registered: dict[str, str],
+) -> str:
     return (
         "Toolsmith capability registered: "
         f"{capability_id}@{registered['version']} digest={registered['digest']}"
