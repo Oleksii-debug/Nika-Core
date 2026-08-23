@@ -55,12 +55,15 @@ def test_release_passes_only_with_complete_approved_provenance_and_obligations()
                 source_ref="public:https://example.test",
                 provenance_ref="research:public:1",
                 permitted_public_evidence=True,
+                permission_basis_ref="terms-review:public-source:1",
             ),
         ),
     )
     assert decision.allowed is True
     assert decision.findings == ()
     assert "hash:sha256:fixture" in decision.evidence_refs
+    assert "review:license:1" in decision.evidence_refs
+    assert "terms-review:public-source:1" in decision.evidence_refs
     ProductComplianceGate().require_release_allowed(decision)
 
 
@@ -86,6 +89,29 @@ def test_missing_dependency_identity_or_provenance_is_rejected_at_contract_bound
             provenance_ref="",
             license_expression="MIT",
             license_disposition=LicenseDisposition.APPROVED,
+        )
+
+
+def test_release_allowing_policy_decisions_require_durable_review_evidence() -> None:
+    with pytest.raises(ProductComplianceError, match="authorized review_ref"):
+        DependencyAdoption(
+            project_id="project-1",
+            component_id="component-1",
+            package_name="pkg",
+            version="1.0",
+            source_ref="registry:pkg",
+            provenance_ref="hash:1",
+            license_expression="MIT",
+            license_disposition=LicenseDisposition.APPROVED,
+        )
+
+    with pytest.raises(ProductComplianceError, match="permission_basis_ref"):
+        CompetitorResearchEvidence(
+            project_id="project-1",
+            evidence_id="competitor-public-no-policy",
+            source_ref="public:https://example.test",
+            provenance_ref="research:public:no-policy",
+            permitted_public_evidence=True,
         )
 
 
@@ -119,6 +145,38 @@ def test_missing_notice_or_distribution_fulfillment_blocks_release() -> None:
     assert decision.allowed is False
     assert "notice:missing:component-1" in decision.findings
     assert any(item.startswith("distribution-obligation:unfulfilled") for item in decision.findings)
+
+
+def test_duplicate_or_orphan_distribution_evidence_blocks_release() -> None:
+    duplicate = ProductComplianceGate().evaluate(
+        project_id="project-1",
+        dependencies=(_dependency(),),
+        obligation_evidence=(
+            _obligation(),
+            DistributionObligationEvidence(
+                project_id="project-1",
+                component_id="component-1",
+                obligation="retain-license",
+                fulfillment_ref="artifact:notices#duplicate",
+            ),
+        ),
+    )
+    assert duplicate.allowed is False
+    assert "duplicate:distribution-obligation:component-1:retain-license" in duplicate.findings
+
+    orphan = ProductComplianceGate().evaluate(
+        project_id="project-1",
+        obligation_evidence=(
+            DistributionObligationEvidence(
+                project_id="project-1",
+                component_id="undeclared-component",
+                obligation="retain-license",
+                fulfillment_ref="artifact:notices#orphan",
+            ),
+        ),
+    )
+    assert orphan.allowed is False
+    assert "orphan:distribution-obligation:undeclared-component:retain-license" in orphan.findings
 
 
 def test_proprietary_material_access_is_not_copy_permission() -> None:
@@ -168,6 +226,7 @@ def test_non_public_unpermissioned_research_and_cross_project_evidence_block() -
         source_ref="public:https://example.test/2",
         provenance_ref="research:public:2",
         permitted_public_evidence=True,
+        permission_basis_ref="terms-review:public-source:2",
     )
     decision = ProductComplianceGate().evaluate(
         project_id="project-1",
