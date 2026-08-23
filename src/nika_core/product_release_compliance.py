@@ -25,22 +25,13 @@ _RELEASE_AUTHORITY_KEY = secrets.token_bytes(32)
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$", re.IGNORECASE)
 _PACKAGE_SEPARATORS_RE = re.compile(r"[-_.]+")
 _UNKNOWN_LICENSE_MARKERS = frozenset(
-    {
-        "",
-        "UNKNOWN",
-        "NOASSERTION",
-        "NONE",
-        "N/A",
-        "NA",
-        "UNLICENSED",
-        "PROPRIETARY-UNKNOWN",
-    }
+    {"UNKNOWN", "NOASSERTION", "NONE", "N/A", "NA", "UNLICENSED", "PROPRIETARY-UNKNOWN"}
 )
 
 
 @dataclass(frozen=True, slots=True)
 class ReleaseDependency:
-    """One exact release dependency plus immutable source and graph identity."""
+    """Exact dependency identity plus immutable source digest and dependency edges."""
 
     adoption: DependencyAdoption
     source_sha256: str
@@ -50,7 +41,7 @@ class ReleaseDependency:
         if not isinstance(self.adoption, DependencyAdoption):
             raise TypeError("release dependency adoption must be DependencyAdoption")
         _sha256(self.source_sha256, "release dependency source_sha256")
-        _unique_text(self.requires_component_ids, "required component id")
+        _unique_text(self.requires_component_ids, "required component id", allow_empty=True)
         if self.adoption.component_id in self.requires_component_ids:
             raise ProductComplianceError(
                 f"dependency cannot require itself: {self.adoption.component_id}"
@@ -58,12 +49,12 @@ class ReleaseDependency:
 
     @property
     def canonical_package_name(self) -> str:
-        return _PACKAGE_SEPARATORS_RE.sub("-", self.adoption.package_name).casefold()
+        return _canonical_package(self.adoption.package_name)
 
 
 @dataclass(frozen=True, slots=True)
 class ReleaseNoticeEvidence:
-    """Exact mapping from one declared dependency notice reference to packaged evidence."""
+    """Exact mapping from a declared dependency notice ref to packaged evidence."""
 
     project_id: str
     component_id: str
@@ -113,9 +104,8 @@ class ReleaseComplianceSnapshot:
 
     @property
     def digest(self) -> str:
-        payload = _snapshot_payload(self)
         encoded = json.dumps(
-            payload,
+            _snapshot_payload(self),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -125,7 +115,7 @@ class ReleaseComplianceSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class ReleaseComplianceDecision:
-    """PF10 decision bound to an exact immutable release snapshot."""
+    """PF10 result bound to one exact release snapshot."""
 
     project_id: str
     release_id: str
@@ -164,7 +154,7 @@ class ReleaseComplianceDecision:
 
 @dataclass(frozen=True, slots=True)
 class ReleaseComplianceGrant:
-    """Short-lived delivery authority issued only after current-snapshot revalidation."""
+    """Delivery authority issued only after current release state is revalidated."""
 
     project_id: str
     release_id: str
@@ -190,7 +180,7 @@ class ReleaseComplianceGrant:
 
 
 class ProductReleaseComplianceGate:
-    """Fail-closed PF10 release gate over provenance, notices and trusted review evidence."""
+    """Fail-closed release/delivery gate over exact PF10 and packaged notices."""
 
     def __init__(
         self,
@@ -207,36 +197,30 @@ class ProductReleaseComplianceGate:
     ) -> ReleaseComplianceDecision:
         if not isinstance(snapshot, ReleaseComplianceSnapshot):
             raise TypeError("release evaluation requires ReleaseComplianceSnapshot")
-        bundle_dir = Path(bundle_dir)
-        findings = list(_release_findings(snapshot))
-        findings.extend(_notice_bundle_findings(snapshot, bundle_dir))
-
-        base_decision = self._base_gate.evaluate(
+        findings = [*_release_findings(snapshot), *_notice_bundle_findings(snapshot, bundle_dir)]
+        base = self._base_gate.evaluate(
             project_id=snapshot.project_id,
             dependencies=tuple(item.adoption for item in snapshot.dependencies),
             obligation_evidence=snapshot.obligation_evidence,
             competitor_evidence=snapshot.competitor_evidence,
             scope_review_ref=snapshot.scope_review_ref,
         )
-        findings.extend(base_decision.findings)
-
-        evidence_refs = list(base_decision.evidence_refs)
-        evidence_refs.extend(
-            (
-                snapshot.project_source_ref,
-                f"sha256:{snapshot.project_source_sha256}",
-                snapshot.artifact_ref,
-                f"sha256:{snapshot.artifact_sha256}",
-                f"notices:sha256:{snapshot.notice_bundle_sha256}",
-                f"pf10:snapshot:{snapshot.digest}",
-            )
-        )
-        evidence_refs.extend(item.notice_ref for item in snapshot.notice_evidence)
+        findings.extend(base.findings)
+        evidence_refs = [
+            *base.evidence_refs,
+            snapshot.project_source_ref,
+            f"sha256:{snapshot.project_source_sha256}",
+            snapshot.artifact_ref,
+            f"sha256:{snapshot.artifact_sha256}",
+            f"notices:sha256:{snapshot.notice_bundle_sha256}",
+            f"pf10:snapshot:{snapshot.digest}",
+            *(item.notice_ref for item in snapshot.notice_evidence),
+        ]
         normalized_findings = tuple(dict.fromkeys(findings))
         normalized_evidence = tuple(dict.fromkeys(evidence_refs))
         return _issue_decision(
             snapshot=snapshot,
-            allowed=not normalized_findings and base_decision.allowed,
+            allowed=not normalized_findings and base.allowed,
             findings=normalized_findings,
             evidence_refs=normalized_evidence,
         )
@@ -249,39 +233,36 @@ class ProductReleaseComplianceGate:
         bundle_dir: Path,
     ) -> ReleaseComplianceGrant:
         if not isinstance(decision, ReleaseComplianceDecision):
-            raise ProductComplianceError(
-                "release requires an exact ReleaseComplianceDecision"
-            )
+            raise ProductComplianceError("release requires an exact ReleaseComplianceDecision")
         if not isinstance(snapshot, ReleaseComplianceSnapshot):
             raise ProductComplianceError("release requires current ReleaseComplianceSnapshot")
-        current_digest = snapshot.digest
         context_matches = (
             decision.project_id == snapshot.project_id
             and decision.release_id == snapshot.release_id
             and decision.artifact_ref == snapshot.artifact_ref
-            and decision.snapshot_digest == current_digest
+            and decision.snapshot_digest == snapshot.digest
         )
-        packaging_findings = _notice_bundle_findings(snapshot, Path(bundle_dir))
-        if not context_matches or packaging_findings or not decision.allowed:
-            findings = list(decision.findings)
-            if not context_matches:
-                findings.append("decision:stale-or-wrong-release-snapshot")
-            findings.extend(packaging_findings)
-            raw_allowed = object.__getattribute__(decision, "allowed")
-            if raw_allowed and not _valid_decision_proof(decision):
-                findings.append("decision:untrusted-origin")
-            joined = ", ".join(dict.fromkeys(findings)) or "not-authorized"
-            raise ProductComplianceError(
-                f"release blocked by exact PF10 release gate: {joined}"
-            )
-        return _issue_grant(decision, snapshot)
+        packaging_findings = _notice_bundle_findings(snapshot, bundle_dir)
+        if context_matches and not packaging_findings and decision.allowed:
+            return _issue_grant(decision, snapshot)
+
+        findings = list(decision.findings)
+        if not context_matches:
+            findings.append("decision:stale-or-wrong-release-snapshot")
+        findings.extend(packaging_findings)
+        raw_allowed = object.__getattribute__(decision, "allowed")
+        if raw_allowed and not _valid_decision_proof(decision):
+            findings.append("decision:untrusted-origin")
+        joined = ", ".join(dict.fromkeys(findings)) or "not-authorized"
+        raise ProductComplianceError(f"release blocked by exact PF10 release gate: {joined}")
 
 
 def build_verified_notice_bundle(bundle_dir: Path) -> str:
-    """Reuse the canonical packaging notice generator and return its exact SHA-256."""
+    """Reuse canonical packaging notices and return the verified bundle SHA-256."""
 
-    target = build_third_party_notices(Path(bundle_dir))
-    findings = verify_third_party_notices(Path(bundle_dir))
+    directory = Path(bundle_dir)
+    target = build_third_party_notices(directory)
+    findings = verify_third_party_notices(directory)
     if findings:
         raise ProductComplianceError(
             "third-party notice generation did not verify: " + ", ".join(findings)
@@ -293,7 +274,7 @@ def _release_findings(snapshot: ReleaseComplianceSnapshot) -> tuple[str, ...]:
     findings: list[str] = []
     component_map: dict[str, ReleaseDependency] = {}
     package_map: dict[str, ReleaseDependency] = {}
-    exact_identity: set[tuple[str, str, str]] = set()
+    exact_identities: set[tuple[str, str, str]] = set()
 
     for item in snapshot.dependencies:
         adoption = item.adoption
@@ -307,17 +288,16 @@ def _release_findings(snapshot: ReleaseComplianceSnapshot) -> tuple[str, ...]:
 
         package_name = item.canonical_package_name
         identity = (package_name, adoption.version, item.source_sha256.casefold())
-        if identity in exact_identity:
+        if identity in exact_identities:
             findings.append(
-                "duplicate:dependency-identity:"
-                f"{package_name}:{adoption.version}:{item.source_sha256.casefold()}"
+                f"duplicate:dependency-identity:{package_name}:{adoption.version}:"
+                f"{item.source_sha256.casefold()}"
             )
-        exact_identity.add(identity)
+        exact_identities.add(identity)
         previous = package_map.get(package_name)
         if previous is not None:
-            previous_adoption = previous.adoption
             if (
-                previous_adoption.version != adoption.version
+                previous.adoption.version != adoption.version
                 or previous.source_sha256.casefold() != item.source_sha256.casefold()
             ):
                 findings.append(f"conflict:dependency-package:{package_name}")
@@ -335,42 +315,37 @@ def _release_findings(snapshot: ReleaseComplianceSnapshot) -> tuple[str, ...]:
             continue
         for required_id in item.requires_component_ids:
             if required_id not in component_map:
-                findings.append(
-                    f"transitive-dependency:missing:{component_id}:{required_id}"
-                )
+                findings.append(f"transitive-dependency:missing:{component_id}:{required_id}")
 
-    declared_notices: set[tuple[str, str]] = set()
-    for component_id, item in component_map.items():
-        for notice_ref in item.adoption.notice_refs:
-            declared_notices.add((component_id, notice_ref))
-
-    seen_notice_refs: set[tuple[str, str]] = set()
+    declared_notices = {
+        (component_id, notice_ref)
+        for component_id, item in component_map.items()
+        for notice_ref in item.adoption.notice_refs
+    }
+    seen_notices: set[tuple[str, str]] = set()
     for notice in snapshot.notice_evidence:
         if notice.project_id != snapshot.project_id:
             findings.append(f"cross-project:notice-evidence:{notice.component_id}")
             continue
-        item = component_map.get(notice.component_id)
-        if item is None:
+        dependency = component_map.get(notice.component_id)
+        if dependency is None:
             findings.append(f"orphan:notice:{notice.component_id}:{notice.notice_ref}")
             continue
         key = (notice.component_id, notice.notice_ref)
-        if key in seen_notice_refs:
+        if key in seen_notices:
             findings.append(f"duplicate:notice:{notice.component_id}:{notice.notice_ref}")
             continue
-        seen_notice_refs.add(key)
+        seen_notices.add(key)
         if key not in declared_notices:
             findings.append(f"orphan:notice:{notice.component_id}:{notice.notice_ref}")
-        adoption = item.adoption
         if (
-            _canonical_package(notice.package_name) != item.canonical_package_name
-            or notice.version != adoption.version
+            _canonical_package(notice.package_name) != dependency.canonical_package_name
+            or notice.version != dependency.adoption.version
         ):
             findings.append(f"notice:identity-mismatch:{notice.component_id}")
 
-    for component_id, notice_ref in sorted(declared_notices):
-        if (component_id, notice_ref) not in seen_notice_refs:
-            findings.append(f"notice:evidence-missing:{component_id}:{notice_ref}")
-
+    for component_id, notice_ref in sorted(declared_notices - seen_notices):
+        findings.append(f"notice:evidence-missing:{component_id}:{notice_ref}")
     return tuple(dict.fromkeys(findings))
 
 
@@ -378,12 +353,12 @@ def _notice_bundle_findings(
     snapshot: ReleaseComplianceSnapshot,
     bundle_dir: Path,
 ) -> tuple[str, ...]:
-    findings = [f"packaging:{item}" for item in verify_third_party_notices(bundle_dir)]
-    target = bundle_dir / "THIRD_PARTY_NOTICES.txt"
+    directory = Path(bundle_dir)
+    findings = [f"packaging:{item}" for item in verify_third_party_notices(directory)]
+    target = directory / "THIRD_PARTY_NOTICES.txt"
     if target.is_file():
-        actual_hash = _file_sha256(target)
         if not hmac.compare_digest(
-            actual_hash.casefold(), snapshot.notice_bundle_sha256.casefold()
+            _file_sha256(target).casefold(), snapshot.notice_bundle_sha256.casefold()
         ):
             findings.append("packaging:notices-digest-mismatch")
     elif "packaging:missing:THIRD_PARTY_NOTICES.txt" not in findings:
@@ -539,7 +514,7 @@ def _decision_proof(
     findings: tuple[str, ...],
     evidence_refs: tuple[str, ...],
 ) -> str:
-    payload = json.dumps(
+    return _proof(
         {
             "schema": "nika-pf10-release-decision-authority-v1",
             "project_id": project_id,
@@ -549,12 +524,8 @@ def _decision_proof(
             "allowed": allowed,
             "findings": list(findings),
             "evidence_refs": list(evidence_refs),
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hmac.new(_RELEASE_AUTHORITY_KEY, payload, hashlib.sha256).hexdigest()
+        }
+    )
 
 
 def _valid_decision_proof(decision: ReleaseComplianceDecision) -> bool:
@@ -582,7 +553,7 @@ def _grant_proof(
     snapshot_digest: str,
     evidence_refs: tuple[str, ...],
 ) -> str:
-    payload = json.dumps(
+    return _proof(
         {
             "schema": "nika-pf10-release-grant-authority-v1",
             "project_id": project_id,
@@ -591,12 +562,8 @@ def _grant_proof(
             "artifact_sha256": artifact_sha256.casefold(),
             "snapshot_digest": snapshot_digest,
             "evidence_refs": list(evidence_refs),
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hmac.new(_RELEASE_AUTHORITY_KEY, payload, hashlib.sha256).hexdigest()
+        }
+    )
 
 
 def _valid_grant_proof(grant: ReleaseComplianceGrant) -> bool:
@@ -612,6 +579,16 @@ def _valid_grant_proof(grant: ReleaseComplianceGrant) -> bool:
         evidence_refs=grant.evidence_refs,
     )
     return hmac.compare_digest(proof, expected)
+
+
+def _proof(payload: dict[str, object]) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hmac.new(_RELEASE_AUTHORITY_KEY, encoded, hashlib.sha256).hexdigest()
 
 
 def _file_sha256(path: Path) -> str:
