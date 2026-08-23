@@ -139,7 +139,6 @@ def test_deterministic_brain_cannot_bypass_high_impact_tool_approval(tmp_path) -
         brain.run(
             run_id="approval-proof",
             task_id="task-approval-proof",
-            execution_id="execution-approval-proof",
             state=WorldState(frozenset({"draft-ready"})),
             goal=DeterministicGoal(required=frozenset({"published"})),
             actions=(action,),
