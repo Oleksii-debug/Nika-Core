@@ -12,6 +12,7 @@ An HTTP `source_id` is a durable provenance identity, not a mutable bookmark.
 - Two different `source_id` values in one workspace may not resolve to the same canonical locator.
 - URL userinfo (`user:password@host`) and credential-bearing query parameters (for example API keys, access tokens, signatures, and passwords) are rejected before SQLite persistence. Rejection messages do not echo the credential-bearing URL.
 - Re-registering the same identity is idempotent and must not clear ETag, Last-Modified, raw-content hash, freshness, or prior provenance.
+- If a persisted HTTP locator cannot be validated after restart, the repository reports `source_identity_corrupt` and fails closed. It does not return the corrupted locator, skip it during duplicate checks, or admit a new source into that workspace while source identity is unverifiable.
 
 These rules deliberately avoid a new migration. The existing `(workspace_id, url)` uniqueness remains useful, while the repository performs canonical duplicate checks and immutable-identity checks before writes. This avoids a shared schema-version collision with parallel lanes.
 
@@ -46,6 +47,6 @@ The field is additive and backward-compatible: existing disposition/error-code b
 
 ## Acceptance evidence
 
-Network-free deterministic tests must prove canonical/idempotent registration, duplicate rejection, cross-workspace and locator mutation rejection across restart, credential non-persistence (userinfo and query credentials), distinct private/auth/unsupported/network failure classes, and evidence locator stability after a rejected rebind.
+Network-free deterministic tests must prove canonical/idempotent registration, duplicate rejection, cross-workspace and locator mutation rejection across restart, credential non-persistence (userinfo and query credentials), fail-closed behavior for malformed or credential-bearing persisted locator state after restart, distinct private/auth/unsupported/network failure classes, and evidence locator stability after a rejected rebind.
 
 `HUMAN_TESTED=false`; `NVDA_VERIFIED=false`. This backend contract does not claim a human accessibility verification gate.
