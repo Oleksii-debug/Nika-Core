@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager, suppress
@@ -16,6 +17,8 @@ from nika_core.runtime.contracts import (
     RuntimeRequest,
     RuntimeResult,
     RuntimeResumeMode,
+    RuntimeResumeProbe,
+    RuntimeResumeProbeStatus,
     RuntimeResumeRequest,
 )
 
@@ -26,14 +29,42 @@ def _default_resume_command(value: Any) -> Any:
     return Command(resume=value)
 
 
+def _stable_sort_key(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return repr(value)
+
+
 def _safe_value(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, Mapping):
         return {str(key): _safe_value(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set, frozenset)):
+    if isinstance(value, (set, frozenset)):
+        normalized = [_safe_value(item) for item in value]
+        return sorted(normalized, key=_stable_sort_key)
+    if isinstance(value, (list, tuple)):
         return [_safe_value(item) for item in value]
     return repr(value)
+
+
+def _checkpoint_id(snapshot: Any) -> str | None:
+    raw_config = (
+        snapshot.get("config")
+        if isinstance(snapshot, Mapping)
+        else getattr(snapshot, "config", None)
+    )
+    if not isinstance(raw_config, Mapping):
+        return None
+    configurable = raw_config.get("configurable")
+    if not isinstance(configurable, Mapping):
+        return None
+    raw_checkpoint_id = configurable.get("checkpoint_id")
+    if raw_checkpoint_id is None:
+        return None
+    checkpoint_id = str(raw_checkpoint_id).strip()
+    return checkpoint_id or None
 
 
 @dataclass(slots=True)
@@ -49,6 +80,12 @@ class LangGraphSqliteHandle:
             return
         self._closed = True
         await self.connection.close()
+
+
+@dataclass(slots=True)
+class _ActiveInvocation:
+    task_id: str
+    task: asyncio.Task[Any]
 
 
 @asynccontextmanager
@@ -102,7 +139,9 @@ class LangGraphRuntime:
             raise TypeError("graph must provide an async ainvoke method")
         self._graph = graph
         self._resume_command_factory = resume_command_factory or _default_resume_command
-        self._active: dict[tuple[str, str], asyncio.Task[Any]] = {}
+        # LangGraph persists by thread_id. A thread therefore has exactly one in-process owner,
+        # even when two Nika tasks accidentally request the same cursor concurrently.
+        self._active: dict[str, _ActiveInvocation] = {}
 
     @staticmethod
     def initial_resume_token(*, task_id: str, thread_id: str) -> str:
@@ -110,10 +149,54 @@ class LangGraphRuntime:
 
         LangGraph checkpoint lookup is keyed by ``thread_id``. Persisting it before the
         invocation starts closes the process-loss window where LangGraph may already have
-        durable checkpoints but Nika has not yet received a RuntimeResult.
+        durable checkpoints but Nika has not yet received a RuntimeResult. Startup recovery
+        must still probe the checkpointer because the process may die before the first
+        LangGraph checkpoint is written.
         """
         del task_id
         return thread_id
+
+    async def probe_resume(
+        self,
+        *,
+        task_id: str,
+        thread_id: str,
+        resume_token: str,
+    ) -> RuntimeResumeProbe:
+        """Verify a LangGraph checkpoint without exposing StateSnapshot/checkpointer types."""
+        del task_id
+        if resume_token != thread_id:
+            return RuntimeResumeProbe(
+                status=RuntimeResumeProbeStatus.INVALID,
+                reason="resume token does not match LangGraph thread_id",
+            )
+
+        state_reader = getattr(self._graph, "aget_state", None)
+        if not callable(state_reader):
+            return RuntimeResumeProbe(
+                status=RuntimeResumeProbeStatus.UNVERIFIABLE,
+                reason="compiled graph does not expose async checkpoint state lookup",
+            )
+
+        try:
+            snapshot = await state_reader(self._thread_config(thread_id))
+        except Exception as exc:  # noqa: BLE001 - checkpoint boundary must fail closed
+            return RuntimeResumeProbe(
+                status=RuntimeResumeProbeStatus.UNREADABLE,
+                reason=f"checkpoint lookup failed: {exc}",
+            )
+
+        checkpoint_id = _checkpoint_id(snapshot)
+        if checkpoint_id is None:
+            return RuntimeResumeProbe(
+                status=RuntimeResumeProbeStatus.MISSING,
+                reason="no persisted LangGraph checkpoint exists for thread",
+            )
+        return RuntimeResumeProbe(
+            status=RuntimeResumeProbeStatus.READY,
+            reason="persisted LangGraph checkpoint is readable",
+            checkpoint_id=checkpoint_id,
+        )
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
         config = self._config(request.thread_id, request.max_steps)
@@ -133,6 +216,18 @@ class LangGraphRuntime:
                 error_code=RuntimeErrorCode.INVALID_RESUME,
             )
 
+        probe = await self.probe_resume(
+            task_id=request.task_id,
+            thread_id=request.thread_id,
+            resume_token=request.resume_token,
+        )
+        if not probe.can_resume:
+            return RuntimeResult(
+                outcome=RuntimeOutcome.FAILED,
+                error=f"durable resume blocked: {probe.reason}",
+                error_code=RuntimeErrorCode.RESUME_UNAVAILABLE,
+            )
+
         config = self._config(request.thread_id, request.max_steps)
         graph_input = (
             None
@@ -148,13 +243,12 @@ class LangGraphRuntime:
         )
 
     async def cancel(self, *, task_id: str, thread_id: str) -> bool:
-        key = (task_id, thread_id)
-        active = self._active.get(key)
-        if active is None or active.done():
+        active = self._active.get(thread_id)
+        if active is None or active.task.done() or active.task_id != task_id:
             return False
-        active.cancel()
+        active.task.cancel()
         with suppress(asyncio.CancelledError):
-            await active
+            await active.task
         return True
 
     async def _execute(
@@ -166,42 +260,62 @@ class LangGraphRuntime:
         config: Mapping[str, Any],
         timeout_seconds: float | None,
     ) -> RuntimeResult:
-        key = (task_id, thread_id)
-        existing = self._active.get(key)
-        if existing is not None and not existing.done():
+        existing = self._active.get(thread_id)
+        if existing is not None and not existing.task.done():
             return RuntimeResult(
                 outcome=RuntimeOutcome.FAILED,
-                error="runtime execution is already active for task/thread",
+                error="runtime execution is already active for LangGraph thread_id",
                 error_code=RuntimeErrorCode.DUPLICATE_ACTIVE,
             )
 
         invocation = asyncio.create_task(self._graph.ainvoke(graph_input, config=config))
-        self._active[key] = invocation
+        self._active[thread_id] = _ActiveInvocation(task_id=task_id, task=invocation)
         try:
             if timeout_seconds is None:
                 raw = await invocation
             else:
                 raw = await asyncio.wait_for(invocation, timeout=timeout_seconds)
         except TimeoutError:
+            resume_token = await self._resume_token_if_safe(
+                task_id=task_id,
+                thread_id=thread_id,
+            )
             return RuntimeResult(
                 outcome=RuntimeOutcome.FAILED,
                 error=f"runtime invocation exceeded {timeout_seconds:g} seconds",
                 error_code=RuntimeErrorCode.TIMEOUT,
-                resume_token=thread_id,
+                resume_token=resume_token,
             )
         except asyncio.CancelledError:
             return RuntimeResult(outcome=RuntimeOutcome.CANCELLED)
         except Exception as exc:  # noqa: BLE001 - framework boundary normalizes unknown failures
+            resume_token = await self._resume_token_if_safe(
+                task_id=task_id,
+                thread_id=thread_id,
+            )
             return RuntimeResult(
                 outcome=RuntimeOutcome.FAILED,
                 error=str(exc),
                 error_code=RuntimeErrorCode.INTERNAL,
-                resume_token=thread_id,
+                resume_token=resume_token,
             )
         finally:
-            if self._active.get(key) is invocation:
-                self._active.pop(key, None)
+            active = self._active.get(thread_id)
+            if active is not None and active.task is invocation:
+                self._active.pop(thread_id, None)
         return self._normalize(raw, thread_id=thread_id)
+
+    async def _resume_token_if_safe(self, *, task_id: str, thread_id: str) -> str | None:
+        probe = await self.probe_resume(
+            task_id=task_id,
+            thread_id=thread_id,
+            resume_token=thread_id,
+        )
+        return thread_id if probe.can_resume else None
+
+    @staticmethod
+    def _thread_config(thread_id: str) -> dict[str, Any]:
+        return {"configurable": {"thread_id": thread_id}}
 
     @staticmethod
     def _config(thread_id: str, max_steps: int) -> dict[str, Any]:

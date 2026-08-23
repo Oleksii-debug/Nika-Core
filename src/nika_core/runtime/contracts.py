@@ -31,6 +31,7 @@ class RuntimeErrorCode(StrEnum):
     TIMEOUT = "timeout"
     TRANSIENT = "transient"
     INVALID_RESUME = "invalid_resume"
+    RESUME_UNAVAILABLE = "resume_unavailable"
     DUPLICATE_ACTIVE = "duplicate_active"
     INTERNAL = "internal"
 
@@ -38,6 +39,16 @@ class RuntimeErrorCode(StrEnum):
 class RuntimeResumeMode(StrEnum):
     CONTINUE = "continue"
     APPROVAL = "approval"
+
+
+class RuntimeResumeProbeStatus(StrEnum):
+    """Framework-neutral durability verdict for one persisted resume cursor."""
+
+    READY = "ready"
+    MISSING = "missing"
+    UNREADABLE = "unreadable"
+    UNVERIFIABLE = "unverifiable"
+    INVALID = "invalid"
 
 
 class RuntimeUnsupportedError(RuntimeError):
@@ -80,6 +91,25 @@ class RuntimeResumeRequest:
             raise ValueError("max_steps must be positive")
         if self.timeout_seconds is not None and self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive when provided")
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeResumeProbe:
+    """Nika-owned verdict proving whether a persisted runtime cursor is safe to resume."""
+
+    status: RuntimeResumeProbeStatus
+    reason: str
+    checkpoint_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.reason.strip():
+            raise ValueError("resume probe reason must not be empty")
+        if self.status == RuntimeResumeProbeStatus.READY and not self.checkpoint_id:
+            raise ValueError("ready resume probe requires checkpoint_id")
+
+    @property
+    def can_resume(self) -> bool:
+        return self.status == RuntimeResumeProbeStatus.READY
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,3 +156,16 @@ class AgentRuntimePort(Protocol):
     async def resume(self, request: RuntimeResumeRequest) -> RuntimeResult: ...
 
     async def cancel(self, *, task_id: str, thread_id: str) -> bool: ...
+
+
+@runtime_checkable
+class RuntimeResumeProbePort(Protocol):
+    """Optional durability extension used before automatic or framework resume."""
+
+    async def probe_resume(
+        self,
+        *,
+        task_id: str,
+        thread_id: str,
+        resume_token: str,
+    ) -> RuntimeResumeProbe: ...

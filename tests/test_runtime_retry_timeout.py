@@ -27,6 +27,19 @@ class _SlowGraph:
         return {"done": True}
 
 
+class _SlowCheckpointedGraph(_SlowGraph):
+    async def aget_state(self, config):
+        thread_id = config["configurable"]["thread_id"]
+        return {
+            "config": {
+                "configurable": {
+                    "thread_id": thread_id,
+                    "checkpoint_id": "checkpoint-before-timeout",
+                }
+            }
+        }
+
+
 class _TransientDurableRuntime:
     runtime_id = "transient-proof"
     capabilities = frozenset({RuntimeCapability.DURABLE_RESUME})
@@ -84,7 +97,7 @@ def test_runtime_request_rejects_non_positive_timeout() -> None:
         RuntimeRequest("task", "thread", timeout_seconds=0)
 
 
-def test_langgraph_timeout_is_typed_failure_not_user_cancellation() -> None:
+def test_langgraph_timeout_without_checkpoint_has_no_fake_resume_token() -> None:
     result = asyncio.run(
         LangGraphRuntime(_SlowGraph()).run(
             RuntimeRequest("task", "thread", timeout_seconds=0.01)
@@ -93,8 +106,20 @@ def test_langgraph_timeout_is_typed_failure_not_user_cancellation() -> None:
 
     assert result.outcome == RuntimeOutcome.FAILED
     assert result.error_code == RuntimeErrorCode.TIMEOUT
-    assert result.resume_token == "thread"
+    assert result.resume_token is None
     assert "exceeded" in (result.error or "")
+
+
+def test_langgraph_timeout_preserves_resume_token_only_after_checkpoint_proof() -> None:
+    result = asyncio.run(
+        LangGraphRuntime(_SlowCheckpointedGraph()).run(
+            RuntimeRequest("task", "thread", timeout_seconds=0.01)
+        )
+    )
+
+    assert result.outcome == RuntimeOutcome.FAILED
+    assert result.error_code == RuntimeErrorCode.TIMEOUT
+    assert result.resume_token == "thread"
 
 
 def test_retry_policy_uses_durable_resume_and_audits_retry(tmp_path) -> None:

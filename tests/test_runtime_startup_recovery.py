@@ -7,7 +7,12 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.task_state import TaskState
-from nika_core.runtime.contracts import RuntimeOutcome, RuntimeResult
+from nika_core.runtime.contracts import (
+    RuntimeOutcome,
+    RuntimeResult,
+    RuntimeResumeProbe,
+    RuntimeResumeProbeStatus,
+)
 from nika_core.runtime.idempotency import IdempotencyLedger
 from nika_core.runtime.recovery import RecoveryDisposition, RuntimeRecoveryService
 from nika_core.runtime.registry import RuntimeRegistry
@@ -29,6 +34,42 @@ class RecoverableRuntime:
 
     async def cancel(self, *, task_id: str, thread_id: str) -> bool:
         return False
+
+    async def probe_resume(self, *, task_id: str, thread_id: str, resume_token: str):
+        del task_id
+        assert resume_token == thread_id
+        return RuntimeResumeProbe(
+            status=RuntimeResumeProbeStatus.READY,
+            reason="test checkpoint exists",
+            checkpoint_id=f"checkpoint:{thread_id}",
+        )
+
+
+class SessionMutatingProbeRuntime(RecoverableRuntime):
+    runtime_id = "mutating-probe"
+
+    def __init__(self, sessions: RuntimeSessionStore) -> None:
+        self._sessions = sessions
+        self.resume_calls = 0
+
+    async def resume(self, request):
+        self.resume_calls += 1
+        raise AssertionError("changed recovery session must never be resumed")
+
+    async def probe_resume(self, *, task_id: str, thread_id: str, resume_token: str):
+        assert resume_token == thread_id
+        self._sessions.delete(task_id)
+        self._sessions.record_active(
+            task_id=task_id,
+            runtime_id=self.runtime_id,
+            thread_id=f"{thread_id}-rebound",
+            resume_token=f"{thread_id}-rebound",
+        )
+        return RuntimeResumeProbe(
+            status=RuntimeResumeProbeStatus.READY,
+            reason="old checkpoint was readable before session rebind",
+            checkpoint_id=f"checkpoint:{thread_id}",
+        )
 
 
 def _services(tmp_path: Path):
@@ -196,5 +237,48 @@ def test_zero_auto_resume_limit_fails_closed(tmp_path: Path):
 
         with pytest.raises(ValueError, match="max_count"):
             await recovery.resume_safe_crash_sessions(max_count=0)
+
+    asyncio.run(scenario())
+
+
+def test_checkpoint_preflight_fails_closed_if_session_changes_during_probe(tmp_path: Path):
+    async def scenario() -> None:
+        store = SQLiteStore(tmp_path / "nika-race.db")
+        store.initialize()
+        queue = TaskQueue(store)
+        audit = AuditLog(store)
+        sessions = RuntimeSessionStore(store)
+        task_id = _running_task(queue)
+        sessions.record_active(
+            task_id=task_id,
+            runtime_id="mutating-probe",
+            thread_id="thread-original",
+            resume_token="thread-original",
+        )
+        runtime = SessionMutatingProbeRuntime(sessions)
+        runtimes = RuntimeRegistry()
+        runtimes.register(runtime)
+        recovery = RuntimeRecoveryService(
+            queue=queue,
+            audit=audit,
+            runtimes=runtimes,
+            sessions=sessions,
+        )
+
+        executions = await recovery.resume_safe_crash_sessions(max_count=1)
+
+        assert len(executions) == 1
+        assert executions[0].candidate.disposition == RecoveryDisposition.INCONSISTENT_STATE
+        assert "changed during checkpoint preflight" in executions[0].candidate.reason
+        assert runtime.resume_calls == 0
+        rebound = sessions.get(task_id)
+        assert rebound is not None
+        assert rebound.thread_id == "thread-original-rebound"
+        event_types = [
+            event.event_type
+            for event in audit.list_for(entity_type="task", entity_id=task_id)
+        ]
+        assert "runtime.recovery_checkpoint_blocked" in event_types
+        assert "runtime.recovery_auto_resume_requested" not in event_types
 
     asyncio.run(scenario())
