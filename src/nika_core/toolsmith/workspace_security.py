@@ -189,6 +189,12 @@ def _paths_overlap(first: pathlib.Path, second: pathlib.Path) -> bool:
     return first == second or first in second.parents or second in first.parents
 
 
+def _executable_identity_key(value: str) -> str:
+    if os.name == "nt":
+        return pathlib.PureWindowsPath(value).as_posix().casefold()
+    return value
+
+
 def normalize_job_relative_path(value: str) -> pathlib.PurePosixPath:
     stripped = value.strip()
     if not stripped or stripped != value:
@@ -362,10 +368,14 @@ def validate_typed_argv(
     if basename in _SHELL_EXECUTABLES:
         raise WorkspaceSecurityError("generic shell entrypoints are forbidden")
 
-    allowlist = {item.casefold() for item in allowed_executables if item.strip()}
+    allowlist = {
+        _executable_identity_key(item)
+        for item in allowed_executables
+        if item.strip()
+    }
     if not allowlist:
         raise WorkspaceSecurityError("allowed executable set must not be empty")
-    if executable.casefold() not in allowlist:
+    if _executable_identity_key(executable) not in allowlist:
         raise WorkspaceSecurityError("executable identity is not exactly allowlisted")
     return tuple(argv)
 
