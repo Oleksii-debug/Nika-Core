@@ -4,7 +4,7 @@ Status: MANUAL-DEV10 implementation/evidence contract.
 
 ## Collision and scope boundary
 
-PF3 incident repair/release already landed before this work-run. Active PR #178 owns repeated-incident isolation in `product_factory_incident_contracts.py` and `product_factory_incidents.py`. The active DEV3 fleet-replacement branch owns fleet replacement/maintenance source. This batch therefore changes only the independent Product Operations maintenance evidence boundary and its tests.
+PF3 incident repair/release already landed before this work-run. Active PR #178 owns repeated-incident isolation in `product_factory_incident_contracts.py` and `product_factory_incidents.py`. The active fleet-replacement lane owns fleet replacement source. DEV09 owns production promotion authorization. This batch therefore changes only the independent Product Operations maintenance/evidence boundary and its tests.
 
 ## REUSE → ADAPT → CUSTOM (thin)
 
@@ -22,6 +22,8 @@ CUSTOM is limited to evidence-lineage validation, strict primitive identity chec
 - Request-id replay remains idempotent and does not call the provider twice.
 - Service observation timestamps cannot move backwards; a different payload at the same timestamp is rejected rather than overwriting evidence.
 - Exact rollback evidence replay is idempotent; conflicting rollback evidence is rejected.
+- A terminal rollback seals the failed-release observation lineage: later observations for that failed release are rejected.
+- Node-availability recomputation cannot resurrect a failed release after terminal rollback. Credential blocking may temporarily surface `BLOCKED`; when the credential is restored the service returns to the rollback-derived terminal state, not to health derived from the failed release.
 - Maintenance adapter results must cross the boundary as `MaintenanceResult`, with exact boolean flags and non-duplicate evidence references.
 
 ## Restart reconciliation
@@ -33,7 +35,7 @@ CUSTOM is limited to evidence-lineage validation, strict primitive identity chec
 - unavailable-node identity and exact per-service replica loss;
 - service observation release/service/replica binding;
 - rollback service/release/timeline binding;
-- service health from durable observation, credential, node-loss and rollback evidence;
+- service health from durable observation, credential, node-loss and rollback evidence, with terminal rollback taking precedence once credential blocking clears;
 - maintenance request uniqueness, target service, durable approval and evidence binding;
 - maintenance state backed by at least one persisted result for that service.
 
@@ -41,7 +43,7 @@ Corruption therefore fails closed without partially replacing the coordinator's 
 
 ## Scale and isolation evidence
 
-Focused tests exercise 50 services with five independently maintained services and restart the snapshot, proving that maintenance state does not leak to the other 45 services. Existing 60-service Product Operations coverage remains the broad multi-service regression gate.
+Focused tests exercise 50 services with five independently maintained services and restart the snapshot, proving that maintenance state does not leak to the other 45 services. Dedicated terminal-rollback regressions cover node loss, credential revoke/restore, late observation rejection and restart preservation. Existing 60-service Product Operations coverage remains the broad multi-service regression gate.
 
 ## Truth
 
