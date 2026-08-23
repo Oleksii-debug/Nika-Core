@@ -69,6 +69,48 @@ def _canonical(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _exact_int(value: Any, label: str, *, minimum: int) -> int:
+    if type(value) is not int or value < minimum:
+        raise ProductProjectError(f"{label} must be an exact integer >= {minimum}")
+    return value
+
+
+def _exact_nonempty_str(value: Any, label: str) -> str:
+    if type(value) is not str or not value.strip():
+        raise ProductProjectError(f"{label} must be a non-empty string")
+    return value
+
+
+def _aware_timestamp(value: Any, label: str) -> str:
+    text = _exact_nonempty_str(value, label)
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise ProductProjectError(f"{label} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ProductProjectError(f"{label} must be timezone-aware")
+    return text
+
+
+def _transition_fingerprint(
+    *,
+    project_id: str,
+    new_state: ProductProjectState,
+    reason: str,
+    changed_by_ref: str,
+) -> str:
+    return hashlib.sha256(
+        _canonical(
+            {
+                "project_id": project_id,
+                "new_state": new_state.value,
+                "reason": reason,
+                "changed_by_ref": changed_by_ref,
+            }
+        ).encode()
+    ).hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class ProductProjectStatusTransition:
     project_id: str
@@ -99,6 +141,11 @@ class ProductProjectLifecycleService:
     ) -> ProductProjectStatusTransition:
         if not isinstance(new_state, ProductProjectState):
             raise ProductProjectError("new_state must be ProductProjectState")
+        expected_row_version = _exact_int(
+            expected_row_version,
+            "expected_row_version",
+            minimum=0,
+        )
         if not idempotency_key.strip():
             raise ProductProjectError("idempotency_key is required")
         if not reason.strip() or not changed_by_ref.strip():
@@ -107,16 +154,12 @@ class ProductProjectLifecycleService:
             {"reason": reason, "changed_by_ref": changed_by_ref},
             path="product_project.status_transition",
         )
-        fingerprint = hashlib.sha256(
-            _canonical(
-                {
-                    "project_id": project_id,
-                    "new_state": new_state.value,
-                    "reason": reason,
-                    "changed_by_ref": changed_by_ref,
-                }
-            ).encode()
-        ).hexdigest()
+        fingerprint = _transition_fingerprint(
+            project_id=project_id,
+            new_state=new_state,
+            reason=reason,
+            changed_by_ref=changed_by_ref,
+        )
 
         with self.store.connection() as conn:
             replay = conn.execute(
@@ -135,10 +178,16 @@ class ProductProjectLifecycleService:
                     raise ProductProjectError(
                         "idempotency key was already used with different mutation input"
                     )
+                replay_version = _exact_int(
+                    replay["entity_version"],
+                    "status idempotency entity_version",
+                    minimum=1,
+                )
                 return self._transition_for_row_version(
                     conn,
                     project_id,
-                    int(replay["entity_version"]),
+                    replay_version,
+                    expected_fingerprint=fingerprint,
                 )
 
             row = conn.execute(
@@ -147,10 +196,15 @@ class ProductProjectLifecycleService:
             ).fetchone()
             if row is None:
                 raise KeyError(project_id)
-            if int(row["row_version"]) != expected_row_version:
+            current_row_version = _exact_int(
+                row["row_version"],
+                "durable ProductProject row_version",
+                minimum=0,
+            )
+            if current_row_version != expected_row_version:
                 raise StaleProjectVersionError(
                     f"stale ProductProject write: expected {expected_row_version}, "
-                    f"current {row['row_version']}"
+                    f"current {current_row_version}"
                 )
             try:
                 previous_state = ProductProjectState(row["status"])
@@ -169,11 +223,11 @@ class ProductProjectLifecycleService:
                 )
 
             now = _now()
-            next_row_version = expected_row_version + 1
+            next_row_version = current_row_version + 1
             cursor = conn.execute(
                 "UPDATE product_projects SET status=?,row_version=row_version+1,updated_at=? "
                 "WHERE project_id=? AND row_version=?",
-                (new_state.value, now, project_id, expected_row_version),
+                (new_state.value, now, project_id, current_row_version),
             )
             if cursor.rowcount != 1:
                 raise StaleProjectVersionError("concurrent ProductProject status update")
@@ -215,6 +269,18 @@ class ProductProjectLifecycleService:
 
     def history(self, project_id: str) -> tuple[ProductProjectStatusTransition, ...]:
         project = self.projects.get(project_id)
+        current_row_version = _exact_int(
+            project.row_version,
+            "ProductProject row_version",
+            minimum=0,
+        )
+        created_at = _aware_timestamp(project.created_at, "ProductProject created_at")
+        try:
+            current_state = ProductProjectState(project.status)
+        except ValueError as exc:
+            raise ProductProjectError(
+                f"unsupported durable ProductProject status: {project.status}"
+            ) from exc
         baseline = ProductProjectStatusTransition(
             project_id=project_id,
             row_version=0,
@@ -222,7 +288,7 @@ class ProductProjectLifecycleService:
             new_state=ProductProjectState.ACTIVE,
             reason="initial project state",
             changed_by_ref="system://product-project-create",
-            created_at=project.created_at,
+            created_at=created_at,
         )
         with self.store.connection() as conn:
             rows = conn.execute(
@@ -231,7 +297,29 @@ class ProductProjectLifecycleService:
                 "AND entity_type='product_project' AND entity_id=? ORDER BY event_id",
                 (project_id,),
             ).fetchall()
-        return (baseline, *(self._from_audit_row(project_id, row) for row in rows))
+        transitions = tuple(self._from_audit_row(project_id, row) for row in rows)
+        previous_state = ProductProjectState.ACTIVE
+        previous_row_version = 0
+        for transition in transitions:
+            if transition.row_version <= previous_row_version:
+                raise ProductProjectError(
+                    "ProductProject status audit row_version must increase monotonically"
+                )
+            if transition.row_version > current_row_version:
+                raise ProductProjectError(
+                    "ProductProject status audit row_version exceeds durable project version"
+                )
+            if transition.previous_state is not previous_state:
+                raise ProductProjectError(
+                    "ProductProject status audit state chain is inconsistent"
+                )
+            previous_state = transition.new_state
+            previous_row_version = transition.row_version
+        if previous_state is not current_state:
+            raise ProductProjectError(
+                "ProductProject durable status is not backed by matching lifecycle audit evidence"
+            )
+        return (baseline, *transitions)
 
     def current_state(self, project_id: str) -> ProductProjectState:
         project = self.projects.get(project_id)
@@ -256,6 +344,8 @@ class ProductProjectLifecycleService:
         conn: Any,
         project_id: str,
         row_version: int,
+        *,
+        expected_fingerprint: str,
     ) -> ProductProjectStatusTransition:
         rows = conn.execute(
             "SELECT payload_json,created_at FROM audit_events "
@@ -265,8 +355,19 @@ class ProductProjectLifecycleService:
         ).fetchall()
         for row in rows:
             transition = self._from_audit_row(project_id, row)
-            if transition.row_version == row_version:
-                return transition
+            if transition.row_version != row_version:
+                continue
+            actual_fingerprint = _transition_fingerprint(
+                project_id=project_id,
+                new_state=transition.new_state,
+                reason=transition.reason,
+                changed_by_ref=transition.changed_by_ref,
+            )
+            if actual_fingerprint != expected_fingerprint:
+                raise ProductProjectError(
+                    "status idempotency record does not match durable audit evidence"
+                )
+            return transition
         raise ProductProjectError(
             "status idempotency record has no matching durable audit evidence"
         )
@@ -276,17 +377,46 @@ class ProductProjectLifecycleService:
         project_id: str,
         row: Any,
     ) -> ProductProjectStatusTransition:
-        payload = json.loads(row["payload_json"])
         try:
-            previous_state = ProductProjectState(payload["previous_state"])
-            new_state = ProductProjectState(payload["new_state"])
-            row_version = int(payload["row_version"])
-            reason = str(payload["reason"])
-            changed_by_ref = str(payload["changed_by_ref"])
-        except (KeyError, TypeError, ValueError) as exc:
+            payload = json.loads(row["payload_json"])
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
             raise ProductProjectError("invalid ProductProject status audit evidence") from exc
-        if row_version < 1 or not reason.strip() or not changed_by_ref.strip():
+        if type(payload) is not dict:
             raise ProductProjectError("invalid ProductProject status audit evidence")
+        try:
+            previous_state_raw = payload["previous_state"]
+            new_state_raw = payload["new_state"]
+            row_version_raw = payload["row_version"]
+            reason_raw = payload["reason"]
+            changed_by_ref_raw = payload["changed_by_ref"]
+            created_at_raw = row["created_at"]
+        except (KeyError, TypeError) as exc:
+            raise ProductProjectError("invalid ProductProject status audit evidence") from exc
+        if type(previous_state_raw) is not str or type(new_state_raw) is not str:
+            raise ProductProjectError("invalid ProductProject status audit evidence")
+        try:
+            previous_state = ProductProjectState(previous_state_raw)
+            new_state = ProductProjectState(new_state_raw)
+        except ValueError as exc:
+            raise ProductProjectError("invalid ProductProject status audit evidence") from exc
+        row_version = _exact_int(
+            row_version_raw,
+            "ProductProject status audit row_version",
+            minimum=1,
+        )
+        reason = _exact_nonempty_str(reason_raw, "ProductProject status audit reason")
+        changed_by_ref = _exact_nonempty_str(
+            changed_by_ref_raw,
+            "ProductProject status audit changed_by_ref",
+        )
+        created_at = _aware_timestamp(
+            created_at_raw,
+            "ProductProject status audit created_at",
+        )
+        _reject_secret_material(
+            {"reason": reason, "changed_by_ref": changed_by_ref},
+            path="product_project.status_audit",
+        )
         return ProductProjectStatusTransition(
             project_id=project_id,
             row_version=row_version,
@@ -294,7 +424,7 @@ class ProductProjectLifecycleService:
             new_state=new_state,
             reason=reason,
             changed_by_ref=changed_by_ref,
-            created_at=row["created_at"],
+            created_at=created_at,
         )
 
     @staticmethod
