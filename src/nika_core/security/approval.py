@@ -17,6 +17,7 @@ _MAX_TTL = timedelta(minutes=15)
 _ACTION_SIGNATURE_SCHEMA = "nika-r4-approval-evidence-v1"
 _REVIEW_SUBJECT_SCHEMA = "nika-trusted-review-subject-v1"
 _REVIEW_SIGNATURE_SCHEMA = "nika-trusted-review-evidence-v1"
+_PROCESS_KEY_SCHEMA = b"nika-m10-process-ephemeral-key-v1"
 
 
 def _aware_now(now: datetime | None) -> datetime:
@@ -231,6 +232,8 @@ class ProjectPurposeReviewVerifier(Protocol):
 
 
 class ExactReviewVerifier(Protocol):
+    """Framework-neutral verifier for PF6/Toolsmith exact immutable subjects."""
+
     def verify_subject(
         self,
         subject: ReviewSubject,
@@ -241,13 +244,26 @@ class ExactReviewVerifier(Protocol):
 
 
 class _HmacApprovalVerifier:
-    __slots__ = ("_issuer_id", "_secret")
+    __slots__ = ("_issuer_id", "_secret", "_lock", "_used")
 
-    def __init__(self, *, issuer_id: str, secret: bytes) -> None:
+    def __init__(
+        self,
+        *,
+        issuer_id: str,
+        secret: bytes,
+        lock: RLock,
+        used: set[tuple[str, str]],
+    ) -> None:
         self._issuer_id = issuer_id
         self._secret = secret
+        self._lock = lock
+        self._used = used
 
-    def verify(
+    @property
+    def authorization_lock(self) -> RLock:
+        return self._lock
+
+    def validate_locked(
         self,
         intent: ActionIntent,
         approval: ApprovalEvidence,
@@ -258,13 +274,30 @@ class _HmacApprovalVerifier:
             raise ValueError("approval verification time must be timezone-aware")
         if approval.issuer_id != self._issuer_id:
             raise PermissionError("approval evidence came from an untrusted issuer")
+        if (approval.issuer_id, approval.approval_id) in self._used:
+            raise PermissionError("approval evidence was already used by trusted host")
         if approval.action_fingerprint != intent.approval_fingerprint:
             raise PermissionError("approval does not match the exact action")
-        expected = hmac.new(self._secret, _action_signature_payload(approval), hashlib.sha256).hexdigest()
+        expected = hmac.new(
+            self._secret, _action_signature_payload(approval), hashlib.sha256
+        ).hexdigest()
         if not hmac.compare_digest(expected, approval.signature):
             raise PermissionError("approval evidence signature is invalid")
         if now < approval.approved_at or now >= approval.expires_at:
             raise PermissionError("approval is not currently valid")
+
+    def commit_locked(self, approval: ApprovalEvidence) -> None:
+        self._used.add((approval.issuer_id, approval.approval_id))
+
+    def verify(
+        self,
+        intent: ActionIntent,
+        approval: ApprovalEvidence,
+        *,
+        now: datetime,
+    ) -> None:
+        with self._lock:
+            self.validate_locked(intent, approval, now=now)
 
 
 class _ExactReviewVerifier:
@@ -305,7 +338,7 @@ class _ProjectPurposeReviewAdapter:
 def project_purpose_review_subject(
     *, subject_kind: str, project_id: str, purpose: str
 ) -> ReviewSubject:
-    """Canonical adapter subject for ports whose exact contract is project+purpose+ref."""
+    """Canonical subject for a consumer port whose exact identity is project+purpose+ref."""
     return ReviewSubject(
         subject_kind=subject_kind,
         project_id=project_id,
@@ -317,23 +350,29 @@ def project_purpose_review_subject(
 class ApprovalAuthority:
     """Trusted host-owned issuer for R4 action approvals and exact human reviews.
 
-    The secret is process-ephemeral by default. Restart intentionally invalidates all
-    pending requests and previously issued evidence; the human must review again.
-    Runtime agents/JS receive only safe request views and opaque evidence references,
-    never this authority, its secret, signatures, or verifier internals.
+    The effective key is always process-instance ephemeral, even when deterministic seed bytes
+    are supplied by tests. Restart therefore invalidates all pending requests and issued evidence;
+    the human must review again. Runtime agents/JS receive only safe request views and opaque
+    evidence references, never this authority, its key, signatures, or verifier internals.
     """
 
     def __init__(self, *, issuer_id: str | None = None, secret: bytes | None = None) -> None:
         resolved_issuer = f"host-{secrets.token_urlsafe(18)}" if issuer_id is None else issuer_id
         _require_text(resolved_issuer, "approval issuer_id")
-        resolved_secret = secrets.token_bytes(32) if secret is None else secret
-        if len(resolved_secret) < 32:
-            raise ValueError("approval authority secret must contain at least 32 bytes")
+        seed = secrets.token_bytes(32) if secret is None else bytes(secret)
+        if len(seed) < 32:
+            raise ValueError("approval authority secret seed must contain at least 32 bytes")
+        process_nonce = secrets.token_bytes(32)
         self._issuer_id = resolved_issuer
-        self._secret = bytes(resolved_secret)
+        self._secret = hmac.new(
+            seed,
+            _PROCESS_KEY_SCHEMA + process_nonce,
+            hashlib.sha256,
+        ).digest()
         self._pending: dict[str, _PendingApproval] = {}
         self._approved: dict[str, ApprovalEvidence] = {}
         self._denied: set[str] = set()
+        self._used_action_approvals: set[tuple[str, str]] = set()
         self._pending_reviews: dict[str, _PendingReview] = {}
         self._reviews: dict[str, tuple[ReviewSubject, ReviewEvidence]] = {}
         self._denied_reviews: set[str] = set()
@@ -344,7 +383,12 @@ class ApprovalAuthority:
         return self._issuer_id
 
     def verifier(self) -> ApprovalVerifier:
-        return _HmacApprovalVerifier(issuer_id=self._issuer_id, secret=self._secret)
+        return _HmacApprovalVerifier(
+            issuer_id=self._issuer_id,
+            secret=self._secret,
+            lock=self._lock,
+            used=self._used_action_approvals,
+        )
 
     def exact_review_verifier(self) -> ExactReviewVerifier:
         return _ExactReviewVerifier(self)
@@ -393,7 +437,8 @@ class ApprovalAuthority:
             return tuple(
                 item.view
                 for item in sorted(
-                    self._pending.values(), key=lambda item: (item.view.requested_at, item.view.request_id)
+                    self._pending.values(),
+                    key=lambda item: (item.view.requested_at, item.view.request_id),
                 )
             )
 
