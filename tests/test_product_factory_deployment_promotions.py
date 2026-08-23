@@ -31,12 +31,12 @@ from nika_core.product_factory_deployment_promotions import (
     build_production_promotion_action,
     build_promotion_wave_plan,
 )
-from nika_core.security.policy import ApprovalEvidence
 from nika_core.product_factory_deployment_waves import (
     DeploymentWaveCoordinator,
     DeploymentWaveSnapshot,
     RolloutState,
 )
+from nika_core.security.policy import ApprovalEvidence
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
