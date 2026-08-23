@@ -25,15 +25,18 @@ from nika_core.model_gateway.contracts import (
 )
 from nika_core.model_gateway.foundry_local import FoundryLocalProvider
 from nika_core.model_gateway.gateway import ModelGateway
-from nika_core.model_gateway.providers import OllamaProvider, OpenAICompatibleProvider
+from nika_core.model_gateway.providers import (
+    OllamaProvider,
+    OpenAICompatibleProvider,
+)
 from nika_core.resources.contracts import ResourceSnapshot
 
 
 OWNER_BLOCKED = pytest.mark.xfail(
     strict=True,
     reason=(
-        "current main violates this fail-closed oracle in DEV17-owned ModelGateway surface; "
-        "strict XPASS forces conversion after the production fix integrates"
+        "current main violates this DEV17-owned fail-closed oracle; strict XPASS requires "
+        "conversion to an ordinary PASS assertion after the production fix integrates"
     ),
 )
 
@@ -137,7 +140,11 @@ class _BlockingFoundryModel:
                     if model.completion_gate is not None:
                         model.completion_gate.wait(timeout=2.0)
                     return SimpleNamespace(
-                        choices=[SimpleNamespace(message=SimpleNamespace(content="foundry ok"))],
+                        choices=[
+                            SimpleNamespace(
+                                message=SimpleNamespace(content="foundry ok")
+                            )
+                        ],
                         usage=SimpleNamespace(
                             prompt_tokens=2,
                             completion_tokens=1,
@@ -183,7 +190,7 @@ def _foundry_request(request_id: str, *, timeout_seconds: float = 1.0) -> ModelR
     )
 
 
-def _client_factory_for(handler: Any) -> Any:
+def _client_factory(handler: Any) -> Any:
     transport = httpx.MockTransport(handler)
 
     def factory(**kwargs: Any) -> httpx.AsyncClient:
@@ -195,7 +202,7 @@ def _client_factory_for(handler: Any) -> Any:
 def test_primary_local_slow_ollama_times_out_without_unsafe_fallback() -> None:
     fallback = _RecordingProvider("fallback")
 
-    async def slow_ollama(_http_request: httpx.Request) -> httpx.Response:
+    async def handler(_request: httpx.Request) -> httpx.Response:
         await asyncio.sleep(0.2)
         return httpx.Response(
             200,
@@ -210,12 +217,12 @@ def test_primary_local_slow_ollama_times_out_without_unsafe_fallback() -> None:
     gateway.register(
         OllamaProvider(
             default_model="qwen3:8b",
-            client_factory=_client_factory_for(slow_ollama),
+            client_factory=_client_factory(handler),
         )
     )
     gateway.register(fallback)
 
-    with pytest.raises(ModelGatewayError) as exc_info:
+    with pytest.raises(ModelGatewayError) as raised:
         asyncio.run(
             gateway.complete(
                 _request(
@@ -226,15 +233,13 @@ def test_primary_local_slow_ollama_times_out_without_unsafe_fallback() -> None:
             )
         )
 
-    assert exc_info.value.code is ModelErrorCode.TIMEOUT
-    assert exc_info.value.retryable is False
+    assert raised.value.code is ModelErrorCode.TIMEOUT
+    assert raised.value.retryable is False
     assert fallback.calls == []
 
 
 def test_typed_timeout_remains_typed_and_nonretryable() -> None:
-    fallback = _RecordingProvider("fallback")
-
-    class TypedTimeoutProvider(_RecordingProvider):
+    class TypedTimeout(_RecordingProvider):
         async def complete(self, request: ModelRequest) -> ModelResponse:
             self.calls.append(request.request_id)
             raise ModelGatewayError(
@@ -244,43 +249,43 @@ def test_typed_timeout_remains_typed_and_nonretryable() -> None:
                 retryable=False,
             )
 
-    primary = TypedTimeoutProvider("primary")
+    primary = TypedTimeout("primary")
+    fallback = _RecordingProvider("fallback")
     gateway = ModelGateway()
     gateway.register(primary)
     gateway.register(fallback)
 
-    with pytest.raises(ModelGatewayError) as exc_info:
+    with pytest.raises(ModelGatewayError) as raised:
         asyncio.run(
             gateway.complete(_request(fallback_provider_ids=("fallback",)))
         )
 
-    assert exc_info.value.code is ModelErrorCode.TIMEOUT
-    assert exc_info.value.retryable is False
+    assert raised.value.code is ModelErrorCode.TIMEOUT
+    assert raised.value.retryable is False
     assert primary.calls == ["chaos-request"]
     assert fallback.calls == []
 
 
 @OWNER_BLOCKED
 def test_raw_timeout_cannot_masquerade_as_gateway_deadline_or_trigger_fallback() -> None:
-    fallback = _RecordingProvider("fallback")
-
-    class RawTimeoutProvider(_RecordingProvider):
+    class RawTimeout(_RecordingProvider):
         async def complete(self, request: ModelRequest) -> ModelResponse:
             self.calls.append(request.request_id)
             raise TimeoutError("raw provider timeout with unknown native state")
 
-    primary = RawTimeoutProvider("primary", supports_hard_cancellation=True)
+    primary = RawTimeout("primary", supports_hard_cancellation=True)
+    fallback = _RecordingProvider("fallback")
     gateway = ModelGateway()
     gateway.register(primary)
     gateway.register(fallback)
 
-    with pytest.raises(ModelGatewayError) as exc_info:
+    with pytest.raises(ModelGatewayError) as raised:
         asyncio.run(
             gateway.complete(_request(fallback_provider_ids=("fallback",)))
         )
 
-    assert exc_info.value.code is ModelErrorCode.PROVIDER_ERROR
-    assert exc_info.value.retryable is False
+    assert raised.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert raised.value.retryable is False
     assert fallback.calls == []
 
 
@@ -294,8 +299,7 @@ def test_foundry_cancellation_while_queued_never_starts_second_native_request() 
 
     async def scenario() -> None:
         first = asyncio.create_task(provider.complete(_foundry_request("first")))
-        started = await asyncio.to_thread(model.started.wait, 1.0)
-        assert started is True
+        assert await asyncio.to_thread(model.started.wait, 1.0) is True
 
         second = asyncio.create_task(provider.complete(_foundry_request("second")))
         await asyncio.sleep(0)
@@ -305,8 +309,7 @@ def test_foundry_cancellation_while_queued_never_starts_second_native_request() 
 
         assert model.completion_count == 1
         gate.set()
-        response = await first
-        assert response.request_id == "first"
+        assert (await first).request_id == "first"
 
     asyncio.run(scenario())
     assert model.completion_count == 1
@@ -333,8 +336,7 @@ def test_foundry_cancellation_after_native_start_never_runs_fallback() -> None:
                 )
             )
         )
-        started = await asyncio.to_thread(model.started.wait, 1.0)
-        assert started is True
+        assert await asyncio.to_thread(model.started.wait, 1.0) is True
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -342,8 +344,7 @@ def test_foundry_cancellation_after_native_start_never_runs_fallback() -> None:
         assert fallback.calls == []
         assert model.completion_count == 1
         gate.set()
-        finished = await asyncio.to_thread(model.finished.wait, 1.0)
-        assert finished is True
+        assert await asyncio.to_thread(model.finished.wait, 1.0) is True
         await asyncio.sleep(0)
 
     asyncio.run(scenario())
@@ -351,7 +352,7 @@ def test_foundry_cancellation_after_native_start_never_runs_fallback() -> None:
 
 
 def test_ollama_malformed_usage_fails_closed() -> None:
-    def handler(_http_request: httpx.Request) -> httpx.Response:
+    def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
             json={
@@ -367,20 +368,20 @@ def test_ollama_malformed_usage_fails_closed() -> None:
     gateway.register(
         OllamaProvider(
             default_model="qwen3:8b",
-            client_factory=_client_factory_for(handler),
+            client_factory=_client_factory(handler),
         )
     )
 
-    with pytest.raises(ModelGatewayError) as exc_info:
+    with pytest.raises(ModelGatewayError) as raised:
         asyncio.run(gateway.complete(_request(provider_id="ollama")))
 
-    assert exc_info.value.code is ModelErrorCode.PROVIDER_ERROR
-    assert exc_info.value.retryable is False
+    assert raised.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert raised.value.retryable is False
 
 
 @OWNER_BLOCKED
 def test_gateway_rejects_malformed_normalized_usage_from_any_provider() -> None:
-    class MalformedUsageProvider(_RecordingProvider):
+    class MalformedUsage(_RecordingProvider):
         async def complete(self, request: ModelRequest) -> ModelResponse:
             self.calls.append(request.request_id)
             return ModelResponse(
@@ -393,18 +394,18 @@ def test_gateway_rejects_malformed_normalized_usage_from_any_provider() -> None:
             )
 
     gateway = ModelGateway()
-    gateway.register(MalformedUsageProvider("primary"))
+    gateway.register(MalformedUsage("primary"))
 
-    with pytest.raises(ModelGatewayError) as exc_info:
+    with pytest.raises(ModelGatewayError) as raised:
         asyncio.run(gateway.complete(_request()))
 
-    assert exc_info.value.code is ModelErrorCode.PROVIDER_ERROR
-    assert exc_info.value.retryable is False
+    assert raised.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert raised.value.retryable is False
 
 
 @OWNER_BLOCKED
 def test_ollama_incomplete_final_response_is_rejected() -> None:
-    def handler(_http_request: httpx.Request) -> httpx.Response:
+    def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
             json={
@@ -418,46 +419,47 @@ def test_ollama_incomplete_final_response_is_rejected() -> None:
     gateway.register(
         OllamaProvider(
             default_model="qwen3:8b",
-            client_factory=_client_factory_for(handler),
+            client_factory=_client_factory(handler),
         )
     )
 
-    with pytest.raises(ModelGatewayError) as exc_info:
+    with pytest.raises(ModelGatewayError) as raised:
         asyncio.run(gateway.complete(_request(provider_id="ollama")))
 
-    assert exc_info.value.code is ModelErrorCode.PROVIDER_ERROR
-    assert exc_info.value.retryable is False
+    assert raised.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert raised.value.retryable is False
 
 
 def test_authentication_denial_never_falls_back() -> None:
     fallback = _RecordingProvider("fallback")
 
-    def handler(_http_request: httpx.Request) -> httpx.Response:
+    def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, json={"error": "denied"})
 
-    primary = OpenAICompatibleProvider(
-        provider_id="primary",
-        base_url="https://provider.invalid/v1",
-        kind=ProviderKind.CLOUD,
-        default_model="controlled-model",
-        supports_private_data=True,
-        client_factory=_client_factory_for(handler),
-    )
     gateway = ModelGateway()
-    gateway.register(primary)
+    gateway.register(
+        OpenAICompatibleProvider(
+            provider_id="primary",
+            base_url="https://provider.invalid/v1",
+            kind=ProviderKind.CLOUD,
+            default_model="controlled-model",
+            supports_private_data=True,
+            client_factory=_client_factory(handler),
+        )
+    )
     gateway.register(fallback)
 
-    with pytest.raises(ModelGatewayError) as exc_info:
+    with pytest.raises(ModelGatewayError) as raised:
         asyncio.run(
             gateway.complete(_request(fallback_provider_ids=("fallback",)))
         )
 
-    assert exc_info.value.code is ModelErrorCode.AUTHENTICATION
-    assert exc_info.value.retryable is False
+    assert raised.value.code is ModelErrorCode.AUTHENTICATION
+    assert raised.value.retryable is False
     assert fallback.calls == []
 
 
-def test_foundry_resource_denial_happens_before_native_start_and_never_falls_back() -> None:
+def test_foundry_resource_denial_precedes_native_start_and_fallback() -> None:
     model = _BlockingFoundryModel()
     provider = FoundryLocalProvider(
         default_model="qa-chaos-model",
@@ -470,7 +472,7 @@ def test_foundry_resource_denial_happens_before_native_start_and_never_falls_bac
     gateway.register(provider)
     gateway.register(fallback)
 
-    with pytest.raises(ModelGatewayError) as exc_info:
+    with pytest.raises(ModelGatewayError) as raised:
         asyncio.run(
             gateway.complete(
                 _request(
@@ -480,8 +482,8 @@ def test_foundry_resource_denial_happens_before_native_start_and_never_falls_bac
             )
         )
 
-    assert exc_info.value.code is ModelErrorCode.RESOURCE_LIMIT
-    assert exc_info.value.retryable is False
+    assert raised.value.code is ModelErrorCode.RESOURCE_LIMIT
+    assert raised.value.retryable is False
     assert model.completion_count == 0
     assert fallback.calls == []
 
@@ -519,18 +521,18 @@ def test_private_route_is_rejected_before_any_candidate_receives_payload() -> No
     assert unapproved.calls == []
 
 
-def test_missing_fallback_provider_fails_preflight_before_primary_execution() -> None:
+def test_missing_fallback_fails_preflight_before_primary_execution() -> None:
     primary = _RecordingProvider("primary")
     gateway = ModelGateway()
     gateway.register(primary)
 
-    with pytest.raises(ModelGatewayError) as exc_info:
+    with pytest.raises(ModelGatewayError) as raised:
         asyncio.run(
             gateway.complete(_request(fallback_provider_ids=("missing",)))
         )
 
-    assert exc_info.value.code is ModelErrorCode.UNAVAILABLE
-    assert exc_info.value.provider_id == "missing"
+    assert raised.value.code is ModelErrorCode.UNAVAILABLE
+    assert raised.value.provider_id == "missing"
     assert primary.calls == []
 
 
@@ -553,16 +555,20 @@ def test_overall_deadline_is_shared_across_primary_and_fallback() -> None:
             self.calls.append(request.request_id)
             fallback_timeouts.append(request.timeout_seconds)
             await asyncio.sleep(1.0)
-            return await super().complete(request)
+            return ModelResponse(
+                request_id=request.request_id,
+                text="late fallback",
+                provider_id=self.capabilities.provider_id,
+                provider_kind=self.capabilities.kind,
+                model="chaos-model",
+            )
 
-    primary = DelayedUnavailable("primary")
-    fallback = SlowFallback("fallback")
     gateway = ModelGateway()
-    gateway.register(primary)
-    gateway.register(fallback)
+    gateway.register(DelayedUnavailable("primary"))
+    gateway.register(SlowFallback("fallback"))
 
     started = time.perf_counter()
-    with pytest.raises(ModelGatewayError) as exc_info:
+    with pytest.raises(ModelGatewayError) as raised:
         asyncio.run(
             gateway.complete(
                 _request(
@@ -573,14 +579,14 @@ def test_overall_deadline_is_shared_across_primary_and_fallback() -> None:
         )
     elapsed = time.perf_counter() - started
 
-    assert exc_info.value.code is ModelErrorCode.TIMEOUT
+    assert raised.value.code is ModelErrorCode.TIMEOUT
     assert fallback_timeouts
     assert 0 < fallback_timeouts[0] < 0.2
     assert elapsed < 0.5
 
 
 @OWNER_BLOCKED
-def test_ambiguous_observed_primary_effect_blocks_retryable_fallback() -> None:
+def test_ambiguous_first_provider_effect_blocks_retryable_fallback() -> None:
     effects: list[str] = []
     fallback = _RecordingProvider("fallback")
 
@@ -597,22 +603,21 @@ def test_ambiguous_observed_primary_effect_blocks_retryable_fallback() -> None:
             error.observed_effect = True
             raise error
 
-    primary = EffectfulPrimary("primary")
     gateway = ModelGateway()
-    gateway.register(primary)
+    gateway.register(EffectfulPrimary("primary"))
     gateway.register(fallback)
 
-    with pytest.raises(ModelGatewayError) as exc_info:
+    with pytest.raises(ModelGatewayError) as raised:
         asyncio.run(
             gateway.complete(_request(fallback_provider_ids=("fallback",)))
         )
 
-    assert exc_info.value.code is ModelErrorCode.UNAVAILABLE
+    assert raised.value.code is ModelErrorCode.UNAVAILABLE
     assert effects == ["native-effect-observed"]
     assert fallback.calls == []
 
 
-def test_foundry_concurrent_requests_remain_serialized() -> None:
+def test_foundry_concurrent_requests_are_serialized_per_provider() -> None:
     model = _BlockingFoundryModel(completion_delay=0.02)
     provider = FoundryLocalProvider(
         default_model="qa-chaos-model",
@@ -635,7 +640,7 @@ def test_foundry_concurrent_requests_remain_serialized() -> None:
     assert model.max_active_completions == 1
 
 
-def test_foundry_provider_lifecycle_restart_has_no_stale_request_state() -> None:
+def test_foundry_provider_restart_has_no_stale_request_state() -> None:
     model = _BlockingFoundryModel()
     manager = _FoundryManager(model)
 
@@ -670,12 +675,12 @@ def test_base_windows_release_keeps_foundry_and_ollama_optional() -> None:
     optional = project["optional-dependencies"]
     embedded_dependencies = tuple(optional["embedded-ai"])
 
-    assert not any("foundry-local-sdk" in dependency for dependency in base_dependencies)
-    assert any("foundry-local-sdk" in dependency for dependency in embedded_dependencies)
-    assert not any("ollama" in dependency.lower() for dependency in base_dependencies)
+    assert not any("foundry-local-sdk" in item for item in base_dependencies)
+    assert any("foundry-local-sdk" in item for item in embedded_dependencies)
+    assert not any("ollama" in item.lower() for item in base_dependencies)
 
-    release_workflow = (root / ".github/workflows/m11-windows-release.yml").read_text(
+    workflow = (root / ".github/workflows/m11-windows-release.yml").read_text(
         encoding="utf-8"
     )
-    assert 'pip install -e ".[gui,qa,dev]"' in release_workflow
-    assert "embedded-ai" not in release_workflow
+    assert 'pip install -e ".[gui,qa,dev]"' in workflow
+    assert "embedded-ai" not in workflow
