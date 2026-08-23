@@ -4,6 +4,8 @@
 
 - repository: `Oleksii-debug/Nika-Core`
 - starting live `main`: `bd7517f38c04560aa7350b870d8a51bfb6c8113b`
+- live `main` after in-run synchronization: `e40691a6e2ff9c31fd413f63d004612e048d95ed`
+- synchronization commit before this evidence update: `1bda5761e59cb9687abd4ee5f3acd6ba9b05ee8e`
 - lane: `MANUAL-DEV03`
 - gate: `PF2`
 - branch: `work/manual-dev03/pf2-team-lifecycle`
@@ -14,15 +16,21 @@ The run re-read the binding Product Factory specification, acceptance gate, proj
 parallel execution board, Issue #1 control stream, open PRs, and current ownership before writing.
 GitHub live state was treated as authoritative over stale state-document snapshots.
 
-## Collision decision
+## Collision and synchronization decision
 
-Open PR #160 owns `src/nika_core/product_factory_orchestration.py`, including active PF2 lease
-identity work. MANUAL-DEV03 therefore did not edit that file or its lease tests.
+At run start PR #160 owned `src/nika_core/product_factory_orchestration.py`, including active PF2
+lease-identity work. MANUAL-DEV03 therefore did not edit that file or its lease tests.
 
-This slice is deliberately implemented as a new adapter module:
+During this run PR #160 merged, advancing live `main` from `bd7517f...` to `e40691a6...`.
+The MANUAL-DEV03 branch was then synchronized without force-push using a two-parent commit whose
+tree is current main plus only the three MANUAL-DEV03-owned files. No stale pre-merge version of
+`product_factory_orchestration.py` was overlaid onto the merged lease-identity fix.
+
+This slice remains deliberately isolated in:
 
 - `src/nika_core/product_factory_team_lifecycle.py`
 - `tests/test_product_factory_team_lifecycle.py`
+- this evidence document
 
 The adapter reuses the already-integrated `DynamicTeamComposer`, `TeamCompositionRequest`,
 `TeamPlan`, and `TeamRole` contracts.
@@ -66,23 +74,24 @@ raw agent/role count as a quality metric.
 Existing repository scale tests remain the authoritative broader Product Factory proof for
 coordinator scheduling and checkpoint recovery. This PR does not duplicate or weaken those gates.
 
-## Cheap validation before final push
+## Cheap validation before final exact-head CI
 
 The source and test files were syntax-compiled and exercised through a live-signature-compatible
 contract harness. The final pre-CI harness result after the history/ceiling edge-case fix was:
 
 - `19 passed`
 
-This harness is not acceptance evidence. Repository GitHub Actions on the exact PR head are
-required before merge readiness can be claimed.
+This harness is not acceptance evidence. Repository GitHub Actions on the final exact PR head are
+required before merge readiness can be claimed. Any CI that ran on the pre-synchronization SHA is
+lineage evidence only after `main` advanced.
 
 ## DEPENDENCY_REQUEST
 
 Canonical durable storage of this lifecycle payload belongs at the ProductProject / coordinator
-persistence boundary. That source slice overlaps active ownership and must not be edited by this
-lane without a compatibility decision.
+persistence boundary. That source slice is outside MANUAL-DEV03 ownership and must not be edited
+without a compatibility decision from its active owner / TECH02.
 
-Requested integration decision after PR #160 / relevant ProductProject ownership clears:
+Requested integration decision:
 
 1. choose the canonical ProductProject field/checkpoint location for `TeamLifecycleSnapshot`;
 2. persist the versioned JSON transactionally with the owning ProductProject revision/checkpoint;
