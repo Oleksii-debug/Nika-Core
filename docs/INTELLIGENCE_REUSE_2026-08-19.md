@@ -1,6 +1,6 @@
 # Nika Core — intelligence reuse decisions
 
-Updated: 2026-08-19.
+Updated: 2026-08-23.
 Status: binding addendum to `docs/REUSE_CATALOG_2026-08-18.md` for intelligence/model/planning choices. Where this file conflicts with the older catalog on these topics, this file is newer.
 
 ## Decision order
@@ -9,12 +9,15 @@ REUSE -> ADAPT -> CUSTOM (thin). Nika owns contracts, permissions, product seman
 
 ## A. Deterministic Brain — zero model
 
-### Unified Planning 1.3.x + Pyperplan — ADAPT
-- Project: AIPlan4EU Unified Planning.
-- License: Apache-2.0.
+### Unified Planning 1.3.x + Aries 0.5.0 — ADAPT
+- Project: AIPlan4EU Unified Planning plus the official `up-aries` integration.
+- License: Unified Planning is Apache-2.0; `up-aries` is MIT and the Aries upstream project is MIT/Apache-2.0 licensed.
 - Role: formal planning for explicit goals/actions/preconditions/effects.
 - Integration: optional `planning` dependency; Nika `WorldState`, goal/action and planner contracts remain framework-neutral.
-- First proof engine: Pyperplan through Unified Planning.
+- First default proof engine: `up-aries==0.5.0` through Unified Planning.
+- Engine-selection reason: Aries is a maintained official Unified Planning adapter with permissive source/plugin licensing and packaged Windows/Linux support. Its general action-planning search is not claimed to prove every unsatisfiable problem, so Nika preserves separate `GOAL_UNREACHABLE` and `NO_PLAN_FOUND` semantics.
+- Pyperplan is not the Nika default dependency: fresh provenance review found the `up-pyperplan` wrapper is Apache-2.0 but the Pyperplan 2.1 engine itself is GPLv3+. Nika does not silently describe that transitive engine as Apache-licensed.
+- LPG/ENHSP/Tamer and other engine wrappers are not adopted merely because wrapper metadata looks permissive; the underlying binary/runtime license and Windows fit must pass their own adoption proof.
 - Non-goal: do not convert every open-ended natural-language task into a planning domain.
 - Security: plans call ordinary Nika tools; ToolExecutor permissions/approval remain authoritative.
 - Execution budget: Nika bounds planner wall time and rejects a returned plan whose step count exceeds the caller's explicit `max_steps` budget before any tool action is executed. Planning remains cancellable at the asyncio caller boundary; a timed-out worker thread is not falsely represented as a hard-killed native planner process.
