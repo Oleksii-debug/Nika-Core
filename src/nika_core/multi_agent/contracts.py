@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 from math import isfinite
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 from uuid import uuid4
 
 from nika_core.builder.spec import ToolGrant
@@ -30,6 +30,29 @@ class HandoffKind(StrEnum):
     RESULT = "result"
     STATUS = "status"
     ERROR = "error"
+
+
+class CancellationOperationState(StrEnum):
+    CANCELLING = "cancelling"
+    RECONCILE_REQUIRED = "reconcile_required"
+    COMPLETED = "completed"
+
+
+class CancellationEffectState(StrEnum):
+    PLANNED = "planned"
+    DISPATCHING = "dispatching"
+    CONFIRMED = "confirmed"
+    RECONCILE_REQUIRED = "reconcile_required"
+
+
+class CancellationProbeState(StrEnum):
+    CANCELLED = "cancelled"
+    NOT_CANCELLED = "not_cancelled"
+    UNKNOWN = "unknown"
+
+
+class CancellationReconciliationRequired(RuntimeError):
+    """Raised when an external cancellation effect cannot be safely replayed."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +128,72 @@ class EvaluationScore:
             raise ValueError("metric must not be empty")
         if not isfinite(float(self.score)):
             raise ValueError("evaluation score must be finite")
+
+
+@dataclass(frozen=True, slots=True)
+class CancellationEffect:
+    operation_id: str
+    team_id: str
+    member_id: str
+    task_id: str
+    thread_id: str
+    sequence: int
+    state: CancellationEffectState
+    error_type: str | None = None
+
+    def __post_init__(self) -> None:
+        values = (
+            self.operation_id,
+            self.team_id,
+            self.member_id,
+            self.task_id,
+            self.thread_id,
+        )
+        if any(not value.strip() for value in values):
+            raise ValueError("cancellation effect identity must be complete")
+        if self.sequence < 0:
+            raise ValueError("cancellation effect sequence must not be negative")
+
+
+@dataclass(frozen=True, slots=True)
+class CancellationOperation:
+    operation_id: str
+    team_id: str
+    state: CancellationOperationState
+    effects: tuple[CancellationEffect, ...]
+
+    def __post_init__(self) -> None:
+        if not self.operation_id.strip() or not self.team_id.strip():
+            raise ValueError("cancellation operation identity must be complete")
+
+
+@dataclass(frozen=True, slots=True)
+class CancellationProbeRequest:
+    operation_id: str
+    team_id: str
+    member_id: str
+    task_id: str
+    thread_id: str
+
+    def __post_init__(self) -> None:
+        values = (
+            self.operation_id,
+            self.team_id,
+            self.member_id,
+            self.task_id,
+            self.thread_id,
+        )
+        if any(not value.strip() for value in values):
+            raise ValueError("cancellation probe identity must be complete")
+
+
+@runtime_checkable
+class CancellationReconciliationPort(Protocol):
+    async def inspect_cancellation(
+        self, request: CancellationProbeRequest
+    ) -> CancellationProbeState:
+        """Inspect one exact prior cancellation dispatch without causing another cancel effect."""
+        ...
 
 
 def attenuate_grants(
