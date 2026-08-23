@@ -9,6 +9,7 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
 from nika_core.multi_agent.contracts import (
     AgentHandoff,
+    ChildRequest,
     HandoffKind,
     MemberState,
     TeamMember,
@@ -134,8 +135,49 @@ class MultiAgentStore:
         requested_grants: tuple[ToolGrant, ...],
         task_handoff: AgentHandoff | None = None,
     ) -> TeamMember:
+        return self.spawn_children(
+            team_id=team_id,
+            parent_id=parent_id,
+            requests=(
+                ChildRequest(
+                    member_id=child_id,
+                    agent_id=agent_id,
+                    agent_version=agent_version,
+                    thread_id=thread_id,
+                    requested_grants=requested_grants,
+                ),
+            ),
+            task_handoffs=(task_handoff,),
+        )[0]
+
+    def spawn_children(
+        self,
+        *,
+        team_id: str,
+        parent_id: str,
+        requests: tuple[ChildRequest, ...],
+        task_handoffs: tuple[AgentHandoff | None, ...] | None = None,
+    ) -> tuple[TeamMember, ...]:
+        """Atomically admit and persist one fan-out wave.
+
+        Aggregate depth/parent/total quotas are checked under the same SQLite writer lock used
+        for every child, TASK handoff and audit event. Any late constraint/handoff failure rolls
+        back the whole wave, so restart can never observe a partially admitted fan-out batch.
+        """
+        if not requests:
+            return ()
+        handoffs = task_handoffs
+        if handoffs is None:
+            handoffs = (None,) * len(requests)
+        if len(handoffs) != len(requests):
+            raise ValueError("task handoff count must match child request count")
+        member_ids = [request.member_id for request in requests]
+        if len(member_ids) != len(set(member_ids)):
+            raise ValueError("child member IDs must be unique within one fan-out batch")
+
         now = datetime.now(UTC).isoformat()
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             team = conn.execute(
                 "SELECT state, quota_json FROM multi_agent_teams WHERE team_id = ?",
                 (team_id,),
@@ -151,6 +193,8 @@ class MultiAgentStore:
             parent = self._member_from_row(parent_row)
             if parent.depth + 1 > quota.max_depth:
                 raise RuntimeError("spawn depth quota exceeded")
+
+            batch_size = len(requests)
             child_count = int(
                 conn.execute(
                     "SELECT COUNT(*) FROM multi_agent_members "
@@ -158,44 +202,55 @@ class MultiAgentStore:
                     (team_id, parent_id),
                 ).fetchone()[0]
             )
-            if child_count >= quota.max_children_per_parent:
-                raise RuntimeError("children-per-parent quota exceeded")
+            if child_count + batch_size > quota.max_children_per_parent:
+                raise RuntimeError("fan-out batch exceeds remaining children-per-parent quota")
             total_count = int(
                 conn.execute(
                     "SELECT COUNT(*) FROM multi_agent_members WHERE team_id = ?",
                     (team_id,),
                 ).fetchone()[0]
             )
-            if total_count >= quota.max_total_agents:
-                raise RuntimeError("total-agent quota exceeded")
-            grants = attenuate_grants(parent.tool_grants, requested_grants)
-            child = TeamMember(
-                team_id=team_id,
-                member_id=child_id,
-                parent_id=parent_id,
-                depth=parent.depth + 1,
-                agent_id=agent_id,
-                agent_version=agent_version,
-                thread_id=thread_id,
-                tool_grants=grants,
-            )
-            self._insert_member(conn, child, now)
-            if task_handoff is not None:
-                self._validate_task_handoff(
-                    task_handoff,
+            if total_count + batch_size > quota.max_total_agents:
+                raise RuntimeError("fan-out batch exceeds remaining total-agent quota")
+
+            children: list[TeamMember] = []
+            for request, handoff in zip(requests, handoffs, strict=True):
+                grants = attenuate_grants(parent.tool_grants, request.requested_grants)
+                child = TeamMember(
                     team_id=team_id,
+                    member_id=request.member_id,
                     parent_id=parent_id,
-                    child_id=child_id,
+                    depth=parent.depth + 1,
+                    agent_id=request.agent_id,
+                    agent_version=request.agent_version,
+                    thread_id=request.thread_id,
+                    tool_grants=grants,
                 )
-                self._insert_handoff_with_connection(conn, task_handoff, now)
-            self._audit.append_with_connection(
-                conn,
-                event_type="multi_agent.child_spawned",
-                entity_type="multi_agent_team",
-                entity_id=team_id,
-                payload={"parent_id": parent_id, "child_id": child_id, "depth": child.depth},
-            )
-        return child
+                if handoff is not None:
+                    self._validate_task_handoff(
+                        handoff,
+                        team_id=team_id,
+                        parent_id=parent_id,
+                        child_id=request.member_id,
+                    )
+                children.append(child)
+
+            for child, handoff in zip(children, handoffs, strict=True):
+                self._insert_member(conn, child, now)
+                if handoff is not None:
+                    self._insert_handoff_with_connection(conn, handoff, now)
+                self._audit.append_with_connection(
+                    conn,
+                    event_type="multi_agent.child_spawned",
+                    entity_type="multi_agent_team",
+                    entity_id=team_id,
+                    payload={
+                        "parent_id": parent_id,
+                        "child_id": child.member_id,
+                        "depth": child.depth,
+                    },
+                )
+        return tuple(children)
 
     def task_payload(self, team_id: str, member_id: str) -> dict[str, object]:
         with self._store.connection() as conn:
@@ -303,9 +358,7 @@ class MultiAgentStore:
             if team["state"] != TeamState.ACTIVE.value:
                 raise RuntimeError("team is not active")
             if member.state in _TERMINAL_MEMBER_STATES:
-                raise RuntimeError(
-                    f"cannot overwrite terminal child state {member.state.value}"
-                )
+                raise RuntimeError(f"cannot overwrite terminal child state {member.state.value}")
             if result_handoff is not None:
                 self._validate_result_handoff(
                     result_handoff,
@@ -533,7 +586,8 @@ class MultiAgentStore:
     def _insert_member(self, conn: object, member: TeamMember, now: str) -> None:
         conn.execute(
             "INSERT INTO multi_agent_members(team_id, member_id, parent_id, depth, agent_id, "
-            "agent_version, thread_id, tool_grants_json, state, resume_token, created_at, updated_at) "
+            "agent_version, thread_id, tool_grants_json, state, resume_token, created_at, "
+            "updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 member.team_id,

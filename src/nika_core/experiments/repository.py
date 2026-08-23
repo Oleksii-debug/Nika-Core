@@ -9,6 +9,7 @@ from typing import Protocol
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.experiments.contracts import (
     ArtifactKind,
+    DatasetSplit,
     ExperimentDefinition,
     ExperimentSnapshot,
     ExperimentStatus,
@@ -232,6 +233,9 @@ def _encode_definition(definition: ExperimentDefinition) -> str:
                 "replay_id": item.replay_id,
                 "dataset_ref": item.dataset_ref,
                 "dataset_version": item.dataset_version,
+                "split": item.split.value,
+                "dataset_fingerprint": item.dataset_fingerprint,
+                "data_end_at": _encode_datetime(item.data_end_at),
             }
             for item in definition.replays
         ],
@@ -249,17 +253,19 @@ def _encode_definition(definition: ExperimentDefinition) -> str:
             ],
             "primary_higher_is_better": definition.policy.primary_higher_is_better,
         },
+        "evaluation_cutoff": _encode_datetime(definition.evaluation_cutoff),
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
-def _strategy_payload(item: StrategyRef) -> dict[str, str]:
+def _strategy_payload(item: StrategyRef) -> dict[str, object]:
     return {
         "candidate_id": item.candidate_id,
         "version": item.version,
         "artifact_kind": item.artifact_kind.value,
         "artifact_ref": item.artifact_ref,
         "permission_fingerprint": item.permission_fingerprint,
+        "training_dataset_fingerprints": list(item.training_dataset_fingerprints),
     }
 
 
@@ -275,6 +281,9 @@ def _decode_definition(raw: str) -> ExperimentDefinition:
                 replay_id=item["replay_id"],
                 dataset_ref=item["dataset_ref"],
                 dataset_version=item["dataset_version"],
+                split=DatasetSplit(str(item.get("split", DatasetSplit.HELD_OUT.value))),
+                dataset_fingerprint=_optional_string(item.get("dataset_fingerprint")),
+                data_end_at=_decode_datetime(item.get("data_end_at")),
             )
             for item in payload["replays"]
         ),
@@ -292,14 +301,39 @@ def _decode_definition(raw: str) -> ExperimentDefinition:
             ),
             primary_higher_is_better=bool(policy.get("primary_higher_is_better", True)),
         ),
+        evaluation_cutoff=_decode_datetime(payload.get("evaluation_cutoff")),
     )
 
 
 def _decode_strategy(payload: dict[str, object]) -> StrategyRef:
+    training = payload.get("training_dataset_fingerprints", ())
+    if not isinstance(training, (list, tuple)):
+        raise TypeError("training_dataset_fingerprints must be a sequence")
     return StrategyRef(
         candidate_id=str(payload["candidate_id"]),
         version=str(payload["version"]),
         artifact_kind=ArtifactKind(str(payload["artifact_kind"])),
         artifact_ref=str(payload["artifact_ref"]),
         permission_fingerprint=str(payload["permission_fingerprint"]),
+        training_dataset_fingerprints=tuple(str(item) for item in training),
     )
+
+
+def _encode_datetime(value: datetime | None) -> str | None:
+    return None if value is None else value.isoformat()
+
+
+def _decode_datetime(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("persisted experiment datetime must be a string")
+    return datetime.fromisoformat(value)
+
+
+def _optional_string(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("persisted dataset fingerprint must be a string")
+    return value

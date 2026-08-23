@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from math import isfinite
 
@@ -19,6 +20,12 @@ class ArtifactKind(StrEnum):
     CONFIG = "config"
 
 
+class DatasetSplit(StrEnum):
+    TRAINING = "training"
+    EVALUATION = "evaluation"
+    HELD_OUT = "held_out"
+
+
 @dataclass(frozen=True, slots=True)
 class StrategyRef:
     candidate_id: str
@@ -26,6 +33,7 @@ class StrategyRef:
     artifact_kind: ArtifactKind
     artifact_ref: str
     permission_fingerprint: str
+    training_dataset_fingerprints: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         for value, name in (
@@ -36,6 +44,11 @@ class StrategyRef:
         ):
             if not value.strip():
                 raise ValueError(f"{name} must not be empty")
+        fingerprints = tuple(item.strip() for item in self.training_dataset_fingerprints)
+        if any(not item for item in fingerprints):
+            raise ValueError("training dataset fingerprints must not be empty")
+        if len(fingerprints) != len(set(fingerprints)):
+            raise ValueError("training dataset fingerprints must be unique")
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,10 +56,23 @@ class ReplayCase:
     replay_id: str
     dataset_ref: str
     dataset_version: str
+    split: DatasetSplit = DatasetSplit.HELD_OUT
+    dataset_fingerprint: str | None = None
+    data_end_at: datetime | None = None
 
     def __post_init__(self) -> None:
-        if not self.replay_id.strip() or not self.dataset_ref.strip() or not self.dataset_version.strip():
+        if (
+            not self.replay_id.strip()
+            or not self.dataset_ref.strip()
+            or not self.dataset_version.strip()
+        ):
             raise ValueError("replay identity must be complete")
+        if self.split is DatasetSplit.TRAINING:
+            raise ValueError("promotion replay cannot use the training split")
+        if self.dataset_fingerprint is not None and not self.dataset_fingerprint.strip():
+            raise ValueError("dataset_fingerprint must not be empty when provided")
+        if self.data_end_at is not None and self.data_end_at.tzinfo is None:
+            raise ValueError("data_end_at must be timezone-aware")
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +131,7 @@ class ExperimentDefinition:
     challengers: tuple[StrategyRef, ...]
     replays: tuple[ReplayCase, ...]
     policy: PromotionPolicy
+    evaluation_cutoff: datetime | None = None
 
     def __post_init__(self) -> None:
         if not self.experiment_id.strip():
@@ -123,8 +150,53 @@ class ExperimentDefinition:
         if len(replay_ids) != len(set(replay_ids)):
             raise ValueError("replay IDs must be unique")
         permission_truth = self.champion.permission_fingerprint
-        if any(candidate.permission_fingerprint != permission_truth for candidate in self.challengers):
+        if any(
+            candidate.permission_fingerprint != permission_truth
+            for candidate in self.challengers
+        ):
             raise PermissionError("experiment candidates may not widen or alter permissions")
+        if self.evaluation_cutoff is not None and self.evaluation_cutoff.tzinfo is None:
+            raise ValueError("evaluation_cutoff must be timezone-aware")
+
+        training_fingerprints = {
+            fingerprint
+            for candidate in candidates
+            for fingerprint in candidate.training_dataset_fingerprints
+        }
+        if training_fingerprints:
+            missing = [
+                replay.replay_id for replay in self.replays if replay.dataset_fingerprint is None
+            ]
+            if missing:
+                raise ValueError(
+                    "evaluation replay fingerprints are required when candidate training data "
+                    "is declared"
+                )
+            overlap = sorted(
+                {
+                    replay.dataset_fingerprint
+                    for replay in self.replays
+                    if replay.dataset_fingerprint in training_fingerprints
+                }
+            )
+            if overlap:
+                raise ValueError("evaluation data overlaps candidate training data")
+
+        if self.evaluation_cutoff is not None:
+            missing_cutoff = [
+                replay.replay_id for replay in self.replays if replay.data_end_at is None
+            ]
+            if missing_cutoff:
+                raise ValueError(
+                    "replay data_end_at is required when an evaluation cutoff is declared"
+                )
+            future = [
+                replay.replay_id
+                for replay in self.replays
+                if replay.data_end_at is not None and replay.data_end_at > self.evaluation_cutoff
+            ]
+            if future:
+                raise ValueError("evaluation replay contains data after the declared cutoff")
 
 
 @dataclass(frozen=True, slots=True)

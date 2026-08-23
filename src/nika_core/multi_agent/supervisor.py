@@ -71,27 +71,23 @@ class MultiAgentSupervisor:
             )
             for request in requests
         }
-
-        members = tuple(
-            self._store.spawn_child(
+        task_handoffs = tuple(
+            AgentHandoff(
                 team_id=team_id,
-                parent_id=parent_id,
-                child_id=request.member_id,
-                agent_id=request.agent_id,
-                agent_version=request.agent_version,
-                thread_id=request.thread_id,
-                requested_grants=request.requested_grants,
-                task_handoff=AgentHandoff(
-                    team_id=team_id,
-                    sender_id=parent_id,
-                    recipient_id=request.member_id,
-                    kind=HandoffKind.TASK,
-                    payload=request.payload,
-                    handoff_id=f"task:{team_id}:{request.member_id}",
-                    correlation_id=f"team:{team_id}:{parent_id}:{request.member_id}",
-                ),
+                sender_id=parent_id,
+                recipient_id=request.member_id,
+                kind=HandoffKind.TASK,
+                payload=request.payload,
+                handoff_id=f"task:{team_id}:{request.member_id}",
+                correlation_id=f"team:{team_id}:{parent_id}:{request.member_id}",
             )
             for request in requests
+        )
+        members = self._store.spawn_children(
+            team_id=team_id,
+            parent_id=parent_id,
+            requests=requests,
+            task_handoffs=task_handoffs,
         )
         by_id = {request.member_id: request for request in requests}
         semaphore = asyncio.Semaphore(quota.max_parallel)
