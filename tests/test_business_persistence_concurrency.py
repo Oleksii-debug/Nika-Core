@@ -63,12 +63,9 @@ def test_business_factory_first_writer_race_has_one_typed_stale_loser(tmp_path) 
         return "saved"
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        outcomes = sorted(
-            (
-                executor.submit(write, first).result(),
-                executor.submit(write, second).result(),
-            )
-        )
+        first_result = executor.submit(write, first)
+        second_result = executor.submit(write, second)
+        outcomes = sorted((first_result.result(), second_result.result()))
 
     assert outcomes == ["saved", "stale"]
     restored = first.load(snapshot.objective.objective_id)
@@ -111,12 +108,9 @@ def test_business_communication_first_writer_race_has_one_typed_stale_loser(tmp_
         return "saved"
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        outcomes = sorted(
-            (
-                executor.submit(write, first).result(),
-                executor.submit(write, second).result(),
-            )
-        )
+        first_result = executor.submit(write, first)
+        second_result = executor.submit(write, second)
+        outcomes = sorted((first_result.result(), second_result.result()))
 
     assert outcomes == ["saved", "stale"]
     restored = first.load(record.message_id)
