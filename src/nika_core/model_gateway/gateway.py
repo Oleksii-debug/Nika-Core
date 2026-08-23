@@ -29,6 +29,17 @@ class _AuditLogPort(Protocol):
     ) -> int: ...
 
 
+class _UntypedProviderTimeout(Exception):
+    """Internal marker separating provider bugs from the gateway deadline."""
+
+
+async def _invoke_provider(provider: ModelProvider, request: ModelRequest) -> ModelResponse:
+    try:
+        return await provider.complete(request)
+    except TimeoutError as exc:
+        raise _UntypedProviderTimeout from exc
+
+
 _NO_FALLBACK_CODES = frozenset(
     {
         ModelErrorCode.INVALID_REQUEST,
@@ -113,8 +124,17 @@ class ModelGateway:
 
             try:
                 response = await asyncio.wait_for(
-                    provider.complete(attempt_request), timeout=remaining
+                    _invoke_provider(provider, attempt_request), timeout=remaining
                 )
+            except _UntypedProviderTimeout as exc:
+                error = ModelGatewayError(
+                    ModelErrorCode.PROVIDER_ERROR,
+                    "model provider raised an untyped timeout failure",
+                    provider_id=capabilities.provider_id,
+                    retryable=False,
+                )
+                self._audit_failure(request, capabilities.provider_id, error)
+                raise error from exc
             except TimeoutError as exc:
                 retryable = capabilities.supports_hard_cancellation
                 error = ModelGatewayError(
