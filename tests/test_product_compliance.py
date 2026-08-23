@@ -26,15 +26,37 @@ class _ReviewAuthority:
         return (project_id, evidence_ref, purpose) in self._grants
 
 
+class _NoticeAuthority:
+    def verify_notice(
+        self,
+        *,
+        project_id: str,
+        component_id: str,
+        package_name: str,
+        version: str,
+        notice_ref: str,
+    ) -> bool:
+        return (
+            project_id == "project-1"
+            and component_id == "component-1"
+            and package_name == "example-package"
+            and version == "1.2.3"
+            and notice_ref == "artifact:notices#component"
+        )
+
+
 def _gate(*grants: tuple[str, str, str]) -> ProductComplianceGate:
-    return ProductComplianceGate(review_authority=_ReviewAuthority(grants))
+    return ProductComplianceGate(
+        review_authority=_ReviewAuthority(grants),
+        notice_authority=_NoticeAuthority(),
+    )
 
 
 def _dependency(
     *,
     disposition: LicenseDisposition = LicenseDisposition.APPROVED,
-    notice_required: bool = True,
-    notice_refs: tuple[str, ...] = ("artifact:notices#component",),
+    notice_required: bool = False,
+    notice_refs: tuple[str, ...] = (),
 ) -> DependencyAdoption:
     return DependencyAdoption(
         project_id="project-1",
@@ -75,7 +97,12 @@ def test_release_passes_only_with_complete_approved_provenance_and_obligations()
         ),
     ).evaluate(
         project_id="project-1",
-        dependencies=(_dependency(),),
+        dependencies=(
+            _dependency(
+                notice_required=True,
+                notice_refs=("artifact:notices#component",),
+            ),
+        ),
         obligation_evidence=(_obligation(),),
         competitor_evidence=(
             CompetitorResearchEvidence(
@@ -93,6 +120,7 @@ def test_release_passes_only_with_complete_approved_provenance_and_obligations()
     assert "hash:sha256:fixture" in decision.evidence_refs
     assert "review:license:1" in decision.evidence_refs
     assert "terms-review:public-source:1" in decision.evidence_refs
+    assert any(ref.startswith("dependency-snapshot:sha256:") for ref in decision.evidence_refs)
     ProductComplianceGate().require_release_allowed(decision)
 
 
@@ -162,17 +190,13 @@ def test_default_gate_rejects_opaque_review_authority_strings() -> None:
 
 
 def test_review_authority_is_bound_to_exact_project_ref_and_purpose() -> None:
-    authority = _ReviewAuthority(
+    exact = _gate(
         (
-            (
-                "project-1",
-                "review:license:1",
-                "license-disposition:component-1",
-            ),
-        )
-    )
-    gate = ProductComplianceGate(review_authority=authority)
-    exact = gate.evaluate(
+            "project-1",
+            "review:license:1",
+            "license-disposition:component-1",
+        ),
+    ).evaluate(
         project_id="project-1",
         dependencies=(_dependency(),),
         obligation_evidence=(_obligation(),),
@@ -232,14 +256,36 @@ def test_unacceptable_or_unresolved_license_blocks_release(
         ProductComplianceGate().require_release_allowed(decision)
 
 
-def test_missing_notice_or_distribution_fulfillment_blocks_release() -> None:
-    decision = ProductComplianceGate().evaluate(
+def test_missing_or_unverified_notice_and_distribution_fulfillment_block_release() -> None:
+    missing = ProductComplianceGate().evaluate(
         project_id="project-1",
-        dependencies=(_dependency(notice_refs=()),),
+        dependencies=(_dependency(notice_required=True),),
     )
-    assert decision.allowed is False
-    assert "notice:missing:component-1" in decision.findings
-    assert any(item.startswith("distribution-obligation:unfulfilled") for item in decision.findings)
+    assert missing.allowed is False
+    assert "notice:missing:component-1" in missing.findings
+    assert any(
+        item.startswith("distribution-obligation:unfulfilled")
+        for item in missing.findings
+    )
+
+    opaque = _gate(
+        (
+            "project-1",
+            "review:license:1",
+            "license-disposition:component-1",
+        ),
+    ).evaluate(
+        project_id="project-1",
+        dependencies=(
+            _dependency(
+                notice_required=True,
+                notice_refs=("artifact:notices#does-not-exist",),
+            ),
+        ),
+        obligation_evidence=(_obligation(),),
+    )
+    assert opaque.allowed is False
+    assert "notice:untrusted-evidence:component-1" in opaque.findings
 
 
 def test_duplicate_or_orphan_distribution_evidence_blocks_release() -> None:
