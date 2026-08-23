@@ -27,10 +27,11 @@ The implementation deliberately does **not** provide autonomous external-message
 - ProductProject handoff is bound to an authorized WorkOrder and a PF9-derived durable operation identity.
 - Communication policy is adapted into durable `DRAFT -> AUTHORIZED -> SENT/FAILED` evidence without adding a sender to PF9 core.
 - PF10 dependency records add the project-level source/version/license/provenance, authorized review evidence and distribution-obligation decision needed before delivery.
+- `ComplianceReviewAuthorityPort` is a framework-neutral dependency-inversion boundary for resolving review/legal/permission evidence. It is intended to adapt the canonical Nika approval/review authority after that authority is integrated; PF10 does not create a parallel signer.
 
 ### CUSTOM (thin)
 
-Nika-specific custom code is limited to the Business lifecycle state machine, policy authority boundaries, restart-safe snapshot/communication persistence, append-only ordered audit evidence, WorkOrder handoff binding and PF10 release/delivery compliance decisions.
+Nika-specific custom code is limited to the Business lifecycle state machine, policy authority boundaries, restart-safe snapshot/communication persistence, append-only ordered audit evidence, WorkOrder handoff binding and PF10 release/delivery compliance semantics.
 
 ## Policy and authority boundaries
 
@@ -91,17 +92,31 @@ Every declared distribution obligation must have matching fulfillment evidence. 
 
 Competitor evidence is permitted only when it is recorded as permitted public evidence with a durable permission/terms-policy basis reference, or when proprietary material carries both a legal-basis reference and an explicit reuse-authorization reference. Possession, public visibility or access alone is not treated as permission to copy/reuse.
 
-A compliance inventory cannot become release-allowing merely because every evidence tuple was omitted. At least one review-bearing evidence reference must exist. Products with legitimately empty dependency/competitor inventories use an explicit `scope_review_ref` stating that the empty scope itself was reviewed.
+A compliance inventory cannot become release-allowing merely because every evidence tuple was omitted. Products with legitimately empty dependency/competitor inventories may supply a `scope_review_ref`, but that reference is not authority by itself.
+
+### Review and legal authority resolution
+
+PF10 treats opaque evidence references as identifiers, not as proof that a review occurred. Every release-allowing reference must be resolved through `ComplianceReviewAuthorityPort.verify(project_id, evidence_ref, purpose)`.
+
+The resolver binding includes all three dimensions:
+
+- exact ProductProject identity;
+- exact evidence reference;
+- exact purpose, such as `compliance-scope`, `license-disposition:<component>`, `public-source-permission:<evidence>`, `proprietary-legal-basis:<evidence>` or `proprietary-reuse-authorization:<evidence>`.
+
+`ProductComplianceGate()` has no default trusted resolver. Without a resolver, arbitrary strings such as `caller:claims-review-happened` fail closed with an explicit untrusted-authority finding. A resolver exception or a result other than the literal Boolean `True` also fails closed.
+
+Tests use deterministic fake implementations of this port to prove exact project/ref/purpose binding. Those fakes are test composition only and do not represent production approval authority.
+
+Current `main` does not yet provide an integrated authenticated M10/R4 approval/review contract suitable for this PF10 adapter. Active security work owns that authority surface. DEV30 therefore does not invent a second HMAC signer or consume an unmerged sibling contract. Until a canonical trusted resolver is integrated and adapted, PF10 production positive-authority integration remains blocked even if this framework-neutral contract and its deterministic tests are green.
 
 ### Positive decision authority
 
 `ProductComplianceDecision` is a result, not caller-owned release authority. A caller may still construct the value type for negative/reporting use, but a caller-constructed `allowed=True` object has no positive authority: its effective `allowed` value is false at the PF9 delivery boundary.
 
-`ProductComplianceGate.evaluate(...)` is the only production path that issues a positive decision. It binds the project ID, decision state, findings and exact evidence-reference set with a process-local HMAC-SHA256 integrity proof. Copying/tampering with a valid decision, including project or evidence substitution, invalidates the positive authority.
+`ProductComplianceGate.evaluate(...)` is the only production path that issues a positive decision after all applicable input references resolve through the trusted review-authority port. It binds the project ID, decision state, findings and exact evidence-reference set with a process-local HMAC-SHA256 integrity proof. Copying/tampering with a valid decision, including project or evidence substitution, invalidates the positive authority.
 
 This proof is deliberately **not** described as a durable signature, human approval, secret-store authority or hostile-code sandbox. The key exists only in the current trusted Python process. Same-process code with unrestricted module-memory access is outside this contract's containment claim. A positive decision is therefore short-lived and should be regenerated from durable compliance evidence after process restart rather than persisted as an authority token.
-
-PF10 also does not authenticate whether a text `review_ref`, `permission_basis_ref`, legal-basis ref or reuse-authorization ref came from the correct human/policy authority. Those references must originate from the canonical approval/review subsystem when that integration is available; this layer only prevents missing/ambiguous evidence and caller fabrication of the final positive decision.
 
 ## Persistence and restart integrity
 
@@ -137,12 +152,15 @@ Focused regressions cover:
 - QA and exact-project PF10 delivery gate;
 - caller-fabricated positive compliance decision rejection at the real PF9 delivery boundary;
 - positive decision project/evidence tamper invalidation;
-- unreviewed empty compliance-inventory false-green rejection and explicit reviewed-empty positive control;
+- opaque scope-review and approved-license review strings rejected without trusted resolver;
+- exact project/ref/purpose review-authority binding;
+- resolver exceptions fail closed;
+- reviewed-empty compliance positive control only through an explicitly trusted test resolver;
 - forged snapshot and stale-writer rejection;
 - missing dependency version/provenance rejection;
 - missing approved-license review evidence;
 - blocked/review-required license rejection;
 - missing/duplicate/orphan distribution fulfillment and missing notices;
-- public competitor permission-basis evidence and proprietary-copy authorization boundaries.
+- public competitor permission-basis and proprietary-copy authorization boundaries.
 
-Exact-head CI remains the acceptance evidence source. This document does not assign `HUMAN_TESTED` or `NVDA_VERIFIED` and does not claim that any real external business provider has been exercised.
+Exact-head CI remains the source-quality evidence source. This document does not assign `HUMAN_TESTED` or `NVDA_VERIFIED`, does not claim that any real external business provider has been exercised, and does not claim PF10 production authority is integrated before the canonical review-authority adapter exists.
