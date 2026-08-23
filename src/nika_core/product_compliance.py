@@ -3,12 +3,20 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import secrets
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 
 _DECISION_AUTHORITY_KEY = secrets.token_bytes(32)
+_MUTABLE_SOURCE_RE = re.compile(
+    r"(?:^|[/:@._-])(latest|head|snapshot)(?:$|[/?#:@._-])",
+    re.IGNORECASE,
+)
+_NON_EXACT_VERSION_RE = re.compile(r"[<>=!~*,\s]")
+_UNKNOWN_LICENSES = frozenset({"unknown", "none", "n/a", "na", "tbd", "unlicensed"})
+_CONTENT_PROVENANCE_PREFIXES = ("hash:sha256:", "sha256:", "digest:sha256:")
 
 
 class ProductComplianceError(ValueError):
@@ -30,6 +38,20 @@ class ComplianceReviewAuthorityPort(Protocol):
         project_id: str,
         evidence_ref: str,
         purpose: str,
+    ) -> bool: ...
+
+
+class ComplianceNoticeAuthorityPort(Protocol):
+    """Trusted resolver for notice refs proven by the canonical packaging subsystem."""
+
+    def verify_notice(
+        self,
+        *,
+        project_id: str,
+        component_id: str,
+        package_name: str,
+        version: str,
+        notice_ref: str,
     ) -> bool: ...
 
 
@@ -60,6 +82,8 @@ class DependencyAdoption:
             raise ProductComplianceError("dependency license_disposition is invalid")
         _require_unique_text(self.distribution_obligations, "distribution obligation")
         _require_unique_text(self.notice_refs, "dependency notice_ref")
+        if not isinstance(self.notice_required, bool):
+            raise ProductComplianceError("dependency notice_required must be a boolean")
         if self.review_ref is not None:
             _require_text(self.review_ref, "dependency review_ref")
         if self.license_disposition is LicenseDisposition.APPROVED and self.review_ref is None:
@@ -127,6 +151,7 @@ class ProductComplianceDecision:
     allowed: bool
     findings: tuple[str, ...]
     evidence_refs: tuple[str, ...]
+    inventory_fingerprint: str = ""
     _authority_proof: str | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -135,6 +160,8 @@ class ProductComplianceDecision:
             raise ProductComplianceError("compliance decision allowed must be a boolean")
         _require_unique_text(self.findings, "compliance finding", allow_empty=True)
         _require_unique_text(self.evidence_refs, "compliance evidence_ref", allow_empty=True)
+        if self.inventory_fingerprint:
+            _require_sha256_ref(self.inventory_fingerprint, "compliance inventory fingerprint")
         raw_allowed = object.__getattribute__(self, "allowed")
         if raw_allowed and self.findings:
             raise ProductComplianceError("allowed compliance decision cannot contain findings")
@@ -159,8 +186,10 @@ class ProductComplianceGate:
         self,
         *,
         review_authority: ComplianceReviewAuthorityPort | None = None,
+        notice_authority: ComplianceNoticeAuthorityPort | None = None,
     ) -> None:
         self._review_authority = review_authority
+        self._notice_authority = notice_authority
 
     def evaluate(
         self,
@@ -170,18 +199,23 @@ class ProductComplianceGate:
         obligation_evidence: tuple[DistributionObligationEvidence, ...] = (),
         competitor_evidence: tuple[CompetitorResearchEvidence, ...] = (),
         scope_review_ref: str | None = None,
+        extra_findings: tuple[str, ...] = (),
+        extra_evidence_refs: tuple[str, ...] = (),
     ) -> ProductComplianceDecision:
         _require_text(project_id, "project_id")
         _require_tuple(dependencies, "dependencies")
         _require_tuple(obligation_evidence, "obligation_evidence")
         _require_tuple(competitor_evidence, "competitor_evidence")
+        _require_unique_text(extra_findings, "extra compliance finding", allow_empty=True)
+        _require_unique_text(extra_evidence_refs, "extra compliance evidence_ref", allow_empty=True)
         if scope_review_ref is not None:
             _require_text(scope_review_ref, "scope_review_ref")
 
-        findings: list[str] = []
-        evidence_refs: list[str] = []
+        findings: list[str] = list(extra_findings)
+        evidence_refs: list[str] = list(extra_evidence_refs)
         trusted_scope_refs: set[str] = set()
         component_ids: set[str] = set()
+        physical_dependencies: set[str] = set()
 
         if scope_review_ref is not None:
             evidence_refs.append(scope_review_ref)
@@ -215,12 +249,31 @@ class ProductComplianceGate:
                 continue
             if dependency.component_id in component_ids:
                 findings.append(f"duplicate:dependency-component:{dependency.component_id}")
-                continue
             component_ids.add(dependency.component_id)
-            evidence_refs.extend((dependency.source_ref, dependency.provenance_ref))
+
+            physical_id = canonical_dependency_name(dependency.package_name)
+            if physical_id in physical_dependencies:
+                findings.append(f"duplicate:dependency-identity:{physical_id}")
+            physical_dependencies.add(physical_id)
+
+            dependency_snapshot = dependency_evidence_ref(dependency)
+            evidence_refs.extend(
+                (dependency.source_ref, dependency.provenance_ref, dependency_snapshot)
+            )
             if dependency.review_ref:
                 evidence_refs.append(dependency.review_ref)
             evidence_refs.extend(dependency.notice_refs)
+
+            if not _is_exact_version(dependency.version):
+                findings.append(f"dependency:version-not-exact:{dependency.component_id}")
+            if _is_mutable_source(dependency.source_ref):
+                findings.append(f"dependency:source-not-immutable:{dependency.component_id}")
+            if not _has_content_provenance(dependency.provenance_ref):
+                findings.append(
+                    f"dependency:provenance-not-content-bound:{dependency.component_id}"
+                )
+            if _is_unknown_license(dependency.license_expression):
+                findings.append(f"license:unknown:{dependency.component_id}")
 
             if dependency.license_disposition is LicenseDisposition.BLOCKED:
                 findings.append(f"license:blocked:{dependency.component_id}")
@@ -245,8 +298,21 @@ class ProductComplianceGate:
                         "distribution-obligation:unfulfilled:"
                         f"{dependency.component_id}:{obligation}"
                     )
-            if dependency.notice_required and not dependency.notice_refs:
-                findings.append(f"notice:missing:{dependency.component_id}")
+
+            if dependency.notice_required:
+                if not dependency.notice_refs:
+                    findings.append(f"notice:missing:{dependency.component_id}")
+                else:
+                    for notice_ref in dependency.notice_refs:
+                        if not self._notice_allowed(
+                            dependency=dependency,
+                            notice_ref=notice_ref,
+                        ):
+                            findings.append(
+                                f"notice:untrusted-evidence:{dependency.component_id}"
+                            )
+            elif dependency.notice_refs:
+                findings.append(f"orphan:notice:{dependency.component_id}")
 
         for component_id, obligation in obligations:
             if component_id not in component_ids:
@@ -318,16 +384,40 @@ class ProductComplianceGate:
 
         normalized_findings = tuple(dict.fromkeys(findings))
         normalized_evidence = tuple(dict.fromkeys(evidence_refs))
+        inventory_fingerprint = compliance_inventory_fingerprint(
+            project_id=project_id,
+            dependencies=dependencies,
+            obligation_evidence=obligation_evidence,
+            competitor_evidence=competitor_evidence,
+            scope_review_ref=scope_review_ref,
+            extra_findings=extra_findings,
+            extra_evidence_refs=extra_evidence_refs,
+        )
         return _issue_decision(
             project_id=project_id,
             allowed=not normalized_findings,
             findings=normalized_findings,
             evidence_refs=normalized_evidence,
+            inventory_fingerprint=inventory_fingerprint,
         )
 
-    def require_release_allowed(self, decision: ProductComplianceDecision) -> None:
+    def require_release_allowed(
+        self,
+        decision: ProductComplianceDecision,
+        *,
+        expected_inventory_fingerprint: str | None = None,
+    ) -> None:
         if not isinstance(decision, ProductComplianceDecision):
             raise ProductComplianceError("release requires ProductComplianceDecision")
+        if expected_inventory_fingerprint is not None:
+            _require_sha256_ref(
+                expected_inventory_fingerprint,
+                "expected compliance inventory fingerprint",
+            )
+            if decision.inventory_fingerprint != expected_inventory_fingerprint:
+                raise ProductComplianceError(
+                    "release blocked by PF10 compliance gate: decision:stale-inventory"
+                )
         if not decision.allowed:
             findings = decision.findings
             raw_allowed = object.__getattribute__(decision, "allowed")
@@ -356,6 +446,98 @@ class ProductComplianceGate:
             return False
         return result is True
 
+    def _notice_allowed(
+        self,
+        *,
+        dependency: DependencyAdoption,
+        notice_ref: str,
+    ) -> bool:
+        authority = self._notice_authority
+        if authority is None:
+            return False
+        try:
+            result = authority.verify_notice(
+                project_id=dependency.project_id,
+                component_id=dependency.component_id,
+                package_name=dependency.package_name,
+                version=dependency.version,
+                notice_ref=notice_ref,
+            )
+        except (LookupError, PermissionError, RuntimeError, TypeError, ValueError):
+            return False
+        return result is True
+
+
+def canonical_dependency_name(package_name: str) -> str:
+    _require_text(package_name, "dependency package_name")
+    return re.sub(r"[-_.]+", "-", package_name.strip()).casefold()
+
+
+def dependency_evidence_ref(dependency: DependencyAdoption) -> str:
+    payload = _dependency_payload(dependency)
+    return "dependency-snapshot:sha256:" + _sha256_json(payload)
+
+
+def compliance_inventory_fingerprint(
+    *,
+    project_id: str,
+    dependencies: tuple[DependencyAdoption, ...],
+    obligation_evidence: tuple[DistributionObligationEvidence, ...],
+    competitor_evidence: tuple[CompetitorResearchEvidence, ...],
+    scope_review_ref: str | None,
+    extra_findings: tuple[str, ...] = (),
+    extra_evidence_refs: tuple[str, ...] = (),
+) -> str:
+    payload = {
+        "schema": "nika-pf10-inventory-v2",
+        "project_id": project_id,
+        "dependencies": [_dependency_payload(item) for item in dependencies],
+        "obligation_evidence": [
+            {
+                "project_id": item.project_id,
+                "component_id": item.component_id,
+                "obligation": item.obligation,
+                "fulfillment_ref": item.fulfillment_ref,
+            }
+            for item in obligation_evidence
+        ],
+        "competitor_evidence": [
+            {
+                "project_id": item.project_id,
+                "evidence_id": item.evidence_id,
+                "source_ref": item.source_ref,
+                "provenance_ref": item.provenance_ref,
+                "permitted_public_evidence": item.permitted_public_evidence,
+                "proprietary_material": item.proprietary_material,
+                "permission_basis_ref": item.permission_basis_ref,
+                "legal_basis_ref": item.legal_basis_ref,
+                "reuse_authorization_ref": item.reuse_authorization_ref,
+            }
+            for item in competitor_evidence
+        ],
+        "scope_review_ref": scope_review_ref,
+        "extra_findings": list(extra_findings),
+        "extra_evidence_refs": list(extra_evidence_refs),
+    }
+    return "sha256:" + _sha256_json(payload)
+
+
+def _dependency_payload(dependency: DependencyAdoption) -> dict[str, object]:
+    return {
+        "project_id": dependency.project_id,
+        "component_id": dependency.component_id,
+        "package_name": canonical_dependency_name(dependency.package_name),
+        "version": dependency.version,
+        "source_ref": dependency.source_ref,
+        "provenance_ref": dependency.provenance_ref,
+        "license_expression": dependency.license_expression,
+        "license_disposition": dependency.license_disposition.value,
+        "distribution_obligations": list(dependency.distribution_obligations),
+        "notice_required": dependency.notice_required,
+        "notice_refs": list(dependency.notice_refs),
+        "review_ref": dependency.review_ref,
+    }
+
 
 def _issue_decision(
     *,
@@ -363,18 +545,21 @@ def _issue_decision(
     allowed: bool,
     findings: tuple[str, ...],
     evidence_refs: tuple[str, ...],
+    inventory_fingerprint: str,
 ) -> ProductComplianceDecision:
     proof = _decision_proof(
         project_id=project_id,
         allowed=allowed,
         findings=findings,
         evidence_refs=evidence_refs,
+        inventory_fingerprint=inventory_fingerprint,
     )
     return ProductComplianceDecision(
         project_id=project_id,
         allowed=allowed,
         findings=findings,
         evidence_refs=evidence_refs,
+        inventory_fingerprint=inventory_fingerprint,
         _authority_proof=proof,
     )
 
@@ -385,14 +570,16 @@ def _decision_proof(
     allowed: bool,
     findings: tuple[str, ...],
     evidence_refs: tuple[str, ...],
+    inventory_fingerprint: str,
 ) -> str:
     payload = json.dumps(
         {
-            "schema": "nika-pf10-decision-authority-v1",
+            "schema": "nika-pf10-decision-authority-v2",
             "project_id": project_id,
             "allowed": allowed,
             "findings": list(findings),
             "evidence_refs": list(evidence_refs),
+            "inventory_fingerprint": inventory_fingerprint,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -405,13 +592,57 @@ def _valid_decision_proof(decision: ProductComplianceDecision) -> bool:
     proof = object.__getattribute__(decision, "_authority_proof")
     if not isinstance(proof, str) or not proof:
         return False
+    fingerprint = object.__getattribute__(decision, "inventory_fingerprint")
+    if not isinstance(fingerprint, str) or not fingerprint.startswith("sha256:"):
+        return False
     expected = _decision_proof(
         project_id=object.__getattribute__(decision, "project_id"),
         allowed=object.__getattribute__(decision, "allowed"),
         findings=object.__getattribute__(decision, "findings"),
         evidence_refs=object.__getattribute__(decision, "evidence_refs"),
+        inventory_fingerprint=fingerprint,
     )
     return hmac.compare_digest(proof, expected)
+
+
+def _is_exact_version(version: str) -> bool:
+    normalized = version.strip().casefold()
+    return (
+        bool(normalized)
+        and normalized not in {"latest", "unknown", "tbd"}
+        and not _NON_EXACT_VERSION_RE.search(version)
+    )
+
+
+def _is_mutable_source(source_ref: str) -> bool:
+    return _MUTABLE_SOURCE_RE.search(source_ref.strip()) is not None
+
+
+def _has_content_provenance(provenance_ref: str) -> bool:
+    normalized = provenance_ref.strip().casefold()
+    return any(
+        normalized.startswith(prefix) and len(normalized) > len(prefix)
+        for prefix in _CONTENT_PROVENANCE_PREFIXES
+    )
+
+
+def _is_unknown_license(expression: str) -> bool:
+    return expression.strip().casefold() in _UNKNOWN_LICENSES
+
+
+def _sha256_json(payload: object) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _require_sha256_ref(value: str, label: str) -> None:
+    if not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+        raise ProductComplianceError(f"{label} must be an exact sha256 reference")
 
 
 def _require_text(value: object, label: str) -> None:
