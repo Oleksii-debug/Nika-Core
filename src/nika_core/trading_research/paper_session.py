@@ -303,8 +303,11 @@ class PaperSessionRepository:
                 (session_id,),
             ).fetchall()
             fill_rows = conn.execute(
-                "SELECT * FROM trading_research_paper_fills WHERE session_id = ? "
-                "ORDER BY filled_slice, fill_id",
+                "SELECT f.* FROM trading_research_paper_fills AS f "
+                "JOIN trading_research_paper_orders AS o "
+                "ON o.session_id = f.session_id AND o.approval_id = f.approval_id "
+                "WHERE f.session_id = ? "
+                "ORDER BY f.filled_slice, o.queued_seq, f.fill_id",
                 (session_id,),
             ).fetchall()
         return self._decode_record(session_row, order_rows, fill_rows)
