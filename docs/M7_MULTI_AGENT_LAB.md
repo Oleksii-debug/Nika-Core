@@ -1,81 +1,52 @@
 # M7 Multi-agent laboratory
 
-Status: integrated M7 foundation on `main`; MANUAL-DEV21 successor PR #194 is a separate hardening
-candidate and receives no integration credit until exact-head acceptance and coordinator merge.
+Status: integrated baseline on `main`; AUTO03 durable-team-lifecycle successor candidate is isolated on `fix/agent-lab-durable-team-lifecycle` until exact-head acceptance evidence is green.
 
 ## Reuse decision
+- **REUSE / ADAPT** the already integrated LangGraph runtime only through Nika `AgentRuntimePort`; no second orchestration kernel is introduced.
+- **REUSE** Pydantic `ToolGrant` from the integrated Agent Builder contract rather than inventing a parallel permission schema.
+- **REUSE** SQLite and the existing ordered migration runner for durable team lineage/evidence.
+- **REUSE** the existing Nika `AuditLog` for team creation/spawn/cancellation/lifecycle evidence.
+- **CUSTOM (thin)** team identity, typed handoffs, parent/child lineage, privilege attenuation, quotas, evaluator aggregation, cancellation propagation and explicit team-finalization policy because these are Nika product/safety semantics not owned by LangGraph.
 
-- **REUSE / ADAPT** the integrated LangGraph runtime only through Nika `AgentRuntimePort`;
-  no second orchestration kernel is introduced.
-- **REUSE** Pydantic `ToolGrant`, canonical SQLite and the existing `AuditLog` public API.
-- **CUSTOM (thin)** team identity, typed handoffs, parent/child lineage, privilege attenuation,
-  quotas, evaluator aggregation, cancellation authority/reconciliation and finalization policy.
+The stale draft PR #11 was audited. Its useful bounded-delegation ideas were not merged wholesale because it predates the current integrated M6 Agent Builder contracts, does not use the canonical schema/runtime state, and is non-mergeable against current main.
 
-## Contracts and fan-out
+## Contracts
+`TeamQuota` bounds depth, children per parent, total agents and concurrent execution. `TeamMember` persists stable parent/child identity, agent definition version, runtime thread ID, attenuated tool grants, lifecycle state and optional resume token. `AgentHandoff` is a typed task/result/status/error message with explicit team, sender, recipient, handoff and correlation IDs.
 
-`TeamQuota` bounds depth, children per parent, total agents and concurrent execution. `TeamMember`
-persists parent/child identity, exact activated agent version, runtime thread, attenuated grants,
-lifecycle state and optional resume token. `AgentHandoff` is typed TASK/RESULT/STATUS/ERROR evidence.
+Privilege attenuation is fail-closed. A child may only request tools already granted to the parent, may not request a higher risk tier, and scopes must be a subset of the parent's scopes. Escalation attempts are rejected instead of silently broadening permissions.
 
-Privilege attenuation is fail-closed. Atomic fan-out admits the complete validated wave under one
-SQLite writer transaction or admits none of it. Durable member/thread identity, remaining quota,
-TASK handoffs and spawn audit evidence are decided before runtime execution begins.
+## Persistence and restart evidence
+SQLite migration v6 remains the durable schema for team, member, handoff and result evidence; the lifecycle repair does not require a new migration. Supervisor-created child identity and its TASK handoff are committed together. Before `runtime.run()` is awaited, `RUNNING` state and a runtime-provided initial resume cursor are committed together. After execution returns, member state, result evidence and RESULT/ERROR handoff are committed as one SQLite transaction.
 
-## Persistence and restart
+A runtime that advertises `DURABLE_RESUME` must expose a non-empty `initial_resume_token`; otherwise fan-out fails before any child is spawned. This prevents M7 from claiming crash-safe execution while persisting no pre-execution recovery cursor.
 
-Core migration v6 remains the authoritative team/member/handoff/result schema. Cancellation cleanup
-adds a versioned M7 extension schema in the same SQLite database, with its own future-version
-fail-closed migration marker so DEV21 does not collide with the shared global migration stream.
+`recoverable_members()` remains the broad product-level view. `recoverable_children()` excludes the root supervisory identity. `MultiAgentSupervisor.recover_team()` starts persisted `SPAWNED` children from their durable TASK handoff and resumes persisted `RUNNING` children through `AgentRuntimePort.resume(RuntimeResumeRequest)`. `WAITING_APPROVAL` is deliberately not auto-resumed because restart recovery must never invent or bypass a human approval decision.
 
-Before `runtime.run()` is awaited, RUNNING state and the runtime-provided initial recovery cursor are
-committed together. Result state, result evidence and RESULT/ERROR handoff commit atomically.
-`recover_team()` starts persisted SPAWNED children from their TASK handoff and resumes RUNNING
-children through `AgentRuntimePort.resume`. WAITING_APPROVAL is never auto-resumed.
+The M7 layer does not replace M2 checkpoints. LangGraph remains execution/checkpoint truth behind `AgentRuntimePort`; M7 stores only product-level team identity, lineage, policy, recovery routing and result evidence.
 
-## Durable cancellation
+## Supervisor
+`MultiAgentSupervisor` uses the existing `AgentRuntimePort` for child execution and recovery. Fan-out is bounded with an asyncio semaphore derived from the persisted team quota. One worker exception is contained and recorded as that child's failure while sibling results remain valid. Runtime result states are normalized into durable M7 member states.
 
-Cancellation authority commits before external runtime effects. One transaction records the stable
-cancellation operation, exact member/task/thread effect set, team `CANCELLED` state and all current
-nonterminal member `CANCELLED` states. Only after that commit may runtime cleanup begin.
+Team cancellation first verifies that the team is still active, then calls the runtime cancellation port for recoverable members and marks the team/unfinished members cancelled in Nika persistence. A late runtime completion cannot overwrite an already-cancelled team/member. A completed or failed team is terminal and cannot later be reclassified as cancelled; that rejection occurs before runtime cancellation side effects. Repeating cancellation of an already-cancelled team is idempotent. Typed TASK and RESULT/ERROR handoffs are recorded around execution, with terminal result/state/handoff evidence committed atomically.
 
-`MultiAgentSupervisor.cancel_team()` is the sole production path allowed to create new cancellation
-authority because only the supervisor owns both the durable journal and runtime cleanup port.
-`MultiAgentStore.cancel_team()` remains as a compatibility guard: it may read an already-cancelled
-team idempotently, but it refuses an ACTIVE-to-CANCELLED transition that would bypass the journal.
-A legacy/local `CANCELLED` team with no journal is not accepted as proof of external cleanup. The
-supervisor atomically adopts its cancelled member/task/thread identities as `RECONCILE_REQUIRED`
-evidence; no runtime effect is issued until a read-only probe proves `NOT_CANCELLED`. `CANCELLED`
-confirms the old effect and `UNKNOWN` remains fail-closed. This adoption uses the existing M7
-extension schema and does not manufacture historical success or require a schema bump.
+Team completion is **explicit**, not automatic after each fan-out wave. Auto-closing after one wave would make legal later/nested fan-out impossible. `finalize_team()` fails while any child is `spawned`, `running` or `waiting_approval`. Once all children are terminal, a team with at least one completed child is `completed` even if another child failed (failure containment); a team with failures and no completed child is `failed`; an all-cancelled active team becomes `cancelled`.
 
-Each external effect follows `PLANNED -> DISPATCHING -> CONFIRMED`. Exception or process loss after
-`DISPATCHING` is uncertain and cannot be replayed. It requires the optional read-only
-`CancellationReconciliationPort`; `CANCELLED` confirms the old effect, `NOT_CANCELLED` permits one
-exact retry, and `UNKNOWN` remains blocked. Confirmed effects are never repeated. An unfinished
-cancellation also blocks team recovery, new fan-out and finalization.
-
-This does not claim that every runtime can inspect an old cancellation effect. When no trustworthy
-probe exists, uncertainty deliberately remains blocked rather than manufacturing success or
-reissuing a potentially duplicate side effect.
-
-## Finalization and evaluator
-
-Team completion remains explicit. Finalization fails while child work is nonterminal or a durable
-cancellation operation is unfinished. Mixed success/failure containment retains successful sibling
-evidence; all-failure and all-cancelled outcomes remain deterministic.
-
-Evaluator aggregation is deterministic arithmetic over finite `EvaluationScore` records. One
-aggregate represents exactly one metric; mixed metric names fail closed. Promotion policy remains in
-M8 and requires declared metrics and fixed/held-out evidence.
+## Evaluator
+Evaluator aggregation is deterministic arithmetic over typed `EvaluationScore` records. Scores must be finite. One aggregate operation represents exactly one metric; attempting to combine records from different metrics fails closed instead of silently averaging unlike quantities such as quality and latency. M7 does not use an LLM to decide whether a score exists or to invent a metric. More advanced learning/promotion policy belongs to M8.
 
 ## Acceptance evidence required
+Before the durable lifecycle successor is integrated:
+1. dependency consistency, Ruff, compile and complete pytest pass on the exact candidate;
+2. Ubuntu and Windows shared CI both green on the same exact head;
+3. process-loss after pre-execution cursor binding is recovered through `runtime.resume`, not replayed as a fresh child;
+4. persisted-but-not-started `SPAWNED` work restarts from the persisted TASK payload;
+5. `WAITING_APPROVAL` remains blocked after restart until an explicit approval path is invoked;
+6. injected result-handoff failure rolls back result/state atomically;
+7. late runtime completion after team cancellation cannot resurrect work;
+8. mixed success/failure and all-failure team finalization policies are deterministic;
+9. completed/failed teams reject later cancellation before runtime side effects;
+10. activated-definition/grant/quota/cancellation/evaluator regressions remain green;
+11. exact branch/SHA and CI evidence are recorded before merge.
 
-The current successor must pass dependency consistency, Ruff, compile and complete pytest on one
-exact candidate head on Ubuntu and Windows. Focused durability evidence includes atomic fan-out,
-restart-safe execution, WAITING_APPROVAL blocking, result rollback, late completion after cancel,
-exact AUD03 effect→exception reproduction, no blind cancel replay after restart/crash, reconciliation
-verdict handling, concurrent cancel callers, direct-store authority bypass rejection, legacy
-unjournaled cancellation adoption, completed-cancellation idempotency, and future M7 extension-schema
-rejection.
-
-`HUMAN_TESTED` and `NVDA_VERIFIED` remain false until their separate human protocols are executed.
+`PACKAGED`, `HUMAN_TESTED` and `NVDA_VERIFIED` are separate later gates and are not claimed by this M7 successor.

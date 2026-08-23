@@ -1,6 +1,5 @@
 from nika_core.experiments.contracts import (
     ArtifactKind,
-    DatasetSplit,
     ExperimentDefinition,
     ExperimentSnapshot,
     ExperimentStatus,
@@ -19,7 +18,6 @@ from nika_core.experiments.repository import (
 
 __all__ = [
     "ArtifactKind",
-    "DatasetSplit",
     "ExperimentDefinition",
     "ExperimentEngine",
     "ExperimentRepository",
