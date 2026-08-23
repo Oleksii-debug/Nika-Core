@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -45,10 +46,11 @@ class APSchedulerAdapter(SchedulerPort):
         self._started = False
 
     def upsert(self, job: ScheduledJob) -> None:
+        trigger = _make_trigger(job)
         self._jobs.upsert(job)
         if self._started:
             if job.enabled:
-                self._install(job)
+                self._install(job, trigger=trigger)
             elif self._scheduler.get_job(job.job_id) is not None:
                 self._scheduler.remove_job(job.job_id)
         self._audit_change("scheduler.job_upserted", job)
@@ -67,37 +69,28 @@ class APSchedulerAdapter(SchedulerPort):
 
     def pause(self, job_id: str) -> None:
         job = self._required_job(job_id)
+        paused_job = replace(job, enabled=False)
         self._jobs.set_enabled(job_id, False)
         if self._started and self._scheduler.get_job(job_id) is not None:
             self._scheduler.remove_job(job_id)
-        self._audit_change("scheduler.job_paused", job)
+        self._audit_change("scheduler.job_paused", paused_job)
 
     def resume(self, job_id: str) -> None:
         job = self._required_job(job_id)
+        trigger = _make_trigger(job)
+        enabled_job = replace(job, enabled=True)
         self._jobs.set_enabled(job_id, True)
-        enabled_job = ScheduledJob(
-            job_id=job.job_id,
-            action_id=job.action_id,
-            trigger_kind=job.trigger_kind,
-            trigger=job.trigger,
-            payload=job.payload,
-            enabled=True,
-            coalesce=job.coalesce,
-            max_instances=job.max_instances,
-            misfire_grace_seconds=job.misfire_grace_seconds,
-            identity=job.identity,
-        )
         if self._started:
-            self._install(enabled_job)
+            self._install(enabled_job, trigger=trigger)
         self._audit_change("scheduler.job_resumed", enabled_job)
 
     def has_runtime_job(self, job_id: str) -> bool:
         return self._scheduler.get_job(job_id) is not None
 
-    def _install(self, job: ScheduledJob) -> None:
+    def _install(self, job: ScheduledJob, *, trigger: object | None = None) -> None:
         self._scheduler.add_job(
             self._dispatch,
-            trigger=_make_trigger(job),
+            trigger=trigger if trigger is not None else _make_trigger(job),
             id=job.job_id,
             args=(job.job_id,),
             replace_existing=True,
