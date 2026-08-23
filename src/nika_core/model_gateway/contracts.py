@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
@@ -17,12 +18,28 @@ class ProviderKind(StrEnum):
     CLOUD = "cloud"
 
 
+class ProviderCostClass(StrEnum):
+    NONE = "none"
+    LOCAL_RESOURCE = "local_resource"
+    METERED = "metered"
+    UNKNOWN = "unknown"
+
+
+class ProviderResourceClass(StrEnum):
+    NONE = "none"
+    LOCAL_PROCESS = "local_process"
+    LOCAL_SERVICE = "local_service"
+    REMOTE_SERVICE = "remote_service"
+    UNKNOWN = "unknown"
+
+
 class ModelErrorCode(StrEnum):
     INVALID_REQUEST = "invalid_request"
     UNAVAILABLE = "unavailable"
     TIMEOUT = "timeout"
     CANCELLED = "cancelled"
     AUTHENTICATION = "authentication"
+    POLICY_DENIED = "policy_denied"
     RATE_LIMITED = "rate_limited"
     RESOURCE_LIMIT = "resource_limit"
     PROVIDER_ERROR = "provider_error"
@@ -41,6 +58,32 @@ class ModelMessage:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelRoutePolicy:
+    """Provider-neutral routing constraints evaluated before any provider sees payload data."""
+
+    local_only: bool = False
+    allow_metered: bool = True
+    allowed_resource_classes: frozenset[ProviderResourceClass] = field(
+        default_factory=frozenset
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.local_only, bool):
+            raise TypeError("local_only must be a boolean")
+        if not isinstance(self.allow_metered, bool):
+            raise TypeError("allow_metered must be a boolean")
+        if not isinstance(self.allowed_resource_classes, frozenset):
+            raise TypeError("allowed_resource_classes must be a frozenset")
+        if any(
+            not isinstance(resource_class, ProviderResourceClass)
+            for resource_class in self.allowed_resource_classes
+        ):
+            raise TypeError(
+                "allowed_resource_classes must contain ProviderResourceClass values"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class ModelRequest:
     request_id: str
     messages: tuple[ModelMessage, ...]
@@ -52,6 +95,7 @@ class ModelRequest:
     timeout_seconds: float = 60.0
     temperature: float | None = None
     metadata: dict[str, str] = field(default_factory=dict)
+    route_policy: ModelRoutePolicy = field(default_factory=ModelRoutePolicy)
 
     def __post_init__(self) -> None:
         if not self.request_id.strip():
@@ -137,6 +181,27 @@ class ModelUsage:
     output_tokens: int | None = None
     total_tokens: int | None = None
 
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("input_tokens", self.input_tokens),
+            ("output_tokens", self.output_tokens),
+            ("total_tokens", self.total_tokens),
+        ):
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an integer")
+            if value < 0:
+                raise ValueError(f"{name} must not be negative")
+        if self.total_tokens is not None:
+            known_parts = tuple(
+                value
+                for value in (self.input_tokens, self.output_tokens)
+                if value is not None
+            )
+            if known_parts and self.total_tokens < max(known_parts):
+                raise ValueError("total_tokens must not be smaller than a component token count")
+
 
 @dataclass(frozen=True, slots=True)
 class ModelResponse:
@@ -147,6 +212,30 @@ class ModelResponse:
     model: str
     usage: ModelUsage = field(default_factory=ModelUsage)
     latency_ms: float | None = None
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("request_id", self.request_id),
+            ("provider_id", self.provider_id),
+            ("model", self.model),
+        ):
+            if not value.strip():
+                raise ValueError(f"{name} must not be empty")
+            if value != value.strip():
+                raise ValueError(f"{name} must not contain surrounding whitespace")
+        if not self.text.strip():
+            raise ValueError("response text must not be empty")
+        if not isinstance(self.provider_kind, ProviderKind):
+            raise TypeError("provider_kind must be a ProviderKind")
+        if not isinstance(self.usage, ModelUsage):
+            raise TypeError("usage must be ModelUsage")
+        if self.latency_ms is not None:
+            if isinstance(self.latency_ms, bool) or not isinstance(
+                self.latency_ms, (int, float)
+            ):
+                raise TypeError("latency_ms must be numeric")
+            if not math.isfinite(float(self.latency_ms)) or self.latency_ms < 0:
+                raise ValueError("latency_ms must be finite and non-negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +249,33 @@ class ProviderCapabilities:
     # evidence that cancelling/timing out the caller also stops the underlying
     # inference, not merely the local coroutine or HTTP socket.
     supports_hard_cancellation: bool = False
+    cost_class: ProviderCostClass | None = None
+    resource_class: ProviderResourceClass | None = None
+
+    def __post_init__(self) -> None:
+        if not self.provider_id.strip():
+            raise ValueError("provider_id must not be empty")
+        if self.provider_id != self.provider_id.strip():
+            raise ValueError("provider_id must not contain surrounding whitespace")
+        if not isinstance(self.kind, ProviderKind):
+            raise TypeError("kind must be a ProviderKind")
+        if not isinstance(self.supports_private_data, bool):
+            raise TypeError("supports_private_data must be a boolean")
+        for name, value in (
+            ("supports_tools", self.supports_tools),
+            ("supports_streaming", self.supports_streaming),
+            ("supports_hard_cancellation", self.supports_hard_cancellation),
+        ):
+            if not isinstance(value, bool):
+                raise TypeError(f"{name} must be a boolean")
+        if self.cost_class is not None and not isinstance(
+            self.cost_class, ProviderCostClass
+        ):
+            raise TypeError("cost_class must be a ProviderCostClass")
+        if self.resource_class is not None and not isinstance(
+            self.resource_class, ProviderResourceClass
+        ):
+            raise TypeError("resource_class must be a ProviderResourceClass")
 
 
 class ModelGatewayError(RuntimeError):
