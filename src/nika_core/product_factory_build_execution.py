@@ -8,6 +8,7 @@ from typing import Protocol
 
 from nika_core.product_factory_deployment import (
     DeploymentFabricError,
+    ExecutionNode,
     ExecutionNodeRegistry,
     ExecutionRequest,
     NormalizedBuildEvidence,
@@ -84,8 +85,8 @@ class BuildExecutionSpec:
             raise BuildExecutionError("execution argv must contain a non-empty executable")
         if self.request.project_id != self.authority.project_id:
             raise BuildExecutionError("execution request and authority project mismatch")
-        if self.lease_seconds <= 0:
-            raise BuildExecutionError("execution node lease duration must be positive")
+        if type(self.lease_seconds) is not int or self.lease_seconds <= 0:
+            raise BuildExecutionError("execution node lease duration must be a positive integer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,8 +110,8 @@ class BuildExecutionDispatch:
         if self.project_id != self.authority.project_id:
             raise BuildExecutionError("dispatch authority project mismatch")
         _validate_sha(self.source_sha)
-        if self.attempt <= 0:
-            raise BuildExecutionError("dispatch attempt must be positive")
+        if type(self.attempt) is not int or self.attempt <= 0:
+            raise BuildExecutionError("dispatch attempt must be a positive integer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +127,8 @@ class BuildExecutionResult:
         _validate_sha(self.source_sha)
         _validate_digest(self.artifact_digest)
         _aware(self.completed_at)
+        if type(self.succeeded) is not bool or type(self.uncertain) is not bool:
+            raise BuildExecutionError("execution result status fields must be exact booleans")
         if not self.evidence_refs:
             raise BuildExecutionError("execution result requires evidence references")
         _validate_unique_nonempty(self.evidence_refs, "evidence reference")
@@ -146,8 +149,8 @@ class BuildExecutionRecord:
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def __post_init__(self) -> None:
-        if self.attempt < 0:
-            raise BuildExecutionError("execution attempt must not be negative")
+        if type(self.attempt) is not int or self.attempt < 0:
+            raise BuildExecutionError("execution attempt must be a non-negative integer")
         _aware(self.updated_at)
         if self.node_id is not None and not self.node_id.strip():
             raise BuildExecutionError("execution node identity must not be empty")
@@ -364,8 +367,10 @@ class BuildExecutionCoordinator:
         work_ids = [record.spec.request.work_id for record in snapshot.records]
         if len(work_ids) != len(set(work_ids)):
             raise BuildExecutionError("execution snapshot contains duplicate work identities")
+        registry_snapshot = self.nodes.snapshot()
+        registry_nodes = {node.identity.node_id: node for node in registry_snapshot.nodes}
         registry_leases: dict[tuple[str, str], WorkLease] = {}
-        for lease in self.nodes.snapshot().leases:
+        for lease in registry_snapshot.leases:
             key = (lease.project_id, lease.work_id)
             if key in registry_leases:
                 raise BuildExecutionError(
@@ -381,13 +386,9 @@ class BuildExecutionCoordinator:
             lease = registry_leases.get(key)
             current = record
             if record.state is BuildExecutionState.PREPARED:
-                if (
-                    lease is None
-                    or lease.lease_id != record.lease_id
-                    or lease.node_id != record.node_id
-                    or lease.expires_at <= instant
-                ):
-                    if lease is not None and lease.lease_id == record.lease_id:
+                self._validate_active_lease_binding(record, lease, registry_nodes)
+                if lease is None or lease.expires_at <= instant:
+                    if lease is not None:
                         self._safe_registry_release(lease.lease_id)
                     current = replace(
                         record,
@@ -401,7 +402,8 @@ class BuildExecutionCoordinator:
                 else:
                     ephemeral[work_id] = lease
             elif record.state is BuildExecutionState.DISPATCHING:
-                if lease is not None and lease.lease_id == record.lease_id:
+                self._validate_active_lease_binding(record, lease, registry_nodes)
+                if lease is not None:
                     self._safe_registry_release(lease.lease_id)
                 current = replace(
                     record,
@@ -488,10 +490,16 @@ class BuildExecutionCoordinator:
         work_id = record.spec.request.work_id
         if record.spec.request.project_id != record.spec.authority.project_id:
             raise BuildExecutionError("snapshot execution authority project mismatch")
+        if record.node_id is not None and record.node_id not in record.spec.authority.allowed_node_ids:
+            raise BuildExecutionError("snapshot execution node is outside project authority")
         if record.dispatch is not None:
             dispatch = record.dispatch
+            expected_dispatch_id = (
+                f"dispatch:{record.spec.request.project_id}:{work_id}:{record.attempt}"
+            )
             if (
-                dispatch.project_id != record.spec.request.project_id
+                dispatch.dispatch_id != expected_dispatch_id
+                or dispatch.project_id != record.spec.request.project_id
                 or dispatch.work_id != work_id
                 or dispatch.platform is not record.spec.request.platform
                 or dispatch.source_sha != record.spec.source_sha
@@ -544,6 +552,26 @@ class BuildExecutionCoordinator:
         elif record.evidence is not None:
             raise BuildExecutionError(
                 "non-terminal execution snapshot must not claim build evidence"
+            )
+
+    def _validate_active_lease_binding(
+        self,
+        record: BuildExecutionRecord,
+        lease: WorkLease | None,
+        registry_nodes: dict[str, ExecutionNode],
+    ) -> None:
+        if lease is None:
+            return
+        if lease.lease_id != record.lease_id or lease.node_id != record.node_id:
+            raise BuildExecutionError(
+                "execution snapshot active lease identity does not match registry"
+            )
+        node = registry_nodes.get(lease.node_id)
+        if node is None:
+            raise BuildExecutionError("execution snapshot active lease references unknown node")
+        if not _node_satisfies_request(node, record.spec.request):
+            raise BuildExecutionError(
+                "execution snapshot active lease node no longer satisfies request contract"
             )
 
     def _acquire_authorized_available(
@@ -630,6 +658,17 @@ def _validate_sha(value: str) -> None:
 def _validate_digest(value: str) -> None:
     if not re.fullmatch(r"[0-9a-f]{64}", value):
         raise BuildExecutionError("artifact digest must be exact lowercase SHA-256 hex")
+
+
+def _node_satisfies_request(node: ExecutionNode, request: ExecutionRequest) -> bool:
+    return (
+        node.enabled
+        and node.identity.platform is request.platform
+        and node.resources.fits(request.resources)
+        and request.required_features <= node.capabilities.features
+        and request.required_toolchains <= node.capabilities.toolchains
+        and (not request.require_gpu or node.capabilities.gpu)
+    )
 
 
 def _aware(value: datetime) -> datetime:
