@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
@@ -40,9 +41,12 @@ class _Provider(DeploymentProviderPort):
     rollback_error: bool = False
     rollback_succeeds: bool = True
     inspection: ProviderInspection | None = None
+    observe_before_deploy_result: Callable[[], None] | None = None
 
     def deploy(self, intent: DeploymentIntent) -> ProviderDeploymentResult:
         self.deploy_calls += 1
+        if self.observe_before_deploy_result is not None:
+            self.observe_before_deploy_result()
         if self.deploy_error:
             raise RuntimeError("deploy transport failed after possible mutation")
         if self.deploy_without_evidence:
@@ -220,6 +224,20 @@ def test_exact_staging_snapshot_requires_backing_healthy_record() -> None:
     restarted = DeploymentFabric(provider)
     with pytest.raises(DeploymentFabricError, match="not backed by a healthy staging record"):
         restarted.restore(corrupted)
+
+
+def test_provider_sees_uncertain_marker_before_deploy_returns() -> None:
+    provider = _Provider()
+    fabric = DeploymentFabric(provider)
+    observed: list[DeploymentFabricSnapshot] = []
+    provider.observe_before_deploy_result = lambda: observed.append(fabric.snapshot())
+
+    result = fabric.deploy(_intent(EnvironmentTier.STAGING, "stage-pre-dispatch"))
+
+    assert result.state is DeploymentState.HEALTHY
+    assert len(observed) == 1
+    assert observed[0].records[0].state is DeploymentState.UNCERTAIN
+    assert observed[0].records[0].provider_evidence_refs == ()
 
 
 def test_provider_deploy_exception_is_durable_and_restart_idempotent() -> None:
