@@ -8,7 +8,7 @@ from typing import Any
 
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.kernel.action_registry import Keymap
+from nika_core.kernel.action_registry import ActionDefinition, ActionRegistry, Keymap
 from nika_core.kernel.agent_registry import AgentRegistry
 from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.default_actions import build_default_action_registry
@@ -24,6 +24,7 @@ from nika_core.product_factory_packaged_journey import (
     product_project_identity,
 )
 from nika_core.product_project import ProductProjectRepository
+from nika_core.security import ApprovalAuthority
 from nika_core.ui.bridge import UIActionBridge
 from nika_core.ui.bridge_models import UIResult
 from nika_core.ui.desktop_backend import DesktopBackend
@@ -39,18 +40,40 @@ def _focus(focus_id: str, message: str) -> UIResult:
     )
 
 
+def _register_authority_actions(actions: ActionRegistry) -> None:
+    for action_id, label in (
+        ("approval.action.approve", "Підтвердити небезпечну дію"),
+        ("approval.action.deny", "Відхилити небезпечну дію"),
+        ("approval.review.approve", "Схвалити точний предмет перевірки"),
+        ("approval.review.deny", "Відхилити предмет перевірки"),
+    ):
+        actions.register(
+            ActionDefinition(
+                action_id=action_id,
+                label=label,
+                category="approval",
+                default_binding=None,
+                scope="explicit",
+                may_be_unbound=True,
+            )
+        )
+
+
 def build_windows_bridge(
     config: AppConfig,
 ) -> tuple[UIActionBridge, ProductProjectCommandService]:
     store = SQLiteStore(config.database_path)
     store.initialize()
     actions = build_default_action_registry()
+    _register_authority_actions(actions)
     keymap = Keymap(store, actions)
+    approval_authority = ApprovalAuthority()
     backend = DesktopBackend(
         queue=TaskQueue(store),
         agents=AgentRegistry(store),
         workspaces=WorkspaceRegistry(store),
         audit=AuditLog(store),
+        approval_authority=approval_authority,
     )
     products = ProductProjectCommandService(ProductProjectRepository(store))
     product_router = PackagedProductCommandRouter(
@@ -72,6 +95,10 @@ def build_windows_bridge(
             "task.pause": backend.pause_task,
             "task.resume": backend.resume_task,
             "agent.stop": backend.stop_agent,
+            "approval.action.approve": backend.approve_action,
+            "approval.action.deny": backend.deny_action,
+            "approval.review.approve": backend.approve_review,
+            "approval.review.deny": backend.deny_review,
             "nav.tasks": lambda _payload: _focus(
                 "tasks-heading", "Завдання відкрито."
             ),
