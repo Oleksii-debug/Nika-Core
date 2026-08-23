@@ -10,7 +10,11 @@ from pathlib import Path
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.reliability.backup import RestorePlanStaleError, SQLiteRecoveryManager
+from nika_core.reliability.backup import (
+    RestorePlanStaleError,
+    RestoreSafetyError,
+    SQLiteRecoveryManager,
+)
 
 
 def _initialize(path: Path) -> SQLiteStore:
@@ -109,3 +113,21 @@ def test_restore_rejects_committed_wal_only_change_after_preview(tmp_path: Path)
         assert _task_value(database) == "committed-after-preview"
     finally:
         writer.close()
+
+
+def test_prepare_restore_rejects_orphan_sqlite_sidecars(tmp_path: Path) -> None:
+    source = tmp_path / "source.db"
+    source_store = _initialize(source)
+    backup = tmp_path / "known-good.db"
+    SQLiteRecoveryManager(source_store).create_backup(backup)
+
+    target = tmp_path / "missing-live.db"
+    wal_path = target.with_name(f"{target.name}-wal")
+    wal_path.write_bytes(b"orphan-wal-bytes")
+    manager = SQLiteRecoveryManager(SQLiteStore(target))
+
+    with pytest.raises(RestoreSafetyError, match="sidecars remain"):
+        manager.prepare_restore(backup)
+
+    assert not target.exists()
+    assert wal_path.read_bytes() == b"orphan-wal-bytes"
