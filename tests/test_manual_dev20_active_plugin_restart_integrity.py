@@ -68,7 +68,7 @@ def test_active_workspace_restart_rejects_missing_plugin(tmp_path: Path) -> None
     restarted = WorkspaceActivationRepository(
         SQLiteStore(store.path),
         WorkspaceCatalog(),
-        lambda: {},
+        dict,
     )
     with pytest.raises(WorkspaceCompatibilityError, match="missing required plugin"):
         restarted.active(candidate.workspace.workspace_id)
