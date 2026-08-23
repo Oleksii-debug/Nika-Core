@@ -86,7 +86,9 @@ def test_empty_cache_tree_is_not_valid_model_checksum_evidence(tmp_path: Path) -
 
 def test_cache_file_symlink_fails_closed(tmp_path: Path) -> None:
     if os.name == "nt":
-        pytest.skip("Windows symlink creation is privilege-dependent; reparse policy is tested directly")
+        pytest.skip(
+            "Windows symlink creation is privilege-dependent; reparse policy is tested directly"
+        )
 
     cache = tmp_path / "cache"
     cache.mkdir()
