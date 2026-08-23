@@ -606,6 +606,8 @@ class ProductProjectRepository:
                 "WHERE project_id=? ORDER BY spec_version",
                 (project_id,),
             ).fetchall()
+            if not rows:
+                raise ProductProjectError("ProductProject specification history is missing")
             versions = tuple(
                 _durable_int(
                     row["spec_version"],
@@ -639,6 +641,8 @@ class ProductProjectRepository:
                     )
                 try:
                     spec = ProductProjectSpec.from_dict(parsed_spec)
+                except ProductProjectError:
+                    raise
                 except (AttributeError, KeyError, TypeError, ValueError) as exc:
                     raise ProductProjectError(
                         f"invalid ProductProject specification version {version}"
@@ -780,6 +784,8 @@ class ProductProjectRepository:
             )
         try:
             spec = ProductProjectSpec.from_dict(parsed_spec)
+        except ProductProjectError:
+            raise
         except (AttributeError, KeyError, TypeError, ValueError) as exc:
             raise ProductProjectError("invalid current ProductProject specification") from exc
         return ProductProject(
