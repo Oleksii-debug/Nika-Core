@@ -33,6 +33,8 @@ class _Provider(DeploymentProviderPort):
     health_calls: int = 0
     rollback_calls: int = 0
     deploy_uncertain: bool = False
+    deploy_error: bool = False
+    deploy_without_evidence: bool = False
     health_error: bool = False
     healthy: bool = True
     rollback_error: bool = False
@@ -41,6 +43,10 @@ class _Provider(DeploymentProviderPort):
 
     def deploy(self, intent: DeploymentIntent) -> ProviderDeploymentResult:
         self.deploy_calls += 1
+        if self.deploy_error:
+            raise RuntimeError("deploy transport failed after possible mutation")
+        if self.deploy_without_evidence:
+            return ProviderDeploymentResult(True, False, ())
         if self.deploy_uncertain:
             return ProviderDeploymentResult(
                 False,
@@ -214,6 +220,41 @@ def test_exact_staging_snapshot_requires_backing_healthy_record() -> None:
     restarted = DeploymentFabric(provider)
     with pytest.raises(DeploymentFabricError, match="not backed by a healthy staging record"):
         restarted.restore(corrupted)
+
+
+def test_provider_deploy_exception_is_durable_and_restart_idempotent() -> None:
+    provider = _Provider(deploy_error=True)
+    fabric = DeploymentFabric(provider)
+    intent = _intent(EnvironmentTier.STAGING, "stage-deploy-error")
+
+    uncertain = fabric.deploy(intent)
+    assert uncertain.state is DeploymentState.UNCERTAIN
+    assert uncertain.provider_evidence_refs == ()
+    assert provider.deploy_calls == 1
+    assert fabric.snapshot().healthy_staging == ()
+
+    restarted = DeploymentFabric(provider)
+    restarted.restore(fabric.snapshot())
+    duplicate = restarted.deploy(intent)
+    assert duplicate == uncertain
+    assert provider.deploy_calls == 1
+
+
+def test_missing_deploy_evidence_is_durable_and_restart_idempotent() -> None:
+    provider = _Provider(deploy_without_evidence=True)
+    fabric = DeploymentFabric(provider)
+    intent = _intent(EnvironmentTier.STAGING, "stage-missing-deploy-evidence")
+
+    uncertain = fabric.deploy(intent)
+    assert uncertain.state is DeploymentState.UNCERTAIN
+    assert uncertain.provider_evidence_refs == ()
+    assert provider.deploy_calls == 1
+
+    restarted = DeploymentFabric(provider)
+    restarted.restore(fabric.snapshot())
+    duplicate = restarted.deploy(intent)
+    assert duplicate == uncertain
+    assert provider.deploy_calls == 1
 
 
 def test_health_failure_after_applied_effect_is_durable_and_idempotent() -> None:
