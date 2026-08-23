@@ -182,7 +182,7 @@ class HeldOutProtocol:
 
     @property
     def fingerprint(self) -> str:
-        return self._sealed_fingerprint
+        return _protocol_fingerprint(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -569,8 +569,6 @@ def _validate_assessment_identity(assessment: HeldOutAssessment) -> None:
     if not isinstance(assessment, HeldOutAssessment):
         raise TradingResearchError("assessment must be HeldOutAssessment evidence")
     protocol = _validated_protocol(assessment.protocol)
-    _validate_selection_identity(assessment.selection)
-    _validate_partition_result_identity(assessment.test_result)
     expected = _assessment_fingerprint(
         protocol,
         assessment.selection,
@@ -578,6 +576,8 @@ def _validate_assessment_identity(assessment: HeldOutAssessment) -> None:
     )
     if expected != assessment._authority_fingerprint:
         raise TradingResearchError("held-out assessment evidence changed after binding")
+    _validate_selection_identity(assessment.selection)
+    _validate_partition_result_identity(assessment.test_result)
     if assessment.selection.protocol_fingerprint != protocol.fingerprint:
         raise TradingResearchError("held-out assessment protocol identity changed")
     if assessment.selection.selected_at < protocol.validation.end_at:
