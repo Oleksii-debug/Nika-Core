@@ -16,7 +16,7 @@ from nika_core.intelligence.contracts import (
 class UnifiedPlanningAdapter:
     """Adapter from Nika boolean-fact planning contracts to Unified Planning."""
 
-    def __init__(self, *, engine_name: str = "pyperplan") -> None:
+    def __init__(self, *, engine_name: str = "aries") -> None:
         if not engine_name.strip():
             raise ValueError("engine_name must not be empty")
         self._engine_name = engine_name
