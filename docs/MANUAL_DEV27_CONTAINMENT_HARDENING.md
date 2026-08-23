@@ -41,6 +41,8 @@ ADAPT:
 - the child environment is filtered again at the process boundary;
 - TEMP/TMP/TMPDIR are pinned into the declared worker workspace;
 - cwd is required to remain below the declared worker workspace root;
+- workspace, evidence and process-temp roots are rejected when the root object itself is a
+  symlink or Windows reparse point;
 - production repository and job workspace roots must be fully disjoint in both directions;
 - cleanup removes only canonical private Git/worktree roots and refuses reparse/symlink
   content;
@@ -64,12 +66,15 @@ fail-closed validation. No alternate generic sandbox framework is introduced.
    overrides are not inherited.
 6. Process TEMP/TMP/TMPDIR point into the declared workspace, not a host-supplied temp path.
 7. A declared process cwd outside its workspace root fails closed before process launch.
-8. A job root cannot be inside the production repository, equal to it, or contain it.
-9. Cleanup does not recursively delete the job root and refuses symlink/reparse content before
-   removing the canonical private Git and worktree roots.
-10. Output delta evidence detects additions, modifications, and deletions deterministically,
+8. Guarded workspace, evidence and temp roots fail closed if the root itself is a symlink or
+   Windows reparse point; evidence collection must not resolve an attacker-replaced worktree root
+   into an external tree before validating the root object.
+9. A job root cannot be inside the production repository, equal to it, or contain it.
+10. Cleanup does not recursively delete the job root and refuses symlink/reparse content before
+    removing the canonical private Git and worktree roots.
+11. Output delta evidence detects additions, modifications, and deletions deterministically,
     enforces allowed path scope, and enforces the changed-file budget.
-11. `.github/workflows` and `.github/actions` mutations are denied by default by the output
+12. `.github/workflows` and `.github/actions` mutations are denied by default by the output
     provenance boundary unless a trusted higher-level control-plane approval explicitly opts in.
 
 ## AUD02 executable-indirection repair
@@ -104,6 +109,20 @@ system. It does not claim protection against replacement of an otherwise approve
 between policy creation and launch, nor against a general-purpose interpreter deliberately granted
 by policy being used as arbitrary code. Those stronger hostile-code guarantees require trusted
 artifact identity and/or real OS/remote isolation rather than path-name validation alone.
+
+## Root-level indirection repair
+
+A second DEV27 self-audit found that the earlier `collect_tree_evidence()` implementation resolved
+its root before rejecting symlink/reparse entries below it. If a worker replaced the entire
+worktree root with an indirection to another tree before evidence capture, provenance could be
+collected from the wrong filesystem authority.
+
+The shared low-level root guard now performs `lstat()` on the supplied root before canonical
+resolution, rejects symbolic links and Windows reparse points, requires an actual directory, and
+is reused by guarded workspace paths, process temp roots and tree-evidence collection. Focused
+regressions prove that a symlinked evidence root, workspace root and process-temp root all fail
+closed. Physical Windows junction evidence owned by PR #72 remains separate and is not copied into
+this lane.
 
 ## Isolation truth and non-goals
 
