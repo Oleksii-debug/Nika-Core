@@ -171,6 +171,41 @@ def test_rollback_is_time_ordered_and_exact_replay_is_idempotent() -> None:
         coordinator.record_rollback(replace(proof, restored_release_sha=sha(28)))
 
 
+def test_terminal_rollback_survives_node_and_credential_changes_and_rejects_late_observation() -> None:
+    coordinator = ProductOperationsCoordinator("project-a")
+    api = service("api", release=31, node="node-a", credential="credential://api")
+    coordinator.register(api)
+    coordinator.record_observation(failed(api))
+    proof = RollbackObservation(
+        "api",
+        api.release_sha,
+        sha(30),
+        True,
+        ("rollback://api/verified",),
+        NOW + timedelta(seconds=1),
+    )
+    coordinator.record_rollback(proof)
+
+    coordinator.record_node_availability("node-a", available=False)
+    assert coordinator.snapshot().services[0].health is ServiceHealth.ROLLED_BACK
+
+    coordinator.revoke_credential("credential://api")
+    assert coordinator.snapshot().services[0].health is ServiceHealth.BLOCKED
+    coordinator.restore_credential("credential://api")
+    assert coordinator.snapshot().services[0].health is ServiceHealth.ROLLED_BACK
+
+    with pytest.raises(ProductOperationsError, match="terminal rollback"):
+        coordinator.record_observation(
+            failed(api, observed_at=NOW + timedelta(seconds=2))
+        )
+
+    snapshot = coordinator.snapshot()
+    restarted = ProductOperationsCoordinator("project-a")
+    restarted.restore(snapshot)
+    assert restarted.snapshot() == snapshot
+    assert restarted.snapshot().services[0].health is ServiceHealth.ROLLED_BACK
+
+
 def test_restore_rejects_derived_health_credential_and_node_loss_tamper_atomically() -> None:
     coordinator = ProductOperationsCoordinator("project-a")
     api = service("api", release=40, node="node-a", credential="credential://api")
