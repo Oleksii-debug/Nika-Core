@@ -26,8 +26,39 @@ class _ReviewAuthority:
         return (project_id, evidence_ref, purpose) in self._grants
 
 
+class _NoticeAuthority:
+    def __init__(self, grants: tuple[tuple[str, str, str, str], ...]) -> None:
+        self._grants = frozenset(grants)
+
+    def verify(
+        self,
+        *,
+        project_id: str,
+        package_name: str,
+        version: str,
+        notice_ref: str,
+    ) -> bool:
+        return (project_id, package_name, version, notice_ref) in self._grants
+
+
+def _notice_authority() -> _NoticeAuthority:
+    return _NoticeAuthority(
+        (
+            (
+                "project-1",
+                "example-package",
+                "1.2.3",
+                "artifact:notices#component",
+            ),
+        )
+    )
+
+
 def _gate(*grants: tuple[str, str, str]) -> ProductComplianceGate:
-    return ProductComplianceGate(review_authority=_ReviewAuthority(grants))
+    return ProductComplianceGate(
+        review_authority=_ReviewAuthority(grants),
+        notice_authority=_notice_authority(),
+    )
 
 
 def _dependency(
@@ -93,7 +124,11 @@ def test_release_passes_only_with_complete_approved_provenance_and_obligations()
     assert "hash:sha256:fixture" in decision.evidence_refs
     assert "review:license:1" in decision.evidence_refs
     assert "terms-review:public-source:1" in decision.evidence_refs
-    ProductComplianceGate().require_release_allowed(decision)
+    assert f"compliance-snapshot:sha256:{decision.snapshot_sha256}" in decision.evidence_refs
+    ProductComplianceGate().require_release_allowed(
+        decision,
+        expected_snapshot_sha256=decision.snapshot_sha256,
+    )
 
 
 def test_missing_dependency_identity_or_provenance_is_rejected_at_contract_boundary() -> None:
@@ -159,6 +194,7 @@ def test_default_gate_rejects_opaque_review_authority_strings() -> None:
     )
     assert license_decision.allowed is False
     assert "license:untrusted-review-authority:component-1" in license_decision.findings
+    assert any(item.startswith("notice:untrusted:component-1") for item in license_decision.findings)
 
 
 def test_review_authority_is_bound_to_exact_project_ref_and_purpose() -> None:
@@ -171,7 +207,10 @@ def test_review_authority_is_bound_to_exact_project_ref_and_purpose() -> None:
             ),
         )
     )
-    gate = ProductComplianceGate(review_authority=authority)
+    gate = ProductComplianceGate(
+        review_authority=authority,
+        notice_authority=_notice_authority(),
+    )
     exact = gate.evaluate(
         project_id="project-1",
         dependencies=(_dependency(),),
@@ -188,7 +227,8 @@ def test_review_authority_is_bound_to_exact_project_ref_and_purpose() -> None:
                     "license-disposition:component-1",
                 ),
             )
-        )
+        ),
+        notice_authority=_notice_authority(),
     ).evaluate(
         project_id="project-1",
         dependencies=(_dependency(),),
@@ -200,7 +240,8 @@ def test_review_authority_is_bound_to_exact_project_ref_and_purpose() -> None:
     wrong_purpose = ProductComplianceGate(
         review_authority=_ReviewAuthority(
             (("project-1", "review:license:1", "compliance-scope"),)
-        )
+        ),
+        notice_authority=_notice_authority(),
     ).evaluate(
         project_id="project-1",
         dependencies=(_dependency(),),
@@ -341,3 +382,23 @@ def test_non_public_unpermissioned_research_and_cross_project_evidence_block() -
     assert decision.allowed is False
     assert "research-source:not-permitted:competitor-1" in decision.findings
     assert "cross-project:competitor-evidence:competitor-2" in decision.findings
+
+
+def test_release_rejects_stale_snapshot_even_if_decision_was_originally_allowed() -> None:
+    decision = _gate(
+        (
+            "project-1",
+            "review:license:1",
+            "license-disposition:component-1",
+        )
+    ).evaluate(
+        project_id="project-1",
+        dependencies=(_dependency(),),
+        obligation_evidence=(_obligation(),),
+    )
+    assert decision.allowed is True
+    with pytest.raises(ProductComplianceError, match="decision:stale-snapshot"):
+        ProductComplianceGate().require_release_allowed(
+            decision,
+            expected_snapshot_sha256="0" * 64,
+        )
