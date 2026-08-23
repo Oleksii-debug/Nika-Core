@@ -30,8 +30,7 @@ class RuntimeIdempotencyEffectJournal:
             raise ValueError("task_id must not be empty")
         return tuple(
             record.operation_key
-            for record in self._ledger.list_for_task(task_id)
-            if record.status in _UNRESOLVED
+            for record in self._unresolved_records(task_id)
         )
 
     def reserve(
@@ -49,13 +48,9 @@ class RuntimeIdempotencyEffectJournal:
             task_id=task_id,
             action_id=action.action_id,
         )
-        for record in self._ledger.list_for_task(task_id):
-            if record.status in _UNRESOLVED and record.operation_key != operation_key:
-                return DeterministicEffectReservation(
-                    operation_key=record.operation_key,
-                    status=DeterministicEffectStatus(record.status.value),
-                    created=False,
-                )
+        for record in self._unresolved_records(task_id):
+            if record.operation_key != operation_key:
+                return self._blocked_reservation(record)
 
         fingerprint = self._action_fingerprint(action)
         try:
@@ -69,6 +64,19 @@ class RuntimeIdempotencyEffectJournal:
             raise DeterministicEffectConflictError(
                 "deterministic action effect identity conflicts with durable evidence"
             ) from exc
+
+        if created:
+            competing = tuple(
+                item
+                for item in self._unresolved_records(task_id)
+                if item.operation_key != operation_key
+            )
+            if competing:
+                # No handler has run yet. Drop only our own PENDING reservation and block behind
+                # the concurrently visible task effect instead of allowing two mutations to race.
+                self._ledger.release_pending(operation_key)
+                return self._blocked_reservation(competing[0])
+
         return DeterministicEffectReservation(
             operation_key=operation_key,
             status=DeterministicEffectStatus(record.status.value),
@@ -83,6 +91,21 @@ class RuntimeIdempotencyEffectJournal:
 
     def release_pending(self, operation_key: str) -> None:
         self._ledger.release_pending(operation_key)
+
+    def _unresolved_records(self, task_id: str):
+        return tuple(
+            record
+            for record in self._ledger.list_for_task(task_id)
+            if record.status in _UNRESOLVED
+        )
+
+    @staticmethod
+    def _blocked_reservation(record) -> DeterministicEffectReservation:
+        return DeterministicEffectReservation(
+            operation_key=record.operation_key,
+            status=DeterministicEffectStatus(record.status.value),
+            created=False,
+        )
 
     @staticmethod
     def _operation_key(*, task_id: str, action_id: str) -> str:
