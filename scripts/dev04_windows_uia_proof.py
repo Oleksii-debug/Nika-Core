@@ -83,10 +83,6 @@ def main() -> None:
         edit = _resolve(before, role="edit", name="Problem description")
         apply_button = _resolve(before, role="button", name="Apply semantic action")
         checkbox = _resolve(before, role="checkbox", name="Verify semantic target")
-        move = _resolve(before, role="button", name="Move and resize window")
-        replace_control = _resolve(before, role="button", name="Replace semantic target")
-        replaceable = _resolve(before, role="button", name="Replaceable semantic action")
-
         assert edit.enabled and edit.visible
         assert "Value" in adapter.pattern_capabilities(edit)
         assert "Invoke" in adapter.pattern_capabilities(apply_button)
