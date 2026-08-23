@@ -12,6 +12,8 @@ from nika_core.media.model_evidence import (
     bind_model_evidence,
     inspect_model_directory,
     inspect_model_files,
+    snapshot_model_directory,
+    snapshot_model_files,
 )
 from nika_core.media.transcription import TranscriptionRequest, TranscriptionResult
 
@@ -67,14 +69,24 @@ class FasterWhisperTranscriber:
         )
         if model.engine_id != self._engine.engine_id:
             raise ValueError("model descriptor must belong to faster-whisper")
-        evidence = inspect_model_directory(
+
+        preflight = inspect_model_directory(
             requested_model_path,
-            compute_sha256=model.sha256 is not None,
+            compute_sha256=False,
         )
-        self._model_descriptor = bind_model_evidence(model, evidence)
+        self._runtime_snapshot = None
+        runtime_model_path = self._model_path
+        if model.sha256 is None:
+            self._model_descriptor = bind_model_evidence(model, preflight)
+        else:
+            snapshot = snapshot_model_directory(requested_model_path)
+            self._model_descriptor = bind_model_evidence(model, snapshot.evidence)
+            self._runtime_snapshot = snapshot
+            runtime_model_path = snapshot.root
+
         module = importlib.import_module("faster_whisper")
         self._runtime = module.WhisperModel(
-            str(self._model_path),
+            str(runtime_model_path),
             device=device,
             compute_type=compute_type,
             local_files_only=True,
@@ -158,16 +170,34 @@ class SherpaOnnxWhisperTranscriber:
         )
         if model.engine_id != self._engine.engine_id:
             raise ValueError("model descriptor must belong to sherpa-onnx")
-        evidence = inspect_model_files(
+
+        preflight = inspect_model_files(
             requested_files,
-            compute_sha256=model.sha256 is not None,
+            compute_sha256=False,
         )
-        self._model_descriptor = bind_model_evidence(model, evidence)
+        self._runtime_snapshot = None
+        runtime_paths = {
+            "encoder": paths[0],
+            "decoder": paths[1],
+            "tokens": paths[2],
+        }
+        if model.sha256 is None:
+            self._model_descriptor = bind_model_evidence(model, preflight)
+        else:
+            snapshot = snapshot_model_files(requested_files)
+            self._model_descriptor = bind_model_evidence(model, snapshot.evidence)
+            self._runtime_snapshot = snapshot
+            runtime_paths = {
+                "encoder": snapshot.path_for("encoder"),
+                "decoder": snapshot.path_for("decoder"),
+                "tokens": snapshot.path_for("tokens"),
+            }
+
         module = importlib.import_module("sherpa_onnx")
         self._recognizer = module.OfflineRecognizer.from_whisper(
-            encoder=str(paths[0]),
-            decoder=str(paths[1]),
-            tokens=str(paths[2]),
+            encoder=str(runtime_paths["encoder"]),
+            decoder=str(runtime_paths["decoder"]),
+            tokens=str(runtime_paths["tokens"]),
             language=language,
             task="transcribe",
             num_threads=num_threads,
