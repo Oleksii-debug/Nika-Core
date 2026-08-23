@@ -10,7 +10,10 @@ from nika_core.media.contracts import (
     ModelDescriptor,
     OCRDocument,
     OCRPage,
+    Segment,
     StructuredMediaArtifact,
+    Transcript,
+    TranscriptMethod,
 )
 from nika_core.media.handoff import build_corpus_media_handoff, validate_artifact_for_handoff
 
@@ -127,6 +130,39 @@ def test_handoff_rejects_unreferenced_model_with_missing_engine_evidence() -> No
 
     with pytest.raises(ValueError, match="references an engine missing from artifact evidence"):
         validate_artifact_for_handoff(artifact)
+
+
+def test_handoff_rejects_duplicate_transcript_segment_identity() -> None:
+    transcript = Transcript(
+        transcript_id="transcript-1",
+        version_id="version-1",
+        method=TranscriptMethod.OFFLINE_ASR,
+        segments=(
+            Segment(segment_id="same", start_ms=0, end_ms=100, text="first"),
+            Segment(segment_id="same", start_ms=100, end_ms=200, text="second"),
+        ),
+    )
+    artifact = _artifact(transcript=transcript)
+
+    with pytest.raises(ValueError, match="transcript segment identities must be unique"):
+        build_corpus_media_handoff(artifact)
+
+
+def test_handoff_rejects_duplicate_ocr_page_identity() -> None:
+    ocr = OCRDocument(
+        document_id="ocr-1",
+        version_id="version-1",
+        engine_id="tesseract",
+        model_id="traineddata-ukr",
+        pages=(
+            OCRPage(page_number=1, text="first", source_sha256=_SHA_A),
+            OCRPage(page_number=1, text="second", source_sha256=_SHA_B),
+        ),
+    )
+    artifact = _artifact(ocr_document=ocr)
+
+    with pytest.raises(ValueError, match="OCR page identities must be unique"):
+        build_corpus_media_handoff(artifact)
 
 
 def test_handoff_accepts_unique_closed_engine_model_evidence_graph() -> None:
