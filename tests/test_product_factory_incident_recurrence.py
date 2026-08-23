@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import timedelta
+from typing import get_type_hints
 
 import pytest
 import test_product_factory_incidents as baseline
@@ -18,7 +19,10 @@ from nika_core.product_factory_incident_persistence import (
     dump_incident_snapshot,
     load_incident_snapshot,
 )
-from nika_core.product_factory_incidents import IncidentRepairReleaseCoordinator
+from nika_core.product_factory_incidents import (
+    IncidentRepairReleaseCoordinator,
+    TrustedReviewAuthority,
+)
 
 
 def _rolled_back_first_occurrence():
@@ -50,6 +54,11 @@ def _second_occurrence(
         repeat_trigger,
         baseline.operations().snapshot(),
     )
+
+
+def test_persistence_review_authority_annotation_matches_runtime_contract() -> None:
+    hints = get_type_hints(load_incident_snapshot)
+    assert hints["review_authorities"] == tuple[TrustedReviewAuthority, ...]
 
 
 def test_active_duplicate_is_still_idempotent() -> None:
