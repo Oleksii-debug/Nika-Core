@@ -85,6 +85,13 @@ class BusinessCommunication:
 class BusinessCommunicationCoordinator:
     """Records policy-governed communication state without performing external sends."""
 
+    def __init__(
+        self,
+        *,
+        approval_authority: BusinessAuthorizationAuthorityPort | None = None,
+    ) -> None:
+        self._approval_authority = approval_authority
+
     @staticmethod
     def draft(
         snapshot: BusinessFactorySnapshot,
@@ -114,13 +121,12 @@ class BusinessCommunicationCoordinator:
         )
         return _record_event(record, "communication.drafted", payload_ref)
 
-    @staticmethod
     def authorize(
+        self,
         record: BusinessCommunication,
         snapshot: BusinessFactorySnapshot,
         *,
         approval_ref: str | None = None,
-        approval_authority: BusinessAuthorizationAuthorityPort | None = None,
     ) -> BusinessCommunication:
         _validate_record(record)
         _validate_business_binding(record, snapshot)
@@ -141,7 +147,7 @@ class BusinessCommunicationCoordinator:
             raise BusinessCommunicationError("unsupported communication authority")
         intent = _communication_authorization_intent(record, authorization_use)
         if not trusted_business_authorization(
-            approval_authority,
+            self._approval_authority,
             intent=intent,
             evidence_ref=authorization_ref,
         ):
