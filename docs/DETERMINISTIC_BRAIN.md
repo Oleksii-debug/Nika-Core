@@ -46,7 +46,8 @@ A deterministic run receives:
 - a `DeterministicGoal` with required and forbidden facts;
 - uniquely identified `DeterministicAction` definitions with explicit preconditions/effects and
   optional registered Nika tool calls;
-- caller budgets for maximum executed steps, maximum re-plans, and total planning wall time;
+- caller budgets for maximum executed steps, maximum re-plans, total planning wall time and a
+  per-observation timeout when authoritative state observation is enabled;
 - optionally, a `WorldStateObserver` for authoritative state drift detection;
 - optionally, ordered `previously_completed_action_ids` recovered from a durable checkpoint;
 - for durable non-read-only tool execution, a `DeterministicEffectJournal` plus the stable
@@ -69,6 +70,12 @@ described as a hard-killed native planner process. A particular Unified Planning
 support an internal solve timeout, but Nika does not claim hard native/process cancellation from
 that API without engine-specific executable evidence.
 
+Every `WorldStateObserver.observe()` call is separately bounded by
+`observation_timeout_seconds`. Timeout returns `STATE_OBSERVATION_TIMEOUT`; adapter/type failure
+returns `STATE_OBSERVATION_FAILED`; cancellation propagates rather than being normalized away.
+Together with `max_steps` and `max_replans`, this prevents an observer from making changed-state
+replanning an unbounded wait.
+
 ## Durable tool-effect boundary
 
 A returned `completed_actions` list alone cannot close the process-loss window after a tool has
@@ -80,8 +87,9 @@ Before planner invocation, a Brain configured with an effect journal inspects th
 `PENDING` or `UNCERTAIN` durable operations. Any unresolved operation fails immediately with
 `SIDE_EFFECT_RECONCILIATION_REQUIRED`; the planner is not invoked, so restart cannot evade an
 uncertain effect by choosing a different side-effect action or a purely deterministic alternative
-plan. The journal repeats this task-level unresolved check when reserving a later mutation, which
-closes the preflight-to-side-effect race if another unresolved operation appears concurrently.
+plan. The journal repeats this task-level check both before and after creating its own reservation.
+If another unresolved operation becomes visible in that window, the still-unexecuted local
+reservation is released and no handler is dispatched.
 
 For a registered tool whose `ToolRisk` is not `READ_ONLY`:
 
@@ -117,6 +125,12 @@ and fail-closed no-replay/no-alternative-progress under uncertainty. The externa
 needs its own idempotency or inspection/reconciliation capability when it can apply an effect and
 lose the response.
 
+The effect journal is also not a replacement for the runtime's single-owner/claim authority. Two
+independent Brain instances must not be granted concurrent ownership of the same task merely
+because their individual effects are journaled. Cross-process task ownership and recovery-claim
+serialization belong to the runtime durability layer; DEV16 does not create a competing lease or
+second source of task authority.
+
 Read-only tool calls do not require the effect journal because they are not declared mutation
 boundaries. Misclassifying an effectful tool as `READ_ONLY` is a Tool Registry/policy defect and is
 not legitimized by the planner.
@@ -138,9 +152,9 @@ no approval by itself.
 Planner failures carry `DeterministicErrorCode`, including dependency unavailable, proven
 unreachable goal, no plan found by an incomplete planner, planning timeout, planner resource
 limit, unsupported problem, and planner failure. Execution results additionally classify plan
-length, invalid-plan, re-plan-limit, unavailable-action, ordinary tool-execution failure, missing
-side-effect journal, durable effect-identity conflict, reconciliation-required effect state,
-durable-record failure, and goal-unsatisfied failures.
+length, invalid-plan, re-plan-limit, unavailable-action, state-observation timeout/failure,
+ordinary tool-execution failure, missing side-effect journal, durable effect-identity conflict,
+reconciliation-required effect state, durable-record failure, and goal-unsatisfied failures.
 
 The message remains human-readable while `error_code` is stable for programmatic handling.
 
