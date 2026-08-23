@@ -34,6 +34,7 @@ SHA_A = "a" * 40
 SHA_B = "b" * 40
 DIGEST = "d" * 64
 PERMISSIONS = frozenset({"read_source", "write_source", "run_tests"})
+_RUNNING_STATE = RecoveryState("running", "token")
 
 
 def _run(coroutine):
@@ -90,7 +91,7 @@ class Evidence:
 
 
 class Worker:
-    def __init__(self, execute_result, *, inspect_state=RecoveryState("running", "token")):
+    def __init__(self, execute_result, *, inspect_state=_RUNNING_STATE):
         self.execute_result = execute_result
         self.inspect_state = inspect_state
         self.cancelled = []
