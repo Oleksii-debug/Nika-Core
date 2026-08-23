@@ -1,0 +1,343 @@
+from __future__ import annotations
+
+import asyncio
+
+from nika_core.data.sqlite import SQLiteStore
+from nika_core.intelligence.brain import DeterministicBrain
+from nika_core.intelligence.contracts import (
+    DeterministicAction,
+    DeterministicErrorCode,
+    DeterministicGoal,
+    DeterministicPlan,
+    PlanStep,
+    WorldState,
+)
+from nika_core.intelligence.runtime_effect_journal import RuntimeIdempotencyEffectJournal
+from nika_core.kernel.audit import AuditLog
+from nika_core.kernel.task_queue import TaskQueue
+from nika_core.kernel.task_state import TaskState
+from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
+from nika_core.runtime.recovery import RecoveryDisposition, RuntimeRecoveryService
+from nika_core.runtime.registry import RuntimeRegistry
+from nika_core.runtime.session_store import RuntimeSessionStore
+from nika_core.tools import ToolExecutor, ToolRisk, ToolSpec
+
+
+class _SimulatedProcessLoss(BaseException):
+    """Bypass normal exception handling like abrupt process termination."""
+
+
+class _OneActionPlanner:
+    def plan(self, *, state, goal, actions):
+        del state, goal
+        if not actions:
+            return DeterministicPlan(steps=())
+        action = actions[0]
+        return DeterministicPlan(
+            steps=(PlanStep(action_id=action.action_id, tool_id=action.tool_id),)
+        )
+
+
+class _CrashAfterCompleteJournal:
+    def __init__(self, delegate: RuntimeIdempotencyEffectJournal) -> None:
+        self._delegate = delegate
+
+    def reserve(self, *, task_id, execution_id, action):
+        return self._delegate.reserve(
+            task_id=task_id,
+            execution_id=execution_id,
+            action=action,
+        )
+
+    def complete(self, operation_key: str) -> None:
+        self._delegate.complete(operation_key)
+        raise _SimulatedProcessLoss()
+
+    def mark_uncertain(self, operation_key: str) -> None:
+        self._delegate.mark_uncertain(operation_key)
+
+    def release_pending(self, operation_key: str) -> None:
+        self._delegate.release_pending(operation_key)
+
+
+def _store(tmp_path) -> SQLiteStore:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    return store
+
+
+def _action(*, arguments: dict[str, object] | None = None) -> DeterministicAction:
+    return DeterministicAction(
+        action_id="write-result",
+        adds=frozenset({"done"}),
+        tool_id="write.result",
+        arguments=arguments or {"target": "result.txt"},
+    )
+
+
+def _brain(
+    *,
+    tools: ToolExecutor,
+    journal: RuntimeIdempotencyEffectJournal | _CrashAfterCompleteJournal,
+) -> DeterministicBrain:
+    return DeterministicBrain(
+        planner=_OneActionPlanner(),
+        tools=tools,
+        effect_journal=journal,
+    )
+
+
+def _run(
+    brain: DeterministicBrain,
+    action: DeterministicAction,
+    *,
+    task_id: str,
+    execution_id: str = "execution-1",
+):
+    return asyncio.run(
+        brain.run(
+            run_id="attempt-local",
+            task_id=task_id,
+            execution_id=execution_id,
+            state=WorldState(),
+            goal=DeterministicGoal(required=frozenset({"done"})),
+            actions=(action,),
+        )
+    )
+
+
+def test_process_loss_after_tool_effect_leaves_pending_and_blocks_replay(tmp_path) -> None:
+    store = _store(tmp_path)
+    queue = TaskQueue(store)
+    task = queue.create(workspace_id="proof", agent_id="deterministic")
+    queue.transition(task.task_id, TaskState.READY)
+    queue.transition(task.task_id, TaskState.RUNNING)
+    RuntimeSessionStore(store).record_active(
+        task_id=task.task_id,
+        runtime_id="deterministic-proof",
+        thread_id="thread-1",
+        resume_token="thread-1",
+    )
+    ledger = IdempotencyLedger(store)
+    journal = RuntimeIdempotencyEffectJournal(ledger)
+    effects = 0
+
+    async def effect_then_die(_arguments: dict[str, object]) -> object:
+        nonlocal effects
+        effects += 1
+        raise _SimulatedProcessLoss()
+
+    first_tools = ToolExecutor()
+    first_tools.register(
+        ToolSpec(
+            tool_id="write.result",
+            description="write",
+            risk=ToolRisk.LOCAL_WRITE,
+        ),
+        effect_then_die,
+    )
+
+    try:
+        _run(_brain(tools=first_tools, journal=journal), _action(), task_id=task.task_id)
+    except _SimulatedProcessLoss:
+        pass
+    else:  # pragma: no cover - abrupt-loss fixture must escape the brain
+        raise AssertionError("simulated process loss did not escape")
+
+    records = ledger.list_for_task(task.task_id)
+    assert len(records) == 1
+    assert records[0].status == IdempotencyStatus.PENDING
+    assert effects == 1
+
+    candidate = RuntimeRecoveryService(
+        queue=queue,
+        audit=AuditLog(store),
+        runtimes=RuntimeRegistry(),
+    ).inspect()[0]
+    assert candidate.disposition == RecoveryDisposition.RECONCILE_SIDE_EFFECTS
+    assert candidate.unresolved_operation_keys == (records[0].operation_key,)
+
+    async def must_not_repeat(_arguments: dict[str, object]) -> object:
+        nonlocal effects
+        effects += 1
+        return "repeated"
+
+    restart_tools = ToolExecutor()
+    restart_tools.register(
+        ToolSpec(
+            tool_id="write.result",
+            description="write",
+            risk=ToolRisk.LOCAL_WRITE,
+        ),
+        must_not_repeat,
+    )
+    result = _run(
+        _brain(tools=restart_tools, journal=journal),
+        _action(),
+        task_id=task.task_id,
+    )
+
+    assert result.error_code == DeterministicErrorCode.SIDE_EFFECT_RECONCILIATION_REQUIRED
+    assert result.completed_actions == ()
+    assert effects == 1
+
+
+def test_completed_effect_survives_loss_before_brain_applies_state(tmp_path) -> None:
+    store = _store(tmp_path)
+    ledger = IdempotencyLedger(store)
+    base_journal = RuntimeIdempotencyEffectJournal(ledger)
+    effects = 0
+
+    async def write(_arguments: dict[str, object]) -> object:
+        nonlocal effects
+        effects += 1
+        return "written"
+
+    tools = ToolExecutor()
+    tools.register(
+        ToolSpec(
+            tool_id="write.result",
+            description="write",
+            risk=ToolRisk.LOCAL_WRITE,
+        ),
+        write,
+    )
+
+    crashing_journal = _CrashAfterCompleteJournal(base_journal)
+    try:
+        _run(
+            _brain(tools=tools, journal=crashing_journal),
+            _action(),
+            task_id="task-1",
+        )
+    except _SimulatedProcessLoss:
+        pass
+    else:  # pragma: no cover - fixture must stop after durable completion
+        raise AssertionError("simulated process loss did not escape")
+
+    records = ledger.list_for_task("task-1")
+    assert len(records) == 1
+    assert records[0].status == IdempotencyStatus.COMPLETED
+    assert effects == 1
+
+    restarted = _run(
+        _brain(tools=tools, journal=base_journal),
+        _action(),
+        task_id="task-1",
+    )
+    assert restarted.ok
+    assert restarted.completed_actions == ("write-result",)
+    assert restarted.final_state == WorldState(frozenset({"done"}))
+    assert effects == 1
+
+
+def test_approval_denial_releases_unused_effect_reservation(tmp_path) -> None:
+    store = _store(tmp_path)
+    ledger = IdempotencyLedger(store)
+    journal = RuntimeIdempotencyEffectJournal(ledger)
+    action = _action()
+    calls = 0
+
+    async def write(_arguments: dict[str, object]) -> object:
+        nonlocal calls
+        calls += 1
+        return "written"
+
+    denied_tools = ToolExecutor()
+    denied_tools.register(
+        ToolSpec(
+            tool_id="write.result",
+            description="write",
+            risk=ToolRisk.HIGH_IMPACT,
+        ),
+        write,
+    )
+    denied = _run(
+        _brain(tools=denied_tools, journal=journal),
+        action,
+        task_id="task-approval",
+    )
+    assert denied.error_code == DeterministicErrorCode.TOOL_EXECUTION_FAILED
+    assert denied.error == "approval required"
+    assert ledger.list_for_task("task-approval") == ()
+    assert calls == 0
+
+    async def approve(_spec, _call) -> bool:
+        return True
+
+    approved_tools = ToolExecutor(approval_policy=approve)
+    approved_tools.register(
+        ToolSpec(
+            tool_id="write.result",
+            description="write",
+            risk=ToolRisk.HIGH_IMPACT,
+        ),
+        write,
+    )
+    approved = _run(
+        _brain(tools=approved_tools, journal=journal),
+        action,
+        task_id="task-approval",
+    )
+    assert approved.ok
+    assert calls == 1
+    assert ledger.list_for_task("task-approval")[0].status == IdempotencyStatus.COMPLETED
+
+
+def test_changed_effect_arguments_cannot_rebind_pending_identity(tmp_path) -> None:
+    store = _store(tmp_path)
+    ledger = IdempotencyLedger(store)
+    journal = RuntimeIdempotencyEffectJournal(ledger)
+    calls = 0
+
+    async def effect_then_die(_arguments: dict[str, object]) -> object:
+        nonlocal calls
+        calls += 1
+        raise _SimulatedProcessLoss()
+
+    tools = ToolExecutor()
+    tools.register(
+        ToolSpec(
+            tool_id="write.result",
+            description="write",
+            risk=ToolRisk.LOCAL_WRITE,
+        ),
+        effect_then_die,
+    )
+    try:
+        _run(
+            _brain(tools=tools, journal=journal),
+            _action(arguments={"target": "first.txt"}),
+            task_id="task-conflict",
+        )
+    except _SimulatedProcessLoss:
+        pass
+
+    changed = _run(
+        _brain(tools=tools, journal=journal),
+        _action(arguments={"target": "other.txt"}),
+        task_id="task-conflict",
+    )
+    assert changed.error_code == DeterministicErrorCode.SIDE_EFFECT_IDENTITY_CONFLICT
+    assert calls == 1
+
+
+def test_effect_journal_requires_stable_task_and_execution_identity(tmp_path) -> None:
+    store = _store(tmp_path)
+    journal = RuntimeIdempotencyEffectJournal(IdempotencyLedger(store))
+    tools = ToolExecutor()
+
+    brain = _brain(tools=tools, journal=journal)
+    try:
+        asyncio.run(
+            brain.run(
+                run_id="attempt",
+                state=WorldState(),
+                goal=DeterministicGoal(),
+                actions=(),
+            )
+        )
+    except ValueError as exc:
+        assert "task_id" in str(exc)
+    else:  # pragma: no cover - durable identity is mandatory with the journal
+        raise AssertionError("missing durable identity was accepted")
