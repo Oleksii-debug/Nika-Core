@@ -12,8 +12,8 @@ from nika_core.experiments import (
     DatasetSplit,
     ExperimentDefinition,
     ExperimentEngine,
-    InMemoryExperimentRepository,
     ExperimentStatus,
+    InMemoryExperimentRepository,
     MetricObservation,
     PromotionPolicy,
     ReplayCase,
@@ -107,15 +107,16 @@ def test_declared_cutoff_requires_temporal_provenance_for_every_replay() -> None
 
 
 def test_timezone_naive_temporal_evidence_is_rejected() -> None:
+    naive = datetime(2026, 8, 1, tzinfo=UTC).replace(tzinfo=None)
     with pytest.raises(ValueError, match="timezone-aware"):
         ReplayCase(
             "r1",
             "dataset://evaluation",
             "v1",
-            data_end_at=datetime(2026, 8, 1),
+            data_end_at=naive,
         )
     with pytest.raises(ValueError, match="timezone-aware"):
-        _definition(evaluation_cutoff=datetime(2026, 8, 1))
+        _definition(evaluation_cutoff=naive)
 
 
 def test_causally_valid_held_out_data_can_drive_promotion() -> None:

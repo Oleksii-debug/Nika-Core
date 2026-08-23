@@ -1,6 +1,7 @@
-# MANUAL-DEV21 — atomic fan-out and causally safe experiments
+# MANUAL-DEV21 — atomic fan-out, durable cancellation and causally safe experiments
 
 Starting live `main`: `bd7517f38c04560aa7350b870d8a51bfb6c8113b`.
+Compatibility main: `e40691a6e2ff9c31fd413f63d004612e048d95ed`.
 Lane: `work/manual-dev21/atomic-fanout-causal-experiments`.
 
 ## Scope
@@ -12,26 +13,50 @@ system.
 ### M7: atomic fan-out admission
 
 The prior durable-team lifecycle made each individual child restart-safe, but a fan-out wave could
-still be partially admitted: `MultiAgentSupervisor.fan_out()` called `spawn_child()` repeatedly, so
-an already-partially-consumed parent/team quota could allow early children and reject a later child.
-A restart would then observe an unintended partial wave.
-
-`MultiAgentStore.spawn_children()` is now the canonical fan-out admission primitive:
+still be partially admitted. `MultiAgentStore.spawn_children()` is now the canonical admission
+primitive:
 
 - `BEGIN IMMEDIATE` obtains one SQLite writer boundary before quota decisions;
 - depth, remaining children-per-parent quota, and remaining total-agent quota are evaluated for the
   whole requested wave;
-- privilege attenuation and durable thread-identity uniqueness are validated before the first child insert;
-- every child identity, TASK handoff, and `multi_agent.child_spawned` audit event is committed in the
-  same transaction;
+- privilege attenuation and durable thread-identity uniqueness are validated before the first child
+  insert;
+- every child identity, TASK handoff, and `multi_agent.child_spawned` audit event is committed in
+  the same transaction;
 - any late database/handoff constraint failure rolls back the entire wave;
-- competing fan-out waves serialize at the SQLite writer boundary, so both cannot consume the same
-  remaining aggregate quota;
-- legacy `spawn_child()` remains as a one-child wrapper over the atomic primitive.
+- competing fan-out waves serialize at the SQLite writer boundary;
+- legacy `spawn_child()` remains a one-child wrapper over the atomic primitive.
 
-The supervisor still validates activated agent definitions and definition-level grants before
-admission, and obtains durable runtime initial-resume tokens before the store transaction. Runtime
-execution begins only after the complete wave is durably admitted.
+Runtime execution begins only after the complete wave is durably admitted.
+
+### M7: cancellation authority and uncertain-effect reconciliation
+
+AUD03 proved that the previous supervisor called every external `runtime.cancel()` before committing
+the team's durable cancellation state. An external effect followed by an exception could therefore
+leave durable authority `ACTIVE`; restart or retry could recover or cancel the same work again.
+
+The repaired flow is state-first and effect-aware:
+
+1. a versioned M7 cancellation extension transaction records one stable operation and every exact
+   member/task/thread effect identity;
+2. that same transaction changes the team and every nonterminal member to `CANCELLED` before the
+   first external cancellation call;
+3. each external call must first persist `DISPATCHING`;
+4. normal adapter return records `CONFIRMED`;
+5. an exception records `RECONCILE_REQUIRED`; a crash after `DISPATCHING` is also treated as
+   uncertain after restart and is never blindly replayed;
+6. confirmed effects are skipped on retry;
+7. uncertain effects can move forward only through the optional read-only
+   `CancellationReconciliationPort`, whose exact verdict is `CANCELLED`, `NOT_CANCELLED`, or
+   `UNKNOWN`;
+8. `NOT_CANCELLED` permits exactly that effect to return to `PLANNED`; `CANCELLED` records it as
+   confirmed; `UNKNOWN` remains blocked;
+9. team recovery, new fan-out, and team finalization fail closed while a durable cancellation
+   operation is unfinished.
+
+The external cleanup journal is stored in the same canonical SQLite database. It uses an additive
+M7-owned schema version stream instead of taking the shared global migration number currently used
+by independent research lanes. Future M7 cancellation schema versions fail closed.
 
 ### M8: immutable evaluation-data provenance and causal cutoff
 
@@ -43,58 +68,38 @@ or Gymnasium into the baseline engine.
 New backward-compatible immutable definition metadata:
 
 - `DatasetSplit`: `training`, `evaluation`, or `held_out`;
-- `StrategyRef.training_dataset_fingerprints`: exact content identities of data used to produce a
-  strategy when that provenance is known;
-- `ReplayCase.dataset_fingerprint`: exact content identity of evaluation data;
-- `ReplayCase.data_end_at`: timezone-aware latest data timestamp for temporal experiments;
-- `ExperimentDefinition.evaluation_cutoff`: timezone-aware causal cutoff.
+- `StrategyRef.training_dataset_fingerprints` for exact known training-data identities;
+- `ReplayCase.dataset_fingerprint` for exact evaluation-data identity;
+- `ReplayCase.data_end_at` for timezone-aware latest data time;
+- `ExperimentDefinition.evaluation_cutoff` for the causal cutoff.
 
-Fail-closed rules are activated when the corresponding provenance is declared:
+Fail-closed rules apply when the corresponding provenance is declared: training splits cannot be
+promotion evidence; known training provenance requires evaluation fingerprints; overlapping
+training/evaluation identity is rejected; future data beyond a declared cutoff is rejected; missing
+or timezone-naive temporal evidence is rejected; and fingerprint identities must be canonical
+without leading/trailing whitespace.
 
-1. a promotion replay may never use `DatasetSplit.TRAINING`;
-2. when any candidate declares training-data fingerprints, every promotion replay must declare its
-   own fingerprint;
-3. promotion data whose fingerprint overlaps any candidate training fingerprint is rejected before
-   experiment creation;
-4. when an evaluation cutoff is declared, every replay must declare `data_end_at` and it must be at
-   or before the cutoff;
-5. naive datetimes are rejected so comparisons cannot depend on host-local timezone assumptions;
-6. dataset fingerprints must be canonical exact identities without leading/trailing whitespace.
-
-These fields persist inside the existing immutable experiment-definition JSON. No SQLite schema
-migration is needed. Legacy persisted definitions decode as held-out replays with no fingerprint or
-cutoff, preserving historical M8 behavior until a caller opts into stronger provenance evidence.
+These fields persist inside the existing immutable experiment-definition JSON. No M8 SQLite schema
+migration is needed. Legacy definitions retain their historical held-out/no-cutoff defaults.
 
 ## REUSE → ADAPT → CUSTOM (thin)
 
-- **REUSE:** existing `AgentRuntimePort`, existing LangGraph adapter only behind that port, canonical
-  SQLite transactions, existing `ToolGrant` attenuation, existing M8 repository/events/promotion
-  lifecycle.
-- **ADAPT:** the existing team store into a whole-wave transactional admission boundary; existing
-  immutable M8 definition JSON into a causal-data evidence carrier.
-- **CUSTOM (thin):** Nika-specific aggregate quota admission and generic dataset
-  provenance/contamination/cutoff invariants.
-- **Not added:** scikit-learn, DSPy, Gymnasium, a new orchestration runtime, a training framework, or
-  any production-source mutation API.
+- **REUSE:** `AgentRuntimePort`, LangGraph only behind that port, canonical SQLite, `ToolGrant`
+  attenuation, M8 repository/event/promotion lifecycle, and generic `AuditLog` public append API.
+- **ADAPT:** the existing team store into whole-wave admission; the existing team cancellation path
+  into state-first durable cleanup; immutable M8 definition JSON into a causal-data evidence carrier.
+- **CUSTOM (thin):** Nika aggregate quota, durable cancellation operation/effect identity,
+  reconciliation policy, and generic dataset contamination/cutoff invariants.
+- **Not added:** scikit-learn, DSPy, Gymnasium, a second runtime, a training framework, or a
+  production-source mutation API.
 
 ## Verification matrix
 
-Focused deterministic regressions cover:
-
-- parent remaining quota rejects the entire fan-out wave and remains absent after restart;
-- total-agent remaining quota rejects the entire wave;
-- a late handoff uniqueness failure rolls back every child in the transaction;
-- duplicate/reused durable thread identities are rejected without partial admission;
-- two concurrent batches cannot overbook the same total-agent capacity;
-- non-canonical dataset fingerprints and training/evaluation overlap are rejected;
-- declared training provenance without evaluation fingerprints fails closed;
-- training split cannot be promotion evidence;
-- future data beyond the causal cutoff is rejected;
-- declared cutoff without replay temporal provenance fails closed;
-- timezone-naive temporal identities are rejected;
-- valid held-out data can still promote deterministically;
-- dataset provenance/cutoff survive SQLite restart and promotion continues;
-- legacy persisted definitions decode with backward-compatible defaults.
+Focused deterministic regressions cover atomic remaining-quota admission, transaction rollback,
+concurrent fan-out, durable thread identity, exact AUD03 cancellation effect→exception, restart with
+no blind replay, crash after `DISPATCHING`, concurrent cancel callers, cancellation intent rollback
+before external effect, reconciliation verdicts, future extension-schema rejection, contaminated or
+future evaluation data, valid held-out promotion, SQLite restart, and legacy M8 decoding.
 
 Acceptance credit requires exact-head Ruff, compile, complete pytest, and GitHub Ubuntu/Windows CI.
 Automated tests do not set `HUMAN_TESTED` or `NVDA_VERIFIED`.
