@@ -21,7 +21,7 @@ class PsutilResourceObserver(ResourceObserverPort, ResourceOwnerProbePort):
 
     def snapshot(self) -> ResourceSnapshot:
         memory = psutil.virtual_memory()
-        disk = psutil.disk_usage(self._disk_path)
+        disk = psutil.disk_usage(str(self._disk_path))
         process_memory = self._process.memory_info()
         interval = 0.1 if self._first_snapshot else None
         cpu_percent = float(psutil.cpu_percent(interval=interval))
