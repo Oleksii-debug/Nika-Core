@@ -73,19 +73,12 @@ class HeldOutProtocol:
 
     @property
     def fingerprint(self) -> str:
-        payload = "|".join(
-            (
-                _HELDOUT_SCHEMA,
-                self.train.partition.value,
-                self.train.start_at.isoformat(),
-                self.train.end_at.isoformat(),
-                self.validation.partition.value,
-                self.validation.start_at.isoformat(),
-                self.validation.end_at.isoformat(),
-                self.test.partition.value,
-                self.test.start_at.isoformat(),
-                self.test.end_at.isoformat(),
-            )
+        payload = (
+            f"{_HELDOUT_SCHEMA}|{self.train.partition.value}|"
+            f"{self.train.start_at.isoformat()}|{self.train.end_at.isoformat()}|"
+            f"{self.validation.partition.value}|{self.validation.start_at.isoformat()}|"
+            f"{self.validation.end_at.isoformat()}|{self.test.partition.value}|"
+            f"{self.test.start_at.isoformat()}|{self.test.end_at.isoformat()}"
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 

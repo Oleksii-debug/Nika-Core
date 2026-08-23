@@ -3,8 +3,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Context, Decimal, ROUND_HALF_EVEN, localcontext
+from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
 from enum import StrEnum
+from itertools import pairwise
 
 from .contracts import TradingResearchError, require_aware_utc
 
@@ -74,7 +75,7 @@ def returns_from_equity(points: Sequence[EquityPoint]) -> tuple[Decimal, ...]:
     with localcontext(_METRIC_CONTEXT):
         return tuple(
             (current.equity / previous.equity) - Decimal(1)
-            for previous, current in zip(materialized, materialized[1:], strict=False)
+            for previous, current in pairwise(materialized)
         )
 
 
@@ -88,8 +89,7 @@ def max_drawdown(points: Sequence[EquityPoint]) -> Decimal:
                 peak = point.equity
                 continue
             drawdown = (peak - point.equity) / peak
-            if drawdown > maximum:
-                maximum = drawdown
+            maximum = max(maximum, drawdown)
         return +maximum
 
 
