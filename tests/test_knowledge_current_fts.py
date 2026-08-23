@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.research.chunking import ChunkPolicy
 from nika_core.research.knowledge import (
     CorpusCorruptionError,
     KnowledgeCorpus,
@@ -45,11 +46,11 @@ def _request(text: str) -> KnowledgeIngestRequest:
     )
 
 
-def _inject_historical_fts(store: SQLiteStore) -> None:
+def _historical_fts_rows(store: SQLiteStore) -> list[tuple[str, ...]]:
     with store.connection() as conn:
-        row = conn.execute(
-            """SELECT c.workspace_id, c.artifact_key, c.ordinal, c.chunk_id,
-                      c.text, v.title
+        rows = conn.execute(
+            """SELECT c.workspace_id, c.artifact_key, c.version, c.ordinal,
+                      c.chunk_id, c.text, v.title
             FROM knowledge_chunks AS c
             JOIN knowledge_versions AS v
               ON v.workspace_id=c.workspace_id
@@ -57,21 +58,31 @@ def _inject_historical_fts(store: SQLiteStore) -> None:
              AND v.version=c.version
             WHERE c.workspace_id='ws-a' AND c.artifact_key='artifact-a'
               AND c.version=1
-            ORDER BY c.ordinal LIMIT 1"""
-        ).fetchone()
-        assert row is not None
-        conn.execute(
+            ORDER BY c.ordinal"""
+        ).fetchall()
+    return [
+        (
+            row["workspace_id"],
+            row["artifact_key"],
+            str(row["version"]),
+            str(row["ordinal"]),
+            row["chunk_id"],
+            row["title"],
+            row["text"],
+        )
+        for row in rows
+    ]
+
+
+def _inject_historical_fts(store: SQLiteStore) -> None:
+    rows = _historical_fts_rows(store)
+    assert rows
+    with store.connection() as conn:
+        conn.executemany(
             """INSERT INTO knowledge_fts(
                 workspace_id, artifact_key, version, ordinal, chunk_id, title, body
-            ) VALUES (?, ?, '1', ?, ?, ?, ?)""",
-            (
-                row["workspace_id"],
-                row["artifact_key"],
-                str(row["ordinal"]),
-                row["chunk_id"],
-                row["title"],
-                row["text"],
-            ),
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            rows,
         )
 
 
@@ -149,6 +160,29 @@ def test_v3_migration_rebuilds_v2_fts_projection_without_losing_history(
     assert [int(row["version"]) for row in fts_versions] == [2]
     assert schema_version == KNOWLEDGE_SCHEMA_VERSION == 3
     assert corpus.verify_integrity().versions_checked == 2
+
+
+def test_v3_rebuild_restores_current_only_bm25_statistics(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    corpus = KnowledgeCorpus(store)
+    old_text = " ".join("rankingmarker historical" for _ in range(80))
+    corpus.ingest(
+        _request(old_text),
+        chunk_policy=ChunkPolicy(max_chars=64, overlap_chars=8),
+    )
+    corpus.ingest(_request("rankingmarker current authority"))
+    scope = RetrievalScope(principal_id="user:reader", workspace_ids=("ws-a",))
+    baseline = corpus.search(scope, "rankingmarker")[0].rank
+
+    _inject_historical_fts(store)
+    contaminated = corpus.search(scope, "rankingmarker")[0].rank
+    assert contaminated != baseline
+
+    with store.connection() as conn:
+        conn.execute("DELETE FROM knowledge_schema_migrations WHERE version=3")
+        initialize_knowledge_schema(conn)
+    repaired = corpus.search(scope, "rankingmarker")[0].rank
+    assert repaired == pytest.approx(baseline, rel=0.0, abs=1e-15)
 
 
 def test_v3_migration_fails_closed_on_missing_current_version(tmp_path: Path) -> None:
