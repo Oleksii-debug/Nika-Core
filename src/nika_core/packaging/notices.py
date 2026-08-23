@@ -174,3 +174,19 @@ def verify_third_party_notices(bundle_dir: Path) -> tuple[str, ...]:
         if sections.get(title) != expected_body:
             findings.append(base_finding)
     return tuple(dict.fromkeys(findings))
+
+
+def third_party_notice_section_refs(bundle_dir: Path) -> tuple[str, ...]:
+    """Return exact PF10-addressable refs for generated notice sections."""
+
+    target = bundle_dir / "THIRD_PARTY_NOTICES.txt"
+    if not target.is_file():
+        raise RuntimeError("THIRD_PARTY_NOTICES.txt is missing")
+    text = target.read_text(encoding="utf-8", errors="replace")
+    sections, duplicates = _sections(text)
+    if duplicates:
+        raise RuntimeError(f"duplicate third-party notice sections: {duplicates}")
+    return tuple(
+        f"artifact:THIRD_PARTY_NOTICES.txt#{title}"
+        for title in sorted(sections)
+    )
