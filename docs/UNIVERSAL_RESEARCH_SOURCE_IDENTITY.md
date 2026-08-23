@@ -10,7 +10,7 @@ An HTTP `source_id` is a durable provenance identity, not a mutable bookmark.
 - A `source_id` is permanently bound to one canonical HTTP locator. To research a replacement locator, register a new `source_id`; do not rewrite historical identity.
 - The canonical locator normalizes scheme/host case, IDNA host spelling, default ports, an empty path, and fragments. Query spelling and ordering are preserved because they may change the fetched resource.
 - Two different `source_id` values in one workspace may not resolve to the same canonical locator.
-- URL userinfo (`user:password@host`) is rejected before SQLite persistence. The rejection message does not echo the credential-bearing URL.
+- URL userinfo (`user:password@host`) and credential-bearing query parameters (for example API keys, access tokens, signatures, and passwords) are rejected before SQLite persistence. Rejection messages do not echo the credential-bearing URL.
 - Re-registering the same identity is idempotent and must not clear ETag, Last-Modified, raw-content hash, freshness, or prior provenance.
 
 These rules deliberately avoid a new migration. The existing `(workspace_id, url)` uniqueness remains useful, while the repository performs canonical duplicate checks and immutable-identity checks before writes. This avoids a shared schema-version collision with parallel lanes.
@@ -46,6 +46,6 @@ The field is additive and backward-compatible: existing disposition/error-code b
 
 ## Acceptance evidence
 
-Network-free deterministic tests must prove canonical/idempotent registration, duplicate rejection, cross-workspace and locator mutation rejection across restart, credential non-persistence, distinct private/auth/unsupported/network failure classes, and evidence locator stability after a rejected rebind.
+Network-free deterministic tests must prove canonical/idempotent registration, duplicate rejection, cross-workspace and locator mutation rejection across restart, credential non-persistence (userinfo and query credentials), distinct private/auth/unsupported/network failure classes, and evidence locator stability after a rejected rebind.
 
 `HUMAN_TESTED=false`; `NVDA_VERIFIED=false`. This backend contract does not claim a human accessibility verification gate.
