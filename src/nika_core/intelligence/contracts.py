@@ -118,7 +118,6 @@ class DeterministicEffectJournal(Protocol):
         self,
         *,
         task_id: str,
-        execution_id: str,
         action: DeterministicAction,
     ) -> DeterministicEffectReservation: ...
 
