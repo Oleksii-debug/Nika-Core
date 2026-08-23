@@ -194,13 +194,13 @@ class ModelUsage:
             if value < 0:
                 raise ValueError(f"{name} must not be negative")
         if self.total_tokens is not None:
-            known_parts = tuple(
+            known_total = sum(
                 value
                 for value in (self.input_tokens, self.output_tokens)
                 if value is not None
             )
-            if known_parts and self.total_tokens < max(known_parts):
-                raise ValueError("total_tokens must not be smaller than a component token count")
+            if known_total and self.total_tokens < known_total:
+                raise ValueError("total_tokens must not be smaller than known component tokens")
 
 
 @dataclass(frozen=True, slots=True)
