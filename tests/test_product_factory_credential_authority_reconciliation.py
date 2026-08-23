@@ -27,6 +27,7 @@ class _AuthorityStore:
     issued_handles: list[str] = field(default_factory=list)
     fail_after_effect_once: bool = False
     fail_before_effect: bool = False
+    fail_retirement_after_effect_once: bool = False
 
     def contains(self, secret_ref: str, generation: int) -> bool:
         return (secret_ref, generation) in self.material
@@ -69,6 +70,9 @@ class _AuthorityStore:
         if existing != current_authority_fingerprint:
             raise RuntimeError("authority retirement conflict")
         self.authorities[key] = retired_authority_fingerprint
+        if self.fail_retirement_after_effect_once:
+            self.fail_retirement_after_effect_once = False
+            raise RuntimeError("authority retirement acknowledgement lost")
 
     def issue_handle(
         self,
@@ -214,6 +218,26 @@ def test_restore_rejects_revocation_rollback_to_active_while_material_remains() 
         project_id=PROJECT_A,
         secret_ref=SECRET_REF,
     ).state is CredentialState.REVOKED
+
+
+def test_revocation_reconciles_lost_retirement_acknowledgement_on_exact_retry() -> None:
+    store = _AuthorityStore(fail_retirement_after_effect_once=True)
+    broker, store = _broker(store)
+
+    with pytest.raises(RuntimeError, match="retirement acknowledgement lost"):
+        broker.revoke(project_id=PROJECT_A, secret_ref=SECRET_REF, now=NOW)
+
+    assert broker.get_secret_ref(project_id=PROJECT_A, secret_ref=SECRET_REF).state is CredentialState.ACTIVE
+    broker.revoke(project_id=PROJECT_A, secret_ref=SECRET_REF, now=NOW)
+
+    assert broker.get_secret_ref(
+        project_id=PROJECT_A,
+        secret_ref=SECRET_REF,
+    ).state is CredentialState.REVOKED
+    assert tuple(event.action for event in broker.audit_events(PROJECT_A)) == (
+        "register",
+        "revoke",
+    )
 
 
 def test_restore_rejects_rotation_rollback_to_old_active_generation() -> None:
