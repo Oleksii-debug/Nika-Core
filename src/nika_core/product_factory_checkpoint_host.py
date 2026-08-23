@@ -660,9 +660,9 @@ def _validate_checkpoint_transition(
             raise ProductFactoryCheckpointIntegrityError(
                 "repair attempt requires a prior durable repair_required checkpoint"
             )
-        if current_record.state is WorkState.PLANNED:
+        if current_record.state is not WorkState.READY:
             raise ProductFactoryCheckpointIntegrityError(
-                "repair attempt cannot return to planned state"
+                "new repair attempt must be durably checkpointed as ready before execution"
             )
         _validate_repair_request_transition(previous_request, current_request)
 
