@@ -258,19 +258,11 @@ class BusinessCommunicationRepository:
         payload = dump_business_communication(record)
         now = datetime.now(UTC).isoformat()
         with self.store.connection() as conn:
-            row = conn.execute(
-                "SELECT row_version FROM business_communications WHERE message_id = ?",
-                (record.message_id,),
-            ).fetchone()
-            if row is None:
-                if expected_row_version != 0:
-                    raise StaleCommunicationStateError(
-                        "communication does not exist at expected row version"
-                    )
-                conn.execute(
+            if expected_row_version == 0:
+                inserted = conn.execute(
                     "INSERT INTO business_communications("
                     "message_id, objective_id, row_version, payload_json, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?) ON CONFLICT(message_id) DO NOTHING",
                     (
                         record.message_id,
                         record.objective_id,
@@ -279,13 +271,17 @@ class BusinessCommunicationRepository:
                         now,
                     ),
                 )
-            else:
-                current = int(row["row_version"])
-                if current != expected_row_version:
+                if inserted.rowcount != 1:
+                    row = conn.execute(
+                        "SELECT row_version FROM business_communications WHERE message_id = ?",
+                        (record.message_id,),
+                    ).fetchone()
+                    current = "missing" if row is None else str(int(row["row_version"]))
                     raise StaleCommunicationStateError(
                         "communication row version changed: "
                         f"{current} != {expected_row_version}"
                     )
+            else:
                 updated = conn.execute(
                     "UPDATE business_communications SET objective_id = ?, row_version = ?, "
                     "payload_json = ?, updated_at = ? "
@@ -300,8 +296,18 @@ class BusinessCommunicationRepository:
                     ),
                 )
                 if updated.rowcount != 1:
+                    row = conn.execute(
+                        "SELECT row_version FROM business_communications WHERE message_id = ?",
+                        (record.message_id,),
+                    ).fetchone()
+                    if row is None:
+                        raise StaleCommunicationStateError(
+                            "communication does not exist at expected row version"
+                        )
+                    current = int(row["row_version"])
                     raise StaleCommunicationStateError(
-                        "communication changed during save"
+                        "communication row version changed: "
+                        f"{current} != {expected_row_version}"
                     )
         return record
 
