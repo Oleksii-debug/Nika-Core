@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import timedelta
 
 import pytest
+import test_product_factory_incidents as baseline
 
 from nika_core.product_factory_incident_contracts import (
     INCIDENT_LIFECYCLE_SCHEMA,
@@ -18,8 +19,6 @@ from nika_core.product_factory_incident_persistence import (
     load_incident_snapshot,
 )
 from nika_core.product_factory_incidents import IncidentRepairReleaseCoordinator
-
-import test_product_factory_incidents as baseline
 
 
 def _rolled_back_first_occurrence():
