@@ -4,6 +4,7 @@ from typing import Any
 
 from nika_core.intelligence.contracts import (
     DeterministicAction,
+    DeterministicErrorCode,
     DeterministicGoal,
     DeterministicPlan,
     DeterministicPlanningError,
@@ -31,8 +32,12 @@ class UnifiedPlanningAdapter:
             up = self._shortcuts()
         except (ImportError, ModuleNotFoundError) as exc:
             raise DeterministicPlanningError(
-                "Unified Planning is not installed; install the 'planning' optional component"
+                "Unified Planning is not installed; install the 'planning' optional component",
+                code=DeterministicErrorCode.DEPENDENCY_UNAVAILABLE,
             ) from exc
+
+        if self._goal_satisfied(state, goal):
+            return DeterministicPlan(steps=())
 
         all_facts = set(state.facts) | set(goal.required) | set(goal.forbidden)
         for action in actions:
@@ -69,27 +74,80 @@ class UnifiedPlanningAdapter:
         for fact in goal.forbidden:
             problem.add_goal(up.Not(fluents[fact]))
 
-        if not goal.required and not goal.forbidden:
-            return DeterministicPlan(steps=())
-
         try:
             with up.OneshotPlanner(name=self._engine_name) as planner:
                 result = planner.solve(problem)
         except Exception as exc:
-            raise DeterministicPlanningError("deterministic planner failed") from exc
+            raise DeterministicPlanningError(
+                "deterministic planner failed",
+                code=DeterministicErrorCode.PLANNER_FAILURE,
+            ) from exc
 
+        status_name = getattr(result.status, "name", str(result.status))
         if result.plan is None:
-            raise DeterministicPlanningError("goal is not reachable from the current state")
+            raise self._result_error(status_name)
+
+        if status_name not in {"SOLVED_SATISFICING", "SOLVED_OPTIMALLY"}:
+            raise DeterministicPlanningError(
+                f"deterministic planner returned inconsistent status: {status_name}",
+                code=DeterministicErrorCode.PLANNER_FAILURE,
+            )
+
+        actions_in_plan = getattr(result.plan, "actions", None)
+        if actions_in_plan is None:
+            raise DeterministicPlanningError(
+                "deterministic planner returned a non-sequential plan",
+                code=DeterministicErrorCode.UNSUPPORTED_PROBLEM,
+            )
 
         plan_steps: list[PlanStep] = []
-        for action_instance in result.plan.actions:
+        for action_instance in actions_in_plan:
             definition = action_by_up_name.get(action_instance.action.name)
             if definition is None:
-                raise DeterministicPlanningError("planner returned an unknown action")
+                raise DeterministicPlanningError(
+                    "planner returned an unknown action",
+                    code=DeterministicErrorCode.PLANNER_FAILURE,
+                )
             plan_steps.append(
                 PlanStep(action_id=definition.action_id, tool_id=definition.tool_id)
             )
         return DeterministicPlan(steps=tuple(plan_steps))
+
+    @staticmethod
+    def _result_error(status_name: str) -> DeterministicPlanningError:
+        if status_name == "UNSOLVABLE_PROVEN":
+            return DeterministicPlanningError(
+                "goal is not reachable from the current state",
+                code=DeterministicErrorCode.GOAL_UNREACHABLE,
+            )
+        if status_name == "UNSOLVABLE_INCOMPLETELY":
+            return DeterministicPlanningError(
+                "planner could not find a plan for the current state and goal",
+                code=DeterministicErrorCode.NO_PLAN_FOUND,
+            )
+        if status_name == "TIMEOUT":
+            return DeterministicPlanningError(
+                "deterministic planner timed out",
+                code=DeterministicErrorCode.PLANNING_TIMEOUT,
+            )
+        if status_name == "MEMOUT":
+            return DeterministicPlanningError(
+                "deterministic planner exhausted its memory budget",
+                code=DeterministicErrorCode.PLANNER_RESOURCE_LIMIT,
+            )
+        if status_name == "UNSUPPORTED_PROBLEM":
+            return DeterministicPlanningError(
+                "deterministic planner does not support this planning problem",
+                code=DeterministicErrorCode.UNSUPPORTED_PROBLEM,
+            )
+        return DeterministicPlanningError(
+            f"deterministic planner failed with status: {status_name}",
+            code=DeterministicErrorCode.PLANNER_FAILURE,
+        )
+
+    @staticmethod
+    def _goal_satisfied(state: WorldState, goal: DeterministicGoal) -> bool:
+        return goal.required <= state.facts and not goal.forbidden & state.facts
 
     @staticmethod
     def _shortcuts() -> Any:
