@@ -71,7 +71,6 @@ class DeterministicBrain:
         previously_completed_action_ids: tuple[str, ...] = (),
         state_observer: WorldStateObserver | None = None,
         task_id: str | None = None,
-        execution_id: str | None = None,
         max_steps: int = 100,
         max_replans: int = 8,
         planning_timeout_seconds: float = 30.0,
@@ -84,11 +83,8 @@ class DeterministicBrain:
             raise ValueError("max_replans must be non-negative")
         if planning_timeout_seconds <= 0:
             raise ValueError("planning_timeout_seconds must be greater than zero")
-        if self._effect_journal is not None:
-            if task_id is None or not task_id.strip():
-                raise ValueError("task_id is required when effect_journal is configured")
-            if execution_id is None or not execution_id.strip():
-                raise ValueError("execution_id is required when effect_journal is configured")
+        if self._effect_journal is not None and (task_id is None or not task_id.strip()):
+            raise ValueError("task_id is required when effect_journal is configured")
 
         # Kept for source compatibility only. A planner-selected action ID is not approval
         # evidence and must never turn into ToolCall.approved=True.
@@ -226,7 +222,6 @@ class DeterministicBrain:
                     action=action,
                     run_id=run_id,
                     task_id=task_id,
-                    execution_id=execution_id,
                     executed_steps=executed_steps,
                     plan_index=index,
                     tool_specs=tool_specs,
@@ -295,7 +290,6 @@ class DeterministicBrain:
         action: DeterministicAction,
         run_id: str,
         task_id: str | None,
-        execution_id: str | None,
         executed_steps: int,
         plan_index: int,
         tool_specs: dict[str, ToolSpec],
@@ -315,14 +309,12 @@ class DeterministicBrain:
                 DeterministicErrorCode.SIDE_EFFECT_JOURNAL_REQUIRED,
                 "non-read-only deterministic tool requires a durable effect journal",
             )
-
-        if task_id is None or execution_id is None:  # validated at run entry
-            raise AssertionError("durable deterministic effect identity is unavailable")
+        if task_id is None:  # validated at run entry
+            raise AssertionError("durable deterministic task identity is unavailable")
 
         try:
             reservation = journal.reserve(
                 task_id=task_id,
-                execution_id=execution_id,
                 action=action,
             )
         except DeterministicEffectConflictError as exc:
