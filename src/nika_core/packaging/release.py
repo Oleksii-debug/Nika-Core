@@ -70,9 +70,7 @@ def _canonical_relative_path(value: object) -> bool:
     path = PurePosixPath(value)
     if path.is_absolute() or path.as_posix() != value:
         return False
-    if any(part in {".", ".."} for part in path.parts):
-        return False
-    return True
+    return not any(part in {".", ".."} for part in path.parts)
 
 
 def _canonical_release_path(value: object) -> bool:
