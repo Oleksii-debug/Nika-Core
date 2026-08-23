@@ -80,14 +80,19 @@ or timezone-naive temporal evidence is rejected; and fingerprint identities must
 without leading/trailing whitespace.
 
 These fields persist inside the existing immutable experiment-definition JSON. No M8 SQLite schema
-migration is needed. Legacy definitions retain their historical held-out/no-cutoff defaults.
+migration is needed. A replay without explicit split provenance defaults conservatively to
+`evaluation`, never `held_out`. Legacy persisted definitions that predate the split field therefore
+retain their promotion compatibility without being retroactively upgraded to held-out evidence.
+Persisted definition decoding also fails closed on wrong JSON scalar/container types instead of
+coercing strings, numbers, or booleans into plausible experiment policy/provenance values.
 
 ## REUSE → ADAPT → CUSTOM (thin)
 
 - **REUSE:** `AgentRuntimePort`, LangGraph only behind that port, canonical SQLite, `ToolGrant`
   attenuation, M8 repository/event/promotion lifecycle, and generic `AuditLog` public append API.
 - **ADAPT:** the existing team store into whole-wave admission; the existing team cancellation path
-  into state-first durable cleanup; immutable M8 definition JSON into a causal-data evidence carrier.
+  into state-first durable cleanup; immutable M8 definition JSON into a causal-data evidence
+  carrier.
 - **CUSTOM (thin):** Nika aggregate quota, durable cancellation operation/effect identity,
   reconciliation policy, and generic dataset contamination/cutoff invariants.
 - **Not added:** scikit-learn, DSPy, Gymnasium, a second runtime, a training framework, or a
@@ -99,7 +104,8 @@ Focused deterministic regressions cover atomic remaining-quota admission, transa
 concurrent fan-out, durable thread identity, exact AUD03 cancellation effect→exception, restart with
 no blind replay, crash after `DISPATCHING`, concurrent cancel callers, cancellation intent rollback
 before external effect, reconciliation verdicts, future extension-schema rejection, contaminated or
-future evaluation data, valid held-out promotion, SQLite restart, and legacy M8 decoding.
+future evaluation data, valid held-out promotion, SQLite restart, conservative legacy split
+decoding, and fail-closed persisted-type corruption.
 
 Acceptance credit requires exact-head Ruff, compile, complete pytest, and GitHub Ubuntu/Windows CI.
 Automated tests do not set `HUMAN_TESTED` or `NVDA_VERIFIED`.

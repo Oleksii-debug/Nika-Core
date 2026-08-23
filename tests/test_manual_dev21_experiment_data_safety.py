@@ -64,6 +64,70 @@ def _definition(
     )
 
 
+def _legacy_definition_payload() -> dict[str, object]:
+    return {
+        "experiment_id": "legacy-exp",
+        "champion": {
+            "candidate_id": "champion",
+            "version": "1",
+            "artifact_kind": "prompt",
+            "artifact_ref": "prompt://champion/1",
+            "permission_fingerprint": "perm-v1",
+        },
+        "challengers": [
+            {
+                "candidate_id": "challenger",
+                "version": "1",
+                "artifact_kind": "prompt",
+                "artifact_ref": "prompt://challenger/1",
+                "permission_fingerprint": "perm-v1",
+            }
+        ],
+        "replays": [
+            {
+                "replay_id": "r1",
+                "dataset_ref": "dataset://legacy",
+                "dataset_version": "v1",
+            }
+        ],
+        "policy": {
+            "primary_metric": "quality",
+            "minimum_improvement": 0.0,
+            "minimum_replays": 1,
+            "guardrails": [],
+            "primary_higher_is_better": True,
+        },
+    }
+
+
+def _persist_definition(
+    tmp_path: Path,
+    definition: dict[str, object],
+    *,
+    experiment_id: str = "legacy-exp",
+) -> SQLiteExperimentRepository:
+    path = tmp_path / "nika.db"
+    store = SQLiteStore(path)
+    store.initialize()
+    now = datetime.now(UTC).isoformat()
+    with store.connection() as conn:
+        conn.execute(
+            "INSERT INTO experiments(experiment_id, definition_json, status, "
+            "selected_candidate_id, previous_champion_id, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                experiment_id,
+                json.dumps(definition, sort_keys=True, separators=(",", ":")),
+                "draft",
+                None,
+                None,
+                now,
+                now,
+            ),
+        )
+    return SQLiteExperimentRepository(SQLiteStore(path))
+
+
 def test_dataset_fingerprints_require_canonical_exact_identity() -> None:
     with pytest.raises(ValueError, match="canonical without whitespace"):
         _strategy("candidate", training=("sha256:train-v1 ",))
@@ -74,6 +138,11 @@ def test_dataset_fingerprints_require_canonical_exact_identity() -> None:
             "v1",
             dataset_fingerprint=" sha256:eval-v1",
         )
+
+
+def test_replay_without_proven_split_defaults_to_evaluation_not_held_out() -> None:
+    replay = ReplayCase("r1", "dataset://evaluation", "v1")
+    assert replay.split is DatasetSplit.EVALUATION
 
 
 def test_training_dataset_cannot_be_reused_as_promotion_replay() -> None:
@@ -170,63 +239,44 @@ def test_dataset_provenance_and_cutoff_survive_sqlite_restart(tmp_path: Path) ->
     assert promoted.status is ExperimentStatus.PROMOTED
 
 
-def test_legacy_persisted_definition_defaults_to_held_out_without_cutoff(tmp_path: Path) -> None:
-    path = tmp_path / "nika.db"
-    store = SQLiteStore(path)
-    store.initialize()
-    legacy_definition = {
-        "experiment_id": "legacy-exp",
-        "champion": {
-            "candidate_id": "champion",
-            "version": "1",
-            "artifact_kind": "prompt",
-            "artifact_ref": "prompt://champion/1",
-            "permission_fingerprint": "perm-v1",
-        },
-        "challengers": [
-            {
-                "candidate_id": "challenger",
-                "version": "1",
-                "artifact_kind": "prompt",
-                "artifact_ref": "prompt://challenger/1",
-                "permission_fingerprint": "perm-v1",
-            }
-        ],
-        "replays": [
-            {
-                "replay_id": "r1",
-                "dataset_ref": "dataset://legacy",
-                "dataset_version": "v1",
-            }
-        ],
-        "policy": {
-            "primary_metric": "quality",
-            "minimum_improvement": 0.0,
-            "minimum_replays": 1,
-            "guardrails": [],
-            "primary_higher_is_better": True,
-        },
-    }
-    now = datetime.now(UTC).isoformat()
-    with store.connection() as conn:
-        conn.execute(
-            "INSERT INTO experiments(experiment_id, definition_json, status, "
-            "selected_candidate_id, previous_champion_id, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                "legacy-exp",
-                json.dumps(legacy_definition, sort_keys=True, separators=(",", ":")),
-                "draft",
-                None,
-                None,
-                now,
-                now,
-            ),
-        )
+def test_legacy_persisted_definition_keeps_unknown_split_as_evaluation(tmp_path: Path) -> None:
+    recovered = _persist_definition(tmp_path, _legacy_definition_payload()).get("legacy-exp")
 
-    recovered = SQLiteExperimentRepository(SQLiteStore(path)).get("legacy-exp")
-    assert recovered.definition.replays[0].split is DatasetSplit.HELD_OUT
+    assert recovered.definition.replays[0].split is DatasetSplit.EVALUATION
     assert recovered.definition.replays[0].dataset_fingerprint is None
     assert recovered.definition.replays[0].data_end_at is None
     assert recovered.definition.evaluation_cutoff is None
     assert recovered.definition.champion.training_dataset_fingerprints == ()
+
+
+def test_persisted_policy_direction_string_fails_closed(tmp_path: Path) -> None:
+    definition = _legacy_definition_payload()
+    policy = definition["policy"]
+    assert isinstance(policy, dict)
+    policy["primary_higher_is_better"] = "false"
+    repository = _persist_definition(tmp_path, definition)
+
+    with pytest.raises(TypeError, match="primary_higher_is_better"):
+        repository.get("legacy-exp")
+
+
+def test_persisted_numeric_training_fingerprint_fails_closed(tmp_path: Path) -> None:
+    definition = _legacy_definition_payload()
+    champion = definition["champion"]
+    assert isinstance(champion, dict)
+    champion["training_dataset_fingerprints"] = [123]
+    repository = _persist_definition(tmp_path, definition)
+
+    with pytest.raises(TypeError, match="contain only strings"):
+        repository.get("legacy-exp")
+
+
+def test_persisted_minimum_replays_string_fails_closed(tmp_path: Path) -> None:
+    definition = _legacy_definition_payload()
+    policy = definition["policy"]
+    assert isinstance(policy, dict)
+    policy["minimum_replays"] = "1"
+    repository = _persist_definition(tmp_path, definition)
+
+    with pytest.raises(TypeError, match="minimum_replays"):
+        repository.get("legacy-exp")

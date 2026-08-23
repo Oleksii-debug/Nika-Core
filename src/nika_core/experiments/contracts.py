@@ -45,6 +45,8 @@ class StrategyRef:
             if not value.strip():
                 raise ValueError(f"{name} must not be empty")
         fingerprints = self.training_dataset_fingerprints
+        if any(not isinstance(item, str) for item in fingerprints):
+            raise TypeError("training dataset fingerprints must be strings")
         if any(not item.strip() for item in fingerprints):
             raise ValueError("training dataset fingerprints must not be empty")
         if any(item != item.strip() for item in fingerprints):
@@ -58,7 +60,7 @@ class ReplayCase:
     replay_id: str
     dataset_ref: str
     dataset_version: str
-    split: DatasetSplit = DatasetSplit.HELD_OUT
+    split: DatasetSplit = DatasetSplit.EVALUATION
     dataset_fingerprint: str | None = None
     data_end_at: datetime | None = None
 
@@ -69,6 +71,8 @@ class ReplayCase:
             or not self.dataset_version.strip()
         ):
             raise ValueError("replay identity must be complete")
+        if not isinstance(self.split, DatasetSplit):
+            raise TypeError("replay split must be a DatasetSplit")
         if self.split is DatasetSplit.TRAINING:
             raise ValueError("promotion replay cannot use the training split")
         if self.dataset_fingerprint is not None:
@@ -103,6 +107,8 @@ class MetricRule:
     def __post_init__(self) -> None:
         if not self.metric.strip():
             raise ValueError("metric must not be empty")
+        if type(self.higher_is_better) is not bool:
+            raise TypeError("higher_is_better must be a boolean")
         if not isfinite(float(self.max_regression)) or self.max_regression < 0:
             raise ValueError("max_regression must be finite and non-negative")
 
@@ -120,8 +126,12 @@ class PromotionPolicy:
             raise ValueError("primary_metric must not be empty")
         if not isfinite(float(self.minimum_improvement)) or self.minimum_improvement < 0:
             raise ValueError("minimum_improvement must be finite and non-negative")
+        if type(self.minimum_replays) is not int:
+            raise TypeError("minimum_replays must be an integer")
         if self.minimum_replays < 1:
             raise ValueError("minimum_replays must be at least 1")
+        if type(self.primary_higher_is_better) is not bool:
+            raise TypeError("primary_higher_is_better must be a boolean")
         names = [rule.metric for rule in self.guardrails]
         if len(names) != len(set(names)):
             raise ValueError("guardrail metrics must be unique")

@@ -271,37 +271,73 @@ def _strategy_payload(item: StrategyRef) -> dict[str, object]:
 
 def _decode_definition(raw: str) -> ExperimentDefinition:
     payload = json.loads(raw)
-    policy = payload["policy"]
+    if not isinstance(payload, dict):
+        raise TypeError("persisted experiment definition must be an object")
+    policy = _required_mapping(payload.get("policy"), "policy")
+    challengers = _required_sequence(payload.get("challengers"), "challengers")
+    replays = _required_sequence(payload.get("replays"), "replays")
+    guardrails = _required_sequence(policy.get("guardrails"), "policy.guardrails")
     return ExperimentDefinition(
-        experiment_id=payload["experiment_id"],
-        champion=_decode_strategy(payload["champion"]),
-        challengers=tuple(_decode_strategy(item) for item in payload["challengers"]),
+        experiment_id=_required_string(payload.get("experiment_id"), "experiment_id"),
+        champion=_decode_strategy(_required_mapping(payload.get("champion"), "champion")),
+        challengers=tuple(
+            _decode_strategy(_required_mapping(item, "challenger")) for item in challengers
+        ),
         replays=tuple(
-            ReplayCase(
-                replay_id=item["replay_id"],
-                dataset_ref=item["dataset_ref"],
-                dataset_version=item["dataset_version"],
-                split=DatasetSplit(str(item.get("split", DatasetSplit.HELD_OUT.value))),
-                dataset_fingerprint=_optional_string(item.get("dataset_fingerprint")),
-                data_end_at=_decode_datetime(item.get("data_end_at")),
-            )
-            for item in payload["replays"]
+            _decode_replay(_required_mapping(item, "replay"))
+            for item in replays
         ),
         policy=PromotionPolicy(
-            primary_metric=policy["primary_metric"],
-            minimum_improvement=float(policy["minimum_improvement"]),
-            minimum_replays=int(policy["minimum_replays"]),
+            primary_metric=_required_string(
+                policy.get("primary_metric"),
+                "policy.primary_metric",
+            ),
+            minimum_improvement=_required_number(
+                policy.get("minimum_improvement"),
+                "policy.minimum_improvement",
+            ),
+            minimum_replays=_required_integer(
+                policy.get("minimum_replays"),
+                "policy.minimum_replays",
+            ),
             guardrails=tuple(
                 MetricRule(
-                    metric=item["metric"],
-                    higher_is_better=bool(item["higher_is_better"]),
-                    max_regression=float(item["max_regression"]),
+                    metric=_required_string(item.get("metric"), "guardrail.metric"),
+                    higher_is_better=_required_boolean(
+                        item.get("higher_is_better"),
+                        "guardrail.higher_is_better",
+                    ),
+                    max_regression=_required_number(
+                        item.get("max_regression"),
+                        "guardrail.max_regression",
+                    ),
                 )
-                for item in policy["guardrails"]
+                for item in (
+                    _required_mapping(raw_guardrail, "guardrail")
+                    for raw_guardrail in guardrails
+                )
             ),
-            primary_higher_is_better=bool(policy.get("primary_higher_is_better", True)),
+            primary_higher_is_better=_required_boolean(
+                policy.get("primary_higher_is_better", True),
+                "policy.primary_higher_is_better",
+            ),
         ),
         evaluation_cutoff=_decode_datetime(payload.get("evaluation_cutoff")),
+    )
+
+
+def _decode_replay(payload: dict[str, object]) -> ReplayCase:
+    raw_split = payload.get("split", DatasetSplit.EVALUATION.value)
+    return ReplayCase(
+        replay_id=_required_string(payload.get("replay_id"), "replay.replay_id"),
+        dataset_ref=_required_string(payload.get("dataset_ref"), "replay.dataset_ref"),
+        dataset_version=_required_string(
+            payload.get("dataset_version"),
+            "replay.dataset_version",
+        ),
+        split=DatasetSplit(_required_string(raw_split, "replay.split")),
+        dataset_fingerprint=_optional_string(payload.get("dataset_fingerprint")),
+        data_end_at=_decode_datetime(payload.get("data_end_at")),
     )
 
 
@@ -309,13 +345,20 @@ def _decode_strategy(payload: dict[str, object]) -> StrategyRef:
     training = payload.get("training_dataset_fingerprints", ())
     if not isinstance(training, (list, tuple)):
         raise TypeError("training_dataset_fingerprints must be a sequence")
+    if any(not isinstance(item, str) for item in training):
+        raise TypeError("training_dataset_fingerprints must contain only strings")
     return StrategyRef(
-        candidate_id=str(payload["candidate_id"]),
-        version=str(payload["version"]),
-        artifact_kind=ArtifactKind(str(payload["artifact_kind"])),
-        artifact_ref=str(payload["artifact_ref"]),
-        permission_fingerprint=str(payload["permission_fingerprint"]),
-        training_dataset_fingerprints=tuple(str(item) for item in training),
+        candidate_id=_required_string(payload.get("candidate_id"), "strategy.candidate_id"),
+        version=_required_string(payload.get("version"), "strategy.version"),
+        artifact_kind=ArtifactKind(
+            _required_string(payload.get("artifact_kind"), "strategy.artifact_kind")
+        ),
+        artifact_ref=_required_string(payload.get("artifact_ref"), "strategy.artifact_ref"),
+        permission_fingerprint=_required_string(
+            payload.get("permission_fingerprint"),
+            "strategy.permission_fingerprint",
+        ),
+        training_dataset_fingerprints=tuple(training),
     )
 
 
@@ -337,3 +380,39 @@ def _optional_string(value: object) -> str | None:
     if not isinstance(value, str):
         raise TypeError("persisted dataset fingerprint must be a string")
     return value
+
+
+def _required_mapping(value: object, field: str) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise TypeError(f"persisted {field} must be an object")
+    return value
+
+
+def _required_sequence(value: object, field: str) -> list[object] | tuple[object, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(f"persisted {field} must be a sequence")
+    return value
+
+
+def _required_string(value: object, field: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"persisted {field} must be a string")
+    return value
+
+
+def _required_boolean(value: object, field: str) -> bool:
+    if type(value) is not bool:
+        raise TypeError(f"persisted {field} must be a boolean")
+    return value
+
+
+def _required_integer(value: object, field: str) -> int:
+    if type(value) is not int:
+        raise TypeError(f"persisted {field} must be an integer")
+    return value
+
+
+def _required_number(value: object, field: str) -> float:
+    if type(value) not in (int, float):
+        raise TypeError(f"persisted {field} must be numeric")
+    return float(value)
