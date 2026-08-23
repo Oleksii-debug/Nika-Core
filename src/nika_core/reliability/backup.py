@@ -87,6 +87,14 @@ class SQLiteRecoveryManager:
         self._audit = audit or AuditLog(store)
 
     def create_backup(self, backup_path: Path | str) -> BackupArtifact:
+        return self._create_backup(backup_path, record_audit=True)
+
+    def _create_backup(
+        self,
+        backup_path: Path | str,
+        *,
+        record_audit: bool,
+    ) -> BackupArtifact:
         self._ensure_no_interrupted_restore()
         source = self._store.path.resolve()
         destination = Path(backup_path).resolve()
@@ -137,15 +145,16 @@ class SQLiteRecoveryManager:
             schema_version=schema,
             created_at=created_at,
         )
-        self._audit_if_possible(
-            "reliability.backup_created",
-            {
-                "backup_file": destination.name,
-                "sha256": digest,
-                "size_bytes": size,
-                "schema_version": schema,
-            },
-        )
+        if record_audit:
+            self._audit_if_possible(
+                "reliability.backup_created",
+                {
+                    "backup_file": destination.name,
+                    "sha256": digest,
+                    "size_bytes": size,
+                    "schema_version": schema,
+                },
+            )
         return artifact
 
     def verify_backup(self, backup_path: Path | str) -> BackupArtifact:
@@ -305,8 +314,9 @@ class SQLiteRecoveryManager:
                     "staged restore did not migrate to the current schema"
                 )
             if current_exists and plan.current_is_healthy:
-                safety = self.create_backup(
-                    target.parent / self._safety_backup_name(target)
+                safety = self._create_backup(
+                    target.parent / self._safety_backup_name(target),
+                    record_audit=False,
                 )
             elif current_exists and not allow_replace_unrecoverable_current:
                 raise RestoreSafetyError(
