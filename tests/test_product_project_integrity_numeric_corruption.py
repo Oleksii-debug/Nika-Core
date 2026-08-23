@@ -3,12 +3,11 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
+import test_product_project_integrity as baseline
 
 from nika_core.product_decisions import ProductDecisionRepository
 from nika_core.product_project import ProductProjectError
 from nika_core.product_project_integrity import ProductProjectIntegrityService
-
-import test_product_project_integrity as baseline
 
 
 @pytest.mark.parametrize(
