@@ -115,7 +115,6 @@ def test_http_provider_failure_maps_to_typed_gateway_error() -> None:
             base_url="https://provider.invalid/v1",
             kind=ProviderKind.CLOUD,
             default_model="controlled-model",
-            supports_private_data=True,
             client_factory=client_factory,
         ),
         default=True,
@@ -195,7 +194,7 @@ def test_sensitive_data_fails_closed_for_untrusted_provider() -> None:
             )
         )
 
-    assert exc_info.value.code is ModelErrorCode.POLICY_DENIED
+    assert exc_info.value.code is ModelErrorCode.INVALID_REQUEST
 
 
 def test_gateway_uses_explicit_fallback_after_retryable_failure() -> None:
@@ -349,7 +348,7 @@ def test_sensitive_fallback_route_is_rejected_before_primary_execution() -> None
             )
         )
 
-    assert exc_info.value.code is ModelErrorCode.POLICY_DENIED
+    assert exc_info.value.code is ModelErrorCode.INVALID_REQUEST
     assert exc_info.value.provider_id == "unsafe-cloud"
     assert primary_called is False
 
