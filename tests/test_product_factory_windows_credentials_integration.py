@@ -251,15 +251,15 @@ def test_windows_handle_operation_is_idempotent_and_reconcilable() -> None:
     store = WindowsCredentialStore(backend)
     store.provision_secret("secret-a", 1, RAW_SECRET)
     expires_at = NOW + timedelta(minutes=5)
-    request = dict(
-        operation_id="credential-lease-00000001",
-        secret_ref="secret-a",
-        generation=1,
-        project_id=PROJECT,
-        audience="github-api",
-        scopes=frozenset({"repo:read"}),
-        expires_at=expires_at,
-    )
+    request = {
+        "operation_id": "credential-lease-00000001",
+        "secret_ref": "secret-a",
+        "generation": 1,
+        "project_id": PROJECT,
+        "audience": "github-api",
+        "scopes": frozenset({"repo:read"}),
+        "expires_at": expires_at,
+    }
 
     first = store.issue_handle(**request)
     second = store.issue_handle(**request)

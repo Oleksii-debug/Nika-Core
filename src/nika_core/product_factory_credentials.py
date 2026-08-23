@@ -351,7 +351,7 @@ class CredentialBroker:
                     scopes=pending.scopes,
                     expires_at=pending.expires_at,
                 )
-            except Exception:
+            except RuntimeError:
                 try:
                     handle_ref = self.store.reconcile_handle(
                         operation_id=pending.lease_id,
@@ -362,7 +362,7 @@ class CredentialBroker:
                         scopes=pending.scopes,
                         expires_at=pending.expires_at,
                     )
-                except Exception:
+                except RuntimeError:
                     raise CredentialBrokerError(
                         "protected store handle issuance failed and could not be reconciled"
                     ) from None
