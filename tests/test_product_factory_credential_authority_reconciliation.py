@@ -54,6 +54,22 @@ class _AuthorityStore:
     ) -> bool:
         return self.authorities.get((secret_ref, generation)) == authority_fingerprint
 
+    def retire_authority(
+        self,
+        *,
+        secret_ref: str,
+        generation: int,
+        current_authority_fingerprint: str,
+        retired_authority_fingerprint: str,
+    ) -> None:
+        key = (secret_ref, generation)
+        existing = self.authorities.get(key)
+        if existing == retired_authority_fingerprint:
+            return
+        if existing != current_authority_fingerprint:
+            raise RuntimeError("authority retirement conflict")
+        self.authorities[key] = retired_authority_fingerprint
+
     def issue_handle(
         self,
         *,
@@ -179,6 +195,44 @@ def test_restore_rejects_forged_credential_policy(replacement: dict[str, object]
 
     with pytest.raises(CredentialBrokerError, match="authority does not match"):
         CredentialBroker(store).restore(forged)
+
+
+def test_restore_rejects_revocation_rollback_to_active_while_material_remains() -> None:
+    broker, store = _broker()
+    stale_active = broker.snapshot()
+
+    broker.revoke(project_id=PROJECT_A, secret_ref=SECRET_REF, now=NOW)
+    revoked = broker.snapshot()
+
+    assert store.contains(SECRET_REF, 1)
+    with pytest.raises(CredentialBrokerError, match="authority does not match"):
+        CredentialBroker(store).restore(stale_active)
+
+    restored = CredentialBroker(store)
+    restored.restore(revoked)
+    assert restored.get_secret_ref(
+        project_id=PROJECT_A,
+        secret_ref=SECRET_REF,
+    ).state is CredentialState.REVOKED
+
+
+def test_restore_rejects_rotation_rollback_to_old_active_generation() -> None:
+    broker, store = _broker()
+    stale_generation_one = broker.snapshot()
+    store.material.add((SECRET_REF, 2))
+
+    rotated = broker.rotate(project_id=PROJECT_A, secret_ref=SECRET_REF, now=NOW)
+    current = broker.snapshot()
+
+    assert rotated.generation == 2
+    with pytest.raises(CredentialBrokerError, match="authority does not match"):
+        CredentialBroker(store).restore(stale_generation_one)
+
+    restored = CredentialBroker(store)
+    restored.restore(current)
+    active = restored.get_secret_ref(project_id=PROJECT_A, secret_ref=SECRET_REF)
+    assert active.generation == 2
+    assert active.state is CredentialState.ACTIVE
 
 
 def test_post_effect_handle_failure_is_reconciled_without_duplicate_authority() -> None:
