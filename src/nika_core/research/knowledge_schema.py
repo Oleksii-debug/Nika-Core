@@ -4,7 +4,7 @@ import hashlib
 import sqlite3
 from datetime import UTC, datetime
 
-KNOWLEDGE_SCHEMA_VERSION = 2
+KNOWLEDGE_SCHEMA_VERSION = 3
 
 KNOWLEDGE_MIGRATION_1 = (
     """CREATE TABLE IF NOT EXISTS knowledge_artifacts (
@@ -203,6 +203,43 @@ def _backfill_legacy_corpus(conn: sqlite3.Connection) -> None:
             )
 
 
+def _rebuild_current_fts(conn: sqlite3.Connection) -> None:
+    artifact_count = int(
+        conn.execute("SELECT COUNT(*) FROM knowledge_artifacts").fetchone()[0]
+    )
+    current_version_count = int(
+        conn.execute(
+            """SELECT COUNT(*) FROM knowledge_artifacts AS a
+            JOIN knowledge_versions AS v
+              ON v.workspace_id=a.workspace_id
+             AND v.artifact_key=a.artifact_key
+             AND v.version=a.current_version"""
+        ).fetchone()[0]
+    )
+    if current_version_count != artifact_count:
+        raise RuntimeError("knowledge v3 migration found a missing current version")
+
+    conn.execute("DELETE FROM knowledge_fts")
+    conn.execute(
+        """INSERT INTO knowledge_fts(
+            workspace_id, artifact_key, version, ordinal, chunk_id, title, body
+        )
+        SELECT
+            a.workspace_id, a.artifact_key, CAST(a.current_version AS TEXT),
+            CAST(c.ordinal AS TEXT), c.chunk_id, v.title, c.text
+        FROM knowledge_artifacts AS a
+        JOIN knowledge_versions AS v
+          ON v.workspace_id=a.workspace_id
+         AND v.artifact_key=a.artifact_key
+         AND v.version=a.current_version
+        JOIN knowledge_chunks AS c
+          ON c.workspace_id=a.workspace_id
+         AND c.artifact_key=a.artifact_key
+         AND c.version=a.current_version
+        ORDER BY a.workspace_id, a.artifact_key, c.ordinal"""
+    )
+
+
 def initialize_knowledge_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE TABLE IF NOT EXISTS knowledge_schema_migrations ("
@@ -223,6 +260,8 @@ def initialize_knowledge_schema(conn: sqlite3.Connection) -> None:
                 conn.execute(statement)
         elif version == 2:
             _backfill_legacy_corpus(conn)
+        elif version == 3:
+            _rebuild_current_fts(conn)
         else:
             raise RuntimeError(f"missing knowledge migration {version}")
         conn.execute(
