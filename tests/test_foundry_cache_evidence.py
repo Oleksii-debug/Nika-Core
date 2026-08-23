@@ -100,6 +100,23 @@ def test_cache_file_symlink_fails_closed(tmp_path: Path) -> None:
         foundry_cache_tree_sha256(cache)
 
 
+def test_cache_directory_symlink_path_escape_fails_closed(tmp_path: Path) -> None:
+    if os.name == "nt":
+        pytest.skip(
+            "Windows symlink creation is privilege-dependent; reparse policy is tested directly"
+        )
+
+    cache = tmp_path / "cache"
+    outside = tmp_path / "outside"
+    cache.mkdir()
+    outside.mkdir()
+    (outside / "model.bin").write_bytes(b"outside-model-bytes")
+    (cache / "redirect").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="filesystem indirection"):
+        foundry_cache_tree_sha256(cache)
+
+
 def test_windows_reparse_attribute_fails_closed_without_traversal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -120,7 +137,6 @@ def test_windows_reparse_attribute_fails_closed_without_traversal(
         raising=False,
     )
     monkeypatch.setattr(foundry_cache_evidence.os, "lstat", lambda _path: fake)
-    monkeypatch.setattr(Path, "is_symlink", lambda _self: False)
 
     with pytest.raises(ValueError, match="filesystem indirection"):
         foundry_cache_tree_sha256(cache)
@@ -145,6 +161,87 @@ def test_walk_enumeration_error_fails_closed(
         foundry_cache_tree_sha256(cache)
 
 
+def test_walk_entry_outside_selected_root_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = tmp_path / "cache"
+    outside = tmp_path / "outside"
+    cache.mkdir()
+    outside.mkdir()
+    (outside / "model.bin").write_bytes(b"outside")
+
+    def escaped_walk(_root, *, topdown, onerror, followlinks):
+        assert topdown is True
+        assert onerror is not None
+        assert followlinks is False
+        yield (str(outside), [], ["model.bin"])
+
+    monkeypatch.setattr(foundry_cache_evidence.os, "walk", escaped_walk)
+
+    with pytest.raises(ValueError, match="escapes selected root"):
+        foundry_cache_tree_sha256(cache)
+
+
+def test_file_replacement_between_inventory_and_open_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    model = cache / "model.bin"
+    model.write_bytes(b"original")
+    replacement = tmp_path / "replacement.bin"
+    replacement.write_bytes(b"replaced")
+
+    original_open = foundry_cache_evidence.os.open
+    replaced = False
+
+    def replacing_open(path, flags):
+        nonlocal replaced
+        if Path(path) == model and not replaced:
+            os.replace(replacement, model)
+            replaced = True
+        return original_open(path, flags)
+
+    monkeypatch.setattr(foundry_cache_evidence.os, "open", replacing_open)
+
+    with pytest.raises(ValueError, match="changed before hashing"):
+        foundry_cache_tree_sha256(cache)
+
+
+def test_open_file_metadata_change_during_hashing_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "model.bin").write_bytes(b"model")
+
+    original_fstat = foundry_cache_evidence.os.fstat
+    calls = 0
+
+    def changed_fstat(descriptor):
+        nonlocal calls
+        calls += 1
+        info = original_fstat(descriptor)
+        if calls != 2:
+            return info
+        return SimpleNamespace(
+            st_mode=info.st_mode,
+            st_dev=info.st_dev,
+            st_ino=info.st_ino,
+            st_size=info.st_size,
+            st_mtime_ns=info.st_mtime_ns + 1,
+            st_ctime_ns=info.st_ctime_ns,
+        )
+
+    monkeypatch.setattr(foundry_cache_evidence.os, "fstat", changed_fstat)
+
+    with pytest.raises(ValueError, match="changed while hashing"):
+        foundry_cache_tree_sha256(cache)
+
+
 def test_added_file_during_hashing_invalidates_inventory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -160,6 +257,31 @@ def test_added_file_during_hashing_invalidates_inventory(
         inventory_calls += 1
         if inventory_calls == 2:
             (root / "late.bin").write_bytes(b"late")
+        return original_cache_files(root)
+
+    monkeypatch.setattr(foundry_cache_evidence, "_cache_files", changing_inventory)
+
+    with pytest.raises(ValueError, match="tree changed while hashing"):
+        foundry_cache_tree_sha256(cache)
+
+
+def test_removed_file_during_hashing_invalidates_inventory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "model.bin").write_bytes(b"model")
+    late = cache / "second.bin"
+    late.write_bytes(b"second")
+    original_cache_files = foundry_cache_evidence._cache_files
+    inventory_calls = 0
+
+    def changing_inventory(root: Path):
+        nonlocal inventory_calls
+        inventory_calls += 1
+        if inventory_calls == 2:
+            late.unlink()
         return original_cache_files(root)
 
     monkeypatch.setattr(foundry_cache_evidence, "_cache_files", changing_inventory)

@@ -2,7 +2,7 @@
 
 Date: 2026-08-23  
 Original branch start main: `e40691a6e2ff9c31fd413f63d004612e048d95ed`  
-Current synchronized main: `8e2e0eb3f0f65b75e1d23b0f36ab2bf09a8477ba`  
+Current synchronized main: `e8743566ffc673d6f8d272e88de0e027c23ab277`  
 Branch: `work/manual-dev18/foundry-cache-evidence-v2`
 
 ## Scope
@@ -11,7 +11,7 @@ This is an independent DEV18 physical-proof integrity batch. It is not stacked o
 
 No model was selected, downloaded, loaded, or executed while producing this change.
 
-The branch was synchronized non-force with the current main after DEV06 Product Factory integration. That main movement touched only DEV06 Product Factory/docs/tests and had no Foundry cache-proof overlap.
+The branch is synchronized non-force with current main. The intervening TECH02 immutable-action and DEV16 deterministic-planning integrations are file-disjoint from this Foundry cache-proof slice.
 
 ## Deterministic defects
 
@@ -28,15 +28,18 @@ The regression fixture proves one concrete pair:
 
 Both serialize identically under the old v1 framing. They must not be accepted as the same model-cache integrity evidence.
 
-Additional evidence-boundary defects found during review:
+Additional evidence-boundary defects covered by the current implementation/tests:
 
-1. A cache entry that is a symbolic link or Windows reparse point can make a proof hash bytes outside the selected model cache tree while reporting the in-tree relative name.
-2. Python `os.walk()` ignores directory enumeration errors unless an `onerror` callback is supplied. An unreadable/disappearing subtree could therefore be silently omitted from a checksum.
-3. A file could be added or removed after initial enumeration while hashing was in progress, yielding evidence for an incomplete inventory unless the tree is reconciled again before success.
+1. symbolic links or Windows reparse points can redirect traversal outside the selected cache tree;
+2. `os.walk()` enumeration errors can otherwise omit an unreadable/disappearing subtree;
+3. a malicious/incorrect enumerator can yield a path lexically outside the selected root;
+4. a pathname can be replaced between inventory `lstat` and file open;
+5. file identity/size/mtime/ctime can change while the opened descriptor is being hashed;
+6. files can be added or removed after initial enumeration.
 
 ## Repair
 
-`foundry_cache_tree_sha256()` now emits `sha256-tree-v2` evidence and binds:
+`foundry_cache_tree_sha256()` emits `sha256-tree-v2` evidence and binds:
 
 1. a versioned domain-separation header;
 2. exact file count;
@@ -48,19 +51,24 @@ The framing is unambiguous even when model bytes contain NULs or path-like byte 
 
 The helper also:
 
+- canonicalizes the selected root only for containment checks while preserving relative-path identity for the digest;
 - fails closed on symbolic links and Windows reparse-point attributes;
+- requires every enumerated base/child to remain inside the selected root;
 - accepts regular files/directories only;
 - supplies an `os.walk(..., onerror=...)` failure path so enumeration errors cannot be silently omitted;
 - rejects an empty cache tree as model checksum evidence;
 - records file count and total bytes;
-- compares file identity, size, modification time, and change time before/after each read;
+- opens each model file with `O_NOFOLLOW` where the platform exposes it;
+- compares the opened descriptor identity against the pre-open `lstat` before hashing bytes;
+- rechecks descriptor identity/size/mtime/ctime after hashing;
+- rechecks pathname identity and root containment after descriptor hashing;
 - performs a final full inventory rescan and rejects added, removed, replaced, or metadata-changed files detected while hashing.
 
 The physical proof script delegates only its optional `--hash-model-cache` action to this helper. Its model selection, explicit-download gate, ModelGateway inference, resource evidence, ownership-safe unload/reload, and no-raw-prompt/response evidence behavior are otherwise unchanged.
 
 ## REUSE -> ADAPT -> CUSTOM(thin)
 
-- REUSE: Python stdlib `hashlib`, `os.lstat`, `os.walk`, `stat`, `pathlib`.
+- REUSE: Python stdlib `hashlib`, `os.lstat`, `os.open`/`os.fstat`/`os.read`, `os.walk`, `stat`, `pathlib`.
 - ADAPT: existing optional Foundry physical-proof cache checksum surface.
 - CUSTOM(thin): only Nika-specific versioned model-cache evidence framing and fail-closed filesystem/inventory policy.
 
@@ -68,31 +76,43 @@ No additional hashing library, model manager, inference backend, generic artifac
 
 ## Regression coverage
 
-The test module covers:
+The focused test module now covers 13 deterministic cases:
 
 - concrete old-v1 structural ambiguity and v2 separation;
 - deterministic digest independent of file creation order;
 - relative-path and file-content binding;
 - empty-cache rejection;
-- symbolic-link rejection;
+- file symlink rejection;
+- directory-symlink/path-escape rejection;
 - Windows reparse-attribute rejection;
 - directory-enumeration error rejection;
-- final inventory rejection when a new file appears during hashing.
+- explicit enumerator path outside the selected root;
+- pathname replacement between inventory and descriptor open;
+- descriptor metadata mutation during hashing;
+- final inventory rejection when a file is added;
+- final inventory rejection when a file is removed.
 
-An initial isolated exact-content harness, before the final two inventory fail-closed cases were added, passed `6` focused tests plus Python compile and had maximum source/test line length `96`. The final candidate receives no GREEN credit from that partial local harness. Repository exact-head Core CI and applicable M12 are authoritative for the complete current source/tests.
+Exact-content isolated preflight for the strengthened helper/tests: Python import/compile PASS, focused pytest `13 passed`, maximum source/test line length `96`.
 
-## Acceptance boundary
+Repository exact-head Core CI and complete applicable M12 remain authoritative for GREEN classification after this current-main synchronization.
 
-This change strengthens the future physical-model evidence collector. It does not itself provide physical Foundry acceptance.
+## Physical proof path and authorization boundary
 
-Still required for real model acceptance on physical Windows:
+The existing `scripts/prove_foundry_local.py` remains the bounded collector. A valid real run requires:
 
-- exact installed `foundry-local-sdk-winml` package/version;
-- explicit model alias and exact public selected variant ID;
-- human-reviewed model license reference;
-- applicable real cache checksum/bytes/resource evidence;
-- real inference through ModelGateway;
-- provider-owned unload/reload proof without disrupting another consumer.
+- physical Windows;
+- installed `foundry-local-sdk-winml` (the collector records the exact installed version);
+- explicit `--model` alias;
+- exact public `--model-id` selected variant identity;
+- operator-supplied, human-reviewed `--model-license` evidence reference;
+- optional resource ceilings and mandatory resource snapshots;
+- real inference through Nika `ModelGateway`;
+- provider-owned unload, reload inference, and final unload;
+- optional `--hash-model-cache` using the v2 tree evidence above.
+
+Inference itself never silently downloads a model. `--allow-download` is a separate explicit model-management authorization for the exact alias/variant/license and must not be supplied unless an authorized run has approved that acquisition.
+
+No such model-download authorization exists in this coding cycle, so no model was acquired or executed here.
 
 `MODEL_SELECTED=false`  
 `MODEL_DOWNLOADED=false`  
