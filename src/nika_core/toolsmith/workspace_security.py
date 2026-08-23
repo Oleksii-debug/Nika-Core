@@ -56,6 +56,10 @@ _ALLOWED_ENVIRONMENT_VARIABLES = frozenset(
         "TMPDIR",
     }
 )
+_CONTROL_PLANE_PREFIXES = (
+    (".github", "workflows"),
+    (".github", "actions"),
+)
 
 
 class WorkspaceSecurityError(ValueError):
@@ -122,6 +126,34 @@ class TreeEvidence:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class TreeChangeEvidence:
+    path: str
+    kind: str
+    before_sha256: str | None
+    after_sha256: str | None
+    after_size_bytes: int | None
+
+    def __post_init__(self) -> None:
+        normalize_job_relative_path(self.path)
+        if self.kind not in {"added", "modified", "deleted"}:
+            raise WorkspaceSecurityError("tree change kind is invalid")
+        if self.kind == "added" and self.before_sha256 is not None:
+            raise WorkspaceSecurityError("added tree change cannot contain a before digest")
+        if self.kind == "deleted" and self.after_sha256 is not None:
+            raise WorkspaceSecurityError("deleted tree change cannot contain an after digest")
+        if self.kind != "deleted" and self.after_size_bytes is None:
+            raise WorkspaceSecurityError("non-deleted tree change requires after size")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class TreeDeltaEvidence:
+    before_digest: str
+    after_digest: str
+    changes: tuple[TreeChangeEvidence, ...]
+    digest: str
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class ProductionIntegritySnapshot:
     base_sha: str
     tree_digest: str
@@ -143,6 +175,18 @@ def _windows_component_is_reserved(component: str) -> bool:
         return True
     stem = trimmed.split(".", 1)[0].casefold()
     return stem in _WINDOWS_RESERVED_BASENAMES
+
+
+def _is_reparse_point(file_stat: os.stat_result) -> bool:
+    attributes = getattr(file_stat, "st_file_attributes", 0)
+    return bool(
+        stat.FILE_ATTRIBUTE_REPARSE_POINT
+        and attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+    )
+
+
+def _paths_overlap(first: pathlib.Path, second: pathlib.Path) -> bool:
+    return first == second or first in second.parents or second in first.parents
 
 
 def normalize_job_relative_path(value: str) -> pathlib.PurePosixPath:
@@ -172,6 +216,22 @@ def normalize_job_relative_path(value: str) -> pathlib.PurePosixPath:
     return pathlib.PurePosixPath(*parts)
 
 
+def ensure_worker_mutation_path(
+    value: str,
+    *,
+    allow_control_plane: bool = False,
+) -> pathlib.PurePosixPath:
+    normalized = normalize_job_relative_path(value)
+    parts = tuple(part.casefold() for part in normalized.parts)
+    if not allow_control_plane and any(
+        parts[: len(prefix)] == prefix for prefix in _CONTROL_PLANE_PREFIXES
+    ):
+        raise WorkspaceSecurityError(
+            "worker mutation of GitHub workflow/action control-plane paths requires trusted approval"
+        )
+    return normalized
+
+
 def ensure_path_policy(
     root: pathlib.Path,
     relative_path: str,
@@ -196,12 +256,7 @@ def ensure_path_policy(
         file_stat = current.lstat()
         if stat.S_ISLNK(file_stat.st_mode):
             raise WorkspaceSecurityError("symbolic links are forbidden in guarded workspace paths")
-        attributes = getattr(file_stat, "st_file_attributes", 0)
-        if (
-            policy.reject_reparse_points
-            and stat.FILE_ATTRIBUTE_REPARSE_POINT
-            and attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
-        ):
+        if policy.reject_reparse_points and _is_reparse_point(file_stat):
             raise WorkspaceSecurityError("Windows reparse points are forbidden in guarded paths")
 
     resolved_parent = candidate.parent.resolve(strict=False)
@@ -234,6 +289,29 @@ def sterile_git_environment(
     return environment
 
 
+def sterile_process_environment(
+    source: collections.abc.Mapping[str, str],
+    *,
+    temp_root: pathlib.Path,
+) -> dict[str, str]:
+    resolved_temp = temp_root.resolve(strict=True)
+    if not resolved_temp.is_dir():
+        raise WorkspaceSecurityError("worker temp root must be an existing directory")
+    environment = sterile_git_environment(source)
+    for key in tuple(environment):
+        if key.upper() in {"TEMP", "TMP", "TMPDIR"}:
+            environment.pop(key)
+    environment.update(
+        {
+            "TEMP": str(resolved_temp),
+            "TMP": str(resolved_temp),
+            "TMPDIR": str(resolved_temp),
+            "PYTHONNOUSERSITE": "1",
+        }
+    )
+    return environment
+
+
 def make_sterile_git_plan(
     *,
     repository_root: pathlib.Path,
@@ -247,15 +325,10 @@ def make_sterile_git_plan(
     private_git_dir = job_root / "_nika_private_git"
     worktree_root = job_root / "worktree"
 
-    try:
-        job_root.relative_to(repository_root)
-    except ValueError:
-        pass
-    else:
-        raise WorkspaceSecurityError("job workspace must not be inside the production repository")
-
-    if repository_root == job_root:
-        raise WorkspaceSecurityError("job workspace must be distinct from production repository")
+    if _paths_overlap(repository_root, job_root):
+        raise WorkspaceSecurityError(
+            "job workspace and production repository must be fully disjoint"
+        )
 
     config_args = (
         "-c",
@@ -292,9 +365,23 @@ def validate_typed_argv(
     allowlist = {item.casefold() for item in allowed_executables if item.strip()}
     if not allowlist:
         raise WorkspaceSecurityError("allowed executable set must not be empty")
-    if executable.casefold() not in allowlist and basename not in allowlist:
-        raise WorkspaceSecurityError("executable is not explicitly allowlisted")
+    if executable.casefold() not in allowlist:
+        raise WorkspaceSecurityError("executable identity is not exactly allowlisted")
     return tuple(argv)
+
+
+def assert_cleanup_tree_safe(root: pathlib.Path) -> None:
+    if not root.exists() and not root.is_symlink():
+        return
+    root_stat = root.lstat()
+    if stat.S_ISLNK(root_stat.st_mode) or _is_reparse_point(root_stat):
+        raise WorkspaceSecurityError("cleanup refuses symbolic links and reparse points")
+    if not root.is_dir():
+        raise WorkspaceSecurityError("cleanup root must be a directory")
+    for path in root.rglob("*"):
+        file_stat = path.lstat()
+        if stat.S_ISLNK(file_stat.st_mode) or _is_reparse_point(file_stat):
+            raise WorkspaceSecurityError("cleanup refuses symbolic links and reparse points")
 
 
 def _hash_file(path: pathlib.Path, *, max_file_bytes: int) -> tuple[str, int]:
@@ -326,11 +413,7 @@ def collect_tree_evidence(
         relative = path.relative_to(root).as_posix()
         normalize_job_relative_path(relative)
         file_stat = path.lstat()
-        attributes = getattr(file_stat, "st_file_attributes", 0)
-        if stat.S_ISLNK(file_stat.st_mode) or (
-            stat.FILE_ATTRIBUTE_REPARSE_POINT
-            and attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
-        ):
+        if stat.S_ISLNK(file_stat.st_mode) or _is_reparse_point(file_stat):
             raise WorkspaceSecurityError("tree evidence refuses symlinks and reparse points")
         if path.is_dir():
             continue
@@ -353,6 +436,64 @@ def collect_tree_evidence(
         tree_hasher.update(str(record.size_bytes).encode("ascii"))
         tree_hasher.update(b"\n")
     return TreeEvidence(tuple(records), tree_hasher.hexdigest(), total_bytes)
+
+
+def collect_tree_delta_evidence(
+    before: TreeEvidence,
+    after: TreeEvidence,
+    *,
+    path_policy: WorkspacePathPolicy,
+    max_changed_files: int,
+    allow_control_plane: bool = False,
+) -> TreeDeltaEvidence:
+    if max_changed_files <= 0:
+        raise WorkspaceSecurityError("changed-file budget must be positive")
+    before_files = {item.path: item for item in before.files}
+    after_files = {item.path: item for item in after.files}
+    changes: list[TreeChangeEvidence] = []
+    for path in sorted(set(before_files) | set(after_files), key=str.casefold):
+        old = before_files.get(path)
+        new = after_files.get(path)
+        if old == new:
+            continue
+        ensure_worker_mutation_path(path, allow_control_plane=allow_control_plane)
+        if not path_policy.allows(path):
+            raise WorkspaceSecurityError(f"worker changed path outside allowed scope: {path}")
+        if old is None:
+            kind = "added"
+        elif new is None:
+            kind = "deleted"
+        else:
+            kind = "modified"
+        changes.append(
+            TreeChangeEvidence(
+                path=path,
+                kind=kind,
+                before_sha256=None if old is None else old.sha256,
+                after_sha256=None if new is None else new.sha256,
+                after_size_bytes=None if new is None else new.size_bytes,
+            )
+        )
+        if len(changes) > max_changed_files:
+            raise WorkspaceSecurityError("worker exceeded changed-file budget")
+
+    delta_hasher = hashlib.sha256()
+    delta_hasher.update(before.digest.encode("ascii"))
+    delta_hasher.update(b"\x00")
+    delta_hasher.update(after.digest.encode("ascii"))
+    delta_hasher.update(b"\n")
+    for change in changes:
+        delta_hasher.update(change.path.encode("utf-8"))
+        delta_hasher.update(b"\x00")
+        delta_hasher.update(change.kind.encode("ascii"))
+        delta_hasher.update(b"\x00")
+        delta_hasher.update((change.before_sha256 or "-").encode("ascii"))
+        delta_hasher.update(b"\x00")
+        delta_hasher.update((change.after_sha256 or "-").encode("ascii"))
+        delta_hasher.update(b"\x00")
+        delta_hasher.update(str(change.after_size_bytes).encode("ascii"))
+        delta_hasher.update(b"\n")
+    return TreeDeltaEvidence(before.digest, after.digest, tuple(changes), delta_hasher.hexdigest())
 
 
 def assert_production_integrity(
