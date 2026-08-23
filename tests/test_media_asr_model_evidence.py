@@ -296,9 +296,13 @@ def test_sherpa_model_files_are_bound_by_roles_and_keep_license_separate(
     assert adapter.engine.license_id == "Apache-2.0"
     assert adapter.model.license_reference == "model-license://sherpa-fixture"
     assert adapter.model.sha256 == evidence.sha256
-    assert FakeOfflineRecognizer.calls[0]["encoder"] == str(files["encoder"].resolve())
-    assert FakeOfflineRecognizer.calls[0]["decoder"] == str(files["decoder"].resolve())
-    assert FakeOfflineRecognizer.calls[0]["tokens"] == str(files["tokens"].resolve())
+    runtime_call = FakeOfflineRecognizer.calls[0]
+    assert Path(str(runtime_call["encoder"])) != files["encoder"].resolve()
+    assert Path(str(runtime_call["decoder"])) != files["decoder"].resolve()
+    assert Path(str(runtime_call["tokens"])) != files["tokens"].resolve()
+    assert Path(str(runtime_call["encoder"])).read_bytes() == b"encoder"
+    assert Path(str(runtime_call["decoder"])).read_bytes() == b"decoder"
+    assert Path(str(runtime_call["tokens"])).read_text(encoding="utf-8") == "token"
 
 
 def test_model_size_mismatch_fails_closed() -> None:
