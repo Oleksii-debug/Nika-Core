@@ -224,12 +224,15 @@ def test_lease_paths_fail_closed_on_escape_or_absolute_identity(unsafe_path: str
         "src/api ",
         "src/bad /child",
         "src/NUL.txt",
+        "src/COM0.log",
         "src/COM1.log",
+        "src/LPT0",
         "src/CONIN$",
         "src/CONOUT$",
         "src/file:stream",
         "src/what?now",
         "src/control\x01",
+        "src/control\t",
     ),
 )
 def test_windows_repository_rejects_nonportable_component_identity(unsafe_path: str) -> None:

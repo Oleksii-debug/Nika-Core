@@ -556,8 +556,10 @@ class ProductRepositoryGraph:
 
 def _normalize_repo_path(path: str, *, windows_path_semantics: bool = False) -> str:
     raw_candidate = path.replace("\\", "/")
-    if windows_path_semantics and raw_candidate.endswith((" ", ".")):
-        raise RepositoryGraphError(f"Windows repository path has unsafe trailing identity: {path!r}")
+    if windows_path_semantics and (
+        raw_candidate != raw_candidate.strip() or raw_candidate.endswith(".")
+    ):
+        raise RepositoryGraphError(f"Windows repository path has unsafe edge identity: {path!r}")
     candidate = raw_candidate.strip()
     if not candidate or candidate.startswith("/") or ":" in candidate.split("/", 1)[0]:
         raise RepositoryGraphError(f"repository path must be relative: {path!r}")
@@ -578,8 +580,8 @@ def _validate_windows_repo_path(path: str, *, original: str) -> None:
         "conout$",
         "nul",
         "prn",
-        *(f"com{index}" for index in range(1, 10)),
-        *(f"lpt{index}" for index in range(1, 10)),
+        *(f"com{index}" for index in range(10)),
+        *(f"lpt{index}" for index in range(10)),
         "com¹",
         "com²",
         "com³",
