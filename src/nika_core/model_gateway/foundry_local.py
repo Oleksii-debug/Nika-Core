@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Lock
@@ -26,7 +26,7 @@ from nika_core.resources.contracts import ResourceObserverPort
 # FoundryLocalManager is a process-wide singleton. A single dedicated worker plus
 # a native-operation lock prevents separate provider instances from overlapping
 # in-process model load/download/inference/unload work.
-_FOUNDRY_NATIVE_EXECUTOR = ThreadPoolExecutor(
+_FOUNDRY_NATIVE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=1,
     thread_name_prefix="nika-foundry",
 )
