@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -271,11 +272,11 @@ def _canonical_json(payload: object) -> str:
 def _decode_row(
     workspace_id: str,
     generation: int,
-    row: object,
+    row: sqlite3.Row,
 ) -> StoredWorkspaceActivation:
-    manifest_json = row["manifest_json"]  # type: ignore[index]
-    plugins_json = row["plugins_json"]  # type: ignore[index]
-    permissions_json = row["effective_permissions_json"]  # type: ignore[index]
+    manifest_json = row["manifest_json"]
+    plugins_json = row["plugins_json"]
+    permissions_json = row["effective_permissions_json"]
     workspace = WorkspaceManifest.model_validate(json.loads(str(manifest_json)))
     if workspace.workspace_id != workspace_id:
         raise RuntimeError("stored workspace identity does not match activation key")
@@ -291,11 +292,11 @@ def _decode_row(
         generation=generation,
         plugins=plugins,
         effective_permission_ids=permissions,
-        status=str(row["status"]),  # type: ignore[index]
-        created_at=str(row["created_at"]),  # type: ignore[index]
+        status=str(row["status"]),
+        created_at=str(row["created_at"]),
         activated_at=(
-            str(row["activated_at"])  # type: ignore[index]
-            if row["activated_at"] is not None  # type: ignore[index]
+            str(row["activated_at"])
+            if row["activated_at"] is not None
             else None
         ),
     )

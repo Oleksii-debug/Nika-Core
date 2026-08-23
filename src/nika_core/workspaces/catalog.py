@@ -41,9 +41,8 @@ class PluginRequirement(BaseModel):
         normalized = tuple(dict.fromkeys(item.strip() for item in value if item.strip()))
         if len(normalized) != len(value):
             raise ValueError("workspace plugin requirements must be unique and non-blank")
-        for item in normalized:
-            if item in value and "." not in item:
-                raise ValueError("workspace plugin IDs must be stable dotted identifiers")
+        if any("." not in item for item in normalized):
+            raise ValueError("workspace plugin IDs must be stable dotted identifiers")
         return normalized
 
     @model_validator(mode="after")

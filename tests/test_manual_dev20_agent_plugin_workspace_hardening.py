@@ -18,14 +18,15 @@ from nika_core.plugins import (
     PluginRegistration,
     PluginRuntime,
     discover_plugin_entrypoints,
+    entrypoints,
     inspect_plugin_entrypoints,
 )
-from nika_core.plugins import entrypoints
 from nika_core.tools import ToolRisk
 from nika_core.workspaces import (
     PluginRequirement,
     WorkspaceActivationRepository,
     WorkspaceCatalog,
+    WorkspaceCompatibilityError,
     WorkspaceManifest,
     WorkspacePolicyCatalog,
 )
@@ -200,11 +201,11 @@ def test_discovery_is_metadata_only_provider_neutral_and_load_failures_are_isola
         return original_good_load()
 
     good.load = counted_good_load  # type: ignore[method-assign]
-    monkeypatch.setattr(entrypoints, "_entry_points", lambda group: (bad, good))
+    monkeypatch.setattr(entrypoints, "_entry_points", lambda _group: (bad, good))
 
     discovered = discover_plugin_entrypoints()
     assert loads["count"] == 0
-    assert all(type(item) is EntrypointDescriptor for item in discovered)
+    assert all(isinstance(item, EntrypointDescriptor) for item in discovered)
     assert {item.name for item in discovered} == {"broken-plugin", "research-plugin"}
 
     report = inspect_plugin_entrypoints(discovered)
@@ -234,7 +235,7 @@ def test_duplicate_discovered_plugin_identity_is_quarantined(
         registration,
         distribution_name="two-dist",
     )
-    monkeypatch.setattr(entrypoints, "_entry_points", lambda group: (first, second))
+    monkeypatch.setattr(entrypoints, "_entry_points", lambda _group: (first, second))
     report = inspect_plugin_entrypoints()
     assert report.registrations == ()
     assert [item.error_type for item in report.failures] == [
@@ -256,7 +257,7 @@ def test_workspace_catalog_rejects_permission_action_and_plugin_scope_escape() -
     bad_permission = _workspace(version="1.0.1").model_copy(
         update={"permission_ids": ("workspace.admin",)}
     )
-    with pytest.raises(Exception, match="unknown workspace permission"):
+    with pytest.raises(WorkspaceCompatibilityError, match="unknown workspace permission"):
         catalog.validate(bad_permission, {"research.plugin": plugin})
 
     requirement = PluginRequirement(
@@ -267,7 +268,7 @@ def test_workspace_catalog_rejects_permission_action_and_plugin_scope_escape() -
     widened = _workspace(version="1.0.2").model_copy(
         update={"required_plugins": (requirement,)}
     )
-    with pytest.raises(Exception, match="does not declare permissions"):
+    with pytest.raises(WorkspaceCompatibilityError, match="does not declare permissions"):
         catalog.validate(widened, {"research.plugin": plugin})
 
 
