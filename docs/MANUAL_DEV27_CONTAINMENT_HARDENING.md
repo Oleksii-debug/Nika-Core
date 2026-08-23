@@ -26,7 +26,7 @@ REUSE:
 
 - `subprocess` typed argv with `shell=False`;
 - Windows Job Objects already used by the process runner;
-- `pathlib`, `stat`, and OS reparse/symlink metadata;
+- `pathlib`, `os`, `stat`, and OS reparse/symlink metadata;
 - private Git metadata with no retained remotes;
 - sterile Git environment construction;
 - deterministic SHA-256 tree evidence.
@@ -35,6 +35,9 @@ ADAPT:
 
 - exact executable identity is checked before launch;
 - runtime launch requires an absolute pinned executable instead of PATH/CWD lookup;
+- every named executable symlink hop is shell-policy checked before dereference;
+- `Popen` receives the final canonical resolved executable rather than the allowlisted alias;
+- the final canonical executable identity is shell-policy checked again before launch;
 - the child environment is filtered again at the process boundary;
 - TEMP/TMP/TMPDIR are pinned into the declared worker workspace;
 - cwd is required to remain below the declared worker workspace root;
@@ -53,19 +56,54 @@ fail-closed validation. No alternate generic sandbox framework is introduced.
 
 1. A path-qualified executable cannot pass an allowlist merely because its basename matches.
 2. A worker process cannot rely on PATH/CWD executable search in `run_typed_process`.
-3. Generic shell entrypoints remain forbidden and arguments remain typed/literal.
-4. Child environment input is reduced to the explicit safe environment surface; known tokens,
+3. An allowlisted executable alias cannot hide a forbidden named shell in its symlink chain;
+   the runner validates each named hop before dereference and launches only the canonical target.
+4. Generic shell entrypoints remain forbidden and arguments remain typed/literal.
+5. Child environment input is reduced to the explicit safe environment surface; known tokens,
    arbitrary custom variables, Python path poisoning, SSH agent variables, and Git credential
    overrides are not inherited.
-5. Process TEMP/TMP/TMPDIR point into the declared workspace, not a host-supplied temp path.
-6. A declared process cwd outside its workspace root fails closed before process launch.
-7. A job root cannot be inside the production repository, equal to it, or contain it.
-8. Cleanup does not recursively delete the job root and refuses symlink/reparse content before
+6. Process TEMP/TMP/TMPDIR point into the declared workspace, not a host-supplied temp path.
+7. A declared process cwd outside its workspace root fails closed before process launch.
+8. A job root cannot be inside the production repository, equal to it, or contain it.
+9. Cleanup does not recursively delete the job root and refuses symlink/reparse content before
    removing the canonical private Git and worktree roots.
-9. Output delta evidence detects additions, modifications, and deletions deterministically,
-   enforces allowed path scope, and enforces the changed-file budget.
-10. `.github/workflows` and `.github/actions` mutations are denied by default by the output
+10. Output delta evidence detects additions, modifications, and deletions deterministically,
+    enforces allowed path scope, and enforces the changed-file budget.
+11. `.github/workflows` and `.github/actions` mutations are denied by default by the output
     provenance boundary unless a trusted higher-level control-plane approval explicitly opts in.
+
+## AUD02 executable-indirection repair
+
+Independent AUD02 QA-only PR #199 reproduced a real command-boundary defect against an earlier
+DEV27 candidate. An exactly allowlisted absolute alias could point to `/bin/sh`; the old runner
+validated only the alias name, resolved it, and then launched the resolved target without
+preserving the shell-policy evidence from the resolution chain.
+
+The QA-only oracle failed on Ubuntu exactly as intended: the forbidden shell executed and the
+test reported that no security exception was raised. Windows skipped that portable `/bin/sh`
+fixture, so the finding is specifically independent POSIX evidence rather than a claim about the
+separate PR #72 physical Windows proof.
+
+The production repair keeps safe symlinked executables usable while closing that attack family:
+
+1. the originally requested executable still has to match the trusted `ProcessPolicy` allowlist;
+2. the executable must still be an absolute path;
+3. every named symlink hop is visited with loop/depth bounds and reuses the same generic-shell
+   validation before dereference;
+4. the final canonical target is resolved strictly and generic-shell validation is applied again;
+5. only that canonical path is passed to `subprocess.Popen(..., shell=False)`;
+6. a symlink loop or invalid/missing target fails before process launch.
+
+DEV27 regressions cover a nested alias chain through `/bin/sh`, a legitimate safe Python symlink
+that must launch the canonical Python target, and a symlink loop that must fail before launch.
+The independent AUD02 attack must still be replayed on the final exact DEV27 head; DEV27 does not
+self-clear the `AUD02-BLOCK` label from its own regression evidence.
+
+This repair is command-boundary hardening, not an immutable executable-content attestation
+system. It does not claim protection against replacement of an otherwise approved executable file
+between policy creation and launch, nor against a general-purpose interpreter deliberately granted
+by policy being used as arbitrary code. Those stronger hostile-code guarantees require trusted
+artifact identity and/or real OS/remote isolation rather than path-name validation alone.
 
 ## Isolation truth and non-goals
 
@@ -109,6 +147,8 @@ not a substitute for OS isolation.
 - Ruff, compile, dependency consistency and full pytest must be green on the exact candidate
   SHA through Core CI on Ubuntu and Windows.
 - M12 pre-human release gate must be green on that same exact SHA where applicable.
+- The AUD02 executable-indirection attack family must be independently replayed on that exact
+  candidate and clear the blocker; prior-head QA evidence cannot clear a newer candidate.
 - Compatibility with PR #72 is architectural unless/ until its physical Windows test is present
   in the same integrated main; this lane does not copy another owner's test into its PR.
 - `HUMAN_TESTED=false` and `NVDA_VERIFIED=false` unless a real human/NVDA run is recorded.
