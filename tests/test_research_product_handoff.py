@@ -288,6 +288,63 @@ def test_requirement_inherits_approved_decision_evidence_and_survives_restart(tm
     assert recovered_requirement.evidence_package_ids == ("research-1",)
 
 
+def test_decision_rejects_formal_handoff_when_remote_source_becomes_stale(tmp_path) -> None:
+    store, projects, _, service = _environment(tmp_path)
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT evidence_json FROM research_result_items "
+            "WHERE result_set_id='rs-1' AND ordinal=0"
+        ).fetchone()
+        evidence = json.loads(row["evidence_json"])
+        evidence[0].update(
+            {
+                "source_id": "http-1",
+                "source_kind": "http",
+                "locator": "https://example.com/research",
+                "freshness": "current",
+            }
+        )
+        conn.execute(
+            "UPDATE research_result_items SET evidence_json=? "
+            "WHERE result_set_id='rs-1' AND ordinal=0",
+            (json.dumps(evidence),),
+        )
+        conn.execute(
+            "INSERT INTO research_http_sources("
+            "source_id,workspace_id,url,freshness,created_at,updated_at"
+            ") VALUES (?,?,?,?,?,?)",
+            (
+                "http-1",
+                "ws",
+                "https://example.com/research",
+                "current",
+                "2026-08-23T00:00:00+00:00",
+                "2026-08-23T00:00:00+00:00",
+            ),
+        )
+
+    service.handoff(
+        project_id="p1",
+        result_set_id="rs-1",
+        package_id="research-1",
+        options=_options(),
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE research_http_sources SET freshness='stale' WHERE source_id='http-1'"
+        )
+
+    decisions = ProductDecisionRepository(store)
+    with pytest.raises(ProductProjectError, match="remote research source is not current"):
+        decisions.record(
+            "p1",
+            _approved_decision(),
+            expected_row_version=0,
+            idempotency_key="decision:approve:stale-source",
+        )
+    assert projects.get("p1").row_version == 0
+
+
 def test_conflicting_handoff_replay_fails_closed(tmp_path) -> None:
     _, _, _, service = _environment(tmp_path)
     service.handoff(

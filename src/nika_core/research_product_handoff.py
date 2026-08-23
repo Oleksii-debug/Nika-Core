@@ -172,6 +172,40 @@ def _research_result_payload_conn(conn: Any, result_set_id: str) -> dict[str, An
     }
 
 
+def _verify_live_http_sources_conn(
+    conn: Any,
+    research_payload: dict[str, Any],
+) -> None:
+    for item in research_payload.get("items", ()):
+        if not isinstance(item, dict):
+            raise ProductProjectError("sealed research result contains invalid item data")
+        evidence_values = item.get("evidence")
+        if not isinstance(evidence_values, list):
+            raise ProductProjectError("sealed research result evidence must be a list")
+        for evidence in evidence_values:
+            if not isinstance(evidence, dict):
+                raise ProductProjectError("sealed research result contains invalid evidence")
+            source_kind = evidence.get("source_kind")
+            if source_kind != SourceKind.HTTP.value:
+                continue
+            source_id = _required_text(
+                evidence.get("source_id"),
+                label="remote research evidence source_id",
+            )
+            if evidence.get("freshness") != FreshnessState.CURRENT.value:
+                raise ProductProjectError(
+                    f"remote research evidence is stale at handoff: {source_id}"
+                )
+            source = conn.execute(
+                "SELECT freshness FROM research_http_sources WHERE source_id=?",
+                (source_id,),
+            ).fetchone()
+            if source is None or source["freshness"] != FreshnessState.CURRENT.value:
+                raise ProductProjectError(
+                    f"remote research source is not current: {source_id}"
+                )
+
+
 def _seal_rows_conn(
     conn: Any,
     project_id: str,
@@ -268,6 +302,7 @@ def verify_sealed_handoffs_conn(
             raise ProductProjectError(
                 f"research result integrity mismatch: {result_set_id}"
             )
+        _verify_live_http_sources_conn(conn, research_payload)
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,6 +361,8 @@ class ResearchProductHandoffService:
 
         result_set = self.network.get_result_set(result_set_id)
         self._validate_result_set(result_set)
+        with self.store.connection() as conn:
+            _verify_live_http_sources_conn(conn, _result_set_payload(result_set))
         self._validate_options(options, package_id)
         package = self._package_from_result_set(result_set, package_id)
         expected_payload = _handoff_payload(package, options)
