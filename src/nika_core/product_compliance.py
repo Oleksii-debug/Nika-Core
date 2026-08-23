@@ -43,6 +43,10 @@ class DependencyAdoption:
         _require_unique_text(self.notice_refs, "dependency notice_ref")
         if self.review_ref is not None:
             _require_text(self.review_ref, "dependency review_ref")
+        if self.license_disposition is LicenseDisposition.APPROVED and self.review_ref is None:
+            raise ProductComplianceError(
+                "approved dependency license requires authorized review_ref evidence"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +71,7 @@ class CompetitorResearchEvidence:
     provenance_ref: str
     permitted_public_evidence: bool
     proprietary_material: bool = False
+    permission_basis_ref: str | None = None
     legal_basis_ref: str | None = None
     reuse_authorization_ref: str | None = None
 
@@ -78,6 +83,12 @@ class CompetitorResearchEvidence:
         if self.proprietary_material and self.permitted_public_evidence:
             raise ProductComplianceError(
                 "competitor evidence cannot be both proprietary material and public evidence"
+            )
+        if self.permission_basis_ref is not None:
+            _require_text(self.permission_basis_ref, "competitor permission_basis_ref")
+        if self.permitted_public_evidence and self.permission_basis_ref is None:
+            raise ProductComplianceError(
+                "permitted public competitor evidence requires permission_basis_ref"
             )
         if self.legal_basis_ref is not None:
             _require_text(self.legal_basis_ref, "competitor legal_basis_ref")
@@ -122,15 +133,20 @@ class ProductComplianceGate:
         evidence_refs: list[str] = []
         component_ids: set[str] = set()
 
-        obligations = {
-            (item.component_id, item.obligation): item
-            for item in obligation_evidence
-            if item.project_id == project_id
-        }
+        obligations: dict[tuple[str, str], DistributionObligationEvidence] = {}
         for item in obligation_evidence:
+            evidence_refs.append(item.fulfillment_ref)
             if item.project_id != project_id:
                 findings.append("cross-project:distribution-obligation")
-            evidence_refs.append(item.fulfillment_ref)
+                continue
+            obligation_key = (item.component_id, item.obligation)
+            if obligation_key in obligations:
+                findings.append(
+                    "duplicate:distribution-obligation:"
+                    f"{item.component_id}:{item.obligation}"
+                )
+                continue
+            obligations[obligation_key] = item
 
         for dependency in dependencies:
             if dependency.project_id != project_id:
@@ -158,6 +174,12 @@ class ProductComplianceGate:
             if dependency.notice_required and not dependency.notice_refs:
                 findings.append(f"notice:missing:{dependency.component_id}")
 
+        for component_id, obligation in obligations:
+            if component_id not in component_ids:
+                findings.append(
+                    f"orphan:distribution-obligation:{component_id}:{obligation}"
+                )
+
         evidence_ids: set[str] = set()
         for evidence in competitor_evidence:
             if evidence.project_id != project_id:
@@ -168,6 +190,8 @@ class ProductComplianceGate:
                 continue
             evidence_ids.add(evidence.evidence_id)
             evidence_refs.extend((evidence.source_ref, evidence.provenance_ref))
+            if evidence.permission_basis_ref:
+                evidence_refs.append(evidence.permission_basis_ref)
             if evidence.legal_basis_ref:
                 evidence_refs.append(evidence.legal_basis_ref)
             if evidence.reuse_authorization_ref:
