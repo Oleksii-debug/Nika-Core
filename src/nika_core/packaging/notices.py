@@ -29,6 +29,7 @@ RUNTIME_DISTRIBUTIONS = (
 )
 
 _SECTION_RE = re.compile(r"^===== (?P<title>.+?) =====$")
+_NOTICE_REF_PREFIX = "artifact:THIRD_PARTY_NOTICES.txt#"
 
 
 def _python_license() -> str:
@@ -174,3 +175,56 @@ def verify_third_party_notices(bundle_dir: Path) -> tuple[str, ...]:
         if sections.get(title) != expected_body:
             findings.append(base_finding)
     return tuple(dict.fromkeys(findings))
+
+
+def third_party_notice_ref(title: str) -> str:
+    """Return the stable PF10 evidence reference for one generated notice section."""
+    candidate = title.strip()
+    if not candidate or any(ord(character) < 32 for character in candidate):
+        raise ValueError("notice section title must be non-empty printable text")
+    return f"{_NOTICE_REF_PREFIX}{candidate}"
+
+
+class ThirdPartyNoticeAuthority:
+    """Resolve PF10 notice evidence against the exact generated notice content."""
+
+    def __init__(self, *, project_id: str, bundle_dir: Path) -> None:
+        if not project_id.strip():
+            raise ValueError("project_id must not be empty")
+        self._project_id = project_id
+        self._bundle_dir = bundle_dir
+
+    def verify(
+        self,
+        *,
+        project_id: str,
+        package_name: str,
+        version: str,
+        notice_ref: str,
+    ) -> bool:
+        if project_id != self._project_id:
+            return False
+        target = self._bundle_dir / "THIRD_PARTY_NOTICES.txt"
+        if not target.is_file():
+            return False
+        normalized_runtime_names = {
+            re.sub(r"[-_.]+", "-", name).casefold() for name in RUNTIME_DISTRIBUTIONS
+        }
+        normalized_package_name = re.sub(r"[-_.]+", "-", package_name).casefold()
+        if normalized_package_name not in normalized_runtime_names:
+            return False
+        try:
+            dist = metadata.distribution(package_name)
+            if dist.version != version:
+                return False
+            title, expected_body = _distribution_section(package_name, dist)
+            text = target.read_text(encoding="utf-8", errors="replace")
+        except (metadata.PackageNotFoundError, OSError, RuntimeError, UnicodeError):
+            return False
+        sections, duplicates = _sections(text)
+        if title in duplicates:
+            return False
+        return (
+            notice_ref == third_party_notice_ref(title)
+            and sections.get(title) == expected_body
+        )
