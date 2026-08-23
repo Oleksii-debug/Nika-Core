@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,7 +15,9 @@ CANDIDATE_ENV = "NIKA_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || g
 CHECKOUT_ACTION = "uses: actions/checkout@"
 CHECKOUT_REF = "ref: ${{ env.NIKA_CANDIDATE_SHA }}"
 TRUSTED_MAIN_REF = "ref: ${{ github.sha }}"
-IDENTITY_ASSERTION = "scripts/qa_assert_checkout_identity.py"
+IDENTITY_ASSERTION_RUN = re.compile(
+    r"(?m)^\s*run:\s*python\s+(?:\./)?scripts/qa_assert_checkout_identity\.py\s*$"
+)
 MAIN_PUSH_TRIGGER = '  push:\n    branches:\n      - "main"'
 ATTEST_MAIN_JOB = "\n  attest-main-distributable:\n"
 M12_UPSTREAM_WORKFLOW_PATHS = (
@@ -27,6 +30,10 @@ def _checkout_indexes(text: str) -> list[int]:
     return [
         index for index, line in enumerate(text.splitlines()) if CHECKOUT_ACTION in line
     ]
+
+
+def _identity_assertion_count(text: str) -> int:
+    return len(IDENTITY_ASSERTION_RUN.findall(text))
 
 
 def _candidate_job_text(path: Path, text: str) -> str:
@@ -61,7 +68,7 @@ def test_every_candidate_job_fails_closed_on_checkout_identity() -> None:
         text = path.read_text(encoding="utf-8")
         candidate_text = _candidate_job_text(path, text)
         checkout_count = len(_checkout_indexes(candidate_text))
-        assertion_count = candidate_text.count(IDENTITY_ASSERTION)
+        assertion_count = _identity_assertion_count(candidate_text)
         assert assertion_count == checkout_count, path
 
 
@@ -74,7 +81,7 @@ def test_m12_trusted_main_attestation_checkout_is_exact_and_separate() -> None:
     checkout_block = "\n".join(lines[checkout_indexes[0] : checkout_indexes[0] + 5])
     assert TRUSTED_MAIN_REF in checkout_block
     assert "persist-credentials: false" in checkout_block
-    assert trusted_main.count(IDENTITY_ASSERTION) == 1
+    assert _identity_assertion_count(trusted_main) == 1
     assert "if: github.event_name == 'push' && github.ref == 'refs/heads/main'" in trusted_main
 
 
