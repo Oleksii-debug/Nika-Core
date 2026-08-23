@@ -5,6 +5,7 @@ import ctypes
 import dataclasses
 import os
 import pathlib
+import shutil
 import signal
 import subprocess
 import threading
@@ -15,8 +16,12 @@ from nika_core.toolsmith import contracts as toolsmith_contracts
 from nika_core.toolsmith.workspace_security import (
     SterileGitPlan,
     TreeEvidence,
+    WorkspacePathPolicy,
     WorkspaceSecurityError,
+    assert_cleanup_tree_safe,
     collect_tree_evidence,
+    ensure_path_policy,
+    sterile_process_environment,
     validate_typed_argv,
 )
 
@@ -156,6 +161,44 @@ def _terminate_process_tree(process: subprocess.Popen[bytes], job: _WindowsJob) 
     process.kill()
 
 
+def _pinned_runtime_argv(
+    argv: collections.abc.Sequence[str],
+    allowed_executables: collections.abc.Iterable[str],
+) -> tuple[str, ...]:
+    typed = validate_typed_argv(argv, allowed_executables)
+    executable = pathlib.Path(typed[0])
+    if not executable.is_absolute():
+        raise ProcessExecutionError(
+            "runtime executable must be an absolute pinned path; PATH/CWD search is forbidden"
+        )
+    try:
+        resolved = executable.resolve(strict=True)
+    except OSError as exc:
+        raise ProcessExecutionError("pinned runtime executable does not exist") from exc
+    if not resolved.is_file():
+        raise ProcessExecutionError("pinned runtime executable must be a regular file")
+    return (str(resolved), *typed[1:])
+
+
+def _prepare_process_environment(
+    *,
+    source: collections.abc.Mapping[str, str],
+    workspace_root: pathlib.Path,
+) -> dict[str, str]:
+    temp_policy = WorkspacePathPolicy(("_nika_process_tmp",))
+    temp_root = ensure_path_policy(workspace_root, "_nika_process_tmp", temp_policy)
+    temp_root.mkdir(parents=False, exist_ok=True)
+    temp_root = ensure_path_policy(
+        workspace_root,
+        "_nika_process_tmp",
+        temp_policy,
+        must_exist=True,
+    )
+    if not temp_root.is_dir():
+        raise ProcessExecutionError("worker temp path must be a directory")
+    return sterile_process_environment(source, temp_root=temp_root)
+
+
 def run_typed_process(
     argv: collections.abc.Sequence[str],
     *,
@@ -164,11 +207,23 @@ def run_typed_process(
     cwd: pathlib.Path,
     environment: collections.abc.Mapping[str, str],
     cancellation_event: threading.Event | None = None,
+    workspace_root: pathlib.Path | None = None,
 ) -> ProcessExecutionResult:
-    typed_argv = validate_typed_argv(argv, process_policy.allowed_executables)
+    typed_argv = _pinned_runtime_argv(argv, process_policy.allowed_executables)
     cwd = cwd.resolve(strict=True)
     if not cwd.is_dir():
         raise ProcessExecutionError("process cwd must be a directory")
+    workspace_root = (cwd if workspace_root is None else workspace_root).resolve(strict=True)
+    if not workspace_root.is_dir():
+        raise ProcessExecutionError("process workspace root must be a directory")
+    try:
+        cwd.relative_to(workspace_root)
+    except ValueError as exc:
+        raise ProcessExecutionError("process cwd escapes declared workspace root") from exc
+    process_environment = _prepare_process_environment(
+        source=environment,
+        workspace_root=workspace_root,
+    )
 
     limit = resource_budget.max_output_bytes
     output = {"stdout": bytearray(), "stderr": bytearray()}
@@ -183,7 +238,7 @@ def run_typed_process(
     process = subprocess.Popen(
         typed_argv,
         cwd=cwd,
-        env=dict(environment),
+        env=process_environment,
         shell=False,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
@@ -426,3 +481,27 @@ def prepare_private_git_workspace(
     ).stdout.strip()
     tree_evidence = collect_tree_evidence(plan.worktree_root)
     return PreparedGitWorkspace(plan, head, remaining_remotes, tree_evidence)
+
+
+def cleanup_private_git_workspace(plan: SterileGitPlan) -> None:
+    job_root = plan.private_git_dir.parent.resolve(strict=False)
+    repository_root = plan.repository_root.resolve(strict=False)
+    if plan.worktree_root.parent.resolve(strict=False) != job_root:
+        raise WorkspaceSecurityError("private Git paths do not share the trusted job root")
+    if plan.private_git_dir.name != "_nika_private_git" or plan.worktree_root.name != "worktree":
+        raise WorkspaceSecurityError("private Git paths do not match the canonical workspace plan")
+    if (
+        repository_root == job_root
+        or repository_root in job_root.parents
+        or job_root in repository_root.parents
+    ):
+        raise WorkspaceSecurityError("cleanup refuses overlapping production and job roots")
+
+    for root in (plan.worktree_root, plan.private_git_dir):
+        assert_cleanup_tree_safe(root)
+    for root in (plan.worktree_root, plan.private_git_dir):
+        if root.exists():
+            try:
+                shutil.rmtree(root)
+            except OSError as exc:
+                raise WorkspaceSecurityError(f"unable to clean private workspace: {root.name}") from exc
