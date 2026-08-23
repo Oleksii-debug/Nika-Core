@@ -35,6 +35,7 @@ class _SharedResumeGate:
     calls: list[str] = field(default_factory=list)
     entered: asyncio.Event = field(default_factory=asyncio.Event)
     release: asyncio.Event = field(default_factory=asyncio.Event)
+    checkpoint_id: str = "checkpoint:initial"
 
 
 class _ClaimedRuntime:
@@ -47,20 +48,27 @@ class _ClaimedRuntime:
         owner: str,
         *,
         process_loss: bool = False,
+        advance_checkpoint: bool = False,
+        block: bool = True,
     ) -> None:
         self._gate = gate
         self._owner = owner
         self._process_loss = process_loss
+        self._advance_checkpoint = advance_checkpoint
+        self._block = block
 
     async def run(self, request):
         raise AssertionError("recovery must resume, not run")
 
     async def resume(self, request):
         self._gate.calls.append(self._owner)
+        if self._advance_checkpoint:
+            self._gate.checkpoint_id = "checkpoint:advanced"
         self._gate.entered.set()
         if self._process_loss:
             raise _SimulatedProcessLoss()
-        await self._gate.release.wait()
+        if self._block:
+            await self._gate.release.wait()
         return RuntimeResult(
             outcome=RuntimeOutcome.COMPLETED,
             output={"owner": self._owner, "task_id": request.task_id},
@@ -76,8 +84,27 @@ class _ClaimedRuntime:
         return RuntimeResumeProbe(
             status=RuntimeResumeProbeStatus.READY,
             reason="durable checkpoint exists",
-            checkpoint_id=f"checkpoint:{thread_id}",
+            checkpoint_id=self._gate.checkpoint_id,
         )
+
+
+class _NoProbeRuntime:
+    runtime_id = "claim-proof"
+    capabilities = frozenset()
+
+    def __init__(self) -> None:
+        self.resume_calls = 0
+
+    async def run(self, request):
+        raise AssertionError("recovery must resume, not run")
+
+    async def resume(self, request):
+        self.resume_calls += 1
+        return RuntimeResult(outcome=RuntimeOutcome.COMPLETED)
+
+    async def cancel(self, *, task_id: str, thread_id: str) -> bool:
+        del task_id, thread_id
+        return False
 
 
 def _active_session(path: Path) -> tuple[SQLiteStore, TaskQueue, str]:
@@ -159,17 +186,22 @@ def test_two_startup_owners_have_one_durable_resume_winner(tmp_path: Path) -> No
         assert completed.status == IdempotencyStatus.COMPLETED
         assert completed.result is not None
         assert completed.result["owner_id"] == "process-a"
+        assert completed.result["checkpoint_proven"] is True
 
     asyncio.run(scenario())
 
 
-def test_direct_resume_saved_rejects_second_process_owner(tmp_path: Path) -> None:
+def test_direct_resume_claim_survives_checkpoint_advance_by_first_owner(tmp_path: Path) -> None:
     async def scenario() -> None:
         path = tmp_path / "explicit.db"
         store, queue, task_id = _active_session(path)
         gate = _SharedResumeGate()
-        runtime_a = _ClaimedRuntime(gate, "process-a")
-        runtime_b = _ClaimedRuntime(gate, "process-b")
+        runtime_a = _ClaimedRuntime(
+            gate,
+            "process-a",
+            advance_checkpoint=True,
+        )
+        runtime_b = _ClaimedRuntime(gate, "process-b", block=False)
         first = TaskRuntimeCoordinator(
             queue,
             AuditLog(store),
@@ -183,14 +215,50 @@ def test_direct_resume_saved_rejects_second_process_owner(tmp_path: Path) -> Non
 
         first_task = asyncio.create_task(first.resume_saved(runtime_a, task_id=task_id))
         await gate.entered.wait()
+        assert gate.checkpoint_id == "checkpoint:advanced"
         with pytest.raises(RuntimeRecoveryClaimConflict):
             await second.resume_saved(runtime_b, task_id=task_id)
         assert gate.calls == ["process-a"]
+
+        claims = [
+            record
+            for record in IdempotencyLedger(store).list_for_task(task_id)
+            if record.operation_type == "runtime.recovery_resume"
+        ]
+        assert len(claims) == 1
+        assert claims[0].status == IdempotencyStatus.PENDING
 
         gate.release.set()
         result = await first_task
         assert result.outcome == RuntimeOutcome.COMPLETED
         assert gate.calls == ["process-a"]
+
+    asyncio.run(scenario())
+
+
+def test_durable_resume_requires_exact_checkpoint_probe_before_claim(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        path = tmp_path / "no-probe.db"
+        store, queue, task_id = _active_session(path)
+        runtime = _NoProbeRuntime()
+        coordinator = TaskRuntimeCoordinator(
+            queue,
+            AuditLog(store),
+            recovery_owner_id="process-no-probe",
+        )
+
+        with pytest.raises(ValueError, match="RuntimeResumeProbePort"):
+            await coordinator.resume_saved(runtime, task_id=task_id)
+
+        assert runtime.resume_calls == 0
+        assert RuntimeSessionStore(store).get(task_id) is not None
+        assert queue.get(task_id).state == TaskState.RUNNING
+        claims = [
+            record
+            for record in IdempotencyLedger(store).list_for_task(task_id)
+            if record.operation_type == "runtime.recovery_resume"
+        ]
+        assert claims == []
 
     asyncio.run(scenario())
 

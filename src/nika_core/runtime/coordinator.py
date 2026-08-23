@@ -49,6 +49,7 @@ _RESUMABLE_OUTCOMES = frozenset(
 
 _CANCEL_OPERATION_TYPE = "runtime.cancel"
 _RECOVERY_RESUME_OPERATION_TYPE = "runtime.recovery_resume"
+_RECOVERY_SESSION_EPOCH_SCHEMA = "nika-runtime-recovery-session-epoch-v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,19 +58,27 @@ class _RuntimeResumeClaim:
     owner_id: str
     checkpoint_id: str
     session_fingerprint: str
-    checkpoint_proven: bool
+    claim_fingerprint: str
     resume_mode: RuntimeResumeMode
 
 
 class RuntimeRecoveryClaimConflict(IdempotencyConflictError):
-    """Another durable recovery owner already controls this exact resume epoch."""
+    """Another durable recovery owner already controls this persisted session epoch."""
 
-    def __init__(self, operation_key: str, status: IdempotencyStatus) -> None:
+    def __init__(
+        self,
+        operation_key: str,
+        status: IdempotencyStatus | None,
+        *,
+        detail: str | None = None,
+    ) -> None:
         self.operation_key = operation_key
         self.status = status
+        status_text = status.value if status is not None else "conflicting-input"
+        detail_text = f"; {detail}" if detail else ""
         super().__init__(
-            "durable runtime recovery is already claimed for this session/checkpoint; "
-            f"operation_key={operation_key} status={status.value}"
+            "durable runtime recovery is already claimed for this persisted session epoch; "
+            f"operation_key={operation_key} status={status_text}{detail_text}"
         )
 
 
@@ -572,17 +581,18 @@ class TaskRuntimeCoordinator:
         task_state: TaskState,
         mode: RuntimeResumeMode,
     ) -> _RuntimeResumeClaim:
-        checkpoint_id, checkpoint_proven = await self._resume_checkpoint_identity(runtime, record)
-        fingerprint = self._resume_claim_fingerprint(
+        checkpoint_id = await self._resume_checkpoint_identity(runtime, record)
+        session_fingerprint = self._resume_session_fingerprint(record)
+        claim_fingerprint = self._resume_claim_fingerprint(
             record=record,
             task_state=task_state,
             checkpoint_id=checkpoint_id,
             mode=mode,
         )
-        operation_key = f"runtime.recovery:{fingerprint}"
+        operation_key = f"runtime.recovery:{session_fingerprint}"
 
         with self._queue.store.connection() as conn:
-            # Serialize competing process-like recovery owners before re-reading authority.
+            # Serialize competing processes before re-reading Nika's session authority.
             conn.execute("BEGIN IMMEDIATE")
             current_record = self._sessions.get_with_connection(conn, record.task_id)
             if current_record != record:
@@ -591,13 +601,23 @@ class TaskRuntimeCoordinator:
             if current_state != task_state:
                 raise ValueError("task state changed before durable recovery claim")
 
-            reservation, created = self._idempotency.reserve_with_connection(
-                conn,
-                operation_key=operation_key,
-                task_id=record.task_id,
-                operation_type=_RECOVERY_RESUME_OPERATION_TYPE,
-                input_fingerprint=fingerprint,
-            )
+            try:
+                reservation, created = self._idempotency.reserve_with_connection(
+                    conn,
+                    operation_key=operation_key,
+                    task_id=record.task_id,
+                    operation_type=_RECOVERY_RESUME_OPERATION_TYPE,
+                    input_fingerprint=claim_fingerprint,
+                )
+            except IdempotencyConflictError as exc:
+                raise RuntimeRecoveryClaimConflict(
+                    operation_key,
+                    None,
+                    detail=(
+                        "the same Nika session epoch was already claimed with different "
+                        "checkpoint/state evidence"
+                    ),
+                ) from exc
             if not created:
                 raise RuntimeRecoveryClaimConflict(operation_key, reservation.status)
 
@@ -613,9 +633,10 @@ class TaskRuntimeCoordinator:
                     "operation_key": operation_key,
                     "owner_id": self._recovery_owner_id,
                     "session_updated_at": record.updated_at,
-                    "session_fingerprint": fingerprint,
+                    "session_fingerprint": session_fingerprint,
+                    "claim_fingerprint": claim_fingerprint,
                     "checkpoint_id": checkpoint_id,
-                    "checkpoint_proven": checkpoint_proven,
+                    "checkpoint_proven": True,
                     "resume_mode": mode.value,
                 },
             )
@@ -624,8 +645,8 @@ class TaskRuntimeCoordinator:
             operation_key=operation_key,
             owner_id=self._recovery_owner_id,
             checkpoint_id=checkpoint_id,
-            session_fingerprint=fingerprint,
-            checkpoint_proven=checkpoint_proven,
+            session_fingerprint=session_fingerprint,
+            claim_fingerprint=claim_fingerprint,
             resume_mode=mode,
         )
 
@@ -633,28 +654,51 @@ class TaskRuntimeCoordinator:
         self,
         runtime: AgentRuntimePort,
         record: RuntimeSessionRecord,
-    ) -> tuple[str, bool]:
-        if isinstance(runtime, RuntimeResumeProbePort):
-            try:
-                probe = await runtime.probe_resume(
-                    task_id=record.task_id,
-                    thread_id=record.thread_id,
-                    resume_token=record.resume_token,
-                )
-            except Exception as exc:  # noqa: BLE001 - unsafe checkpoint evidence must fail closed
-                raise ValueError(f"resume checkpoint probe raised: {exc}") from exc
-            if not probe.can_resume or not probe.checkpoint_id:
-                raise ValueError(
-                    "runtime resume checkpoint is not readable: "
-                    f"{probe.status.value}: {probe.reason}"
-                )
-            return probe.checkpoint_id, True
+    ) -> str:
+        if not isinstance(runtime, RuntimeResumeProbePort):
+            raise ValueError(
+                "runtime cannot prove persisted checkpoint identity; "
+                "RuntimeResumeProbePort is required before durable resume"
+            )
+        try:
+            probe = await runtime.probe_resume(
+                task_id=record.task_id,
+                thread_id=record.thread_id,
+                resume_token=record.resume_token,
+            )
+        except Exception as exc:
+            raise ValueError(f"resume checkpoint probe raised: {exc}") from exc
+        if not probe.can_resume or not probe.checkpoint_id:
+            raise ValueError(
+                "runtime resume checkpoint is not readable: "
+                f"{probe.status.value}: {probe.reason}"
+            )
+        return probe.checkpoint_id
 
-        # Explicit/manual runtimes may not expose a framework checkpoint probe. Their persisted
-        # resume token still gets a durable one-owner claim. Automatic startup recovery already
-        # requires RuntimeResumeProbePort before this boundary can be reached.
-        digest = hashlib.sha256(record.resume_token.encode("utf-8")).hexdigest()
-        return f"resume-token:{digest}", False
+    @staticmethod
+    def _resume_session_fingerprint(record: RuntimeSessionRecord) -> str:
+        """Stable identity for one persisted Nika session epoch.
+
+        Checkpoint identity is deliberately excluded: a running owner may advance the framework
+        checkpoint while this Nika session row is still unresolved. Every such checkpoint must
+        remain covered by the same durable owner claim until Nika atomically finalizes a new
+        session epoch or deletes the session.
+        """
+        material = json.dumps(
+            {
+                "schema": _RECOVERY_SESSION_EPOCH_SCHEMA,
+                "task_id": record.task_id,
+                "runtime_id": record.runtime_id,
+                "thread_id": record.thread_id,
+                "resume_token": record.resume_token,
+                "stored_outcome": record.outcome.value if record.outcome else "active",
+                "session_updated_at": record.updated_at,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(material).hexdigest()
 
     @staticmethod
     def _resume_claim_fingerprint(
@@ -793,7 +837,8 @@ class TaskRuntimeCoordinator:
                         "owner_id": resume_claim.owner_id,
                         "checkpoint_id": resume_claim.checkpoint_id,
                         "session_fingerprint": resume_claim.session_fingerprint,
-                        "checkpoint_proven": resume_claim.checkpoint_proven,
+                        "claim_fingerprint": resume_claim.claim_fingerprint,
+                        "checkpoint_proven": True,
                         "resume_mode": resume_claim.resume_mode.value,
                         "runtime_outcome": effective_outcome.value,
                     },
