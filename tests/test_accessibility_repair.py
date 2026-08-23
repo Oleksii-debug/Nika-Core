@@ -35,6 +35,16 @@ class Fallback:
         return self.evidence
 
 
+class FailingFallback:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.calls = 0
+
+    async def inspect_visual(self, target: str) -> AccessibilityEvidence:
+        self.calls += 1
+        raise self.error
+
+
 def evidence(
     method: EvidenceMethod,
     *,
@@ -85,6 +95,37 @@ def test_ocr_precedes_vision_and_records_semantic_failure() -> None:
     assert len(resolved.fallback_attempts) == 1
     assert resolved.fallback_attempts[0].method is EvidenceMethod.DOM
     assert resolved.fallback_attempts[0].cause is FallbackCause.MISSING_CONTROLS
+
+
+def test_operational_fallback_error_is_recorded_and_next_tier_can_recover() -> None:
+    ocr = FailingFallback(RuntimeError("OCR adapter unavailable"))
+    vision = Fallback(evidence(EvidenceMethod.VISION, confidence=0.82))
+    service = AccessibilityRepairService(
+        Semantic(evidence(EvidenceMethod.DOM, controls=())),
+        fallback=vision,
+        ocr=ocr,
+    )
+
+    resolved = asyncio.run(service.inspect_browser("app://settings"))
+
+    assert resolved.method is EvidenceMethod.VISION
+    assert ocr.calls == 1
+    assert vision.calls == 1
+    assert [(item.method, item.cause) for item in resolved.fallback_attempts] == [
+        (EvidenceMethod.DOM, FallbackCause.MISSING_CONTROLS),
+        (EvidenceMethod.OCR, FallbackCause.ADAPTER_ERROR),
+    ]
+
+
+def test_programming_error_from_fallback_is_not_masked_as_unavailable_tier() -> None:
+    ocr = FailingFallback(TypeError("adapter contract bug"))
+    service = AccessibilityRepairService(
+        Semantic(evidence(EvidenceMethod.DOM, controls=())),
+        ocr=ocr,
+    )
+
+    with pytest.raises(TypeError, match="adapter contract bug"):
+        asyncio.run(service.inspect_browser("app://settings"))
 
 
 def test_ambiguous_ocr_is_rejected_and_vision_can_recover() -> None:
