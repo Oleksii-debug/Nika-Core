@@ -5,7 +5,7 @@
 - repository: `Oleksii-debug/Nika-Core`
 - starting live `main`: `bd7517f38c04560aa7350b870d8a51bfb6c8113b`
 - live `main` after in-run synchronization: `e40691a6e2ff9c31fd413f63d004612e048d95ed`
-- synchronization commit before this evidence update: `1bda5761e59cb9687abd4ee5f3acd6ba9b05ee8e`
+- synchronization commit: `1bda5761e59cb9687abd4ee5f3acd6ba9b05ee8e`
 - lane: `MANUAL-DEV03`
 - gate: `PF2`
 - branch: `work/manual-dev03/pf2-team-lifecycle`
@@ -23,13 +23,14 @@ lease-identity work. MANUAL-DEV03 therefore did not edit that file or its lease 
 
 During this run PR #160 merged, advancing live `main` from `bd7517f...` to `e40691a6...`.
 The MANUAL-DEV03 branch was then synchronized without force-push using a two-parent commit whose
-tree is current main plus only the three MANUAL-DEV03-owned files. No stale pre-merge version of
+tree is current main plus only the MANUAL-DEV03-owned files. No stale pre-merge version of
 `product_factory_orchestration.py` was overlaid onto the merged lease-identity fix.
 
-This slice remains deliberately isolated in:
+This slice is deliberately isolated in:
 
 - `src/nika_core/product_factory_team_lifecycle.py`
 - `tests/test_product_factory_team_lifecycle.py`
+- `tests/test_product_factory_team_lifecycle_audit.py`
 - this evidence document
 
 The adapter reuses the already-integrated `DynamicTeamComposer`, `TeamCompositionRequest`,
@@ -63,6 +64,9 @@ The adapter reuses the already-integrated `DynamicTeamComposer`, `TeamCompositio
     ceiling narrows; only current executable assignments must fit the current ceiling.
 13. Historical roles can only become executable again through deterministic recomposition, which
     re-applies the current permission ceiling.
+14. Replacing an unavailable worker does not overwrite the original blocked/failed reason or
+    evidence. The terminal historical assignment retains unavailable evidence while the new
+    assignment carries replacement-decision evidence, and the separation survives restart.
 
 ## Scale evidence
 
@@ -74,16 +78,16 @@ raw agent/role count as a quality metric.
 Existing repository scale tests remain the authoritative broader Product Factory proof for
 coordinator scheduling and checkpoint recovery. This PR does not duplicate or weaken those gates.
 
-## Cheap validation before final exact-head CI
+## Validation truth
 
-The source and test files were syntax-compiled and exercised through a live-signature-compatible
-contract harness. The final pre-CI harness result after the history/ceiling edge-case fix was:
+Before the final audit-evidence defect was found, a live-signature-compatible local harness had
+reported `19 passed`, and a superseded exact-head Core run had already proved dependency
+consistency, Ruff, and compile before its full pytest run was cancelled by a newer push at 68%
+with no failures observed to that point.
 
-- `19 passed`
-
-This harness is not acceptance evidence. Repository GitHub Actions on the final exact PR head are
-required before merge readiness can be claimed. Any CI that ran on the pre-synchronization SHA is
-lineage evidence only after `main` advanced.
+Those results are lineage/diagnostic evidence only. The subsequent audit fix changed production
+source and added two regression tests, so no local success count is claimed for the final source.
+Only repository GitHub Actions on the final exact PR head count for merge readiness.
 
 ## DEPENDENCY_REQUEST
 
