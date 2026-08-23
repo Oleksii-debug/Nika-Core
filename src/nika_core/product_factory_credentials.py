@@ -528,11 +528,13 @@ class CredentialBroker:
                         current_authority_fingerprint=active_fingerprint,
                         retired_authority_fingerprint=retired_fingerprint,
                     )
-                elif not self.store.authority_matches(
+                elif self.store.authority_matches(
                     secret_ref=secret.secret_ref,
                     generation=secret.generation,
                     authority_fingerprint=retired_fingerprint,
                 ):
+                    self._invalidate_generation(secret)
+                else:
                     raise CredentialBrokerError(
                         "protected store credential authority does not match reference metadata"
                     )
