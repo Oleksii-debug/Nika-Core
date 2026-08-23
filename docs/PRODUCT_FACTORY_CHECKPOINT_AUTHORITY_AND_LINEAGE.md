@@ -10,7 +10,9 @@ A coordinator checkpoint is candidate state. Its serialized bytes, work requests
 
 A raw trusted-plan fingerprint is therefore never accepted as a first-anchor credential by `ProductFactoryCheckpointHost.save()`. The public save API accepts only the checkpoint and host-task identity. Knowing or recomputing the candidate plan hash is insufficient to mint first authority.
 
-For the first checkpoint in one host process, `ProductProjectCoordinatorBinding.checkpoint()` attaches a process-ephemeral keyed proof that binds the exact ProductProject identity/version and trusted-plan fingerprint. The checkpoint constructor cannot accept either the fingerprint or the proof. Neither field is serialized. The checkpoint host independently verifies that proof before it writes the first durable host-task anchor.
+For the first checkpoint in one host process, `ProductProjectCoordinatorBinding.checkpoint()` attaches a process-ephemeral keyed proof. The proof binds the exact ProductProject identity/version, immutable trusted-plan fingerprint, and the complete exact live coordinator snapshot. The checkpoint constructor cannot accept either the fingerprint or the proof. Neither field is serialized. The checkpoint host independently verifies that proof before it writes the first durable host-task anchor.
+
+Binding the complete live snapshot prevents a valid host-issued proof from being reused after an in-memory `object.__setattr__` mutation of revision, work state, request, result/review evidence, blocker, or trusted-plan content. Such a modified checkpoint fails proof verification before the first anchor is written.
 
 After the first successful save, the canonical restart authority is the fingerprint anchored in the Product Factory host-task payload. Every later save and restore validates the candidate snapshot against that durable host-task anchor. A legacy checkpoint that exists without that anchor fails closed and requires explicit reconciliation.
 
@@ -64,6 +66,7 @@ Focused tests introduced or extended with this contract:
   - the removed public `trusted_plan_fingerprint=` save argument cannot be used as a matching forged first anchor;
   - constructor injection of either live authority field is rejected;
   - `object.__setattr__` with a known fingerprint plus a forged proof cannot mint authority;
+  - a valid host-issued proof cannot be replayed after exact snapshot tamper;
   - live proof/fingerprint are not rehydrated from persisted checkpoint bytes;
   - durable restore succeeds through the host-task anchor.
 - `tests/test_product_factory_checkpoint_transition_lineage.py`
