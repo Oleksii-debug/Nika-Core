@@ -4,7 +4,7 @@ import json
 from datetime import UTC, datetime
 
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.scheduler.contracts import ScheduleIdentity, ScheduledJob, TriggerKind
+from nika_core.scheduler.contracts import ScheduledJob, ScheduleIdentity, TriggerKind
 
 
 class ScheduledJobStore:
@@ -177,7 +177,7 @@ def _validate_time_semantics(job: ScheduledJob) -> None:
         if value is None:
             continue
         if not isinstance(value, str):
-            raise ValueError(f"{key} must be a timezone-aware ISO-8601 string")
+            raise TypeError(f"{key} must be a timezone-aware ISO-8601 string")
         try:
             parsed = datetime.fromisoformat(value)
         except ValueError as exc:

@@ -1,7 +1,7 @@
 from nika_core.scheduler.apscheduler_adapter import APSchedulerAdapter
 from nika_core.scheduler.contracts import (
-    ScheduleIdentity,
     ScheduledJob,
+    ScheduleIdentity,
     SchedulerPort,
     TriggerKind,
 )

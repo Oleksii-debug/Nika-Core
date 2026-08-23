@@ -16,9 +16,9 @@ from nika_core.resources import (
 )
 from nika_core.scheduler import (
     APSchedulerAdapter,
-    ScheduleIdentity,
     ScheduledJob,
     ScheduledJobStore,
+    ScheduleIdentity,
     TriggerKind,
 )
 
@@ -224,6 +224,16 @@ def test_scheduler_rejects_naive_time_and_preserves_identity_on_resume(tmp_path:
                 action_id="noop",
                 trigger_kind=TriggerKind.DATE,
                 trigger={"run_date": "2030-01-01T00:00:00"},
+            )
+        )
+
+    with pytest.raises(TypeError, match="ISO-8601"):
+        jobs.upsert(
+            ScheduledJob(
+                job_id="bad-time-type",
+                action_id="noop",
+                trigger_kind=TriggerKind.DATE,
+                trigger={"run_date": 17},
             )
         )
 
