@@ -31,21 +31,23 @@ The predecessor contract is:
 - accepted and blocked terminal states cannot be recomputed backwards into executable states;
 - an attempt may advance by exactly one generation;
 - attempt `N + 1` requires attempt `N` to have been durably saved as `repair_required`;
+- the first durable checkpoint for attempt `N + 1` must be `ready`, before execution can begin;
 - repair keeps project, component, repository, path scope, permission ceiling, and acceptance commands unchanged;
 - repair goal lineage is the previous durable goal plus exactly one non-empty `Repair:` reason.
 
-Ordinary progress does not require a database write after every pure in-memory coordinator call. For example, `ready -> running -> review_required -> accepted` may be persisted as one later accepted checkpoint. Security-significant repair-generation creation is stricter: the prior failed attempt must already exist durably as `repair_required` before the next attempt can become durable.
+Ordinary progress does not require a database write after every pure in-memory coordinator call. For example, `ready -> running -> review_required -> accepted` may be persisted as one later accepted checkpoint within the same already-durable attempt. Security-significant repair-generation creation is stricter: the prior failed attempt must already exist durably as `repair_required`, and the new attempt must itself cross the durable boundary as `ready` before any `running` or later state is accepted.
 
 ## Crash and restart semantics
 
-The program host checkpoints `running` before external worker dispatch. Worker result reconciliation checkpoints `review_required` or `repair_required`. Preparing a repair creates the next attempt and checkpoints it before that new attempt is dispatched by the program host.
+The program host checkpoints `running` before external worker dispatch. Worker result reconciliation checkpoints `review_required` or `repair_required`. Preparing a repair creates the next attempt and checkpoints it as `ready` before that new attempt is dispatched by the program host.
 
 Consequently:
 
 1. a crash after `running` but before worker result leaves a durable running record for worker recovery/reconciliation;
 2. a crash after a failed result but before repair preparation leaves durable `repair_required` evidence;
-3. a crash after repair preparation leaves exactly the next durable attempt and its deterministic work identity;
-4. a restart restores only after host-task authority, ProductProject binding, checkpoint integrity, trusted-plan semantics, and coordinator restore validation all agree.
+3. a crash after repair preparation leaves exactly the next durable `ready` attempt and its deterministic work identity;
+4. a candidate cannot create a new attempt in memory, start it, and then make `running` or later state its first durable generation checkpoint;
+5. a restart restores only after host-task authority, ProductProject binding, checkpoint integrity, trusted-plan semantics, and coordinator restore validation all agree.
 
 No recovery path is allowed to infer a missing repair-generation boundary from candidate-controlled hashes or a newly recomputed snapshot.
 
@@ -77,6 +79,10 @@ Focused tests introduced or extended with this contract:
   - conflicting writers over two independent SQLite connections serialize to one durable next revision;
   - a legitimate failure-to-repair sequence survives process restart;
   - 25 repair generations survive repeated store reconstruction/restart while preserving the original trusted-plan authority.
+- `tests/test_product_factory_repair_generation_boundary.py`
+  - a newly prepared repair that is started only in memory cannot make `running` its first durable generation state;
+  - rejection leaves the previous durable `repair_required` checkpoint unchanged;
+  - the canonical `ProductFactoryProgramHost.prepare_repair_and_checkpoint()` path persists attempt `N + 1` as `ready` before dispatch.
 - existing `tests/test_product_factory_scale_recovery.py`
   - 100 components complete across ten restart waves; this is the regression that guards legal sparse checkpointing at scale.
 
