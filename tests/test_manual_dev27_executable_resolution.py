@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from nika_core.toolsmith import ProcessPolicy, ResourceBudget
+from nika_core.toolsmith import ProcessPolicy, ResourceBudget, execution
 from nika_core.toolsmith.execution import ProcessExecutionError, run_typed_process
 from nika_core.toolsmith.workspace_security import WorkspaceSecurityError
 
@@ -56,6 +56,33 @@ def test_allowlisted_symlink_chain_cannot_cross_forbidden_shell_name(
     assert not marker.exists()
 
 
+def test_allowlisted_symlink_cannot_substitute_non_allowlisted_canonical_target(
+    tmp_path: pathlib.Path,
+) -> None:
+    target = pathlib.Path(sys.executable).resolve(strict=True)
+    alias = tmp_path / "safe-python"
+    _make_symlink(alias, target)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    marker = workspace / "canonical-substitution.txt"
+    payload = (
+        "from pathlib import Path; "
+        "Path('canonical-substitution.txt').write_text('bad', encoding='utf-8')"
+    )
+
+    with pytest.raises(WorkspaceSecurityError, match="exactly allowlisted"):
+        run_typed_process(
+            (str(alias), "-c", payload),
+            process_policy=ProcessPolicy((str(alias),)),
+            resource_budget=_budget(),
+            cwd=workspace,
+            workspace_root=workspace,
+            environment=dict(os.environ),
+        )
+
+    assert not marker.exists()
+
+
 def test_safe_allowlisted_symlink_launches_canonical_target(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -67,7 +94,7 @@ def test_safe_allowlisted_symlink_launches_canonical_target(
 
     result = run_typed_process(
         (str(alias), "-c", "print('canonical-ok')"),
-        process_policy=ProcessPolicy((str(alias),)),
+        process_policy=ProcessPolicy((str(alias), str(target))),
         resource_budget=_budget(),
         cwd=workspace,
         workspace_root=workspace,
@@ -78,6 +105,34 @@ def test_safe_allowlisted_symlink_launches_canonical_target(
     assert result.stdout.strip() == "canonical-ok"
     assert result.argv[0] == str(target)
     assert result.argv[0] != str(alias)
+
+
+def test_opaque_executable_reparse_fails_before_launch(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = pathlib.Path(sys.executable).resolve(strict=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    marker = workspace / "opaque-reparse.txt"
+    payload = (
+        "from pathlib import Path; "
+        "Path('opaque-reparse.txt').write_text('bad', encoding='utf-8')"
+    )
+
+    monkeypatch.setattr(execution, "_is_windows_reparse_point", lambda _stat: True)
+
+    with pytest.raises(ProcessExecutionError, match="reparse"):
+        run_typed_process(
+            (str(target), "-c", payload),
+            process_policy=ProcessPolicy((str(target),)),
+            resource_budget=_budget(),
+            cwd=workspace,
+            workspace_root=workspace,
+            environment=dict(os.environ),
+        )
+
+    assert not marker.exists()
 
 
 def test_allowlisted_executable_symlink_loop_fails_before_launch(

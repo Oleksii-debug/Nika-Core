@@ -7,6 +7,7 @@ import os
 import pathlib
 import shutil
 import signal
+import stat
 import subprocess
 import threading
 import time
@@ -167,6 +168,12 @@ def _resolution_chain_key(path: pathlib.Path) -> str:
     return value.casefold() if os.name == "nt" else value
 
 
+def _is_windows_reparse_point(file_stat: os.stat_result) -> bool:
+    attributes = getattr(file_stat, "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return bool(reparse_flag and attributes & reparse_flag)
+
+
 def _resolve_pinned_executable(
     executable: pathlib.Path,
     arguments: tuple[str, ...],
@@ -188,10 +195,15 @@ def _resolve_pinned_executable(
 
         validate_typed_argv((str(current), *arguments), (str(current),))
         try:
-            current.lstat()
+            current_stat = current.lstat()
         except OSError as exc:
             raise ProcessExecutionError("pinned runtime executable does not exist") from exc
-        if not current.is_symlink():
+        is_symlink = current.is_symlink()
+        if _is_windows_reparse_point(current_stat) and not is_symlink:
+            raise ProcessExecutionError(
+                "pinned runtime executable opaque reparse indirection is forbidden"
+            )
+        if not is_symlink:
             break
         try:
             target = pathlib.Path(os.readlink(current))
@@ -215,13 +227,15 @@ def _pinned_runtime_argv(
     argv: collections.abc.Sequence[str],
     allowed_executables: collections.abc.Iterable[str],
 ) -> tuple[str, ...]:
-    typed = validate_typed_argv(argv, allowed_executables)
+    allowed = tuple(allowed_executables)
+    typed = validate_typed_argv(argv, allowed)
     executable = pathlib.Path(typed[0])
     if not executable.is_absolute():
         raise ProcessExecutionError(
             "runtime executable must be an absolute pinned path; PATH/CWD search is forbidden"
         )
     resolved = _resolve_pinned_executable(executable, typed[1:])
+    validate_typed_argv((str(resolved), *typed[1:]), allowed)
     return (str(resolved), *typed[1:])
 
 
