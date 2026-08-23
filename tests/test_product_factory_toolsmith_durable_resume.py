@@ -30,6 +30,7 @@ from nika_core.product_factory_toolsmith_integration import (
 )
 from nika_core.product_factory_toolsmith_state import (
     ComponentCapabilityBindingState,
+    ProductFactoryToolsmithBindingError,
     ProductFactoryToolsmithBindingRepository,
 )
 from nika_core.product_project import (
@@ -54,6 +55,7 @@ from nika_core.toolsmith.service import CapabilityEscalationService
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
+SHA_C = "c" * 40
 DIFF_DIGEST = "d" * 64
 CAPABILITY_DIGEST = "f" * 64
 PERMISSIONS = frozenset({"read_source", "write_source", "run_tests"})
@@ -168,7 +170,10 @@ def _setup(tmp_path):
     host_task = TaskQueue(store).create(
         workspace_id="ws-product",
         agent_id="product-factory",
-        payload={"kind": "product_factory", "product_project_id": project.project_id},
+        payload={
+            "kind": "product_factory",
+            "product_project_id": project.project_id,
+        },
     )
     ProductFactoryCheckpointHost(store).save(
         host_task_id=host_task.task_id,
@@ -187,15 +192,25 @@ def _toolsmith(store: SQLiteStore):
     return repository, service
 
 
-def _bridge(store: SQLiteStore, service: CapabilityEscalationService):
+def _bridge(
+    store: SQLiteStore,
+    service: CapabilityEscalationService,
+) -> ProductFactoryToolsmithBridge:
     return ProductFactoryToolsmithBridge(
         service,
-        CodingWorkerComponentAdapter(UnusedWorker(), UnusedContexts(), UnusedEvidence()),
+        CodingWorkerComponentAdapter(
+            UnusedWorker(),
+            UnusedContexts(),
+            UnusedEvidence(),
+        ),
         store=store,
     )
 
 
-def _register(service, checkpoint) -> None:
+def _register(
+    service: CapabilityEscalationService,
+    checkpoint,
+) -> None:
     candidate = ReuseCandidate(
         capability_id=checkpoint.capability_id,
         version="1.4.0",
@@ -233,7 +248,10 @@ def _register(service, checkpoint) -> None:
     )
 
 
-def _restart(store: SQLiteStore, host_task_id: str):
+def _restart(
+    store: SQLiteStore,
+    host_task_id: str,
+):
     restarted = SQLiteStore(store.path)
     restarted.initialize()
     project = ProductProjectRepository(restarted).get("project-1")
@@ -256,6 +274,13 @@ def test_real_toolsmith_begin_uses_canonical_host_task_and_accepts_zero_row_vers
     store, _, coordinator, request, host_task_id = _setup(tmp_path)
     repository, service = _toolsmith(store)
     bridge = _bridge(store, service)
+
+    with pytest.raises(ProductFactoryToolsmithError, match="begin_durable_gap"):
+        bridge.begin_gap(
+            request,
+            capability_id="toml-editor",
+            reason="legacy in-memory path is unsafe for durable composition",
+        )
 
     checkpoint = bridge.begin_durable_gap(
         request,
@@ -291,7 +316,10 @@ def test_registered_gap_survives_process_restart_and_checkpoints_exact_repair(
     )
     _register(service, checkpoint)
 
-    restarted, binding, coordinator, service = _restart(store, host_task_id)
+    restarted, binding, coordinator, service = _restart(
+        store,
+        host_task_id,
+    )
     bridge = _bridge(restarted, service)
     resumed = bridge.resume_durable_registered_gap(
         host_task_id=host_task_id,
@@ -308,12 +336,17 @@ def test_registered_gap_survives_process_restart_and_checkpoints_exact_repair(
     assert resumed.capability_version == "1.4.0"
     assert resumed.capability_digest == CAPABILITY_DIGEST
 
-    restarted_again, _, coordinator_again, _ = _restart(restarted, host_task_id)
+    restarted_again, _, coordinator_again, _ = _restart(
+        restarted,
+        host_task_id,
+    )
     durable = _record(coordinator_again)
     assert durable.state is WorkState.READY
     assert durable.request.work_id == resumed.next_request.work_id
     assert durable.request.attempt == 2
-    binding_row = ProductFactoryToolsmithBindingRepository(restarted_again).require(
+    binding_row = ProductFactoryToolsmithBindingRepository(
+        restarted_again
+    ).require(
         host_task_id=host_task_id,
         work_id=request.work_id,
     )
@@ -362,7 +395,10 @@ def test_checkpoint_failure_leaves_prepared_binding_and_restart_retries_same_att
         store,
         host_task_id,
     )
-    resumed = _bridge(restarted, restarted_service).resume_durable_registered_gap(
+    resumed = _bridge(
+        restarted,
+        restarted_service,
+    ).resume_durable_registered_gap(
         host_task_id=host_task_id,
         binding=restarted_binding,
         coordinator=restarted_coordinator,
@@ -391,8 +427,10 @@ def test_checkpoint_committed_before_binding_finalization_reconciles_without_att
 
     original = ProductFactoryToolsmithBindingRepository.mark_consumed
 
-    def fail_consume(self, _binding):
-        raise RuntimeError("simulated binding finalization outage")
+    def fail_consume(*_args):
+        raise ProductFactoryToolsmithBindingError(
+            "simulated binding finalization outage"
+        )
 
     monkeypatch.setattr(
         ProductFactoryToolsmithBindingRepository,
@@ -420,7 +458,10 @@ def test_checkpoint_committed_before_binding_finalization_reconciles_without_att
         store,
         host_task_id,
     )
-    resumed = _bridge(restarted, restarted_service).resume_durable_registered_gap(
+    resumed = _bridge(
+        restarted,
+        restarted_service,
+    ).resume_durable_registered_gap(
         host_task_id=host_task_id,
         binding=restarted_binding,
         coordinator=restarted_coordinator,
@@ -432,12 +473,17 @@ def test_checkpoint_committed_before_binding_finalization_reconciles_without_att
     assert resumed.next_request.attempt == 2
 
 
-def test_foreign_product_factory_task_is_rejected_before_toolsmith_escalation(tmp_path) -> None:
+def test_foreign_product_factory_task_is_rejected_before_toolsmith_escalation(
+    tmp_path,
+) -> None:
     store, _, _, request, _ = _setup(tmp_path)
     foreign = TaskQueue(store).create(
         workspace_id="ws-product",
         agent_id="product-factory",
-        payload={"kind": "product_factory", "product_project_id": "other-project"},
+        payload={
+            "kind": "product_factory",
+            "product_project_id": "other-project",
+        },
     )
     repository, service = _toolsmith(store)
     bridge = _bridge(store, service)
@@ -485,3 +531,62 @@ def test_old_gap_cannot_be_consumed_after_component_advances_to_another_attempt(
             coordinator=coordinator,
             component_id="core",
         )
+
+
+def test_new_gap_on_resumed_attempt_takes_precedence_over_consumed_predecessor(
+    tmp_path,
+) -> None:
+    store, binding, coordinator, request, host_task_id = _setup(tmp_path)
+    _, service = _toolsmith(store)
+    bridge = _bridge(store, service)
+    first = bridge.begin_durable_gap(
+        request,
+        host_task_id=host_task_id,
+        capability_id="toml-editor",
+        reason="missing TOML capability",
+    )
+    _register(service, first)
+    resumed = bridge.resume_durable_registered_gap(
+        host_task_id=host_task_id,
+        binding=binding,
+        coordinator=coordinator,
+        component_id="core",
+    )
+    assert resumed is not None
+
+    second_request = coordinator.start("core")
+    coordinator.record_result(
+        WorkerResultEnvelope(
+            work_id=second_request.work_id,
+            component_id=second_request.component_id,
+            repository_id=second_request.repository_id,
+            base_sha=second_request.base_sha,
+            result_sha=SHA_C,
+            diff_digest=DIFF_DIGEST,
+            coding_result=CodingResult(
+                job_id=second_request.work_id,
+                failure=WorkerFailure(
+                    WorkerFailureKind.PROCESS_FAILED,
+                    "missing formatter capability",
+                    retryable=True,
+                ),
+            ),
+        )
+    )
+
+    second = bridge.begin_durable_gap(
+        second_request,
+        host_task_id=host_task_id,
+        capability_id="formatter",
+        reason="missing formatter capability",
+    )
+
+    assert second.work_id == second_request.work_id
+    assert second.capability_id == "formatter"
+    active = ProductFactoryToolsmithBindingRepository(store).find_for_request(
+        host_task_id=host_task_id,
+        request=second_request,
+    )
+    assert active is not None
+    assert active.capability_id == "formatter"
+    assert active.state is ComponentCapabilityBindingState.BEGUN
