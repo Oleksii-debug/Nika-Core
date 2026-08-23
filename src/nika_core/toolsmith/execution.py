@@ -435,6 +435,29 @@ def _git(
     return result
 
 
+def _resolve_host_git_executable(git_executable: str) -> str:
+    requested = git_executable.strip()
+    if not requested or requested != git_executable or "\x00" in requested:
+        raise WorkspaceSecurityError("git executable identity is empty or ambiguous")
+
+    candidate = pathlib.Path(requested)
+    if not candidate.is_absolute():
+        if pathlib.PureWindowsPath(requested).name != requested:
+            raise WorkspaceSecurityError(
+                "relative path-qualified Git executable is forbidden; use a host PATH name or absolute path"
+            )
+        host_path = os.environ.get("PATH", "")
+        discovered = shutil.which(requested, path=host_path)
+        if discovered is None:
+            raise WorkspaceSecurityError("trusted host Git executable was not found")
+        candidate = pathlib.Path(discovered)
+
+    try:
+        return str(_resolve_pinned_executable(candidate, ()))
+    except ProcessExecutionError as exc:
+        raise WorkspaceSecurityError("trusted host Git executable is invalid") from exc
+
+
 def _private_git_job_root(plan: SterileGitPlan) -> pathlib.Path:
     raw_job_root = plan.private_git_dir.parent
     if plan.worktree_root.parent != raw_job_root:
@@ -460,6 +483,7 @@ def prepare_private_git_workspace(
 ) -> PreparedGitWorkspace:
     _validate_branch_name(plan.branch_name)
     job_root = _private_git_job_root(plan)
+    git_executable = _resolve_host_git_executable(git_executable)
     if plan.private_git_dir.exists() or plan.worktree_root.exists():
         raise WorkspaceSecurityError("job-private Git paths already exist; refusing ambiguous reuse")
     if not (plan.repository_root / ".git").exists():
