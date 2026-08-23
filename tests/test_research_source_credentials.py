@@ -15,6 +15,8 @@ from nika_core.research.source_identity import ResearchSourceIdentityError
     [
         "https://example.com/data?access_token=super-secret",
         "https://example.com/data?X-Amz-Signature=super-secret",
+        "https://example.com/data?AWSAccessKeyId=super-secret",
+        "https://example.com/data?GoogleAccessId=super-secret",
         "https://example.com/data?key=super-secret",
     ],
 )
