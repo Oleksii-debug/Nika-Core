@@ -64,6 +64,57 @@ PERMISSIONS = frozenset(
         "write_source",
     }
 )
+COMPONENT_META = (
+    ("identity-session", "backend", frozenset({"credentials", "security"}), ()),
+    ("conversation-contact", "backend", frozenset({"privacy"}), ()),
+    ("local-event-transport", "backend", frozenset(), ()),
+    (
+        "security-boundaries",
+        "backend",
+        frozenset({"security", "privacy"}),
+        ("identity-session", "conversation-contact"),
+    ),
+    (
+        "notification-state",
+        "backend",
+        frozenset({"privacy"}),
+        ("conversation-contact",),
+    ),
+    (
+        "message-persistence",
+        "data",
+        frozenset({"privacy", "security"}),
+        ("identity-session", "conversation-contact", "security-boundaries"),
+    ),
+    (
+        "desktop-client",
+        "desktop",
+        frozenset({"accessibility"}),
+        ("identity-session", "conversation-contact", "notification-state"),
+    ),
+    (
+        "packaging",
+        "infra",
+        frozenset({"deployment"}),
+        (
+            "desktop-client",
+            "local-event-transport",
+            "message-persistence",
+            "notification-state",
+            "security-boundaries",
+        ),
+    ),
+)
+COMPONENT_ROOTS = {
+    "identity-session": "identity",
+    "conversation-contact": "conversation",
+    "local-event-transport": "transport",
+    "security-boundaries": "security",
+    "notification-state": "notifications",
+    "message-persistence": "persistence",
+    "desktop-client": "client",
+    "packaging": "package",
+}
 
 
 def _sha(index: int) -> str:
@@ -94,7 +145,7 @@ def _generated_files(component_id: str) -> dict[str, str]:
     files = {
         "identity-session": {
             "identity/__init__.py": "",
-            "identity/session.py": """
+            "identity/session.py": '''
                 from dataclasses import dataclass
 
 
@@ -112,11 +163,11 @@ def _generated_files(component_id: str) -> dict[str, str]:
 
                 def create_session(identity: Identity) -> Session:
                     return Session(identity.user_id, f"session:{identity.user_id}")
-            """,
+            ''',
         },
         "conversation-contact": {
             "conversation/__init__.py": "",
-            "conversation/model.py": """
+            "conversation/model.py": '''
                 from dataclasses import dataclass
 
 
@@ -137,21 +188,21 @@ def _generated_files(component_id: str) -> dict[str, str]:
                             raise ValueError("conversation members must be unique")
                         if len(self.member_ids) < 2:
                             raise ValueError("conversation requires at least two members")
-            """,
+            ''',
         },
         "security-boundaries": {
             "security/__init__.py": "",
-            "security/access.py": """
+            "security/access.py": '''
                 def require_member(actor_id: str, member_ids: tuple[str, ...]) -> None:
                     if actor_id not in member_ids:
                         raise PermissionError(
                             f"actor {actor_id} is not a member of this conversation"
                         )
-            """,
+            ''',
         },
         "local-event-transport": {
             "transport/__init__.py": "",
-            "transport/local.py": """
+            "transport/local.py": '''
                 from collections import deque
                 from dataclasses import dataclass
 
@@ -173,11 +224,11 @@ def _generated_files(component_id: str) -> dict[str, str]:
                         events = tuple(self._events)
                         self._events.clear()
                         return events
-            """,
+            ''',
         },
         "message-persistence": {
             "persistence/__init__.py": "",
-            "persistence/store.py": """
+            "persistence/store.py": '''
                 import sqlite3
                 from pathlib import Path
 
@@ -189,26 +240,17 @@ def _generated_files(component_id: str) -> dict[str, str]:
                         self._conn = sqlite3.connect(path)
                         self._conn.row_factory = sqlite3.Row
                         self._conn.executescript(
-                            """
-                            CREATE TABLE IF NOT EXISTS users (
-                                user_id TEXT PRIMARY KEY,
-                                display_name TEXT NOT NULL
-                            );
-                            CREATE TABLE IF NOT EXISTS conversations (
-                                conversation_id TEXT PRIMARY KEY
-                            );
-                            CREATE TABLE IF NOT EXISTS conversation_members (
-                                conversation_id TEXT NOT NULL,
-                                user_id TEXT NOT NULL,
-                                PRIMARY KEY(conversation_id, user_id)
-                            );
-                            CREATE TABLE IF NOT EXISTS messages (
-                                message_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                                conversation_id TEXT NOT NULL,
-                                sender_id TEXT NOT NULL,
-                                body TEXT NOT NULL
-                            );
-                            """
+                            "CREATE TABLE IF NOT EXISTS users ("
+                            "user_id TEXT PRIMARY KEY, display_name TEXT NOT NULL);"
+                            "CREATE TABLE IF NOT EXISTS conversations ("
+                            "conversation_id TEXT PRIMARY KEY);"
+                            "CREATE TABLE IF NOT EXISTS conversation_members ("
+                            "conversation_id TEXT NOT NULL, user_id TEXT NOT NULL, "
+                            "PRIMARY KEY(conversation_id, user_id));"
+                            "CREATE TABLE IF NOT EXISTS messages ("
+                            "message_id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                            "conversation_id TEXT NOT NULL, sender_id TEXT NOT NULL, "
+                            "body TEXT NOT NULL);"
                         )
 
                     def create_user(self, user_id: str, display_name: str) -> None:
@@ -274,11 +316,11 @@ def _generated_files(component_id: str) -> dict[str, str]:
 
                     def close(self) -> None:
                         self._conn.close()
-            """,
+            ''',
         },
         "notification-state": {
             "notifications/__init__.py": "",
-            "notifications/state.py": """
+            "notifications/state.py": '''
                 class NotificationState:
                     def __init__(self) -> None:
                         self._unread: dict[tuple[str, str], int] = {}
@@ -292,10 +334,10 @@ def _generated_files(component_id: str) -> dict[str, str]:
 
                     def mark_read(self, user_id: str, conversation_id: str) -> None:
                         self._unread[(user_id, conversation_id)] = 0
-            """,
+            ''',
         },
         "desktop-client": {
-            "client/index.html": """
+            "client/index.html": '''
                 <!doctype html>
                 <html lang="en">
                 <head><meta charset="utf-8"><title>C2 Messenger</title></head>
@@ -319,10 +361,10 @@ def _generated_files(component_id: str) -> dict[str, str]:
                   </main>
                 </body>
                 </html>
-            """,
+            ''',
         },
         "packaging": {
-            "package/build_release.py": """
+            "package/build_release.py": '''
                 import hashlib
                 import os
                 import zipfile
@@ -415,7 +457,7 @@ def _generated_files(component_id: str) -> dict[str, str]:
                     bundle.write(client, "client/index.html")
                     bundle.write(proof, "PROOF.txt")
                 print(hashlib.sha256(archive.read_bytes()).hexdigest())
-            """,
+            ''',
         },
     }
     return {
@@ -425,47 +467,6 @@ def _generated_files(component_id: str) -> dict[str, str]:
 
 
 def _graph() -> ProductRepositoryGraph:
-    component_specs = (
-        ("identity-session", "backend", frozenset({"credentials", "security"}), ()),
-        ("conversation-contact", "backend", frozenset({"privacy"}), ()),
-        ("local-event-transport", "backend", frozenset(), ()),
-        (
-            "security-boundaries",
-            "backend",
-            frozenset({"security", "privacy"}),
-            ("identity-session", "conversation-contact"),
-        ),
-        (
-            "notification-state",
-            "backend",
-            frozenset({"privacy"}),
-            ("conversation-contact",),
-        ),
-        (
-            "message-persistence",
-            "data",
-            frozenset({"privacy", "security"}),
-            ("identity-session", "conversation-contact", "security-boundaries"),
-        ),
-        (
-            "desktop-client",
-            "desktop",
-            frozenset({"accessibility"}),
-            ("identity-session", "conversation-contact", "notification-state"),
-        ),
-        (
-            "packaging",
-            "infra",
-            frozenset({"deployment"}),
-            (
-                "desktop-client",
-                "local-event-transport",
-                "message-persistence",
-                "notification-state",
-                "security-boundaries",
-            ),
-        ),
-    )
     repositories = tuple(
         RepositoryRef(
             repository_id=f"repo-{component_id}",
@@ -473,20 +474,10 @@ def _graph() -> ProductRepositoryGraph:
             locator=f"fixture/c2/{component_id}",
             default_branch="main",
         )
-        for component_id, _kind, _risk, _dependencies in component_specs
+        for component_id, _kind, _risk, _dependencies in COMPONENT_META
     )
     components = []
-    for component_id, _kind, _risk, dependencies in component_specs:
-        root = {
-            "identity-session": "identity",
-            "conversation-contact": "conversation",
-            "local-event-transport": "transport",
-            "security-boundaries": "security",
-            "notification-state": "notifications",
-            "message-persistence": "persistence",
-            "desktop-client": "client",
-            "packaging": "package",
-        }[component_id]
+    for component_id, _kind, _risk, dependencies in COMPONENT_META:
         if component_id == "desktop-client":
             test_command = (
                 PYTHON,
@@ -494,27 +485,31 @@ def _graph() -> ProductRepositoryGraph:
                 (
                     "from pathlib import Path; "
                     "s=Path('client/index.html').read_text(encoding='utf-8'); "
-                    "assert '<main>' in s and 'aria-live=\"polite\"' in s and '<label' in s"
+                    "assert '<main>' in s and 'aria-live=\"polite\"' in s "
+                    "and '<label' in s"
                 ),
             )
         elif component_id == "packaging":
             test_command = (PYTHON, "package/build_release.py")
         else:
             main_file = next(
-                path for path in _generated_files(component_id) if path.endswith(".py")
+                path
+                for path in _generated_files(component_id)
+                if path.endswith(".py") and not path.endswith("/__init__.py")
             )
             test_command = (PYTHON, "-m", "py_compile", main_file)
+        build_commands = (
+            ((PYTHON, "package/build_release.py"),)
+            if component_id == "packaging"
+            else ()
+        )
         components.append(
             ProductComponent(
                 component_id=component_id,
                 repository_id=f"repo-{component_id}",
-                paths=(root,),
+                paths=(COMPONENT_ROOTS[component_id],),
                 dependencies=dependencies,
-                build_commands=(
-                    ((PYTHON, "package/build_release.py"),)
-                    if component_id == "packaging"
-                    else ()
-                ),
+                build_commands=build_commands,
                 test_commands=(test_command,),
             )
         )
@@ -550,6 +545,7 @@ class LocalRepositoryEvidence:
         self.roots = roots
 
     async def collect(self, request, job, result):
+        del job
         root = self.roots[request.repository_id]
         changed_payload = "\n".join(
             f"{item.path}:{item.sha256}:{item.size_bytes}" for item in result.changed_files
@@ -569,11 +565,9 @@ class DeterministicMessengerCodingWorker:
     def __init__(self, roots: dict[str, Path]) -> None:
         self.roots = roots
         self.failed_persistence_once = False
-        self.execution_order: list[tuple[str, int]] = []
 
     async def execute(self, job):
         component_id = job.task_id.rsplit(":", 1)[-1]
-        self.execution_order.append((component_id, job.job_id.count(":")))
         root = job.lease.workspace_root
         if component_id == "message-persistence" and not self.failed_persistence_once:
             self.failed_persistence_once = True
@@ -709,43 +703,22 @@ def test_c2_messenger_product_factory_multi_repo_restart_repair_and_package(tmp_
     for root in roots.values():
         root.mkdir(parents=True)
 
-    team_request = TeamCompositionRequest(
-        project_id=PROJECT_ID,
-        components=tuple(
-            ComponentBrief(component.component_id, kind, risk)
-            for component, (_component_id, kind, risk, _deps) in zip(
-                graph.components,
-                (
-                    ("identity-session", "backend", frozenset({"credentials", "security"}), ()),
-                    ("conversation-contact", "backend", frozenset({"privacy"}), ()),
-                    ("local-event-transport", "backend", frozenset(), ()),
-                    (
-                        "security-boundaries",
-                        "backend",
-                        frozenset({"security", "privacy"}),
-                        (),
-                    ),
-                    ("notification-state", "backend", frozenset({"privacy"}), ()),
-                    (
-                        "message-persistence",
-                        "data",
-                        frozenset({"privacy", "security"}),
-                        (),
-                    ),
-                    ("desktop-client", "desktop", frozenset({"accessibility"}), ()),
-                    ("packaging", "infra", frozenset({"deployment"}), ()),
-                ),
-            )
-        ),
-        acceptance_criteria=(
-            "persist and recover a message after restart",
-            "reject unauthorized cross-user reads",
-            "package an accessible desktop surface",
-        ),
-        permission_ceiling=PERMISSIONS,
-        scale=ProjectScale.LARGE,
+    team = DynamicTeamComposer().compose(
+        TeamCompositionRequest(
+            project_id=PROJECT_ID,
+            components=tuple(
+                ComponentBrief(component_id, kind, risk)
+                for component_id, kind, risk, _deps in COMPONENT_META
+            ),
+            acceptance_criteria=(
+                "persist and recover a message after restart",
+                "reject unauthorized cross-user reads",
+                "package an accessible desktop surface",
+            ),
+            permission_ceiling=PERMISSIONS,
+            scale=ProjectScale.LARGE,
+        )
     )
-    team = DynamicTeamComposer().compose(team_request)
     capabilities = {capability for role in team.roles for capability in role.capabilities}
     assert {"accessibility", "qa", "release", "security", "windows"} <= capabilities
     assert any(role.independent_review for role in team.roles)
@@ -754,8 +727,7 @@ def test_c2_messenger_product_factory_multi_repo_restart_repair_and_package(tmp_
     db_path = tmp_path / "nika-c2.db"
     store = SQLiteStore(db_path)
     store.initialize()
-    projects = ProductProjectRepository(store)
-    project = projects.create(
+    project = ProductProjectRepository(store).create(
         project_id=PROJECT_ID,
         name="C2 Messenger Vertical",
         spec=ProductProjectSpec(
