@@ -39,12 +39,14 @@ Additional invariants:
   duplicate result contracts and non-text contract keys fail closed;
 - Nika evidence is a deterministic SHA-256 reference over normalized result identity, not raw output;
 - failed/timed-out deployment is `uncertain=True`, because a remote mutation may have partially occurred;
+- before calling the provider, `DeploymentFabric` places an evidence-less `UNCERTAIN` marker in its own
+  state. A snapshot taken from inside the provider call therefore already contains the unresolved intent;
 - a provider exception during `deploy()` or a deploy result with no evidence cannot be treated as a safe
-  rejection: `DeploymentFabric` records durable `UNCERTAIN` without inventing provider evidence, and an
-  `UNCERTAIN` snapshot may therefore have no provider refs when the provider returned none;
+  rejection: the marker remains `UNCERTAIN` without fabricated provider evidence, and an `UNCERTAIN`
+  snapshot may therefore have no provider refs when the provider returned none;
 - once a provider reports `applied=True`, health transport failure, malformed health evidence, or exact
-  release mismatch is persisted by `DeploymentFabric` as durable `UNCERTAIN`; retrying the same intent
-  returns that durable record instead of replaying the deployment mutation;
+  release mismatch remains `UNCERTAIN`; retrying the same intent returns that record instead of replaying
+  the deployment mutation;
 - any unresolved deployment effect blocks a different intent targeting the same project/environment until
   explicit `inspect()` reconciliation resolves the effect;
 - an unresolved staging effect invalidates prior healthy staging authority for that project, so stale
@@ -59,7 +61,21 @@ Additional invariants:
   same-SHA/different-artifact or different-version evidence is rejected and uncertainty is preserved;
 - successful rollback must report the exact requested previous release SHA;
 - rollback transport failure, invalid rollback evidence, or `succeeded=False` after an applied deployment
-  remains durable `UNCERTAIN`; it is not converted into a terminal safe rejection and requires inspection.
+  remains `UNCERTAIN`; it is not converted into a terminal safe rejection and requires inspection.
+
+### Process-crash durability boundary
+
+The pre-dispatch marker above is written to `DeploymentFabric` state before the provider call and is
+snapshot-visible before any provider result returns. This PR does **not** wire a synchronous SQLite
+host-task checkpoint between that marker and the external provider effect. The integrated generic
+`SQLiteStore` / `checkpoints` table is task-anchored, while current deployment execution contracts do not
+carry the canonical host-task identity needed to reuse that authority safely.
+
+Therefore this batch proves deterministic snapshot/restart idempotency once the fabric snapshot has been
+durably captured, but it does **not** claim that an OS/process crash in the narrow interval between the
+in-memory marker and an external provider effect is already persisted to disk. Closing that boundary
+requires a separate compatibility-approved deployment checkpoint host using canonical task authority; it
+must not be replaced with a second ad-hoc persistence authority in this adapter.
 
 ## Runner-side contract
 
@@ -114,15 +130,15 @@ The test suite covers:
 - project/environment/provider mismatch rejection before side effect;
 - safe extravars with exact release version/SHA/digest and no password/token/secret fields;
 - timeout/failure -> uncertain deployment;
-- provider deploy exception and missing deploy evidence -> durable `UNCERTAIN`, snapshot/restart support,
-  and same-intent idempotency without blind provider replay;
-- explicit deploy result requirement;
-- applied deployment followed by health failure/mismatch -> durable `UNCERTAIN` with same-intent and
-  restart idempotency, never blind deploy replay;
+- provider-visible pre-dispatch `UNCERTAIN` marker before a provider result returns;
+- provider deploy exception and missing deploy evidence -> `UNCERTAIN`, snapshot/restart support, and
+  same-intent idempotency without blind provider replay;
+- applied deployment followed by health failure/mismatch -> `UNCERTAIN` with same-intent and restart
+  idempotency, never blind deploy replay;
 - unresolved same-environment effects blocking new mutation until reconciliation;
 - unresolved staging invalidating staging authority and corrupt restart state with stale authority failing
   closed;
-- failed rollback -> durable `UNCERTAIN` rather than false terminal success/rejection;
+- failed rollback -> `UNCERTAIN` rather than false terminal success/rejection;
 - no-release inspection resolving uncertainty and permitting later fresh work;
 - exact version/SHA/digest health binding, incomplete identity rejection and health transport failure;
 - exact previous-SHA rollback and false rollback rejection;
@@ -134,5 +150,6 @@ The test suite covers:
 - raw unrelated Runner output not escaping into evidence;
 - deterministic normalized evidence identity.
 
-No claim is made for a live remote-node, provider or production deployment in CI.
+No claim is made for a live remote-node, provider or production deployment in CI. No claim is made for
+SQLite-backed process-crash persistence across the pre-dispatch external-effect boundary in this batch.
 `HUMAN_TESTED=false`; `NVDA_VERIFIED=false`; `PRODUCTION_RELEASE_READY=false`.
