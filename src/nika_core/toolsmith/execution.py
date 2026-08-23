@@ -185,8 +185,6 @@ def _resolve_pinned_executable(
             raise ProcessExecutionError("pinned runtime executable symlink chain contains a loop")
         seen.add(key)
 
-        # Reuse the same generic-shell rule for every named hop. In particular, an
-        # allowlisted alias -> /bin/sh must fail before /bin/sh is dereferenced again.
         validate_typed_argv((str(current), *arguments), (str(current),))
         try:
             current.lstat()
@@ -206,8 +204,6 @@ def _resolve_pinned_executable(
         resolved = current.resolve(strict=True)
     except OSError as exc:
         raise ProcessExecutionError("pinned runtime executable does not exist") from exc
-    # Re-apply shell policy to the final canonical identity as well. This also covers
-    # non-symlink reparse/junction resolution where pathlib returns a different target.
     validate_typed_argv((str(resolved), *arguments), (str(resolved),))
     if not resolved.is_file():
         raise ProcessExecutionError("pinned runtime executable must be a regular file")
@@ -226,6 +222,12 @@ def _pinned_runtime_argv(
         )
     resolved = _resolve_pinned_executable(executable, typed[1:])
     return (str(resolved), *typed[1:])
+
+
+def _validate_process_workspace_root(root: pathlib.Path) -> pathlib.Path:
+    probe_policy = WorkspacePathPolicy(("_nika_process_tmp",))
+    ensure_path_policy(root, "_nika_process_tmp", probe_policy)
+    return root.resolve(strict=True)
 
 
 def _prepare_process_environment(
@@ -279,12 +281,12 @@ def run_typed_process(
     workspace_root: pathlib.Path | None = None,
 ) -> ProcessExecutionResult:
     typed_argv = _pinned_runtime_argv(argv, process_policy.allowed_executables)
-    cwd = cwd.resolve(strict=True)
+    raw_cwd = pathlib.Path(cwd)
+    raw_workspace_root = raw_cwd if workspace_root is None else pathlib.Path(workspace_root)
+    workspace_root = _validate_process_workspace_root(raw_workspace_root)
+    cwd = raw_cwd.resolve(strict=True)
     if not cwd.is_dir():
         raise ProcessExecutionError("process cwd must be a directory")
-    workspace_root = (cwd if workspace_root is None else workspace_root).resolve(strict=True)
-    if not workspace_root.is_dir():
-        raise ProcessExecutionError("process workspace root must be a directory")
     try:
         cwd.relative_to(workspace_root)
     except ValueError as exc:
@@ -381,9 +383,6 @@ def run_typed_process(
 
     forced_termination = timed_out or cancelled or overflow.is_set()
     if forced_termination and returncode == 0:
-        # Closing a Windows kill-on-close Job Object can surface a native zero
-        # exit status even though Nika deliberately terminated the process tree.
-        # Never report an orchestrator-forced termination as process success.
         returncode = 1
 
     return ProcessExecutionResult(
