@@ -24,19 +24,15 @@ class RuntimeIdempotencyEffectJournal:
         self,
         *,
         task_id: str,
-        execution_id: str,
         action: DeterministicAction,
     ) -> DeterministicEffectReservation:
         if not task_id.strip():
             raise ValueError("task_id must not be empty")
-        if not execution_id.strip():
-            raise ValueError("execution_id must not be empty")
         if action.tool_id is None:
             raise ValueError("durable effect reservation requires a tool action")
 
         operation_key = self._operation_key(
             task_id=task_id,
-            execution_id=execution_id,
             action_id=action.action_id,
         )
         fingerprint = self._action_fingerprint(action)
@@ -67,11 +63,10 @@ class RuntimeIdempotencyEffectJournal:
         self._ledger.release_pending(operation_key)
 
     @staticmethod
-    def _operation_key(*, task_id: str, execution_id: str, action_id: str) -> str:
+    def _operation_key(*, task_id: str, action_id: str) -> str:
         identity = json.dumps(
             {
                 "action_id": action_id,
-                "execution_id": execution_id,
                 "task_id": task_id,
             },
             ensure_ascii=False,
