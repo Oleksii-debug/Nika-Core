@@ -305,10 +305,15 @@ class DeterministicBrain:
 
         spec = tool_specs.get(action.tool_id)
         journal = self._effect_journal
-        if spec is None or spec.risk == ToolRisk.READ_ONLY or journal is None:
+        if spec is None or spec.risk == ToolRisk.READ_ONLY:
             return await self._execute_tool_call(
                 action=action,
                 call_id=f"{run_id}:{executed_steps}:{plan_index}:{action.action_id}",
+            )
+        if journal is None:
+            return _ToolExecutionFailure(
+                DeterministicErrorCode.SIDE_EFFECT_JOURNAL_REQUIRED,
+                "non-read-only deterministic tool requires a durable effect journal",
             )
 
         if task_id is None or execution_id is None:  # validated at run entry
