@@ -399,6 +399,8 @@ class ProductRepositoryGraph:
         active_ids = [lease.lease_id for lease in active_tuple]
         if len(active_ids) != len(set(active_ids)):
             raise RepositoryGraphError("active lease ids must be unique")
+        if candidate.lease_id in active_ids:
+            raise RepositoryGraphError("candidate lease id is already active")
         active_by_id = {lease.lease_id: lease for lease in active_tuple}
         for active in active_by_id.values():
             active_paths = self._lease_paths(active)
