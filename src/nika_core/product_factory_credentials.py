@@ -218,6 +218,15 @@ class ProtectedSecretStorePort(Protocol):
         authority_fingerprint: str,
     ) -> bool: ...
 
+    def retire_authority(
+        self,
+        *,
+        secret_ref: str,
+        generation: int,
+        current_authority_fingerprint: str,
+        retired_authority_fingerprint: str,
+    ) -> None: ...
+
     def issue_handle(
         self,
         *,
@@ -439,9 +448,10 @@ class CredentialBroker:
         instant = _aware(now or datetime.now(UTC))
         with self._lock:
             secret = self._authorized_secret(project_id, secret_ref)
-            self._require_authority(secret)
             if secret.state is CredentialState.REVOKED:
+                self._require_authority(secret)
                 return
+            self._require_authority(secret)
             revoked = SecretRef(
                 secret.secret_ref,
                 secret.project_id,
@@ -452,8 +462,14 @@ class CredentialBroker:
                 secret.generation,
                 CredentialState.REVOKED,
             )
-            self._secrets[secret_ref] = revoked
             self._invalidate_generation(secret)
+            self.store.retire_authority(
+                secret_ref=secret.secret_ref,
+                generation=secret.generation,
+                current_authority_fingerprint=_secret_authority_fingerprint(secret),
+                retired_authority_fingerprint=_secret_authority_fingerprint(revoked),
+            )
+            self._secrets[secret_ref] = revoked
             self._record("revoke", project_id, secret_ref, instant, "reference revoked")
 
     def rotate(
@@ -466,12 +482,47 @@ class CredentialBroker:
         instant = _aware(now or datetime.now(UTC))
         with self._lock:
             secret = self._authorized_secret(project_id, secret_ref)
-            self._require_authority(secret)
             next_generation = secret.generation + 1
             if not self.store.contains(secret_ref, next_generation):
                 raise CredentialBrokerError(
                     "protected store does not contain next secret generation"
                 )
+            retired = SecretRef(
+                secret.secret_ref,
+                secret.project_id,
+                secret.provider,
+                secret.purpose,
+                secret.scopes,
+                secret.allowed_audiences,
+                secret.generation,
+                CredentialState.REVOKED,
+            )
+            if secret.state is CredentialState.ACTIVE:
+                active_fingerprint = _secret_authority_fingerprint(secret)
+                retired_fingerprint = _secret_authority_fingerprint(retired)
+                if self.store.authority_matches(
+                    secret_ref=secret.secret_ref,
+                    generation=secret.generation,
+                    authority_fingerprint=active_fingerprint,
+                ):
+                    self._invalidate_generation(secret)
+                    self.store.retire_authority(
+                        secret_ref=secret.secret_ref,
+                        generation=secret.generation,
+                        current_authority_fingerprint=active_fingerprint,
+                        retired_authority_fingerprint=retired_fingerprint,
+                    )
+                elif not self.store.authority_matches(
+                    secret_ref=secret.secret_ref,
+                    generation=secret.generation,
+                    authority_fingerprint=retired_fingerprint,
+                ):
+                    raise CredentialBrokerError(
+                        "protected store credential authority does not match reference metadata"
+                    )
+            else:
+                self._require_authority(secret)
+                self._invalidate_generation(secret)
             rotated = SecretRef(
                 secret.secret_ref,
                 secret.project_id,
@@ -487,7 +538,6 @@ class CredentialBroker:
                 generation=rotated.generation,
                 authority_fingerprint=_secret_authority_fingerprint(rotated),
             )
-            self._invalidate_generation(secret)
             self._secrets[secret_ref] = rotated
             self._record("rotate", project_id, secret_ref, instant, "reference generation advanced")
             return rotated
@@ -661,6 +711,7 @@ def _secret_authority_fingerprint(secret: SecretRef) -> str:
         "purpose": secret.purpose,
         "scopes": sorted(secret.scopes),
         "allowed_audiences": sorted(secret.allowed_audiences),
+        "state": secret.state.value,
     }
     encoded = json.dumps(
         payload,
