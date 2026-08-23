@@ -45,7 +45,7 @@ def _research_package() -> ResearchEvidencePackage:
     )
 
 
-def _factory() -> BusinessFactory:
+def _factory(approval_authority=None) -> BusinessFactory:
     return BusinessFactory.start(
         objective=BusinessObjective(
             objective_id="objective-1",
@@ -57,10 +57,11 @@ def _factory() -> BusinessFactory:
             allowed_channel_ids=("sandbox-email", "test-marketplace"),
             communication_authority=CommunicationAuthority.APPROVAL_REQUIRED,
         ),
+        approval_authority=approval_authority,
     )
 
 
-def _advance_to_work_order(factory: BusinessFactory) -> None:
+def _advance_to_work_order(factory: BusinessFactory, approval_authority) -> None:
     factory.identify_opportunity(
         opportunity_id="opportunity-1",
         title="Small-team expense approval workflow",
@@ -76,7 +77,9 @@ def _advance_to_work_order(factory: BusinessFactory) -> None:
         proposal_id="proposal-1",
         scope_summary="Build and deliver the approved test product scope.",
     )
+    approval_authority.allow_once("approval:proposal:1")
     factory.approve_proposal(approval_ref="approval:proposal:1")
+    approval_authority.allow_once("approval:work-order:1")
     factory.create_work_order(
         work_order_id="work-order-1",
         scope="Implement the approved expense-app test scope.",
@@ -150,19 +153,22 @@ def _allowed_compliance(project_id: str) -> ProductComplianceDecision:
     )
 
 
-def test_business_flow_links_real_product_project_and_survives_restart(tmp_path) -> None:
+def test_business_flow_links_real_product_project_and_survives_restart(
+    tmp_path,
+    business_authority,
+) -> None:
     store = SQLiteStore(tmp_path / "nika.sqlite")
     store.initialize()
     product_projects = ProductProjectRepository(store)
     business_store = BusinessFactoryRepository(store)
     business_store.initialize()
 
-    factory = _factory()
+    factory = _factory(business_authority)
     first = factory.snapshot()
     assert first.row_version == 1
     business_store.save(first, expected_row_version=0)
 
-    _advance_to_work_order(factory)
+    _advance_to_work_order(factory, business_authority)
     order = factory.handoff_to_product_factory(
         repository=product_projects,
         project_id="product-project-1",
@@ -175,11 +181,16 @@ def test_business_flow_links_real_product_project_and_survives_restart(tmp_path)
         idempotency_key="business-work-order-1-product-project",
     )
     assert order.product_project_id == "product-project-1"
-    assert product_projects.get("product-project-1").project_id == "product-project-1"
+    stored_product = product_projects.get("product-project-1")
+    assert stored_product.project_id == "product-project-1"
+    assert stored_product.spec.compliance["business_work_order_authorization_fingerprint"] == (
+        order.authorization_fingerprint
+    )
 
     factory.record_qa(state=QAState.PASSED, evidence_ref="qa:report:1")
     decision = _allowed_compliance("product-project-1")
     assert decision.allowed is True
+    business_authority.allow_once("approval:delivery:1")
     factory.record_delivery(
         delivery_id="delivery-1",
         artifact_ref="artifact:expense-app:test:1",
@@ -250,6 +261,8 @@ def test_business_flow_fails_closed_before_required_policy_gates() -> None:
 
     factory.qualify_lead(qualification_ref="qualification:review:1")
     factory.draft_proposal(proposal_id="proposal-1", scope_summary="Draft only")
+    with pytest.raises(BusinessFactoryError, match="trusted business approval authority"):
+        factory.approve_proposal(approval_ref="caller:self-minted-proposal-approval")
     with pytest.raises(BusinessFactoryError, match="approved proposal"):
         factory.create_work_order(
             work_order_id="work-order-1",
@@ -258,11 +271,14 @@ def test_business_flow_fails_closed_before_required_policy_gates() -> None:
         )
 
 
-def test_delivery_requires_qa_and_matching_allowed_compliance(tmp_path) -> None:
+def test_delivery_requires_qa_and_matching_allowed_compliance(
+    tmp_path,
+    business_authority,
+) -> None:
     store = SQLiteStore(tmp_path / "nika.sqlite")
     store.initialize()
-    factory = _factory()
-    _advance_to_work_order(factory)
+    factory = _factory(business_authority)
+    _advance_to_work_order(factory, business_authority)
     factory.handoff_to_product_factory(
         repository=ProductProjectRepository(store),
         project_id="product-project-1",
@@ -305,6 +321,24 @@ def test_delivery_requires_qa_and_matching_allowed_compliance(tmp_path) -> None:
             authorization_ref="approval:delivery:1",
             compliance=replace(allowed, project_id="other-project"),
         )
+    with pytest.raises(BusinessFactoryError, match="trusted business approval authority"):
+        factory.record_delivery(
+            delivery_id="delivery-1",
+            artifact_ref="artifact:1",
+            authorization_ref="caller:self-minted-delivery-approval",
+            compliance=allowed,
+        )
+
+
+def test_authorization_fingerprint_detects_scope_substitution(business_authority) -> None:
+    factory = _factory(business_authority)
+    _advance_to_work_order(factory, business_authority)
+    snapshot = factory.snapshot()
+    assert snapshot.work_order is not None
+    forged_order = replace(snapshot.work_order, scope="Attacker-changed scope")
+    forged = replace(snapshot, work_order=forged_order)
+    with pytest.raises(BusinessFactoryError, match="fingerprint does not match scope"):
+        dump_business_snapshot(forged)
 
 
 def test_policy_cannot_expand_contract_or_money_authority() -> None:
