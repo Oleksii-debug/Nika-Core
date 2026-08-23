@@ -25,6 +25,7 @@ covered there.
 REUSE:
 
 - `subprocess` typed argv with `shell=False`;
+- the installed host Git CLI rather than a new Git implementation;
 - Windows Job Objects already used by the process runner;
 - `pathlib`, `os`, `stat`, and OS reparse/symlink metadata;
 - private Git metadata with no retained remotes;
@@ -38,6 +39,8 @@ ADAPT:
 - every named executable symlink hop is shell-policy checked before dereference;
 - `Popen` receives the final canonical resolved executable rather than the allowlisted alias;
 - the final canonical executable identity is shell-policy checked again before launch;
+- host-side private-Git preparation resolves `git` from the trusted host PATH once and then uses
+  only the canonical absolute executable, never the worker-supplied PATH as executable authority;
 - the child environment is filtered again at the process boundary;
 - TEMP/TMP/TMPDIR are pinned into the declared worker workspace;
 - cwd is required to remain below the declared worker workspace root;
@@ -45,18 +48,17 @@ ADAPT:
   cancellation check immediately before `Popen`;
 - workspace, evidence and process-temp roots are rejected when the root object itself is a
   symlink or Windows reparse point;
-- the private-Git job root is a pre-created trusted directory whose root identity is validated
-  before Git preparation and again before destructive cleanup;
+- the private-Git job root is a pre-created trusted directory whose identity is validated at plan
+  creation, before Git preparation and again before destructive cleanup;
 - production repository and job workspace roots must be fully disjoint in both directions;
-- cleanup removes only canonical private Git/worktree roots and refuses reparse/symlink
-  content;
+- cleanup removes only canonical private Git/worktree roots and refuses reparse/symlink content;
 - before/after tree evidence is converted into deterministic added/modified/deleted delta
   evidence and checked against allowed paths and changed-file budget.
 
 CUSTOM:
 
 Only Nika-specific policy glue: control-plane path classification, evidence records, and
-fail-closed validation. No alternate generic sandbox framework is introduced.
+fail-closed validation. No alternate generic sandbox or Git framework is introduced.
 
 ## Security invariants covered by this batch
 
@@ -76,15 +78,20 @@ fail-closed validation. No alternate generic sandbox framework is introduced.
 9. Guarded workspace, evidence and temp roots fail closed if the root itself is a symlink or
    Windows reparse point; evidence collection must not resolve an attacker-replaced worktree root
    into an external tree before validating the root object.
-10. Private-Git prepare/cleanup require the declared job root itself to remain a real directory;
-    replacing the job root with a symlink/reparse point fails closed before Git execution or
-    recursive deletion can be redirected into an external tree.
-11. A job root cannot be inside the production repository, equal to it, or contain it.
-12. Cleanup does not recursively delete the job root and refuses symlink/reparse content before
+10. `make_sterile_git_plan()` requires a pre-created real job directory and rejects an initial
+    symlink/reparse job root before canonicalization can erase that identity evidence.
+11. Private-Git prepare/cleanup require the declared job root itself to remain a real directory;
+    replacing the job root after plan creation fails closed before Git execution or recursive
+    deletion can be redirected into an external tree.
+12. Host-side private Git commands use a canonical host-resolved Git executable; a worker PATH
+    value cannot substitute a different `git` binary, and relative path-qualified Git identities
+    are rejected.
+13. A job root cannot be inside the production repository, equal to it, or contain it.
+14. Cleanup does not recursively delete the job root and refuses symlink/reparse content before
     removing the canonical private Git and worktree roots.
-13. Output delta evidence detects additions, modifications, and deletions deterministically,
+15. Output delta evidence detects additions, modifications, and deletions deterministically,
     enforces allowed path scope, and enforces the changed-file budget.
-14. `.github/workflows` and `.github/actions` mutations are denied by default by the output
+16. `.github/workflows` and `.github/actions` mutations are denied by default by the output
     provenance boundary unless a trusted higher-level control-plane approval explicitly opts in.
 
 ## AUD02 executable-indirection repair
@@ -122,10 +129,10 @@ artifact identity and/or real OS/remote isolation rather than path-name validati
 
 ## Root-level indirection repair
 
-A second DEV27 self-audit found that the earlier `collect_tree_evidence()` implementation resolved
-its root before rejecting symlink/reparse entries below it. If a worker replaced the entire
-worktree root with an indirection to another tree before evidence capture, provenance could be
-collected from the wrong filesystem authority.
+A DEV27 self-audit found that the earlier `collect_tree_evidence()` implementation resolved its
+root before rejecting symlink/reparse entries below it. If a worker replaced the entire worktree
+root with an indirection to another tree before evidence capture, provenance could be collected
+from the wrong filesystem authority.
 
 The shared low-level root guard now performs `lstat()` on the supplied root before canonical
 resolution, rejects symbolic links and Windows reparse points, requires an actual directory, and
@@ -134,103 +141,118 @@ Focused regressions prove that a symlinked evidence root, workspace root and pro
 fail closed. Physical Windows junction evidence owned by PR #72 remains separate and is not copied
 into this lane.
 
-## Private-Git job-root replacement repair
+## Private-Git job-root identity repair
 
 A later DEV27 self-audit extended the same root-identity attack family to host-side Git preparation
-and cleanup. The previous cleanup implementation canonicalized
-`plan.private_git_dir.parent.resolve(...)` before proving the job-root object was still the trusted
-root. If the entire job root were replaced by a symlink/reparse point after plan creation, the
-private paths could resolve into an attacker-selected external tree. That is especially serious for
-cleanup because the trusted host calls `shutil.rmtree()` on the private Git/worktree roots.
+and cleanup. The old plan builder canonicalized `job_root` before proving that the supplied object
+was not an indirection, and the old cleanup canonicalized `plan.private_git_dir.parent` before
+proving that the job-root object was still trusted. Either behavior could erase evidence of an
+attacker-selected symlink/reparse root.
 
-The repair centralizes job-root validation through the same real-directory primitive and applies it
-before private-Git preparation and destructive cleanup. `prepare_private_git_workspace()` now
-requires the job root to have been created by the trusted orchestrator before the call; it no longer
-creates a missing job root through an unresolved path. The canonical plan shape is checked so both
-`_nika_private_git` and `worktree` remain direct children of that same declared root. Cleanup
-revalidates the job-root identity after read-only tree checks and again immediately before each
-recursive deletion.
+The repair applies one real-directory primitive at all relevant boundaries. The trusted host must
+create the job directory first. `make_sterile_git_plan()` rejects a missing, symbolic-link or
+Windows-reparse job root before canonicalization. The resulting canonical plan keeps
+`_nika_private_git` and `worktree` as direct children of that root. Preparation revalidates the
+root before invoking Git and before creating the worktree. Cleanup revalidates after read-only tree
+checks and immediately before each recursive deletion.
 
-Portable destructive-marker regressions replace the declared job root with a directory symlink to
-an external tree. Preparation must fail before invoking Git or creating private paths in the
-external tree. Cleanup must fail while preserving external `_nika_private_git` and `worktree`
-markers. Physical Windows junction/reparse proof remains with PR #72 rather than being duplicated
-here.
+Portable regressions cover both an initially indirect job root and replacement after plan
+creation. Preparation must fail before Git or private paths can be created in an external tree.
+Cleanup must fail while preserving external `_nika_private_git` and `worktree` markers. Physical
+Windows junction/reparse proof remains with PR #72 rather than being duplicated here.
 
-This remains path-identity hardening rather than a race-free filesystem transaction. A hostile
-actor able to replace the trusted job-root directory in the tiny interval after the final
-revalidation and before an OS filesystem operation can still create a TOCTOU race. The required
-operational invariant is therefore that worker descendants are terminated before cleanup and that
-the trusted host owns the job-root parent. Stronger hostile-concurrent-filesystem guarantees require
-handle-relative/OS sandbox primitives rather than false Python-level claims.
+This is path-identity hardening rather than a race-free filesystem transaction. A hostile actor
+able to replace a trusted directory in the tiny interval after final validation and before an OS
+filesystem operation can still create a TOCTOU race. The operational invariant is therefore that
+worker descendants are terminated before cleanup and the trusted host owns the job-root parent.
+Stronger hostile-concurrent-filesystem guarantees require handle-relative/OS sandbox primitives,
+not a false Python-level claim.
+
+## Host Git executable identity repair
+
+The private-Git helper reused the installed Git CLI as intended, but it previously passed the
+literal name `git` to subprocess calls together with `plan.environment`. Because that environment
+contains a filtered `PATH`, a caller-controlled worker PATH could become executable-selection
+authority for trusted host-side Git operations.
+
+The repair separates executable discovery from the worker environment. A bare Git name is resolved
+once using the host process PATH, converted to the canonical executable target, and every private
+Git command uses that absolute identity. A caller may explicitly supply an absolute Git executable;
+it is canonicalized without PATH search. Relative path-qualified Git values are rejected. The
+worker environment may still carry PATH for child tooling, but it cannot decide which Git binary
+the trusted private-workspace controller invokes.
+
+Focused regressions prove host PATH is used for discovery even when `plan.environment["PATH"]`
+points at an attacker directory, prove the first Git argv is absolute/canonical, prove absolute Git
+identity avoids PATH discovery, and reject relative path-qualified Git input.
+
+This is still host executable path hardening, not signed-binary attestation. Replacement of the
+trusted host Git file itself requires OS/package integrity controls outside this Python boundary.
 
 ## Pre-launch cancellation repair
 
-A third DEV27 self-audit found a deterministic side-effect race in the old process runner. When a
+Another DEV27 self-audit found a deterministic side-effect race in the old process runner. When a
 `cancellation_event` was already set before `run_typed_process()` was called, the runner still
-created the child with `Popen` and only noticed the cancellation in its post-launch polling loop.
-A short-lived command could therefore perform an immediate filesystem or external side effect even
-though cancellation authority already existed before dispatch.
+created the child with `Popen` and only noticed cancellation in its post-launch polling loop. A
+short-lived command could therefore perform an immediate side effect even though cancellation
+authority already existed before dispatch.
 
 The runner now checks cancellation after trusted argv/cwd/workspace validation but before process
-environment/temp preparation, and checks it a second time immediately after environment setup and
-before `Popen`. A pre-cancelled request returns a typed failed/cancelled `ProcessExecutionResult`
-without creating the worker temp directory or launching the child. The focused regression uses an
-immediate marker-writing Python command and proves both the marker and `_nika_process_tmp` remain
-absent.
+environment/temp preparation, and checks it again after environment setup and before `Popen`. A
+pre-cancelled request returns a typed failed/cancelled `ProcessExecutionResult` without creating the
+worker temp directory or launching the child. A marker-writing regression proves the marker and
+`_nika_process_tmp` remain absent.
 
 This does not claim a mathematically atomic cancellation-to-process-creation transaction. A new
 cancellation can still race in the very small interval after the final check and before the OS
 creates the process; once a process exists, existing Job Object/process-group termination remains
 the containment mechanism. Eliminating that residual launch race requires a stronger OS-specific
-suspended-process/dispatch primitive or a remote sandbox transaction, not an inaccurate Python
-object-level claim.
+suspended-process/dispatch primitive or a remote sandbox transaction.
 
 ## Isolation truth and non-goals
 
-`POLICY_ONLY` and Windows `PROCESS_CONTAINED` remain exactly what their names state.
-They are not filesystem or network sandboxes. This batch does not relabel them and does not
-claim that Python validation can confine arbitrary hostile code.
+`POLICY_ONLY` and Windows `PROCESS_CONTAINED` remain exactly what their names state. They are not
+filesystem or network sandboxes. This batch does not relabel them and does not claim that Python
+validation can confine arbitrary hostile code.
 
 The documented Popen-to-Job assignment race remains a limitation of the current Windows
 process-contained runner and is not silently reclassified as solved.
 
-Network-deny or approved-host enforcement for untrusted coding execution still requires a
-real OS or remote sandbox adapter. A future OpenHands, Codex, container, VM, Windows Sandbox,
-or equivalent worker must remain behind `CodingWorkerPort` and must provide independently
-verified isolation evidence before it can be classified `OS_SANDBOXED` or
-`REMOTE_SANDBOXED`.
+Network-deny or approved-host enforcement for untrusted coding execution still requires a real OS
+or remote sandbox adapter. A future OpenHands, Codex, container, VM, Windows Sandbox or equivalent
+worker must remain behind `CodingWorkerPort` and provide independently verified isolation evidence
+before it can be classified `OS_SANDBOXED` or `REMOTE_SANDBOXED`.
 
-A worker process that can execute arbitrary Python or another general-purpose interpreter
-must be treated as arbitrary code. Executable allowlisting is command-boundary hardening,
-not a substitute for OS isolation.
+A worker process that can execute arbitrary Python or another general-purpose interpreter must be
+treated as arbitrary code. Executable allowlisting is command-boundary hardening, not a substitute
+for OS isolation.
 
 ## Required integration sequence for a real coding-worker adapter
 
 1. The trusted host creates a dedicated real-directory job root fully disjoint from production
-   source and metadata. Do not pass a missing/symlink/reparse job root to private-Git preparation.
-2. Create private Git metadata/worktree with `make_sterile_git_plan` and
-   `prepare_private_git_workspace`.
+   source and metadata.
+2. Build the sterile Git plan only after that root exists, then prepare private Git metadata and
+   the worktree through `prepare_private_git_workspace()`.
 3. Capture the initial `TreeEvidence`.
-4. Launch only through a real isolation adapter appropriate to the job's network/filesystem
-   policy. If the low-level typed process runner is used for trusted bounded commands, supply
-   a pinned absolute executable and the declared workspace root.
-5. Capture final `TreeEvidence` and derive `TreeDeltaEvidence` with the job allowed paths and
+4. Launch only through an isolation adapter appropriate to the job's network/filesystem policy.
+   If the low-level typed process runner is used for trusted bounded commands, supply a pinned
+   absolute executable and declared workspace root.
+5. Capture final `TreeEvidence` and derive `TreeDeltaEvidence` with the allowed paths and
    changed-file budget.
 6. Independently verify candidate tests and exact digests; do not trust worker self-report.
 7. Re-check production repository integrity.
 8. Cancel/terminate process descendants before cleanup.
-9. Clean only the private Git/worktree roots with `cleanup_private_git_workspace`.
+9. Clean only the private Git/worktree roots with `cleanup_private_git_workspace()`.
 10. Promotion/registration remains outside the worker and cannot expand the original task
     permission ceiling.
 
 ## Acceptance evidence required before integration credit
 
-- Ruff, compile, dependency consistency and full pytest must be green on the exact candidate
-  SHA through Core CI on Ubuntu and Windows.
+- Ruff, compile, dependency consistency and full pytest must be green on the exact candidate SHA
+  through Core CI on Ubuntu and Windows.
 - M12 pre-human release gate must be green on that same exact SHA where applicable.
 - The AUD02 executable-indirection attack family must be independently replayed on that exact
   candidate and clear the blocker; prior-head QA evidence cannot clear a newer candidate.
-- Compatibility with PR #72 is architectural unless/ until its physical Windows test is present
-  in the same integrated main; this lane does not copy another owner's test into its PR.
+- Compatibility with PR #72 is architectural unless/until its physical Windows test is present in
+  the same integrated main; this lane does not copy another owner's test into its PR.
 - `HUMAN_TESTED=false` and `NVDA_VERIFIED=false` unless a real human/NVDA run is recorded.
