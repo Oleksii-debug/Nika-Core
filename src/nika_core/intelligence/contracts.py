@@ -114,6 +114,8 @@ class DeterministicEffectConflictError(RuntimeError):
 class DeterministicEffectJournal(Protocol):
     """Durable fail-closed journal for non-read-only deterministic tool effects."""
 
+    def unresolved_operation_keys(self, *, task_id: str) -> tuple[str, ...]: ...
+
     def reserve(
         self,
         *,
