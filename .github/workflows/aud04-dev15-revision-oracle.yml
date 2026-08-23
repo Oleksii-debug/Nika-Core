@@ -1,0 +1,38 @@
+name: AUD04 DEV15 revision-drift oracle
+
+on:
+  push:
+    branches:
+      - "qa/aud04-dev15-revision-replay-9b177"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  revision-drift-oracle:
+    name: Reject cross-revision accessibility fallback
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Verify exact QA checkout
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+      - name: Install minimal test dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Compile target and QA oracle
+        run: >-
+          python -m py_compile
+          src/nika_core/workspaces/accessibility_repair.py
+          tests/test_aud04_accessibility_fallback_revision.py
+      - name: Run independent revision-drift oracle
+        run: python -m pytest -q tests/test_aud04_accessibility_fallback_revision.py
