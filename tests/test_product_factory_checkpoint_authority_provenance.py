@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -177,6 +178,24 @@ def test_object_setattr_cannot_mint_live_authority_from_known_fingerprint(tmp_pa
         candidate.trusted_plan_fingerprint,
     )
     object.__setattr__(checkpoint, "trusted_plan_authority_proof", "0" * 64)
+
+    with pytest.raises(ProductFactoryTrustedPlanAuthorityError, match="authority proof"):
+        ProductFactoryCheckpointHost(store).save(
+            host_task_id=task_id,
+            checkpoint=checkpoint,
+        )
+    assert "trusted_plan_fingerprint" not in _host_payload(store, task_id)
+
+
+def test_host_issued_proof_cannot_be_reused_after_snapshot_tamper(tmp_path) -> None:
+    store, binding, task_id = _setup(tmp_path)
+    coordinator = _planned(binding)
+    checkpoint = binding.checkpoint(coordinator)
+    tampered_snapshot = replace(
+        checkpoint.coordinator,
+        revision=checkpoint.coordinator.revision + 1,
+    )
+    object.__setattr__(checkpoint, "coordinator", tampered_snapshot)
 
     with pytest.raises(ProductFactoryTrustedPlanAuthorityError, match="authority proof"):
         ProductFactoryCheckpointHost(store).save(
