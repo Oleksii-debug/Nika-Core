@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import tempfile
 import zipfile
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
@@ -157,7 +158,10 @@ def build_release_manifest(
 
 def write_release_manifest(bundle_dir: Path, manifest: ReleaseManifest) -> Path:
     _require_valid_manifest(manifest)
-    target = bundle_dir / _RELEASE_MANIFEST_NAME
+    root = bundle_dir.resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError("bundle_dir must be a directory")
+    target = root / _RELEASE_MANIFEST_NAME
     payload = {
         "manifest_version": manifest.manifest_version,
         "product": manifest.product,
@@ -165,7 +169,23 @@ def write_release_manifest(bundle_dir: Path, manifest: ReleaseManifest) -> Path:
         "source_sha": manifest.source_sha,
         "files": [asdict(item) for item in manifest.files],
     }
-    target.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    serialized = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=root,
+            prefix=".release-manifest-",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            handle.write(serialized)
+            temporary_path = Path(handle.name)
+        temporary_path.replace(target)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
     return target
 
 
