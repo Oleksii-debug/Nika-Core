@@ -25,7 +25,16 @@ class ProductProjectCoordinatorCheckpoint:
     spec_version: int
     row_version: int
     coordinator: CoordinatorSnapshot
-    trusted_plan_fingerprint: str | None = field(default=None, repr=False, compare=False)
+    # This field is deliberately excluded from __init__. A serialized/untrusted
+    # checkpoint is candidate state, not an authority capable of blessing its own
+    # trusted-plan hash. ProductProjectCoordinatorBinding.checkpoint() attaches the
+    # value only while crossing the live host-side binding boundary.
+    trusted_plan_fingerprint: str | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
 
 @dataclass(slots=True)
@@ -36,6 +45,11 @@ class ProductProjectCoordinatorBinding:
     coordinator snapshots nor creates a second project store; the host persists the
     checkpoint wherever orchestration state is durably owned and must re-bind it against
     the current ProductProject before resume.
+
+    The live trusted-plan fingerprint attached by :meth:`checkpoint` is provenance
+    metadata for the host-side save boundary only. It is intentionally not constructor
+    controlled and is never restored from serialized checkpoint bytes, so candidate
+    state cannot mint the external authority used to validate itself.
     """
 
     project: ProductProject
@@ -80,13 +94,20 @@ class ProductProjectCoordinatorBinding:
             raise ProductProjectBindingError(
                 "coordinator snapshot does not belong to bound ProductProject"
             )
-        return ProductProjectCoordinatorCheckpoint(
+        checkpoint = ProductProjectCoordinatorCheckpoint(
             project_id=self.project.project_id,
             spec_version=self.project.spec_version,
             row_version=self.project.row_version,
             coordinator=snapshot,
-            trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
         )
+        # Frozen dataclass mutation is intentionally confined to this trusted live
+        # construction boundary. Decoders construct the same type without this value.
+        object.__setattr__(
+            checkpoint,
+            "trusted_plan_fingerprint",
+            coordinator.trusted_plan_fingerprint,
+        )
+        return checkpoint
 
     def restore(
         self,
