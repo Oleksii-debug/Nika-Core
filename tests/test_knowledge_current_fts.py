@@ -162,7 +162,9 @@ def test_v3_migration_rebuilds_v2_fts_projection_without_losing_history(
     assert corpus.verify_integrity().versions_checked == 2
 
 
-def test_v3_rebuild_restores_current_only_bm25_statistics(tmp_path: Path) -> None:
+def test_v3_rebuild_repairs_persistent_fts_without_contaminating_acl_bm25(
+    tmp_path: Path,
+) -> None:
     store = _make_store(tmp_path)
     corpus = KnowledgeCorpus(store)
     old_text = " ".join("rankingmarker historical" for _ in range(80))
@@ -175,14 +177,17 @@ def test_v3_rebuild_restores_current_only_bm25_statistics(tmp_path: Path) -> Non
     baseline = corpus.search(scope, "rankingmarker")[0].rank
 
     _inject_historical_fts(store)
+    with pytest.raises(CorpusCorruptionError, match="historical version"):
+        corpus.verify_integrity()
     contaminated = corpus.search(scope, "rankingmarker")[0].rank
-    assert contaminated != baseline
+    assert contaminated == pytest.approx(baseline, rel=0.0, abs=1e-15)
 
     with store.connection() as conn:
         conn.execute("DELETE FROM knowledge_schema_migrations WHERE version=3")
         initialize_knowledge_schema(conn)
     repaired = corpus.search(scope, "rankingmarker")[0].rank
     assert repaired == pytest.approx(baseline, rel=0.0, abs=1e-15)
+    assert corpus.verify_integrity().versions_checked == 2
 
 
 def test_v3_migration_fails_closed_on_missing_current_version(tmp_path: Path) -> None:
