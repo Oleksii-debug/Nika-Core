@@ -149,6 +149,7 @@ def verify_third_party_notices(bundle_dir: Path) -> tuple[str, ...]:
     text = target.read_text(encoding="utf-8", errors="replace")
     sections, duplicates = _sections(text)
     findings: list[str] = []
+    expected_titles = {"Python runtime"}
     if "Python runtime" in duplicates:
         findings.extend(("notices:pythonruntime", "notices:pythonruntime:duplicate"))
     python_body = sections.get("Python runtime")
@@ -168,9 +169,15 @@ def verify_third_party_notices(bundle_dir: Path) -> tuple[str, ...]:
         except (metadata.PackageNotFoundError, RuntimeError):
             findings.extend((base_finding, f"{base_finding}:metadata"))
             continue
+        expected_titles.add(title)
         if title in duplicates:
             findings.extend((base_finding, f"{base_finding}:duplicate"))
             continue
         if sections.get(title) != expected_body:
             findings.append(base_finding)
+
+    for title in sorted(set(sections) - expected_titles):
+        findings.append(f"notices:orphan-section:{title}")
+    for title in sorted(set(duplicates) - expected_titles):
+        findings.append(f"notices:orphan-duplicate-section:{title}")
     return tuple(dict.fromkeys(findings))
