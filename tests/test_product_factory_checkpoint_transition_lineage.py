@@ -137,6 +137,7 @@ def test_attempt_cannot_skip_multiple_durable_repair_generations(tmp_path) -> No
     host = ProductFactoryCheckpointHost(store)
     host.save(host_task_id=task_id, checkpoint=binding.checkpoint(coordinator))
     coordinator.start("core")
+    host.save(host_task_id=task_id, checkpoint=binding.checkpoint(coordinator))
     _fail_running(coordinator)
     host.save(host_task_id=task_id, checkpoint=binding.checkpoint(coordinator))
 
