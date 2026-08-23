@@ -39,6 +39,9 @@ Additional invariants:
   duplicate result contracts and non-text contract keys fail closed;
 - Nika evidence is a deterministic SHA-256 reference over normalized result identity, not raw output;
 - failed/timed-out deployment is `uncertain=True`, because a remote mutation may have partially occurred;
+- a provider exception during `deploy()` or a deploy result with no evidence cannot be treated as a safe
+  rejection: `DeploymentFabric` records durable `UNCERTAIN` without inventing provider evidence, and an
+  `UNCERTAIN` snapshot may therefore have no provider refs when the provider returned none;
 - once a provider reports `applied=True`, health transport failure, malformed health evidence, or exact
   release mismatch is persisted by `DeploymentFabric` as durable `UNCERTAIN`; retrying the same intent
   returns that durable record instead of replaying the deployment mutation;
@@ -111,6 +114,8 @@ The test suite covers:
 - project/environment/provider mismatch rejection before side effect;
 - safe extravars with exact release version/SHA/digest and no password/token/secret fields;
 - timeout/failure -> uncertain deployment;
+- provider deploy exception and missing deploy evidence -> durable `UNCERTAIN`, snapshot/restart support,
+  and same-intent idempotency without blind provider replay;
 - explicit deploy result requirement;
 - applied deployment followed by health failure/mismatch -> durable `UNCERTAIN` with same-intent and
   restart idempotency, never blind deploy replay;
