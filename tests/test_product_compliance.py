@@ -12,6 +12,24 @@ from nika_core.product_compliance import (
 )
 
 
+class _ReviewAuthority:
+    def __init__(self, grants: tuple[tuple[str, str, str], ...]) -> None:
+        self._grants = frozenset(grants)
+
+    def verify(
+        self,
+        *,
+        project_id: str,
+        evidence_ref: str,
+        purpose: str,
+    ) -> bool:
+        return (project_id, evidence_ref, purpose) in self._grants
+
+
+def _gate(*grants: tuple[str, str, str]) -> ProductComplianceGate:
+    return ProductComplianceGate(review_authority=_ReviewAuthority(grants))
+
+
 def _dependency(
     *,
     disposition: LicenseDisposition = LicenseDisposition.APPROVED,
@@ -44,7 +62,18 @@ def _obligation() -> DistributionObligationEvidence:
 
 
 def test_release_passes_only_with_complete_approved_provenance_and_obligations() -> None:
-    decision = ProductComplianceGate().evaluate(
+    decision = _gate(
+        (
+            "project-1",
+            "review:license:1",
+            "license-disposition:component-1",
+        ),
+        (
+            "project-1",
+            "terms-review:public-source:1",
+            "public-source-permission:competitor-1",
+        ),
+    ).evaluate(
         project_id="project-1",
         dependencies=(_dependency(),),
         obligation_evidence=(_obligation(),),
@@ -113,6 +142,72 @@ def test_release_allowing_policy_decisions_require_durable_review_evidence() -> 
             provenance_ref="research:public:no-policy",
             permitted_public_evidence=True,
         )
+
+
+def test_default_gate_rejects_opaque_review_authority_strings() -> None:
+    scope = ProductComplianceGate().evaluate(
+        project_id="project-1",
+        scope_review_ref="caller:claims-review-happened",
+    )
+    assert scope.allowed is False
+    assert "compliance-scope:untrusted-review-authority" in scope.findings
+
+    license_decision = ProductComplianceGate().evaluate(
+        project_id="project-1",
+        dependencies=(_dependency(),),
+        obligation_evidence=(_obligation(),),
+    )
+    assert license_decision.allowed is False
+    assert "license:untrusted-review-authority:component-1" in license_decision.findings
+
+
+def test_review_authority_is_bound_to_exact_project_ref_and_purpose() -> None:
+    authority = _ReviewAuthority(
+        (
+            (
+                "project-1",
+                "review:license:1",
+                "license-disposition:component-1",
+            ),
+        )
+    )
+    gate = ProductComplianceGate(review_authority=authority)
+    exact = gate.evaluate(
+        project_id="project-1",
+        dependencies=(_dependency(),),
+        obligation_evidence=(_obligation(),),
+    )
+    assert exact.allowed is True
+
+    wrong_project = ProductComplianceGate(
+        review_authority=_ReviewAuthority(
+            (
+                (
+                    "other-project",
+                    "review:license:1",
+                    "license-disposition:component-1",
+                ),
+            )
+        )
+    ).evaluate(
+        project_id="project-1",
+        dependencies=(_dependency(),),
+        obligation_evidence=(_obligation(),),
+    )
+    assert wrong_project.allowed is False
+    assert "license:untrusted-review-authority:component-1" in wrong_project.findings
+
+    wrong_purpose = ProductComplianceGate(
+        review_authority=_ReviewAuthority(
+            (("project-1", "review:license:1", "compliance-scope"),)
+        )
+    ).evaluate(
+        project_id="project-1",
+        dependencies=(_dependency(),),
+        obligation_evidence=(_obligation(),),
+    )
+    assert wrong_purpose.allowed is False
+    assert "license:untrusted-review-authority:component-1" in wrong_purpose.findings
 
 
 @pytest.mark.parametrize(
@@ -205,7 +300,18 @@ def test_proprietary_material_access_is_not_copy_permission() -> None:
         legal_basis_ref="legal-basis:license:1",
         reuse_authorization_ref="approval:reuse:1",
     )
-    allowed = ProductComplianceGate().evaluate(
+    allowed = _gate(
+        (
+            "project-1",
+            "legal-basis:license:1",
+            "proprietary-legal-basis:licensed-reference-1",
+        ),
+        (
+            "project-1",
+            "approval:reuse:1",
+            "proprietary-reuse-authorization:licensed-reference-1",
+        ),
+    ).evaluate(
         project_id="project-1",
         competitor_evidence=(authorized_record,),
     )
