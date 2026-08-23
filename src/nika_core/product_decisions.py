@@ -25,6 +25,28 @@ def _canonical(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _strict_int(value: Any, *, label: str, minimum: int) -> int:
+    if type(value) is not int or value < minimum:
+        raise ProductProjectError(
+            f"{label} must be an integer greater than or equal to {minimum}"
+        )
+    return value
+
+
+def _decode_id_list(raw: Any, *, label: str) -> tuple[str, ...]:
+    try:
+        values = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ProductProjectError(f"{label} contains invalid JSON") from exc
+    if not isinstance(values, list) or not values:
+        raise ProductProjectError(f"{label} must be a non-empty list")
+    if any(not isinstance(value, str) or not value.strip() for value in values):
+        raise ProductProjectError(f"{label} must contain non-empty string identifiers")
+    if len(values) != len(set(values)):
+        raise ProductProjectError(f"{label} must not contain duplicates")
+    return tuple(values)
+
+
 @dataclass(frozen=True, slots=True)
 class StoredProductDecision:
     project_id: str
@@ -50,6 +72,11 @@ class ProductDecisionRepository:
         idempotency_key: str,
     ) -> StoredProductDecision:
         self._validate_input(decision, idempotency_key)
+        expected_row_version = _strict_int(
+            expected_row_version,
+            label="expected ProductProject row_version",
+            minimum=0,
+        )
         fingerprint = hashlib.sha256(
             _canonical(
                 {
@@ -78,11 +105,16 @@ class ProductDecisionRepository:
                     raise ProductProjectError(
                         "idempotency key was already used with different mutation input"
                     )
+                entity_version = _strict_int(
+                    replay["entity_version"],
+                    label="persisted product decision entity_version",
+                    minimum=1,
+                )
                 stored = self._get_version_conn(
                     conn,
                     project_id,
                     decision.decision_id,
-                    int(replay["entity_version"]),
+                    entity_version,
                 )
                 verify_sealed_handoffs_conn(
                     conn,
@@ -97,10 +129,15 @@ class ProductDecisionRepository:
             ).fetchone()
             if project is None:
                 raise KeyError(project_id)
-            if int(project["row_version"]) != expected_row_version:
+            current_row_version = _strict_int(
+                project["row_version"],
+                label="persisted ProductProject row_version",
+                minimum=0,
+            )
+            if current_row_version != expected_row_version:
                 raise StaleProjectVersionError(
                     f"stale ProductProject write: expected {expected_row_version}, "
-                    f"current {project['row_version']}"
+                    f"current {current_row_version}"
                 )
 
             evidence_package_ids = self._option_evidence_conn(
@@ -226,6 +263,11 @@ class ProductDecisionRepository:
         decision_id: str,
         expected_row_version: int,
     ) -> ProductProject:
+        expected_row_version = _strict_int(
+            expected_row_version,
+            label="expected ProductProject row_version",
+            minimum=0,
+        )
         project = self.projects.get(project_id)
         matching = [
             (index, requirement)
@@ -331,8 +373,15 @@ class ProductDecisionRepository:
                 rationale=row["rationale"],
                 decided_by_ref=row["decided_by_ref"],
             ),
-            decision_version=int(row["decision_version"]),
-            evidence_package_ids=tuple(json.loads(row["evidence_package_ids_json"])),
+            decision_version=_strict_int(
+                row["decision_version"],
+                label="persisted product decision version",
+                minimum=1,
+            ),
+            evidence_package_ids=_decode_id_list(
+                row["evidence_package_ids_json"],
+                label="persisted product decision evidence package ids",
+            ),
             created_at=row["created_at"],
         )
 
@@ -406,7 +455,12 @@ class ProductDecisionRepository:
                 raise ProductProjectError(
                     "product research handoff must contain a JSON object"
                 )
-            for option in payload.get("options", []):
+            raw_options = payload.get("options", [])
+            if not isinstance(raw_options, list):
+                raise ProductProjectError(
+                    "product research handoff options must be a list"
+                )
+            for option in raw_options:
                 if not isinstance(option, dict):
                     raise ProductProjectError(
                         "product research handoff contains invalid option data"
@@ -417,11 +471,14 @@ class ProductDecisionRepository:
                         raise ProductProjectError(
                             "product option evidence_package_ids must be a list"
                         )
-                    package_ids = tuple(str(value) for value in raw_package_ids)
-                    if not package_ids or any(not value.strip() for value in package_ids):
+                    if not raw_package_ids or any(
+                        not isinstance(value, str) or not value.strip()
+                        for value in raw_package_ids
+                    ):
                         raise ProductProjectError(
-                            "product option requires evidence package ids"
+                            "product option evidence package ids must be non-empty strings"
                         )
+                    package_ids = tuple(raw_package_ids)
                     if len(set(package_ids)) != len(package_ids):
                         raise ProductProjectError(
                             "product option contains duplicate evidence package ids"
