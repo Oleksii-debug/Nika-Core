@@ -128,10 +128,6 @@ def validate_artifact_for_handoff(artifact: StructuredMediaArtifact) -> None:
     for model in artifact.models:
         if model.model_id in model_by_id:
             raise ValueError(f"duplicate media model identity: {model.model_id}")
-        if model.engine_id not in engine_by_id:
-            raise ValueError(
-                f"media model {model.model_id} references an engine missing from artifact evidence"
-            )
         model_by_id[model.model_id] = model
 
     if artifact.ocr_document is not None:
@@ -143,6 +139,12 @@ def validate_artifact_for_handoff(artifact: StructuredMediaArtifact) -> None:
                 raise ValueError("OCR document references a model missing from artifact evidence")
             if model.engine_id != artifact.ocr_document.engine_id:
                 raise ValueError("OCR model and OCR engine identity mismatch")
+
+    for model in artifact.models:
+        if model.engine_id not in engine_by_id:
+            raise ValueError(
+                f"media model {model.model_id} references an engine missing from artifact evidence"
+            )
 
     previous_revision_id: str | None = None
     for ordinal, revision in enumerate(artifact.revisions):
