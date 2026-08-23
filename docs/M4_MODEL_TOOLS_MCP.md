@@ -32,7 +32,7 @@ Model and tool execution are bounded by deadlines and cancellation. ModelGateway
 
 Normalized provider responses fail closed. The gateway rejects wrong request/provider/kind identity and non-`ModelResponse` values. Shared `ModelUsage` rejects booleans, negative/non-integer token counts and totals smaller than the sum of all known input/output token components. Shared `ModelResponse` rejects empty text/identity/model and invalid latency. Direct HTTP/Ollama adapters reject malformed response objects, choices/messages, empty text, invalid model values and malformed usage instead of manufacturing plausible defaults.
 
-Audit records contain provider/tool identifiers, risk class, model/usage/latency, cost/resource class and error class. They do **not** record prompts, request metadata, tool arguments, API keys or raw provider responses.
+Audit records contain provider/tool identifiers, risk class, model/usage/latency, cost/resource class and error class. Route-selection and policy failures that occur before the first provider attempt also emit `model.failed` with `phase=preflight`, the typed error code and provider identity when one is known. Ambiguous preflight failures do not fabricate a provider identity. Audit evidence does **not** record prompts, request metadata, tool arguments, API keys or raw provider responses.
 
 `supports_hard_cancellation` means the underlying inference is proven stopped, not merely that the Python caller or HTTP socket was cancelled. The shared `ProviderCapabilities` contract itself defaults this field to `False`, so a newly added adapter cannot accidentally inherit hard-cancellation credit. Generic HTTP providers also default it to `False`. An adapter may opt in only when its upstream/provider path has separate evidence for hard server-side cancellation. This prevents ModelGateway from launching a fallback inference after a timeout when the first inference may still be consuming resources.
 
@@ -81,7 +81,8 @@ The acceptance suite constructs a real official `MCPServer` in process, discover
 6. request deadlines are finite positive numeric values, one total deadline is preserved across all attempts, raw provider `TimeoutError` cannot masquerade as the gateway deadline, and typed timeout fallback remains blocked when hard cancellation is unproven;
 7. response identity, text, model, usage and latency normalization fail closed on malformed values, including token totals smaller than known input/output components;
 8. native Ollama request contract proves `/api/chat`, `stream: false`, default `think: false`, generic documented `low`/`medium`/`high`/`max` level validation, `done: true` completion, model override and usage normalization;
-9. no secrets, request metadata or prompt content appear in Git/audit evidence;
-10. exact green SHA is current-main-compatible before merge.
+9. route preflight failures produce redacted typed audit evidence without prompt/metadata leakage or fabricated provider identity;
+10. no secrets, request metadata or prompt content appear in Git/audit evidence;
+11. exact green SHA is current-main-compatible before merge.
 
 Live Ollama execution is useful focused evidence but does not award physical-Windows Foundry inference credit. Embedded Foundry implementation/lifecycle remains a separate ownership lane. HUMAN_TESTED and NVDA_VERIFIED remain human-only states.
