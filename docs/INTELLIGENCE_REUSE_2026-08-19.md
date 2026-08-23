@@ -11,7 +11,7 @@ REUSE -> ADAPT -> CUSTOM (thin). Nika owns contracts, permissions, product seman
 
 ### Unified Planning 1.3.x + Aries 0.5.0 — ADAPT
 - Project: AIPlan4EU Unified Planning plus the official `up-aries` integration.
-- License: Unified Planning is Apache-2.0; `up-aries` is MIT and the Aries upstream project is MIT/Apache-2.0 licensed.
+- License: Unified Planning is Apache-2.0; the exact adopted `up-aries==0.5.0` package/plugin and Aries v0.5.0 upstream source tree are MIT-licensed.
 - Role: formal planning for explicit goals/actions/preconditions/effects.
 - Integration: optional `planning` dependency; Nika `WorldState`, goal/action and planner contracts remain framework-neutral.
 - First default proof engine: `up-aries==0.5.0` through Unified Planning.
