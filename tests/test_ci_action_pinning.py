@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import pathlib
 import re
-from pathlib import Path
 
 import pytest
 
@@ -18,7 +18,7 @@ _FULL_COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 @pytest.mark.parametrize("workflow_path", _WORKFLOWS)
 def test_release_critical_actions_are_pinned_to_immutable_commits(workflow_path: str) -> None:
     """Release evidence must not execute mutable third-party action tags."""
-    text = Path(workflow_path).read_text(encoding="utf-8")
+    text = pathlib.Path(workflow_path).read_text(encoding="utf-8")
     mutable: list[str] = []
 
     for action_ref in _ACTION_USE.findall(text):
