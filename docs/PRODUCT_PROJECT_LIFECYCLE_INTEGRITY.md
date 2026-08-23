@@ -1,14 +1,22 @@
-# ProductProject Lifecycle Integrity
+# ProductProject Core and Lifecycle Integrity
 
 Status: MANUAL-DEV01 PF0/PF12 durability hardening.
 
 ## Scope and ownership boundary
 
-This contract hardens `product_project_lifecycle.py` only. Portable-history files remain outside this lane because the active PF1 strict-numeric owner is responsible for that family.
+This contract hardens the canonical `product_project.py` durable read/write boundary together with `product_project_lifecycle.py`. Portable-history files remain outside this lane because the active PF1 strict-numeric owner is responsible for that separate family. This change does not depend on the alternate spec-mutation path in PR #166.
 
-## Durable version identity
+## Canonical durable version identity
 
-Lifecycle optimistic concurrency accepts only exact non-negative Python integers for `expected_row_version`. Boolean, floating-point, string and negative coercions are rejected before any database mutation. Durable project and idempotency row versions are also treated as exact integer identity rather than normalized with `int(...)`.
+`ProductProjectRepository` is the authority that first reads core ProductProject rows. It must therefore reject corrupted numeric identity before constructing a domain object: `row_version` is an exact non-negative integer and `current_spec_version` is an exact positive integer. Specification-history version rows are validated on read as well.
+
+`update_spec(expected_row_version=...)` accepts only an exact non-negative Python integer. Boolean, floating-point, string and negative aliases are rejected before database mutation. `ProductProjectSpec.supersedes_spec_version`, when present, is an exact positive integer.
+
+This canonical validation is intentionally upstream of lifecycle reconstruction so a raw SQLite REAL such as `0.5` cannot be normalized with `int(...)` before integrity checks observe it.
+
+## Lifecycle durable version identity
+
+Lifecycle optimistic concurrency also accepts only exact non-negative Python integers for `expected_row_version`. Durable project and lifecycle-idempotency versions are treated as exact integer identity rather than normalized.
 
 ## Restart and corrupted-state behavior
 
@@ -28,6 +36,6 @@ The existing idempotency input fingerprint is retained for compatibility. On rep
 
 ## Evidence truth
 
-Focused tests cover coercion attacks, boolean rehashed audit versions, malformed actor types, idempotent replay tamper, state-chain tamper, non-monotonic versions, missing audit evidence and credential-shaped read tamper.
+Focused tests cover raw REAL core-row corruption at both repository and lifecycle restart boundaries, expected-version coercion attacks, boolean lineage versions, boolean/rehashed audit versions, malformed actor types, idempotent replay tamper, state-chain tamper, non-monotonic versions, missing audit evidence and credential-shaped read tamper. A valid integer spec revision remains the positive compatibility control.
 
 Automated evidence does not set `HUMAN_TESTED` or `NVDA_VERIFIED`.
