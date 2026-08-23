@@ -16,9 +16,11 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_compliance import (
     DependencyAdoption,
     LicenseDisposition,
+    PackagedDependencyEvidence,
     ProductComplianceDecision,
     ProductComplianceError,
     ProductComplianceGate,
+    ProductComplianceSnapshot,
 )
 from nika_core.product_project import (
     EvidenceRef,
@@ -26,6 +28,9 @@ from nika_core.product_project import (
     ProductProjectSpec,
     ResearchEvidencePackage,
 )
+
+SOURCE_SHA = "1" * 64
+NOTICE_SHA = "2" * 64
 
 
 class _ReviewAuthority:
@@ -53,30 +58,81 @@ class _BrokenReviewAuthority:
         raise RuntimeError(f"authority unavailable for {project_id}:{purpose}:{evidence_ref}")
 
 
-def _scope_gate(project_id: str, review_ref: str) -> ProductComplianceGate:
-    return ProductComplianceGate(
-        review_authority=_ReviewAuthority(
-            ((project_id, review_ref, "compliance-scope"),)
-        )
+class _PackagingAuthority:
+    def __init__(
+        self,
+        project_id: str,
+        inventory: tuple[PackagedDependencyEvidence, ...] = (),
+    ) -> None:
+        self._project_id = project_id
+        self._inventory = inventory
+
+    def inventory(self, *, project_id: str) -> tuple[PackagedDependencyEvidence, ...]:
+        if project_id != self._project_id:
+            raise PermissionError("wrong project")
+        return self._inventory
+
+    def verify_notice(
+        self,
+        *,
+        project_id: str,
+        package: PackagedDependencyEvidence,
+    ) -> bool:
+        return project_id == self._project_id and package in self._inventory
+
+
+def _empty_snapshot(project_id: str, review_ref: str) -> ProductComplianceSnapshot:
+    return ProductComplianceSnapshot(
+        project_id=project_id,
+        dependencies=(),
+        obligation_evidence=(),
+        competitor_evidence=(),
+        packaged_dependencies=(),
+        scope_review_ref=review_ref,
     )
+
+
+def _scope_gate(
+    project_id: str,
+    review_ref: str,
+) -> tuple[ProductComplianceGate, ProductComplianceSnapshot]:
+    snapshot = _empty_snapshot(project_id, review_ref)
+    gate = ProductComplianceGate(
+        review_authority=_ReviewAuthority(
+            ((project_id, review_ref, snapshot.scope_review_purpose),)
+        ),
+        packaging_authority=_PackagingAuthority(project_id),
+    )
+    return gate, snapshot
 
 
 def test_caller_constructed_positive_decision_has_no_release_authority() -> None:
     forged = ProductComplianceDecision(
         project_id="project-1",
+        snapshot_fingerprint="0" * 64,
         allowed=True,
         findings=(),
         evidence_refs=("caller:asserted-compliance",),
     )
 
     assert forged.allowed is False
-    with pytest.raises(ProductComplianceError, match="decision:untrusted-origin"):
-        ProductComplianceGate().require_release_allowed(forged)
+    with pytest.raises(ProductComplianceError, match="untrusted-origin"):
+        ProductComplianceGate().require_release_allowed(
+            forged,
+            current_snapshot=ProductComplianceSnapshot(
+                project_id="project-1",
+                dependencies=(),
+                obligation_evidence=(),
+                competitor_evidence=(),
+                packaged_dependencies=(),
+            ),
+        )
 
 
-def test_gate_issued_positive_decision_has_process_local_authority() -> None:
+def test_gate_issued_positive_decision_is_bound_to_exact_snapshot() -> None:
     review_ref = "review:compliance-scope:project-1"
-    decision = _scope_gate("project-1", review_ref).evaluate(
+    gate, snapshot = _scope_gate("project-1", review_ref)
+    decision = gate.evaluate(
         project_id="project-1",
         scope_review_ref=review_ref,
     )
@@ -84,42 +140,43 @@ def test_gate_issued_positive_decision_has_process_local_authority() -> None:
     assert decision.allowed is True
     assert decision.findings == ()
     assert review_ref in decision.evidence_refs
-    ProductComplianceGate().require_release_allowed(decision)
+    gate.require_release_allowed(decision, current_snapshot=snapshot)
 
 
 def test_positive_decision_tamper_invalidates_authority() -> None:
     review_ref = "review:compliance-scope:project-1"
-    decision = _scope_gate("project-1", review_ref).evaluate(
-        project_id="project-1",
-        scope_review_ref=review_ref,
-    )
+    gate, snapshot = _scope_gate("project-1", review_ref)
+    decision = gate.evaluate(project_id="project-1", scope_review_ref=review_ref)
     assert decision.allowed is True
 
     project_substitution = replace(decision, project_id="project-2")
+    snapshot_substitution = replace(decision, snapshot_fingerprint="f" * 64)
     evidence_substitution = replace(
         decision,
         evidence_refs=("review:attacker-substitution",),
     )
 
     assert project_substitution.allowed is False
+    assert snapshot_substitution.allowed is False
     assert evidence_substitution.allowed is False
-    with pytest.raises(ProductComplianceError, match="decision:untrusted-origin"):
-        ProductComplianceGate().require_release_allowed(project_substitution)
-    with pytest.raises(ProductComplianceError, match="decision:untrusted-origin"):
-        ProductComplianceGate().require_release_allowed(evidence_substitution)
+    for forged in (project_substitution, snapshot_substitution, evidence_substitution):
+        with pytest.raises(ProductComplianceError):
+            gate.require_release_allowed(forged, current_snapshot=snapshot)
 
 
 def test_missing_compliance_scope_review_blocks_empty_inventory_false_green() -> None:
-    unreviewed = ProductComplianceGate().evaluate(project_id="project-1")
+    unreviewed = ProductComplianceGate(
+        packaging_authority=_PackagingAuthority("project-1")
+    ).evaluate(project_id="project-1")
 
     assert unreviewed.allowed is False
     assert "compliance-scope:unreviewed" in unreviewed.findings
-    with pytest.raises(ProductComplianceError, match="compliance-scope:unreviewed"):
-        ProductComplianceGate().require_release_allowed(unreviewed)
 
 
 def test_opaque_scope_review_text_is_not_authority() -> None:
-    decision = ProductComplianceGate().evaluate(
+    decision = ProductComplianceGate(
+        packaging_authority=_PackagingAuthority("project-1")
+    ).evaluate(
         project_id="project-1",
         scope_review_ref="caller:claims-review-happened",
     )
@@ -129,47 +186,67 @@ def test_opaque_scope_review_text_is_not_authority() -> None:
 
 
 def test_opaque_dependency_review_text_is_not_license_authority() -> None:
-    decision = ProductComplianceGate().evaluate(
+    dependency = DependencyAdoption(
         project_id="project-1",
-        dependencies=(
-            DependencyAdoption(
-                project_id="project-1",
-                component_id="component-aud05",
-                package_name="example-package",
-                version="1.0.0",
-                source_ref="source:example-package",
-                provenance_ref="provenance:example-package",
-                license_expression="MIT",
-                license_disposition=LicenseDisposition.APPROVED,
-                review_ref="caller:claims-license-review-happened",
-            ),
-        ),
+        component_id="component-aud05",
+        package_name="example-package",
+        version="1.0.0",
+        source_ref="registry:pypi:example-package:1.0.0",
+        source_sha256=SOURCE_SHA,
+        provenance_ref="provenance:example-package",
+        license_expression="MIT",
+        license_disposition=LicenseDisposition.APPROVED,
+        notice_required=True,
+        notice_refs=("artifact:THIRD_PARTY_NOTICES.txt#example-package@1.0.0",),
+        review_ref="caller:claims-license-review-happened",
+    )
+    package = PackagedDependencyEvidence(
+        package_name="example-package",
+        version="1.0.0",
+        notice_ref=dependency.notice_refs[0],
+        notice_sha256=NOTICE_SHA,
+    )
+    decision = ProductComplianceGate(
+        packaging_authority=_PackagingAuthority("project-1", (package,))
+    ).evaluate(
+        project_id="project-1",
+        dependencies=(dependency,),
     )
 
     assert decision.allowed is False
     assert "license:untrusted-review-authority:component-aud05" in decision.findings
 
 
-def test_explicit_trusted_review_can_authorize_empty_compliance_inventory() -> None:
+def test_explicit_trusted_review_can_authorize_verified_empty_inventory() -> None:
     project_id = "project-no-third-party-components"
     review_ref = "review:compliance-scope:empty-inventory:1"
-    reviewed = _scope_gate(project_id, review_ref).evaluate(
+    gate, snapshot = _scope_gate(project_id, review_ref)
+    reviewed = gate.evaluate(project_id=project_id, scope_review_ref=review_ref)
+
+    assert reviewed.allowed is True
+    gate.require_release_allowed(reviewed, current_snapshot=snapshot)
+
+
+def test_review_authority_failure_is_fail_closed() -> None:
+    project_id = "project-1"
+    review_ref = "review:compliance-scope:project-1"
+    decision = ProductComplianceGate(
+        review_authority=_BrokenReviewAuthority(),
+        packaging_authority=_PackagingAuthority(project_id),
+    ).evaluate(
         project_id=project_id,
         scope_review_ref=review_ref,
     )
 
-    assert reviewed.allowed is True
-    ProductComplianceGate().require_release_allowed(reviewed)
-
-
-def test_review_authority_failure_is_fail_closed() -> None:
-    decision = ProductComplianceGate(review_authority=_BrokenReviewAuthority()).evaluate(
-        project_id="project-1",
-        scope_review_ref="review:compliance-scope:project-1",
-    )
-
     assert decision.allowed is False
     assert "compliance-scope:untrusted-review-authority" in decision.findings
+
+
+def test_packaging_authority_is_project_bound() -> None:
+    gate = ProductComplianceGate(packaging_authority=_PackagingAuthority("other-project"))
+    decision = gate.evaluate(project_id="project-1")
+    assert decision.allowed is False
+    assert "packaging:untrusted-inventory-authority" in decision.findings
 
 
 def test_business_delivery_rejects_caller_fabricated_positive_decision(
@@ -239,6 +316,7 @@ def test_business_delivery_rejects_caller_fabricated_positive_decision(
 
     forged = ProductComplianceDecision(
         project_id="product-authority",
+        snapshot_fingerprint="0" * 64,
         allowed=True,
         findings=(),
         evidence_refs=("caller:asserted-compliance",),
