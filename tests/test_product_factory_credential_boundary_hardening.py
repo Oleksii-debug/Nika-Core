@@ -22,14 +22,38 @@ SECRET_REF = "opaque-secret-a"
 @dataclass(slots=True)
 class _ProtectedStore:
     material: set[tuple[str, int]] = field(default_factory=set)
-    handles: set[tuple[str, int]] = field(default_factory=set)
+    authorities: dict[tuple[str, int], str] = field(default_factory=dict)
+    handles: dict[str, tuple[str, int]] = field(default_factory=dict)
 
     def contains(self, secret_ref: str, generation: int) -> bool:
         return (secret_ref, generation) in self.material
 
+    def bind_authority(
+        self,
+        *,
+        secret_ref: str,
+        generation: int,
+        authority_fingerprint: str,
+    ) -> None:
+        key = (secret_ref, generation)
+        existing = self.authorities.get(key)
+        if existing is not None and existing != authority_fingerprint:
+            raise AssertionError("authority conflict")
+        self.authorities[key] = authority_fingerprint
+
+    def authority_matches(
+        self,
+        *,
+        secret_ref: str,
+        generation: int,
+        authority_fingerprint: str,
+    ) -> bool:
+        return self.authorities.get((secret_ref, generation)) == authority_fingerprint
+
     def issue_handle(
         self,
         *,
+        operation_id: str,
         secret_ref: str,
         generation: int,
         project_id: str,
@@ -40,11 +64,29 @@ class _ProtectedStore:
         del project_id, audience, scopes, expires_at
         if not self.contains(secret_ref, generation):
             raise AssertionError("missing protected material")
-        self.handles.add((secret_ref, generation))
-        return "opaque-handle"
+        self.handles.setdefault(operation_id, (secret_ref, generation))
+        return f"opaque-handle:{operation_id}"
+
+    def reconcile_handle(
+        self,
+        *,
+        operation_id: str,
+        secret_ref: str,
+        generation: int,
+        project_id: str,
+        audience: str,
+        scopes: frozenset[str],
+        expires_at: datetime,
+    ) -> str | None:
+        del secret_ref, generation, project_id, audience, scopes, expires_at
+        if operation_id not in self.handles:
+            return None
+        return f"opaque-handle:{operation_id}"
 
     def revoke_handles(self, secret_ref: str, generation: int) -> None:
-        self.handles.discard((secret_ref, generation))
+        for operation_id, identity in list(self.handles.items()):
+            if identity == (secret_ref, generation):
+                del self.handles[operation_id]
 
 
 def _secret(*, state_generation: int = 1) -> SecretRef:
@@ -77,20 +119,21 @@ def test_secret_reference_access_is_exact_not_enumerable() -> None:
 
 
 def test_restore_fails_closed_when_active_protected_generation_is_missing() -> None:
-    broker, _store = _broker()
+    broker, store = _broker()
     snapshot = broker.snapshot()
-    unavailable_store = _ProtectedStore()
+    store.material.clear()
 
     with pytest.raises(CredentialBrokerError, match="protected store.*unavailable"):
-        CredentialBroker(unavailable_store).restore(snapshot)
+        CredentialBroker(store).restore(snapshot)
 
 
 def test_restore_allows_missing_material_for_already_revoked_reference() -> None:
-    broker, _store = _broker()
+    broker, store = _broker()
     broker.revoke(project_id=PROJECT_A, secret_ref=SECRET_REF, now=NOW)
     snapshot = broker.snapshot()
+    store.material.clear()
 
-    restored = CredentialBroker(_ProtectedStore())
+    restored = CredentialBroker(store)
     restored.restore(snapshot)
 
     secret = restored.get_secret_ref(project_id=PROJECT_A, secret_ref=SECRET_REF)
