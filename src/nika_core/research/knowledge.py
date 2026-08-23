@@ -85,6 +85,8 @@ class KnowledgeIngestRequest:
         for name, value in required.items():
             if not value.strip():
                 raise ValueError(f"{name} is required")
+        if not isinstance(self.visibility, KnowledgeVisibility):
+            raise ValueError("visibility must be a KnowledgeVisibility value")
         if self.source_id is not None and not self.source_id.strip():
             raise ValueError("source_id must be non-empty when provided")
         if self.raw_sha256 is not None and not _SHA256.fullmatch(self.raw_sha256):
@@ -204,6 +206,7 @@ class KnowledgeCorpus:
             ).fetchone()
             if workspace is None:
                 raise ValueError("unknown research workspace")
+            self._validate_source_provenance(conn, request)
 
             artifact = conn.execute(
                 """SELECT current_version, visibility FROM knowledge_artifacts
@@ -370,6 +373,32 @@ class KnowledgeCorpus:
         )
 
     @staticmethod
+    def _validate_source_provenance(
+        conn: sqlite3.Connection,
+        request: KnowledgeIngestRequest,
+    ) -> None:
+        if request.source_id is None:
+            return
+        local_rows = conn.execute(
+            """SELECT workspace_id, locator FROM research_sources
+            WHERE source_id=?""",
+            (request.source_id,),
+        ).fetchall()
+        http_rows = conn.execute(
+            """SELECT workspace_id, url AS locator FROM research_http_sources
+            WHERE source_id=?""",
+            (request.source_id,),
+        ).fetchall()
+        source_rows = tuple(local_rows) + tuple(http_rows)
+        if len(source_rows) != 1:
+            raise ValueError("knowledge source identity is missing or ambiguous")
+        source = source_rows[0]
+        if source["workspace_id"] != request.workspace_id:
+            raise PermissionError("knowledge source identity crosses workspace boundary")
+        if source["locator"] != request.source_locator:
+            raise ValueError("knowledge source locator does not match durable source identity")
+
+    @staticmethod
     def _assert_duplicate_acl(
         conn: sqlite3.Connection,
         request: KnowledgeIngestRequest,
@@ -416,8 +445,8 @@ class KnowledgeCorpus:
         *,
         limit: int = 20,
     ) -> list[KnowledgeHit]:
-        if limit < 1 or limit > 100:
-            raise ValueError("limit must be between 1 and 100")
+        if type(limit) is not int or limit < 1 or limit > 100:
+            raise ValueError("limit must be an integer between 1 and 100")
         fts_query = _safe_fts_query(query)
         placeholders = ",".join("?" for _ in scope.workspace_ids)
         sql = f"""SELECT
@@ -426,6 +455,7 @@ class KnowledgeCorpus:
             CAST(knowledge_fts.version AS INTEGER) AS version,
             CAST(knowledge_fts.ordinal AS INTEGER) AS ordinal,
             knowledge_fts.chunk_id,
+            knowledge_fts.title AS indexed_title,
             knowledge_fts.body AS indexed_body,
             snippet(knowledge_fts, 6, '[', ']', ' … ', 24) AS snippet,
             bm25(knowledge_fts) AS rank,
@@ -508,6 +538,8 @@ class KnowledgeCorpus:
     @staticmethod
     def _verify_hit_row(row: sqlite3.Row) -> None:
         text = row["text"]
+        if row["indexed_title"] != row["title"]:
+            raise CorpusCorruptionError("FTS title does not match authoritative version title")
         if row["indexed_body"] != text:
             raise CorpusCorruptionError("FTS body does not match authoritative chunk text")
         if _sha256(text) != row["chunk_sha256"]:
@@ -594,6 +626,8 @@ class KnowledgeCorpus:
                     raise CorpusCorruptionError("knowledge chunk hash mismatch")
                 start = int(chunk["start_char"])
                 end = int(chunk["end_char"])
+                if start < 0 or end < start or end > len(version["normalized_text"]):
+                    raise CorpusCorruptionError("knowledge chunk boundaries are invalid")
                 if version["normalized_text"][start:end] != chunk["text"]:
                     raise CorpusCorruptionError(
                         "knowledge chunk boundaries do not match source text"
@@ -606,7 +640,7 @@ class KnowledgeCorpus:
                 fts_where = f" WHERE workspace_id IN ({placeholders})"
                 fts_params = selected
             fts_rows = conn.execute(
-                "SELECT workspace_id, artifact_key, version, ordinal, chunk_id, body "
+                "SELECT workspace_id, artifact_key, version, ordinal, chunk_id, title, body "
                 "FROM knowledge_fts" + fts_where + " ORDER BY rowid",
                 fts_params,
             ).fetchall()
@@ -619,11 +653,20 @@ class KnowledgeCorpus:
                 if fts["chunk_id"] in seen_fts:
                     raise CorpusCorruptionError("knowledge FTS row is duplicated")
                 seen_fts.add(fts["chunk_id"])
+                version_key = (
+                    chunk["workspace_id"],
+                    chunk["artifact_key"],
+                    int(chunk["version"]),
+                )
+                version = version_map.get(version_key)
+                if version is None:
+                    raise CorpusCorruptionError("knowledge FTS row points to a missing version")
                 if (
                     fts["workspace_id"] != chunk["workspace_id"]
                     or fts["artifact_key"] != chunk["artifact_key"]
                     or int(fts["version"]) != int(chunk["version"])
                     or int(fts["ordinal"]) != int(chunk["ordinal"])
+                    or fts["title"] != version["title"]
                     or fts["body"] != chunk["text"]
                 ):
                     raise CorpusCorruptionError("knowledge FTS metadata is stale or mismatched")
