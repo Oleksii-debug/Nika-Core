@@ -107,3 +107,32 @@ def test_ambiguous_preflight_route_audits_without_fabricated_provider_identity()
             {"code": ModelErrorCode.INVALID_REQUEST.value, "phase": "preflight"},
         )
     ]
+
+
+def test_unknown_caller_provider_identity_is_not_persisted_in_preflight_audit() -> None:
+    audit = _AuditRecorder()
+    gateway = ModelGateway(audit_log=audit)
+    gateway.register(DeterministicMockProvider(provider_id="known"))
+    untrusted_provider_id = "credential-shaped-secret-sentinel"
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        asyncio.run(
+            gateway.complete(
+                _request(
+                    provider_id=untrusted_provider_id,
+                    privacy=PrivacyClass.PUBLIC,
+                    fallback_provider_ids=(),
+                )
+            )
+        )
+
+    assert exc_info.value.code is ModelErrorCode.UNAVAILABLE
+    assert audit.events == [
+        (
+            "model.failed",
+            "model_request",
+            "preflight-audit",
+            {"code": ModelErrorCode.UNAVAILABLE.value, "phase": "preflight"},
+        )
+    ]
+    assert untrusted_provider_id not in repr(audit.events)
