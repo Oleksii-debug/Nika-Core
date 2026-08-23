@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
@@ -9,6 +10,7 @@ from typing import Any
 from nika_core.product_compliance import ProductComplianceDecision
 from nika_core.product_project import (
     EvidenceRef,
+    ProductProjectError,
     ProductProjectRepository,
     ProductProjectSpec,
     ResearchEvidencePackage,
@@ -366,18 +368,68 @@ class BusinessFactory:
         idempotency_key: str,
     ) -> BusinessWorkOrder:
         order = self._require_work_order()
+        _text(project_id, "ProductProject project_id")
+        _text(project_name, "ProductProject project_name")
+        _text(idempotency_key, "ProductProject handoff request key")
+        if not isinstance(spec, ProductProjectSpec):
+            raise BusinessFactoryError("ProductProject handoff requires ProductProjectSpec")
+        work_order_ref = spec.compliance.get("business_work_order_ref")
+        if work_order_ref != order.work_order_id:
+            raise BusinessFactoryError(
+                "ProductProject spec must bind the exact authorized business WorkOrder"
+            )
         if order.product_project_id is not None:
             if order.product_project_id != project_id:
                 raise BusinessFactoryError(
                     "work order is already linked to a different ProductProject"
                 )
+            try:
+                linked = repository.get(project_id)
+            except KeyError as exc:
+                raise BusinessFactoryError(
+                    "linked ProductProject is missing from durable repository"
+                ) from exc
+            if linked.spec.compliance.get("business_work_order_ref") != order.work_order_id:
+                raise BusinessFactoryError(
+                    "linked ProductProject does not match the authorized business WorkOrder"
+                )
             return order
-        project = repository.create(
-            project_id=project_id,
-            name=project_name,
-            spec=spec,
-            idempotency_key=idempotency_key,
+
+        objective_id = self._snapshot.objective.objective_id
+        identity_payload = json.dumps(
+            {"objective_id": objective_id, "work_order_id": order.work_order_id},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
         )
+        operation_key = "nika-pf9-handoff-v1:" + hashlib.sha256(
+            identity_payload.encode("utf-8")
+        ).hexdigest()
+        compliance = dict(spec.compliance)
+        compliance.update(
+            {
+                "business_work_order_ref": order.work_order_id,
+                "business_work_order_authorization_ref": order.authorization_ref,
+                "business_objective_ref": objective_id,
+                "business_handoff_request_key": idempotency_key,
+            }
+        )
+        bound_spec = replace(spec, compliance=compliance)
+        try:
+            project = repository.create(
+                project_id=project_id,
+                name=project_name,
+                spec=bound_spec,
+                idempotency_key=operation_key,
+            )
+        except ProductProjectError as exc:
+            raise BusinessFactoryError(
+                "ProductProject handoff conflicts with durable WorkOrder effect"
+            ) from exc
+        if project.spec.compliance.get("business_work_order_ref") != order.work_order_id:
+            raise BusinessFactoryError(
+                "durable ProductProject does not match the authorized business WorkOrder"
+            )
         order = replace(order, product_project_id=project.project_id)
         self._snapshot = replace(self._snapshot, work_order=order)
         self._record("product_project.linked", project.project_id, order.authorization_ref)
