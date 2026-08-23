@@ -16,6 +16,9 @@ from nika_core.product_project import (
 
 _SPEC_MUTATION_KIND = "product_project.spec_update.v2"
 _SPEC_MUTATION_EVENT = "product_project.spec_versioned"
+_PROJECT_STATES = frozenset(
+    {"active", "paused", "blocked", "completed", "cancelled", "archived"}
+)
 
 
 def _canonical(value: Any) -> str:
@@ -99,89 +102,121 @@ def _audit_payload(
     }
 
 
-def _status_at_row_version(conn: Any, project_id: str, row_version: int) -> str:
-    """Reconstruct the lifecycle status visible at one exact ProductProject row version."""
-    status = "active"
-    previous_event_version = 0
-    for event in conn.execute(
+def _project_status_at_row_version(
+    conn: Any,
+    project_id: str,
+    *,
+    target_row_version: int,
+    current_row_version: int,
+    current_status: Any,
+) -> str:
+    current = _nonempty_str(current_status, label="ProductProject status")
+    if current not in _PROJECT_STATES:
+        raise ProductProjectError(f"unsupported durable ProductProject status: {current}")
+
+    audit_state = "active"
+    target_state = "active"
+    previous_event_row_version = 0
+    rows = conn.execute(
         "SELECT payload_json FROM audit_events "
         "WHERE event_type='product_project.status_changed' "
         "AND entity_type='product_project' AND entity_id=? ORDER BY event_id",
         (project_id,),
-    ).fetchall():
+    ).fetchall()
+    for row in rows:
         try:
-            payload = json.loads(event["payload_json"])
+            payload = json.loads(row["payload_json"])
         except (TypeError, json.JSONDecodeError) as exc:
-            raise ProductProjectError("invalid ProductProject lifecycle audit evidence") from exc
+            raise ProductProjectError("invalid ProductProject status audit evidence") from exc
         if type(payload) is not dict:
-            raise ProductProjectError("invalid ProductProject lifecycle audit evidence")
-        event_version = _durable_int(
+            raise ProductProjectError("invalid ProductProject status audit evidence")
+        event_row_version = _durable_int(
             payload.get("row_version"),
-            label="lifecycle audit row_version",
+            label="ProductProject status audit row_version",
             minimum=1,
         )
-        if event_version <= previous_event_version:
-            raise ProductProjectError(
-                "ProductProject lifecycle audit row_version must increase monotonically"
-            )
-        previous_event_version = event_version
-        if event_version > row_version:
-            break
         previous_state = _nonempty_str(
             payload.get("previous_state"),
-            label="lifecycle audit previous_state",
+            label="ProductProject status audit previous_state",
         )
         new_state = _nonempty_str(
             payload.get("new_state"),
-            label="lifecycle audit new_state",
+            label="ProductProject status audit new_state",
         )
-        if previous_state != status:
-            raise ProductProjectError("ProductProject lifecycle audit state chain is inconsistent")
-        status = new_state
-    return status
+        if previous_state not in _PROJECT_STATES or new_state not in _PROJECT_STATES:
+            raise ProductProjectError("invalid ProductProject status audit state")
+        if event_row_version <= previous_event_row_version:
+            raise ProductProjectError(
+                "ProductProject status audit row_version must increase monotonically"
+            )
+        if event_row_version > current_row_version:
+            raise ProductProjectError(
+                "ProductProject status audit row_version exceeds durable project version"
+            )
+        if previous_state != audit_state:
+            raise ProductProjectError("ProductProject status audit state chain is inconsistent")
+        audit_state = new_state
+        previous_event_row_version = event_row_version
+        if event_row_version <= target_row_version:
+            target_state = new_state
+
+    if audit_state != current:
+        raise ProductProjectError(
+            "ProductProject durable status is not backed by matching lifecycle audit evidence"
+        )
+    return target_state
 
 
-def _materialize_replay_result(
+def _materialize_spec_result(
     conn: Any,
     *,
     project_id: str,
-    result_spec_version: int,
-    result_row_version: int,
-    stored_spec: ProductProjectSpec,
-    result_updated_at: str,
+    spec_version: int,
+    row_version: int,
+    spec: ProductProjectSpec,
+    updated_at: str,
 ) -> ProductProject:
-    """Build the exact mutation result from receipt-bound durable identity, not current state."""
-    project_row = conn.execute(
-        "SELECT project_id,name,current_spec_version,row_version,created_at "
+    row = conn.execute(
+        "SELECT project_id,name,current_spec_version,row_version,status,created_at "
         "FROM product_projects WHERE project_id=?",
         (project_id,),
     ).fetchone()
-    if project_row is None:
-        raise ProductProjectError("spec idempotency record references missing project")
-    durable_project_id = _nonempty_str(project_row["project_id"], label="project_id")
+    if row is None:
+        raise ProductProjectError("spec mutation result references missing project")
+    durable_project_id = _nonempty_str(row["project_id"], label="ProductProject project_id")
     if durable_project_id != project_id:
-        raise ProductProjectError("spec idempotency project identity mismatch")
-    name = _nonempty_str(project_row["name"], label="project name")
-    created_at = _aware_timestamp(project_row["created_at"], label="project created_at")
+        raise ProductProjectError("spec mutation result project identity mismatch")
+    name = _nonempty_str(row["name"], label="ProductProject name")
     current_spec_version = _durable_int(
-        project_row["current_spec_version"],
-        label="current_spec_version",
+        row["current_spec_version"],
+        label="ProductProject current_spec_version",
         minimum=1,
     )
     current_row_version = _durable_int(
-        project_row["row_version"],
-        label="row_version",
+        row["row_version"],
+        label="ProductProject row_version",
         minimum=0,
     )
-    if current_spec_version < result_spec_version or current_row_version < result_row_version:
-        raise ProductProjectError("spec idempotency record is ahead of durable project state")
+    if current_spec_version < spec_version or current_row_version < row_version:
+        raise ProductProjectError("spec mutation result is ahead of durable project state")
+    if current_row_version == row_version and current_spec_version != spec_version:
+        raise ProductProjectError("spec mutation result version identity is inconsistent")
+    status = _project_status_at_row_version(
+        conn,
+        project_id,
+        target_row_version=row_version,
+        current_row_version=current_row_version,
+        current_status=row["status"],
+    )
+    created_at = _aware_timestamp(row["created_at"], label="ProductProject created_at")
+    result_updated_at = _aware_timestamp(updated_at, label="spec mutation updated_at")
     return ProductProject(
         project_id=project_id,
         name=name,
-        spec_version=result_spec_version,
-        row_version=result_row_version,
-        status=_status_at_row_version(conn, project_id, result_row_version),
-        spec=stored_spec,
+        spec_version=spec_version,
+        row_version=row_version,
+        status=status,
+        spec=spec,
         created_at=created_at,
         updated_at=result_updated_at,
     )
@@ -196,7 +231,7 @@ def _validate_replay(
     operation_key: str,
     fingerprint: str,
     change_reason: str,
-) -> tuple[int, int, ProductProjectSpec, str]:
+) -> ProductProject:
     if (
         replay["project_id"] != project_id
         or replay["operation_kind"] != _SPEC_MUTATION_KIND
@@ -325,7 +360,15 @@ def _validate_replay(
         raise ProductProjectError(
             "spec idempotency record must have exactly one canonical durable audit event"
         )
-    return result_spec_version, result_row_version, stored_spec, created_at
+
+    return _materialize_spec_result(
+        conn,
+        project_id=project_id,
+        spec_version=result_spec_version,
+        row_version=result_row_version,
+        spec=stored_spec,
+        updated_at=created_at,
+    )
 
 
 def update_product_project_spec(
@@ -360,6 +403,7 @@ def update_product_project_spec(
     operation_key = idempotency_key or f"auto:{fingerprint}"
     operation_key_sha256 = hashlib.sha256(operation_key.encode()).hexdigest()
 
+    result: ProductProject
     with store.connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
         replay = conn.execute(
@@ -367,12 +411,7 @@ def update_product_project_spec(
             (operation_key,),
         ).fetchone()
         if replay is not None:
-            (
-                result_spec_version,
-                result_row_version,
-                stored_spec,
-                result_updated_at,
-            ) = _validate_replay(
+            result = _validate_replay(
                 conn,
                 replay,
                 project_id=project_id,
@@ -381,31 +420,14 @@ def update_product_project_spec(
                 fingerprint=fingerprint,
                 change_reason=change_reason,
             )
-            result = _materialize_replay_result(
-                conn,
-                project_id=project_id,
-                result_spec_version=result_spec_version,
-                result_row_version=result_row_version,
-                stored_spec=stored_spec,
-                result_updated_at=result_updated_at,
-            )
         else:
             row = conn.execute(
-                "SELECT project_id,name,current_spec_version,row_version,status,created_at "
-                "FROM product_projects WHERE project_id=?",
+                "SELECT current_spec_version,row_version FROM product_projects "
+                "WHERE project_id=?",
                 (project_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(project_id)
-            durable_project_id = _nonempty_str(row["project_id"], label="project_id")
-            if durable_project_id != project_id:
-                raise ProductProjectError("durable ProductProject identity mismatch")
-            name = _nonempty_str(row["name"], label="project name")
-            status = _nonempty_str(row["status"], label="project status")
-            project_created_at = _aware_timestamp(
-                row["created_at"],
-                label="project created_at",
-            )
             current_spec_version = _durable_int(
                 row["current_spec_version"],
                 label="current_spec_version",
@@ -485,20 +507,15 @@ def update_product_project_spec(
                     now,
                 ),
             )
-            result = ProductProject(
+            result = _materialize_spec_result(
+                conn,
                 project_id=project_id,
-                name=name,
                 spec_version=next_spec_version,
                 row_version=next_row_version,
-                status=status,
                 spec=stored_spec,
-                created_at=project_created_at,
                 updated_at=now,
             )
 
-    # Non-authoritative current-state integrity probe. A concurrent later mutation may
-    # legitimately advance this read; the public return value remains transaction-bound above.
-    ProductProjectRepository(store).get(project_id)
     return result
 
 
