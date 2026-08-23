@@ -39,6 +39,12 @@ class _DecisionView:
     evidence_package_ids: tuple[str, ...]
 
 
+def _durable_integer(raw: object, *, label: str, minimum: int) -> int:
+    if type(raw) is not int or raw < minimum:
+        raise ProductProjectError(f"invalid durable {label}")
+    return raw
+
+
 class ProductProjectIntegrityService:
     """Fail-closed PF1 reconciliation over one durable ProductProject snapshot."""
 
@@ -63,15 +69,16 @@ class ProductProjectIntegrityService:
             ).fetchone()
             if project_row is None:
                 raise KeyError(project_id)
-            try:
-                spec_version = int(project_row["current_spec_version"])
-                row_version = int(project_row["row_version"])
-            except (TypeError, ValueError) as exc:
-                raise ProductProjectError(
-                    "invalid durable ProductProject version metadata"
-                ) from exc
-            if spec_version < 1 or row_version < 0:
-                raise ProductProjectError("invalid durable ProductProject version metadata")
+            spec_version = _durable_integer(
+                project_row["current_spec_version"],
+                label="ProductProject spec version metadata",
+                minimum=1,
+            )
+            row_version = _durable_integer(
+                project_row["row_version"],
+                label="ProductProject row version metadata",
+                minimum=0,
+            )
             spec_row = conn.execute(
                 "SELECT spec_json FROM product_project_specs "
                 "WHERE project_id=? AND spec_version=?",
@@ -177,7 +184,14 @@ class ProductProjectIntegrityService:
             "WHERE project_id=? ORDER BY spec_version",
             (project_id,),
         ).fetchall()
-        versions = tuple(int(row["spec_version"]) for row in rows)
+        versions = tuple(
+            _durable_integer(
+                row["spec_version"],
+                label="ProductProject specification version",
+                minimum=1,
+            )
+            for row in rows
+        )
         expected = tuple(range(1, current_spec_version + 1))
         if versions != expected:
             raise ProductProjectError(
@@ -185,7 +199,11 @@ class ProductProjectIntegrityService:
             )
         legacy_lineage_count = 0
         for row in rows:
-            version = int(row["spec_version"])
+            version = _durable_integer(
+                row["spec_version"],
+                label="ProductProject specification version",
+                minimum=1,
+            )
             spec = self._parse_spec(
                 row["spec_json"],
                 label=f"specification version {version}",
@@ -316,7 +334,14 @@ class ProductProjectIntegrityService:
         for decision_id, history in grouped.items():
             if not decision_id.strip():
                 raise ProductProjectError("product decision identity must not be empty")
-            versions = tuple(int(row["decision_version"]) for row in history)
+            versions = tuple(
+                _durable_integer(
+                    row["decision_version"],
+                    label="product decision version",
+                    minimum=1,
+                )
+                for row in history
+            )
             if versions != tuple(range(1, len(history) + 1)):
                 raise ProductProjectError(
                     f"product decision history is not contiguous: {decision_id}"
