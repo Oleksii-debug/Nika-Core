@@ -51,14 +51,22 @@ class RuntimeSessionStore:
 
     def get(self, task_id: str) -> RuntimeSessionRecord | None:
         with self._store.connection() as conn:
-            row = conn.execute(
-                """
-                SELECT task_id, runtime_id, thread_id, resume_token, outcome, updated_at
-                FROM runtime_sessions
-                WHERE task_id = ?
-                """,
-                (task_id,),
-            ).fetchone()
+            return self.get_with_connection(conn, task_id)
+
+    def get_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        task_id: str,
+    ) -> RuntimeSessionRecord | None:
+        """Read one session inside a caller-owned transaction/CAS boundary."""
+        row = conn.execute(
+            """
+            SELECT task_id, runtime_id, thread_id, resume_token, outcome, updated_at
+            FROM runtime_sessions
+            WHERE task_id = ?
+            """,
+            (task_id,),
+        ).fetchone()
         if row is None:
             return None
         return self._record_from_row(row)

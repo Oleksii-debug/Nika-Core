@@ -14,6 +14,8 @@ from nika_core.runtime.contracts import (
     RuntimeOutcome,
     RuntimeRequest,
     RuntimeResult,
+    RuntimeResumeProbe,
+    RuntimeResumeProbeStatus,
     RuntimeResumeRequest,
 )
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
@@ -48,6 +50,11 @@ class _TransientDurableRuntime:
         self.run_calls = 0
         self.resume_calls = 0
 
+    @staticmethod
+    def initial_resume_token(*, task_id: str, thread_id: str) -> str:
+        del task_id
+        return thread_id
+
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
         self.run_calls += 1
         return RuntimeResult(
@@ -63,6 +70,15 @@ class _TransientDurableRuntime:
 
     async def cancel(self, *, task_id: str, thread_id: str) -> bool:
         return False
+
+    async def probe_resume(self, *, task_id: str, thread_id: str, resume_token: str):
+        del task_id
+        assert resume_token == thread_id
+        return RuntimeResumeProbe(
+            status=RuntimeResumeProbeStatus.READY,
+            reason="retry checkpoint exists",
+            checkpoint_id=f"checkpoint:{thread_id}",
+        )
 
 
 class _UnsafeTransientRuntime(_TransientDurableRuntime):
@@ -147,12 +163,13 @@ def test_retry_policy_uses_durable_resume_and_audits_retry(tmp_path) -> None:
     events = audit.list_for(entity_type="task", entity_id=task_id)
     assert [event.event_type for event in events] == [
         "runtime.started",
+        "runtime.session_bound",
         "runtime.retry_scheduled",
         "runtime.retry_started",
         "runtime.finished",
     ]
-    assert events[1].payload["error_code"] == RuntimeErrorCode.TRANSIENT.value
-    assert events[2].payload["resume"] is True
+    assert events[2].payload["error_code"] == RuntimeErrorCode.TRANSIENT.value
+    assert events[3].payload["resume"] is True
 
 
 def test_retry_policy_fails_closed_without_resume_token(tmp_path) -> None:
