@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
@@ -84,6 +86,16 @@ def _planned(binding: ProductProjectCoordinatorBinding, *, goal: str = "build co
     )
 
 
+def _host_payload(store: SQLiteStore, task_id: str) -> dict[str, object]:
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM tasks WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+    assert row is not None
+    return json.loads(row["payload_json"])
+
+
 def test_candidate_checkpoint_cannot_supply_its_own_bootstrap_authority(tmp_path) -> None:
     store, binding, task_id = _setup(tmp_path)
     candidate = _planned(binding, goal="candidate-controlled plan")
@@ -95,6 +107,7 @@ def test_candidate_checkpoint_cannot_supply_its_own_bootstrap_authority(tmp_path
     )
 
     assert untrusted_checkpoint.trusted_plan_fingerprint is None
+    assert untrusted_checkpoint.trusted_plan_authority_proof is None
     with pytest.raises(
         ProductFactoryTrustedPlanAuthorityError,
         match="first Product Factory checkpoint requires live trusted plan authority",
@@ -103,9 +116,10 @@ def test_candidate_checkpoint_cannot_supply_its_own_bootstrap_authority(tmp_path
             host_task_id=task_id,
             checkpoint=untrusted_checkpoint,
         )
+    assert "trusted_plan_fingerprint" not in _host_payload(store, task_id)
 
 
-def test_checkpoint_constructor_rejects_candidate_controlled_authority_keyword(tmp_path) -> None:
+def test_checkpoint_constructor_rejects_candidate_controlled_authority_keywords(tmp_path) -> None:
     _, binding, _ = _setup(tmp_path)
     coordinator = _planned(binding)
 
@@ -117,6 +131,59 @@ def test_checkpoint_constructor_rejects_candidate_controlled_authority_keyword(t
             coordinator=coordinator.snapshot(),
             trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
         )
+    with pytest.raises(TypeError, match="trusted_plan_authority_proof"):
+        ProductProjectCoordinatorCheckpoint(
+            project_id=binding.project.project_id,
+            spec_version=binding.project.spec_version,
+            row_version=binding.project.row_version,
+            coordinator=coordinator.snapshot(),
+            trusted_plan_authority_proof="0" * 64,
+        )
+
+
+def test_public_save_rejects_matching_forged_fingerprint_keyword_before_anchor_write(
+    tmp_path,
+) -> None:
+    store, binding, task_id = _setup(tmp_path)
+    candidate = _planned(binding, goal="recomputed candidate plan")
+    checkpoint = ProductProjectCoordinatorCheckpoint(
+        project_id=binding.project.project_id,
+        spec_version=binding.project.spec_version,
+        row_version=binding.project.row_version,
+        coordinator=candidate.snapshot(),
+    )
+
+    with pytest.raises(TypeError, match="trusted_plan_fingerprint"):
+        ProductFactoryCheckpointHost(store).save(
+            host_task_id=task_id,
+            checkpoint=checkpoint,
+            trusted_plan_fingerprint=candidate.trusted_plan_fingerprint,
+        )
+    assert "trusted_plan_fingerprint" not in _host_payload(store, task_id)
+
+
+def test_object_setattr_cannot_mint_live_authority_from_known_fingerprint(tmp_path) -> None:
+    store, binding, task_id = _setup(tmp_path)
+    candidate = _planned(binding, goal="recomputed candidate plan")
+    checkpoint = ProductProjectCoordinatorCheckpoint(
+        project_id=binding.project.project_id,
+        spec_version=binding.project.spec_version,
+        row_version=binding.project.row_version,
+        coordinator=candidate.snapshot(),
+    )
+    object.__setattr__(
+        checkpoint,
+        "trusted_plan_fingerprint",
+        candidate.trusted_plan_fingerprint,
+    )
+    object.__setattr__(checkpoint, "trusted_plan_authority_proof", "0" * 64)
+
+    with pytest.raises(ProductFactoryTrustedPlanAuthorityError, match="authority proof"):
+        ProductFactoryCheckpointHost(store).save(
+            host_task_id=task_id,
+            checkpoint=checkpoint,
+        )
+    assert "trusted_plan_fingerprint" not in _host_payload(store, task_id)
 
 
 def test_live_binding_authority_is_ephemeral_and_not_rehydrated_from_checkpoint_bytes(
@@ -127,11 +194,13 @@ def test_live_binding_authority_is_ephemeral_and_not_rehydrated_from_checkpoint_
     live_checkpoint = binding.checkpoint(coordinator)
 
     assert live_checkpoint.trusted_plan_fingerprint == coordinator.trusted_plan_fingerprint
+    assert live_checkpoint.trusted_plan_authority_proof is not None
     host = ProductFactoryCheckpointHost(store)
     saved = host.save(host_task_id=task_id, checkpoint=live_checkpoint)
     loaded = host.load(saved.checkpoint_id)
 
     assert loaded.checkpoint.trusted_plan_fingerprint is None
+    assert loaded.checkpoint.trusted_plan_authority_proof is None
     restored = host.restore_latest(host_task_id=task_id, binding=binding)
     assert restored.trusted_plan_fingerprint == coordinator.trusted_plan_fingerprint
     assert restored.snapshot() == coordinator.snapshot()
