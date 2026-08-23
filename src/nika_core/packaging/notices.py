@@ -174,3 +174,22 @@ def verify_third_party_notices(bundle_dir: Path) -> tuple[str, ...]:
         if sections.get(title) != expected_body:
             findings.append(base_finding)
     return tuple(dict.fromkeys(findings))
+
+
+def verified_third_party_notice_inventory(
+    bundle_dir: Path,
+) -> tuple[tuple[str, str, str], ...]:
+    """Return exact runtime distribution notice sections after canonical verification."""
+
+    findings = verify_third_party_notices(bundle_dir)
+    if findings:
+        raise RuntimeError(
+            "third-party notices are not verified: " + ", ".join(findings)
+        )
+    inventory: list[tuple[str, str, str]] = []
+    for distribution_name in RUNTIME_DISTRIBUTIONS:
+        dist = metadata.distribution(distribution_name)
+        title, _ = _distribution_section(distribution_name, dist)
+        package_name = dist.metadata.get("Name") or distribution_name
+        inventory.append((package_name, dist.version, title))
+    return tuple(inventory)
