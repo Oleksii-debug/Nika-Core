@@ -47,12 +47,15 @@ For each shared fingerprint family, restore fails closed unless all of the follo
 - every successor observation is strictly later than its predecessor's terminal release/rollback evidence;
 - existing candidate/review/deployment authority validation still passes for all persisted evidence.
 
-This prevents persisted-state tampering from rewinding the current incident pointer, creating overlapping active repairs, or inserting a recurrence before the previous repair lifecycle actually terminated.
+The persistence entrypoint now exposes the same authority contract as runtime restore: `review_authorities` is typed as `TrustedReviewAuthority`, not raw `CoordinatorSnapshot`. That keeps the public restart API aligned with the fail-closed host-provided trusted-plan fingerprint validation already enforced by `IncidentRepairReleaseCoordinator.restore()`.
+
+This prevents persisted-state tampering from rewinding the current incident pointer, creating overlapping active repairs, inserting a recurrence before the previous repair lifecycle actually terminated, or encouraging callers to treat candidate-contained coordinator state as review authority.
 
 ## Regression evidence added
 
 `tests/test_product_factory_incident_recurrence.py` covers:
 
+- persistence review-authority annotation matching the runtime `TrustedReviewAuthority` contract;
 - active duplicate idempotency;
 - stale terminal retry suppression;
 - later repeated occurrence isolation;
