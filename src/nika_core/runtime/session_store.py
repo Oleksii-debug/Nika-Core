@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.runtime.contracts import RuntimeOutcome, RuntimeResult
@@ -48,6 +48,25 @@ class RuntimeSessionStore:
             outcome=None if raw_outcome == _ACTIVE_MARKER else RuntimeOutcome(raw_outcome),
             updated_at=row["updated_at"],
         )
+
+    @staticmethod
+    def _next_updated_at(previous: str | None) -> str:
+        """Return a wall-clock timestamp that also advances the durable session epoch.
+
+        Recovery claim identity includes ``updated_at``. A repeated resumable result may keep
+        the same runtime/thread/token/outcome, so equal wall-clock readings must not collapse two
+        distinct persisted epochs into the same durable recovery claim. SQLite serialization
+        gives the caller one authoritative previous value; advance by one microsecond when the
+        wall clock has not moved forward.
+        """
+        now = datetime.now(UTC)
+        if previous is not None:
+            previous_value = datetime.fromisoformat(previous)
+            if previous_value.tzinfo is None:
+                previous_value = previous_value.replace(tzinfo=UTC)
+            if now <= previous_value:
+                now = previous_value + timedelta(microseconds=1)
+        return now.isoformat()
 
     def get(self, task_id: str) -> RuntimeSessionRecord | None:
         with self._store.connection() as conn:
@@ -116,7 +135,7 @@ class RuntimeSessionStore:
         """
         if not resume_token.strip():
             raise ValueError("active runtime resume token must not be empty")
-        now = datetime.now(UTC).isoformat()
+        now = self._next_updated_at(None)
         try:
             conn.execute(
                 """
@@ -162,7 +181,12 @@ class RuntimeSessionStore:
             self.delete_with_connection(conn, task_id)
             return
 
-        now = datetime.now(UTC).isoformat()
+        previous_row = conn.execute(
+            "SELECT updated_at FROM runtime_sessions WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        previous = previous_row["updated_at"] if previous_row is not None else None
+        now = self._next_updated_at(previous)
         conn.execute(
             """
             INSERT INTO runtime_sessions(
