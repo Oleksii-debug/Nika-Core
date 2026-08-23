@@ -17,6 +17,8 @@ class DeterministicErrorCode(StrEnum):
     INVALID_PLAN = "invalid_plan"
     REPLAN_LIMIT = "replan_limit"
     ACTION_UNAVAILABLE = "action_unavailable"
+    STATE_OBSERVATION_TIMEOUT = "state_observation_timeout"
+    STATE_OBSERVATION_FAILED = "state_observation_failed"
     TOOL_EXECUTION_FAILED = "tool_execution_failed"
     SIDE_EFFECT_JOURNAL_REQUIRED = "side_effect_journal_required"
     SIDE_EFFECT_IDENTITY_CONFLICT = "side_effect_identity_conflict"
