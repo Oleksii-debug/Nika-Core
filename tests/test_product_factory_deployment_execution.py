@@ -40,15 +40,75 @@ DIGEST = "a" * 64
 @dataclass
 class FakeProtectedStore:
     generations: set[tuple[str, int]] = field(default_factory=set)
+    authorities: dict[tuple[str, int], str] = field(default_factory=dict)
+    operation_handles: dict[str, tuple[str, str, int]] = field(default_factory=dict)
 
     def contains(self, secret_ref: str, generation: int) -> bool:
         return (secret_ref, generation) in self.generations
 
+    def bind_authority(
+        self,
+        *,
+        secret_ref: str,
+        generation: int,
+        authority_fingerprint: str,
+    ) -> None:
+        key = (secret_ref, generation)
+        if key not in self.generations:
+            raise RuntimeError("protected generation is unavailable")
+        existing = self.authorities.get(key)
+        if existing is not None and existing != authority_fingerprint:
+            raise RuntimeError("credential authority conflicts")
+        self.authorities[key] = authority_fingerprint
+
+    def authority_matches(
+        self,
+        *,
+        secret_ref: str,
+        generation: int,
+        authority_fingerprint: str,
+    ) -> bool:
+        return self.authorities.get((secret_ref, generation)) == authority_fingerprint
+
     def issue_handle(self, **kwargs: object) -> str:
-        return f"opaque-handle:{kwargs['secret_ref']}:{kwargs['generation']}"
+        operation_id = kwargs["operation_id"]
+        secret_ref = kwargs["secret_ref"]
+        generation = kwargs["generation"]
+        assert isinstance(operation_id, str)
+        assert isinstance(secret_ref, str)
+        assert isinstance(generation, int) and not isinstance(generation, bool)
+        existing = self.operation_handles.get(operation_id)
+        if existing is not None:
+            handle, bound_ref, bound_generation = existing
+            if (bound_ref, bound_generation) != (secret_ref, generation):
+                raise RuntimeError("operation identity conflicts")
+            return handle
+        handle = f"opaque-handle:{operation_id}"
+        self.operation_handles[operation_id] = (handle, secret_ref, generation)
+        return handle
+
+    def reconcile_handle(self, **kwargs: object) -> str | None:
+        operation_id = kwargs["operation_id"]
+        secret_ref = kwargs["secret_ref"]
+        generation = kwargs["generation"]
+        assert isinstance(operation_id, str)
+        assert isinstance(secret_ref, str)
+        assert isinstance(generation, int) and not isinstance(generation, bool)
+        existing = self.operation_handles.get(operation_id)
+        if existing is None:
+            return None
+        handle, bound_ref, bound_generation = existing
+        if (bound_ref, bound_generation) != (secret_ref, generation):
+            raise RuntimeError("operation identity conflicts")
+        return handle
 
     def revoke_handles(self, secret_ref: str, generation: int) -> None:
-        return None
+        for operation_id in [
+            operation_id
+            for operation_id, (_, bound_ref, bound_generation) in self.operation_handles.items()
+            if (bound_ref, bound_generation) == (secret_ref, generation)
+        ]:
+            del self.operation_handles[operation_id]
 
 
 @dataclass
