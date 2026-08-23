@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -16,6 +17,9 @@ _INTEGRITY_VERSION = "nika-audit-integrity-v1"
 _EVENT_SCHEMA = "nika-audit-event-v1"
 _ROOT_SHA256 = "0" * 64
 _REDACTED = "[REDACTED]"
+_CAMEL_ACRONYM_BOUNDARY = re.compile(r"([A-Z]+)([A-Z][a-z])")
+_CAMEL_WORD_BOUNDARY = re.compile(r"([a-z0-9])([A-Z])")
+_KEY_SEPARATOR = re.compile(r"[^0-9A-Za-z]+")
 _SENSITIVE_KEYS = frozenset(
     {
         "access_token",
@@ -86,7 +90,9 @@ def _canonical_json(value: object) -> str:
 
 
 def _normalized_key(key: str) -> str:
-    return key.casefold().replace("-", "_")
+    separated = _CAMEL_ACRONYM_BOUNDARY.sub(r"\1_\2", key)
+    separated = _CAMEL_WORD_BOUNDARY.sub(r"\1_\2", separated)
+    return _KEY_SEPARATOR.sub("_", separated).strip("_").casefold()
 
 
 def _is_sensitive_key(key: str) -> bool:
