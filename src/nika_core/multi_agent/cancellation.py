@@ -145,6 +145,73 @@ class TeamCancellationJournal:
             raise RuntimeError("cancellation operation disappeared after commit")
         return operation
 
+    def adopt_unjournaled_cancelled(self, *, team_id: str) -> CancellationOperation:
+        """Adopt legacy/local CANCELLED state as probe-only uncertain cleanup evidence."""
+        operation_id = self._operation_id(team_id)
+        now = datetime.now(UTC).isoformat()
+        with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._load_with_connection(conn, team_id)
+            if current is not None:
+                return current
+            team = conn.execute(
+                "SELECT state FROM multi_agent_teams WHERE team_id = ?",
+                (team_id,),
+            ).fetchone()
+            if team is None:
+                raise KeyError(f"unknown team: {team_id}")
+            if team["state"] != "cancelled":
+                raise RuntimeError("legacy cancellation adoption requires a cancelled team")
+            target_rows = conn.execute(
+                "SELECT member_id, thread_id FROM multi_agent_members "
+                "WHERE team_id = ? AND state = 'cancelled' "
+                "ORDER BY depth, created_at, member_id",
+                (team_id,),
+            ).fetchall()
+            if not target_rows:
+                raise RuntimeError("cancelled team has no cancelled member cleanup identity")
+            conn.execute(
+                "INSERT INTO multi_agent_cancellations("
+                "operation_id, team_id, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (
+                    operation_id,
+                    team_id,
+                    CancellationOperationState.RECONCILE_REQUIRED.value,
+                    now,
+                    now,
+                ),
+            )
+            for sequence, member in enumerate(target_rows):
+                member_id = str(member["member_id"])
+                thread_id = str(member["thread_id"])
+                conn.execute(
+                    "INSERT INTO multi_agent_cancellation_effects("
+                    "operation_id, team_id, member_id, task_id, thread_id, sequence, state, "
+                    "error_type, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        operation_id,
+                        team_id,
+                        member_id,
+                        self._task_id(team_id, member_id),
+                        thread_id,
+                        sequence,
+                        CancellationEffectState.RECONCILE_REQUIRED.value,
+                        "unjournaled_cancelled_state",
+                        now,
+                    ),
+                )
+            self._audit.append_with_connection(
+                conn,
+                event_type="multi_agent.team_cancel_legacy_adopted",
+                entity_type="multi_agent_team",
+                entity_id=team_id,
+                payload={"operation_id": operation_id, "target_count": len(target_rows)},
+            )
+        operation = self.get(team_id)
+        if operation is None:
+            raise RuntimeError("adopted cancellation operation disappeared after commit")
+        return operation
+
     def mark_dispatching(self, operation_id: str, member_id: str) -> None:
         self._transition_effect(
             operation_id=operation_id,

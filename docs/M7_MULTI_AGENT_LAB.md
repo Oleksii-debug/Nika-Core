@@ -38,6 +38,16 @@ Cancellation authority commits before external runtime effects. One transaction 
 cancellation operation, exact member/task/thread effect set, team `CANCELLED` state and all current
 nonterminal member `CANCELLED` states. Only after that commit may runtime cleanup begin.
 
+`MultiAgentSupervisor.cancel_team()` is the sole production path allowed to create new cancellation
+authority because only the supervisor owns both the durable journal and runtime cleanup port.
+`MultiAgentStore.cancel_team()` remains as a compatibility guard: it may read an already-cancelled
+team idempotently, but it refuses an ACTIVE-to-CANCELLED transition that would bypass the journal.
+A legacy/local `CANCELLED` team with no journal is not accepted as proof of external cleanup. The
+supervisor atomically adopts its cancelled member/task/thread identities as `RECONCILE_REQUIRED`
+evidence; no runtime effect is issued until a read-only probe proves `NOT_CANCELLED`. `CANCELLED`
+confirms the old effect and `UNKNOWN` remains fail-closed. This adoption uses the existing M7
+extension schema and does not manufacture historical success or require a schema bump.
+
 Each external effect follows `PLANNED -> DISPATCHING -> CONFIRMED`. Exception or process loss after
 `DISPATCHING` is uncertain and cannot be replayed. It requires the optional read-only
 `CancellationReconciliationPort`; `CANCELLED` confirms the old effect, `NOT_CANCELLED` permits one
@@ -64,6 +74,8 @@ The current successor must pass dependency consistency, Ruff, compile and comple
 exact candidate head on Ubuntu and Windows. Focused durability evidence includes atomic fan-out,
 restart-safe execution, WAITING_APPROVAL blocking, result rollback, late completion after cancel,
 exact AUD03 effect→exception reproduction, no blind cancel replay after restart/crash, reconciliation
-verdict handling, concurrent cancel callers, and future M7 extension-schema rejection.
+verdict handling, concurrent cancel callers, direct-store authority bypass rejection, legacy
+unjournaled cancellation adoption, completed-cancellation idempotency, and future M7 extension-schema
+rejection.
 
 `HUMAN_TESTED` and `NVDA_VERIFIED` remain false until their separate human protocols are executed.

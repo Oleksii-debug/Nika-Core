@@ -165,10 +165,11 @@ class MultiAgentSupervisor:
         state = self._store.team_state(team_id)
         if operation is None:
             if state is TeamState.CANCELLED:
-                return self._store.members(team_id)
-            if state is not TeamState.ACTIVE:
+                operation = self._cancellations.adopt_unjournaled_cancelled(team_id=team_id)
+            elif state is not TeamState.ACTIVE:
                 raise RuntimeError(f"team cannot be cancelled from terminal state: {state.value}")
-            operation = self._cancellations.begin(team_id=team_id)
+            else:
+                operation = self._cancellations.begin(team_id=team_id)
         elif operation.state is CancellationOperationState.COMPLETED:
             if state is not TeamState.CANCELLED:
                 raise RuntimeError("completed cancellation conflicts with durable team state")

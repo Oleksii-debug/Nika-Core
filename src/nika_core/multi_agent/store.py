@@ -539,42 +539,16 @@ class MultiAgentStore:
         return final
 
     def cancel_team(self, team_id: str) -> tuple[TeamMember, ...]:
-        now = datetime.now(UTC).isoformat()
-        with self._store.connection() as conn:
-            row = conn.execute(
-                "SELECT state FROM multi_agent_teams WHERE team_id = ?",
-                (team_id,),
-            ).fetchone()
-            if row is None:
-                raise KeyError(f"unknown team: {team_id}")
-            current = TeamState(row["state"])
-            if current is TeamState.CANCELLED:
-                return self.members(team_id)
-            if current is not TeamState.ACTIVE:
-                raise RuntimeError(f"team cannot be cancelled from terminal state: {current.value}")
-            conn.execute(
-                "UPDATE multi_agent_teams SET state = ?, updated_at = ? WHERE team_id = ?",
-                (TeamState.CANCELLED.value, now, team_id),
-            )
-            conn.execute(
-                "UPDATE multi_agent_members SET state = ?, updated_at = ? WHERE team_id = ? "
-                "AND state IN (?, ?, ?)",
-                (
-                    MemberState.CANCELLED.value,
-                    now,
-                    team_id,
-                    MemberState.SPAWNED.value,
-                    MemberState.RUNNING.value,
-                    MemberState.WAITING_APPROVAL.value,
-                ),
-            )
-            self._audit.append_with_connection(
-                conn,
-                event_type="multi_agent.team_cancelled",
-                entity_type="multi_agent_team",
-                entity_id=team_id,
-            )
-        return self.members(team_id)
+        """Compatibility guard: runtime-aware cancellation belongs to MultiAgentSupervisor."""
+        current = self.team_state(team_id)
+        if current is TeamState.CANCELLED:
+            return self.members(team_id)
+        if current is not TeamState.ACTIVE:
+            raise RuntimeError(f"team cannot be cancelled from terminal state: {current.value}")
+        raise RuntimeError(
+            "direct store cancellation would bypass durable runtime cleanup; "
+            "use MultiAgentSupervisor.cancel_team"
+        )
 
     @staticmethod
     def _grant_payload(grants: tuple[ToolGrant, ...]) -> str:

@@ -128,6 +128,81 @@ def _assert_cancelled(store: MultiAgentStore) -> None:
     assert all(member.state is MemberState.CANCELLED for member in store.members("team-cancel"))
 
 
+def test_direct_store_cancellation_cannot_bypass_durable_runtime_cleanup(tmp_path: Path) -> None:
+    _, store = _make_store(tmp_path)
+
+    with pytest.raises(RuntimeError, match="MultiAgentSupervisor.cancel_team"):
+        store.cancel_team("team-cancel")
+
+    assert store.team_state("team-cancel") is TeamState.ACTIVE
+    assert all(member.state is MemberState.SPAWNED for member in store.members("team-cancel"))
+
+    runtime = _RecordingRuntime()
+    asyncio.run(_supervisor(store, runtime).cancel_team("team-cancel"))
+    assert runtime.cancel_effects == ["team:team-cancel:root", "team:team-cancel:child"]
+    _assert_cancelled(store)
+
+
+def test_unjournaled_cancelled_state_is_adopted_before_any_retry(tmp_path: Path) -> None:
+    path, _ = _make_store(tmp_path)
+    sqlite = SQLiteStore(path)
+    with sqlite.connection() as conn:
+        conn.execute(
+            "UPDATE multi_agent_teams SET state = ? WHERE team_id = ?",
+            (TeamState.CANCELLED.value, "team-cancel"),
+        )
+        conn.execute(
+            "UPDATE multi_agent_members SET state = ? WHERE team_id = ?",
+            (MemberState.CANCELLED.value, "team-cancel"),
+        )
+
+    restarted = MultiAgentStore(SQLiteStore(path))
+    runtime = _RecordingRuntime()
+    with pytest.raises(CancellationReconciliationRequired, match="requires reconciliation"):
+        asyncio.run(_supervisor(restarted, runtime).cancel_team("team-cancel"))
+    assert runtime.cancel_effects == []
+
+    with sqlite.connection() as conn:
+        operation = conn.execute(
+            "SELECT state FROM multi_agent_cancellations WHERE team_id = ?",
+            ("team-cancel",),
+        ).fetchone()
+        effects = conn.execute(
+            "SELECT member_id, state, error_type FROM multi_agent_cancellation_effects "
+            "WHERE team_id = ? ORDER BY sequence",
+            ("team-cancel",),
+        ).fetchall()
+    assert operation["state"] == "reconcile_required"
+    assert [(row["member_id"], row["state"], row["error_type"]) for row in effects] == [
+        ("root", "reconcile_required", "unjournaled_cancelled_state"),
+        ("child", "reconcile_required", "unjournaled_cancelled_state"),
+    ]
+
+    probe = _Probe(CancellationProbeState.NOT_CANCELLED)
+    asyncio.run(
+        _supervisor(restarted, runtime, probe=probe).reconcile_team_cancellation("team-cancel")
+    )
+    assert [request.member_id for request in probe.requests] == ["root", "child"]
+    assert runtime.cancel_effects == ["team:team-cancel:root", "team:team-cancel:child"]
+    _assert_cancelled(restarted)
+
+
+def test_completed_journal_cancellation_is_idempotent_without_repeating_effects(
+    tmp_path: Path,
+) -> None:
+    _, store = _make_store(tmp_path)
+    runtime = _RecordingRuntime()
+    supervisor = _supervisor(store, runtime)
+
+    first = asyncio.run(supervisor.cancel_team("team-cancel"))
+    effects = list(runtime.cancel_effects)
+    second = asyncio.run(supervisor.cancel_team("team-cancel"))
+
+    assert effects == ["team:team-cancel:root", "team:team-cancel:child"]
+    assert runtime.cancel_effects == effects
+    assert first == second
+
+
 def test_uncertain_external_effect_is_durable_and_not_replayed_after_restart(
     tmp_path: Path,
 ) -> None:
