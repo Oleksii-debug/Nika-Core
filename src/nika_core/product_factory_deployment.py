@@ -413,7 +413,6 @@ class DeploymentFabric:
         try:
             result = self.provider.deploy(intent)
         except Exception:  # noqa: BLE001
-            # A provider may mutate the target before failing to return a result.
             return self._mark_uncertain(uncertain)
         if not result.evidence_refs:
             return self._mark_uncertain(uncertain)
@@ -447,7 +446,6 @@ class DeploymentFabric:
         try:
             health = self.provider.health(intent)
         except Exception:  # noqa: BLE001
-            # Provider failures after an applied effect must become durable uncertainty.
             return self._mark_uncertain(record)
         try:
             return self._finish_health(record, health)
@@ -467,6 +465,8 @@ class DeploymentFabric:
                     "provider inspection exact release requires release SHA"
                 )
             self._current_releases.pop(_environment_key(record.intent), None)
+            if record.intent.environment.tier is EnvironmentTier.STAGING:
+                self._healthy_staging.pop(record.intent.project_id, None)
             return self._save(
                 DeploymentRecord(
                     record.intent,
@@ -476,27 +476,72 @@ class DeploymentFabric:
                     previous_release=record.previous_release,
                 )
             )
-        if inspection.release_sha != record.intent.release.source_sha:
+        if inspection.release is None:
             self._mark_uncertain(record, inspection.evidence_refs)
             raise DeploymentFabricError(
-                "provider reports a different release for uncertain deployment"
+                "provider inspection requires exact release identity"
             )
-        if inspection.release is not None and inspection.release != record.intent.release:
+        if inspection.release.project_id != record.intent.project_id:
             self._mark_uncertain(record, inspection.evidence_refs)
             raise DeploymentFabricError(
-                "provider reports a different exact release for uncertain deployment"
+                "provider reports a different project release for uncertain deployment"
             )
-        if inspection.healthy is None:
-            return self._mark_uncertain(record, inspection.evidence_refs)
-        health = HealthEvidence(
-            record.intent.environment.environment_id,
-            record.intent.release.source_sha,
-            inspection.healthy,
-            inspection.evidence_refs,
-            datetime.now(UTC),
-            release=inspection.release,
+        if inspection.release == record.intent.release:
+            if inspection.healthy is not True:
+                return self._mark_uncertain(record, inspection.evidence_refs)
+            health = HealthEvidence(
+                record.intent.environment.environment_id,
+                record.intent.release.source_sha,
+                True,
+                inspection.evidence_refs,
+                datetime.now(UTC),
+                release=inspection.release,
+            )
+            return self._finish_health(record, health)
+
+        previous = record.previous_release
+        if previous is not None and inspection.release == previous:
+            if inspection.healthy is not True:
+                return self._mark_uncertain(record, inspection.evidence_refs)
+            environment_key = _environment_key(record.intent)
+            self._current_releases[environment_key] = previous
+            if record.intent.environment.tier is EnvironmentTier.STAGING:
+                self._healthy_staging[record.intent.project_id] = previous
+            if record.health is not None and not record.health.healthy:
+                rollback = RollbackEvidence(
+                    record.intent.environment.environment_id,
+                    record.intent.release.source_sha,
+                    previous.source_sha,
+                    True,
+                    inspection.evidence_refs,
+                    failed_release=record.intent.release,
+                    restored_release=previous,
+                )
+                return self._save(
+                    DeploymentRecord(
+                        record.intent,
+                        DeploymentState.ROLLED_BACK,
+                        record.provider_evidence_refs + inspection.evidence_refs,
+                        health=record.health,
+                        rollback=rollback,
+                        previous_release_sha=record.previous_release_sha,
+                        previous_release=previous,
+                    )
+                )
+            return self._save(
+                DeploymentRecord(
+                    record.intent,
+                    DeploymentState.REJECTED,
+                    record.provider_evidence_refs + inspection.evidence_refs,
+                    previous_release_sha=record.previous_release_sha,
+                    previous_release=previous,
+                )
+            )
+
+        self._mark_uncertain(record, inspection.evidence_refs)
+        raise DeploymentFabricError(
+            "provider reports a different exact release for uncertain deployment"
         )
-        return self._finish_health(record, health)
 
     def snapshot(self) -> DeploymentFabricSnapshot:
         current_releases = tuple(
@@ -599,34 +644,32 @@ class DeploymentFabric:
                 self._healthy_staging[intent.project_id] = intent.release
             return self._save(updated)
 
+        rollback_record = replace(record, health=health)
         rollback_exact = getattr(self.provider, "rollback_exact", None)
         if record.previous_release is not None and not callable(rollback_exact):
-            # A SHA-only rollback target can select the wrong artifact/version when
-            # multiple releases share source SHA. Do not issue that ambiguous effect.
-            return self._mark_uncertain(record, health.evidence_refs)
+            return self._mark_uncertain(rollback_record, health.evidence_refs)
         try:
             if callable(rollback_exact):
                 rollback = rollback_exact(intent, record.previous_release)
             else:
                 rollback = self.provider.rollback(intent, record.previous_release_sha)
         except Exception:  # noqa: BLE001
-            # Provider failures after an applied effect must become durable uncertainty.
-            return self._mark_uncertain(record, health.evidence_refs)
+            return self._mark_uncertain(rollback_record, health.evidence_refs)
         if rollback.environment_id != intent.environment.environment_id:
             return self._mark_uncertain(
-                record, health.evidence_refs + rollback.evidence_refs
+                rollback_record, health.evidence_refs + rollback.evidence_refs
             )
         if rollback.failed_release_sha != intent.release.source_sha:
             return self._mark_uncertain(
-                record, health.evidence_refs + rollback.evidence_refs
+                rollback_record, health.evidence_refs + rollback.evidence_refs
             )
         if rollback.failed_release is not None and rollback.failed_release != intent.release:
             return self._mark_uncertain(
-                record, health.evidence_refs + rollback.evidence_refs
+                rollback_record, health.evidence_refs + rollback.evidence_refs
             )
         if not rollback.succeeded:
             return self._mark_uncertain(
-                record,
+                rollback_record,
                 health.evidence_refs + rollback.evidence_refs,
             )
         if record.previous_release is None:
@@ -635,11 +678,11 @@ class DeploymentFabric:
                 or rollback.restored_release is not None
             ):
                 return self._mark_uncertain(
-                    record, health.evidence_refs + rollback.evidence_refs
+                    rollback_record, health.evidence_refs + rollback.evidence_refs
                 )
         elif rollback.restored_release != record.previous_release:
             return self._mark_uncertain(
-                record, health.evidence_refs + rollback.evidence_refs
+                rollback_record, health.evidence_refs + rollback.evidence_refs
             )
         return self._save(
             DeploymentRecord(
@@ -685,6 +728,8 @@ class DeploymentFabric:
                 record.intent,
                 DeploymentState.UNCERTAIN,
                 record.provider_evidence_refs + evidence_refs,
+                health=record.health,
+                rollback=record.rollback,
                 previous_release_sha=record.previous_release_sha,
                 previous_release=record.previous_release,
             )
@@ -964,10 +1009,15 @@ def _validate_record(record: DeploymentRecord) -> None:
             raise DeploymentFabricError("rolled-back snapshot record is semantically inconsistent")
     elif record.state is DeploymentState.HEALTH_CHECK:
         raise DeploymentFabricError("health-check state must not be serialized as durable")
-    elif record.state is DeploymentState.UNCERTAIN and (
-        record.health is not None or record.rollback is not None
-    ):
-        raise DeploymentFabricError("uncertain snapshot record has final evidence")
+    elif record.state is DeploymentState.UNCERTAIN:
+        if record.health is not None and record.health.healthy:
+            raise DeploymentFabricError(
+                "uncertain snapshot record cannot contain healthy terminal evidence"
+            )
+        if record.rollback is not None:
+            raise DeploymentFabricError(
+                "uncertain snapshot record cannot contain terminal rollback evidence"
+            )
 
 
 def _aware(value: datetime) -> datetime:
