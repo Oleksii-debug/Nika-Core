@@ -6,6 +6,12 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
+from nika_core.business_authority import (
+    BusinessAuthorizationAuthorityPort,
+    BusinessAuthorizationIntent,
+    BusinessAuthorizationUse,
+    trusted_business_authorization,
+)
 from nika_core.business_factory import (
     BusinessFactorySnapshot,
     BusinessPolicy,
@@ -61,12 +67,15 @@ class BusinessCommunication:
     message_id: str
     objective_id: str
     lead_id: str
+    counterparty_ref: str
     thread_ref: str
     channel_id: str
     payload_ref: str
     policy_id: str
     state: CommunicationState = CommunicationState.DRAFT
     authorization_ref: str | None = None
+    authorization_use: BusinessAuthorizationUse | None = None
+    authorization_fingerprint: str | None = None
     provider_evidence_ref: str | None = None
     failure_ref: str | None = None
     audit: tuple[CommunicationAuditEvent, ...] = ()
@@ -97,6 +106,7 @@ class BusinessCommunicationCoordinator:
             message_id=message_id,
             objective_id=snapshot.objective.objective_id,
             lead_id=lead.lead_id,
+            counterparty_ref=lead.counterparty_ref,
             thread_ref=thread_ref,
             channel_id=lead.channel_id,
             payload_ref=payload_ref,
@@ -110,6 +120,7 @@ class BusinessCommunicationCoordinator:
         snapshot: BusinessFactorySnapshot,
         *,
         approval_ref: str | None = None,
+        approval_authority: BusinessAuthorizationAuthorityPort | None = None,
     ) -> BusinessCommunication:
         _validate_record(record)
         _validate_business_binding(record, snapshot)
@@ -121,15 +132,28 @@ class BusinessCommunicationCoordinator:
         if policy.communication_authority is CommunicationAuthority.APPROVAL_REQUIRED:
             _text(approval_ref, "communication approval_ref")
             authorization_ref = approval_ref
+            authorization_use = BusinessAuthorizationUse.ONE_TIME
         elif policy.communication_authority is CommunicationAuthority.STANDING_POLICY:
             authorization_ref = policy.standing_policy_ref
             _text(authorization_ref, "standing communication policy ref")
+            authorization_use = BusinessAuthorizationUse.STANDING_POLICY
         else:
             raise BusinessCommunicationError("unsupported communication authority")
+        intent = _communication_authorization_intent(record, authorization_use)
+        if not trusted_business_authorization(
+            approval_authority,
+            intent=intent,
+            evidence_ref=authorization_ref,
+        ):
+            raise BusinessCommunicationError(
+                "trusted communication approval authority rejected or could not verify the action"
+            )
         authorized = replace(
             record,
             state=CommunicationState.AUTHORIZED,
             authorization_ref=authorization_ref,
+            authorization_use=authorization_use,
+            authorization_fingerprint=intent.fingerprint,
         )
         return _record_event(
             authorized,
@@ -314,12 +338,15 @@ def load_business_communication(payload: str) -> BusinessCommunication:
         "message_id",
         "objective_id",
         "lead_id",
+        "counterparty_ref",
         "thread_ref",
         "channel_id",
         "payload_ref",
         "policy_id",
         "state",
         "authorization_ref",
+        "authorization_use",
+        "authorization_fingerprint",
         "provider_evidence_ref",
         "failure_ref",
         "audit",
@@ -351,17 +378,34 @@ def load_business_communication(payload: str) -> BusinessCommunication:
         state = CommunicationState(state_raw)
     except ValueError as exc:
         raise BusinessCommunicationError("communication state is invalid") from exc
+    use_raw = raw.get("authorization_use")
+    if use_raw is None:
+        authorization_use = None
+    elif isinstance(use_raw, str):
+        try:
+            authorization_use = BusinessAuthorizationUse(use_raw)
+        except ValueError as exc:
+            raise BusinessCommunicationError("communication authorization use is invalid") from exc
+    else:
+        raise BusinessCommunicationError("communication authorization use must be text or null")
     record = BusinessCommunication(
         schema=_required(raw, "schema", "communication"),
         message_id=_required(raw, "message_id", "communication"),
         objective_id=_required(raw, "objective_id", "communication"),
         lead_id=_required(raw, "lead_id", "communication"),
+        counterparty_ref=_required(raw, "counterparty_ref", "communication"),
         thread_ref=_required(raw, "thread_ref", "communication"),
         channel_id=_required(raw, "channel_id", "communication"),
         payload_ref=_required(raw, "payload_ref", "communication"),
         policy_id=_required(raw, "policy_id", "communication"),
         state=state,
         authorization_ref=_optional(raw, "authorization_ref", "communication"),
+        authorization_use=authorization_use,
+        authorization_fingerprint=_optional(
+            raw,
+            "authorization_fingerprint",
+            "communication",
+        ),
         provider_evidence_ref=_optional(
             raw,
             "provider_evidence_ref",
@@ -408,6 +452,8 @@ def _validate_business_binding(
         raise BusinessCommunicationError("communication policy changed; redraft is required")
     if lead is None or record.lead_id != lead.lead_id:
         raise BusinessCommunicationError("communication lead changed")
+    if record.counterparty_ref != lead.counterparty_ref:
+        raise BusinessCommunicationError("communication counterparty changed")
     if record.channel_id != lead.channel_id:
         raise BusinessCommunicationError("communication channel changed")
     if record.channel_id not in snapshot.policy.allowed_channel_ids:
@@ -421,6 +467,7 @@ def _validate_record(record: BusinessCommunication) -> None:
         (record.message_id, "message_id"),
         (record.objective_id, "objective_id"),
         (record.lead_id, "lead_id"),
+        (record.counterparty_ref, "counterparty_ref"),
         (record.thread_ref, "thread_ref"),
         (record.channel_id, "channel_id"),
         (record.payload_ref, "payload_ref"),
@@ -440,6 +487,8 @@ def _validate_record(record: BusinessCommunication) -> None:
             value is not None
             for value in (
                 record.authorization_ref,
+                record.authorization_use,
+                record.authorization_fingerprint,
                 record.provider_evidence_ref,
                 record.failure_ref,
             )
@@ -447,6 +496,17 @@ def _validate_record(record: BusinessCommunication) -> None:
             raise BusinessCommunicationError("draft communication contains terminal evidence")
         return
     _text(record.authorization_ref, "communication authorization_ref")
+    if not isinstance(record.authorization_use, BusinessAuthorizationUse):
+        raise BusinessCommunicationError("communication authorization use is missing")
+    _text(record.authorization_fingerprint, "communication authorization fingerprint")
+    expected_fingerprint = _communication_authorization_intent(
+        record,
+        record.authorization_use,
+    ).fingerprint
+    if record.authorization_fingerprint != expected_fingerprint:
+        raise BusinessCommunicationError(
+            "communication authorization fingerprint does not match exact message scope"
+        )
     if record.state is CommunicationState.AUTHORIZED:
         if record.provider_evidence_ref is not None or record.failure_ref is not None:
             raise BusinessCommunicationError("authorized communication contains provider result")
@@ -462,6 +522,26 @@ def _validate_record(record: BusinessCommunication) -> None:
             raise BusinessCommunicationError("failed communication contains provider evidence")
         return
     raise BusinessCommunicationError("communication state is invalid")
+
+
+def _communication_authorization_intent(
+    record: BusinessCommunication,
+    use: BusinessAuthorizationUse,
+) -> BusinessAuthorizationIntent:
+    return BusinessAuthorizationIntent(
+        objective_id=record.objective_id,
+        purpose="communication.send",
+        subject_id=record.message_id,
+        bindings=(
+            ("channel_id", record.channel_id),
+            ("counterparty_ref", record.counterparty_ref),
+            ("lead_id", record.lead_id),
+            ("payload_ref", record.payload_ref),
+            ("policy_id", record.policy_id),
+            ("thread_ref", record.thread_ref),
+        ),
+        use=use,
+    )
 
 
 def _required(raw: dict[str, Any], key: str, label: str) -> str:
