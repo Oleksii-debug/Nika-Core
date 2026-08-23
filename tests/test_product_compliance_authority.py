@@ -14,6 +14,8 @@ from nika_core.business_factory import (
 )
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_compliance import (
+    DependencyAdoption,
+    LicenseDisposition,
     ProductComplianceDecision,
     ProductComplianceError,
     ProductComplianceGate,
@@ -24,6 +26,39 @@ from nika_core.product_project import (
     ProductProjectSpec,
     ResearchEvidencePackage,
 )
+
+
+class _ReviewAuthority:
+    def __init__(self, grants: tuple[tuple[str, str, str], ...]) -> None:
+        self._grants = frozenset(grants)
+
+    def verify(
+        self,
+        *,
+        project_id: str,
+        evidence_ref: str,
+        purpose: str,
+    ) -> bool:
+        return (project_id, evidence_ref, purpose) in self._grants
+
+
+class _BrokenReviewAuthority:
+    def verify(
+        self,
+        *,
+        project_id: str,
+        evidence_ref: str,
+        purpose: str,
+    ) -> bool:
+        raise RuntimeError(f"authority unavailable for {project_id}:{purpose}:{evidence_ref}")
+
+
+def _scope_gate(project_id: str, review_ref: str) -> ProductComplianceGate:
+    return ProductComplianceGate(
+        review_authority=_ReviewAuthority(
+            ((project_id, review_ref, "compliance-scope"),)
+        )
+    )
 
 
 def test_caller_constructed_positive_decision_has_no_release_authority() -> None:
@@ -40,21 +75,23 @@ def test_caller_constructed_positive_decision_has_no_release_authority() -> None
 
 
 def test_gate_issued_positive_decision_has_process_local_authority() -> None:
-    decision = ProductComplianceGate().evaluate(
+    review_ref = "review:compliance-scope:project-1"
+    decision = _scope_gate("project-1", review_ref).evaluate(
         project_id="project-1",
-        scope_review_ref="review:compliance-scope:project-1",
+        scope_review_ref=review_ref,
     )
 
     assert decision.allowed is True
     assert decision.findings == ()
-    assert "review:compliance-scope:project-1" in decision.evidence_refs
+    assert review_ref in decision.evidence_refs
     ProductComplianceGate().require_release_allowed(decision)
 
 
 def test_positive_decision_tamper_invalidates_authority() -> None:
-    decision = ProductComplianceGate().evaluate(
+    review_ref = "review:compliance-scope:project-1"
+    decision = _scope_gate("project-1", review_ref).evaluate(
         project_id="project-1",
-        scope_review_ref="review:compliance-scope:project-1",
+        scope_review_ref=review_ref,
     )
     assert decision.allowed is True
 
@@ -81,14 +118,58 @@ def test_missing_compliance_scope_review_blocks_empty_inventory_false_green() ->
         ProductComplianceGate().require_release_allowed(unreviewed)
 
 
-def test_explicit_review_can_authorize_legitimately_empty_compliance_inventory() -> None:
-    reviewed = ProductComplianceGate().evaluate(
-        project_id="project-no-third-party-components",
-        scope_review_ref="review:compliance-scope:empty-inventory:1",
+def test_opaque_scope_review_text_is_not_authority() -> None:
+    decision = ProductComplianceGate().evaluate(
+        project_id="project-1",
+        scope_review_ref="caller:claims-review-happened",
+    )
+
+    assert decision.allowed is False
+    assert "compliance-scope:untrusted-review-authority" in decision.findings
+
+
+def test_opaque_dependency_review_text_is_not_license_authority() -> None:
+    decision = ProductComplianceGate().evaluate(
+        project_id="project-1",
+        dependencies=(
+            DependencyAdoption(
+                project_id="project-1",
+                component_id="component-aud05",
+                package_name="example-package",
+                version="1.0.0",
+                source_ref="source:example-package",
+                provenance_ref="provenance:example-package",
+                license_expression="MIT",
+                license_disposition=LicenseDisposition.APPROVED,
+                review_ref="caller:claims-license-review-happened",
+            ),
+        ),
+    )
+
+    assert decision.allowed is False
+    assert "license:untrusted-review-authority:component-aud05" in decision.findings
+
+
+def test_explicit_trusted_review_can_authorize_empty_compliance_inventory() -> None:
+    project_id = "project-no-third-party-components"
+    review_ref = "review:compliance-scope:empty-inventory:1"
+    reviewed = _scope_gate(project_id, review_ref).evaluate(
+        project_id=project_id,
+        scope_review_ref=review_ref,
     )
 
     assert reviewed.allowed is True
     ProductComplianceGate().require_release_allowed(reviewed)
+
+
+def test_review_authority_failure_is_fail_closed() -> None:
+    decision = ProductComplianceGate(review_authority=_BrokenReviewAuthority()).evaluate(
+        project_id="project-1",
+        scope_review_ref="review:compliance-scope:project-1",
+    )
+
+    assert decision.allowed is False
+    assert "compliance-scope:untrusted-review-authority" in decision.findings
 
 
 def test_business_delivery_rejects_caller_fabricated_positive_decision(tmp_path) -> None:
