@@ -21,6 +21,7 @@ from nika_core.toolsmith.workspace_security import (
     assert_cleanup_tree_safe,
     collect_tree_evidence,
     ensure_path_policy,
+    ensure_real_directory_root,
     sterile_process_environment,
     validate_typed_argv,
 )
@@ -227,7 +228,7 @@ def _pinned_runtime_argv(
 def _validate_process_workspace_root(root: pathlib.Path) -> pathlib.Path:
     probe_policy = WorkspacePathPolicy(("_nika_process_tmp",))
     ensure_path_policy(root, "_nika_process_tmp", probe_policy)
-    return root.resolve(strict=True)
+    return ensure_real_directory_root(root, label="process workspace root")
 
 
 def _prepare_process_environment(
@@ -434,21 +435,39 @@ def _git(
     return result
 
 
+def _private_git_job_root(plan: SterileGitPlan) -> pathlib.Path:
+    raw_job_root = plan.private_git_dir.parent
+    if plan.worktree_root.parent != raw_job_root:
+        raise WorkspaceSecurityError("private Git paths do not share the trusted job root")
+    if plan.private_git_dir.name != "_nika_private_git" or plan.worktree_root.name != "worktree":
+        raise WorkspaceSecurityError("private Git paths do not match the canonical workspace plan")
+
+    job_root = ensure_real_directory_root(raw_job_root, label="job workspace root")
+    repository_root = plan.repository_root.resolve(strict=False)
+    if (
+        repository_root == job_root
+        or repository_root in job_root.parents
+        or job_root in repository_root.parents
+    ):
+        raise WorkspaceSecurityError("job workspace and production repository must be fully disjoint")
+    return job_root
+
+
 def prepare_private_git_workspace(
     plan: SterileGitPlan,
     *,
     git_executable: str = "git",
 ) -> PreparedGitWorkspace:
     _validate_branch_name(plan.branch_name)
+    job_root = _private_git_job_root(plan)
     if plan.private_git_dir.exists() or plan.worktree_root.exists():
         raise WorkspaceSecurityError("job-private Git paths already exist; refusing ambiguous reuse")
     if not (plan.repository_root / ".git").exists():
         raise WorkspaceSecurityError("production repository must expose trusted Git metadata")
 
-    plan.private_git_dir.parent.mkdir(parents=True, exist_ok=True)
     _git(
         (git_executable, "check-ref-format", "--branch", plan.branch_name),
-        cwd=plan.private_git_dir.parent,
+        cwd=job_root,
         environment=plan.environment,
     )
 
@@ -470,14 +489,14 @@ def prepare_private_git_workspace(
         str(plan.repository_root),
         str(plan.private_git_dir),
     )
-    _git(clone_argv, cwd=plan.private_git_dir.parent, environment=plan.environment)
+    _git(clone_argv, cwd=job_root, environment=plan.environment)
 
     git_prefix = (git_executable, *plan.config_args, "--git-dir", str(plan.private_git_dir))
     remote_names = tuple(
         item.strip()
         for item in _git(
             (*git_prefix, "remote"),
-            cwd=plan.private_git_dir.parent,
+            cwd=job_root,
             environment=plan.environment,
         ).stdout.splitlines()
         if item.strip()
@@ -485,14 +504,14 @@ def prepare_private_git_workspace(
     for remote_name in remote_names:
         _git(
             (*git_prefix, "remote", "remove", remote_name),
-            cwd=plan.private_git_dir.parent,
+            cwd=job_root,
             environment=plan.environment,
         )
     remaining_remotes = tuple(
         item.strip()
         for item in _git(
             (*git_prefix, "remote"),
-            cwd=plan.private_git_dir.parent,
+            cwd=job_root,
             environment=plan.environment,
         ).stdout.splitlines()
         if item.strip()
@@ -502,7 +521,7 @@ def prepare_private_git_workspace(
 
     base_result = _git(
         (*git_prefix, "rev-parse", "--verify", f"{plan.base_sha}^{{commit}}"),
-        cwd=plan.private_git_dir.parent,
+        cwd=job_root,
         environment=plan.environment,
     )
     if base_result.stdout.strip().lower() != plan.base_sha.lower():
@@ -510,7 +529,7 @@ def prepare_private_git_workspace(
 
     collision = subprocess.run(
         (*git_prefix, "show-ref", "--verify", "--quiet", f"refs/heads/{plan.branch_name}"),
-        cwd=plan.private_git_dir.parent,
+        cwd=job_root,
         env=dict(plan.environment),
         shell=False,
         stdin=subprocess.DEVNULL,
@@ -523,6 +542,7 @@ def prepare_private_git_workspace(
     if collision.returncode not in {1}:
         raise WorkspaceSecurityError("unable to prove job branch collision state")
 
+    ensure_real_directory_root(plan.private_git_dir.parent, label="job workspace root")
     plan.worktree_root.mkdir(parents=False, exist_ok=False)
     _git(
         (
@@ -535,7 +555,7 @@ def prepare_private_git_workspace(
             plan.branch_name,
             plan.base_sha,
         ),
-        cwd=plan.private_git_dir.parent,
+        cwd=job_root,
         environment=plan.environment,
     )
     if (plan.worktree_root / ".git").exists():
@@ -543,7 +563,7 @@ def prepare_private_git_workspace(
 
     head = _git(
         (*git_prefix, "rev-parse", "HEAD"),
-        cwd=plan.private_git_dir.parent,
+        cwd=job_root,
         environment=plan.environment,
     ).stdout.strip()
     tree_evidence = collect_tree_evidence(plan.worktree_root)
@@ -551,23 +571,19 @@ def prepare_private_git_workspace(
 
 
 def cleanup_private_git_workspace(plan: SterileGitPlan) -> None:
-    job_root = plan.private_git_dir.parent.resolve(strict=False)
-    repository_root = plan.repository_root.resolve(strict=False)
-    if plan.worktree_root.parent.resolve(strict=False) != job_root:
-        raise WorkspaceSecurityError("private Git paths do not share the trusted job root")
-    if plan.private_git_dir.name != "_nika_private_git" or plan.worktree_root.name != "worktree":
-        raise WorkspaceSecurityError("private Git paths do not match the canonical workspace plan")
-    if (
-        repository_root == job_root
-        or repository_root in job_root.parents
-        or job_root in repository_root.parents
-    ):
-        raise WorkspaceSecurityError("cleanup refuses overlapping production and job roots")
+    raw_job_root = plan.private_git_dir.parent
+    job_root = _private_git_job_root(plan)
 
     for root in (plan.worktree_root, plan.private_git_dir):
         assert_cleanup_tree_safe(root)
+    ensure_real_directory_root(raw_job_root, label="job workspace root")
+    if raw_job_root.resolve(strict=True) != job_root:
+        raise WorkspaceSecurityError("job workspace root identity changed before cleanup")
     for root in (plan.worktree_root, plan.private_git_dir):
         if root.exists():
+            ensure_real_directory_root(raw_job_root, label="job workspace root")
+            if raw_job_root.resolve(strict=True) != job_root:
+                raise WorkspaceSecurityError("job workspace root identity changed during cleanup")
             try:
                 shutil.rmtree(root)
             except OSError as exc:
