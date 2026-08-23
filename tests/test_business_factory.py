@@ -84,8 +84,34 @@ def _advance_to_work_order(factory: BusinessFactory) -> None:
     )
 
 
+class _ReviewAuthority:
+    def __init__(self, project_id: str) -> None:
+        self._project_id = project_id
+
+    def verify(
+        self,
+        *,
+        project_id: str,
+        evidence_ref: str,
+        purpose: str,
+    ) -> bool:
+        if project_id != self._project_id:
+            return False
+        expected = {
+            (
+                "review:license:httpx-0.28.1",
+                "license-disposition:component-httpx",
+            ),
+            (
+                "terms-review:public-source:competitor-1",
+                "public-source-permission:competitor-public-1",
+            ),
+        }
+        return (evidence_ref, purpose) in expected
+
+
 def _allowed_compliance(project_id: str) -> ProductComplianceDecision:
-    return ProductComplianceGate().evaluate(
+    return ProductComplianceGate(review_authority=_ReviewAuthority(project_id)).evaluate(
         project_id=project_id,
         dependencies=(
             DependencyAdoption(
