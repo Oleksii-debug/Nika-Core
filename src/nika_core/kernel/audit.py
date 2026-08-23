@@ -176,7 +176,7 @@ def _audit_sequence(conn: sqlite3.Connection) -> int:
     if row is None:
         return 0
     raw_sequence = row[0]
-    if type(raw_sequence) is not int or raw_sequence < 0:
+    if not isinstance(raw_sequence, int) or raw_sequence < 0:
         raise AuditIntegrityError("audit event sequence is invalid")
     return raw_sequence
 
