@@ -15,6 +15,7 @@ from nika_core.runtime.contracts import (
 )
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
 from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
+from nika_core.runtime.recovery_claims import recovery_claim_is_reclaimable
 from nika_core.runtime.registry import RuntimeRegistry
 from nika_core.runtime.session_store import RuntimeSessionRecord, RuntimeSessionStore
 
@@ -59,10 +60,11 @@ class RuntimeRecoveryService:
 
     Startup recovery is intentionally conservative. Only an ACTIVE session left in RUNNING
     state by abrupt process loss is eligible for automatic continuation, and only when no
-    unresolved external side-effect reservation exists. Before execution, the registered
-    runtime must also prove that the persisted resume cursor resolves to a readable durable
-    checkpoint. Approval waits, deliberate pauses, failed runs, missing/corrupt checkpoints,
-    missing runtimes and inconsistent state are surfaced for explicit handling.
+    unresolved external side-effect reservation exists. A recovery claim abandoned before its
+    runtime effect starts is reclaimable only after its durable activation lease expires. Once
+    effect_started is persisted, restart remains fail-closed until reconciliation. Before any
+    execution, the registered runtime must also prove that the persisted resume cursor resolves
+    to a readable durable checkpoint.
     """
 
     def __init__(
@@ -264,10 +266,18 @@ class RuntimeRecoveryService:
 
     def _classify(self, record: RuntimeSessionRecord) -> RecoveryCandidate:
         task_state = self._task_state(record.task_id)
-        unresolved = tuple(
-            item.operation_key
+        unresolved_records = tuple(
+            item
             for item in self._idempotency.list_for_task(record.task_id)
             if item.status in {IdempotencyStatus.PENDING, IdempotencyStatus.UNCERTAIN}
+        )
+        unresolved = tuple(
+            item.operation_key
+            for item in unresolved_records
+            if not (
+                item.status is IdempotencyStatus.PENDING
+                and recovery_claim_is_reclaimable(item)
+            )
         )
 
         if unresolved:
@@ -304,7 +314,8 @@ class RuntimeRecoveryService:
                     task_state,
                     RecoveryDisposition.AUTO_RESUME_CRASH,
                     "active session with stale RUNNING state indicates abrupt process loss; "
-                    "checkpoint preflight is required before automatic resume",
+                    "checkpoint preflight and durable recovery claim are required before "
+                    "automatic resume",
                 )
             if task_state in {TaskState.PAUSED, TaskState.FAILED}:
                 return self._candidate(
