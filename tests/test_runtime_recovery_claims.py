@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from datetime import UTC
+from datetime import datetime as RealDateTime
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -10,6 +13,7 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.task_state import TaskState
+from nika_core.runtime import recovery_claims as recovery_claims_module
 from nika_core.runtime.contracts import (
     RuntimeOutcome,
     RuntimeResult,
@@ -22,6 +26,7 @@ from nika_core.runtime.coordinator import (
 )
 from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
 from nika_core.runtime.recovery import RecoveryDisposition, RuntimeRecoveryService
+from nika_core.runtime.recovery_claims import RecoveryClaimPhase, recovery_claim_metadata
 from nika_core.runtime.registry import RuntimeRegistry
 from nika_core.runtime.session_store import RuntimeSessionStore
 
@@ -107,6 +112,12 @@ class _NoProbeRuntime:
         return False
 
 
+class _AbandonBeforeEffectCoordinator(TaskRuntimeCoordinator):
+    def _begin_resume_effect(self, claim) -> None:
+        del claim
+        raise _SimulatedProcessLoss()
+
+
 def _active_session(path: Path) -> tuple[SQLiteStore, TaskQueue, str]:
     store = SQLiteStore(path)
     store.initialize()
@@ -150,6 +161,19 @@ def _recovery(
     )
 
 
+def _advance_recovery_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    future = RealDateTime.now(UTC) + timedelta(days=1)
+
+    class _FutureDateTime(RealDateTime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return future.replace(tzinfo=None)
+            return future.astimezone(tz)
+
+    monkeypatch.setattr(recovery_claims_module, "datetime", _FutureDateTime)
+
+
 def test_two_startup_owners_have_one_durable_resume_winner(tmp_path: Path) -> None:
     async def scenario() -> None:
         path = tmp_path / "nika.db"
@@ -175,6 +199,9 @@ def test_two_startup_owners_have_one_durable_resume_winner(tmp_path: Path) -> No
         ]
         assert len(pending) == 1
         assert pending[0].status == IdempotencyStatus.PENDING
+        metadata = recovery_claim_metadata(pending[0])
+        assert metadata is not None
+        assert metadata.phase is RecoveryClaimPhase.EFFECT_STARTED
 
         gate.release.set()
         first_result = await first_task
@@ -187,6 +214,7 @@ def test_two_startup_owners_have_one_durable_resume_winner(tmp_path: Path) -> No
         assert completed.result is not None
         assert completed.result["owner_id"] == "process-a"
         assert completed.result["checkpoint_proven"] is True
+        assert completed.result["claim_id"] == metadata.claim_id
 
     asyncio.run(scenario())
 
@@ -263,7 +291,10 @@ def test_durable_resume_requires_exact_checkpoint_probe_before_claim(tmp_path: P
     asyncio.run(scenario())
 
 
-def test_process_loss_leaves_pending_claim_that_blocks_restart(tmp_path: Path) -> None:
+def test_process_loss_after_effect_start_remains_fail_closed_after_lease_expiry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def scenario() -> None:
         path = tmp_path / "loss.db"
         store, _queue, task_id = _active_session(path)
@@ -280,11 +311,77 @@ def test_process_loss_leaves_pending_claim_that_blocks_restart(tmp_path: Path) -
         ]
         assert len(claims) == 1
         assert claims[0].status == IdempotencyStatus.PENDING
+        metadata = recovery_claim_metadata(claims[0])
+        assert metadata is not None
+        assert metadata.phase is RecoveryClaimPhase.EFFECT_STARTED
 
-        restarted = _recovery(path, _SharedResumeGate(), "replacement-owner")
+        _advance_recovery_clock(monkeypatch)
+        restarted_gate = _SharedResumeGate()
+        restarted = _recovery(path, restarted_gate, "replacement-owner")
         candidate = restarted.inspect()[0]
         assert candidate.disposition == RecoveryDisposition.RECONCILE_SIDE_EFFECTS
         assert candidate.unresolved_operation_keys == (claims[0].operation_key,)
+        assert restarted_gate.calls == []
+
+    asyncio.run(scenario())
+
+
+def test_expired_pre_effect_claim_is_reclaimed_without_duplicate_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        path = tmp_path / "abandoned-before-effect.db"
+        store, queue, task_id = _active_session(path)
+        first_gate = _SharedResumeGate()
+        first_registry = RuntimeRegistry()
+        first_registry.register(_ClaimedRuntime(first_gate, "lost-before-effect", block=False))
+        first_coordinator = _AbandonBeforeEffectCoordinator(
+            queue,
+            AuditLog(store),
+            recovery_owner_id="lost-before-effect",
+        )
+        first = RuntimeRecoveryService(
+            queue=queue,
+            audit=AuditLog(store),
+            runtimes=first_registry,
+            coordinator=first_coordinator,
+            sessions=RuntimeSessionStore(store),
+            idempotency=IdempotencyLedger(store),
+        )
+
+        with pytest.raises(_SimulatedProcessLoss):
+            await first.resume_safe_crash_sessions(max_count=1)
+        assert first_gate.calls == []
+
+        claim = next(
+            record
+            for record in IdempotencyLedger(store).list_for_task(task_id)
+            if record.operation_type == "runtime.recovery_resume"
+        )
+        metadata = recovery_claim_metadata(claim)
+        assert metadata is not None
+        assert metadata.phase is RecoveryClaimPhase.CLAIMED
+
+        replacement_gate = _SharedResumeGate()
+        replacement_gate.release.set()
+        replacement = _recovery(path, replacement_gate, "replacement-owner")
+        assert replacement.inspect()[0].disposition == RecoveryDisposition.RECONCILE_SIDE_EFFECTS
+
+        _advance_recovery_clock(monkeypatch)
+        candidate = replacement.inspect()[0]
+        assert candidate.disposition == RecoveryDisposition.AUTO_RESUME_CRASH
+        execution = await replacement.resume_safe_crash_sessions(max_count=1)
+        assert len(execution) == 1
+        assert execution[0].succeeded
+        assert replacement_gate.calls == ["replacement-owner"]
+        assert first_gate.calls == []
+
+        completed = IdempotencyLedger(store).require(claim.operation_key)
+        assert completed.status is IdempotencyStatus.COMPLETED
+        assert completed.result is not None
+        assert completed.result["owner_id"] == "replacement-owner"
+        assert completed.result["claim_id"] != metadata.claim_id
 
     asyncio.run(scenario())
 
