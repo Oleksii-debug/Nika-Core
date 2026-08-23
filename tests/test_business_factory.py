@@ -23,6 +23,8 @@ from nika_core.product_compliance import (
     DependencyAdoption,
     DistributionObligationEvidence,
     LicenseDisposition,
+    PackagedDependencyEvidence,
+    PackagingNoticeEvidence,
     ProductComplianceDecision,
     ProductComplianceGate,
 )
@@ -32,6 +34,9 @@ from nika_core.product_project import (
     ProductProjectSpec,
     ResearchEvidencePackage,
 )
+
+_HTTPX_SOURCE_SHA = "b" * 64
+_HTTPX_NOTICE_REF = "artifact:THIRD_PARTY_NOTICES.txt#httpx"
 
 
 def _research_package() -> ResearchEvidencePackage:
@@ -114,22 +119,31 @@ class _ReviewAuthority:
 
 
 def _allowed_compliance(project_id: str) -> ProductComplianceDecision:
+    dependency = DependencyAdoption(
+        project_id=project_id,
+        component_id="component-httpx",
+        package_name="httpx",
+        version="0.28.1",
+        source_ref="registry:pypi:httpx:0.28.1",
+        source_sha256=_HTTPX_SOURCE_SHA,
+        provenance_ref=f"hash:sha256:{_HTTPX_SOURCE_SHA}",
+        license_expression="BSD-3-Clause",
+        license_disposition=LicenseDisposition.APPROVED,
+        distribution_obligations=("retain-license-notice",),
+        notice_required=True,
+        notice_refs=(_HTTPX_NOTICE_REF,),
+        review_ref="review:license:httpx-0.28.1",
+    )
     return ProductComplianceGate(review_authority=_ReviewAuthority(project_id)).evaluate(
         project_id=project_id,
-        dependencies=(
-            DependencyAdoption(
+        dependencies=(dependency,),
+        packaged_dependencies=(
+            PackagedDependencyEvidence(
                 project_id=project_id,
-                component_id="component-httpx",
-                package_name="httpx",
-                version="0.28.1",
-                source_ref="registry:pypi:httpx:0.28.1",
-                provenance_ref="hash:sha256:httpx-fixture",
-                license_expression="BSD-3-Clause",
-                license_disposition=LicenseDisposition.APPROVED,
-                distribution_obligations=("retain-license-notice",),
-                notice_required=True,
-                notice_refs=("artifact:THIRD_PARTY_NOTICES.txt#httpx",),
-                review_ref="review:license:httpx-0.28.1",
+                component_id=dependency.component_id,
+                package_name=dependency.package_name,
+                version=dependency.version,
+                source_sha256=_HTTPX_SOURCE_SHA,
             ),
         ),
         obligation_evidence=(
@@ -137,7 +151,16 @@ def _allowed_compliance(project_id: str) -> ProductComplianceDecision:
                 project_id=project_id,
                 component_id="component-httpx",
                 obligation="retain-license-notice",
-                fulfillment_ref="artifact:THIRD_PARTY_NOTICES.txt#httpx",
+                fulfillment_ref=_HTTPX_NOTICE_REF,
+            ),
+        ),
+        notice_evidence=(
+            PackagingNoticeEvidence(
+                project_id=project_id,
+                component_id=dependency.component_id,
+                package_name=dependency.package_name,
+                version=dependency.version,
+                notice_ref=_HTTPX_NOTICE_REF,
             ),
         ),
         competitor_evidence=(

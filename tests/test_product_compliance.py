@@ -7,9 +7,13 @@ from nika_core.product_compliance import (
     DependencyAdoption,
     DistributionObligationEvidence,
     LicenseDisposition,
+    PackagedDependencyEvidence,
+    PackagingNoticeEvidence,
     ProductComplianceError,
     ProductComplianceGate,
 )
+
+_SOURCE_SHA = "a" * 64
 
 
 class _ReviewAuthority:
@@ -42,13 +46,36 @@ def _dependency(
         package_name="example-package",
         version="1.2.3",
         source_ref="registry:pypi:example-package:1.2.3",
-        provenance_ref="hash:sha256:fixture",
+        source_sha256=_SOURCE_SHA,
+        provenance_ref=f"hash:sha256:{_SOURCE_SHA}",
         license_expression="MIT",
         license_disposition=disposition,
         distribution_obligations=("retain-license",),
         notice_required=notice_required,
         notice_refs=notice_refs,
         review_ref="review:license:1",
+    )
+
+
+def _packaged_dependency() -> PackagedDependencyEvidence:
+    dependency = _dependency()
+    return PackagedDependencyEvidence(
+        project_id=dependency.project_id,
+        component_id=dependency.component_id,
+        package_name=dependency.package_name,
+        version=dependency.version,
+        source_sha256=_SOURCE_SHA,
+    )
+
+
+def _notice() -> PackagingNoticeEvidence:
+    dependency = _dependency()
+    return PackagingNoticeEvidence(
+        project_id=dependency.project_id,
+        component_id=dependency.component_id,
+        package_name=dependency.package_name,
+        version=dependency.version,
+        notice_ref=dependency.notice_refs[0],
     )
 
 
@@ -76,7 +103,9 @@ def test_release_passes_only_with_complete_approved_provenance_and_obligations()
     ).evaluate(
         project_id="project-1",
         dependencies=(_dependency(),),
+        packaged_dependencies=(_packaged_dependency(),),
         obligation_evidence=(_obligation(),),
+        notice_evidence=(_notice(),),
         competitor_evidence=(
             CompetitorResearchEvidence(
                 project_id="project-1",
@@ -90,7 +119,7 @@ def test_release_passes_only_with_complete_approved_provenance_and_obligations()
     )
     assert decision.allowed is True
     assert decision.findings == ()
-    assert "hash:sha256:fixture" in decision.evidence_refs
+    assert f"hash:sha256:{_SOURCE_SHA}" in decision.evidence_refs
     assert "review:license:1" in decision.evidence_refs
     assert "terms-review:public-source:1" in decision.evidence_refs
     ProductComplianceGate().require_release_allowed(decision)
@@ -163,31 +192,21 @@ def test_default_gate_rejects_opaque_review_authority_strings() -> None:
 
 def test_review_authority_is_bound_to_exact_project_ref_and_purpose() -> None:
     authority = _ReviewAuthority(
-        (
-            (
-                "project-1",
-                "review:license:1",
-                "license-disposition:component-1",
-            ),
-        )
+        (("project-1", "review:license:1", "license-disposition:component-1"),)
     )
     gate = ProductComplianceGate(review_authority=authority)
     exact = gate.evaluate(
         project_id="project-1",
         dependencies=(_dependency(),),
+        packaged_dependencies=(_packaged_dependency(),),
         obligation_evidence=(_obligation(),),
+        notice_evidence=(_notice(),),
     )
     assert exact.allowed is True
 
     wrong_project = ProductComplianceGate(
         review_authority=_ReviewAuthority(
-            (
-                (
-                    "other-project",
-                    "review:license:1",
-                    "license-disposition:component-1",
-                ),
-            )
+            (("other-project", "review:license:1", "license-disposition:component-1"),)
         )
     ).evaluate(
         project_id="project-1",
