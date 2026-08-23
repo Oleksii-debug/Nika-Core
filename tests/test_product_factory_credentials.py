@@ -22,7 +22,9 @@ RAW_SECRET = "super-secret-test-value-never-serialize"
 @dataclass(slots=True)
 class FakeProtectedStore:
     _material: dict[tuple[str, int], str] = field(default_factory=dict)
+    _authorities: dict[tuple[str, int], str] = field(default_factory=dict)
     _handles: dict[str, tuple[str, int]] = field(default_factory=dict)
+    _operation_handles: dict[str, str] = field(default_factory=dict)
     _next_handle: int = 1
 
     def seed(self, secret_ref: str, generation: int, raw_secret: str) -> None:
@@ -31,9 +33,32 @@ class FakeProtectedStore:
     def contains(self, secret_ref: str, generation: int) -> bool:
         return (secret_ref, generation) in self._material
 
+    def bind_authority(
+        self,
+        *,
+        secret_ref: str,
+        generation: int,
+        authority_fingerprint: str,
+    ) -> None:
+        key = (secret_ref, generation)
+        existing = self._authorities.get(key)
+        if existing is not None and existing != authority_fingerprint:
+            raise AssertionError("fake authority conflict")
+        self._authorities[key] = authority_fingerprint
+
+    def authority_matches(
+        self,
+        *,
+        secret_ref: str,
+        generation: int,
+        authority_fingerprint: str,
+    ) -> bool:
+        return self._authorities.get((secret_ref, generation)) == authority_fingerprint
+
     def issue_handle(
         self,
         *,
+        operation_id: str,
         secret_ref: str,
         generation: int,
         project_id: str,
@@ -47,10 +72,28 @@ class FakeProtectedStore:
         assert expires_at.tzinfo is not None
         if not self.contains(secret_ref, generation):
             raise AssertionError("fake store cannot issue a handle for missing material")
+        existing = self._operation_handles.get(operation_id)
+        if existing is not None:
+            return existing
         handle = f"fake-protected-handle-{self._next_handle:08d}"
         self._next_handle += 1
         self._handles[handle] = (secret_ref, generation)
+        self._operation_handles[operation_id] = handle
         return handle
+
+    def reconcile_handle(
+        self,
+        *,
+        operation_id: str,
+        secret_ref: str,
+        generation: int,
+        project_id: str,
+        audience: str,
+        scopes: frozenset[str],
+        expires_at: datetime,
+    ) -> str | None:
+        del secret_ref, generation, project_id, audience, scopes, expires_at
+        return self._operation_handles.get(operation_id)
 
     def revoke_handles(self, secret_ref: str, generation: int) -> None:
         for handle in [
@@ -59,6 +102,9 @@ class FakeProtectedStore:
             if identity == (secret_ref, generation)
         ]:
             del self._handles[handle]
+            for operation_id, operation_handle in list(self._operation_handles.items()):
+                if operation_handle == handle:
+                    del self._operation_handles[operation_id]
 
 
 def secret(
