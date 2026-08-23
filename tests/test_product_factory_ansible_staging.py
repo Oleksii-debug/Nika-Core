@@ -51,7 +51,7 @@ def _intent(
 ) -> DeploymentIntent:
     digest_value = sha if digest is None else digest
     return DeploymentIntent(
-        "intent-1",
+        f"intent-{environment_id}",
         project_id,
         EnvironmentIdentity(
             environment_id,
@@ -233,8 +233,10 @@ def test_health_binds_exact_release_and_timestamp() -> None:
     adapter, _ = _adapter(
         _execution("health", contract)
     )
-    evidence = adapter.health(_intent())
+    intent = _intent()
+    evidence = adapter.health(intent)
     assert evidence.release_sha == _sha(1)
+    assert evidence.release == intent.release
     assert evidence.healthy is True
     assert evidence.checked_at == datetime(
         2026,
@@ -373,8 +375,10 @@ def test_inspect_returns_only_exact_release_health_and_evidence() -> None:
             },
         )
     )
-    inspection = adapter.inspect(_intent())
+    intent = _intent()
+    inspection = adapter.inspect(intent)
     assert inspection.release_sha == _sha(1)
+    assert inspection.release == intent.release
     assert inspection.healthy is False
     assert inspection.evidence_refs == (
         "ansible-runner:evidence-inspect",
