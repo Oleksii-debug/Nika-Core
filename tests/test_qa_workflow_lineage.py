@@ -10,6 +10,7 @@ WORKFLOWS = (
 )
 RELEASE_WORKFLOWS = WORKFLOWS[1:]
 CANDIDATE_ENV = "NIKA_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}"
+CHECKOUT_ACTION = "uses: actions/checkout@"
 CHECKOUT_REF = "ref: ${{ env.NIKA_CANDIDATE_SHA }}"
 IDENTITY_ASSERTION = "python scripts/qa_assert_checkout_identity.py"
 MAIN_PUSH_TRIGGER = '  push:\n    branches:\n      - "main"'
@@ -19,14 +20,18 @@ M12_UPSTREAM_WORKFLOW_PATHS = (
 )
 
 
+def _checkout_indexes(text: str) -> list[int]:
+    return [
+        index for index, line in enumerate(text.splitlines()) if CHECKOUT_ACTION in line
+    ]
+
+
 def test_every_ci_checkout_is_bound_to_exact_candidate_sha() -> None:
     for path in WORKFLOWS:
         text = path.read_text(encoding="utf-8")
         assert CANDIDATE_ENV in text, path
         lines = text.splitlines()
-        checkout_indexes = [
-            index for index, line in enumerate(lines) if "uses: actions/checkout@v4" in line
-        ]
+        checkout_indexes = _checkout_indexes(text)
         assert checkout_indexes, path
         for index in checkout_indexes:
             checkout_block = "\n".join(lines[index : index + 4])
@@ -36,7 +41,7 @@ def test_every_ci_checkout_is_bound_to_exact_candidate_sha() -> None:
 def test_every_candidate_job_fails_closed_on_checkout_identity() -> None:
     for path in WORKFLOWS:
         text = path.read_text(encoding="utf-8")
-        checkout_count = text.count("uses: actions/checkout@v4")
+        checkout_count = len(_checkout_indexes(text))
         assertion_count = text.count(IDENTITY_ASSERTION)
         assert assertion_count == checkout_count, path
 
