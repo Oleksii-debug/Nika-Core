@@ -9,6 +9,10 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 import httpx
 
 from nika_core.research.models import RefreshDisposition, ResearchFetchFailureClass
+from nika_core.research.source_identity import (
+    ResearchSourceIdentityError,
+    canonical_http_locator,
+)
 
 
 class NetworkPolicyError(RuntimeError):
@@ -184,6 +188,12 @@ def _connect_url(logical_url: str, address: str) -> tuple[str, str, str]:
     return connect, host_header, parts.hostname
 
 
+def _identity_failure_class(error: ResearchSourceIdentityError) -> ResearchFetchFailureClass:
+    if error.code == "unsupported_source":
+        return ResearchFetchFailureClass.UNSUPPORTED
+    return ResearchFetchFailureClass.POLICY
+
+
 class HttpxResearchFetcher:
     """Public HTTP fetcher with DNS pinning, redirect revalidation and hard body limits."""
 
@@ -301,16 +311,21 @@ class HttpxResearchFetcher:
     ) -> HttpFetchResult:
         active = policy or HttpFetchPolicy()
         try:
-            requested_url = urlunsplit((*urlsplit(url)[:4], ""))
-        except ValueError as exc:
+            requested_url = canonical_http_locator(url)
+        except ResearchSourceIdentityError as exc:
+            public_url = (
+                "<redacted-http-url>"
+                if exc.code == "credentials_forbidden"
+                else "<invalid-http-url>"
+            )
             return HttpFetchResult(
                 RefreshDisposition.BLOCKED,
-                url,
-                url,
+                public_url,
+                public_url,
                 None,
                 error_code="network_policy",
-                message=f"malformed URL: {exc}",
-                failure_class=ResearchFetchFailureClass.POLICY,
+                message=str(exc),
+                failure_class=_identity_failure_class(exc),
             )
         current_url = requested_url
         headers = {
@@ -378,7 +393,18 @@ class HttpxResearchFetcher:
                                 message="redirect limit exceeded",
                                 failure_class=ResearchFetchFailureClass.HTTP,
                             )
-                        current_url = urljoin(current_url, location)
+                        try:
+                            current_url = canonical_http_locator(urljoin(current_url, location))
+                        except ResearchSourceIdentityError as exc:
+                            return HttpFetchResult(
+                                RefreshDisposition.BLOCKED,
+                                requested_url,
+                                current_url,
+                                status,
+                                error_code="network_policy",
+                                message=f"redirect target violates research URL policy: {exc}",
+                                failure_class=_identity_failure_class(exc),
+                            )
                         headers.pop("If-None-Match", None)
                         headers.pop("If-Modified-Since", None)
                         continue
