@@ -9,6 +9,12 @@ from nika_core.toolsmith import ProcessPolicy, ResourceBudget
 from nika_core.toolsmith.execution import run_typed_process
 
 
+def _python_process_policy() -> ProcessPolicy:
+    canonical = str(pathlib.Path(sys.executable).resolve(strict=True))
+    allowed = (sys.executable,) if canonical == sys.executable else (sys.executable, canonical)
+    return ProcessPolicy(allowed)
+
+
 def test_preexisting_cancellation_never_launches_process(tmp_path: pathlib.Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -22,7 +28,7 @@ def test_preexisting_cancellation_never_launches_process(tmp_path: pathlib.Path)
 
     result = run_typed_process(
         (sys.executable, "-c", code, str(marker)),
-        process_policy=ProcessPolicy((sys.executable,)),
+        process_policy=_python_process_policy(),
         resource_budget=ResourceBudget(
             timeout_seconds=5,
             max_output_bytes=4096,

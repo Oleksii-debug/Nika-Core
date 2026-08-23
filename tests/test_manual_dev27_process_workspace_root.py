@@ -11,6 +11,12 @@ from nika_core.toolsmith.execution import run_typed_process
 from nika_core.toolsmith.workspace_security import WorkspaceSecurityError
 
 
+def _python_process_policy() -> ProcessPolicy:
+    canonical = str(pathlib.Path(sys.executable).resolve(strict=True))
+    allowed = (sys.executable,) if canonical == sys.executable else (sys.executable, canonical)
+    return ProcessPolicy(allowed)
+
+
 def test_process_runner_rejects_symlinked_workspace_root_before_launch(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -30,7 +36,7 @@ def test_process_runner_rejects_symlinked_workspace_root_before_launch(
     with pytest.raises(WorkspaceSecurityError, match="workspace root"):
         run_typed_process(
             (sys.executable, "-c", code, str(marker)),
-            process_policy=ProcessPolicy((sys.executable,)),
+            process_policy=_python_process_policy(),
             resource_budget=ResourceBudget(
                 timeout_seconds=5,
                 max_output_bytes=4096,

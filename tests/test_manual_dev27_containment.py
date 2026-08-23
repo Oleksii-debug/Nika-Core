@@ -30,6 +30,12 @@ def _budget(*, max_changed_files: int = 4) -> ResourceBudget:
     )
 
 
+def _python_process_policy() -> ProcessPolicy:
+    canonical = str(pathlib.Path(sys.executable).resolve(strict=True))
+    allowed = (sys.executable,) if canonical == sys.executable else (sys.executable, canonical)
+    return ProcessPolicy(allowed)
+
+
 @pytest.mark.parametrize(
     "spoofed",
     (
@@ -81,7 +87,7 @@ def test_runner_strips_secrets_and_pins_temp_inside_workspace(tmp_path: pathlib.
 
     result = run_typed_process(
         (sys.executable, "-c", code),
-        process_policy=ProcessPolicy((sys.executable,)),
+        process_policy=_python_process_policy(),
         resource_budget=_budget(),
         cwd=cwd,
         workspace_root=workspace,
@@ -105,7 +111,7 @@ def test_runner_rejects_cwd_outside_declared_workspace(tmp_path: pathlib.Path) -
     with pytest.raises(ProcessExecutionError, match="cwd escapes"):
         run_typed_process(
             (sys.executable, "-c", "print('must not run')"),
-            process_policy=ProcessPolicy((sys.executable,)),
+            process_policy=_python_process_policy(),
             resource_budget=_budget(),
             cwd=outside,
             workspace_root=workspace,
