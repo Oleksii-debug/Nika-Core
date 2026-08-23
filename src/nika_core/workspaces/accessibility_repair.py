@@ -363,7 +363,7 @@ class AccessibilityRepairService:
                     continue
             try:
                 candidate = await port.inspect_visual(target)
-            except Exception:
+            except (OSError, RuntimeError):
                 attempts.append(
                     FallbackAttempt(
                         method=expected_method,
