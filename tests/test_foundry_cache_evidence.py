@@ -124,3 +124,45 @@ def test_windows_reparse_attribute_fails_closed_without_traversal(
 
     with pytest.raises(ValueError, match="filesystem indirection"):
         foundry_cache_tree_sha256(cache)
+
+
+def test_walk_enumeration_error_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+
+    def denied_walk(_root, *, topdown, onerror, followlinks):
+        assert topdown is True
+        assert followlinks is False
+        onerror(PermissionError("denied"))
+        yield (str(cache), [], [])
+
+    monkeypatch.setattr(foundry_cache_evidence.os, "walk", denied_walk)
+
+    with pytest.raises(ValueError, match="cannot be enumerated"):
+        foundry_cache_tree_sha256(cache)
+
+
+def test_added_file_during_hashing_invalidates_inventory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "model.bin").write_bytes(b"model")
+    original_cache_files = foundry_cache_evidence._cache_files
+    inventory_calls = 0
+
+    def changing_inventory(root: Path):
+        nonlocal inventory_calls
+        inventory_calls += 1
+        if inventory_calls == 2:
+            (root / "late.bin").write_bytes(b"late")
+        return original_cache_files(root)
+
+    monkeypatch.setattr(foundry_cache_evidence, "_cache_files", changing_inventory)
+
+    with pytest.raises(ValueError, match="tree changed while hashing"):
+        foundry_cache_tree_sha256(cache)
