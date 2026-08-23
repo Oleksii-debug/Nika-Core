@@ -25,6 +25,17 @@ _UNKNOWN_LICENSE_EXPRESSIONS = frozenset(
         "UNKNOWN",
     }
 )
+_MUTABLE_VERSION_TOKENS = frozenset(
+    {
+        "*",
+        "dev",
+        "head",
+        "latest",
+        "main",
+        "master",
+        "nightly",
+    }
+)
 
 
 class ProductComplianceError(ValueError):
@@ -71,6 +82,10 @@ class DependencyAdoption:
         _require_text(self.component_id, "dependency component_id")
         _require_text(self.package_name, "dependency package_name")
         _require_text(self.version, "dependency version")
+        if self.version.strip().casefold() in _MUTABLE_VERSION_TOKENS:
+            raise ProductComplianceError(
+                "dependency version must be exact; mutable version tags are not allowed"
+            )
         _require_text(self.source_ref, "dependency source_ref")
         _require_text(self.source_integrity_ref, "dependency source_integrity_ref")
         normalized_integrity = self.source_integrity_ref.strip().casefold()
@@ -215,6 +230,16 @@ class ProductComplianceInventory:
 
 
 @dataclass(frozen=True, slots=True)
+class _DecisionContext:
+    inventory_digest: str
+    inventory: ProductComplianceInventory
+    review_authority: ComplianceReviewAuthorityPort | None
+
+
+_CURRENT_DECISION_CONTEXTS: dict[str, _DecisionContext] = {}
+
+
+@dataclass(frozen=True, slots=True)
 class ProductComplianceDecision:
     """PF10 result whose positive authority is issued only by this process's gate."""
 
@@ -229,8 +254,8 @@ class ProductComplianceDecision:
         _require_text(self.project_id, "compliance decision project_id")
         if not isinstance(object.__getattribute__(self, "allowed"), bool):
             raise TypeError("compliance decision allowed must be a boolean")
-        _require_unique_text(self.findings, "compliance finding", allow_empty=True)
-        _require_unique_text(self.evidence_refs, "compliance evidence_ref", allow_empty=True)
+        _require_unique_text(self.findings, "compliance finding")
+        _require_unique_text(self.evidence_refs, "compliance evidence_ref")
         raw_allowed = object.__getattribute__(self, "allowed")
         if raw_allowed and self.findings:
             raise ProductComplianceError("allowed compliance decision cannot contain findings")
@@ -486,6 +511,11 @@ class ProductComplianceGate:
         inventory_digest = inventory.digest
         inventory_ref = f"compliance-inventory:sha256:{inventory_digest}"
         normalized_evidence = tuple(dict.fromkeys((*evidence_refs, inventory_ref)))
+        _CURRENT_DECISION_CONTEXTS[project_id] = _DecisionContext(
+            inventory_digest=inventory_digest,
+            inventory=inventory,
+            review_authority=self._review_authority,
+        )
         return _issue_decision(
             project_id=project_id,
             allowed=not normalized_findings,
@@ -572,18 +602,92 @@ class ProductComplianceGate:
         evidence_ref: str,
         purpose: str,
     ) -> bool:
-        authority = self._review_authority
-        if authority is None:
+        return _trusted_review_allowed(
+            self._review_authority,
+            project_id=project_id,
+            evidence_ref=evidence_ref,
+            purpose=purpose,
+        )
+
+
+def _trusted_review_allowed(
+    authority: ComplianceReviewAuthorityPort | None,
+    *,
+    project_id: str,
+    evidence_ref: str,
+    purpose: str,
+) -> bool:
+    if authority is None:
+        return False
+    try:
+        result = authority.verify(
+            project_id=project_id,
+            evidence_ref=evidence_ref,
+            purpose=purpose,
+        )
+    except (LookupError, PermissionError, RuntimeError, TypeError, ValueError):
+        return False
+    return result is True
+
+
+def _current_authority_still_valid(context: _DecisionContext) -> bool:
+    inventory = context.inventory
+    authority = context.review_authority
+    scope_ref = inventory.scope_review_ref
+    if scope_ref is None or not _trusted_review_allowed(
+        authority,
+        project_id=inventory.project_id,
+        evidence_ref=scope_ref,
+        purpose="compliance-scope",
+    ):
+        return False
+
+    for dependency in inventory.dependencies:
+        if dependency.project_id != inventory.project_id:
+            continue
+        if dependency.license_disposition is not LicenseDisposition.APPROVED:
+            continue
+        review_ref = dependency.review_ref
+        if review_ref is None or not _trusted_review_allowed(
+            authority,
+            project_id=inventory.project_id,
+            evidence_ref=review_ref,
+            purpose=f"license-disposition:{dependency.component_id}",
+        ):
             return False
-        try:
-            result = authority.verify(
-                project_id=project_id,
-                evidence_ref=evidence_ref,
-                purpose=purpose,
-            )
-        except (LookupError, PermissionError, RuntimeError, TypeError, ValueError):
-            return False
-        return result is True
+
+    for evidence in inventory.competitor_evidence:
+        if evidence.project_id != inventory.project_id:
+            continue
+        if evidence.proprietary_material:
+            legal_ref = evidence.legal_basis_ref
+            reuse_ref = evidence.reuse_authorization_ref
+            if legal_ref is None or reuse_ref is None:
+                return False
+            if not _trusted_review_allowed(
+                authority,
+                project_id=inventory.project_id,
+                evidence_ref=legal_ref,
+                purpose=f"proprietary-legal-basis:{evidence.evidence_id}",
+            ):
+                return False
+            if not _trusted_review_allowed(
+                authority,
+                project_id=inventory.project_id,
+                evidence_ref=reuse_ref,
+                purpose=f"proprietary-reuse-authorization:{evidence.evidence_id}",
+            ):
+                return False
+        elif evidence.permitted_public_evidence:
+            permission_ref = evidence.permission_basis_ref
+            if permission_ref is None or not _trusted_review_allowed(
+                authority,
+                project_id=inventory.project_id,
+                evidence_ref=permission_ref,
+                purpose=f"public-source-permission:{evidence.evidence_id}",
+            ):
+                return False
+    return True
 
 
 def _inventory_payload(inventory: ProductComplianceInventory) -> dict[str, object]:
@@ -742,7 +846,14 @@ def _valid_decision_proof(decision: ProductComplianceDecision) -> bool:
         evidence_refs=object.__getattribute__(decision, "evidence_refs"),
         inventory_digest=inventory_digest,
     )
-    return hmac.compare_digest(proof, expected)
+    if not hmac.compare_digest(proof, expected):
+        return False
+
+    project_id = object.__getattribute__(decision, "project_id")
+    context = _CURRENT_DECISION_CONTEXTS.get(project_id)
+    if context is None or context.inventory_digest != inventory_digest:
+        return False
+    return _current_authority_still_valid(context)
 
 
 def _require_text(value: object, label: str) -> None:
@@ -755,12 +866,7 @@ def _require_tuple(value: object, label: str) -> None:
         raise TypeError(f"{label} must be a tuple")
 
 
-def _require_unique_text(
-    values: tuple[str, ...],
-    label: str,
-    *,
-    allow_empty: bool = False,
-) -> None:
+def _require_unique_text(values: tuple[str, ...], label: str) -> None:
     _require_tuple(values, f"{label} collection")
     seen: set[str] = set()
     for value in values:
@@ -768,5 +874,3 @@ def _require_unique_text(
         if value in seen:
             raise ProductComplianceError(f"duplicate {label}: {value}")
         seen.add(value)
-    if not allow_empty and not values and label in {"reserved-never-empty"}:
-        raise ProductComplianceError(f"{label} must not be empty")
