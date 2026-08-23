@@ -511,8 +511,10 @@ def test_openai_compatible_rejects_malformed_text_and_usage() -> None:
             lambda _request, response_body=body: httpx.Response(200, json=response_body)
         )
 
-        def client_factory(**kwargs: Any) -> httpx.AsyncClient:
-            return httpx.AsyncClient(transport=transport, **kwargs)
+        def client_factory(
+            _transport: httpx.MockTransport = transport, **kwargs: Any
+        ) -> httpx.AsyncClient:
+            return httpx.AsyncClient(transport=_transport, **kwargs)
 
         provider = OpenAICompatibleProvider(
             provider_id="provider",
