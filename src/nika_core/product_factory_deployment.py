@@ -360,9 +360,18 @@ class DeploymentFabric:
         self._enforce_staging_first(intent)
         environment_key = _environment_key(intent)
         previous = self._current_releases.get(environment_key)
-        result = self.provider.deploy(intent)
+        uncertain = DeploymentRecord(
+            intent,
+            DeploymentState.UNCERTAIN,
+            previous_release_sha=previous,
+        )
+        try:
+            result = self.provider.deploy(intent)
+        except Exception:  # noqa: BLE001
+            # A provider may mutate the target before failing to return a result.
+            return self._mark_uncertain(uncertain)
         if not result.evidence_refs:
-            raise DeploymentFabricError("provider deploy result requires evidence refs")
+            return self._mark_uncertain(uncertain)
         if result.uncertain:
             return self._mark_uncertain(
                 DeploymentRecord(
@@ -716,7 +725,7 @@ def _validate_record(record: DeploymentRecord) -> None:
     intent = record.intent
     if record.previous_release_sha is not None:
         _validate_sha(record.previous_release_sha)
-    if not record.provider_evidence_refs:
+    if not record.provider_evidence_refs and record.state is not DeploymentState.UNCERTAIN:
         raise DeploymentFabricError("deployment snapshot record requires provider evidence refs")
     if record.health is not None:
         if record.health.environment_id != intent.environment.environment_id:
