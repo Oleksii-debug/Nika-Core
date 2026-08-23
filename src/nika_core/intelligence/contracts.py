@@ -18,6 +18,9 @@ class DeterministicErrorCode(StrEnum):
     REPLAN_LIMIT = "replan_limit"
     ACTION_UNAVAILABLE = "action_unavailable"
     TOOL_EXECUTION_FAILED = "tool_execution_failed"
+    SIDE_EFFECT_IDENTITY_CONFLICT = "side_effect_identity_conflict"
+    SIDE_EFFECT_RECONCILIATION_REQUIRED = "side_effect_reconciliation_required"
+    SIDE_EFFECT_RECORD_FAILED = "side_effect_record_failed"
     GOAL_UNSATISFIED = "goal_unsatisfied"
 
 
@@ -88,6 +91,41 @@ class PlanStep:
 @dataclass(frozen=True, slots=True)
 class DeterministicPlan:
     steps: tuple[PlanStep, ...]
+
+
+class DeterministicEffectStatus(StrEnum):
+    PENDING = "pending"
+    COMPLETED = "completed"
+    UNCERTAIN = "uncertain"
+
+
+@dataclass(frozen=True, slots=True)
+class DeterministicEffectReservation:
+    operation_key: str
+    status: DeterministicEffectStatus
+    created: bool
+
+
+class DeterministicEffectConflictError(RuntimeError):
+    """Raised when a durable effect identity is rebound to different action semantics."""
+
+
+class DeterministicEffectJournal(Protocol):
+    """Durable fail-closed journal for non-read-only deterministic tool effects."""
+
+    def reserve(
+        self,
+        *,
+        task_id: str,
+        execution_id: str,
+        action: DeterministicAction,
+    ) -> DeterministicEffectReservation: ...
+
+    def complete(self, operation_key: str) -> None: ...
+
+    def mark_uncertain(self, operation_key: str) -> None: ...
+
+    def release_pending(self, operation_key: str) -> None: ...
 
 
 class DeterministicPlanner(Protocol):
