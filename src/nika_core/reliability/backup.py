@@ -179,6 +179,9 @@ class SQLiteRecoveryManager:
             raise BackupVerificationError(
                 f"backup manifest does not exist: {manifest_path}"
             )
+        if self._is_indirect_path(database) or self._is_indirect_path(manifest_path):
+            raise BackupVerificationError("backup database and manifest must be direct files")
+        self._ensure_backup_artifact_coherent(database)
         manifest = self._read_json(manifest_path)
         expected = {
             "format_version",
@@ -210,6 +213,12 @@ class SQLiteRecoveryManager:
             raise BackupVerificationError("backup database SHA-256 does not match manifest")
         if self._validate_database(database, require_supported=True) != schema:
             raise BackupVerificationError("backup schema version does not match manifest")
+        self._ensure_backup_artifact_coherent(database)
+        if database.stat().st_size != size:
+            raise BackupVerificationError("backup database size changed during verification")
+        actual_sha = self._sha256_file(database)
+        if not self._equal(actual_sha, expected_sha):
+            raise BackupVerificationError("backup database changed during verification")
 
         created_at = manifest["created_at"]
         if not isinstance(created_at, str):
@@ -319,7 +328,7 @@ class SQLiteRecoveryManager:
         quarantine_manifest: Path | None = None
         copy_completed = False
         try:
-            self._copy_database(backup.database_path, staged)
+            self._stage_verified_backup(backup, staged)
             SQLiteStore(staged).initialize()
             if self._validate_database(staged, require_supported=True) != SCHEMA_VERSION:
                 raise BackupVerificationError(
@@ -569,10 +578,16 @@ class SQLiteRecoveryManager:
     def _rollback_quarantine(self, target: Path, marker: dict[str, Any]) -> None:
         quarantine = target.parent / marker["quarantine_file"]
         old_sha = marker["current_sha256"]
+        stage_sha = marker["stage_sha256"]
         failed: Path | None = None
         if target.exists():
-            if self._equal(self._sha256_file(target), old_sha):
+            target_sha = self._sha256_file(target)
+            if self._equal(target_sha, old_sha):
                 return
+            if not self._equal(target_sha, stage_sha):
+                raise RestoreSafetyError(
+                    "quarantine rollback refused to overwrite an unknown restore target"
+                )
             failed = self._temporary_path(target, "failed-restore")
             os.replace(target, failed)
         if not quarantine.exists():
@@ -841,6 +856,61 @@ class SQLiteRecoveryManager:
             raise RestoreSafetyError(
                 "live database is missing while SQLite sidecars remain"
             )
+
+    @classmethod
+    def _ensure_backup_artifact_coherent(cls, database: Path) -> None:
+        wal = cls._wal_path(database)
+        shm = cls._shm_path(database)
+        for sidecar in (wal, shm):
+            if cls._is_indirect_path(sidecar):
+                raise BackupVerificationError("backup SQLite sidecar must not be indirect")
+            if sidecar.exists():
+                raise BackupVerificationError(
+                    "backup artifact has SQLite sidecar state not bound by its manifest"
+                )
+
+    @classmethod
+    def _validate_locked_backup_source(
+        cls,
+        artifact: BackupArtifact,
+        connection: sqlite3.Connection,
+    ) -> None:
+        database = artifact.database_path
+        if cls._is_indirect_path(database) or not database.is_file():
+            raise BackupVerificationError("backup database identity changed before staging")
+        wal = cls._wal_path(database)
+        shm = cls._shm_path(database)
+        for sidecar in (wal, shm):
+            if cls._is_indirect_path(sidecar):
+                raise BackupVerificationError("backup SQLite sidecar must not be indirect")
+            if sidecar.exists() and not sidecar.is_file():
+                raise BackupVerificationError("backup SQLite sidecar is not a regular file")
+        if wal.exists() and wal.stat().st_size > 0:
+            raise BackupVerificationError(
+                "backup artifact has durable WAL state not bound by its manifest"
+            )
+        if database.stat().st_size != artifact.size_bytes:
+            raise BackupVerificationError("backup database size changed before staging")
+        if not cls._equal(cls._sha256_file(database), artifact.sha256):
+            raise BackupVerificationError("backup database changed before staging")
+        if (
+            cls._validate_connection(connection, require_supported=True)
+            != artifact.schema_version
+        ):
+            raise BackupVerificationError("backup schema version changed before staging")
+
+    @classmethod
+    def _stage_verified_backup(cls, artifact: BackupArtifact, staged: Path) -> None:
+        cls._ensure_backup_artifact_coherent(artifact.database_path)
+        try:
+            with exclusive_sqlite_lease(artifact.database_path) as source_connection:
+                cls._validate_locked_backup_source(artifact, source_connection)
+                cls._copy_connection_to_database(source_connection, staged)
+                cls._validate_locked_backup_source(artifact, source_connection)
+        except RecoveryLeaseError as exc:
+            raise BackupVerificationError(
+                "backup source cannot be held stable for restore staging"
+            ) from exc
 
     @staticmethod
     def _is_indirect_path(path: Path) -> bool:
