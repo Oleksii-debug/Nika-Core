@@ -180,7 +180,7 @@ def test_same_key_concurrent_writers_commit_one_revision(tmp_path) -> None:
     created = _create(repo)
     barrier = threading.Barrier(3)
     results: list[tuple[int, int]] = []
-    failures: list[BaseException] = []
+    failures: list[Exception] = []
 
     def worker() -> None:
         candidate = ProductProjectRepository(SQLiteStore(store.path))
@@ -194,7 +194,7 @@ def test_same_key_concurrent_writers_commit_one_revision(tmp_path) -> None:
                 change_reason="concurrent",
             )
             results.append((result.spec_version, result.row_version))
-        except BaseException as exc:  # pragma: no cover - surfaced by assertion
+        except Exception as exc:  # pragma: no cover - surfaced by assertion
             failures.append(exc)
 
     threads = [threading.Thread(target=worker) for _ in range(2)]
