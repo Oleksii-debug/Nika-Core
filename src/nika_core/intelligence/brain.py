@@ -112,6 +112,40 @@ class DeterministicBrain:
         history: list[DeterministicPlan] = []
         replans = 0
         executed_steps = 0
+
+        journal = self._effect_journal
+        if journal is not None:
+            if task_id is None:  # validated at run entry
+                raise AssertionError("durable deterministic task identity is unavailable")
+            try:
+                unresolved = journal.unresolved_operation_keys(task_id=task_id)
+            except Exception as exc:  # noqa: BLE001 - fail closed before planning or effects.
+                return self._failure(
+                    plan=DeterministicPlan(steps=()),
+                    completed=completed,
+                    state=current_state,
+                    history=history,
+                    replans=replans,
+                    code=DeterministicErrorCode.SIDE_EFFECT_RECORD_FAILED,
+                    message=(
+                        "could not inspect deterministic task effect state: "
+                        f"{type(exc).__name__}"
+                    ),
+                )
+            if unresolved:
+                return self._failure(
+                    plan=DeterministicPlan(steps=()),
+                    completed=completed,
+                    state=current_state,
+                    history=history,
+                    replans=replans,
+                    code=DeterministicErrorCode.SIDE_EFFECT_RECONCILIATION_REQUIRED,
+                    message=(
+                        "deterministic task has an unresolved side effect and requires "
+                        f"reconciliation: {unresolved[0]}"
+                    ),
+                )
+
         loop = asyncio.get_running_loop()
         planning_deadline = loop.time() + planning_timeout_seconds
 
