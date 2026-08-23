@@ -140,6 +140,53 @@ def test_spec_history_rejects_explicit_parent_without_reason(tmp_path) -> None:
         repo.spec_history("p-history")
 
 
+def test_spec_history_rejects_non_string_revision_reason_as_domain_error(tmp_path) -> None:
+    store, repo, project = _repo(tmp_path)
+    repo.update_spec(
+        "p-history",
+        _spec("second"),
+        expected_row_version=project.row_version,
+        idempotency_key="spec:second",
+        change_reason="second",
+    )
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT spec_json FROM product_project_specs "
+            "WHERE project_id='p-history' AND spec_version=2"
+        ).fetchone()
+        payload = json.loads(row["spec_json"])
+        payload["revision_reason"] = 7
+        conn.execute(
+            "UPDATE product_project_specs SET spec_json=? "
+            "WHERE project_id='p-history' AND spec_version=2",
+            (json.dumps(payload),),
+        )
+
+    with pytest.raises(ProductProjectError, match="revision reason"):
+        repo.spec_history("p-history")
+
+
+def test_repository_reads_normalize_malformed_domain_string_types(tmp_path) -> None:
+    store, repo, _ = _repo(tmp_path)
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT spec_json FROM product_project_specs "
+            "WHERE project_id='p-history' AND spec_version=1"
+        ).fetchone()
+        payload = json.loads(row["spec_json"])
+        payload["goal"] = 7
+        conn.execute(
+            "UPDATE product_project_specs SET spec_json=? "
+            "WHERE project_id='p-history' AND spec_version=1",
+            (json.dumps(payload),),
+        )
+
+    with pytest.raises(ProductProjectError, match="invalid current ProductProject specification"):
+        repo.get("p-history")
+    with pytest.raises(ProductProjectError, match="invalid ProductProject specification version 1"):
+        repo.spec_history("p-history")
+
+
 def test_spec_history_preserves_legacy_sequential_parent_compatibility(tmp_path) -> None:
     store, repo, project = _repo(tmp_path)
     updated = repo.update_spec(
