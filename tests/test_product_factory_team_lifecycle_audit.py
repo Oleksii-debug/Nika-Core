@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+
+import pytest
+
 from nika_core.product_factory_orchestration import (
     ComponentBrief,
     ProjectScale,
@@ -8,6 +12,7 @@ from nika_core.product_factory_orchestration import (
 from nika_core.product_factory_team_lifecycle import (
     DynamicTeamLifecycle,
     RoleAssignmentStatus,
+    TeamLifecycleError,
     TeamLifecycleSnapshot,
 )
 
@@ -108,3 +113,51 @@ def test_restart_round_trip_preserves_both_sides_of_replacement_audit_trail() ->
         "approved replacement can continue independent work"
     )
     assert current.evidence_refs == ("decision:replacement:42",)
+
+
+def test_restart_rejects_forged_generation_zero_assignment_identity() -> None:
+    snapshot = DynamicTeamLifecycle().compose(_request())
+    payload = json.loads(snapshot.to_json())
+    payload["assignments"][0]["assignment_id"] = "forged:assignment:zero"
+
+    with pytest.raises(TeamLifecycleError):
+        TeamLifecycleSnapshot.from_json(json.dumps(payload))
+
+
+def test_restart_rejects_consistently_rewritten_replacement_chain_identity() -> None:
+    lifecycle = DynamicTeamLifecycle()
+    snapshot = lifecycle.compose(_request())
+    original = next(
+        assignment
+        for assignment in snapshot.current_assignments
+        if assignment.role.capabilities == ("implementation",)
+    )
+    snapshot = lifecycle.mark_unavailable(
+        snapshot,
+        role_id=original.role.role_id,
+        status=RoleAssignmentStatus.FAILED,
+        reason="worker exited before trusted output",
+        evidence_refs=("worker:event:identity-forgery",),
+    )
+    snapshot = lifecycle.replace_unavailable(
+        snapshot,
+        role_id=original.role.role_id,
+        reason="approved deterministic replacement",
+        evidence_refs=("decision:replacement:identity-forgery",),
+    )
+
+    payload = json.loads(snapshot.to_json())
+    chain = [
+        item
+        for item in payload["assignments"]
+        if item["role"]["role_id"] == original.role.role_id
+    ]
+    assert len(chain) == 2
+    predecessor = next(item for item in chain if item["generation"] == 0)
+    replacement = next(item for item in chain if item["generation"] == 1)
+    predecessor["assignment_id"] = "forged:assignment:predecessor"
+    replacement["assignment_id"] = "forged:assignment:replacement"
+    replacement["replaces_assignment_id"] = predecessor["assignment_id"]
+
+    with pytest.raises(TeamLifecycleError):
+        TeamLifecycleSnapshot.from_json(json.dumps(payload))
