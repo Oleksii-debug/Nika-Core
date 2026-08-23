@@ -7,16 +7,29 @@ Unified Planning remains an optional replaceable planning engine behind those co
 
 ## Reuse decision
 
-- **REUSE:** Unified Planning 1.3.x and the installed Pyperplan engine through the existing
-  `planning` optional dependency.
+- **REUSE:** Unified Planning 1.3.x plus the `up-aries==0.5.0` engine adapter through the
+  `planning` optional dependency. Unified Planning is Apache-2.0. The Aries Unified Planning
+  plugin is MIT and its maintained upstream project is MIT/Apache-2.0 licensed.
 - **ADAPT:** `UnifiedPlanningAdapter` maps Nika boolean facts/actions/goals to Unified Planning
   objects and normalizes planner result status back to Nika error semantics.
 - **CUSTOM (thin):** Nika validates returned action identities/effects, bounds execution and
   re-planning, preserves completed-effect identity across restart, and delegates every tool call
   to the normal `ToolExecutor` permission/approval boundary.
 
-No Unified Planning problem, fluent, action, plan, or result type is exposed by the Nika
-deterministic planning contracts.
+Pyperplan is not the Nika default dependency. Fresh adoption review found that although the
+`up-pyperplan` wrapper is Apache-2.0, the Pyperplan 2.1 engine itself is GPLv3+. Nika therefore
+does not silently treat that transitive engine as Apache-licensed. Other Unified Planning engine
+wrappers remain candidates only after their underlying binary/runtime license and Windows fit are
+verified; wrapper metadata alone is not sufficient distribution provenance.
+
+Aries is selected as the current first proof engine because it is a maintained official Unified
+Planning integration with permissive source/plugin licensing and packaged Windows/Linux support.
+It is not claimed to prove every unsatisfiable action-planning problem. Nika therefore keeps
+`GOAL_UNREACHABLE` distinct from `NO_PLAN_FOUND` and treats either as a clean non-success rather
+than manufacturing a plan.
+
+No Unified Planning problem, fluent, action, plan, result, Aries, or gRPC type is exposed by the
+Nika deterministic planning contracts.
 
 ## Execution contract
 
@@ -43,8 +56,9 @@ replaying that side effect.
 
 `planning_timeout_seconds` is a total caller-visible planning budget across the initial plan and
 all re-plans. The asyncio caller boundary remains authoritative: a timed-out worker thread is not
-described as a hard-killed native planner process. Unified Planning exposes a per-solve timeout,
-but Nika does not claim hard native cancellation from that API without engine-specific evidence.
+described as a hard-killed native planner process. A particular Unified Planning engine may
+support an internal solve timeout, but Nika does not claim hard native/process cancellation from
+that API without engine-specific executable evidence.
 
 ## Approval boundary
 
