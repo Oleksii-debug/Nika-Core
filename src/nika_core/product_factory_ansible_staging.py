@@ -300,10 +300,6 @@ class AuthorizedAnsibleStagingAdapter:
                 _require_sha(contract, "release_sha"),
                 _require_digest(contract, "artifact_digest"),
             )
-            if exact_release != intent.release:
-                raise StagingAdapterError(
-                    "inspection reported a different exact release identity"
-                )
             release_sha = exact_release.source_sha
         healthy = contract.get("healthy")
         if healthy is not None and not isinstance(healthy, bool):
