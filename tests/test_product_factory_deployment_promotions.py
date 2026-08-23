@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -27,8 +28,10 @@ from nika_core.product_factory_deployment_promotions import (
     DeploymentPromotionSnapshot,
     ProductionPromotionAuthorization,
     ServicePromotionSpec,
+    build_production_promotion_action,
     build_promotion_wave_plan,
 )
+from nika_core.security.policy import ApprovalEvidence
 from nika_core.product_factory_deployment_waves import (
     DeploymentWaveCoordinator,
     DeploymentWaveSnapshot,
@@ -39,6 +42,7 @@ SHA_A = "a" * 40
 SHA_B = "b" * 40
 DIGEST_A = "1" * 64
 DIGEST_B = "2" * 64
+NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 
 
 def _execution(
@@ -112,28 +116,29 @@ def _authorization(
     service_id: str,
     *,
     authorization_id: str | None = None,
-    authorization_ref: str | None = None,
+    approved_at: datetime | None = None,
+    expires_at: datetime | None = None,
 ) -> ProductionPromotionAuthorization:
-    service = next(
-        item for item in plan.services if item.service_id == service_id
+    action = build_production_promotion_action(plan, service_id)
+    approval = ApprovalEvidence(
+        approval_id=(
+            authorization_id
+            or f"approval-{plan.plan_id}-{service_id}"
+        ),
+        action_fingerprint=action.approval_fingerprint,
+        approved_at=(
+            approved_at
+            or datetime(2020, 1, 1, tzinfo=UTC)
+        ),
+        expires_at=(
+            expires_at
+            or datetime(2099, 1, 1, tzinfo=UTC)
+        ),
     )
     return ProductionPromotionAuthorization(
-        authorization_id=authorization_id or f"approval-{plan.plan_id}-{service_id}",
         plan_id=plan.plan_id,
-        project_id=plan.project_id,
         service_id=service_id,
-        release_sha=service.release.source_sha,
-        artifact_digest=service.release.artifact_digest,
-        staging_environment_id=(
-            service.staging.intent.environment.environment_id
-        ),
-        production_environment_id=(
-            service.production.intent.environment.environment_id
-        ),
-        authorization_ref=(
-            authorization_ref
-            or f"approval-ref:{plan.plan_id}:{service_id}"
-        ),
+        approval=approval,
     )
 
 
@@ -419,7 +424,7 @@ def test_authorization_is_rejected_before_healthy_staging() -> None:
         )
 
 
-def test_authorization_must_match_release_environment_and_opaque_ref() -> None:
+def test_authorization_reuses_canonical_exact_action_and_expiry() -> None:
     coordinator, _ = _coordinator()
     plan = DeploymentPromotionPlan(
         "plan",
@@ -430,36 +435,60 @@ def test_authorization_must_match_release_environment_and_opaque_ref() -> None:
     coordinator.advance("plan")
     exact = _authorization(plan, "api")
 
+    action = build_production_promotion_action(plan, "api")
+    assert action.approval_required is True
+    assert action.risk.value == "high_impact"
+
     with pytest.raises(
         DeploymentPromotionError,
-        match="exact promotion identity",
+        match="exact promotion action",
     ):
         coordinator.authorize_production(
             replace(
                 exact,
-                release_sha=SHA_B,
-            )
+                approval=replace(
+                    exact.approval,
+                    action_fingerprint="0" * 64,
+                ),
+            ),
+            now=NOW,
         )
 
+    expired = _authorization(
+        plan,
+        "api",
+        authorization_id="approval-expired",
+        approved_at=NOW - timedelta(hours=2),
+        expires_at=NOW - timedelta(hours=1),
+    )
     with pytest.raises(
         DeploymentPromotionError,
-        match="exact promotion identity",
+        match="not currently valid",
     ):
         coordinator.authorize_production(
-            replace(
-                exact,
-                production_environment_id="production-other",
-            )
+            expired,
+            now=NOW,
         )
 
-    with pytest.raises(
-        DeploymentPromotionError,
-        match="opaque reference",
-    ):
-        replace(
-            exact,
-            authorization_ref="ghp_raw-secret-material",
-        )
+    alternate = DeploymentPromotionPlan(
+        "other-plan",
+        "social",
+        (
+            _service(
+                "api",
+                source_sha=SHA_B,
+                digest=DIGEST_B,
+            ),
+        ),
+    )
+    alternate_action = build_production_promotion_action(
+        alternate,
+        "api",
+    )
+    assert (
+        alternate_action.approval_fingerprint
+        != action.approval_fingerprint
+    )
 
 
 def test_authorization_is_idempotent_but_conflicts_fail_closed() -> None:
@@ -490,7 +519,10 @@ def test_authorization_is_idempotent_but_conflicts_fail_closed() -> None:
         coordinator.authorize_production(
             replace(
                 api,
-                authorization_ref="approval-ref:changed",
+                approval=replace(
+                    api.approval,
+                    approval_id="approval-conflicting-payload",
+                ),
             )
         )
 

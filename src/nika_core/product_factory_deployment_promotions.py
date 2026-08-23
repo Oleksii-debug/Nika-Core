@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from nika_core.product_factory_deployment import EnvironmentTier, ReleaseRef
 from nika_core.product_factory_deployment_execution import (
@@ -16,6 +18,12 @@ from nika_core.product_factory_deployment_waves import (
     ServiceRolloutRecord,
     ServiceRolloutSpec,
 )
+from nika_core.security.policy import (
+    ActionIntent,
+    ApprovalEvidence,
+    ApprovalLedger,
+)
+from nika_core.tools import ToolRisk
 
 
 class DeploymentPromotionError(ValueError):
@@ -24,42 +32,21 @@ class DeploymentPromotionError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class ProductionPromotionAuthorization:
-    """Durable, exact-release authorization for one production promotion."""
+    """Durable acceptance of one canonical high-impact approval."""
 
-    authorization_id: str
     plan_id: str
-    project_id: str
     service_id: str
-    release_sha: str
-    artifact_digest: str
-    staging_environment_id: str
-    production_environment_id: str
-    authorization_ref: str
+    approval: ApprovalEvidence
 
     def __post_init__(self) -> None:
-        values = (
-            self.authorization_id,
-            self.plan_id,
-            self.project_id,
-            self.service_id,
-            self.staging_environment_id,
-            self.production_environment_id,
-            self.authorization_ref,
-        )
-        if not all(value.strip() for value in values):
+        if not self.plan_id.strip() or not self.service_id.strip():
             raise DeploymentPromotionError(
                 "production authorization identity fields must not be empty"
             )
-        _validate_sha(self.release_sha)
-        _validate_digest(self.artifact_digest)
-        if self.staging_environment_id == self.production_environment_id:
-            raise DeploymentPromotionError(
-                "production authorization requires distinct environments"
-            )
-        if _looks_secret(self.authorization_ref):
-            raise DeploymentPromotionError(
-                "production authorization_ref must be an opaque reference, not a secret"
-            )
+
+    @property
+    def authorization_id(self) -> str:
+        return self.approval.approval_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,6 +202,7 @@ class DeploymentPromotionSnapshot:
 @dataclass(slots=True)
 class DeploymentPromotionCoordinator:
     waves: DeploymentWaveCoordinator
+    approvals: ApprovalLedger = field(default_factory=ApprovalLedger, repr=False)
     _plans: dict[str, DeploymentPromotionPlan] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -242,6 +230,8 @@ class DeploymentPromotionCoordinator:
     def authorize_production(
         self,
         authorization: ProductionPromotionAuthorization,
+        *,
+        now: datetime | None = None,
     ) -> ProductionPromotionAuthorization:
         plan = self._plan(authorization.plan_id)
         service = self._service(plan, authorization.service_id)
@@ -271,6 +261,21 @@ class DeploymentPromotionCoordinator:
                 raise DeploymentPromotionError(
                     "production authorization id already belongs to another promotion"
                 )
+
+        intent = build_production_promotion_action(
+            plan,
+            authorization.service_id,
+        )
+        try:
+            self.approvals.consume(
+                intent,
+                authorization.approval,
+                now=now,
+            )
+        except (PermissionError, ValueError) as exc:
+            raise DeploymentPromotionError(
+                f"production authorization rejected: {exc}"
+            ) from exc
 
         self._authorizations[key] = authorization
         return authorization
@@ -475,23 +480,21 @@ class DeploymentPromotionCoordinator:
         plan: DeploymentPromotionPlan,
         service: ServicePromotionSpec,
     ) -> None:
-        expected = (
-            plan.project_id,
-            service.release.source_sha,
-            service.release.artifact_digest,
-            service.staging.intent.environment.environment_id,
-            service.production.intent.environment.environment_id,
-        )
-        actual = (
-            authorization.project_id,
-            authorization.release_sha,
-            authorization.artifact_digest,
-            authorization.staging_environment_id,
-            authorization.production_environment_id,
-        )
-        if actual != expected:
+        if authorization.plan_id != plan.plan_id:
             raise DeploymentPromotionError(
-                "production authorization does not match exact promotion identity"
+                "production authorization plan identity mismatch"
+            )
+        if authorization.service_id != service.service_id:
+            raise DeploymentPromotionError(
+                "production authorization service identity mismatch"
+            )
+        intent = build_production_promotion_action(
+            plan,
+            service.service_id,
+        )
+        if authorization.approval.action_fingerprint != intent.approval_fingerprint:
+            raise DeploymentPromotionError(
+                "production authorization does not match exact promotion action"
             )
 
     @staticmethod
@@ -584,6 +587,50 @@ class DeploymentPromotionCoordinator:
         )
 
 
+def build_production_promotion_action(
+    plan: DeploymentPromotionPlan,
+    service_id: str,
+) -> ActionIntent:
+    """Build the exact canonical high-impact action that must be approved."""
+
+    service = next(
+        (
+            item
+            for item in plan.services
+            if item.service_id == service_id
+        ),
+        None,
+    )
+    if service is None:
+        raise DeploymentPromotionError(
+            "production approval action references an unknown service"
+        )
+    target = json.dumps(
+        {
+            "artifact_digest": service.release.artifact_digest,
+            "production_environment_id": (
+                service.production.intent.environment.environment_id
+            ),
+            "project_id": plan.project_id,
+            "release_sha": service.release.source_sha,
+            "service_id": service.service_id,
+            "staging_environment_id": (
+                service.staging.intent.environment.environment_id
+            ),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return ActionIntent(
+        action_id=f"production-promotion:{plan.plan_id}:{service.service_id}",
+        tool_id="deployment.production.promote",
+        risk=ToolRisk.HIGH_IMPACT,
+        target=target,
+        approval_required=True,
+    )
+
+
 def build_promotion_wave_plan(
     plan: DeploymentPromotionPlan,
 ) -> DeploymentWavePlan:
@@ -639,40 +686,6 @@ def _stage_service_id(
 
 def _wave_plan_id(plan_id: str) -> str:
     return f"promotion:{plan_id}"
-
-
-def _validate_sha(value: str) -> None:
-    if len(value) != 40 or any(
-        character not in "0123456789abcdef"
-        for character in value
-    ):
-        raise DeploymentPromotionError(
-            "production authorization release_sha must be a lowercase 40-character SHA"
-        )
-
-
-def _validate_digest(value: str) -> None:
-    if len(value) != 64 or any(
-        character not in "0123456789abcdef"
-        for character in value
-    ):
-        raise DeploymentPromotionError(
-            "production authorization artifact_digest must be a lowercase "
-            "64-character digest"
-        )
-
-
-def _looks_secret(value: str) -> bool:
-    lowered = value.lower()
-    prefixes = (
-        "ghp_",
-        "github_pat_",
-        "sk-",
-        "xoxb-",
-        "xapp-",
-        "akia",
-    )
-    return lowered.startswith(prefixes) or "-----begin " in lowered
 
 
 _TERMINAL_STATES = {
