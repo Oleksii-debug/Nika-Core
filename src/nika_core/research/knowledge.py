@@ -86,7 +86,7 @@ class KnowledgeIngestRequest:
             if not value.strip():
                 raise ValueError(f"{name} is required")
         if not isinstance(self.visibility, KnowledgeVisibility):
-            raise ValueError("visibility must be a KnowledgeVisibility value")
+            raise TypeError("visibility must be a KnowledgeVisibility value")
         if self.source_id is not None and not self.source_id.strip():
             raise ValueError("source_id must be non-empty when provided")
         if self.raw_sha256 is not None and not _SHA256.fullmatch(self.raw_sha256):
