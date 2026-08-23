@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from typing import Protocol
 
-from ..kernel.audit import AuditLog
 from .contracts import (
     ModelErrorCode,
     ModelGatewayError,
@@ -18,6 +18,17 @@ from .contracts import (
 )
 
 
+class _AuditLogPort(Protocol):
+    def append(
+        self,
+        *,
+        event_type: str,
+        entity_type: str,
+        entity_id: str,
+        payload: dict[str, object] | None = None,
+    ) -> int: ...
+
+
 _NO_FALLBACK_CODES = frozenset(
     {
         ModelErrorCode.INVALID_REQUEST,
@@ -30,7 +41,7 @@ _NO_FALLBACK_CODES = frozenset(
 
 
 class ModelGateway:
-    def __init__(self, *, audit_log: AuditLog | None = None) -> None:
+    def __init__(self, *, audit_log: _AuditLogPort | None = None) -> None:
         self._providers: dict[str, ModelProvider] = {}
         self._defaults: dict[ProviderKind, str] = {}
         self._audit_log = audit_log
