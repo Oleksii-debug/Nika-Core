@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
 from nika_core.data.sqlite import SQLiteStore
@@ -70,40 +71,32 @@ def test_update_spec_returns_own_revision_under_post_commit_interleaving(tmp_pat
         committed=writer_a_committed,
         release=release_writer_a,
     )
-    results: dict[str, ProductProject] = {}
-    failures: list[Exception] = []
 
-    def writer_a() -> None:
-        try:
-            results["a"] = ProductProjectRepository(gated_store).update_spec(
-                "p-linearizable",
-                _spec("writer-a"),
-                expected_row_version=created.row_version,
-                idempotency_key="spec:writer-a",
-                change_reason="writer a",
-            )
-        except Exception as exc:  # pragma: no cover - surfaced by assertion
-            failures.append(exc)
-
-    thread = threading.Thread(target=writer_a, name="writer-a")
-    thread.start()
-    assert writer_a_committed.wait(timeout=10)
-
-    try:
-        writer_b = ProductProjectRepository(SQLiteStore(store.path)).update_spec(
+    def writer_a() -> ProductProject:
+        return ProductProjectRepository(gated_store).update_spec(
             "p-linearizable",
-            _spec("writer-b"),
-            expected_row_version=1,
-            idempotency_key="spec:writer-b",
-            change_reason="writer b",
+            _spec("writer-a"),
+            expected_row_version=created.row_version,
+            idempotency_key="spec:writer-a",
+            change_reason="writer a",
         )
-    finally:
-        release_writer_a.set()
-    thread.join(timeout=10)
 
-    assert not thread.is_alive()
-    assert failures == []
-    writer_a_result = results["a"]
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="writer-a") as executor:
+        writer_a_future = executor.submit(writer_a)
+        assert writer_a_committed.wait(timeout=10)
+
+        try:
+            writer_b = ProductProjectRepository(SQLiteStore(store.path)).update_spec(
+                "p-linearizable",
+                _spec("writer-b"),
+                expected_row_version=1,
+                idempotency_key="spec:writer-b",
+                change_reason="writer b",
+            )
+        finally:
+            release_writer_a.set()
+        writer_a_result = writer_a_future.result(timeout=10)
+
     assert (writer_a_result.spec_version, writer_a_result.row_version) == (2, 1)
     assert writer_a_result.spec.hypothesis == "writer-a"
     assert (writer_b.spec_version, writer_b.row_version) == (3, 2)

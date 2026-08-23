@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
 import pytest
@@ -179,33 +180,25 @@ def test_same_key_concurrent_writers_commit_one_revision(tmp_path) -> None:
     store, repo = _repo(tmp_path)
     created = _create(repo)
     barrier = threading.Barrier(3)
-    results: list[tuple[int, int]] = []
-    failures: list[Exception] = []
 
-    def worker() -> None:
+    def worker() -> tuple[int, int]:
         candidate = ProductProjectRepository(SQLiteStore(store.path))
         barrier.wait()
-        try:
-            result = candidate.update_spec(
-                "p1",
-                _spec("concurrent"),
-                expected_row_version=created.row_version,
-                idempotency_key="spec:concurrent",
-                change_reason="concurrent",
-            )
-            results.append((result.spec_version, result.row_version))
-        except Exception as exc:  # pragma: no cover - surfaced by assertion
-            failures.append(exc)
+        result = candidate.update_spec(
+            "p1",
+            _spec("concurrent"),
+            expected_row_version=created.row_version,
+            idempotency_key="spec:concurrent",
+            change_reason="concurrent",
+        )
+        return result.spec_version, result.row_version
 
-    threads = [threading.Thread(target=worker) for _ in range(2)]
-    for thread in threads:
-        thread.start()
-    barrier.wait()
-    for thread in threads:
-        thread.join()
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="spec-writer") as executor:
+        futures = [executor.submit(worker) for _ in range(2)]
+        barrier.wait()
+        results = sorted(future.result(timeout=10) for future in futures)
 
-    assert failures == []
-    assert sorted(results) == [(2, 1), (2, 1)]
+    assert results == [(2, 1), (2, 1)]
     with store.connection() as conn:
         assert conn.execute(
             "SELECT COUNT(*) FROM product_project_specs WHERE project_id='p1'"
