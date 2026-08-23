@@ -19,6 +19,7 @@ The implementation deliberately does **not** provide autonomous external-message
 - Nika's existing `SQLiteStore.connection()` transaction boundary is reused for durable PF9 snapshots and communication records.
 - ProductProject's existing durable idempotency ledger is reused to reconcile an uncertain WorkOrder handoff rather than creating a second side-effect ledger.
 - Existing packaging notice generation/verification remains responsible for Nika runtime bundle notices. PF10 project compliance records dependency-specific notice/obligation evidence instead of replacing that packaging subsystem.
+- Python stdlib HMAC/SHA-256 is used only for a process-local positive-decision integrity proof; no new crypto or policy framework is introduced.
 
 ### ADAPT
 
@@ -90,6 +91,18 @@ Every declared distribution obligation must have matching fulfillment evidence. 
 
 Competitor evidence is permitted only when it is recorded as permitted public evidence with a durable permission/terms-policy basis reference, or when proprietary material carries both a legal-basis reference and an explicit reuse-authorization reference. Possession, public visibility or access alone is not treated as permission to copy/reuse.
 
+A compliance inventory cannot become release-allowing merely because every evidence tuple was omitted. At least one review-bearing evidence reference must exist. Products with legitimately empty dependency/competitor inventories use an explicit `scope_review_ref` stating that the empty scope itself was reviewed.
+
+### Positive decision authority
+
+`ProductComplianceDecision` is a result, not caller-owned release authority. A caller may still construct the value type for negative/reporting use, but a caller-constructed `allowed=True` object has no positive authority: its effective `allowed` value is false at the PF9 delivery boundary.
+
+`ProductComplianceGate.evaluate(...)` is the only production path that issues a positive decision. It binds the project ID, decision state, findings and exact evidence-reference set with a process-local HMAC-SHA256 integrity proof. Copying/tampering with a valid decision, including project or evidence substitution, invalidates the positive authority.
+
+This proof is deliberately **not** described as a durable signature, human approval, secret-store authority or hostile-code sandbox. The key exists only in the current trusted Python process. Same-process code with unrestricted module-memory access is outside this contract's containment claim. A positive decision is therefore short-lived and should be regenerated from durable compliance evidence after process restart rather than persisted as an authority token.
+
+PF10 also does not authenticate whether a text `review_ref`, `permission_basis_ref`, legal-basis ref or reuse-authorization ref came from the correct human/policy authority. Those references must originate from the canonical approval/review subsystem when that integration is available; this layer only prevents missing/ambiguous evidence and caller fabrication of the final positive decision.
+
 ## Persistence and restart integrity
 
 `BusinessFactoryRepository` stores one canonical JSON aggregate per BusinessObjective through Nika's SQLite transaction boundary. It uses a PF9-owned migration table rather than editing shared research/ProductProject migrations.
@@ -122,6 +135,9 @@ Focused regressions cover:
 - qualification/approval ordering;
 - contract and money authority non-expansion;
 - QA and exact-project PF10 delivery gate;
+- caller-fabricated positive compliance decision rejection at the real PF9 delivery boundary;
+- positive decision project/evidence tamper invalidation;
+- unreviewed empty compliance-inventory false-green rejection and explicit reviewed-empty positive control;
 - forged snapshot and stale-writer rejection;
 - missing dependency version/provenance rejection;
 - missing approved-license review evidence;
