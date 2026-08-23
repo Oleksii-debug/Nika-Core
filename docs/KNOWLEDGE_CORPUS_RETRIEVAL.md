@@ -35,7 +35,9 @@ A knowledge artifact is identified by `(workspace_id, artifact_key)`. `artifact_
 source/artifact identity supplied by the approved ingestion caller; it is not derived from mutable
 content. Each changed ingestion creates an immutable integer version. The current version is stored
 on `knowledge_artifacts` and is switched in the same `BEGIN IMMEDIATE` transaction that writes the
-version, chunks, FTS rows and ACL.
+version, chunks and ACL, replaces the artifact's FTS projection, and advances the current pointer.
+Historical version/chunk rows remain immutable audit state; historical FTS rows do not remain in the
+search index.
 
 A retry is deduplicated only when the complete current-version identity is unchanged: normalized
 text hash, optional raw SHA-256, title/media type, source identity/locator, parser name/version,
@@ -107,6 +109,12 @@ This prevents raw FTS syntax from becoming the query language. Results order by 
 then stable artifact/version/chunk identities, so score ties are deterministic. Search limits are
 strict integers bounded to 1..100; Python Boolean aliases are rejected.
 
+`knowledge_fts` is deliberately a current-version-only search projection. Immutable historical
+versions/chunks remain in ordinary SQLite tables for audit and recovery, but superseded text is
+removed from FTS in the same writer transaction that promotes a new version. This matters because
+FTS5 BM25 corpus statistics include indexed rows even when a later SQL join would filter them from
+returned results; leaving historical rows indexed could therefore change current-document ranking.
+
 The evaluation harness in `retrieval_evaluation.py` accepts explicit query/scope/expected-artifact
 cases and reports recall-at-limit plus hit-at-1. It uses the production permission-filtered search
 path, so restricted data cannot receive evaluation credit for an unauthorized scope. Multiple
@@ -125,10 +133,15 @@ character offsets for every historical chunk, each migrated legacy document is r
 exact full-document chunk with boundaries `[0, len(normalized_text))`. Existing source locator/ID is
 retained when present. New ingestions use bounded overlapping chunks with exact offsets.
 
-Restart requires no in-memory reconstruction: current version, history, ACL, chunks, hashes and FTS
-rows are all durable SQLite state. Concurrent ingesters serialize through `BEGIN IMMEDIATE`, so an
-exact duplicate race produces one immutable version plus one deduplicated retry rather than two
-versions.
+Migration v3 rebuilds `knowledge_fts` from each artifact's durable `current_version`. It preserves
+all immutable `knowledge_versions` and `knowledge_chunks`, removes historical index rows from prior
+DEV24 candidate databases, and fails closed if an artifact points to a missing current version.
+This makes the BM25/current-authority repair restart-safe rather than relying only on future writes.
+
+Restart requires no in-memory reconstruction: current version, history, ACL, chunks and hashes are
+durable SQLite authority; FTS is a deterministic current-version projection rebuilt by ordered
+migration when required. Concurrent ingesters serialize through `BEGIN IMMEDIATE`, so an exact
+duplicate race creates one immutable version plus one deduplicated retry rather than two versions.
 
 ## Corruption behavior
 
@@ -138,9 +151,10 @@ versions.
 - normalized text matches its stored SHA-256;
 - every chunk has a valid parent version;
 - chunk text matches its SHA-256 and exact source-text boundaries;
-- every authoritative chunk has exactly one matching FTS row;
-- FTS title/body and metadata match the authoritative version/chunk;
-- no orphan, duplicate, missing, or stale FTS row exists.
+- every current-version chunk has exactly one matching FTS row;
+- historical-version chunks have no FTS projection;
+- FTS title/body and metadata match the authoritative current version/chunk;
+- no orphan, duplicate, missing, historical, or stale FTS row exists.
 
 Search independently rechecks the selected version hash, FTS title/body, chunk hash, and boundaries
 before returning a hit. Corrupt material fails closed with `CorpusCorruptionError`; it is not passed
@@ -150,10 +164,11 @@ to an intelligence provider.
 
 Required repository evidence for this batch is the exact-head `scripts/verify.py` contract:
 `pip check`, Ruff, compileall and the complete pytest suite on Ubuntu and Windows. The focused tests
-cover duplicate/change/reversion/provenance-policy versioning, restart, concurrent duplicate ingest,
-ACL/workspace isolation, DEV23 source-registry provenance binding, the AUD03 cross-workspace oracle,
-deterministic tie ranking, literal query handling, provenance and chunk boundaries, version/chunk/
-FTS corruption, injected transaction rollback, legacy migration, future-schema rejection,
-artifact-distinct retrieval evaluation, Boolean-limit rejection, and real `SQLiteStore` integration.
+cover duplicate/change/reversion/provenance-policy versioning, restart/concurrency, ACL/workspace
+isolation, DEV23 source-registry provenance binding, the AUD03 cross-workspace oracle, deterministic
+tie ranking, literal query handling, provenance and chunk boundaries, current-only FTS projection,
+v2-to-v3 index rebuild, version/chunk/FTS corruption, injected transaction rollback, legacy and
+future-schema migration behavior, artifact-distinct retrieval evaluation, Boolean-limit rejection,
+and real `SQLiteStore` integration.
 
 `HUMAN_TESTED=false`. `NVDA_VERIFIED=false`. This backend batch does not claim a human/NVDA gate.
