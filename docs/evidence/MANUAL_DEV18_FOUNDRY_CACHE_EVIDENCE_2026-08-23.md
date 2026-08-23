@@ -1,7 +1,8 @@
 # MANUAL-DEV18 — Foundry cache evidence framing hardening
 
-Date: 2026-08-23
-Starting live main: `e40691a6e2ff9c31fd413f63d004612e048d95ed`
+Date: 2026-08-23  
+Original branch start main: `e40691a6e2ff9c31fd413f63d004612e048d95ed`  
+Current synchronized main: `8e2e0eb3f0f65b75e1d23b0f36ab2bf09a8477ba`  
 Branch: `work/manual-dev18/foundry-cache-evidence-v2`
 
 ## Scope
@@ -10,7 +11,9 @@ This is an independent DEV18 physical-proof integrity batch. It is not stacked o
 
 No model was selected, downloaded, loaded, or executed while producing this change.
 
-## Deterministic defect
+The branch was synchronized non-force with the current main after DEV06 Product Factory integration. That main movement touched only DEV06 Product Factory/docs/tests and had no Foundry cache-proof overlap.
+
+## Deterministic defects
 
 The prior optional cache digest in `scripts/prove_foundry_local.py` used this framing for each file:
 
@@ -25,7 +28,11 @@ The regression fixture proves one concrete pair:
 
 Both serialize identically under the old v1 framing. They must not be accepted as the same model-cache integrity evidence.
 
-A second evidence-boundary risk was filesystem indirection. A cache entry that is a symbolic link or Windows reparse point can make a proof hash bytes outside the selected model cache tree while reporting the in-tree relative name.
+Additional evidence-boundary defects found during review:
+
+1. A cache entry that is a symbolic link or Windows reparse point can make a proof hash bytes outside the selected model cache tree while reporting the in-tree relative name.
+2. Python `os.walk()` ignores directory enumeration errors unless an `onerror` callback is supplied. An unreadable/disappearing subtree could therefore be silently omitted from a checksum.
+3. A file could be added or removed after initial enumeration while hashing was in progress, yielding evidence for an incomplete inventory unless the tree is reconciled again before success.
 
 ## Repair
 
@@ -43,9 +50,11 @@ The helper also:
 
 - fails closed on symbolic links and Windows reparse-point attributes;
 - accepts regular files/directories only;
+- supplies an `os.walk(..., onerror=...)` failure path so enumeration errors cannot be silently omitted;
 - rejects an empty cache tree as model checksum evidence;
 - records file count and total bytes;
-- compares file identity/size/mtime before and after reading and rejects a detected mutation during hashing.
+- compares file identity, size, modification time, and change time before/after each read;
+- performs a final full inventory rescan and rejects added, removed, replaced, or metadata-changed files detected while hashing.
 
 The physical proof script delegates only its optional `--hash-model-cache` action to this helper. Its model selection, explicit-download gate, ModelGateway inference, resource evidence, ownership-safe unload/reload, and no-raw-prompt/response evidence behavior are otherwise unchanged.
 
@@ -53,20 +62,24 @@ The physical proof script delegates only its optional `--hash-model-cache` actio
 
 - REUSE: Python stdlib `hashlib`, `os.lstat`, `os.walk`, `stat`, `pathlib`.
 - ADAPT: existing optional Foundry physical-proof cache checksum surface.
-- CUSTOM(thin): only Nika-specific versioned model-cache evidence framing and fail-closed filesystem policy.
+- CUSTOM(thin): only Nika-specific versioned model-cache evidence framing and fail-closed filesystem/inventory policy.
 
-No additional hashing library, model manager, inference backend, or generic artifact framework is introduced.
+No additional hashing library, model manager, inference backend, generic artifact framework, dependency, or model file is introduced.
 
-## Cheap preflight
+## Regression coverage
 
-An isolated exact-content harness for the new helper/tests passed:
+The test module covers:
 
-- focused pytest: `6 passed`;
-- Python compile: PASS;
-- source/test maximum line length: 96;
-- the deterministic v1 ambiguity fixture produces equal legacy digests and different v2 digests.
+- concrete old-v1 structural ambiguity and v2 separation;
+- deterministic digest independent of file creation order;
+- relative-path and file-content binding;
+- empty-cache rejection;
+- symbolic-link rejection;
+- Windows reparse-attribute rejection;
+- directory-enumeration error rejection;
+- final inventory rejection when a new file appears during hashing.
 
-Repository exact-head Core CI and complete applicable M12 remain authoritative. No local Ruff/full-repository GREEN is claimed because the authoring container has no Ruff installation/canonical checkout.
+An initial isolated exact-content harness, before the final two inventory fail-closed cases were added, passed `6` focused tests plus Python compile and had maximum source/test line length `96`. The final candidate receives no GREEN credit from that partial local harness. Repository exact-head Core CI and applicable M12 are authoritative for the complete current source/tests.
 
 ## Acceptance boundary
 
@@ -77,10 +90,14 @@ Still required for real model acceptance on physical Windows:
 - exact installed `foundry-local-sdk-winml` package/version;
 - explicit model alias and exact public selected variant ID;
 - human-reviewed model license reference;
-- applicable cache checksum/bytes/resource evidence;
+- applicable real cache checksum/bytes/resource evidence;
 - real inference through ModelGateway;
 - provider-owned unload/reload proof without disrupting another consumer.
 
-`HUMAN_TESTED=false`
+`MODEL_SELECTED=false`  
+`MODEL_DOWNLOADED=false`  
+`MODEL_LOADED=false`  
+`MODEL_INFERENCE_EXECUTED=false`  
+`PHYSICAL_WINDOWS_FOUNDRY_INFERENCE_PROVEN=false`  
+`HUMAN_TESTED=false`  
 `NVDA_VERIFIED=false`
-`PHYSICAL_WINDOWS_FOUNDRY_INFERENCE_PROVEN=false`
