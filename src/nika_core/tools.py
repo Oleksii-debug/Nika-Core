@@ -36,6 +36,7 @@ class ToolCall:
     call_id: str
     tool_id: str
     arguments: dict[str, object]
+    # Compatibility-only caller metadata. A positive value is never execution authority.
     approved: bool = False
 
 
@@ -55,6 +56,8 @@ class ToolHandler(Protocol):
     async def __call__(self, arguments: dict[str, object]) -> object: ...
 
 
+# This callback is a trusted-host policy boundary. Runtime/model callers may provide ToolCall
+# data, but only a host-composed ApprovalPolicy may return positive execution authority.
 ApprovalPolicy = Callable[[ToolSpec, ToolCall], Awaitable[bool]]
 
 
@@ -83,8 +86,8 @@ class ToolExecutor:
             return ToolResult(call_id=call.call_id, tool_id=call.tool_id, error="unknown tool")
         spec, handler = registered
         if spec.risk in {ToolRisk.EXTERNAL_SIDE_EFFECT, ToolRisk.HIGH_IMPACT}:
-            approved = call.approved
-            if not approved and self._approval_policy is not None:
+            approved = False
+            if self._approval_policy is not None:
                 approved = await self._approval_policy(spec, call)
             if not approved:
                 self._audit("tool.denied", call, spec, {"reason": "approval_required"})
