@@ -303,6 +303,12 @@ def _zip_member_is_symlink(member: zipfile.ZipInfo) -> bool:
     return member.create_system == 3 and stat.S_ISLNK(unix_mode)
 
 
+def _zip_member_path(member: zipfile.ZipInfo) -> str:
+    if member.is_dir() and member.filename.endswith("/"):
+        return member.filename[:-1]
+    return member.filename
+
+
 def verify_release_archive(artifact_path: Path, *, source_sha: str) -> tuple[str, ...]:
     """Verify the embedded manifest against the exact files in a Windows release ZIP."""
     normalized_source_sha = source_sha.strip().casefold()
@@ -313,34 +319,40 @@ def verify_release_archive(artifact_path: Path, *, source_sha: str) -> tuple[str
 
     try:
         with zipfile.ZipFile(artifact_path, "r") as archive:
-            members = [member for member in archive.infolist() if not member.is_dir()]
-            if not members:
+            all_members = archive.infolist()
+            if not all_members:
                 return ("archive:empty",)
 
             findings: list[str] = []
             by_path: dict[str, zipfile.ZipInfo] = {}
+            seen_paths: set[str] = set()
             windows_paths: set[str] = set()
-            for index, member in enumerate(members):
-                if not _canonical_relative_path(member.filename):
+            for index, member in enumerate(all_members):
+                member_path = _zip_member_path(member)
+                if not _canonical_relative_path(member_path):
                     findings.append(f"archive:path:{index}")
                     continue
                 if _zip_member_is_symlink(member):
                     findings.append(f"archive:symlink:{index}")
                     continue
-                if member.filename in by_path:
-                    if member.filename == _RELEASE_MANIFEST_NAME:
+                if member_path in seen_paths:
+                    if member_path == _RELEASE_MANIFEST_NAME:
                         findings.append("archive:duplicate-manifest")
                     else:
-                        findings.append(f"archive:duplicate-path:{member.filename}")
+                        findings.append(f"archive:duplicate-path:{member_path}")
                     continue
-                windows_identity = member.filename.casefold()
+                windows_identity = member_path.casefold()
                 if windows_identity in windows_paths:
-                    findings.append(f"archive:windows-path-collision:{member.filename}")
+                    findings.append(f"archive:windows-path-collision:{member_path}")
                     continue
-                by_path[member.filename] = member
+                seen_paths.add(member_path)
                 windows_paths.add(windows_identity)
+                if not member.is_dir():
+                    by_path[member_path] = member
             if findings:
                 return tuple(findings)
+            if not by_path:
+                return ("archive:empty",)
 
             manifest_member = by_path.get(_RELEASE_MANIFEST_NAME)
             if manifest_member is None:
