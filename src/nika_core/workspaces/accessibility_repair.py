@@ -341,6 +341,8 @@ class AccessibilityRepairService:
     ) -> AccessibilityEvidence:
         if semantic_evidence.method not in {EvidenceMethod.DOM, EvidenceMethod.UIA}:
             raise AccessibilityRepairError("semantic adapter must return DOM or UIA evidence")
+        if semantic_evidence.target != target:
+            raise AccessibilityRepairError("semantic adapter returned evidence for another target")
         reason = self._failure_cause(
             semantic_evidence,
             threshold=self._min_semantic_confidence,
@@ -377,6 +379,15 @@ class AccessibilityRepairService:
             if candidate.method is not expected_method:
                 raise AccessibilityRepairError(
                     f"{expected_method.value} fallback adapter returned {candidate.method.value}"
+                )
+            if candidate.target != target:
+                raise AccessibilityRepairError(
+                    f"{expected_method.value} fallback adapter returned evidence for another target"
+                )
+            if candidate.target_revision != semantic_evidence.target_revision:
+                raise AccessibilityRepairError(
+                    "target revision changed during accessibility fallback; "
+                    "semantic re-inspection is required"
                 )
             candidate = replace(candidate, fallback_attempts=tuple(attempts))
             cause = self._failure_cause(
