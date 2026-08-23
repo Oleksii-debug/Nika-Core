@@ -656,7 +656,7 @@ class TaskRuntimeCoordinator:
         record: RuntimeSessionRecord,
     ) -> str:
         if not isinstance(runtime, RuntimeResumeProbePort):
-            raise ValueError(
+            raise TypeError(
                 "runtime cannot prove persisted checkpoint identity; "
                 "RuntimeResumeProbePort is required before durable resume"
             )

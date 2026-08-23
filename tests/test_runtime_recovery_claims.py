@@ -247,7 +247,7 @@ def test_durable_resume_requires_exact_checkpoint_probe_before_claim(tmp_path: P
             recovery_owner_id="process-no-probe",
         )
 
-        with pytest.raises(ValueError, match="RuntimeResumeProbePort"):
+        with pytest.raises(TypeError, match="RuntimeResumeProbePort"):
             await coordinator.resume_saved(runtime, task_id=task_id)
 
         assert runtime.resume_calls == 0
@@ -287,3 +287,24 @@ def test_process_loss_leaves_pending_claim_that_blocks_restart(tmp_path: Path) -
         assert candidate.unresolved_operation_keys == (claims[0].operation_key,)
 
     asyncio.run(scenario())
+
+
+def test_ready_resume_probe_rejects_noncanonical_checkpoint_identity() -> None:
+    with pytest.raises(ValueError, match="checkpoint_id"):
+        RuntimeResumeProbe(
+            status=RuntimeResumeProbeStatus.READY,
+            reason="invalid whitespace identity",
+            checkpoint_id=" ",
+        )
+    with pytest.raises(ValueError, match="surrounding whitespace"):
+        RuntimeResumeProbe(
+            status=RuntimeResumeProbeStatus.READY,
+            reason="invalid padded identity",
+            checkpoint_id=" checkpoint-1 ",
+        )
+    with pytest.raises(TypeError, match="checkpoint_id"):
+        RuntimeResumeProbe(
+            status=RuntimeResumeProbeStatus.READY,
+            reason="invalid non-string identity",
+            checkpoint_id=1,
+        )

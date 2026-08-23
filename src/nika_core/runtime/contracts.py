@@ -104,7 +104,14 @@ class RuntimeResumeProbe:
     def __post_init__(self) -> None:
         if not self.reason.strip():
             raise ValueError("resume probe reason must not be empty")
-        if self.status == RuntimeResumeProbeStatus.READY and not self.checkpoint_id:
+        if self.checkpoint_id is not None:
+            if not isinstance(self.checkpoint_id, str):
+                raise TypeError("checkpoint_id must be a string when provided")
+            if not self.checkpoint_id.strip():
+                raise ValueError("checkpoint_id must not be empty")
+            if self.checkpoint_id != self.checkpoint_id.strip():
+                raise ValueError("checkpoint_id must not have surrounding whitespace")
+        if self.status == RuntimeResumeProbeStatus.READY and self.checkpoint_id is None:
             raise ValueError("ready resume probe requires checkpoint_id")
 
     @property
