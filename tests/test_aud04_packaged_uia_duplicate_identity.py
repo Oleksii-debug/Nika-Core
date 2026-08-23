@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 import re
-
+from pathlib import Path
 
 SCRIPT = Path("scripts/m5_uia_proof.ps1")
 
@@ -41,6 +40,6 @@ def test_packaged_uia_focus_verification_binds_element_identity_not_name_only() 
         or "CompareElements" in focus_wait
         or "Automation.Compare" in focus_wait
     ), (
-        "packaged UIA focus proof accepts focus by accessible Name alone; duplicate labels can "
+        "packaged UIA proof accepts focus by accessible Name alone; duplicate labels can "
         "satisfy the assertion without proving focus stayed on the intended semantic element"
     )
