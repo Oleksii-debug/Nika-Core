@@ -4,27 +4,18 @@ import json
 
 import pytest
 
-from nika_core.product_factory_orchestration import (
-    ComponentBrief,
-    ProjectScale,
-    TeamCompositionRequest,
-)
-from nika_core.product_factory_team_lifecycle import (
-    DynamicTeamLifecycle,
-    RoleAssignmentStatus,
-    TeamLifecycleError,
-    TeamLifecycleSnapshot,
-)
+from nika_core import product_factory_orchestration as orchestration
+from nika_core import product_factory_team_lifecycle as team_lifecycle
 
 
 CEILING = frozenset({"read_source", "write_source", "run_tests"})
 
 
-def _request() -> TeamCompositionRequest:
-    return TeamCompositionRequest(
+def _request() -> orchestration.TeamCompositionRequest:
+    return orchestration.TeamCompositionRequest(
         project_id="project:aud03-team-identity",
         components=(
-            ComponentBrief(
+            orchestration.ComponentBrief(
                 component_id="core",
                 kind="backend",
                 risk_tags=frozenset(),
@@ -32,28 +23,28 @@ def _request() -> TeamCompositionRequest:
         ),
         acceptance_criteria=("Deterministic restart identity",),
         permission_ceiling=CEILING,
-        scale=ProjectScale.SMALL,
+        scale=orchestration.ProjectScale.SMALL,
         evidence_refs=("aud03:team-identity",),
     )
 
 
 def test_restart_rejects_forged_generation_zero_assignment_identity() -> None:
-    snapshot = DynamicTeamLifecycle().compose(_request())
+    snapshot = team_lifecycle.DynamicTeamLifecycle().compose(_request())
     payload = json.loads(snapshot.to_json())
     payload["assignments"][0]["assignment_id"] = "forged:assignment:zero"
 
-    with pytest.raises(TeamLifecycleError):
-        TeamLifecycleSnapshot.from_json(json.dumps(payload))
+    with pytest.raises(team_lifecycle.TeamLifecycleError):
+        team_lifecycle.TeamLifecycleSnapshot.from_json(json.dumps(payload))
 
 
 def test_restart_rejects_consistently_rewritten_replacement_chain_identities() -> None:
-    lifecycle = DynamicTeamLifecycle()
+    lifecycle = team_lifecycle.DynamicTeamLifecycle()
     snapshot = lifecycle.compose(_request())
     target = snapshot.current_assignments[0]
     snapshot = lifecycle.mark_unavailable(
         snapshot,
         role_id=target.role.role_id,
-        status=RoleAssignmentStatus.FAILED,
+        status=team_lifecycle.RoleAssignmentStatus.FAILED,
         reason="adversarial restart fixture",
         evidence_refs=("aud03:failed",),
     )
@@ -78,5 +69,5 @@ def test_restart_rejects_consistently_rewritten_replacement_chain_identities() -
     replacement["assignment_id"] = "forged:assignment:replacement"
     replacement["replaces_assignment_id"] = predecessor["assignment_id"]
 
-    with pytest.raises(TeamLifecycleError):
-        TeamLifecycleSnapshot.from_json(json.dumps(payload))
+    with pytest.raises(team_lifecycle.TeamLifecycleError):
+        team_lifecycle.TeamLifecycleSnapshot.from_json(json.dumps(payload))
