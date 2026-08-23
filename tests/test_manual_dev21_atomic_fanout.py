@@ -35,7 +35,7 @@ def _store(
             max_depth=2,
             max_children_per_parent=max_children,
             max_total_agents=max_total,
-            max_parallel=4,
+            max_parallel=min(4, max_total),
         ),
     )
     return path, store
