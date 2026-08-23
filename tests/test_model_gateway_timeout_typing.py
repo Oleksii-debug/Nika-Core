@@ -93,3 +93,40 @@ def test_typed_retryable_timeout_can_fallback_only_with_hard_cancellation_eviden
 
     assert response.provider_id == "fallback"
     assert fallback.called is True
+
+
+@pytest.mark.parametrize("timeout_seconds", [True, "1"])
+def test_request_rejects_non_numeric_or_boolean_deadline(timeout_seconds: object) -> None:
+    with pytest.raises(TypeError, match="timeout_seconds must be numeric"):
+        _request(timeout_seconds=timeout_seconds)
+
+
+@pytest.mark.parametrize(
+    "timeout_seconds",
+    [float("inf"), float("-inf"), float("nan")],
+)
+def test_request_rejects_non_finite_deadline(timeout_seconds: float) -> None:
+    with pytest.raises(ValueError, match="timeout_seconds must be finite"):
+        _request(timeout_seconds=timeout_seconds)
+
+
+@pytest.mark.parametrize("temperature", [True, "0.5"])
+def test_request_rejects_non_numeric_or_boolean_temperature(temperature: object) -> None:
+    with pytest.raises(TypeError, match="temperature must be numeric"):
+        _request(temperature=temperature)
+
+
+@pytest.mark.parametrize(
+    "temperature",
+    [float("inf"), float("-inf"), float("nan")],
+)
+def test_request_rejects_non_finite_temperature(temperature: float) -> None:
+    with pytest.raises(ValueError, match="temperature must be finite"):
+        _request(temperature=temperature)
+
+
+def test_request_accepts_finite_numeric_deadline_and_temperature() -> None:
+    request = _request(timeout_seconds=2, temperature=0)
+
+    assert request.timeout_seconds == 2
+    assert request.temperature == 0
