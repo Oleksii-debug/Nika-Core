@@ -42,9 +42,9 @@ class ComponentCapabilityGap:
             raise ProductFactoryToolsmithError(
                 "component capability gap identity must not be empty"
             )
-        if self.row_version < 1:
+        if self.row_version < 0:
             raise ProductFactoryToolsmithError(
-                "component capability gap row version must be positive"
+                "component capability gap row version must not be negative"
             )
         if self.gap.task_id != self.task_id:
             raise ProductFactoryToolsmithError(
