@@ -363,7 +363,7 @@ class ModelGateway:
         self, request: ModelRequest, error: ModelGatewayError
     ) -> None:
         payload: dict[str, object] = {"code": error.code.value, "phase": "preflight"}
-        if error.provider_id is not None:
+        if error.provider_id is not None and error.provider_id in self._providers:
             payload["provider_id"] = error.provider_id
         self._audit(event_type="model.failed", request=request, payload=payload)
 
