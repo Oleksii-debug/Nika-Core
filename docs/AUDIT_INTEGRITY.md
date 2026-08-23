@@ -31,12 +31,16 @@ The current digest binds all persisted evidence fields:
 - the previous digest.
 
 Canonical JSON uses UTF-8, sorted keys, compact separators, and rejects non-finite
-JSON numbers. Event IDs must remain contiguous. The `sqlite_sequence` value must
-match the persisted tail, so deleting the last event is also detected.
+JSON numbers. Persisted non-finite JSON corruption is also rejected through the
+same typed `AuditIntegrityError` boundary. Event IDs must remain contiguous. The
+`sqlite_sequence` value must be a non-negative SQLite integer and match the
+persisted tail, so deleting the last event or corrupting sequence metadata is
+detected.
 
-`list_for()` verifies the complete global audit chain in one SQLite read snapshot
-before returning entity history. A corrupted chain therefore fails closed instead
-of returning evidence that appears valid.
+`list_for()` verifies the complete global audit chain and reads the requested entity
+history inside one SQLite transaction snapshot. A corrupted chain therefore fails
+closed instead of returning evidence that appears valid, and a concurrent writer
+cannot create a verification/read time-of-check/time-of-use split.
 
 ## Atomic append protocol
 
@@ -54,9 +58,9 @@ of returning evidence that appears valid.
 7. Compute and persist the new chain seal.
 8. Release the savepoint.
 
-Any integrity failure rolls back to the savepoint before the exception escapes.
-Even if a caller catches that exception and later commits its outer transaction,
-the provisional event cannot be committed.
+Any integrity or sealing failure rolls back to the savepoint before the exception
+escapes. Even if a caller catches that exception and later commits its outer
+transaction, the provisional event cannot be committed.
 
 ## Legacy compatibility
 
@@ -99,7 +103,7 @@ batch does not invent one.
 ## REUSE -> ADAPT -> CUSTOM decision
 
 - **REUSE:** SQLite transaction, writer-lock, savepoint, AUTOINCREMENT sequence,
-  Python `hashlib`, `hmac.compare_digest`, and canonical JSON primitives.
+  Python `hashlib`, `hmac.compare_digest`, `re`, and canonical JSON primitives.
 - **ADAPT:** the repository's existing Product Factory SHA-256 commitment pattern,
   without importing Product Factory modules into the kernel dependency direction.
 - **CUSTOM (thin):** only Nika-specific event framing, reserved envelope semantics,
@@ -109,20 +113,24 @@ No new runtime or cryptography dependency is introduced.
 
 ## Verification
 
-Focused adversarial coverage is in `tests/test_audit_integrity.py`:
+Focused adversarial coverage is in `tests/test_audit_integrity.py` and
+`tests/test_audit_integrity_adversarial.py`:
 
 - sealed round trip and integrity report;
 - recursive secret redaction with raw-storage assertions;
 - reserved-envelope spoof rejection;
-- payload, identity, and timestamp tampering;
+- payload, event identity, previous-digest, and timestamp tampering;
 - middle and tail deletion;
+- corrupt or non-integer `sqlite_sequence` metadata;
+- malformed and non-finite JSON corruption;
 - unsealed direct writer after activation;
 - legacy-prefix anchoring and later tamper detection;
 - caller transaction rollback;
 - savepoint rollback when the caller catches an integrity error;
+- direct sealing-UPDATE failure with no provisional-row leakage;
 - concurrent SQLite writers;
-- invalid JSON corruption.
+- verification plus entity read against one SQLite snapshot.
 
 Repository acceptance still requires exact-head CI, including the normal Windows
-and Linux Core CI jobs. Automated tests do not establish `HUMAN_TESTED` or
-`NVDA_VERIFIED`.
+and Linux Core CI jobs and the applicable M12 gate. Automated tests do not establish
+`HUMAN_TESTED` or `NVDA_VERIFIED`.

@@ -15,7 +15,9 @@ common equivalent key styles such as:
 - `accessToken`;
 - `APIKey`;
 - `private.key`;
-- prefixed forms such as `clientAPIKey` and `nestedRefreshToken`.
+- prefixed forms such as `clientAPIKey` and `nestedRefreshToken`;
+- other prefixed credential forms such as `requestAuthorization`, `browserCookie`,
+  `userSession`, `dbPasswd`, and `httpCookieHeader`.
 
 Those values could therefore be serialized into `audit_events.payload_json` before the
 integrity envelope was calculated. Integrity chaining does not make plaintext secret
@@ -30,21 +32,24 @@ persistence acceptable.
    `accessToken -> access_Token`;
 3. replacing non-ASCII-alphanumeric separator runs with `_`;
 4. trimming separators and applying `casefold()`;
-5. matching the existing exact sensitive names and sensitive suffixes.
+5. matching the exact sensitive vocabulary and prefixed forms whose normalized key
+   ends with the complete sensitive vocabulary.
 
 The original payload key spelling is preserved in the stored redacted object; only the
 matching representation is normalized. This avoids silently rewriting application audit
 schemas while preventing the secret value from reaching SQLite.
 
-Names such as `tokenCount` remain ordinary metadata because their normalized form is
-`token_count`, not the sensitive key `token` and not a configured sensitive suffix.
+Count-like metadata remains ordinary data because normalization is token-boundary based.
+For example, `tokenCount`, `sessionCount`, and `cookieCount` normalize to `_count` forms,
+not to a sensitive key or sensitive-key suffix.
 
 ## Evidence
 
-`tests/test_audit_secret_key_redaction_variants.py` exercises camelCase, acronym,
-punctuation and prefixed sensitive-key variants. It verifies both the public `AuditLog`
-read result and raw `audit_events.payload_json`, asserting that none of the supplied
-secret values exist at rest.
+`tests/test_audit_secret_key_redaction_variants.py` and
+`tests/test_audit_integrity_adversarial.py` exercise snake/camel/acronym/punctuation and
+prefixed sensitive-key variants. They verify the original public key spelling, the
+`[REDACTED]` value, non-secret count metadata, and raw `audit_events.payload_json`,
+asserting that none of the supplied secret values exist at rest.
 
 Repository acceptance still requires exact-head Core CI on Ubuntu and Windows plus the
 applicable M12 gate. AUD02 remains independent acceptance authority for this security

@@ -43,16 +43,7 @@ _SENSITIVE_KEYS = frozenset(
         "token",
     }
 )
-_SENSITIVE_SUFFIXES = (
-    "_api_key",
-    "_credential",
-    "_credentials",
-    "_password",
-    "_private_key",
-    "_secret",
-    "_secret_key",
-    "_token",
-)
+_SENSITIVE_SUFFIXES = tuple(f"_{key}" for key in sorted(_SENSITIVE_KEYS))
 
 
 class AuditIntegrityError(RuntimeError):
@@ -159,12 +150,19 @@ def _event_sha256(
     return hashlib.sha256(_canonical_json(framed).encode("utf-8")).hexdigest()
 
 
+def _reject_nonfinite_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant {value} is not allowed")
+
+
 def _decode_payload_json(payload_json: object, *, event_id: int) -> dict[str, object]:
     if not isinstance(payload_json, str):
         raise AuditIntegrityError(f"audit event {event_id} payload storage is not text")
     try:
-        decoded = json.loads(payload_json)
-    except (json.JSONDecodeError, TypeError) as exc:
+        decoded = json.loads(
+            payload_json,
+            parse_constant=_reject_nonfinite_json_constant,
+        )
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
         raise AuditIntegrityError(f"audit event {event_id} payload is not valid JSON") from exc
     if not isinstance(decoded, dict):
         raise AuditIntegrityError(f"audit event {event_id} payload must be a JSON object")
@@ -177,10 +175,10 @@ def _audit_sequence(conn: sqlite3.Connection) -> int:
     ).fetchone()
     if row is None:
         return 0
-    sequence = int(row[0])
-    if sequence < 0:
+    raw_sequence = row[0]
+    if type(raw_sequence) is not int or raw_sequence < 0:
         raise AuditIntegrityError("audit event sequence is invalid")
-    return sequence
+    return raw_sequence
 
 
 def _verify_rows(rows: list[sqlite3.Row | tuple[Any, ...]]) -> AuditIntegrityReport:
