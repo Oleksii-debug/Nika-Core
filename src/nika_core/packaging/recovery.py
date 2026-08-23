@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import stat
 import tempfile
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -94,8 +95,11 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _readonly_connection(path: Path) -> sqlite3.Connection:
-    return sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+def _readonly_connection(path: Path, *, include_wal: bool = False) -> sqlite3.Connection:
+    uri = path.resolve().as_uri() + "?mode=ro"
+    if not include_wal:
+        uri += "&immutable=1"
+    return sqlite3.connect(uri, uri=True)
 
 
 def _verify_sqlite_integrity(path: Path) -> None:
@@ -278,7 +282,7 @@ def create_database_snapshot(
     try:
         backup_path = stage / _DATABASE_NAME
         try:
-            with _readonly_connection(source) as source_connection:
+            with _readonly_connection(source, include_wal=True) as source_connection:
                 with sqlite3.connect(backup_path) as backup_connection:
                     source_connection.backup(backup_connection)
         except sqlite3.Error as exc:
@@ -301,6 +305,9 @@ def verify_database_snapshot(
     """Verify snapshot structure, exact release identity, hashes and SQLite integrity."""
     root = Path(snapshot_dir)
     _require_directory(root, label="snapshot directory")
+    entries = {entry.name for entry in root.iterdir()}
+    if entries != {_DATABASE_NAME, _MANIFEST_NAME}:
+        raise DatabaseRecoveryError("snapshot directory contents do not match schema")
     manifest_path = root / _MANIFEST_NAME
     database_path = root / _DATABASE_NAME
     _require_regular_file(manifest_path, label="snapshot manifest")
@@ -311,6 +318,50 @@ def verify_database_snapshot(
             raise DatabaseRecoveryError("snapshot source release SHA does not match expectation")
     _verify_manifest_matches_database(database_path, manifest)
     return manifest
+
+
+@contextmanager
+def _database_recovery_lock(database_path: Path):
+    lock_path = Path(f"{database_path}.nika-release-recovery.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+b")
+    locked = False
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            if handle.read(1) == b"":
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as exc:
+                message = "another database recovery operation is active"
+                raise DatabaseRecoveryError(message) from exc
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                message = "another database recovery operation is active"
+                raise DatabaseRecoveryError(message) from exc
+        locked = True
+        yield
+    finally:
+        if locked:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
 
 
 def _assert_quiescent_database(database_path: Path) -> None:
@@ -343,7 +394,7 @@ def _copy_verified_snapshot_database(
         stage.unlink(missing_ok=True)
 
 
-def restore_database_snapshot(
+def _restore_database_snapshot_locked(
     snapshot_dir: Path | str,
     database_path: Path | str,
     *,
@@ -408,6 +459,29 @@ def restore_database_snapshot(
         snapshot=manifest,
         preserved_current=preserved,
     )
+
+
+def restore_database_snapshot(
+    snapshot_dir: Path | str,
+    database_path: Path | str,
+    *,
+    expected_source_release_sha: str,
+    current_release_sha: str | None = None,
+    preserve_current_to: Path | str | None = None,
+) -> DatabaseRestoreResult:
+    """Restore one verified snapshot under an exclusive recovery-operation lock."""
+    root = Path(snapshot_dir)
+    destination = Path(database_path)
+    if destination.absolute().is_relative_to(root.absolute()):
+        raise DatabaseRecoveryError("restore destination may not be inside the snapshot")
+    with _database_recovery_lock(destination):
+        return _restore_database_snapshot_locked(
+            snapshot_dir,
+            destination,
+            expected_source_release_sha=expected_source_release_sha,
+            current_release_sha=current_release_sha,
+            preserve_current_to=preserve_current_to,
+        )
 
 
 def verify_database_file_against_snapshot(
