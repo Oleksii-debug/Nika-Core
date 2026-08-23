@@ -536,21 +536,41 @@ def test_openai_compatible_rejects_malformed_text_and_usage() -> None:
         assert exc_info.value.retryable is False
 
 
-def test_model_usage_and_response_reject_malformed_normalized_values() -> None:
+def test_model_usage_rejects_malformed_normalized_values() -> None:
     with pytest.raises(TypeError, match="input_tokens"):
         ModelUsage(input_tokens=True)
     with pytest.raises(ValueError, match="output_tokens"):
         ModelUsage(output_tokens=-1)
     with pytest.raises(ValueError, match="total_tokens"):
         ModelUsage(input_tokens=5, total_tokens=4)
-    with pytest.raises(ValueError, match="response text"):
-        ModelResponse(
-            request_id="request",
-            text=" ",
-            provider_id="provider",
-            provider_kind=ProviderKind.LOCAL,
-            model="model",
-        )
+
+
+def test_gateway_rejects_empty_normalized_response_text() -> None:
+    class EmptyTextProvider(_CapabilityProvider):
+        async def complete(self, request: ModelRequest) -> ModelResponse:
+            return ModelResponse(
+                request_id=request.request_id,
+                text="   ",
+                provider_id=self.capabilities.provider_id,
+                provider_kind=self.capabilities.kind,
+                model="test-model",
+            )
+
+    provider = EmptyTextProvider(
+        provider_id="primary",
+        kind=ProviderKind.LOCAL,
+        supports_private_data=True,
+        cost_class=ProviderCostClass.LOCAL_RESOURCE,
+        resource_class=ProviderResourceClass.LOCAL_SERVICE,
+    )
+    gateway = ModelGateway()
+    gateway.register(provider)
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        asyncio.run(gateway.complete(_request()))
+
+    assert exc_info.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert exc_info.value.retryable is False
 
 
 def test_provider_registry_exposes_cost_and_resource_metadata_without_provider_types() -> None:
