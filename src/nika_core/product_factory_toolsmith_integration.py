@@ -257,16 +257,25 @@ class ProductFactoryToolsmithBridge:
         durable = self._ensure_gap_begun(bindings, durable)
         checkpoint = _component_gap_from_binding(durable)
 
-        if durable.state is ComponentCapabilityBindingState.CONSUMED:
-            return _consumed_resume(record, durable)
-
         registered = self.escalation.reconcile_resume(
             task_id=checkpoint.task_id,
             capability_id=checkpoint.capability_id,
         )
         if registered is None:
+            if durable.state in {
+                ComponentCapabilityBindingState.RESUME_PREPARED,
+                ComponentCapabilityBindingState.CONSUMED,
+            }:
+                raise ProductFactoryToolsmithError(
+                    "durable Product Factory resume references a capability "
+                    "that is no longer registered"
+                )
             return None
         _validate_registered_identity(checkpoint, registered)
+
+        if durable.state is ComponentCapabilityBindingState.CONSUMED:
+            _validate_prepared_pins(durable, registered)
+            return _consumed_resume(record, durable)
 
         if durable.state is ComponentCapabilityBindingState.RESUME_PREPARED:
             _validate_prepared_pins(durable, registered)
