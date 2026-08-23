@@ -182,10 +182,20 @@ class ModelResourcePolicy:
             ("max_cpu_percent", self.max_cpu_percent),
             ("max_memory_percent", self.max_memory_percent),
         ):
-            if value is not None and not 0 < value <= 100:
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{name} must be numeric")
+            if not math.isfinite(float(value)):
+                raise ValueError(f"{name} must be finite")
+            if not 0 < value <= 100:
                 raise ValueError(f"{name} must be in the range (0, 100]")
-        if self.min_available_memory_bytes is not None and self.min_available_memory_bytes <= 0:
-            raise ValueError("min_available_memory_bytes must be greater than zero")
+        if self.min_available_memory_bytes is not None:
+            value = self.min_available_memory_bytes
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError("min_available_memory_bytes must be an integer")
+            if value <= 0:
+                raise ValueError("min_available_memory_bytes must be greater than zero")
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,12 +217,18 @@ class ModelUsage:
             if value < 0:
                 raise ValueError(f"{name} must not be negative")
         if self.total_tokens is not None:
+            known_components = (
+                self.input_tokens is not None,
+                self.output_tokens is not None,
+            )
             known_total = sum(
                 value
                 for value in (self.input_tokens, self.output_tokens)
                 if value is not None
             )
-            if known_total and self.total_tokens < known_total:
+            if all(known_components) and self.total_tokens != known_total:
+                raise ValueError("total_tokens must equal input_tokens plus output_tokens")
+            if any(known_components) and self.total_tokens < known_total:
                 raise ValueError("total_tokens must not be smaller than known component tokens")
 
 
