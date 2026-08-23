@@ -54,6 +54,7 @@ class NetworkResearchRepository:
         locator = canonical_http_locator(source.locator)
         now = _now()
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             collision = conn.execute(
                 "SELECT 1 FROM research_sources WHERE source_id=?",
                 (source.source_id,),
