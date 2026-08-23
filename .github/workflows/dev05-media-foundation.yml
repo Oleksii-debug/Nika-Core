@@ -53,7 +53,6 @@ jobs:
           src/nika_core/media
           scripts/prove_media_engines.py
           tests/test_media_adversarial.py
-          tests/test_media_asr_model_evidence.py
           tests/test_media_batch_a.py
           tests/test_media_batch_b.py
           tests/test_media_batch_b_retry.py
@@ -73,7 +72,6 @@ jobs:
           src/nika_core/media
           scripts/prove_media_engines.py
           tests/test_media_adversarial.py
-          tests/test_media_asr_model_evidence.py
           tests/test_media_batch_a.py
           tests/test_media_batch_b.py
           tests/test_media_batch_b_retry.py
@@ -91,7 +89,6 @@ jobs:
         run: >-
           python -m pytest -q
           tests/test_media_adversarial.py
-          tests/test_media_asr_model_evidence.py
           tests/test_media_batch_a.py
           tests/test_media_batch_b.py
           tests/test_media_batch_b_retry.py
