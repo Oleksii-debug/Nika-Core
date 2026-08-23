@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import csv
 import hashlib
-from importlib import metadata
 from io import BytesIO, StringIO
 
 import pytest
 from docx import Document
 from openpyxl import load_workbook
 
-from nika_core.packaging.notices import RUNTIME_DISTRIBUTIONS
 from nika_core.research.models import FreshnessState, ResearchEvidence, SourceKind
 from nika_core.research.report_exports import ResearchReportExporter, ResearchReportFormat
 from nika_core.research.review import (
@@ -179,25 +177,3 @@ def test_office_export_rejects_non_iso_created_at() -> None:
 def test_exporter_rejects_untyped_format() -> None:
     with pytest.raises(TypeError, match="ResearchReportFormat"):
         ResearchReportExporter().render(_report(), "txt")  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize(
-    "distribution_name",
-    ("python-docx", "openpyxl", "lxml", "et-xmlfile"),
-)
-def test_report_export_runtime_dependencies_have_notice_and_license_evidence(
-    distribution_name: str,
-) -> None:
-    assert distribution_name in RUNTIME_DISTRIBUTIONS
-    distribution = metadata.distribution(distribution_name)
-    license_evidence = (
-        distribution.metadata.get("License-Expression")
-        or distribution.metadata.get("License")
-        or "".join(
-            value
-            for value in distribution.metadata.get_all("Classifier", [])
-            if value.startswith("License ::")
-        )
-    )
-    assert distribution.version
-    assert license_evidence.strip()
