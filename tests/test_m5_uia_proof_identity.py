@@ -86,3 +86,45 @@ def test_m5_uia_proof_re_resolves_window_without_weakening_semantic_gate() -> No
     assert "SendKeys]::SendWait('^+p')" in source
     assert "Start-Sleep -Milliseconds 500" in source
     assert "Start-Sleep -Milliseconds 250" in source
+
+
+def test_named_control_resolution_collects_all_bound_root_candidates_and_rejects_duplicates() -> None:
+    source = _source()
+    start = source.index("function Find-BoundDescendantName")
+    end = source.index("function New-BoundControlIdentity", start)
+    resolver = source[start:end]
+
+    assert ".FindFirst(" not in resolver
+    assert ".FindAll(" in resolver
+    assert "Add-UniqueAutomationElement" in resolver
+    assert "Automation]::Compare" in source
+    assert "$candidates.Count -gt 1" in resolver
+    assert "Multiple distinct UI Automation descendants matched exact accessible name" in resolver
+
+
+def test_focus_verification_uses_exact_runtime_id_and_automation_element_identity() -> None:
+    source = _source()
+    start = source.index("function Wait-FocusName")
+    end = source.index("function Set-BoundControlFocus", start)
+    verifier = source[start:end]
+
+    assert "GetRuntimeId" in verifier
+    assert "ExpectedControl.RuntimeId" in verifier
+    assert "Automation]::Compare($target, $focused)" in verifier
+    assert "Current.Name -eq" not in verifier
+
+
+def test_control_identity_is_bound_to_process_window_generation_and_fails_closed_on_replacement() -> None:
+    source = _source()
+
+    for token in (
+        "ProcessStartTicks",
+        "ExecutablePath",
+        "WindowHandle",
+        "WindowRuntimeId",
+        "RuntimeId",
+        "Resolve-BoundControlIdentity",
+    ):
+        assert token in source
+    assert "re-resolved to a different RuntimeId after becoming stale or being replaced" in source
+    assert "Discard the incomplete snapshot and retry all bound roots" in source
