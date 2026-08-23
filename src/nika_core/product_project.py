@@ -55,6 +55,14 @@ def _canonical(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _exact_int(value: object, *, label: str, minimum: int) -> int:
+    if type(value) is not int or value < minimum:
+        raise ProductProjectError(
+            f"{label} must be an exact integer greater than or equal to {minimum}"
+        )
+    return value
+
+
 def _reject_secret_material(value: Any, path: str = "project") -> None:
     if isinstance(value, dict):
         for key, child in value.items():
@@ -342,8 +350,12 @@ class ProductProjectSpec:
             ("credential ref", self.credential_refs),
         ):
             _require_unique_nonempty(refs, label=ref_name)
-        if self.supersedes_spec_version is not None and self.supersedes_spec_version < 1:
-            raise ProductProjectError("supersedes_spec_version must be positive")
+        if self.supersedes_spec_version is not None:
+            _exact_int(
+                self.supersedes_spec_version,
+                label="supersedes_spec_version",
+                minimum=1,
+            )
         _reject_secret_material(self.to_dict())
 
     def to_dict(self) -> dict[str, Any]:
@@ -566,6 +578,11 @@ class ProductProjectRepository:
         expected_row_version: int,
         change_reason: str = "specification revision",
     ) -> ProductProject:
+        expected_row_version = _exact_int(
+            expected_row_version,
+            label="expected_row_version",
+            minimum=0,
+        )
         if not change_reason.strip():
             raise ProductProjectError("change_reason must not be empty")
         now = _now()
@@ -577,12 +594,21 @@ class ProductProjectRepository:
             ).fetchone()
             if row is None:
                 raise KeyError(project_id)
-            if int(row["row_version"]) != expected_row_version:
+            durable_row_version = _exact_int(
+                row["row_version"],
+                label="durable ProductProject row_version",
+                minimum=0,
+            )
+            if durable_row_version != expected_row_version:
                 raise StaleProjectVersionError(
                     f"stale ProductProject write: expected {expected_row_version}, "
-                    f"current {row['row_version']}"
+                    f"current {durable_row_version}"
                 )
-            previous_spec_version = int(row["current_spec_version"])
+            previous_spec_version = _exact_int(
+                row["current_spec_version"],
+                label="durable ProductProject current_spec_version",
+                minimum=1,
+            )
             spec_version = previous_spec_version + 1
             stored_spec = replace(
                 spec,
@@ -627,7 +653,11 @@ class ProductProjectRepository:
                 raise KeyError(project_id)
             revisions: list[ProductSpecRevision] = []
             for row in rows:
-                version = int(row["spec_version"])
+                version = _exact_int(
+                    row["spec_version"],
+                    label="durable ProductProject spec_version",
+                    minimum=1,
+                )
                 spec = ProductProjectSpec.from_dict(json.loads(row["spec_json"]))
                 parent = spec.supersedes_spec_version
                 reason = spec.revision_reason
@@ -721,8 +751,16 @@ class ProductProjectRepository:
         return ProductProject(
             row["project_id"],
             row["name"],
-            int(row["current_spec_version"]),
-            int(row["row_version"]),
+            _exact_int(
+                row["current_spec_version"],
+                label="durable ProductProject current_spec_version",
+                minimum=1,
+            ),
+            _exact_int(
+                row["row_version"],
+                label="durable ProductProject row_version",
+                minimum=0,
+            ),
             row["status"],
             spec,
             row["created_at"],
