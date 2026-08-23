@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from nika_core.multi_agent.store import MultiAgentStore
 
 
-MULTI_AGENT_CANCELLATION_SCHEMA_VERSION = 1
+MULTI_AGENT_CANCELLATION_SCHEMA_VERSION = 2
 
 _CANCELLATION_MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -48,6 +48,15 @@ _CANCELLATION_MIGRATIONS: dict[int, tuple[str, ...]] = {
         )""",
         """CREATE INDEX IF NOT EXISTS idx_multi_agent_cancel_effect_state
             ON multi_agent_cancellation_effects(operation_id, state, sequence)""",
+    ),
+    2: (
+        "ALTER TABLE multi_agent_cancellations ADD COLUMN expected_effect_count INTEGER",
+        """UPDATE multi_agent_cancellations
+            SET expected_effect_count = (
+                SELECT COUNT(*) FROM multi_agent_cancellation_effects effects
+                WHERE effects.operation_id = multi_agent_cancellations.operation_id
+            )
+            WHERE expected_effect_count IS NULL""",
     ),
 }
 
@@ -96,13 +105,15 @@ class TeamCancellationJournal:
             ).fetchall()
             conn.execute(
                 "INSERT INTO multi_agent_cancellations("
-                "operation_id, team_id, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                "operation_id, team_id, state, created_at, updated_at, expected_effect_count) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     operation_id,
                     team_id,
                     CancellationOperationState.CANCELLING.value,
                     now,
                     now,
+                    len(target_rows),
                 ),
             )
             for sequence, member in enumerate(target_rows):
@@ -172,13 +183,15 @@ class TeamCancellationJournal:
                 raise RuntimeError("cancelled team has no cancelled member cleanup identity")
             conn.execute(
                 "INSERT INTO multi_agent_cancellations("
-                "operation_id, team_id, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                "operation_id, team_id, state, created_at, updated_at, expected_effect_count) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     operation_id,
                     team_id,
                     CancellationOperationState.RECONCILE_REQUIRED.value,
                     now,
                     now,
+                    len(target_rows),
                 ),
             )
             for sequence, member in enumerate(target_rows):
@@ -277,11 +290,13 @@ class TeamCancellationJournal:
             if row is None:
                 raise KeyError(f"unknown cancellation operation: {operation_id}")
             team_id = str(row["team_id"])
-            states = conn.execute(
-                "SELECT state FROM multi_agent_cancellation_effects WHERE operation_id = ?",
-                (operation_id,),
-            ).fetchall()
-            if any(item["state"] != CancellationEffectState.CONFIRMED.value for item in states):
+            operation = self._load_with_connection(conn, team_id)
+            if operation is None or operation.operation_id != operation_id:
+                raise RuntimeError("cancellation operation identity changed during completion")
+            if any(
+                effect.state is not CancellationEffectState.CONFIRMED
+                for effect in operation.effects
+            ):
                 raise RuntimeError("cancellation operation still has unconfirmed external effects")
             conn.execute(
                 "UPDATE multi_agent_cancellations SET state = ?, updated_at = ? "
@@ -377,8 +392,8 @@ class TeamCancellationJournal:
         team_id: str,
     ) -> CancellationOperation | None:
         row = conn.execute(
-            "SELECT operation_id, team_id, state FROM multi_agent_cancellations "
-            "WHERE team_id = ?",
+            "SELECT operation_id, team_id, state, expected_effect_count "
+            "FROM multi_agent_cancellations WHERE team_id = ?",
             (team_id,),
         ).fetchone()
         if row is None:
@@ -386,6 +401,11 @@ class TeamCancellationJournal:
         operation_id = str(row["operation_id"])
         if operation_id != self._operation_id(team_id):
             raise RuntimeError("cancellation operation identity is corrupt")
+        expected_effect_count = row["expected_effect_count"]
+        if isinstance(expected_effect_count, bool) or not isinstance(expected_effect_count, int):
+            raise RuntimeError("cancellation expected effect count is corrupt")
+        if expected_effect_count < 0:
+            raise RuntimeError("cancellation expected effect count is corrupt")
         effect_rows = conn.execute(
             "SELECT operation_id, team_id, member_id, task_id, thread_id, sequence, state, "
             "error_type FROM multi_agent_cancellation_effects WHERE operation_id = ? "
@@ -409,6 +429,7 @@ class TeamCancellationJournal:
             operation_id=operation_id,
             team_id=str(row["team_id"]),
             state=CancellationOperationState(row["state"]),
+            expected_effect_count=expected_effect_count,
             effects=effects,
         )
         self._validate_operation(conn, operation)
@@ -421,6 +442,18 @@ class TeamCancellationJournal:
     ) -> None:
         if operation.team_id.strip() == "":
             raise RuntimeError("cancellation team identity is corrupt")
+        if len(operation.effects) != operation.expected_effect_count:
+            raise RuntimeError("cancellation effect count is corrupt")
+        expected_sequences = set(range(operation.expected_effect_count))
+        actual_sequences = {effect.sequence for effect in operation.effects}
+        if actual_sequences != expected_sequences:
+            raise RuntimeError("cancellation effect sequence is corrupt")
+        team = conn.execute(
+            "SELECT state FROM multi_agent_teams WHERE team_id = ?",
+            (operation.team_id,),
+        ).fetchone()
+        if team is None or team["state"] != "cancelled":
+            raise RuntimeError("cancellation team state is corrupt")
         seen_sequences: set[int] = set()
         for effect in operation.effects:
             if effect.team_id != operation.team_id or effect.operation_id != operation.operation_id:
@@ -431,11 +464,14 @@ class TeamCancellationJournal:
             if effect.task_id != self._task_id(effect.team_id, effect.member_id):
                 raise RuntimeError("cancellation task identity is corrupt")
             member = conn.execute(
-                "SELECT thread_id FROM multi_agent_members WHERE team_id = ? AND member_id = ?",
+                "SELECT thread_id, state FROM multi_agent_members "
+                "WHERE team_id = ? AND member_id = ?",
                 (effect.team_id, effect.member_id),
             ).fetchone()
             if member is None or str(member["thread_id"]) != effect.thread_id:
                 raise RuntimeError("cancellation member/thread identity is corrupt")
+            if member["state"] != "cancelled":
+                raise RuntimeError("cancellation member state is corrupt")
         states = {effect.state for effect in operation.effects}
         if (
             operation.state is CancellationOperationState.COMPLETED
