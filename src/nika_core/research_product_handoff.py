@@ -19,6 +19,7 @@ from nika_core.research.network_repository import NetworkResearchRepository
 
 _SEAL_EVENT_TYPE = "product_project.research_product_handoff_sealed"
 _SEAL_ENTITY_TYPE = "product_project"
+_FORMAL_REF_PREFIX = "research-result-set://"
 
 
 def _now() -> str:
@@ -108,6 +109,21 @@ def _parse_object(raw: str, *, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ProductProjectError(f"{label} must contain a JSON object")
     return value
+
+
+def _is_formal_handoff_payload(payload: dict[str, Any]) -> bool:
+    artifact_ref = payload.get("research_artifact_ref")
+    if isinstance(artifact_ref, str) and artifact_ref.startswith(_FORMAL_REF_PREFIX):
+        return True
+    evidence = payload.get("evidence")
+    if not isinstance(evidence, list):
+        return False
+    return any(
+        isinstance(item, dict)
+        and isinstance(item.get("provenance_ref"), str)
+        and item["provenance_ref"].startswith(_FORMAL_REF_PREFIX)
+        for item in evidence
+    )
 
 
 def _research_result_payload_conn(conn: Any, result_set_id: str) -> dict[str, Any]:
@@ -254,6 +270,10 @@ def verify_sealed_handoffs_conn(
             )
         seals = _seal_rows_conn(conn, project_id, package_id)
         if not seals:
+            if _is_formal_handoff_payload(payload):
+                raise ProductProjectError(
+                    f"formal research handoff integrity seal is missing: {package_id}"
+                )
             # Direct ProductProjectRepository handoffs predate the formal PF1 adapter.
             continue
         current_digest = _sha256_json(payload)
@@ -388,7 +408,6 @@ class ResearchProductHandoffService:
                         "with different payload"
                     ) from None
 
-        self._verify_option_packages(project_id, options)
         self._ensure_seal(
             project_id=project_id,
             package_id=package_id,
@@ -398,6 +417,7 @@ class ResearchProductHandoffService:
             handoff_payload_sha256=handoff_payload_sha256,
             option_ids=option_ids,
         )
+        self._verify_option_packages(project_id, options)
         return self.get(project_id, package_id)
 
     def get(self, project_id: str, package_id: str) -> ResearchProductHandoffRecord:
@@ -508,9 +528,9 @@ class ResearchProductHandoffService:
             "option_ids": list(option_ids),
         }
         with self.store.connection() as conn:
-            verify_sealed_handoffs_conn(conn, project_id, (package_id,))
             seals = _seal_rows_conn(conn, project_id, package_id)
             if seals:
+                verify_sealed_handoffs_conn(conn, project_id, (package_id,))
                 for _, seal in seals:
                     if seal != expected:
                         raise ProductProjectError(
@@ -529,6 +549,7 @@ class ResearchProductHandoffService:
                     _now(),
                 ),
             )
+            verify_sealed_handoffs_conn(conn, project_id, (package_id,))
 
     def _verify_option_packages(
         self,
