@@ -51,7 +51,7 @@ def test_update_spec_returns_its_own_committed_revision_under_interleaving(
                 idempotency_key="spec:writer-a",
                 change_reason="writer a",
             )
-        except BaseException as exc:  # pragma: no cover - surfaced below
+        except Exception as exc:  # pragma: no cover - surfaced below
             failures.append(exc)
 
     thread = threading.Thread(target=writer_a, name="writer-a")
