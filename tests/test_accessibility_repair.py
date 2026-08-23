@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 
@@ -125,6 +126,42 @@ def test_programming_error_from_fallback_is_not_masked_as_unavailable_tier() -> 
     )
 
     with pytest.raises(TypeError, match="adapter contract bug"):
+        asyncio.run(service.inspect_browser("app://settings"))
+
+
+def test_fallback_cannot_cross_target_revision_without_semantic_reinspection() -> None:
+    ocr = Fallback(evidence(EvidenceMethod.OCR, revision="ui-v2", confidence=0.82))
+    service = AccessibilityRepairService(
+        Semantic(evidence(EvidenceMethod.DOM, controls=(), revision="ui-v1")),
+        ocr=ocr,
+    )
+
+    with pytest.raises(AccessibilityRepairError, match="revision.*re-inspection"):
+        asyncio.run(service.inspect_browser("app://settings"))
+
+    assert ocr.calls == 1
+
+
+def test_semantic_and_fallback_evidence_must_match_requested_target_identity() -> None:
+    wrong_semantic = replace(
+        evidence(EvidenceMethod.DOM, controls=()),
+        target="app://other",
+    )
+    with pytest.raises(AccessibilityRepairError, match="another target"):
+        asyncio.run(
+            AccessibilityRepairService(Semantic(wrong_semantic)).inspect_browser(
+                "app://settings"
+            )
+        )
+
+    wrong_fallback = Fallback(
+        replace(evidence(EvidenceMethod.OCR, confidence=0.82), target="app://other")
+    )
+    service = AccessibilityRepairService(
+        Semantic(evidence(EvidenceMethod.DOM, controls=())),
+        ocr=wrong_fallback,
+    )
+    with pytest.raises(AccessibilityRepairError, match="another target"):
         asyncio.run(service.inspect_browser("app://settings"))
 
 
