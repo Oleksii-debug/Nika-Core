@@ -113,10 +113,18 @@ def _latest_accepted_revision(revisions: tuple[TextRevision, ...]) -> TextRevisi
 def validate_artifact_for_handoff(artifact: StructuredMediaArtifact) -> None:
     if any(asset.version_id != artifact.version_id for asset in artifact.assets):
         raise ValueError("all media assets must belong to the artifact version")
-    if artifact.transcript is not None and artifact.transcript.version_id != artifact.version_id:
-        raise ValueError("transcript must belong to the artifact version")
-    if artifact.ocr_document is not None and artifact.ocr_document.version_id != artifact.version_id:
-        raise ValueError("OCR document must belong to the artifact version")
+    if artifact.transcript is not None:
+        if artifact.transcript.version_id != artifact.version_id:
+            raise ValueError("transcript must belong to the artifact version")
+        segment_ids = [segment.segment_id for segment in artifact.transcript.segments]
+        if len(segment_ids) != len(set(segment_ids)):
+            raise ValueError("transcript segment identities must be unique for Corpus handoff")
+    if artifact.ocr_document is not None:
+        if artifact.ocr_document.version_id != artifact.version_id:
+            raise ValueError("OCR document must belong to the artifact version")
+        page_numbers = [page.page_number for page in artifact.ocr_document.pages]
+        if len(page_numbers) != len(set(page_numbers)):
+            raise ValueError("OCR page identities must be unique for Corpus handoff")
 
     engine_by_id = {}
     for engine in artifact.engines:
