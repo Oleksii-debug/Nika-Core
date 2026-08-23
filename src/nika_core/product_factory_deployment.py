@@ -365,6 +365,7 @@ class DeploymentFabric:
             DeploymentState.UNCERTAIN,
             previous_release_sha=previous,
         )
+        self._save(uncertain)
         try:
             result = self.provider.deploy(intent)
         except Exception:  # noqa: BLE001
