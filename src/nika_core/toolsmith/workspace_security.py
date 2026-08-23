@@ -340,7 +340,7 @@ def make_sterile_git_plan(
     source_environment: collections.abc.Mapping[str, str] | None = None,
 ) -> SterileGitPlan:
     repository_root = repository_root.resolve(strict=False)
-    job_root = job_root.resolve(strict=False)
+    job_root = ensure_real_directory_root(pathlib.Path(job_root), label="job workspace root")
     private_git_dir = job_root / "_nika_private_git"
     worktree_root = job_root / "worktree"
 
