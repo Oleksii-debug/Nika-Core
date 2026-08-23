@@ -17,6 +17,7 @@ from nika_core.product_factory_deployment import (
     HealthEvidence,
     ProviderDeploymentResult,
     ProviderInspection,
+    ReleaseRef,
     RollbackEvidence,
 )
 
@@ -161,17 +162,13 @@ class AuthorizedAnsibleStagingAdapter:
         release_sha = _require_sha(contract, "release_sha")
         release_version = _require_text(contract, "release_version")
         artifact_digest = _require_digest(contract, "artifact_digest")
-        actual_release = (
+        actual_release = ReleaseRef(
+            intent.project_id,
             release_version,
             release_sha,
             artifact_digest,
         )
-        expected_release = (
-            intent.release.version,
-            intent.release.source_sha,
-            intent.release.artifact_digest,
-        )
-        if actual_release != expected_release:
+        if actual_release != intent.release:
             raise StagingAdapterError(
                 "staging health reported a different exact release identity"
             )
@@ -182,6 +179,7 @@ class AuthorizedAnsibleStagingAdapter:
             healthy,
             (execution.evidence_ref,),
             _contract_time(contract),
+            release=actual_release,
         )
 
     def rollback(
@@ -189,6 +187,7 @@ class AuthorizedAnsibleStagingAdapter:
         intent: DeploymentIntent,
         previous_release_sha: str | None,
     ) -> RollbackEvidence:
+        """Legacy SHA-only rollback contract retained for provider compatibility."""
         self._validate_intent(intent)
         execution = self._run(
             "rollback",
@@ -225,6 +224,54 @@ class AuthorizedAnsibleStagingAdapter:
             (execution.evidence_ref,),
         )
 
+    def rollback_exact(
+        self,
+        intent: DeploymentIntent,
+        previous_release: ReleaseRef | None,
+    ) -> RollbackEvidence:
+        """Rollback using the complete previous ReleaseRef identity."""
+        self._validate_intent(intent)
+        if previous_release is not None and previous_release.project_id != intent.project_id:
+            raise StagingAdapterError(
+                "previous release project identity does not match deployment intent"
+            )
+        execution = self._run(
+            "rollback",
+            self.config.rollback_playbook,
+            intent,
+            previous_release=previous_release,
+        )
+        if execution.status != "successful" or execution.rc != 0:
+            return RollbackEvidence(
+                intent.environment.environment_id,
+                intent.release.source_sha,
+                previous_release.source_sha if previous_release is not None else None,
+                False,
+                (execution.evidence_ref,),
+                failed_release=intent.release,
+            )
+
+        contract = _require_contract(execution, "rollback")
+        succeeded = _require_bool(contract, "succeeded")
+        restored_release = _optional_release_contract(
+            contract,
+            project_id=intent.project_id,
+            prefix="restored_release",
+        )
+        if succeeded and restored_release != previous_release:
+            raise StagingAdapterError(
+                "rollback did not restore the requested exact previous release"
+            )
+        return RollbackEvidence(
+            intent.environment.environment_id,
+            intent.release.source_sha,
+            restored_release.source_sha if restored_release is not None else None,
+            succeeded,
+            (execution.evidence_ref,),
+            failed_release=intent.release,
+            restored_release=restored_release,
+        )
+
     def inspect(self, intent: DeploymentIntent) -> ProviderInspection:
         self._validate_intent(intent)
         execution = self._run(
@@ -240,27 +287,24 @@ class AuthorizedAnsibleStagingAdapter:
         release_sha = contract.get("release_sha")
         release_version = contract.get("release_version")
         artifact_digest = contract.get("artifact_digest")
+        exact_release: ReleaseRef | None = None
         if release_sha is None:
             if release_version is not None or artifact_digest is not None:
                 raise StagingAdapterError(
                     "inspection missing release SHA for reported release identity"
                 )
         else:
-            exact_release = (
+            exact_release = ReleaseRef(
+                intent.project_id,
                 _require_text(contract, "release_version"),
                 _require_sha(contract, "release_sha"),
                 _require_digest(contract, "artifact_digest"),
             )
-            expected_release = (
-                intent.release.version,
-                intent.release.source_sha,
-                intent.release.artifact_digest,
-            )
-            if exact_release != expected_release:
+            if exact_release != intent.release:
                 raise StagingAdapterError(
                     "inspection reported a different exact release identity"
                 )
-            release_sha = exact_release[1]
+            release_sha = exact_release.source_sha
         healthy = contract.get("healthy")
         if healthy is not None and not isinstance(healthy, bool):
             raise StagingAdapterError(
@@ -270,6 +314,7 @@ class AuthorizedAnsibleStagingAdapter:
             release_sha,
             healthy,
             (execution.evidence_ref,),
+            release=exact_release,
         )
 
     def _validate_intent(self, intent: DeploymentIntent) -> None:
@@ -300,7 +345,12 @@ class AuthorizedAnsibleStagingAdapter:
         intent: DeploymentIntent,
         *,
         previous_release_sha: str | None = None,
+        previous_release: ReleaseRef | None = None,
     ) -> RunnerExecution:
+        if previous_release_sha is not None and previous_release is not None:
+            raise StagingAdapterError(
+                "rollback target must use either legacy SHA or exact release identity"
+            )
         extravars: dict[str, object] = {
             "nika_pf3_operation": operation,
             "nika_project_id": intent.project_id,
@@ -312,7 +362,15 @@ class AuthorizedAnsibleStagingAdapter:
             "nika_artifact_digest": intent.release.artifact_digest,
             "nika_authorization_ref": self.target.authorization_ref,
         }
-        if previous_release_sha is not None:
+        if previous_release is not None:
+            extravars.update(
+                {
+                    "nika_previous_release_version": previous_release.version,
+                    "nika_previous_release_sha": previous_release.source_sha,
+                    "nika_previous_artifact_digest": previous_release.artifact_digest,
+                }
+            )
+        elif previous_release_sha is not None:
             extravars["nika_previous_release_sha"] = previous_release_sha
         _reject_secret_values(extravars)
         ident = _runner_ident(
@@ -447,6 +505,34 @@ def _require_digest(
             f"contract field {key} must be a lowercase 64-character digest"
         )
     return value
+
+
+def _optional_release_contract(
+    contract: Mapping[str, object],
+    *,
+    project_id: str,
+    prefix: str,
+) -> ReleaseRef | None:
+    version_key = f"{prefix}_version"
+    sha_key = f"{prefix}_sha"
+    digest_key = (
+        "restored_artifact_digest"
+        if prefix == "restored_release"
+        else f"{prefix}_artifact_digest"
+    )
+    values = (contract.get(version_key), contract.get(sha_key), contract.get(digest_key))
+    if values == (None, None, None):
+        return None
+    if any(value is None for value in values):
+        raise StagingAdapterError(
+            f"{prefix} must report version, SHA and artifact digest together"
+        )
+    return ReleaseRef(
+        project_id,
+        _require_text(contract, version_key),
+        _require_sha(contract, sha_key),
+        _require_digest(contract, digest_key),
+    )
 
 
 def _contract_time(contract: Mapping[str, object]) -> datetime:
