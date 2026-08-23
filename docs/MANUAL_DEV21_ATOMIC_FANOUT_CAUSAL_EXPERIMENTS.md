@@ -21,7 +21,7 @@ A restart would then observe an unintended partial wave.
 - `BEGIN IMMEDIATE` obtains one SQLite writer boundary before quota decisions;
 - depth, remaining children-per-parent quota, and remaining total-agent quota are evaluated for the
   whole requested wave;
-- privilege attenuation is validated before the first child insert;
+- privilege attenuation and durable thread-identity uniqueness are validated before the first child insert;
 - every child identity, TASK handoff, and `multi_agent.child_spawned` audit event is committed in the
   same transaction;
 - any late database/handoff constraint failure rolls back the entire wave;
@@ -58,7 +58,8 @@ Fail-closed rules are activated when the corresponding provenance is declared:
    experiment creation;
 4. when an evaluation cutoff is declared, every replay must declare `data_end_at` and it must be at
    or before the cutoff;
-5. naive datetimes are rejected so comparisons cannot depend on host-local timezone assumptions.
+5. naive datetimes are rejected so comparisons cannot depend on host-local timezone assumptions;
+6. dataset fingerprints must be canonical exact identities without leading/trailing whitespace.
 
 These fields persist inside the existing immutable experiment-definition JSON. No SQLite schema
 migration is needed. Legacy persisted definitions decode as held-out replays with no fingerprint or
@@ -83,8 +84,9 @@ Focused deterministic regressions cover:
 - parent remaining quota rejects the entire fan-out wave and remains absent after restart;
 - total-agent remaining quota rejects the entire wave;
 - a late handoff uniqueness failure rolls back every child in the transaction;
+- duplicate/reused durable thread identities are rejected without partial admission;
 - two concurrent batches cannot overbook the same total-agent capacity;
-- training/evaluation dataset overlap is rejected;
+- non-canonical dataset fingerprints and training/evaluation overlap are rejected;
 - declared training provenance without evaluation fingerprints fails closed;
 - training split cannot be promotion evidence;
 - future data beyond the causal cutoff is rejected;

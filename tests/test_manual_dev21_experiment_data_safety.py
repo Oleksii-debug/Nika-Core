@@ -64,6 +64,18 @@ def _definition(
     )
 
 
+def test_dataset_fingerprints_require_canonical_exact_identity() -> None:
+    with pytest.raises(ValueError, match="canonical without whitespace"):
+        _strategy("candidate", training=("sha256:train-v1 ",))
+    with pytest.raises(ValueError, match="canonical without whitespace"):
+        ReplayCase(
+            "r1",
+            "dataset://evaluation",
+            "v1",
+            dataset_fingerprint=" sha256:eval-v1",
+        )
+
+
 def test_training_dataset_cannot_be_reused_as_promotion_replay() -> None:
     with pytest.raises(ValueError, match="overlaps candidate training data"):
         _definition(training=("sha256:eval-v1",))

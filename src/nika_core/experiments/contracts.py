@@ -44,9 +44,11 @@ class StrategyRef:
         ):
             if not value.strip():
                 raise ValueError(f"{name} must not be empty")
-        fingerprints = tuple(item.strip() for item in self.training_dataset_fingerprints)
-        if any(not item for item in fingerprints):
+        fingerprints = self.training_dataset_fingerprints
+        if any(not item.strip() for item in fingerprints):
             raise ValueError("training dataset fingerprints must not be empty")
+        if any(item != item.strip() for item in fingerprints):
+            raise ValueError("training dataset fingerprints must be canonical without whitespace")
         if len(fingerprints) != len(set(fingerprints)):
             raise ValueError("training dataset fingerprints must be unique")
 
@@ -69,8 +71,11 @@ class ReplayCase:
             raise ValueError("replay identity must be complete")
         if self.split is DatasetSplit.TRAINING:
             raise ValueError("promotion replay cannot use the training split")
-        if self.dataset_fingerprint is not None and not self.dataset_fingerprint.strip():
-            raise ValueError("dataset_fingerprint must not be empty when provided")
+        if self.dataset_fingerprint is not None:
+            if not self.dataset_fingerprint.strip():
+                raise ValueError("dataset_fingerprint must not be empty when provided")
+            if self.dataset_fingerprint != self.dataset_fingerprint.strip():
+                raise ValueError("dataset_fingerprint must be canonical without whitespace")
         if self.data_end_at is not None and self.data_end_at.tzinfo is None:
             raise ValueError("data_end_at must be timezone-aware")
 

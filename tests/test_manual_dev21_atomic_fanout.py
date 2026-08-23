@@ -159,6 +159,46 @@ def test_late_handoff_constraint_failure_rolls_back_every_child(tmp_path: Path) 
             store.member("team-atomic", member_id)
 
 
+def test_thread_identity_is_unique_across_batch_and_existing_team(tmp_path: Path) -> None:
+    _, store = _store(tmp_path)
+    duplicate_thread = ChildRequest(
+        member_id="child-2",
+        agent_id="worker",
+        agent_version=1,
+        thread_id="thread-child-1",
+    )
+    with pytest.raises(ValueError, match="thread IDs must be unique"):
+        store.spawn_children(
+            team_id="team-atomic",
+            parent_id="root",
+            requests=(_request("child-1"), duplicate_thread),
+        )
+    assert _member_ids(store) == ["root"]
+
+    store.spawn_child(
+        team_id="team-atomic",
+        parent_id="root",
+        child_id="existing",
+        agent_id="worker",
+        agent_version=1,
+        thread_id="thread-existing",
+        requested_grants=(),
+    )
+    reused_thread = ChildRequest(
+        member_id="new",
+        agent_id="worker",
+        agent_version=1,
+        thread_id="thread-existing",
+    )
+    with pytest.raises(ValueError, match="thread_id already exists"):
+        store.spawn_children(
+            team_id="team-atomic",
+            parent_id="root",
+            requests=(reused_thread,),
+        )
+    assert _member_ids(store) == ["root", "existing"]
+
+
 def test_competing_batches_cannot_overbook_total_quota(tmp_path: Path) -> None:
     path, _ = _store(tmp_path, max_children=4, max_total=3)
 

@@ -174,10 +174,13 @@ class MultiAgentStore:
         member_ids = [request.member_id for request in requests]
         if len(member_ids) != len(set(member_ids)):
             raise ValueError("child member IDs must be unique within one fan-out batch")
+        thread_ids = [request.thread_id for request in requests]
+        if len(thread_ids) != len(set(thread_ids)):
+            raise ValueError("child thread IDs must be unique within one fan-out batch")
 
-        now = datetime.now(UTC).isoformat()
         with self._store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            now = datetime.now(UTC).isoformat()
             team = conn.execute(
                 "SELECT state, quota_json FROM multi_agent_teams WHERE team_id = ?",
                 (team_id,),
@@ -193,6 +196,13 @@ class MultiAgentStore:
             parent = self._member_from_row(parent_row)
             if parent.depth + 1 > quota.max_depth:
                 raise RuntimeError("spawn depth quota exceeded")
+            for thread_id in thread_ids:
+                existing_thread = conn.execute(
+                    "SELECT 1 FROM multi_agent_members WHERE team_id = ? AND thread_id = ?",
+                    (team_id, thread_id),
+                ).fetchone()
+                if existing_thread is not None:
+                    raise ValueError(f"child thread_id already exists in team: {thread_id}")
 
             batch_size = len(requests)
             child_count = int(
