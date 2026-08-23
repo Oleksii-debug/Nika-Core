@@ -348,6 +348,12 @@ class KnowledgeCorpus:
                     ),
                 )
 
+            conn.execute(
+                """DELETE FROM knowledge_fts
+                WHERE workspace_id=? AND artifact_key=?
+                  AND CAST(version AS INTEGER)<>?""",
+                (request.workspace_id, request.artifact_key, version),
+            )
             self._replace_acl(conn, request, now)
             conn.execute(
                 """UPDATE knowledge_artifacts
@@ -602,6 +608,7 @@ class KnowledgeCorpus:
                 (row["workspace_id"], row["artifact_key"], int(row["version"])): row
                 for row in versions
             }
+            current_version_keys: set[tuple[str, str, int]] = set()
             for artifact in artifacts:
                 key = (
                     artifact["workspace_id"],
@@ -612,11 +619,18 @@ class KnowledgeCorpus:
                     raise CorpusCorruptionError(
                         "knowledge artifact points to a missing current version"
                     )
+                current_version_keys.add(key)
             for version in versions:
                 if _sha256(version["normalized_text"]) != version["normalized_sha256"]:
                     raise CorpusCorruptionError("knowledge version hash mismatch")
 
             chunk_map = {row["chunk_id"]: row for row in chunks}
+            current_chunk_map = {
+                row["chunk_id"]: row
+                for row in chunks
+                if (row["workspace_id"], row["artifact_key"], int(row["version"]))
+                in current_version_keys
+            }
             for chunk in chunks:
                 key = (chunk["workspace_id"], chunk["artifact_key"], int(chunk["version"]))
                 version = version_map.get(key)
@@ -647,8 +661,12 @@ class KnowledgeCorpus:
 
             seen_fts: set[str] = set()
             for fts in fts_rows:
-                chunk = chunk_map.get(fts["chunk_id"])
+                chunk = current_chunk_map.get(fts["chunk_id"])
                 if chunk is None:
+                    if fts["chunk_id"] in chunk_map:
+                        raise CorpusCorruptionError(
+                            "knowledge FTS row indexes a historical version"
+                        )
                     raise CorpusCorruptionError("knowledge FTS row has no authoritative chunk")
                 if fts["chunk_id"] in seen_fts:
                     raise CorpusCorruptionError("knowledge FTS row is duplicated")
@@ -671,7 +689,7 @@ class KnowledgeCorpus:
                 ):
                     raise CorpusCorruptionError("knowledge FTS metadata is stale or mismatched")
 
-            missing_fts = set(chunk_map).difference(seen_fts)
+            missing_fts = set(current_chunk_map).difference(seen_fts)
             if missing_fts:
                 raise CorpusCorruptionError("knowledge FTS row is missing")
 
