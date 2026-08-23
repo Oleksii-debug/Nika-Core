@@ -1,63 +1,235 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
 import shutil
-import sqlite3
 import stat
 import tempfile
-from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-_FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-_MANIFEST_NAME = "snapshot-manifest.json"
-_DATABASE_NAME = "database.sqlite3"
-_MANIFEST_VERSION = 1
-_MANIFEST_FIELDS = {
+from nika_core.reliability.backup import (
+    BackupArtifact,
+    BackupRecoveryError,
+    InterruptedRestoreResult,
+    RestorePlan,
+    RestoreResult,
+    SQLiteRecoveryManager,
+)
+
+_RELEASE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_SNAPSHOT_DATABASE = "database.sqlite3"
+_CANONICAL_MANIFEST = "database.sqlite3.manifest.json"
+_RELEASE_METADATA = "release-database-snapshot.json"
+_RELEASE_METADATA_VERSION = 1
+_RESTORE_FINGERPRINT_VERSION = b"nika-release-database-restore-v1\x00"
+_RELEASE_METADATA_FIELDS = {
     "manifest_version",
     "source_release_sha",
     "database_file",
+    "canonical_manifest_file",
     "database_sha256",
-    "database_content_sha256",
     "database_size",
-    "core_schema_version",
-    "product_project_schema_version",
+    "database_schema_version",
+    "database_created_at",
 }
 
 
-class DatabaseRecoveryError(RuntimeError):
-    """Raised when release database backup or restore evidence is unsafe."""
+class ReleaseDatabaseRecoveryError(BackupRecoveryError):
+    """Raised when release-specific database recovery evidence is unsafe."""
 
 
 @dataclass(frozen=True, slots=True)
-class DatabaseSnapshotManifest:
-    manifest_version: int
+class ReleaseDatabaseSnapshot:
+    snapshot_dir: Path
     source_release_sha: str
     database_file: str
+    canonical_manifest_file: str
     database_sha256: str
-    database_content_sha256: str
     database_size: int
-    core_schema_version: int | None
-    product_project_schema_version: int | None
+    database_schema_version: int
+    database_created_at: str
+    manifest_version: int = _RELEASE_METADATA_VERSION
 
 
 @dataclass(frozen=True, slots=True)
-class DatabaseRestoreResult:
-    restored: bool
-    already_restored: bool
-    snapshot: DatabaseSnapshotManifest
-    preserved_current: DatabaseSnapshotManifest | None
+class ReleaseDatabaseRestorePlan:
+    snapshot: ReleaseDatabaseSnapshot
+    canonical_plan: RestorePlan
+    current_release_sha: str | None
+    confirmation_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseDatabaseRestoreResult:
+    snapshot: ReleaseDatabaseSnapshot
+    canonical_result: RestoreResult
+
+
+class ReleaseDatabaseRecovery:
+    """Release-SHA binding over the canonical SQLiteRecoveryManager."""
+
+    def __init__(self, recovery_manager: SQLiteRecoveryManager) -> None:
+        self._recovery = recovery_manager
+
+    def create_snapshot(
+        self,
+        snapshot_dir: Path | str,
+        *,
+        source_release_sha: str,
+    ) -> ReleaseDatabaseSnapshot:
+        """Publish an exact-release snapshot using canonical M10 backup semantics."""
+        root = Path(snapshot_dir)
+        exact_source_sha = _exact_release_sha(source_release_sha)
+        if root.exists():
+            return self.verify_snapshot(
+                root,
+                expected_source_release_sha=exact_source_sha,
+            )
+
+        root.parent.mkdir(parents=True, exist_ok=True)
+        _require_plain_directory(root.parent, label="snapshot parent")
+        stage = Path(
+            tempfile.mkdtemp(
+                prefix=f".{root.name}.release-snapshot-",
+                dir=root.parent,
+            )
+        )
+        try:
+            backup = self._recovery.create_backup(stage / _SNAPSHOT_DATABASE)
+            snapshot = _snapshot_from_backup(stage, exact_source_sha, backup)
+            _write_release_metadata(stage / _RELEASE_METADATA, snapshot)
+            _fsync_directory(stage)
+            os.replace(stage, root)
+            _fsync_directory(root.parent)
+            return self.verify_snapshot(
+                root,
+                expected_source_release_sha=exact_source_sha,
+            )
+        finally:
+            if stage.exists():
+                shutil.rmtree(stage)
+
+    def verify_snapshot(
+        self,
+        snapshot_dir: Path | str,
+        *,
+        expected_source_release_sha: str | None = None,
+    ) -> ReleaseDatabaseSnapshot:
+        """Verify release metadata and delegate database verification to M10."""
+        root = Path(snapshot_dir)
+        _require_plain_directory(root, label="release database snapshot")
+        entries = {entry.name for entry in root.iterdir()}
+        expected_entries = {
+            _SNAPSHOT_DATABASE,
+            _CANONICAL_MANIFEST,
+            _RELEASE_METADATA,
+        }
+        if entries != expected_entries:
+            raise ReleaseDatabaseRecoveryError(
+                "release database snapshot contents do not match schema"
+            )
+
+        snapshot = _read_release_metadata(root / _RELEASE_METADATA, root)
+        if expected_source_release_sha is not None:
+            expected_sha = _exact_release_sha(expected_source_release_sha)
+            if snapshot.source_release_sha != expected_sha:
+                raise ReleaseDatabaseRecoveryError(
+                    "release database snapshot source SHA does not match expectation"
+                )
+
+        backup = self._recovery.verify_backup(root / _SNAPSHOT_DATABASE)
+        _require_backup_matches_snapshot(backup, snapshot)
+        return snapshot
+
+    def prepare_restore(
+        self,
+        snapshot_dir: Path | str,
+        *,
+        expected_source_release_sha: str,
+        current_release_sha: str | None,
+    ) -> ReleaseDatabaseRestorePlan:
+        """Prepare canonical restore plus exact source/current release binding."""
+        snapshot = self.verify_snapshot(
+            snapshot_dir,
+            expected_source_release_sha=expected_source_release_sha,
+        )
+        canonical_plan = self._recovery.prepare_restore(
+            snapshot.snapshot_dir / snapshot.database_file
+        )
+        normalized_current_sha: str | None = None
+        if canonical_plan.current_exists:
+            if current_release_sha is None:
+                raise ReleaseDatabaseRecoveryError(
+                    "current release SHA is required when a live database exists"
+                )
+            normalized_current_sha = _exact_release_sha(current_release_sha)
+        elif current_release_sha is not None:
+            raise ReleaseDatabaseRecoveryError(
+                "current release SHA must be absent when no live database exists"
+            )
+
+        confirmation = _release_restore_fingerprint(
+            snapshot,
+            canonical_plan,
+            normalized_current_sha,
+        )
+        return ReleaseDatabaseRestorePlan(
+            snapshot=snapshot,
+            canonical_plan=canonical_plan,
+            current_release_sha=normalized_current_sha,
+            confirmation_fingerprint=confirmation,
+        )
+
+    def restore(
+        self,
+        plan: ReleaseDatabaseRestorePlan,
+        *,
+        confirmation_fingerprint: str,
+        allow_replace_unrecoverable_current: bool = False,
+    ) -> ReleaseDatabaseRestoreResult:
+        """Execute canonical restore only after release identity is reverified."""
+        expected_confirmation = _release_restore_fingerprint(
+            plan.snapshot,
+            plan.canonical_plan,
+            plan.current_release_sha,
+        )
+        if not _equal(confirmation_fingerprint, expected_confirmation):
+            raise PermissionError(
+                "release database restore confirmation does not match prepared preview"
+            )
+        current_snapshot = self.verify_snapshot(
+            plan.snapshot.snapshot_dir,
+            expected_source_release_sha=plan.snapshot.source_release_sha,
+        )
+        if current_snapshot != plan.snapshot:
+            raise ReleaseDatabaseRecoveryError(
+                "release database snapshot changed after restore preview"
+            )
+
+        result = self._recovery.restore(
+            plan.canonical_plan,
+            confirmation_fingerprint=plan.canonical_plan.confirmation_fingerprint,
+            allow_replace_unrecoverable_current=allow_replace_unrecoverable_current,
+        )
+        return ReleaseDatabaseRestoreResult(
+            snapshot=current_snapshot,
+            canonical_result=result,
+        )
+
+    def recover_interrupted_restore(self) -> InterruptedRestoreResult | None:
+        """Delegate crash recovery to the canonical M10 recovery engine."""
+        return self._recovery.recover_interrupted_restore()
 
 
 def _exact_release_sha(value: str) -> str:
-    candidate = value.strip().lower()
-    if not _FULL_SHA_RE.fullmatch(candidate):
-        raise ValueError("release recovery requires an exact 40-character source SHA")
-    return candidate
+    if not isinstance(value, str) or not _RELEASE_SHA_RE.fullmatch(value):
+        raise ValueError("release recovery requires an exact lowercase 40-character SHA")
+    return value
 
 
 def _is_reparse_or_symlink(path: Path) -> bool:
@@ -69,434 +241,184 @@ def _is_reparse_or_symlink(path: Path) -> bool:
     return bool(attributes & reparse_flag)
 
 
-def _require_regular_file(path: Path, *, label: str) -> None:
+def _require_plain_directory(path: Path, *, label: str) -> None:
     if not path.exists():
-        raise DatabaseRecoveryError(f"{label} is missing: {path}")
+        raise ReleaseDatabaseRecoveryError(f"{label} is missing: {path}")
     if _is_reparse_or_symlink(path):
-        raise DatabaseRecoveryError(f"{label} may not be a symlink or reparse point: {path}")
-    if not path.is_file():
-        raise DatabaseRecoveryError(f"{label} is not a regular file: {path}")
-
-
-def _require_directory(path: Path, *, label: str) -> None:
-    if not path.exists():
-        raise DatabaseRecoveryError(f"{label} is missing: {path}")
-    if _is_reparse_or_symlink(path):
-        raise DatabaseRecoveryError(f"{label} may not be a symlink or reparse point: {path}")
+        raise ReleaseDatabaseRecoveryError(
+            f"{label} may not be a symlink or reparse point: {path}"
+        )
     if not path.is_dir():
-        raise DatabaseRecoveryError(f"{label} is not a directory: {path}")
+        raise ReleaseDatabaseRecoveryError(f"{label} is not a directory: {path}")
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _snapshot_from_backup(
+    root: Path,
+    source_release_sha: str,
+    backup: BackupArtifact,
+) -> ReleaseDatabaseSnapshot:
+    if backup.database_path.name != _SNAPSHOT_DATABASE:
+        raise ReleaseDatabaseRecoveryError("canonical backup database identity is invalid")
+    if backup.manifest_path.name != _CANONICAL_MANIFEST:
+        raise ReleaseDatabaseRecoveryError("canonical backup manifest identity is invalid")
+    return ReleaseDatabaseSnapshot(
+        snapshot_dir=root,
+        source_release_sha=source_release_sha,
+        database_file=_SNAPSHOT_DATABASE,
+        canonical_manifest_file=_CANONICAL_MANIFEST,
+        database_sha256=backup.sha256,
+        database_size=backup.size_bytes,
+        database_schema_version=backup.schema_version,
+        database_created_at=backup.created_at,
+    )
 
 
-def _readonly_connection(path: Path, *, include_wal: bool = False) -> sqlite3.Connection:
-    uri = path.resolve().as_uri() + "?mode=ro"
-    if not include_wal:
-        uri += "&immutable=1"
-    return sqlite3.connect(uri, uri=True)
+def _require_backup_matches_snapshot(
+    backup: BackupArtifact,
+    snapshot: ReleaseDatabaseSnapshot,
+) -> None:
+    expected = (
+        snapshot.database_file,
+        snapshot.canonical_manifest_file,
+        snapshot.database_sha256,
+        snapshot.database_size,
+        snapshot.database_schema_version,
+        snapshot.database_created_at,
+    )
+    actual = (
+        backup.database_path.name,
+        backup.manifest_path.name,
+        backup.sha256,
+        backup.size_bytes,
+        backup.schema_version,
+        backup.created_at,
+    )
+    if actual != expected:
+        raise ReleaseDatabaseRecoveryError(
+            "canonical backup evidence does not match release metadata"
+        )
 
 
-def _verify_sqlite_integrity(path: Path) -> None:
+def _write_release_metadata(path: Path, snapshot: ReleaseDatabaseSnapshot) -> None:
+    payload = asdict(snapshot)
+    payload.pop("snapshot_dir")
+    encoded = (
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+    temporary = path.with_name(f".{path.name}.tmp")
     try:
-        with _readonly_connection(path) as connection:
-            rows = connection.execute("PRAGMA integrity_check").fetchall()
-    except sqlite3.Error as exc:
-        raise DatabaseRecoveryError(f"SQLite integrity check failed for {path.name}") from exc
-    if rows != [("ok",)]:
-        raise DatabaseRecoveryError(f"SQLite integrity check did not return ok for {path.name}")
-
-
-def _content_sha256(path: Path) -> str:
-    handle, temporary_name = tempfile.mkstemp(suffix=".sqlite3")
-    os.close(handle)
-    temporary = Path(temporary_name)
-    try:
-        try:
-            with (
-                _readonly_connection(path) as source_connection,
-                sqlite3.connect(temporary) as target_connection,
-            ):
-                source_connection.backup(target_connection)
-        except sqlite3.Error as exc:
-            message = f"could not fingerprint SQLite content for {path.name}"
-            raise DatabaseRecoveryError(message) from exc
-        return _sha256_file(temporary)
+        with temporary.open("xb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 
 
-def _schema_version(connection: sqlite3.Connection, table_name: str) -> int | None:
-    row = connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-        (table_name,),
-    ).fetchone()
-    if row is None:
-        return None
-    if table_name == "schema_migrations":
-        query = "SELECT MAX(version) FROM schema_migrations"
-    elif table_name == "product_project_schema_migrations":
-        query = "SELECT MAX(version) FROM product_project_schema_migrations"
-    else:  # pragma: no cover - internal callers are fixed above
-        raise ValueError(f"unsupported schema version table: {table_name}")
-    version_row = connection.execute(query).fetchone()
-    value = version_row[0]
-    if value is None:
-        return 0
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise DatabaseRecoveryError(f"invalid migration version in {table_name}")
-    return value
-
-
-def _snapshot_manifest(database_path: Path, source_release_sha: str) -> DatabaseSnapshotManifest:
-    _verify_sqlite_integrity(database_path)
-    try:
-        with _readonly_connection(database_path) as connection:
-            core_version = _schema_version(connection, "schema_migrations")
-            product_project_version = _schema_version(
-                connection,
-                "product_project_schema_migrations",
-            )
-    except sqlite3.Error as exc:
-        raise DatabaseRecoveryError("could not read database migration evidence") from exc
-    return DatabaseSnapshotManifest(
-        manifest_version=_MANIFEST_VERSION,
-        source_release_sha=source_release_sha,
-        database_file=_DATABASE_NAME,
-        database_sha256=_sha256_file(database_path),
-        database_content_sha256=_content_sha256(database_path),
-        database_size=database_path.stat().st_size,
-        core_schema_version=core_version,
-        product_project_schema_version=product_project_version,
-    )
-
-
-def _write_manifest(path: Path, manifest: DatabaseSnapshotManifest) -> None:
-    path.write_text(
-        json.dumps(asdict(manifest), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    _fsync_file(path)
-
-
-def _fsync_file(path: Path) -> None:
-    with path.open("rb") as handle:
-        os.fsync(handle.fileno())
-
-
-def _require_exact_int(payload: dict[str, Any], field: str) -> int:
-    value = payload.get(field)
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise DatabaseRecoveryError(f"snapshot manifest has invalid {field}")
-    return value
-
-
-def _require_optional_int(payload: dict[str, Any], field: str) -> int | None:
-    value = payload.get(field)
-    if value is None:
-        return None
-    return _require_exact_int(payload, field)
-
-
-def _require_text(payload: dict[str, Any], field: str) -> str:
-    value = payload.get(field)
-    if not isinstance(value, str) or not value:
-        raise DatabaseRecoveryError(f"snapshot manifest has invalid {field}")
-    return value
-
-
-def _parse_manifest(path: Path) -> DatabaseSnapshotManifest:
+def _read_release_metadata(path: Path, root: Path) -> ReleaseDatabaseSnapshot:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise DatabaseRecoveryError("snapshot manifest is not valid UTF-8 JSON") from exc
-    if not isinstance(payload, dict):
-        raise DatabaseRecoveryError("snapshot manifest must be a JSON object")
-    if set(payload) != _MANIFEST_FIELDS:
-        raise DatabaseRecoveryError("snapshot manifest fields do not match schema")
-    manifest_version = _require_exact_int(payload, "manifest_version")
-    if manifest_version != _MANIFEST_VERSION:
-        raise DatabaseRecoveryError(f"unsupported snapshot manifest version: {manifest_version}")
-    source_release_sha = _exact_release_sha(_require_text(payload, "source_release_sha"))
-    database_file = _require_text(payload, "database_file")
-    if database_file != _DATABASE_NAME:
-        raise DatabaseRecoveryError("snapshot manifest database file identity is invalid")
-    database_sha256 = _require_text(payload, "database_sha256")
-    database_content_sha256 = _require_text(payload, "database_content_sha256")
+        raise ReleaseDatabaseRecoveryError(
+            "release database metadata is not valid UTF-8 JSON"
+        ) from exc
+    if not isinstance(payload, dict) or set(payload) != _RELEASE_METADATA_FIELDS:
+        raise ReleaseDatabaseRecoveryError(
+            "release database metadata fields do not match schema"
+        )
+
+    manifest_version = _exact_int(payload, "manifest_version")
+    if manifest_version != _RELEASE_METADATA_VERSION:
+        raise ReleaseDatabaseRecoveryError(
+            f"unsupported release database metadata version: {manifest_version}"
+        )
+    source_release_sha = _exact_release_sha(_text(payload, "source_release_sha"))
+    database_file = _text(payload, "database_file")
+    canonical_manifest_file = _text(payload, "canonical_manifest_file")
+    if database_file != _SNAPSHOT_DATABASE:
+        raise ReleaseDatabaseRecoveryError("release snapshot database identity is invalid")
+    if canonical_manifest_file != _CANONICAL_MANIFEST:
+        raise ReleaseDatabaseRecoveryError(
+            "release snapshot canonical manifest identity is invalid"
+        )
+
+    database_sha256 = _text(payload, "database_sha256")
     if not re.fullmatch(r"[0-9a-f]{64}", database_sha256):
-        raise DatabaseRecoveryError("snapshot manifest database_sha256 is invalid")
-    if not re.fullmatch(r"[0-9a-f]{64}", database_content_sha256):
-        raise DatabaseRecoveryError("snapshot manifest database_content_sha256 is invalid")
-    return DatabaseSnapshotManifest(
-        manifest_version=manifest_version,
+        raise ReleaseDatabaseRecoveryError("release snapshot SHA-256 is invalid")
+    created_at = _text(payload, "database_created_at")
+    return ReleaseDatabaseSnapshot(
+        snapshot_dir=root,
         source_release_sha=source_release_sha,
         database_file=database_file,
+        canonical_manifest_file=canonical_manifest_file,
         database_sha256=database_sha256,
-        database_content_sha256=database_content_sha256,
-        database_size=_require_exact_int(payload, "database_size"),
-        core_schema_version=_require_optional_int(payload, "core_schema_version"),
-        product_project_schema_version=_require_optional_int(
-            payload,
-            "product_project_schema_version",
-        ),
+        database_size=_exact_int(payload, "database_size"),
+        database_schema_version=_exact_int(payload, "database_schema_version"),
+        database_created_at=created_at,
+        manifest_version=manifest_version,
     )
 
 
-def _verify_manifest_matches_database(
-    database_path: Path,
-    manifest: DatabaseSnapshotManifest,
-) -> None:
-    _require_regular_file(database_path, label="snapshot database")
-    if database_path.stat().st_size != manifest.database_size:
-        raise DatabaseRecoveryError("snapshot database size does not match manifest")
-    if _sha256_file(database_path) != manifest.database_sha256:
-        raise DatabaseRecoveryError("snapshot database SHA-256 does not match manifest")
-    if _content_sha256(database_path) != manifest.database_content_sha256:
-        raise DatabaseRecoveryError("snapshot SQLite content does not match manifest")
-    _verify_sqlite_integrity(database_path)
-    rebuilt = _snapshot_manifest(database_path, manifest.source_release_sha)
-    if rebuilt != manifest:
-        raise DatabaseRecoveryError("snapshot migration evidence does not match manifest")
-
-
-def create_database_snapshot(
-    database_path: Path | str,
-    snapshot_dir: Path | str,
-    *,
-    source_release_sha: str,
-) -> DatabaseSnapshotManifest:
-    """Create an immutable, SQLite-consistent release rollback snapshot."""
-    source = Path(database_path)
-    target = Path(snapshot_dir)
-    exact_source_sha = _exact_release_sha(source_release_sha)
-    _require_regular_file(source, label="source database")
-
-    if target.exists():
-        return verify_database_snapshot(target, expected_source_release_sha=exact_source_sha)
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix=f".{target.name}.staging-", dir=target.parent))
-    try:
-        backup_path = stage / _DATABASE_NAME
-        try:
-            with (
-                _readonly_connection(source, include_wal=True) as source_connection,
-                sqlite3.connect(backup_path) as backup_connection,
-            ):
-                source_connection.backup(backup_connection)
-        except sqlite3.Error as exc:
-            raise DatabaseRecoveryError("SQLite online backup failed") from exc
-        _fsync_file(backup_path)
-        manifest = _snapshot_manifest(backup_path, exact_source_sha)
-        _write_manifest(stage / _MANIFEST_NAME, manifest)
-        os.replace(stage, target)
-        return verify_database_snapshot(target, expected_source_release_sha=exact_source_sha)
-    finally:
-        if stage.exists():
-            shutil.rmtree(stage)
-
-
-def verify_database_snapshot(
-    snapshot_dir: Path | str,
-    *,
-    expected_source_release_sha: str | None = None,
-) -> DatabaseSnapshotManifest:
-    """Verify snapshot structure, exact release identity, hashes and SQLite integrity."""
-    root = Path(snapshot_dir)
-    _require_directory(root, label="snapshot directory")
-    entries = {entry.name for entry in root.iterdir()}
-    if entries != {_DATABASE_NAME, _MANIFEST_NAME}:
-        raise DatabaseRecoveryError("snapshot directory contents do not match schema")
-    manifest_path = root / _MANIFEST_NAME
-    database_path = root / _DATABASE_NAME
-    _require_regular_file(manifest_path, label="snapshot manifest")
-    manifest = _parse_manifest(manifest_path)
-    if expected_source_release_sha is not None:
-        expected = _exact_release_sha(expected_source_release_sha)
-        if manifest.source_release_sha != expected:
-            raise DatabaseRecoveryError("snapshot source release SHA does not match expectation")
-    _verify_manifest_matches_database(database_path, manifest)
-    return manifest
-
-
-@contextmanager
-def _database_recovery_lock(database_path: Path):
-    lock_path = Path(f"{database_path}.nika-release-recovery.lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = lock_path.open("a+b")
-    locked = False
-    try:
-        if os.name == "nt":
-            import msvcrt
-
-            handle.seek(0)
-            if handle.read(1) == b"":
-                handle.write(b"\0")
-                handle.flush()
-            handle.seek(0)
-            try:
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            except OSError as exc:
-                message = "another database recovery operation is active"
-                raise DatabaseRecoveryError(message) from exc
-        else:
-            import fcntl
-
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError as exc:
-                message = "another database recovery operation is active"
-                raise DatabaseRecoveryError(message) from exc
-        locked = True
-        yield
-    finally:
-        if locked:
-            handle.seek(0)
-            if os.name == "nt":
-                import msvcrt
-
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        handle.close()
-
-
-def _assert_quiescent_database(database_path: Path) -> None:
-    for suffix in ("-wal", "-shm", "-journal"):
-        sidecar = Path(f"{database_path}{suffix}")
-        if sidecar.exists():
-            raise DatabaseRecoveryError(
-                f"database restore requires quiescent SQLite state; sidecar exists: {sidecar.name}"
-            )
-
-
-def _copy_verified_snapshot_database(
-    source: Path,
-    destination: Path,
-    manifest: DatabaseSnapshotManifest,
-) -> None:
-    handle, temporary_name = tempfile.mkstemp(
-        prefix=f".{destination.name}.restore-",
-        dir=destination.parent,
-    )
-    os.close(handle)
-    stage = Path(temporary_name)
-    try:
-        shutil.copyfile(source, stage)
-        _fsync_file(stage)
-        _verify_manifest_matches_database(stage, manifest)
-        os.replace(stage, destination)
-        _fsync_file(destination)
-    finally:
-        stage.unlink(missing_ok=True)
-
-
-def _restore_database_snapshot_locked(
-    snapshot_dir: Path | str,
-    database_path: Path | str,
-    *,
-    expected_source_release_sha: str,
-    current_release_sha: str | None = None,
-    preserve_current_to: Path | str | None = None,
-) -> DatabaseRestoreResult:
-    """Restore a verified rollback snapshot with mandatory preservation of replaced state."""
-    root = Path(snapshot_dir)
-    destination = Path(database_path)
-    manifest = verify_database_snapshot(
-        root,
-        expected_source_release_sha=expected_source_release_sha,
-    )
-    source = root / _DATABASE_NAME
-    root_absolute = root.absolute()
-    destination_absolute = destination.absolute()
-    if destination_absolute.is_relative_to(root_absolute):
-        raise DatabaseRecoveryError("restore destination may not be inside the snapshot")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    _assert_quiescent_database(destination)
-
-    preserved: DatabaseSnapshotManifest | None = None
-    if destination.exists():
-        _require_regular_file(destination, label="current database")
-        _verify_sqlite_integrity(destination)
-        current_content_sha256 = _content_sha256(destination)
-        if current_content_sha256 == manifest.database_content_sha256:
-            return DatabaseRestoreResult(
-                restored=False,
-                already_restored=True,
-                snapshot=manifest,
-                preserved_current=None,
-            )
-        if current_release_sha is None or preserve_current_to is None:
-            raise DatabaseRecoveryError(
-                "replacing an existing database requires current release SHA and preservation path"
-            )
-        preservation_path = Path(preserve_current_to)
-        preservation_absolute = preservation_path.absolute()
-        if preservation_absolute.is_relative_to(root_absolute):
-            raise DatabaseRecoveryError("preservation path may not be inside the restore snapshot")
-        if root_absolute.is_relative_to(preservation_absolute):
-            raise DatabaseRecoveryError("preservation path may not contain the restore snapshot")
-        preserved = create_database_snapshot(
-            destination,
-            preservation_path,
-            source_release_sha=current_release_sha,
+def _exact_int(payload: dict[str, Any], field: str) -> int:
+    value = payload.get(field)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ReleaseDatabaseRecoveryError(
+            f"release database metadata has invalid {field}"
         )
-        if preserved.database_content_sha256 != current_content_sha256:
-            raise DatabaseRecoveryError(
-                "preservation snapshot does not match current database; reconcile first"
-            )
-
-    _copy_verified_snapshot_database(source, destination, manifest)
-    restored = verify_database_file_against_snapshot(destination, manifest)
-    if not restored:
-        raise DatabaseRecoveryError("restored database does not match verified snapshot")
-    return DatabaseRestoreResult(
-        restored=True,
-        already_restored=False,
-        snapshot=manifest,
-        preserved_current=preserved,
-    )
+    return value
 
 
-def restore_database_snapshot(
-    snapshot_dir: Path | str,
-    database_path: Path | str,
-    *,
-    expected_source_release_sha: str,
-    current_release_sha: str | None = None,
-    preserve_current_to: Path | str | None = None,
-) -> DatabaseRestoreResult:
-    """Restore one verified snapshot under an exclusive recovery-operation lock."""
-    root = Path(snapshot_dir)
-    destination = Path(database_path)
-    if destination.absolute().is_relative_to(root.absolute()):
-        raise DatabaseRecoveryError("restore destination may not be inside the snapshot")
-    with _database_recovery_lock(destination):
-        return _restore_database_snapshot_locked(
-            snapshot_dir,
-            destination,
-            expected_source_release_sha=expected_source_release_sha,
-            current_release_sha=current_release_sha,
-            preserve_current_to=preserve_current_to,
+def _text(payload: dict[str, Any], field: str) -> str:
+    value = payload.get(field)
+    if not isinstance(value, str) or not value:
+        raise ReleaseDatabaseRecoveryError(
+            f"release database metadata has invalid {field}"
         )
+    return value
 
 
-def verify_database_file_against_snapshot(
-    database_path: Path | str,
-    manifest: DatabaseSnapshotManifest,
-) -> bool:
-    """Return whether one quiescent database file exactly matches verified snapshot evidence."""
-    path = Path(database_path)
-    try:
-        _require_regular_file(path, label="database")
-        _verify_manifest_matches_database(path, manifest)
-    except DatabaseRecoveryError:
+def _release_restore_fingerprint(
+    snapshot: ReleaseDatabaseSnapshot,
+    canonical_plan: RestorePlan,
+    current_release_sha: str | None,
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(_RESTORE_FINGERPRINT_VERSION)
+    payload = json.dumps(
+        {
+            "source_release_sha": snapshot.source_release_sha,
+            "snapshot_sha256": snapshot.database_sha256,
+            "current_release_sha": current_release_sha,
+            "canonical_confirmation_fingerprint": (
+                canonical_plan.confirmation_fingerprint
+            ),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    digest.update(payload)
+    return digest.hexdigest()
+
+
+def _equal(left: str, right: str) -> bool:
+    if not isinstance(left, str) or not isinstance(right, str):
         return False
-    return True
+    return hmac.compare_digest(left.encode(), right.encode())
+
+
+def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)

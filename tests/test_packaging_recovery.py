@@ -6,284 +6,268 @@ from pathlib import Path
 
 import pytest
 
-import nika_core.packaging.recovery as recovery_module
+from nika_core.data.sqlite import SQLiteStore
 from nika_core.packaging.recovery import (
-    DatabaseRecoveryError,
-    create_database_snapshot,
-    restore_database_snapshot,
-    verify_database_file_against_snapshot,
-    verify_database_snapshot,
+    ReleaseDatabaseRecovery,
+    ReleaseDatabaseRecoveryError,
+)
+from nika_core.reliability.backup import (
+    BackupVerificationError,
+    RestorePlanStaleError,
+    SQLiteRecoveryManager,
 )
 
 SHA_OLD = "1" * 40
 SHA_NEW = "2" * 40
 
 
-def make_db(path: Path, value: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _initialize(path: Path) -> SQLiteStore:
+    store = SQLiteStore(path)
+    store.initialize()
+    return store
+
+
+def _insert_task(path: Path, *, task_id: str, value: str) -> None:
+    payload = json.dumps({"value": value}, ensure_ascii=False, sort_keys=True)
+    with sqlite3.connect(path) as connection:
+        now = "2026-08-23T00:00:00+00:00"
+        connection.execute(
+            """
+            INSERT INTO tasks(
+                task_id, workspace_id, agent_id, state,
+                payload_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                "release-recovery",
+                "agent",
+                "READY",
+                payload,
+                now,
+                now,
+            ),
+        )
+
+
+def _set_task_value(path: Path, *, task_id: str, value: str) -> None:
+    payload = json.dumps({"value": value}, ensure_ascii=False, sort_keys=True)
     with sqlite3.connect(path) as connection:
         connection.execute(
-            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+            "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+            (payload, task_id),
         )
-        connection.execute(
-            "INSERT INTO schema_migrations(version, applied_at) VALUES (13, 'now')"
-        )
-        connection.execute(
-            "CREATE TABLE product_project_schema_migrations "
-            "(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
-        )
-        connection.execute(
-            "INSERT INTO product_project_schema_migrations(version, applied_at) "
-            "VALUES (3, 'now')"
-        )
-        connection.execute("CREATE TABLE payload (value TEXT NOT NULL)")
-        connection.execute("INSERT INTO payload(value) VALUES (?)", (value,))
 
 
-def read_value(path: Path) -> str:
+def _task_value(path: Path, *, task_id: str) -> str:
     with sqlite3.connect(path) as connection:
-        return str(connection.execute("SELECT value FROM payload").fetchone()[0])
+        row = connection.execute(
+            "SELECT payload_json FROM tasks WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+    if row is None:
+        raise AssertionError(f"missing task: {task_id}")
+    return str(json.loads(row[0])["value"])
 
 
-def test_snapshot_is_consistent_immutable_and_bound_to_release(tmp_path: Path) -> None:
+def _release_recovery(database: Path) -> ReleaseDatabaseRecovery:
+    return ReleaseDatabaseRecovery(SQLiteRecoveryManager(_initialize(database)))
+
+
+def test_snapshot_reuses_canonical_backup_and_binds_exact_release(tmp_path: Path) -> None:
     database = tmp_path / "дані з пробілом" / "ніка.db"
-    make_db(database, "before")
-    snapshot = tmp_path / "rollback snapshots" / "old release"
+    recovery = _release_recovery(database)
+    _insert_task(database, task_id="snapshot", value="before")
+    snapshot_dir = tmp_path / "release snapshots" / "old"
 
-    manifest = create_database_snapshot(database, snapshot, source_release_sha=SHA_OLD)
-    assert manifest.source_release_sha == SHA_OLD
-    assert manifest.core_schema_version == 13
-    assert manifest.product_project_schema_version == 3
-    assert read_value(snapshot / "database.sqlite3") == "before"
+    snapshot = recovery.create_snapshot(
+        snapshot_dir,
+        source_release_sha=SHA_OLD,
+    )
+    verified = recovery.verify_snapshot(
+        snapshot_dir,
+        expected_source_release_sha=SHA_OLD,
+    )
 
-    with sqlite3.connect(database) as connection:
-        connection.execute("UPDATE payload SET value = 'after'")
-
-    replay = create_database_snapshot(database, snapshot, source_release_sha=SHA_OLD)
-    assert replay == manifest
-    assert read_value(snapshot / "database.sqlite3") == "before"
-
-
-def test_online_snapshot_captures_committed_wal_state(tmp_path: Path) -> None:
-    database = tmp_path / "wal.db"
-    with sqlite3.connect(database) as connection:
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("CREATE TABLE payload (value TEXT NOT NULL)")
-        connection.execute("INSERT INTO payload(value) VALUES ('committed-in-wal')")
-        connection.commit()
-        snapshot = tmp_path / "wal-snapshot"
-        create_database_snapshot(database, snapshot, source_release_sha=SHA_OLD)
-        assert read_value(snapshot / "database.sqlite3") == "committed-in-wal"
+    assert verified == snapshot
+    assert snapshot.source_release_sha == SHA_OLD
+    assert set(path.name for path in snapshot_dir.iterdir()) == {
+        "database.sqlite3",
+        "database.sqlite3.manifest.json",
+        "release-database-snapshot.json",
+    }
+    assert _task_value(
+        snapshot_dir / "database.sqlite3",
+        task_id="snapshot",
+    ) == "before"
 
 
-def test_snapshot_tampering_fails_before_restore(tmp_path: Path) -> None:
-    database = tmp_path / "source.db"
-    make_db(database, "safe")
-    snapshot = tmp_path / "snapshot"
-    create_database_snapshot(database, snapshot, source_release_sha=SHA_OLD)
-    backup = snapshot / "database.sqlite3"
-    backup.write_bytes(backup.read_bytes() + b"tamper")
+def test_snapshot_path_is_idempotent_and_does_not_rebind_release(tmp_path: Path) -> None:
+    database = tmp_path / "nika.db"
+    recovery = _release_recovery(database)
+    snapshot_dir = tmp_path / "snapshot"
 
-    with pytest.raises(DatabaseRecoveryError, match="size does not match"):
-        verify_database_snapshot(snapshot, expected_source_release_sha=SHA_OLD)
+    first = recovery.create_snapshot(snapshot_dir, source_release_sha=SHA_OLD)
+    replay = recovery.create_snapshot(snapshot_dir, source_release_sha=SHA_OLD)
+    assert replay == first
+
+    with pytest.raises(ReleaseDatabaseRecoveryError, match="source SHA"):
+        recovery.create_snapshot(snapshot_dir, source_release_sha=SHA_NEW)
 
 
-def test_manifest_unknown_fields_and_bool_integer_fail_closed(tmp_path: Path) -> None:
-    database = tmp_path / "source.db"
-    make_db(database, "safe")
-    snapshot = tmp_path / "snapshot"
-    create_database_snapshot(database, snapshot, source_release_sha=SHA_OLD)
-    manifest_path = snapshot / "snapshot-manifest.json"
-    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+def test_snapshot_tamper_is_rejected_by_canonical_verifier(tmp_path: Path) -> None:
+    database = tmp_path / "nika.db"
+    recovery = _release_recovery(database)
+    snapshot_dir = tmp_path / "snapshot"
+    recovery.create_snapshot(snapshot_dir, source_release_sha=SHA_OLD)
+    backup = snapshot_dir / "database.sqlite3"
+    content = bytearray(backup.read_bytes())
+    content[len(content) // 2] ^= 0x01
+    backup.write_bytes(content)
+
+    with pytest.raises(BackupVerificationError):
+        recovery.verify_snapshot(snapshot_dir)
+
+
+def test_release_metadata_strict_numeric_and_unknown_fields_fail(tmp_path: Path) -> None:
+    database = tmp_path / "nika.db"
+    recovery = _release_recovery(database)
+    snapshot_dir = tmp_path / "snapshot"
+    recovery.create_snapshot(snapshot_dir, source_release_sha=SHA_OLD)
+    metadata = snapshot_dir / "release-database-snapshot.json"
+
+    payload = json.loads(metadata.read_text(encoding="utf-8"))
     payload["database_size"] = True
-    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(DatabaseRecoveryError, match="database_size"):
-        verify_database_snapshot(snapshot)
+    metadata.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ReleaseDatabaseRecoveryError, match="database_size"):
+        recovery.verify_snapshot(snapshot_dir)
 
     payload["database_size"] = 1
     payload["unexpected"] = "field"
-    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
-    with pytest.raises(DatabaseRecoveryError, match="fields do not match"):
-        verify_database_snapshot(snapshot)
+    metadata.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ReleaseDatabaseRecoveryError, match="fields do not match"):
+        recovery.verify_snapshot(snapshot_dir)
 
 
-def test_restore_requires_preserving_replaced_database(tmp_path: Path) -> None:
+def test_restore_preview_requires_current_release_identity(tmp_path: Path) -> None:
     database = tmp_path / "nika.db"
-    make_db(database, "old")
-    snapshot = tmp_path / "old"
-    create_database_snapshot(database, snapshot, source_release_sha=SHA_OLD)
-    database.unlink()
-    make_db(database, "new")
+    recovery = _release_recovery(database)
+    snapshot_dir = tmp_path / "snapshot"
+    recovery.create_snapshot(snapshot_dir, source_release_sha=SHA_OLD)
 
-    with pytest.raises(DatabaseRecoveryError, match="requires current release SHA"):
-        restore_database_snapshot(
-            snapshot,
-            database,
+    with pytest.raises(ReleaseDatabaseRecoveryError, match="current release SHA"):
+        recovery.prepare_restore(
+            snapshot_dir,
             expected_source_release_sha=SHA_OLD,
+            current_release_sha=None,
         )
-    assert read_value(database) == "new"
 
 
-def test_restore_preserves_current_state_and_is_restart_idempotent(tmp_path: Path) -> None:
-    database = tmp_path / "ніка core" / "state.db"
-    make_db(database, "old")
-    snapshot = tmp_path / "snapshots" / "before-update"
-    old_manifest = create_database_snapshot(database, snapshot, source_release_sha=SHA_OLD)
-    database.unlink()
-    make_db(database, "new")
-    preservation = tmp_path / "snapshots" / "failed-update"
+def test_release_confirmation_binds_source_and_current_release(tmp_path: Path) -> None:
+    database = tmp_path / "nika.db"
+    recovery = _release_recovery(database)
+    _insert_task(database, task_id="task", value="snapshot")
+    snapshot_dir = tmp_path / "snapshot"
+    recovery.create_snapshot(snapshot_dir, source_release_sha=SHA_OLD)
+    _set_task_value(database, task_id="task", value="current")
 
-    result = restore_database_snapshot(
-        snapshot,
-        database,
+    plan = recovery.prepare_restore(
+        snapshot_dir,
         expected_source_release_sha=SHA_OLD,
         current_release_sha=SHA_NEW,
-        preserve_current_to=preservation,
     )
-    assert result.restored is True
-    assert result.already_restored is False
-    assert result.preserved_current is not None
-    assert result.preserved_current.source_release_sha == SHA_NEW
-    assert read_value(database) == "old"
-    assert read_value(preservation / "database.sqlite3") == "new"
-    assert verify_database_file_against_snapshot(database, old_manifest)
+    with pytest.raises(PermissionError, match="confirmation"):
+        recovery.restore(
+            plan,
+            confirmation_fingerprint="0" * 64,
+        )
 
-    replay = restore_database_snapshot(
-        snapshot,
-        database,
+    result = recovery.restore(
+        plan,
+        confirmation_fingerprint=plan.confirmation_fingerprint,
+    )
+    assert result.snapshot.source_release_sha == SHA_OLD
+    assert result.canonical_result.safety_backup is not None
+    assert _task_value(database, task_id="task") == "snapshot"
+    assert _task_value(
+        result.canonical_result.safety_backup.database_path,
+        task_id="task",
+    ) == "current"
+
+
+def test_canonical_stale_preview_guard_remains_authoritative(tmp_path: Path) -> None:
+    database = tmp_path / "nika.db"
+    recovery = _release_recovery(database)
+    _insert_task(database, task_id="task", value="snapshot")
+    snapshot_dir = tmp_path / "snapshot"
+    recovery.create_snapshot(snapshot_dir, source_release_sha=SHA_OLD)
+    _set_task_value(database, task_id="task", value="preview")
+
+    plan = recovery.prepare_restore(
+        snapshot_dir,
         expected_source_release_sha=SHA_OLD,
         current_release_sha=SHA_NEW,
-        preserve_current_to=preservation,
     )
-    assert replay.restored is False
-    assert replay.already_restored is True
-    assert read_value(database) == "old"
-    assert read_value(preservation / "database.sqlite3") == "new"
+    _set_task_value(database, task_id="task", value="changed-after-preview")
+
+    with pytest.raises(RestorePlanStaleError):
+        recovery.restore(
+            plan,
+            confirmation_fingerprint=plan.confirmation_fingerprint,
+        )
+    assert _task_value(database, task_id="task") == "changed-after-preview"
 
 
-def test_restore_resumes_after_preservation_checkpoint(tmp_path: Path) -> None:
-    database = tmp_path / "state.db"
-    make_db(database, "old")
-    snapshot = tmp_path / "old-snapshot"
-    create_database_snapshot(database, snapshot, source_release_sha=SHA_OLD)
-    database.unlink()
-    make_db(database, "new")
-    preservation = tmp_path / "new-preservation"
+def test_snapshot_rejects_extra_files_and_noncanonical_release_sha(tmp_path: Path) -> None:
+    database = tmp_path / "nika.db"
+    recovery = _release_recovery(database)
+    snapshot_dir = tmp_path / "snapshot"
+    recovery.create_snapshot(snapshot_dir, source_release_sha=SHA_OLD)
+    (snapshot_dir / "extra.txt").write_text("unexpected", encoding="utf-8")
 
-    create_database_snapshot(database, preservation, source_release_sha=SHA_NEW)
-    result = restore_database_snapshot(
-        snapshot,
-        database,
+    with pytest.raises(ReleaseDatabaseRecoveryError, match="contents"):
+        recovery.verify_snapshot(snapshot_dir)
+
+    with pytest.raises(ValueError, match="exact lowercase"):
+        recovery.create_snapshot(
+            tmp_path / "bad-sha",
+            source_release_sha="A" * 40,
+        )
+
+
+def test_missing_live_database_requires_absent_current_release_sha(tmp_path: Path) -> None:
+    source = tmp_path / "source.db"
+    source_recovery = _release_recovery(source)
+    snapshot_dir = tmp_path / "snapshot"
+    source_recovery.create_snapshot(snapshot_dir, source_release_sha=SHA_OLD)
+
+    target = tmp_path / "missing.db"
+    recovery = ReleaseDatabaseRecovery(
+        SQLiteRecoveryManager(SQLiteStore(target))
+    )
+    plan = recovery.prepare_restore(
+        snapshot_dir,
         expected_source_release_sha=SHA_OLD,
-        current_release_sha=SHA_NEW,
-        preserve_current_to=preservation,
+        current_release_sha=None,
     )
-    assert result.restored is True
-    assert read_value(database) == "old"
-    assert read_value(preservation / "database.sqlite3") == "new"
+    assert plan.canonical_plan.current_exists is False
 
-
-def test_restore_rejects_stale_preservation_checkpoint(tmp_path: Path) -> None:
-    database = tmp_path / "state.db"
-    make_db(database, "old")
-    snapshot = tmp_path / "old-snapshot"
-    create_database_snapshot(database, snapshot, source_release_sha=SHA_OLD)
-    database.unlink()
-    make_db(database, "stale-current")
-    preservation = tmp_path / "preserved"
-    create_database_snapshot(database, preservation, source_release_sha=SHA_NEW)
-    with sqlite3.connect(database) as connection:
-        connection.execute("UPDATE payload SET value = 'changed-after-preservation'")
-
-    with pytest.raises(DatabaseRecoveryError, match="does not match current database"):
-        restore_database_snapshot(
-            snapshot,
-            database,
+    with pytest.raises(ReleaseDatabaseRecoveryError, match="must be absent"):
+        recovery.prepare_restore(
+            snapshot_dir,
             expected_source_release_sha=SHA_OLD,
             current_release_sha=SHA_NEW,
-            preserve_current_to=preservation,
-        )
-    assert read_value(database) == "changed-after-preservation"
-
-
-def test_restore_fails_closed_when_sqlite_sidecar_exists(tmp_path: Path) -> None:
-    database = tmp_path / "state.db"
-    make_db(database, "old")
-    snapshot = tmp_path / "snapshot"
-    create_database_snapshot(database, snapshot, source_release_sha=SHA_OLD)
-    Path(f"{database}-wal").write_bytes(b"active")
-
-    with pytest.raises(DatabaseRecoveryError, match="requires quiescent SQLite state"):
-        restore_database_snapshot(
-            snapshot,
-            database,
-            expected_source_release_sha=SHA_OLD,
-            current_release_sha=SHA_NEW,
-            preserve_current_to=tmp_path / "preserved",
         )
 
 
-def test_restore_rejects_destination_or_preservation_inside_snapshot(tmp_path: Path) -> None:
-    database = tmp_path / "state.db"
-    make_db(database, "old")
-    snapshot = tmp_path / "snapshot"
-    create_database_snapshot(database, snapshot, source_release_sha=SHA_OLD)
+def test_packaging_adapter_does_not_implement_a_second_sqlite_engine() -> None:
+    import nika_core.packaging.recovery as module
 
-    with pytest.raises(DatabaseRecoveryError, match="destination may not be inside"):
-        restore_database_snapshot(
-            snapshot,
-            snapshot / "replacement.db",
-            expected_source_release_sha=SHA_OLD,
-        )
-
-    database.unlink()
-    make_db(database, "new")
-    with pytest.raises(DatabaseRecoveryError, match="preservation path may not be inside"):
-        restore_database_snapshot(
-            snapshot,
-            database,
-            expected_source_release_sha=SHA_OLD,
-            current_release_sha=SHA_NEW,
-            preserve_current_to=snapshot / "preserve",
-        )
-
-
-def test_snapshot_rejects_wrong_release_identity(tmp_path: Path) -> None:
-    database = tmp_path / "state.db"
-    make_db(database, "old")
-    snapshot = tmp_path / "snapshot"
-    create_database_snapshot(database, snapshot, source_release_sha=SHA_OLD)
-
-    with pytest.raises(DatabaseRecoveryError, match="does not match expectation"):
-        verify_database_snapshot(snapshot, expected_source_release_sha=SHA_NEW)
-    with pytest.raises(ValueError, match="exact 40-character"):
-        create_database_snapshot(database, tmp_path / "bad", source_release_sha="deadbeef")
-
-
-def test_snapshot_rejects_unexpected_directory_entries(tmp_path: Path) -> None:
-    database = tmp_path / "state.db"
-    make_db(database, "old")
-    snapshot = tmp_path / "snapshot"
-    create_database_snapshot(database, snapshot, source_release_sha=SHA_OLD)
-    (snapshot / "unexpected.txt").write_text("extra", encoding="utf-8")
-
-    with pytest.raises(DatabaseRecoveryError, match="contents do not match schema"):
-        verify_database_snapshot(snapshot)
-
-
-def test_restore_fails_closed_when_recovery_lock_is_already_held(tmp_path: Path) -> None:
-    database = tmp_path / "state.db"
-    make_db(database, "old")
-    snapshot = tmp_path / "snapshot"
-    create_database_snapshot(database, snapshot, source_release_sha=SHA_OLD)
-
-    with (
-        recovery_module._database_recovery_lock(database),
-        pytest.raises(DatabaseRecoveryError, match="recovery operation is active"),
-    ):
-        restore_database_snapshot(
-            snapshot,
-            database,
-            expected_source_release_sha=SHA_OLD,
-        )
+    source = Path(module.__file__).read_text(encoding="utf-8")
+    assert "import sqlite3" not in source
+    assert "SQLiteRecoveryManager" in source
+    assert ".create_backup(" in source
+    assert ".verify_backup(" in source
+    assert ".prepare_restore(" in source
+    assert ".restore(" in source
+    assert ".recover_interrupted_restore(" in source
