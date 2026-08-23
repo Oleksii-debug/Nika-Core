@@ -370,15 +370,21 @@ class TeamCancellationJournal:
             if member is None or str(member["thread_id"]) != effect.thread_id:
                 raise RuntimeError("cancellation member/thread identity is corrupt")
         states = {effect.state for effect in operation.effects}
-        if operation.state is CancellationOperationState.COMPLETED:
-            if any(state is not CancellationEffectState.CONFIRMED for state in states):
-                raise RuntimeError("completed cancellation contains unconfirmed effects")
-        if operation.state is CancellationOperationState.RECONCILE_REQUIRED:
-            if CancellationEffectState.RECONCILE_REQUIRED not in states:
-                raise RuntimeError("reconcile-required cancellation has no uncertain effect")
-        if operation.state is CancellationOperationState.CANCELLING:
-            if CancellationEffectState.RECONCILE_REQUIRED in states:
-                raise RuntimeError("cancelling operation hides a reconcile-required effect")
+        if (
+            operation.state is CancellationOperationState.COMPLETED
+            and any(state is not CancellationEffectState.CONFIRMED for state in states)
+        ):
+            raise RuntimeError("completed cancellation contains unconfirmed effects")
+        if (
+            operation.state is CancellationOperationState.RECONCILE_REQUIRED
+            and CancellationEffectState.RECONCILE_REQUIRED not in states
+        ):
+            raise RuntimeError("reconcile-required cancellation has no uncertain effect")
+        if (
+            operation.state is CancellationOperationState.CANCELLING
+            and CancellationEffectState.RECONCILE_REQUIRED in states
+        ):
+            raise RuntimeError("cancelling operation hides a reconcile-required effect")
 
     def _initialize_schema(self) -> None:
         with self._store.connection() as conn:

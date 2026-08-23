@@ -211,7 +211,7 @@ class MultiAgentSupervisor:
                 verdict = await self._cancellation_reconciliation.inspect_cancellation(request)
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001 - read-only probe failure remains uncertain.
+            except Exception as exc:
                 self._mark_probe_unknown(effect, type(exc).__name__)
                 raise CancellationReconciliationRequired(
                     "uncertain cancellation could not be reconciled"
@@ -281,7 +281,7 @@ class MultiAgentSupervisor:
             except asyncio.CancelledError:
                 self._mark_cancel_uncertain(planned, "CancelledError")
                 raise
-            except Exception as exc:  # noqa: BLE001 - external effect state is now uncertain.
+            except Exception as exc:
                 self._mark_cancel_uncertain(planned, type(exc).__name__)
                 raise CancellationReconciliationRequired(
                     "uncertain cancellation result after external effect; reconciliation required"
@@ -295,7 +295,7 @@ class MultiAgentSupervisor:
                 effect.member_id,
                 error_type=error_type,
             )
-        except Exception as persist_exc:  # noqa: BLE001 - DISPATCHING remains fail-closed.
+        except Exception as persist_exc:
             raise CancellationReconciliationRequired(
                 "uncertain cancellation result could not persist reconciliation state"
             ) from persist_exc
