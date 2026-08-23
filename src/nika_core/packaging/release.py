@@ -3,10 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import stat
 import tempfile
 import zipfile
 from dataclasses import asdict, dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -16,6 +17,7 @@ _RELEASE_MANIFEST_NAME = "release-manifest.json"
 _MAX_RELEASE_MANIFEST_BYTES = 4 * 1024 * 1024
 _MANIFEST_KEYS = frozenset({"manifest_version", "product", "version", "source_sha", "files"})
 _RELEASE_FILE_KEYS = frozenset({"path", "size", "sha256"})
+_WINDOWS_FORBIDDEN_CHARS = frozenset('<>"|?*')
 
 
 class _DuplicateJsonKey(ValueError):
@@ -71,7 +73,14 @@ def _canonical_relative_path(value: object) -> bool:
     path = PurePosixPath(value)
     if path.is_absolute() or path.as_posix() != value:
         return False
-    return not any(part in {".", ".."} for part in path.parts)
+    for part in path.parts:
+        if part in {".", ".."} or part.endswith((" ", ".")):
+            return False
+        if any(ord(character) < 32 or character in _WINDOWS_FORBIDDEN_CHARS for character in part):
+            return False
+        if PureWindowsPath(part).is_reserved():
+            return False
+    return True
 
 
 def _canonical_release_path(value: object) -> bool:
@@ -104,6 +113,7 @@ def _manifest_structure_findings(manifest: ReleaseManifest) -> tuple[str, ...]:
         return tuple(findings)
 
     seen_paths: set[str] = set()
+    seen_windows_paths: set[str] = set()
     for index, entry in enumerate(manifest.files):
         if not isinstance(entry, ReleaseFile):
             findings.append(f"manifest:file-type:{index}")
@@ -114,6 +124,11 @@ def _manifest_structure_findings(manifest: ReleaseManifest) -> tuple[str, ...]:
             findings.append(f"manifest:duplicate-path:{entry.path}")
         else:
             seen_paths.add(entry.path)
+            windows_identity = entry.path.casefold()
+            if windows_identity in seen_windows_paths:
+                findings.append(f"manifest:windows-path-collision:{entry.path}")
+            else:
+                seen_windows_paths.add(windows_identity)
         if type(entry.size) is not int or entry.size < 0:
             findings.append(f"manifest:size-format:{index}")
         if not isinstance(entry.sha256, str) or not _SHA256_RE.fullmatch(entry.sha256):
@@ -283,6 +298,11 @@ def _sha256_archive_member(archive: zipfile.ZipFile, member: zipfile.ZipInfo) ->
     return digest.hexdigest()
 
 
+def _zip_member_is_symlink(member: zipfile.ZipInfo) -> bool:
+    unix_mode = (member.external_attr >> 16) & 0xFFFF
+    return member.create_system == 3 and stat.S_ISLNK(unix_mode)
+
+
 def verify_release_archive(artifact_path: Path, *, source_sha: str) -> tuple[str, ...]:
     """Verify the embedded manifest against the exact files in a Windows release ZIP."""
     normalized_source_sha = source_sha.strip().casefold()
@@ -299,9 +319,13 @@ def verify_release_archive(artifact_path: Path, *, source_sha: str) -> tuple[str
 
             findings: list[str] = []
             by_path: dict[str, zipfile.ZipInfo] = {}
+            windows_paths: set[str] = set()
             for index, member in enumerate(members):
                 if not _canonical_relative_path(member.filename):
                     findings.append(f"archive:path:{index}")
+                    continue
+                if _zip_member_is_symlink(member):
+                    findings.append(f"archive:symlink:{index}")
                     continue
                 if member.filename in by_path:
                     if member.filename == _RELEASE_MANIFEST_NAME:
@@ -309,7 +333,12 @@ def verify_release_archive(artifact_path: Path, *, source_sha: str) -> tuple[str
                     else:
                         findings.append(f"archive:duplicate-path:{member.filename}")
                     continue
+                windows_identity = member.filename.casefold()
+                if windows_identity in windows_paths:
+                    findings.append(f"archive:windows-path-collision:{member.filename}")
+                    continue
                 by_path[member.filename] = member
+                windows_paths.add(windows_identity)
             if findings:
                 return tuple(findings)
 
