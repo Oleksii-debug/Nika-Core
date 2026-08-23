@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
 
 from nika_core.media.contracts import ModelDescriptor
 from nika_core.media.errors import MediaError, MediaErrorCode
