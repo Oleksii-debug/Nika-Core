@@ -184,3 +184,165 @@ def test_valid_manifest_still_verifies_and_writes(tmp_path: Path) -> None:
     assert verify_release_manifest(bundle, manifest) == ()
     target = write_release_manifest(bundle, manifest)
     assert target.is_file()
+
+
+def _write_release_zip(bundle: Path, target: Path) -> None:
+    import zipfile
+
+    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(bundle.rglob("*")):
+            if path.is_file():
+                archive.write(path, path.relative_to(bundle).as_posix())
+
+
+def _write_outer_evidence(evidence: Path, artifact: Path) -> None:
+    import json
+
+    evidence.write_text(
+        json.dumps(
+            {
+                "schema_version": 3,
+                "commit_sha": SOURCE_SHA,
+                "distributable_zip_path": "./dist/NikaCore-1.0.0-windows-x64.zip",
+                "distributable_zip_sha256": _sha256(artifact),
+                "distributable_zip_size": artifact.stat().st_size,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _valid_release_zip(tmp_path: Path) -> tuple[Path, Path]:
+    bundle, _ = _bundle(tmp_path)
+    manifest = build_release_manifest(
+        bundle,
+        product="NikaCore",
+        version="1.0.0",
+        source_sha=SOURCE_SHA,
+    )
+    write_release_manifest(bundle, manifest)
+    artifact = tmp_path / "NikaCore-1.0.0-windows-x64.zip"
+    _write_release_zip(bundle, artifact)
+    return bundle, artifact
+
+
+def test_release_archive_verifies_embedded_manifest(tmp_path: Path) -> None:
+    from nika_core.packaging.release import verify_release_archive
+
+    _, artifact = _valid_release_zip(tmp_path)
+    assert verify_release_archive(artifact, source_sha=SOURCE_SHA) == ()
+
+
+def test_release_archive_rejects_post_manifest_payload_tamper(tmp_path: Path) -> None:
+    from nika_core.packaging.release import verify_release_archive
+
+    bundle, _ = _valid_release_zip(tmp_path)
+    (bundle / "NikaCore.exe").write_bytes(b"tampered-after-manifest-verification")
+    artifact = tmp_path / "tampered.zip"
+    _write_release_zip(bundle, artifact)
+    assert verify_release_archive(artifact, source_sha=SOURCE_SHA) == (
+        "archive:size:NikaCore.exe",
+    )
+
+
+def test_release_archive_rejects_missing_manifest(tmp_path: Path) -> None:
+    import zipfile
+
+    artifact = tmp_path / "missing-manifest.zip"
+    with zipfile.ZipFile(artifact, "w") as archive:
+        archive.writestr("NikaCore.exe", b"binary")
+    from nika_core.packaging.release import verify_release_archive
+
+    assert verify_release_archive(artifact, source_sha=SOURCE_SHA) == (
+        "archive:missing-manifest",
+    )
+
+
+def test_release_archive_rejects_duplicate_member_identity(tmp_path: Path) -> None:
+    import warnings
+    import zipfile
+
+    bundle, _ = _valid_release_zip(tmp_path)
+    manifest_content = (bundle / "release-manifest.json").read_bytes()
+    artifact = tmp_path / "duplicate.zip"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        with zipfile.ZipFile(artifact, "w") as archive:
+            archive.writestr("release-manifest.json", manifest_content)
+            archive.writestr("NikaCore.exe", b"binary")
+            archive.writestr("NikaCore.exe", b"binary")
+    from nika_core.packaging.release import verify_release_archive
+
+    assert verify_release_archive(artifact, source_sha=SOURCE_SHA) == (
+        "archive:duplicate-path:NikaCore.exe",
+    )
+
+
+def test_release_archive_rejects_traversal_member(tmp_path: Path) -> None:
+    import zipfile
+
+    bundle, _ = _valid_release_zip(tmp_path)
+    manifest_content = (bundle / "release-manifest.json").read_bytes()
+    artifact = tmp_path / "traversal.zip"
+    with zipfile.ZipFile(artifact, "w") as archive:
+        archive.writestr("release-manifest.json", manifest_content)
+        archive.writestr("NikaCore.exe", b"binary")
+        archive.writestr("../escape.dll", b"escape")
+    from nika_core.packaging.release import verify_release_archive
+
+    assert verify_release_archive(artifact, source_sha=SOURCE_SHA) == ("archive:path:2",)
+
+
+def test_m12_cli_rejects_outer_bound_zip_with_inner_manifest_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+
+    from scripts import m12_release_evidence
+
+    bundle, _ = _valid_release_zip(tmp_path)
+    (bundle / "NikaCore.exe").write_bytes(b"tampered-after-manifest-verification")
+    artifact = tmp_path / "NikaCore-1.0.0-windows-x64.zip"
+    _write_release_zip(bundle, artifact)
+    evidence = tmp_path / "evidence.json"
+    _write_outer_evidence(evidence, artifact)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "m12_release_evidence.py",
+            "--artifact",
+            str(artifact),
+            "--evidence",
+            str(evidence),
+            "--source-sha",
+            SOURCE_SHA,
+            "--artifact-reference",
+            "./dist/NikaCore-1.0.0-windows-x64.zip",
+        ],
+    )
+    with pytest.raises(SystemExit, match="archive:size:NikaCore.exe"):
+        m12_release_evidence.main()
+
+
+def test_outer_evidence_rejects_duplicate_json_keys(tmp_path: Path) -> None:
+    from nika_core.packaging.release import verify_distributable_evidence
+
+    artifact = tmp_path / "artifact.bin"
+    artifact.write_bytes(b"candidate")
+    evidence = tmp_path / "evidence.json"
+    evidence.write_text(
+        '{"commit_sha":"ffffffffffffffffffffffffffffffffffffffff",'
+        f'"commit_sha":"{SOURCE_SHA}",'
+        '"distributable_zip_path":"ref",'
+        f'"distributable_zip_size":{artifact.stat().st_size},'
+        f'"distributable_zip_sha256":"{_sha256(artifact)}"}}',
+        encoding="utf-8",
+    )
+    assert verify_distributable_evidence(
+        artifact,
+        evidence,
+        source_sha=SOURCE_SHA,
+        artifact_reference="ref",
+    ) == ("distributable:invalid-evidence",)
