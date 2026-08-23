@@ -16,6 +16,7 @@ from nika_core.runtime.idempotency import (
 )
 
 _OPERATION_TYPE = "deterministic.tool_action"
+_UNRESOLVED = frozenset({IdempotencyStatus.PENDING, IdempotencyStatus.UNCERTAIN})
 
 
 class RuntimeIdempotencyEffectJournal:
@@ -30,7 +31,7 @@ class RuntimeIdempotencyEffectJournal:
         return tuple(
             record.operation_key
             for record in self._ledger.list_for_task(task_id)
-            if record.status in {IdempotencyStatus.PENDING, IdempotencyStatus.UNCERTAIN}
+            if record.status in _UNRESOLVED
         )
 
     def reserve(
@@ -48,6 +49,14 @@ class RuntimeIdempotencyEffectJournal:
             task_id=task_id,
             action_id=action.action_id,
         )
+        for record in self._ledger.list_for_task(task_id):
+            if record.status in _UNRESOLVED and record.operation_key != operation_key:
+                return DeterministicEffectReservation(
+                    operation_key=record.operation_key,
+                    status=DeterministicEffectStatus(record.status.value),
+                    created=False,
+                )
+
         fingerprint = self._action_fingerprint(action)
         try:
             record, created = self._ledger.reserve_once(
