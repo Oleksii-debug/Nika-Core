@@ -18,7 +18,10 @@ from nika_core.product_project import (
     ResearchEvidencePackage,
     StaleProjectVersionError,
 )
-from nika_core.product_project_schema import PRODUCT_PROJECT_MIGRATIONS
+from nika_core.product_project_schema import (
+    PRODUCT_PROJECT_MIGRATIONS,
+    PRODUCT_PROJECT_SCHEMA_VERSION,
+)
 
 
 def _spec() -> ProductProjectSpec:
@@ -237,5 +240,9 @@ def test_product_project_schema_v1_upgrades_without_data_loss(tmp_path) -> None:
     with store.connection() as conn:
         version = conn.execute("SELECT MAX(version) FROM product_project_schema_migrations").fetchone()[0]
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-    assert version == 2
-    assert {"product_decisions", "product_project_mutation_idempotency"} <= tables
+    assert version == PRODUCT_PROJECT_SCHEMA_VERSION
+    assert {
+        "product_decisions",
+        "product_project_mutation_idempotency",
+        "product_project_spec_idempotency",
+    } <= tables
