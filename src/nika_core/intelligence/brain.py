@@ -5,6 +5,9 @@ from dataclasses import dataclass
 
 from nika_core.intelligence.contracts import (
     DeterministicAction,
+    DeterministicEffectConflictError,
+    DeterministicEffectJournal,
+    DeterministicEffectStatus,
     DeterministicErrorCode,
     DeterministicGoal,
     DeterministicPlan,
@@ -13,7 +16,7 @@ from nika_core.intelligence.contracts import (
     WorldState,
     WorldStateObserver,
 )
-from nika_core.tools import ToolCall, ToolExecutor
+from nika_core.tools import ToolCall, ToolExecutor, ToolRisk, ToolSpec
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,12 +40,25 @@ class _PlanValidationFailure:
     message: str
 
 
+@dataclass(frozen=True, slots=True)
+class _ToolExecutionFailure:
+    code: DeterministicErrorCode
+    message: str
+
+
 class DeterministicBrain:
     """Plan, validate, re-plan and execute explicit workflows without a language model."""
 
-    def __init__(self, *, planner: DeterministicPlanner, tools: ToolExecutor) -> None:
+    def __init__(
+        self,
+        *,
+        planner: DeterministicPlanner,
+        tools: ToolExecutor,
+        effect_journal: DeterministicEffectJournal | None = None,
+    ) -> None:
         self._planner = planner
         self._tools = tools
+        self._effect_journal = effect_journal
 
     async def run(
         self,
@@ -54,6 +70,8 @@ class DeterministicBrain:
         approved_action_ids: frozenset[str] = frozenset(),
         previously_completed_action_ids: tuple[str, ...] = (),
         state_observer: WorldStateObserver | None = None,
+        task_id: str | None = None,
+        execution_id: str | None = None,
         max_steps: int = 100,
         max_replans: int = 8,
         planning_timeout_seconds: float = 30.0,
@@ -66,6 +84,11 @@ class DeterministicBrain:
             raise ValueError("max_replans must be non-negative")
         if planning_timeout_seconds <= 0:
             raise ValueError("planning_timeout_seconds must be greater than zero")
+        if self._effect_journal is not None:
+            if task_id is None or not task_id.strip():
+                raise ValueError("task_id is required when effect_journal is configured")
+            if execution_id is None or not execution_id.strip():
+                raise ValueError("execution_id is required when effect_journal is configured")
 
         # Kept for source compatibility only. A planner-selected action ID is not approval
         # evidence and must never turn into ToolCall.approved=True.
@@ -86,6 +109,7 @@ class DeterministicBrain:
                 f"previously completed deterministic action is unavailable: {unknown_completed[0]}"
             )
 
+        tool_specs = {spec.tool_id: spec for spec in self._tools.specs()}
         current_state = state
         completed = list(previously_completed_action_ids)
         completed_set = set(previously_completed_action_ids)
@@ -198,25 +222,25 @@ class DeterministicBrain:
                     replan_requested = True
                     break
 
-                if action.tool_id is not None:
-                    result = await self._tools.execute(
-                        ToolCall(
-                            call_id=f"{run_id}:{executed_steps}:{index}:{action.action_id}",
-                            tool_id=action.tool_id,
-                            arguments=dict(action.arguments),
-                            approved=False,
-                        )
+                tool_failure = await self._execute_tool_action(
+                    action=action,
+                    run_id=run_id,
+                    task_id=task_id,
+                    execution_id=execution_id,
+                    executed_steps=executed_steps,
+                    plan_index=index,
+                    tool_specs=tool_specs,
+                )
+                if tool_failure is not None:
+                    return self._failure(
+                        plan=plan,
+                        completed=completed,
+                        state=current_state,
+                        history=history,
+                        replans=replans,
+                        code=tool_failure.code,
+                        message=tool_failure.message,
                     )
-                    if not result.ok:
-                        return self._failure(
-                            plan=plan,
-                            completed=completed,
-                            state=current_state,
-                            history=history,
-                            replans=replans,
-                            code=DeterministicErrorCode.TOOL_EXECUTION_FAILED,
-                            message=result.error or "tool failed",
-                        )
 
                 current_state = self._apply(action, current_state)
                 completed.append(action.action_id)
@@ -264,6 +288,141 @@ class DeterministicBrain:
                 code=DeterministicErrorCode.GOAL_UNSATISFIED,
                 message="plan completed without satisfying the goal",
             )
+
+    async def _execute_tool_action(
+        self,
+        *,
+        action: DeterministicAction,
+        run_id: str,
+        task_id: str | None,
+        execution_id: str | None,
+        executed_steps: int,
+        plan_index: int,
+        tool_specs: dict[str, ToolSpec],
+    ) -> _ToolExecutionFailure | None:
+        if action.tool_id is None:
+            return None
+
+        spec = tool_specs.get(action.tool_id)
+        journal = self._effect_journal
+        if spec is None or spec.risk == ToolRisk.READ_ONLY or journal is None:
+            return await self._execute_tool_call(
+                action=action,
+                call_id=f"{run_id}:{executed_steps}:{plan_index}:{action.action_id}",
+            )
+
+        if task_id is None or execution_id is None:  # validated at run entry
+            raise AssertionError("durable deterministic effect identity is unavailable")
+
+        try:
+            reservation = journal.reserve(
+                task_id=task_id,
+                execution_id=execution_id,
+                action=action,
+            )
+        except DeterministicEffectConflictError as exc:
+            return _ToolExecutionFailure(
+                DeterministicErrorCode.SIDE_EFFECT_IDENTITY_CONFLICT,
+                str(exc),
+            )
+        except Exception as exc:  # noqa: BLE001 - fail closed before the external effect.
+            return _ToolExecutionFailure(
+                DeterministicErrorCode.SIDE_EFFECT_RECORD_FAILED,
+                f"could not reserve deterministic tool effect: {type(exc).__name__}",
+            )
+
+        if not reservation.created:
+            if reservation.status == DeterministicEffectStatus.COMPLETED:
+                return None
+            return _ToolExecutionFailure(
+                DeterministicErrorCode.SIDE_EFFECT_RECONCILIATION_REQUIRED,
+                "deterministic tool effect is pending or uncertain and requires reconciliation",
+            )
+
+        try:
+            result = await self._tools.execute(
+                ToolCall(
+                    call_id=reservation.operation_key,
+                    tool_id=action.tool_id,
+                    arguments=dict(action.arguments),
+                    approved=False,
+                )
+            )
+        except asyncio.CancelledError:
+            self._mark_effect_uncertain_best_effort(journal, reservation.operation_key)
+            raise
+        except BaseException:
+            # Abrupt process loss deliberately leaves the durable reservation PENDING. Startup
+            # recovery treats PENDING exactly like UNCERTAIN and refuses automatic replay.
+            raise
+
+        if not result.ok:
+            if result.error in {"approval required", "unknown tool"}:
+                try:
+                    journal.release_pending(reservation.operation_key)
+                except Exception as exc:  # noqa: BLE001 - do not hide a broken durable ledger.
+                    return _ToolExecutionFailure(
+                        DeterministicErrorCode.SIDE_EFFECT_RECORD_FAILED,
+                        f"could not release unused effect reservation: {type(exc).__name__}",
+                    )
+                return _ToolExecutionFailure(
+                    DeterministicErrorCode.TOOL_EXECUTION_FAILED,
+                    result.error or "tool failed",
+                )
+
+            try:
+                journal.mark_uncertain(reservation.operation_key)
+            except Exception as exc:  # noqa: BLE001 - PENDING still blocks replay fail-closed.
+                return _ToolExecutionFailure(
+                    DeterministicErrorCode.SIDE_EFFECT_RECORD_FAILED,
+                    f"tool failed and durable uncertainty could not be recorded: {type(exc).__name__}",
+                )
+            return _ToolExecutionFailure(
+                DeterministicErrorCode.SIDE_EFFECT_RECONCILIATION_REQUIRED,
+                result.error or "tool effect failed with uncertain external outcome",
+            )
+
+        try:
+            journal.complete(reservation.operation_key)
+        except Exception as exc:  # noqa: BLE001 - effect happened; reservation remains fail-closed.
+            return _ToolExecutionFailure(
+                DeterministicErrorCode.SIDE_EFFECT_RECORD_FAILED,
+                f"tool effect succeeded but durable completion record failed: {type(exc).__name__}",
+            )
+        return None
+
+    async def _execute_tool_call(
+        self,
+        *,
+        action: DeterministicAction,
+        call_id: str,
+    ) -> _ToolExecutionFailure | None:
+        if action.tool_id is None:
+            return None
+        result = await self._tools.execute(
+            ToolCall(
+                call_id=call_id,
+                tool_id=action.tool_id,
+                arguments=dict(action.arguments),
+                approved=False,
+            )
+        )
+        if result.ok:
+            return None
+        return _ToolExecutionFailure(
+            DeterministicErrorCode.TOOL_EXECUTION_FAILED,
+            result.error or "tool failed",
+        )
+
+    @staticmethod
+    def _mark_effect_uncertain_best_effort(
+        journal: DeterministicEffectJournal,
+        operation_key: str,
+    ) -> None:
+        try:
+            journal.mark_uncertain(operation_key)
+        except Exception:  # noqa: BLE001 - PENDING reservation still blocks automatic replay.
+            return
 
     async def _plan(
         self,
