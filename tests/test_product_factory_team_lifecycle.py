@@ -383,3 +383,51 @@ def test_retired_specialization_is_recorded_in_history_instead_of_silent_deletio
     )
     assert historical.status is RoleAssignmentStatus.RETIRED
     assert historical.transition_reason == "role retired by deterministic recomposition"
+
+
+def test_permission_narrowing_preserves_non_executable_replacement_history() -> None:
+    lifecycle = DynamicTeamLifecycle()
+    original_ceiling = frozenset({"read_source", "write_source", "run_tests"})
+    snapshot = lifecycle.compose(
+        _request(5, ProjectScale.MEDIUM, ceiling=original_ceiling)
+    )
+    role = next(
+        item
+        for item in snapshot.current_assignments
+        if item.role.capabilities == ("implementation",)
+    )
+    snapshot = lifecycle.mark_unavailable(
+        snapshot,
+        role_id=role.role.role_id,
+        status=RoleAssignmentStatus.FAILED,
+        reason="worker crash",
+        evidence_refs=("worker:crash:narrowing",),
+    )
+    snapshot = lifecycle.replace_unavailable(
+        snapshot,
+        role_id=role.role.role_id,
+        reason="replacement before project permission reduction",
+        evidence_refs=("decision:replacement:narrowing",),
+    )
+
+    narrowed_ceiling = frozenset({"read_source", "run_tests"})
+    narrowed = lifecycle.recompose(
+        snapshot,
+        _request(5, ProjectScale.MEDIUM, ceiling=narrowed_ceiling),
+    )
+    recovered = TeamLifecycleSnapshot.from_json(narrowed.to_json())
+
+    current = next(
+        item
+        for item in recovered.current_assignments
+        if item.role.role_id == role.role.role_id
+    )
+    historical = next(
+        item
+        for item in recovered.assignments
+        if item.assignment_id == role.assignment_id
+    )
+    assert current.role.permissions <= narrowed_ceiling
+    assert "write_source" not in current.role.permissions
+    assert "write_source" in historical.role.permissions
+    assert historical.status is RoleAssignmentStatus.REPLACED
