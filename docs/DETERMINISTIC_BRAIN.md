@@ -8,8 +8,8 @@ Unified Planning remains an optional replaceable planning engine behind those co
 ## Reuse decision
 
 - **REUSE:** Unified Planning 1.3.x plus the `up-aries==0.5.0` engine adapter through the
-  `planning` optional dependency. Unified Planning is Apache-2.0. The Aries Unified Planning
-  plugin is MIT and its maintained upstream project is MIT/Apache-2.0 licensed.
+  `planning` optional dependency. Unified Planning is Apache-2.0. The exact adopted
+  `up-aries==0.5.0` plugin and Aries v0.5.0 upstream source tree are MIT-licensed.
 - **ADAPT:** `UnifiedPlanningAdapter` maps Nika boolean facts/actions/goals to Unified Planning
   objects and normalizes planner result status back to Nika error semantics.
 - **CUSTOM (thin):** Nika validates returned action identities/effects, bounds execution and
