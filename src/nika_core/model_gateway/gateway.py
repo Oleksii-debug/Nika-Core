@@ -317,6 +317,10 @@ class ModelGateway:
     ) -> None:
         if not isinstance(response, ModelResponse):
             raise TypeError("provider response must be ModelResponse")
+        if not isinstance(response.text, str):
+            raise TypeError("provider response text must be a string")
+        if not response.text.strip():
+            raise ValueError("provider response text must not be empty")
         if response.request_id != request.request_id:
             raise ValueError("provider response request identity does not match")
         if response.provider_id != capabilities.provider_id:
