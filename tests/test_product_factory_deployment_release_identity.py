@@ -358,7 +358,7 @@ def test_restore_rejects_stale_authority_over_unresolved_staging_effect() -> Non
         restarted.restore(corrupted)
 
 
-def test_failed_rollback_stays_uncertain_and_blocks_redeployment() -> None:
+def test_legacy_sha_rollback_is_not_dispatched_for_existing_previous_release() -> None:
     provider = _Provider()
     fabric = DeploymentFabric(provider)
     fabric.deploy(_intent(EnvironmentTier.STAGING, "stage-a"))
@@ -374,7 +374,7 @@ def test_failed_rollback_stays_uncertain_and_blocks_redeployment() -> None:
         )
     )
     assert failed.state is DeploymentState.UNCERTAIN
-    assert provider.rollback_calls == 1
+    assert provider.rollback_calls == 0
     assert fabric.snapshot().healthy_staging == ()
 
     with pytest.raises(DeploymentFabricError, match="unresolved deployment effect"):
