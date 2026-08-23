@@ -55,7 +55,9 @@ class ComponentCapabilityBinding:
                 "durable capability binding identity is incomplete"
             )
         if self.row_version < 0:
-            raise ProductFactoryToolsmithBindingError("binding row version must be non-negative")
+            raise ProductFactoryToolsmithBindingError(
+                "binding row version must be non-negative"
+            )
         if self.escalation_row_version is not None and self.escalation_row_version < 0:
             raise ProductFactoryToolsmithBindingError(
                 "escalation row version must be non-negative"
@@ -85,7 +87,11 @@ class ComponentCapabilityBinding:
                 )
             if any(
                 value is not None
-                for value in (self.next_work_id, self.pinned_version, self.pinned_digest)
+                for value in (
+                    self.next_work_id,
+                    self.pinned_version,
+                    self.pinned_digest,
+                )
             ):
                 raise ProductFactoryToolsmithBindingError(
                     "begun binding contains resume evidence"
@@ -127,7 +133,9 @@ class ProductFactoryToolsmithBindingRepository:
                 "host task, capability id and reason must not be empty"
             )
         if any(not method.strip() for method in attempted_methods):
-            raise ProductFactoryToolsmithBindingError("attempted methods must not be empty")
+            raise ProductFactoryToolsmithBindingError(
+                "attempted methods must not be empty"
+            )
 
         with self._store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -224,7 +232,6 @@ class ProductFactoryToolsmithBindingRepository:
                 "Toolsmith begin can only advance a reserved binding"
             )
         self._cas_update(
-            current,
             """
             UPDATE product_factory_toolsmith_bindings
             SET state = ?, escalation_row_version = ?, candidate_state = ?,
@@ -274,7 +281,6 @@ class ProductFactoryToolsmithBindingRepository:
                 "resume can only be prepared from a begun binding"
             )
         self._cas_update(
-            current,
             """
             UPDATE product_factory_toolsmith_bindings
             SET state = ?, next_work_id = ?, pinned_version = ?, pinned_digest = ?,
@@ -309,7 +315,6 @@ class ProductFactoryToolsmithBindingRepository:
                 "only a prepared resume can be consumed"
             )
         self._cas_update(
-            current,
             """
             UPDATE product_factory_toolsmith_bindings
             SET state = ?, row_version = row_version + 1, updated_at = ?
@@ -343,17 +348,20 @@ class ProductFactoryToolsmithBindingRepository:
                 (host_task_id, request.component_id),
             ).fetchall()
         bindings = tuple(_binding_from_row(row) for row in rows)
-        matching = tuple(
+
+        active_matching = tuple(
             item
             for item in bindings
-            if item.work_id == request.work_id or item.next_work_id == request.work_id
+            if item.state is not ComponentCapabilityBindingState.CONSUMED
+            and (item.work_id == request.work_id or item.next_work_id == request.work_id)
         )
-        if len(matching) > 1:
+        if len(active_matching) > 1:
             raise ProductFactoryToolsmithBindingError(
-                "multiple durable capability bindings match one component attempt"
+                "multiple active capability bindings match one component attempt"
             )
-        if matching:
-            return matching[0]
+        if active_matching:
+            return active_matching[0]
+
         active = tuple(
             item
             for item in bindings
@@ -363,9 +371,25 @@ class ProductFactoryToolsmithBindingRepository:
             raise ProductFactoryToolsmithBindingError(
                 "active capability gap belongs to a stale component attempt"
             )
-        return None
 
-    def require(self, *, host_task_id: str, work_id: str) -> ComponentCapabilityBinding:
+        consumed_matching = tuple(
+            item
+            for item in bindings
+            if item.state is ComponentCapabilityBindingState.CONSUMED
+            and item.next_work_id == request.work_id
+        )
+        if len(consumed_matching) > 1:
+            raise ProductFactoryToolsmithBindingError(
+                "multiple consumed capability bindings match one resumed attempt"
+            )
+        return consumed_matching[0] if consumed_matching else None
+
+    def require(
+        self,
+        *,
+        host_task_id: str,
+        work_id: str,
+    ) -> ComponentCapabilityBinding:
         with self._store.connection() as conn:
             row = conn.execute(
                 """
@@ -395,7 +419,11 @@ class ProductFactoryToolsmithBindingRepository:
                 "SELECT MAX(version) AS version "
                 "FROM product_factory_toolsmith_schema_migrations"
             ).fetchone()
-            current = _exact_int(row["version"], "schema version", allow_none=True) or 0
+            current = _exact_int(
+                row["version"],
+                "schema version",
+                allow_none=True,
+            ) or 0
             if current > _SCHEMA_VERSION:
                 raise ProductFactoryToolsmithBindingError(
                     "Product Factory Toolsmith binding schema is newer than supported"
@@ -438,7 +466,9 @@ class ProductFactoryToolsmithBindingRepository:
                 )
                 conn.execute(
                     """
-                    INSERT INTO product_factory_toolsmith_schema_migrations(version, applied_at)
+                    INSERT INTO product_factory_toolsmith_schema_migrations(
+                        version, applied_at
+                    )
                     VALUES (1, ?)
                     """,
                     (_now(),),
@@ -510,7 +540,6 @@ class ProductFactoryToolsmithBindingRepository:
 
     def _cas_update(
         self,
-        binding: ComponentCapabilityBinding,
         statement: str,
         parameters: tuple[object, ...],
     ) -> None:
@@ -525,7 +554,15 @@ class ProductFactoryToolsmithBindingRepository:
 
 def _binding_from_row(row: sqlite3.Row) -> ComponentCapabilityBinding:
     attempted = _string_tuple(row["attempted_methods_json"], "attempted methods")
-    ceiling = frozenset(_string_tuple(row["permission_ceiling_json"], "permission ceiling"))
+    ceiling = frozenset(
+        _string_tuple(row["permission_ceiling_json"], "permission ceiling")
+    )
+    try:
+        state = ComponentCapabilityBindingState(_text(row["state"], "state"))
+    except ValueError as exc:
+        raise ProductFactoryToolsmithBindingError(
+            "durable capability binding contains unknown state"
+        ) from exc
     return ComponentCapabilityBinding(
         host_task_id=_text(row["host_task_id"], "host task id"),
         project_id=_text(row["project_id"], "project id"),
@@ -535,8 +572,8 @@ def _binding_from_row(row: sqlite3.Row) -> ComponentCapabilityBinding:
         reason=_text(row["reason"], "reason"),
         attempted_methods=attempted,
         permission_ceiling=ceiling,
-        state=ComponentCapabilityBindingState(_text(row["state"], "state")),
-        row_version=_exact_int(row["row_version"], "row version"),
+        state=state,
+        row_version=_require_exact_int(row["row_version"], "row version"),
         escalation_row_version=_exact_int(
             row["escalation_row_version"],
             "escalation row version",
@@ -577,18 +614,41 @@ def _optional_text(value: object) -> str | None:
     return value
 
 
-def _exact_int(value: object, label: str, *, allow_none: bool = False) -> int | None:
+def _exact_int(
+    value: object,
+    label: str,
+    *,
+    allow_none: bool = False,
+) -> int | None:
     if value is None and allow_none:
         return None
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ProductFactoryToolsmithBindingError(f"{label} is not an exact integer")
+        raise ProductFactoryToolsmithBindingError(
+            f"{label} is not an exact integer"
+        )
     if value < 0:
-        raise ProductFactoryToolsmithBindingError(f"{label} must be non-negative")
+        raise ProductFactoryToolsmithBindingError(
+            f"{label} must be non-negative"
+        )
     return value
 
 
+def _require_exact_int(value: object, label: str) -> int:
+    result = _exact_int(value, label)
+    if result is None:
+        raise ProductFactoryToolsmithBindingError(
+            f"{label} unexpectedly disappeared"
+        )
+    return result
+
+
 def _json(value: object) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def _now() -> str:
