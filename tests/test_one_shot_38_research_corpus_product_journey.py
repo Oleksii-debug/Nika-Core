@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 from importlib import import_module
 from importlib.util import find_spec
 from pathlib import Path
@@ -74,7 +73,7 @@ def _environment(tmp_path: Path) -> SimpleNamespace:
         )
 
     fetcher = c.research.HttpxResearchFetcher(
-        resolver=lambda host, port: (_PUBLIC_IP,),
+        resolver=lambda _host, _port: (_PUBLIC_IP,),
         transport=httpx.MockTransport(handler),
     )
     research_service = c.research.HttpResearchService(
@@ -280,7 +279,7 @@ def test_source_content_update_invalidates_old_result_and_decision_replay(tmp_pa
     handoff_service, _ = _formal_handoff(env)
     decisions = c.decisions.ProductDecisionRepository(env.store)
     decision = _approved_decision(env)
-    first = decisions.record(
+    decisions.record(
         "p1",
         decision,
         expected_row_version=0,
@@ -299,13 +298,12 @@ def test_source_content_update_invalidates_old_result_and_decision_replay(tmp_pa
     with pytest.raises(c.product.ProductProjectError, match="source|content|stale|research"):
         handoff_service.get("p1", "research-evidence-1")
     with pytest.raises(c.product.ProductProjectError, match="source|content|stale|research"):
-        replay = decisions.record(
+        decisions.record(
             "p1",
             decision,
             expected_row_version=0,
             idempotency_key="decision:approve",
         )
-        assert replay == first
 
 
 @_requires_convergence
@@ -390,9 +388,3 @@ def test_formal_handoff_cannot_be_downgraded_before_decision(tmp_path: Path) -> 
             expected_row_version=0,
             idempotency_key="decision:downgrade-attack",
         )
-
-
-def test_source_snapshot_sha_fixture_is_deterministic() -> None:
-    assert hashlib.sha256(
-        b"keyboard operation needs deterministic semantic focus evidence"
-    ).hexdigest() == "e022808280089392889cb1b54a10aad2e8247264803811a35ce69ea4f647044a"
