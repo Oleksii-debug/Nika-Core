@@ -11,7 +11,6 @@ from typing import Any
 
 from nika_core.data.sqlite import SQLiteStore
 
-
 _INTEGRITY_KEY = "_nika_audit_integrity"
 _INTEGRITY_VERSION = "nika-audit-integrity-v1"
 _EVENT_SCHEMA = "nika-audit-event-v1"
