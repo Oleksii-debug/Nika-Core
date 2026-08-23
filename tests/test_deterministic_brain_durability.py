@@ -17,6 +17,7 @@ from nika_core.intelligence.contracts import (
 )
 from nika_core.intelligence.runtime_effect_journal import RuntimeIdempotencyEffectJournal
 from nika_core.intelligence.unified_planning_adapter import UnifiedPlanningAdapter
+from nika_core.kernel.task_queue import TaskQueue
 from nika_core.runtime.idempotency import IdempotencyLedger
 from nika_core.tools import ToolExecutor, ToolRisk, ToolSpec
 
@@ -31,6 +32,7 @@ def test_planner_action_id_cannot_manufacture_high_impact_approval(tmp_path) -> 
 
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
+    task = TaskQueue(store).create(workspace_id="proof", agent_id="deterministic")
     tools = ToolExecutor()
     tools.register(
         ToolSpec(tool_id="publish", description="publish", risk=ToolRisk.HIGH_IMPACT),
@@ -50,7 +52,7 @@ def test_planner_action_id_cannot_manufacture_high_impact_approval(tmp_path) -> 
     result = asyncio.run(
         brain.run(
             run_id="planner-approval-bypass",
-            task_id="task-planner-approval-bypass",
+            task_id=task.task_id,
             state=WorldState(),
             goal=DeterministicGoal(required=frozenset({"published"})),
             actions=(action,),
@@ -62,7 +64,7 @@ def test_planner_action_id_cannot_manufacture_high_impact_approval(tmp_path) -> 
     assert result.error == "approval required"
     assert result.error_code is DeterministicErrorCode.TOOL_EXECUTION_FAILED
     assert called is False
-    assert IdempotencyLedger(store).list_for_task("task-planner-approval-bypass") == ()
+    assert IdempotencyLedger(store).list_for_task(task.task_id) == ()
 
 
 def test_changed_state_replans_without_repeating_completed_effect() -> None:
