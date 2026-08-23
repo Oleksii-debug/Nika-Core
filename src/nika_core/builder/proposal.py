@@ -6,7 +6,7 @@ from nika_core.model_gateway.contracts import PrivacyClass
 
 
 class AgentProposalService:
-    """Turns a model-authored draft into a deterministic registry-validated proposal."""
+    """Turn model-authored draft text into a deterministic registry-validated proposal."""
 
     def __init__(self, drafting: AgentDraftService, compiler: AgentCompiler) -> None:
         self._drafting = drafting

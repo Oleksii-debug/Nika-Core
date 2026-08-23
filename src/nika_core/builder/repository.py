@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from nika_core.activation_authority import ActivationAuthorityPort, ActivationSubject
 from nika_core.builder.compiler import CompilationResult
 from nika_core.builder.spec import AgentDefinition
 from nika_core.data.sqlite import SQLiteStore
@@ -23,9 +24,16 @@ class StoredAgentDefinition:
 class AgentDefinitionRepository:
     """Versioned durable storage and atomic activation for Agent Builder definitions."""
 
-    def __init__(self, store: SQLiteStore, *, audit_log: AuditLog | None = None) -> None:
+    def __init__(
+        self,
+        store: SQLiteStore,
+        *,
+        audit_log: AuditLog | None = None,
+        activation_authority: ActivationAuthorityPort | None = None,
+    ) -> None:
         self._store = store
         self._audit_log = audit_log or AuditLog(store)
+        self._activation_authority = activation_authority
 
     def next_version(self, agent_id: str) -> int:
         with self._store.connection() as conn:
@@ -45,6 +53,7 @@ class AgentDefinitionRepository:
             separators=(",", ":"),
         )
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             latest = conn.execute(
                 "SELECT MAX(version) AS version FROM agent_definitions WHERE agent_id = ?",
                 (definition.agent_id,),
@@ -85,15 +94,15 @@ class AgentDefinitionRepository:
         self,
         definition: AgentDefinition,
         *,
-        approved_tool_ids: frozenset[str] = frozenset(),
+        approval_refs: tuple[str, ...] = (),
     ) -> None:
         if not definition.enabled:
             raise ValueError("disabled agent definition cannot be activated")
-        now = datetime.now(UTC).isoformat()
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT definition_json, required_approvals_json, status FROM agent_definitions "
-                "WHERE agent_id = ? AND version = ?",
+                "SELECT definition_json, required_approvals_json, highest_risk, status "
+                "FROM agent_definitions WHERE agent_id = ? AND version = ?",
                 (definition.agent_id, definition.version),
             ).fetchone()
             if row is None:
@@ -101,16 +110,42 @@ class AgentDefinitionRepository:
             persisted = AgentDefinition.model_validate_json(row["definition_json"])
             if persisted != definition:
                 raise ValueError("activation definition differs from persisted immutable draft")
-            required = tuple(str(item) for item in json.loads(row["required_approvals_json"]))
-            missing = sorted(set(required) - set(approved_tool_ids))
-            if missing:
-                raise PermissionError(
-                    "explicit human approval required for high-impact tools: " + ", ".join(missing)
-                )
-            if row["status"] == "active":
-                return
+
+            active_row = conn.execute(
+                "SELECT version FROM agent_definitions "
+                "WHERE agent_id = ? AND status = 'active'",
+                (definition.agent_id,),
+            ).fetchone()
+            if active_row is not None:
+                active_version = int(active_row["version"])
+                if active_version == definition.version:
+                    return
+                if active_version > definition.version:
+                    raise PermissionError(
+                        "stale agent definition cannot replace a newer active version"
+                    )
+
             if row["status"] != "draft":
                 raise ValueError(f"cannot activate definition in status {row['status']}")
+
+            required = tuple(
+                str(item) for item in json.loads(row["required_approvals_json"])
+            )
+            if required:
+                if self._activation_authority is None:
+                    raise PermissionError(
+                        "trusted activation authority is required for high-impact tools"
+                    )
+                subject = ActivationSubject.from_payload(
+                    kind="agent",
+                    subject_id=definition.agent_id,
+                    version=str(definition.version),
+                    payload=definition.model_dump(mode="json"),
+                    high_impact_ids=required,
+                )
+                self._activation_authority.verify(subject, approval_refs)
+
+            now = datetime.now(UTC).isoformat()
             conn.execute(
                 "UPDATE agent_definitions SET status = 'retired' "
                 "WHERE agent_id = ? AND status = 'active'",
@@ -129,7 +164,8 @@ class AgentDefinitionRepository:
                 payload={
                     "agent_id": definition.agent_id,
                     "version": definition.version,
-                    "approved_high_impact_tools": sorted(approved_tool_ids),
+                    "approval_reference_count": len(approval_refs),
+                    "highest_risk": int(row["highest_risk"]),
                 },
             )
 
@@ -144,11 +180,7 @@ class AgentDefinitionRepository:
         return self._decode(row) if row is not None else None
 
     def require_active(self, agent_id: str, version: int) -> StoredAgentDefinition:
-        """Return the exact active definition or fail closed.
-
-        Multi-agent execution must never be able to name an arbitrary draft, retired,
-        disabled or nonexistent Agent Builder document and have it treated as runnable.
-        """
+        """Return the exact active definition or fail closed."""
         stored = self.get(agent_id, version)
         if stored is None:
             raise KeyError(f"unknown agent definition: {agent_id}:{version}")
@@ -171,12 +203,16 @@ class AgentDefinitionRepository:
     @staticmethod
     def _decode(row) -> StoredAgentDefinition:
         payload = json.loads(row["definition_json"])
-        required = tuple(str(item) for item in json.loads(row["required_approvals_json"]))
+        required = tuple(
+            str(item) for item in json.loads(row["required_approvals_json"])
+        )
         return StoredAgentDefinition(
             definition=AgentDefinition.model_validate(payload),
             status=str(row["status"]),
             required_human_approvals=required,
             highest_risk=int(row["highest_risk"]),
             created_at=str(row["created_at"]),
-            activated_at=str(row["activated_at"]) if row["activated_at"] is not None else None,
+            activated_at=(
+                str(row["activated_at"]) if row["activated_at"] is not None else None
+            ),
         )

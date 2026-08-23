@@ -52,7 +52,9 @@ class AgentCompiler:
         self._schedule_ids = frozenset(schedule_ids)
         self._resource_budget_refs = frozenset(resource_budget_refs)
         self._permission_catalog = {
-            tool_id: frozenset(permission.strip() for permission in permissions if permission.strip())
+            tool_id: frozenset(
+                permission.strip() for permission in permissions if permission.strip()
+            )
             for tool_id, permissions in (permission_catalog or {}).items()
         }
         unknown_catalog_tools = sorted(set(self._permission_catalog) - set(self._tools))
@@ -82,11 +84,13 @@ class AgentCompiler:
             declared = RiskTier(grant.max_risk)
             if declared < actual:
                 raise ValueError(
-                    f"tool grant for {grant.tool_id} permits {declared.name} but tool requires {actual.name}"
+                    f"tool grant for {grant.tool_id} permits {declared.name} "
+                    f"but tool requires {actual.name}"
                 )
             if declared > actual:
                 raise ValueError(
-                    f"tool grant for {grant.tool_id} overstates risk beyond registered tool classification"
+                    f"tool grant for {grant.tool_id} overstates risk beyond "
+                    "registered tool classification"
                 )
 
             allowed_permissions = self._permission_catalog.get(grant.tool_id, frozenset())

@@ -6,7 +6,7 @@ from nika_core.builder.spec import AgentDefinition
 
 
 class AgentActivationService:
-    """Revalidates an immutable agent version against live catalogs immediately before activation."""
+    """Revalidate immutable Agent Builder policy immediately before durable activation."""
 
     def __init__(self, repository: AgentDefinitionRepository, compiler: AgentCompiler) -> None:
         self._repository = repository
@@ -16,7 +16,7 @@ class AgentActivationService:
         self,
         definition: AgentDefinition,
         *,
-        approved_tool_ids: frozenset[str] = frozenset(),
+        approval_refs: tuple[str, ...] = (),
     ) -> None:
         compiled = self._compiler.compile(definition)
         stored = self._repository.get(definition.agent_id, definition.version)
@@ -31,4 +31,4 @@ class AgentActivationService:
             raise PermissionError(
                 "agent tool policy changed after draft review; save and review a new version"
             )
-        self._repository.activate(definition, approved_tool_ids=approved_tool_ids)
+        self._repository.activate(definition, approval_refs=approval_refs)

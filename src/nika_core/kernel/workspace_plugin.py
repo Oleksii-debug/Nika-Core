@@ -1,15 +1,22 @@
-"""Compatibility import path for the provider-neutral workspace SDK contracts."""
+from __future__ import annotations
 
-from nika_core.workspace_sdk import (
-    WORKSPACE_ENTRYPOINT_GROUP,
-    WorkspaceEntrypointDescriptor,
-    WorkspacePlugin,
-    discover_workspace_entrypoints,
-)
+from typing import Protocol, runtime_checkable
 
-__all__ = [
-    "WORKSPACE_ENTRYPOINT_GROUP",
-    "WorkspaceEntrypointDescriptor",
-    "WorkspacePlugin",
-    "discover_workspace_entrypoints",
-]
+from nika_core.plugins.entrypoints import EntrypointDescriptor, discover_entrypoints
+
+WORKSPACE_ENTRYPOINT_GROUP = "nika_core.workspaces"
+
+
+@runtime_checkable
+class WorkspacePlugin(Protocol):
+    """Stable minimum contract for independently packaged Nika workspaces."""
+
+    workspace_id: str
+    version: int
+
+    def display_name(self) -> str: ...
+
+
+def discover_workspace_entrypoints() -> tuple[EntrypointDescriptor, ...]:
+    """Discover installed workspace package metadata without importing plugin code."""
+    return discover_entrypoints(WORKSPACE_ENTRYPOINT_GROUP)
