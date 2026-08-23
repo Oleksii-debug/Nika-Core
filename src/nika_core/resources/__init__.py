@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, Any
 from nika_core.resources.contracts import (
     ResourceBudget,
     ResourceObserverPort,
+    ResourceOwnerProbePort,
+    ResourceProcessIdentity,
     ResourceRequestIdentity,
     ResourceSnapshot,
 )
@@ -19,6 +21,8 @@ __all__ = [
     "ResourceDecision",
     "ResourceManager",
     "ResourceObserverPort",
+    "ResourceOwnerProbePort",
+    "ResourceProcessIdentity",
     "ResourceRequestIdentity",
     "ResourceSnapshot",
 ]

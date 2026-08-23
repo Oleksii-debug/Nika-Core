@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-M3_EXTENSION_SCHEMA_VERSION = 1
+M3_EXTENSION_SCHEMA_VERSION = 2
 
 M3_EXTENSION_MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -48,5 +48,11 @@ M3_EXTENSION_MIGRATIONS: dict[int, tuple[str, ...]] = {
         ON resource_requests(scope, owner_id, state, sequence)""",
         """CREATE INDEX idx_resource_requests_lease_owner
         ON resource_requests(lease_owner_id, state)""",
+    ),
+    2: (
+        """ALTER TABLE resource_requests
+        ADD COLUMN lease_owner_process_id INTEGER""",
+        """ALTER TABLE resource_requests
+        ADD COLUMN lease_owner_started_at REAL""",
     ),
 }

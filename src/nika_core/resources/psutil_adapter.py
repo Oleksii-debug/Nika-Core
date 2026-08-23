@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import psutil
 
-from nika_core.resources.contracts import ResourceObserverPort, ResourceSnapshot
+from nika_core.resources.contracts import (
+    ResourceObserverPort,
+    ResourceOwnerProbePort,
+    ResourceProcessIdentity,
+    ResourceSnapshot,
+)
 
 
-class PsutilResourceObserver(ResourceObserverPort):
+class PsutilResourceObserver(ResourceObserverPort, ResourceOwnerProbePort):
     def __init__(self, *, disk_path: Path | str | None = None) -> None:
         self._disk_path = Path(disk_path) if disk_path is not None else Path.cwd()
         self._process = psutil.Process()
@@ -29,3 +35,23 @@ class PsutilResourceObserver(ResourceObserverPort):
             process_rss_bytes=int(process_memory.rss),
             gpu_percent=None,
         )
+
+    def current_process_identity(self) -> ResourceProcessIdentity:
+        return ResourceProcessIdentity(
+            process_id=int(self._process.pid),
+            started_at=float(self._process.create_time()),
+        )
+
+    def is_process_alive(self, identity: ResourceProcessIdentity) -> bool:
+        try:
+            process = psutil.Process(identity.process_id)
+            started_at = float(process.create_time())
+            if not math.isclose(started_at, identity.started_at, rel_tol=0.0, abs_tol=1e-6):
+                return False
+            if not process.is_running():
+                return False
+            return process.status() != psutil.STATUS_ZOMBIE
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+            return False
+        except psutil.AccessDenied:
+            return True

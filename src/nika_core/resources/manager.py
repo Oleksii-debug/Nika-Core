@@ -11,6 +11,8 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.resources.contracts import (
     ResourceBudget,
     ResourceObserverPort,
+    ResourceOwnerProbePort,
+    ResourceProcessIdentity,
     ResourceRequestIdentity,
     ResourceSnapshot,
 )
@@ -30,12 +32,20 @@ class ResourceManager:
         observer: ResourceObserverPort,
         *,
         manager_id: str | None = None,
+        owner_probe: ResourceOwnerProbePort | None = None,
     ) -> None:
         self._store = store
         self._observer = observer
         self._manager_id = manager_id or uuid.uuid4().hex
         if not self._manager_id.strip():
             raise ValueError("manager_id must not be empty")
+        if owner_probe is None and isinstance(observer, ResourceOwnerProbePort):
+            owner_probe = observer
+        self._owner_probe = owner_probe
+        self._process_identity = (
+            owner_probe.current_process_identity() if owner_probe is not None else None
+        )
+        self._owned_requests: set[tuple[str, str, str]] = set()
         self._lock = threading.RLock()
 
     @property
@@ -105,20 +115,22 @@ class ResourceManager:
             request_id=request_id,
             product_project_id=product_project_id,
         )
+        request_key = (identity.scope, identity.owner_id, identity.request_id)
         with self._lock, self._store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """SELECT * FROM resource_requests
                 WHERE scope = ? AND owner_id = ? AND request_id = ?""",
-                (identity.scope, identity.owner_id, identity.request_id),
+                request_key,
             ).fetchone()
             if row is None:
                 now = datetime.now(UTC).isoformat()
                 conn.execute(
                     """INSERT INTO resource_requests(
                         scope, owner_id, request_id, product_project_id, state,
-                        lease_owner_id, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, 'waiting', NULL, ?, ?)""",
+                        lease_owner_id, lease_owner_process_id, lease_owner_started_at,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, 'waiting', NULL, NULL, NULL, ?, ?)""",
                     (
                         identity.scope,
                         identity.owner_id,
@@ -128,16 +140,14 @@ class ResourceManager:
                         now,
                     ),
                 )
-                row = conn.execute(
-                    """SELECT * FROM resource_requests
-                    WHERE scope = ? AND owner_id = ? AND request_id = ?""",
-                    (identity.scope, identity.owner_id, identity.request_id),
-                ).fetchone()
             else:
                 _validate_persisted_identity(row, identity)
                 state = row["state"]
                 if state == "granted":
-                    if row["lease_owner_id"] == self._manager_id:
+                    if (
+                        row["lease_owner_id"] == self._manager_id
+                        and request_key in self._owned_requests
+                    ):
                         return ResourceDecision(True, "already_granted")
                     return ResourceDecision(False, "recovery_required")
                 if state in {"released", "cancelled", "released_after_restart"}:
@@ -145,14 +155,15 @@ class ResourceManager:
                     conn.execute(
                         """DELETE FROM resource_requests
                         WHERE scope = ? AND owner_id = ? AND request_id = ?""",
-                        (identity.scope, identity.owner_id, identity.request_id),
+                        request_key,
                     )
                     now = datetime.now(UTC).isoformat()
                     conn.execute(
                         """INSERT INTO resource_requests(
                             scope, owner_id, request_id, product_project_id, state,
-                            lease_owner_id, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, 'waiting', NULL, ?, ?)""",
+                            lease_owner_id, lease_owner_process_id, lease_owner_started_at,
+                            created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, 'waiting', NULL, NULL, NULL, ?, ?)""",
                         (
                             identity.scope,
                             identity.owner_id,
@@ -163,23 +174,7 @@ class ResourceManager:
                         ),
                     )
 
-            position_row = conn.execute(
-                """SELECT COUNT(*) AS position
-                FROM resource_requests
-                WHERE scope = ? AND owner_id = ? AND state = 'waiting'
-                  AND sequence <= (
-                    SELECT sequence FROM resource_requests
-                    WHERE scope = ? AND owner_id = ? AND request_id = ?
-                  )""",
-                (
-                    identity.scope,
-                    identity.owner_id,
-                    identity.scope,
-                    identity.owner_id,
-                    identity.request_id,
-                ),
-            ).fetchone()
-            position = int(position_row["position"])
+            position = _queue_position(conn, identity)
             first = conn.execute(
                 """SELECT request_id FROM resource_requests
                 WHERE scope = ? AND owner_id = ? AND state = 'waiting'
@@ -188,6 +183,9 @@ class ResourceManager:
             ).fetchone()
             if first is None or first["request_id"] != identity.request_id:
                 return ResourceDecision(False, "fifo_wait", position)
+
+            if self._has_unowned_same_manager_lease(conn):
+                return ResourceDecision(False, "recovery_required", position)
 
             budget = _get_budget_with_connection(conn, identity.scope, identity.owner_id)
             active = conn.execute(
@@ -203,50 +201,78 @@ class ResourceManager:
             if reason is not None:
                 return ResourceDecision(False, reason, position)
 
-            conn.execute(
+            process_id = (
+                self._process_identity.process_id
+                if self._process_identity is not None
+                else None
+            )
+            started_at = (
+                self._process_identity.started_at
+                if self._process_identity is not None
+                else None
+            )
+            cursor = conn.execute(
                 """UPDATE resource_requests
-                SET state = 'granted', lease_owner_id = ?, updated_at = ?
+                SET state = 'granted', lease_owner_id = ?,
+                    lease_owner_process_id = ?, lease_owner_started_at = ?, updated_at = ?
                 WHERE scope = ? AND owner_id = ? AND request_id = ? AND state = 'waiting'""",
                 (
                     self._manager_id,
+                    process_id,
+                    started_at,
                     datetime.now(UTC).isoformat(),
                     identity.scope,
                     identity.owner_id,
                     identity.request_id,
                 ),
             )
+            if cursor.rowcount != 1:
+                raise RuntimeError("resource grant lost its durable waiting record")
+            self._owned_requests.add(request_key)
             return ResourceDecision(True, "granted")
 
     def release(self, *, scope: str, owner_id: str, request_id: str) -> bool:
         ResourceRequestIdentity(scope=scope, owner_id=owner_id, request_id=request_id)
-        with self._lock, self._store.connection() as conn:
-            cursor = conn.execute(
-                """UPDATE resource_requests
-                SET state = 'released', lease_owner_id = NULL, updated_at = ?
-                WHERE scope = ? AND owner_id = ? AND request_id = ?
-                  AND state = 'granted' AND lease_owner_id = ?""",
-                (
-                    datetime.now(UTC).isoformat(),
-                    scope,
-                    owner_id,
-                    request_id,
-                    self._manager_id,
-                ),
-            )
-        return cursor.rowcount > 0
+        request_key = (scope, owner_id, request_id)
+        with self._lock:
+            if request_key not in self._owned_requests:
+                return False
+            with self._store.connection() as conn:
+                cursor = conn.execute(
+                    """UPDATE resource_requests
+                    SET state = 'released', lease_owner_id = NULL,
+                        lease_owner_process_id = NULL, lease_owner_started_at = NULL,
+                        updated_at = ?
+                    WHERE scope = ? AND owner_id = ? AND request_id = ?
+                      AND state = 'granted' AND lease_owner_id = ?""",
+                    (
+                        datetime.now(UTC).isoformat(),
+                        scope,
+                        owner_id,
+                        request_id,
+                        self._manager_id,
+                    ),
+                )
+            if cursor.rowcount > 0:
+                self._owned_requests.remove(request_key)
+                return True
+            return False
 
     def cancel_waiting(self, *, scope: str, owner_id: str, request_id: str) -> bool:
         ResourceRequestIdentity(scope=scope, owner_id=owner_id, request_id=request_id)
         with self._lock, self._store.connection() as conn:
             cursor = conn.execute(
                 """UPDATE resource_requests
-                SET state = 'cancelled', lease_owner_id = NULL, updated_at = ?
+                SET state = 'cancelled', lease_owner_id = NULL,
+                    lease_owner_process_id = NULL, lease_owner_started_at = NULL,
+                    updated_at = ?
                 WHERE scope = ? AND owner_id = ? AND request_id = ? AND state = 'waiting'""",
                 (datetime.now(UTC).isoformat(), scope, owner_id, request_id),
             )
         return cursor.rowcount > 0
 
     def stale_lease_owners(self) -> tuple[str, ...]:
+        """Return lease-owner recovery candidates; this does not prove they are stale."""
         with self._store.connection() as conn:
             rows = conn.execute(
                 """SELECT DISTINCT lease_owner_id FROM resource_requests
@@ -256,20 +282,42 @@ class ResourceManager:
         return tuple(row["lease_owner_id"] for row in rows)
 
     def recover_after_restart(self, *, stale_manager_id: str) -> int:
-        """Release one verified stale owner without stealing another live manager's leases."""
+        """Release leases only after independent process-liveness proof says the owner is dead."""
         stale_manager_id = stale_manager_id.strip()
         if not stale_manager_id:
             raise ValueError("stale_manager_id must not be empty")
-        if stale_manager_id == self._manager_id:
-            raise ValueError("current manager cannot be recovered as stale")
+        if self._owner_probe is None:
+            raise RuntimeError("resource owner liveness cannot be verified")
         with self._lock, self._store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                """SELECT lease_owner_process_id, lease_owner_started_at
+                FROM resource_requests
+                WHERE state = 'granted' AND lease_owner_id = ?
+                ORDER BY sequence""",
+                (stale_manager_id,),
+            ).fetchall()
+            if not rows:
+                return 0
+            owner_identity = _persisted_process_identity(rows)
+            if self._owner_probe.is_process_alive(owner_identity):
+                raise RuntimeError("resource lease owner is still alive")
             cursor = conn.execute(
                 """UPDATE resource_requests
-                SET state = 'released_after_restart', lease_owner_id = NULL, updated_at = ?
-                WHERE state = 'granted' AND lease_owner_id = ?""",
-                (datetime.now(UTC).isoformat(), stale_manager_id),
+                SET state = 'released_after_restart', lease_owner_id = NULL,
+                    lease_owner_process_id = NULL, lease_owner_started_at = NULL,
+                    updated_at = ?
+                WHERE state = 'granted' AND lease_owner_id = ?
+                  AND lease_owner_process_id = ? AND lease_owner_started_at = ?""",
+                (
+                    datetime.now(UTC).isoformat(),
+                    stale_manager_id,
+                    owner_identity.process_id,
+                    owner_identity.started_at,
+                ),
             )
+            if cursor.rowcount != len(rows):
+                raise RuntimeError("resource recovery owner identity changed during recovery")
         return int(cursor.rowcount)
 
     def active_count(self, *, scope: str, owner_id: str) -> int:
@@ -290,6 +338,58 @@ class ResourceManager:
                 (scope, owner_id),
             ).fetchall()
         return tuple(row["request_id"] for row in rows)
+
+    def _has_unowned_same_manager_lease(self, conn: Any) -> bool:
+        rows = conn.execute(
+            """SELECT scope, owner_id, request_id FROM resource_requests
+            WHERE state = 'granted' AND lease_owner_id = ?""",
+            (self._manager_id,),
+        ).fetchall()
+        return any(
+            (row["scope"], row["owner_id"], row["request_id"]) not in self._owned_requests
+            for row in rows
+        )
+
+
+def _queue_position(conn: Any, identity: ResourceRequestIdentity) -> int:
+    row = conn.execute(
+        """SELECT COUNT(*) AS position
+        FROM resource_requests
+        WHERE scope = ? AND owner_id = ? AND state = 'waiting'
+          AND sequence <= (
+            SELECT sequence FROM resource_requests
+            WHERE scope = ? AND owner_id = ? AND request_id = ?
+          )""",
+        (
+            identity.scope,
+            identity.owner_id,
+            identity.scope,
+            identity.owner_id,
+            identity.request_id,
+        ),
+    ).fetchone()
+    return int(row["position"])
+
+
+def _persisted_process_identity(rows: list[Any]) -> ResourceProcessIdentity:
+    identities: set[tuple[int, float]] = set()
+    for row in rows:
+        process_id = row["lease_owner_process_id"]
+        started_at = row["lease_owner_started_at"]
+        if process_id is None or started_at is None:
+            raise RuntimeError("resource lease has no independently verifiable process identity")
+        try:
+            identity = ResourceProcessIdentity(
+                process_id=process_id,
+                started_at=started_at,
+            )
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("resource lease process identity is corrupt") from exc
+        identities.add((identity.process_id, identity.started_at))
+    if len(identities) != 1:
+        raise RuntimeError("resource manager ID spans multiple process identities")
+    process_id, started_at = next(iter(identities))
+    return ResourceProcessIdentity(process_id=process_id, started_at=started_at)
 
 
 def _get_budget_with_connection(conn: Any, scope: str, owner_id: str) -> ResourceBudget:

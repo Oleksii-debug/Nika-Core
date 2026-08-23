@@ -12,6 +12,7 @@ from nika_core.resources import (
     PsutilResourceObserver,
     ResourceBudget,
     ResourceManager,
+    ResourceProcessIdentity,
     ResourceSnapshot,
 )
 from nika_core.scheduler import (
@@ -49,6 +50,28 @@ class FakeObserver:
             process_rss_bytes=self.process_rss,
             gpu_percent=self.gpu,
         )
+
+
+class FakeOwnerObserver(FakeObserver):
+    def __init__(
+        self,
+        *,
+        process_id: int,
+        started_at: float,
+        live_processes: set[tuple[int, float]],
+    ) -> None:
+        super().__init__()
+        self._identity = ResourceProcessIdentity(
+            process_id=process_id,
+            started_at=started_at,
+        )
+        self._live_processes = live_processes
+
+    def current_process_identity(self) -> ResourceProcessIdentity:
+        return self._identity
+
+    def is_process_alive(self, identity: ResourceProcessIdentity) -> bool:
+        return (identity.process_id, identity.started_at) in self._live_processes
 
 
 def _store(tmp_path: Path) -> SQLiteStore:
@@ -260,7 +283,7 @@ def test_m3_extension_migration_fails_closed_on_future_version(tmp_path: Path) -
     with store.connection() as conn:
         conn.execute(
             "INSERT INTO m3_extension_schema_migrations(version, applied_at) VALUES (?, ?)",
-            (2, datetime.now(UTC).isoformat()),
+            (3, datetime.now(UTC).isoformat()),
         )
     with pytest.raises(RuntimeError, match="newer than supported"):
         store.initialize()
@@ -284,9 +307,17 @@ def test_extended_resource_budget_persists_across_restart(tmp_path: Path) -> Non
     assert second.get_budget(scope="product_project", owner_id="project-1") == budget
 
 
-def test_resource_restart_releases_stale_grant_and_preserves_fifo(tmp_path: Path) -> None:
+def test_resource_restart_releases_proven_dead_grant_and_preserves_fifo(
+    tmp_path: Path,
+) -> None:
     store = _store(tmp_path)
-    first = ResourceManager(store, FakeObserver(), manager_id="manager-before-crash")
+    live_processes = {(101, 1001.0), (202, 2002.0)}
+    first_observer = FakeOwnerObserver(
+        process_id=101,
+        started_at=1001.0,
+        live_processes=live_processes,
+    )
+    first = ResourceManager(store, first_observer, manager_id="manager-before-crash")
     first.set_budget(
         ResourceBudget(scope="product_project", owner_id="project-1", max_concurrent=1)
     )
@@ -309,7 +340,17 @@ def test_resource_restart_releases_stale_grant_and_preserves_fifo(tmp_path: Path
         product_project_id="project-1",
     ).reason == "fifo_wait"
 
-    restarted = ResourceManager(store, FakeObserver(), manager_id="manager-after-restart")
+    live_processes.remove((101, 1001.0))
+    restarted_observer = FakeOwnerObserver(
+        process_id=202,
+        started_at=2002.0,
+        live_processes=live_processes,
+    )
+    restarted = ResourceManager(
+        store,
+        restarted_observer,
+        manager_id="manager-after-restart",
+    )
     blocked = restarted.request(
         scope="product_project",
         owner_id="project-1",
@@ -348,6 +389,123 @@ def test_resource_restart_releases_stale_grant_and_preserves_fifo(tmp_path: Path
         request_id="active",
         product_project_id="project-1",
     ).granted
+
+
+def test_restart_recovery_cannot_release_a_live_resource_manager_lease(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    live_processes = {(301, 3001.0), (302, 3002.0)}
+    holder = ResourceManager(
+        store,
+        FakeOwnerObserver(
+            process_id=301,
+            started_at=3001.0,
+            live_processes=live_processes,
+        ),
+        manager_id="manager-live-a",
+    )
+    other = ResourceManager(
+        store,
+        FakeOwnerObserver(
+            process_id=302,
+            started_at=3002.0,
+            live_processes=live_processes,
+        ),
+        manager_id="manager-live-b",
+    )
+    holder.set_budget(ResourceBudget(scope="project", owner_id="p1", max_concurrent=1))
+    assert holder.request(scope="project", owner_id="p1", request_id="r1").granted
+
+    with pytest.raises(RuntimeError, match="still alive"):
+        other.recover_after_restart(stale_manager_id=holder.manager_id)
+
+    assert holder.active_count(scope="project", owner_id="p1") == 1
+    second = other.request(scope="project", owner_id="p1", request_id="r2")
+    assert not second.granted
+    assert second.reason == "concurrency_limit"
+
+
+def test_restart_recovery_without_liveness_probe_fails_closed(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    holder = ResourceManager(store, FakeObserver(), manager_id="manager-live-a")
+    other = ResourceManager(store, FakeObserver(), manager_id="manager-live-b")
+    holder.set_budget(ResourceBudget(scope="project", owner_id="p1", max_concurrent=1))
+    assert holder.request(scope="project", owner_id="p1", request_id="r1").granted
+
+    with pytest.raises(RuntimeError, match="cannot be verified"):
+        other.recover_after_restart(stale_manager_id=holder.manager_id)
+
+    assert holder.active_count(scope="project", owner_id="p1") == 1
+    second = other.request(scope="project", owner_id="p1", request_id="r2")
+    assert second.reason == "concurrency_limit"
+
+
+def test_reused_manager_id_cannot_adopt_or_release_an_old_lease(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    live_processes = {(401, 4001.0), (402, 4002.0)}
+    holder = ResourceManager(
+        store,
+        FakeOwnerObserver(
+            process_id=401,
+            started_at=4001.0,
+            live_processes=live_processes,
+        ),
+        manager_id="stable-manager",
+    )
+    holder.set_budget(ResourceBudget(scope="project", owner_id="p1", max_concurrent=2))
+    assert holder.request(scope="project", owner_id="p1", request_id="r1").granted
+
+    restarted = ResourceManager(
+        store,
+        FakeOwnerObserver(
+            process_id=402,
+            started_at=4002.0,
+            live_processes=live_processes,
+        ),
+        manager_id="stable-manager",
+    )
+    replay = restarted.request(scope="project", owner_id="p1", request_id="r1")
+    assert (replay.granted, replay.reason) == (False, "recovery_required")
+    assert not restarted.release(scope="project", owner_id="p1", request_id="r1")
+    new_request = restarted.request(scope="project", owner_id="p1", request_id="r2")
+    assert (new_request.granted, new_request.reason) == (False, "recovery_required")
+
+    live_processes.remove((401, 4001.0))
+    assert restarted.recover_after_restart(stale_manager_id="stable-manager") == 1
+
+
+def test_corrupt_resource_owner_process_identity_fails_closed(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    live_processes = {(501, 5001.0), (502, 5002.0)}
+    holder = ResourceManager(
+        store,
+        FakeOwnerObserver(
+            process_id=501,
+            started_at=5001.0,
+            live_processes=live_processes,
+        ),
+        manager_id="manager-a",
+    )
+    assert holder.request(scope="project", owner_id="p1", request_id="r1").granted
+    with store.connection() as conn:
+        conn.execute(
+            """UPDATE resource_requests
+            SET lease_owner_started_at = NULL
+            WHERE scope = 'project' AND owner_id = 'p1' AND request_id = 'r1'"""
+        )
+    live_processes.remove((501, 5001.0))
+    restarted = ResourceManager(
+        store,
+        FakeOwnerObserver(
+            process_id=502,
+            started_at=5002.0,
+            live_processes=live_processes,
+        ),
+        manager_id="manager-b",
+    )
+    with pytest.raises(RuntimeError, match="no independently verifiable"):
+        restarted.recover_after_restart(stale_manager_id="manager-a")
 
 
 def test_resource_request_product_project_identity_cannot_drift(tmp_path: Path) -> None:
@@ -442,6 +600,7 @@ def test_invalid_resource_observation_fails_closed(tmp_path: Path) -> None:
 def test_psutil_observer_reports_supported_local_metrics(tmp_path: Path) -> None:
     observer = PsutilResourceObserver(disk_path=tmp_path)
     snapshot = observer.snapshot()
+    identity = observer.current_process_identity()
     assert 0 <= snapshot.cpu_percent <= 100
     assert 0 <= snapshot.memory_percent <= 100
     assert snapshot.available_memory_bytes >= 0
@@ -449,3 +608,4 @@ def test_psutil_observer_reports_supported_local_metrics(tmp_path: Path) -> None
     assert snapshot.available_disk_bytes is not None and snapshot.available_disk_bytes >= 0
     assert snapshot.process_rss_bytes is not None and snapshot.process_rss_bytes > 0
     assert snapshot.gpu_percent is None
+    assert observer.is_process_alive(identity)
