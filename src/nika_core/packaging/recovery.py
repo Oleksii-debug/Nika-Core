@@ -118,9 +118,11 @@ def _content_sha256(path: Path) -> str:
     temporary = Path(temporary_name)
     try:
         try:
-            with _readonly_connection(path) as source_connection:
-                with sqlite3.connect(temporary) as target_connection:
-                    source_connection.backup(target_connection)
+            with (
+                _readonly_connection(path) as source_connection,
+                sqlite3.connect(temporary) as target_connection,
+            ):
+                source_connection.backup(target_connection)
         except sqlite3.Error as exc:
             message = f"could not fingerprint SQLite content for {path.name}"
             raise DatabaseRecoveryError(message) from exc
@@ -282,9 +284,11 @@ def create_database_snapshot(
     try:
         backup_path = stage / _DATABASE_NAME
         try:
-            with _readonly_connection(source, include_wal=True) as source_connection:
-                with sqlite3.connect(backup_path) as backup_connection:
-                    source_connection.backup(backup_connection)
+            with (
+                _readonly_connection(source, include_wal=True) as source_connection,
+                sqlite3.connect(backup_path) as backup_connection,
+            ):
+                source_connection.backup(backup_connection)
         except sqlite3.Error as exc:
             raise DatabaseRecoveryError("SQLite online backup failed") from exc
         _fsync_file(backup_path)
