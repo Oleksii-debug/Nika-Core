@@ -158,7 +158,7 @@ def initial_and_fresh(
 
 
 def test_stable_track_identity_ignores_ephemeral_url_and_discovery_ordinal_id() -> None:
-    initial, fresh, expected = initial_and_fresh()
+    _initial, fresh, expected = initial_and_fresh()
     rediscovered = stable_subtitle_tracks(fresh)[0]
     assert expected.track_id.startswith("subtitle-track-stable:")
     assert rediscovered.track_id == expected.track_id
@@ -186,8 +186,40 @@ def test_ambiguous_durable_track_identity_fails_closed() -> None:
     assert caught.value.code == MediaErrorCode.INVALID_METADATA
 
 
-def test_manual_subtitle_rediscovery_hardening_hash_promotion_and_handoff(tmp_path: Path) -> None:
+def test_ambiguous_cli_materialization_selector_fails_before_download(tmp_path: Path) -> None:
+    initial, fresh, expected_track = initial_and_fresh()
+    second = fresh.subtitles[0].model_copy(
+        update={
+            "track_id": "alternate-raw-id",
+            "name": "Alternate Ukrainian",
+            "url": "https://cdn.example.test/alternate.vtt?sig=other-secret",
+        }
+    )
+    ambiguous = YtDlpDiscovery(
+        source=fresh.source,
+        version=fresh.version,
+        subtitles=(fresh.subtitles[0], second),
+        formats=(),
+        sanitized_metadata={},
+    )
+    runner = SubtitleWritingRunner()
+    with pytest.raises(MediaError) as caught:
+        YtDlpSubtitleAcquirer(runner, StaticDiscovery(ambiguous)).acquire_subtitle(
+            initial.source.locator,
+            expected_version=initial.version,
+            expected_track=expected_track,
+            output_root=tmp_path,
+        )
+    assert caught.value.code == MediaErrorCode.INVALID_METADATA
+    assert runner.calls == []
+
+
+def test_manual_subtitle_rediscovery_hardening_hash_promotion_and_handoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     require_subtitle_parser()
+    monkeypatch.setenv("NIKA_FAKE_TOKEN", "must-not-reach-child")
     initial, fresh, expected_track = initial_and_fresh()
     runner = SubtitleWritingRunner()
     result = YtDlpSubtitleAcquirer(
@@ -232,7 +264,11 @@ def test_manual_subtitle_rediscovery_hardening_hash_promotion_and_handoff(tmp_pa
     assert "--cookies-from-browser" not in argv
     assert "--plugin-dirs" not in argv
     assert "--config-locations" not in argv
-    assert env is not None and env["YTDLP_NO_PLUGINS"] == "1"
+    assert env is not None
+    assert env["YTDLP_NO_PLUGINS"] == "1"
+    assert env["PYTHONNOUSERSITE"] == "1"
+    assert env["PYTHONSAFEPATH"] == "1"
+    assert "NIKA_FAKE_TOKEN" not in env
     assert argv[-1] == initial.source.locator
     joined = " ".join(argv)
     assert "cdn.example.test" not in joined
@@ -398,9 +434,10 @@ def test_manual_and_automatic_tracks_follow_different_quality_policy(tmp_path: P
     auto_root = tmp_path / "auto"
     auto_root.mkdir()
     auto_initial, auto_fresh, auto_track = initial_and_fresh(kind=SubtitleKind.AUTOMATIC)
+    auto_runner = SubtitleWritingRunner(one_segment)
     with pytest.raises(MediaError) as low_quality:
         YtDlpSubtitleAcquirer(
-            SubtitleWritingRunner(one_segment),
+            auto_runner,
             StaticDiscovery(auto_fresh),
         ).acquire_subtitle(
             auto_initial.source.locator,
@@ -409,5 +446,8 @@ def test_manual_and_automatic_tracks_follow_different_quality_policy(tmp_path: P
             output_root=auto_root,
         )
     assert low_quality.value.code == MediaErrorCode.LOW_QUALITY_SUBTITLE
+    auto_argv = auto_runner.calls[0][0]
+    assert "--write-auto-subs" in auto_argv
+    assert "--write-subs" not in auto_argv
     assert not list(auto_root.glob("*.subtitle.*"))
     assert not list(auto_root.glob(".*.subtitle-staging-*"))
