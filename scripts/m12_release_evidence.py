@@ -3,7 +3,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from nika_core.packaging.release import verify_distributable_evidence
+from nika_core.packaging.release import (
+    verify_distributable_evidence,
+    verify_release_archive,
+)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -25,6 +28,8 @@ def main() -> int:
         source_sha=args.source_sha,
         artifact_reference=args.artifact_reference,
     )
+    if not findings:
+        findings = verify_release_archive(args.artifact, source_sha=args.source_sha)
     if findings:
         raise SystemExit("M12 distributable evidence verification failed: " + ", ".join(findings))
     print("M12 distributable evidence verified")
