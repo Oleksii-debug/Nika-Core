@@ -62,6 +62,10 @@ def _store(tmp_path) -> SQLiteStore:
     return store
 
 
+def _task_id(store: SQLiteStore) -> str:
+    return TaskQueue(store).create(workspace_id="proof", agent_id="deterministic").task_id
+
+
 def _action(*, arguments: dict[str, object] | None = None) -> DeterministicAction:
     return DeterministicAction(
         action_id="write-result",
@@ -178,6 +182,7 @@ def test_process_loss_after_tool_effect_leaves_pending_and_blocks_replay(tmp_pat
 
 def test_completed_effect_survives_loss_before_brain_applies_state(tmp_path) -> None:
     store = _store(tmp_path)
+    task_id = _task_id(store)
     ledger = IdempotencyLedger(store)
     base_journal = RuntimeIdempotencyEffectJournal(ledger)
     effects = 0
@@ -202,14 +207,14 @@ def test_completed_effect_survives_loss_before_brain_applies_state(tmp_path) -> 
         _run(
             _brain(tools=tools, journal=crashing_journal),
             _action(),
-            task_id="task-1",
+            task_id=task_id,
         )
     except _SimulatedProcessLoss:
         pass
     else:  # pragma: no cover - fixture must stop after durable completion
         raise AssertionError("simulated process loss did not escape")
 
-    records = ledger.list_for_task("task-1")
+    records = ledger.list_for_task(task_id)
     assert len(records) == 1
     assert records[0].status == IdempotencyStatus.COMPLETED
     assert effects == 1
@@ -217,7 +222,7 @@ def test_completed_effect_survives_loss_before_brain_applies_state(tmp_path) -> 
     restarted = _run(
         _brain(tools=tools, journal=base_journal),
         _action(),
-        task_id="task-1",
+        task_id=task_id,
     )
     assert restarted.ok
     assert restarted.completed_actions == ("write-result",)
@@ -227,6 +232,7 @@ def test_completed_effect_survives_loss_before_brain_applies_state(tmp_path) -> 
 
 def test_approval_denial_releases_unused_effect_reservation(tmp_path) -> None:
     store = _store(tmp_path)
+    task_id = _task_id(store)
     ledger = IdempotencyLedger(store)
     journal = RuntimeIdempotencyEffectJournal(ledger)
     action = _action()
@@ -249,11 +255,11 @@ def test_approval_denial_releases_unused_effect_reservation(tmp_path) -> None:
     denied = _run(
         _brain(tools=denied_tools, journal=journal),
         action,
-        task_id="task-approval",
+        task_id=task_id,
     )
     assert denied.error_code == DeterministicErrorCode.TOOL_EXECUTION_FAILED
     assert denied.error == "approval required"
-    assert ledger.list_for_task("task-approval") == ()
+    assert ledger.list_for_task(task_id) == ()
     assert calls == 0
 
     async def approve(_spec, _call) -> bool:
@@ -271,15 +277,16 @@ def test_approval_denial_releases_unused_effect_reservation(tmp_path) -> None:
     approved = _run(
         _brain(tools=approved_tools, journal=journal),
         action,
-        task_id="task-approval",
+        task_id=task_id,
     )
     assert approved.ok
     assert calls == 1
-    assert ledger.list_for_task("task-approval")[0].status == IdempotencyStatus.COMPLETED
+    assert ledger.list_for_task(task_id)[0].status == IdempotencyStatus.COMPLETED
 
 
 def test_changed_effect_arguments_cannot_rebind_pending_identity(tmp_path) -> None:
     store = _store(tmp_path)
+    task_id = _task_id(store)
     ledger = IdempotencyLedger(store)
     journal = RuntimeIdempotencyEffectJournal(ledger)
     calls = 0
@@ -302,7 +309,7 @@ def test_changed_effect_arguments_cannot_rebind_pending_identity(tmp_path) -> No
         _run(
             _brain(tools=tools, journal=journal),
             _action(arguments={"target": "first.txt"}),
-            task_id="task-conflict",
+            task_id=task_id,
         )
     except _SimulatedProcessLoss:
         pass
@@ -310,7 +317,7 @@ def test_changed_effect_arguments_cannot_rebind_pending_identity(tmp_path) -> No
     changed = _run(
         _brain(tools=tools, journal=journal),
         _action(arguments={"target": "other.txt"}),
-        task_id="task-conflict",
+        task_id=task_id,
     )
     assert changed.error_code == DeterministicErrorCode.SIDE_EFFECT_IDENTITY_CONFLICT
     assert calls == 1
