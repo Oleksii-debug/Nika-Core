@@ -84,6 +84,20 @@ class Port:
         self.inspected.append(request)
         return MaintenanceResult(True, False, (f"provider://{request.request_id}/inspected",))
 
+    def verify(
+        self,
+        *,
+        project_id: str,
+        service: DeployableService,
+        request: MaintenanceRequest,
+    ) -> bool:
+        return (
+            project_id == "project-a"
+            and service.project_id == project_id
+            and request.service_id == service.service_id
+            and request.approval_ref == f"approval://{service.service_id}/maintenance"
+        )
+
 
 def request(service_id: str, request_id: str | None = None) -> MaintenanceRequest:
     return MaintenanceRequest(
@@ -98,7 +112,7 @@ def request(service_id: str, request_id: str | None = None) -> MaintenanceReques
 
 def test_maintenance_side_effect_rejects_missing_and_cross_service_evidence() -> None:
     port = Port()
-    coordinator = ProductOperationsCoordinator("project-a", port)
+    coordinator = ProductOperationsCoordinator("project-a", port, port)
     api = service("api", release=10)
     web = service("web", release=11)
     coordinator.register(api)
@@ -234,7 +248,7 @@ def test_restore_rejects_derived_health_credential_and_node_loss_tamper_atomical
 
 def test_restore_rejects_maintenance_without_service_evidence_or_approval() -> None:
     port = Port()
-    coordinator = ProductOperationsCoordinator("project-a", port)
+    coordinator = ProductOperationsCoordinator("project-a", port, port)
     api = service("api", release=50)
     coordinator.register(api)
     coordinator.record_observation(healthy(api))
@@ -303,7 +317,7 @@ def test_contracts_reject_boolean_numeric_and_duplicate_evidence_identity() -> N
 
 def test_fifty_service_maintenance_remains_service_isolated_after_restart() -> None:
     port = Port()
-    coordinator = ProductOperationsCoordinator("project-a", port)
+    coordinator = ProductOperationsCoordinator("project-a", port, port)
     maintained: set[str] = set()
     for index in range(50):
         service_id = f"svc-{index:02d}"
@@ -315,7 +329,7 @@ def test_fifty_service_maintenance_remains_service_isolated_after_restart() -> N
             coordinator.request_maintenance(request(service_id))
 
     snapshot = coordinator.snapshot()
-    restarted = ProductOperationsCoordinator("project-a")
+    restarted = ProductOperationsCoordinator("project-a", approval_authority=port)
     restarted.restore(snapshot)
     records = {item.service.service_id: item for item in restarted.snapshot().services}
 

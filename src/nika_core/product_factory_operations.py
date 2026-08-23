@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from threading import RLock
 
 from .product_factory_operations_contracts import (
     DeployableService,
     MaintenanceAction,
+    MaintenanceApprovalAuthorityPort,
     MaintenanceRequest,
     MaintenanceResult,
     MaintenanceState,
@@ -72,10 +74,12 @@ class ProjectHealthSummary:
 class ProductOperationsCoordinator:
     project_id: str
     port: ProductOperationsPort | None = None
+    approval_authority: MaintenanceApprovalAuthorityPort | None = None
     _services: dict[str, ServiceRecord] = field(default_factory=dict, init=False, repr=False)
     _maintenance: dict[str, MaintenanceRecord] = field(default_factory=dict, init=False, repr=False)
     _revoked: set[str] = field(default_factory=set, init=False, repr=False)
     _down_nodes: set[str] = field(default_factory=set, init=False, repr=False)
+    _maintenance_lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not self.project_id.strip():
@@ -261,60 +265,66 @@ class ProductOperationsCoordinator:
         return updated
 
     def request_maintenance(self, request: MaintenanceRequest) -> MaintenanceRecord:
-        record = self._require(request.service_id)
-        existing = self._maintenance.get(request.request_id)
-        if existing is not None:
-            if existing.request != request:
+        with self._maintenance_lock:
+            record = self._require(request.service_id)
+            existing = self._maintenance.get(request.request_id)
+            if existing is not None:
+                if existing.request != request:
+                    raise ProductOperationsError(
+                        "maintenance request id conflicts with prior payload"
+                    )
+                return existing
+            if self.port is None or request.approval_ref is None:
                 raise ProductOperationsError(
-                    "maintenance request id conflicts with prior payload"
+                    "maintenance side effect requires configured port and explicit approval"
                 )
-            return existing
-        if self.port is None or request.approval_ref is None:
-            raise ProductOperationsError(
-                "maintenance side effect requires configured port and explicit approval"
+            self._validate_maintenance_authority(record, request)
+            result = self.port.apply(request)
+            if not isinstance(result, MaintenanceResult):
+                raise ProductOperationsError(
+                    "maintenance port returned invalid result evidence"
+                )
+            saved = MaintenanceRecord(request, result)
+            self._maintenance[request.request_id] = saved
+            self._services[request.service_id] = ServiceRecord(
+                record.service,
+                record.health,
+                _maintenance_state(request.action, result),
+                record.observation,
+                record.rollback,
+                record.blocked_credentials,
+                record.node_loss,
             )
-        self._validate_maintenance_authority(record, request)
-        result = self.port.apply(request)
-        if not isinstance(result, MaintenanceResult):
-            raise ProductOperationsError("maintenance port returned invalid result evidence")
-        saved = MaintenanceRecord(request, result)
-        self._maintenance[request.request_id] = saved
-        self._services[request.service_id] = ServiceRecord(
-            record.service,
-            record.health,
-            _maintenance_state(request.action, result),
-            record.observation,
-            record.rollback,
-            record.blocked_credentials,
-            record.node_loss,
-        )
-        return saved
+            return saved
 
     def reconcile_maintenance(self, request_id: str) -> MaintenanceRecord:
-        if request_id not in self._maintenance:
-            raise ProductOperationsError("unknown maintenance request")
-        current = self._maintenance[request_id]
-        if not current.result.uncertain:
-            return current
-        if self.port is None:
-            raise ProductOperationsError("maintenance side-effect port is not configured")
-        record = self._require(current.request.service_id)
-        self._validate_maintenance_authority(record, current.request)
-        result = self.port.inspect(current.request)
-        if not isinstance(result, MaintenanceResult):
-            raise ProductOperationsError("maintenance port returned invalid inspection evidence")
-        saved = MaintenanceRecord(current.request, result, reconciled=True)
-        self._maintenance[request_id] = saved
-        self._services[record.service.service_id] = ServiceRecord(
-            record.service,
-            record.health,
-            _maintenance_state(current.request.action, result),
-            record.observation,
-            record.rollback,
-            record.blocked_credentials,
-            record.node_loss,
-        )
-        return saved
+        with self._maintenance_lock:
+            if request_id not in self._maintenance:
+                raise ProductOperationsError("unknown maintenance request")
+            current = self._maintenance[request_id]
+            if not current.result.uncertain:
+                return current
+            if self.port is None:
+                raise ProductOperationsError("maintenance side-effect port is not configured")
+            record = self._require(current.request.service_id)
+            self._validate_maintenance_authority(record, current.request)
+            result = self.port.inspect(current.request)
+            if not isinstance(result, MaintenanceResult):
+                raise ProductOperationsError(
+                    "maintenance port returned invalid inspection evidence"
+                )
+            saved = MaintenanceRecord(current.request, result, reconciled=True)
+            self._maintenance[request_id] = saved
+            self._services[record.service.service_id] = ServiceRecord(
+                record.service,
+                record.health,
+                _maintenance_state(current.request.action, result),
+                record.observation,
+                record.rollback,
+                record.blocked_credentials,
+                record.node_loss,
+            )
+            return saved
 
     def health_summary(self) -> ProjectHealthSummary:
         bucket = {state: [] for state in ServiceHealth}
@@ -473,13 +483,12 @@ class ProductOperationsCoordinator:
             refs.update(record.rollback.evidence_refs)
         return refs
 
-    @classmethod
     def _validate_maintenance_authority(
-        cls,
+        self,
         record: ServiceRecord,
         request: MaintenanceRequest,
     ) -> None:
-        known = cls._known_maintenance_evidence(record)
+        known = self._known_maintenance_evidence(record)
         if not known:
             raise ProductOperationsError(
                 "maintenance requires approved service health/rollback evidence"
@@ -487,6 +496,24 @@ class ProductOperationsCoordinator:
         if not set(request.evidence_refs) <= known:
             raise ProductOperationsError(
                 "maintenance evidence is not bound to the requested service"
+            )
+        if request.approval_ref is None or self.approval_authority is None:
+            raise ProductOperationsError(
+                "maintenance requires host-verified trusted approval authority"
+            )
+        try:
+            approved = self.approval_authority.verify(
+                project_id=self.project_id,
+                service=record.service,
+                request=request,
+            )
+        except Exception as exc:  # noqa: BLE001 - trusted boundary must fail closed
+            raise ProductOperationsError(
+                "maintenance trusted approval authority verification failed"
+            ) from exc
+        if approved is not True:
+            raise ProductOperationsError(
+                "maintenance approval is not authorized for exact service/release/request"
             )
 
     @classmethod

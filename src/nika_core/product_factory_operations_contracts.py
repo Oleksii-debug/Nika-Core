@@ -135,6 +135,22 @@ class MaintenanceRequest:
             raise ProductOperationsError("maintenance evidence/approval is invalid")
 
 
+class MaintenanceApprovalAuthorityPort(Protocol):
+    """Host-owned resolver for an exact PF8 maintenance approval subject.
+
+    This is a consumer boundary only. It does not issue/sign approvals and is intended to
+    adapt the canonical M10 trusted approval authority when that authority is integrated.
+    """
+
+    def verify(
+        self,
+        *,
+        project_id: str,
+        service: DeployableService,
+        request: MaintenanceRequest,
+    ) -> bool: ...
+
+
 @dataclass(frozen=True, slots=True)
 class MaintenanceResult:
     applied: bool

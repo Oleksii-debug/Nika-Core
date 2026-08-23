@@ -81,6 +81,22 @@ class FakeOperationsPort:
         return self.results.pop(0)
 
 
+class FakeApprovalAuthority:
+    def verify(
+        self,
+        *,
+        project_id: str,
+        service: DeployableService,
+        request: MaintenanceRequest,
+    ) -> bool:
+        return (
+            project_id == "p-social"
+            and request.service_id == service.service_id
+            and request.approval_ref == "approval:operator-42"
+            and request.evidence_refs == (f"health:{service.service_id}",)
+        )
+
+
 def test_staged_wave_waits_for_exact_dependency_health() -> None:
     coordinator = ProductOperationsCoordinator("p-social")
     api = _service("api", wave=0, sha=10)
@@ -188,7 +204,11 @@ def test_maintenance_requires_approval_and_uncertain_result_reconciles() -> None
         MaintenanceResult(False, True, ("fake:uncertain",)),
         MaintenanceResult(True, False, ("fake:inspected",)),
     )
-    coordinator = ProductOperationsCoordinator("p-social", port)
+    coordinator = ProductOperationsCoordinator(
+        "p-social",
+        port,
+        FakeApprovalAuthority(),
+    )
     api = _service("api", sha=60)
     coordinator.register(api)
     coordinator.record_observation(_observation(api, (0, 1)))
