@@ -9,7 +9,11 @@ from nika_core.intelligence.contracts import (
     DeterministicEffectReservation,
     DeterministicEffectStatus,
 )
-from nika_core.runtime.idempotency import IdempotencyConflictError, IdempotencyLedger
+from nika_core.runtime.idempotency import (
+    IdempotencyConflictError,
+    IdempotencyLedger,
+    IdempotencyStatus,
+)
 
 _OPERATION_TYPE = "deterministic.tool_action"
 
@@ -19,6 +23,15 @@ class RuntimeIdempotencyEffectJournal:
 
     def __init__(self, ledger: IdempotencyLedger) -> None:
         self._ledger = ledger
+
+    def unresolved_operation_keys(self, *, task_id: str) -> tuple[str, ...]:
+        if not task_id.strip():
+            raise ValueError("task_id must not be empty")
+        return tuple(
+            record.operation_key
+            for record in self._ledger.list_for_task(task_id)
+            if record.status in {IdempotencyStatus.PENDING, IdempotencyStatus.UNCERTAIN}
+        )
 
     def reserve(
         self,
