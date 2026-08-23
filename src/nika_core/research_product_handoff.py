@@ -162,11 +162,13 @@ def _formal_authority_rows_conn(
     project_id: str,
     package_id: str,
 ) -> list[Any]:
+    operation_key = _formal_authority_key(project_id, package_id)
     return conn.execute(
         "SELECT operation_key,project_id,operation_kind,entity_id,entity_version,"
         "input_fingerprint FROM product_project_mutation_idempotency "
-        "WHERE project_id=? AND operation_kind=? AND entity_id=? ORDER BY operation_key",
-        (project_id, _FORMAL_AUTH_OPERATION_KIND, package_id),
+        "WHERE operation_key=? OR "
+        "(project_id=? AND operation_kind=? AND entity_id=?) ORDER BY operation_key",
+        (operation_key, project_id, _FORMAL_AUTH_OPERATION_KIND, package_id),
     ).fetchall()
 
 
