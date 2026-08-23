@@ -85,22 +85,25 @@ def test_approval_required_communication_records_durable_authority_and_result(
     assert draft.authorization_ref is None
     assert draft.authorization_fingerprint is None
 
+    default_coordinator = BusinessCommunicationCoordinator()
     with pytest.raises(BusinessCommunicationError, match="approval_ref"):
-        BusinessCommunicationCoordinator.authorize(draft, snapshot)
+        default_coordinator.authorize(draft, snapshot)
 
     with pytest.raises(BusinessCommunicationError, match="trusted communication approval"):
-        BusinessCommunicationCoordinator.authorize(
+        default_coordinator.authorize(
             draft,
             snapshot,
             approval_ref="caller:self-minted-communication-approval",
         )
 
     business_authority.allow_once("approval:communication:1")
-    authorized = BusinessCommunicationCoordinator.authorize(
+    trusted_coordinator = BusinessCommunicationCoordinator(
+        approval_authority=business_authority
+    )
+    authorized = trusted_coordinator.authorize(
         draft,
         snapshot,
         approval_ref="approval:communication:1",
-        approval_authority=business_authority,
     )
     assert authorized.state is CommunicationState.AUTHORIZED
     assert authorized.authorization_ref == "approval:communication:1"
@@ -129,12 +132,12 @@ def test_draft_only_policy_never_creates_send_authority(business_authority) -> N
     snapshot = _snapshot(CommunicationAuthority.DRAFT_ONLY)
     draft = _draft(snapshot)
     business_authority.allow_once("approval:must-not-override-policy")
+    coordinator = BusinessCommunicationCoordinator(approval_authority=business_authority)
     with pytest.raises(BusinessCommunicationError, match="draft-only policy"):
-        BusinessCommunicationCoordinator.authorize(
+        coordinator.authorize(
             draft,
             snapshot,
             approval_ref="approval:must-not-override-policy",
-            approval_authority=business_authority,
         )
     assert draft.state is CommunicationState.DRAFT
     assert draft.authorization_ref is None
@@ -150,14 +153,11 @@ def test_standing_policy_authorization_is_trusted_scoped_and_revocable(
     )
     draft = _draft(snapshot)
     with pytest.raises(BusinessCommunicationError, match="trusted communication approval"):
-        BusinessCommunicationCoordinator.authorize(draft, snapshot)
+        BusinessCommunicationCoordinator().authorize(draft, snapshot)
 
     business_authority.allow_standing(standing_ref)
-    authorized = BusinessCommunicationCoordinator.authorize(
-        draft,
-        snapshot,
-        approval_authority=business_authority,
-    )
+    coordinator = BusinessCommunicationCoordinator(approval_authority=business_authority)
+    authorized = coordinator.authorize(draft, snapshot)
     assert authorized.authorization_ref == standing_ref
     assert authorized.authorization_fingerprint
     assert communication_policy_ref(snapshot.policy) == standing_ref
@@ -165,11 +165,7 @@ def test_standing_policy_authorization_is_trusted_scoped_and_revocable(
     business_authority.revoke(standing_ref)
     other = replace(draft, message_id="message-revoked")
     with pytest.raises(BusinessCommunicationError, match="trusted communication approval"):
-        BusinessCommunicationCoordinator.authorize(
-            other,
-            snapshot,
-            approval_authority=business_authority,
-        )
+        coordinator.authorize(other, snapshot)
 
 
 def test_policy_or_lead_change_requires_redraft_before_authorization(
@@ -184,12 +180,12 @@ def test_policy_or_lead_change_requires_redraft_before_authorization(
     )
     changed_snapshot = replace(snapshot, policy=changed_policy)
     business_authority.allow_once("approval:communication:2")
+    coordinator = BusinessCommunicationCoordinator(approval_authority=business_authority)
     with pytest.raises(BusinessCommunicationError, match="policy changed"):
-        BusinessCommunicationCoordinator.authorize(
+        coordinator.authorize(
             draft,
             changed_snapshot,
             approval_ref="approval:communication:2",
-            approval_authority=business_authority,
         )
 
 
@@ -206,11 +202,11 @@ def test_provider_result_requires_authorization_and_exactly_one_outcome(
         )
 
     business_authority.allow_once("approval:communication:1")
-    authorized = BusinessCommunicationCoordinator.authorize(
+    coordinator = BusinessCommunicationCoordinator(approval_authority=business_authority)
+    authorized = coordinator.authorize(
         draft,
         snapshot,
         approval_ref="approval:communication:1",
-        approval_authority=business_authority,
     )
     with pytest.raises(BusinessCommunicationError, match="exactly one"):
         BusinessCommunicationCoordinator.record_provider_result(authorized, snapshot)
@@ -247,21 +243,20 @@ def test_communication_repository_survives_restart_and_rejects_stale_writer(
     loaded = repository.load("message-1")
     assert loaded == draft
 
+    coordinator = BusinessCommunicationCoordinator(approval_authority=business_authority)
     business_authority.allow_once("approval:communication:1")
-    authorized = BusinessCommunicationCoordinator.authorize(
+    authorized = coordinator.authorize(
         loaded,
         snapshot,
         approval_ref="approval:communication:1",
-        approval_authority=business_authority,
     )
     repository.save(authorized, expected_row_version=draft.row_version)
 
     business_authority.allow_once("approval:communication:stale")
-    stale_authorized = BusinessCommunicationCoordinator.authorize(
+    stale_authorized = coordinator.authorize(
         draft,
         snapshot,
         approval_ref="approval:communication:stale",
-        approval_authority=business_authority,
     )
     with pytest.raises(StaleCommunicationStateError, match="row version changed"):
         repository.save(stale_authorized, expected_row_version=draft.row_version)
@@ -289,11 +284,11 @@ def test_authorization_fingerprint_rejects_message_scope_tamper(business_authori
     snapshot = _snapshot()
     draft = _draft(snapshot)
     business_authority.allow_once("approval:communication:scope")
-    authorized = BusinessCommunicationCoordinator.authorize(
+    coordinator = BusinessCommunicationCoordinator(approval_authority=business_authority)
+    authorized = coordinator.authorize(
         draft,
         snapshot,
         approval_ref="approval:communication:scope",
-        approval_authority=business_authority,
     )
     forged = replace(authorized, payload_ref="artifact:attacker-replaced-payload")
     with pytest.raises(BusinessCommunicationError, match="fingerprint does not match"):
