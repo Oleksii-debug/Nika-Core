@@ -33,7 +33,6 @@ from .product_factory_incident_contracts import (
 )
 from .toolsmith.contracts import AllowedPathPolicy
 
-
 _TERMINAL_INCIDENT_STATES = frozenset({IncidentState.RESOLVED, IncidentState.ROLLED_BACK})
 
 
