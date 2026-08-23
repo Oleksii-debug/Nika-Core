@@ -21,11 +21,15 @@ attestation, approval, and update orchestration remain separate release-control 
 
 ## Snapshot format
 
-A snapshot is one committed directory containing:
+A snapshot is one committed directory containing exactly:
 
 - `database.sqlite3` — SQLite online-backup output;
 - `snapshot-manifest.json` — exact source release SHA, file SHA-256, logical SQLite-content
   SHA-256, byte size, and known migration-version evidence.
+
+Unexpected snapshot-directory entries fail closed. Verification opens already-committed backup
+bytes as immutable SQLite input so a WAL-mode source cannot cause verification itself to create
+`-wal` or `-shm` files inside the snapshot.
 
 Creation occurs in a sibling staging directory. Both files are flushed before the staging
 directory is atomically renamed to the requested snapshot directory. An already-existing valid
@@ -43,6 +47,11 @@ Snapshot creation may run against a live SQLite database and captures committed 
 Restore is intentionally stricter: the application must be quiescent. Existing `-wal`, `-shm`,
 or `-journal` sidecars block restore so stale SQLite sidecars cannot be applied to replaced
 bytes.
+
+Each restore is serialized by a non-blocking operating-system file lock associated with the
+destination database. A second concurrent recovery owner fails closed instead of racing the
+preservation or replacement boundary. The operating system releases the lock on process exit;
+the lock file itself may remain as harmless coordination metadata.
 
 If the destination database already exists and differs from the rollback snapshot, callers
 must supply both its exact current release SHA and a distinct preservation directory. Nika
