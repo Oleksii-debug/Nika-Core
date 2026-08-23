@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import sys
 from importlib import metadata
@@ -29,6 +30,7 @@ RUNTIME_DISTRIBUTIONS = (
 )
 
 _SECTION_RE = re.compile(r"^===== (?P<title>.+?) =====$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _python_license() -> str:
@@ -139,6 +141,41 @@ def _sections(text: str) -> tuple[dict[str, str], tuple[str, ...]]:
             body.append(line)
     commit()
     return parsed, tuple(duplicates)
+
+
+def notice_section_sha256(body: str) -> str:
+    if not isinstance(body, str):
+        raise TypeError("notice section body must be text")
+    return hashlib.sha256(body.strip().encode("utf-8")).hexdigest()
+
+
+def verify_third_party_notice_section(
+    bundle_dir: Path,
+    *,
+    section_title: str,
+    expected_sha256: str,
+) -> tuple[str, ...]:
+    """Verify one exact notice section emitted by the canonical notices subsystem."""
+    if not isinstance(section_title, str) or not section_title.strip():
+        raise ValueError("section_title must be non-empty text")
+    normalized_sha256 = expected_sha256.strip().casefold()
+    if not _SHA256_RE.fullmatch(normalized_sha256):
+        raise ValueError("expected_sha256 must be an exact SHA-256 digest")
+
+    target = bundle_dir / "THIRD_PARTY_NOTICES.txt"
+    if not target.is_file():
+        return ("missing:THIRD_PARTY_NOTICES.txt",)
+    text = target.read_text(encoding="utf-8", errors="replace")
+    sections, duplicates = _sections(text)
+    title = section_title.strip()
+    if title in duplicates:
+        return (f"duplicate:{title}",)
+    body = sections.get(title)
+    if body is None:
+        return (f"missing-section:{title}",)
+    if notice_section_sha256(body) != normalized_sha256:
+        return (f"sha256:{title}",)
+    return ()
 
 
 def verify_third_party_notices(bundle_dir: Path) -> tuple[str, ...]:
