@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 
-
 _DECISION_AUTHORITY_KEY = secrets.token_bytes(32)
 
 
