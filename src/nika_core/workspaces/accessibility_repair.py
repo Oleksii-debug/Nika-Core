@@ -111,8 +111,6 @@ class AccessibilityEvidence:
             raise AccessibilityRepairError("confidence must be finite and between zero and one")
         if type(self.candidate_count) is not int or self.candidate_count < 1:
             raise AccessibilityRepairError("candidate_count must be an exact positive integer")
-        if len(set(self.accessible_controls)) != len(self.accessible_controls):
-            raise AccessibilityRepairError("accessible control names must be unique")
         if any(not item.strip() for item in self.accessible_controls):
             raise AccessibilityRepairError("accessible control names must not be empty")
         if self.contains_sensitive_data:
@@ -280,9 +278,14 @@ class AccessibilityRepairService:
             raise AccessibilityRepairError(
                 "target revision changed after inspection; re-inspection is required"
             )
-        if control_name not in evidence.accessible_controls:
+        control_matches = evidence.accessible_controls.count(control_name)
+        if control_matches == 0:
             raise AccessibilityRepairError(
                 "requested control is not present in the inspected accessibility evidence"
+            )
+        if control_matches != 1:
+            raise AccessibilityRepairError(
+                "requested control identity is ambiguous in accessibility evidence"
             )
         if evidence.method is EvidenceMethod.COORDINATE and not self._coordinate_chain_is_complete(
             evidence
