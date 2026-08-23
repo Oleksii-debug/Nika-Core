@@ -11,6 +11,7 @@ import pytest
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.trading_research import paper_session as session_module
 from nika_core.trading_research.contracts import (
+    Bar,
     EventTime,
     Instrument,
     Provenance,
@@ -345,6 +346,53 @@ def test_long_short_reversal_preserves_exact_decimal_accounting_invariants(tmp_p
     assert final.positions[0].quantity == Decimal(-2)
     assert final.positions[0].average_price == Decimal(99)
     assert session.snapshot.risk_state.peak_equity == Decimal(1000)
+
+
+def test_same_slice_fill_reconstruction_preserves_durable_queue_order(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    session = PaperTradingSession.start(store, _config("queue-order"))
+    session.process_slice(TimeSlice(0, NOW, (_quote(NOW),)))
+
+    for intent_id, side, quantity, limit_price in (
+        ("z-buy-low", Side.BUY, "5", "100"),
+        ("y-buy-high", Side.BUY, "5", "120"),
+        ("a-sell-high", Side.SELL, "7", "120"),
+    ):
+        session.queue_intent(
+            OrderIntent(
+                intent_id=intent_id,
+                instrument=INSTRUMENT,
+                side=side,
+                order_type=OrderType.LIMIT,
+                quantity=Decimal(quantity),
+                submitted_at=NOW,
+                submitted_slice=0,
+                limit_price=Decimal(limit_price),
+            ),
+            mark_price=Decimal(110),
+        )
+
+    at_one = NOW + timedelta(minutes=1)
+    bar = Bar(
+        INSTRUMENT,
+        EventTime(at_one, at_one, at_one),
+        Decimal(110),
+        Decimal(130),
+        Decimal(90),
+        Decimal(110),
+        Decimal(100),
+    )
+    session.process_slice(TimeSlice(1, at_one, (bar,)))
+    before = session.snapshot.account
+    assert before.cash == Decimal(790)
+    assert before.realized_pnl == Decimal(105)
+    assert before.equity == Decimal(1120)
+    assert before.positions[0].quantity == Decimal(3)
+    assert before.positions[0].average_price == Decimal(105)
+
+    restarted = PaperTradingSession.resume(store, "queue-order")
+    assert restarted.snapshot.account == before
+    assert restarted.fill_count == 3
 
 
 def test_same_raw_fill_identity_is_session_scoped_across_two_sessions(tmp_path) -> None:
