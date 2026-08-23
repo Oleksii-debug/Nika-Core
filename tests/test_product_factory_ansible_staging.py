@@ -475,8 +475,8 @@ def test_uncertain_reconcile_rejects_same_sha_wrong_artifact() -> None:
     )
 
 
-def test_rejected_health_never_creates_exact_staging_authority() -> None:
-    adapter, _ = _adapter(
+def test_rejected_health_becomes_uncertain_without_staging_authority() -> None:
+    adapter, runner = _adapter(
         _execution("deploy", {"applied": True}),
         _execution(
             "health",
@@ -488,12 +488,16 @@ def test_rejected_health_never_creates_exact_staging_authority() -> None:
         ),
     )
     fabric = DeploymentFabric(adapter)
+    intent = _intent()
 
-    with pytest.raises(
-        StagingAdapterError,
-        match="different exact release identity",
-    ):
-        fabric.deploy(_intent())
+    uncertain = fabric.deploy(intent)
+    assert uncertain.state is DeploymentState.UNCERTAIN
+    assert fabric.snapshot().healthy_staging == ()
+    assert len(runner.calls) == 2
+
+    duplicate = fabric.deploy(intent)
+    assert duplicate == uncertain
+    assert len(runner.calls) == 2
 
     production = _intent(
         tier=EnvironmentTier.PRODUCTION,
