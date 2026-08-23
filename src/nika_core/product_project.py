@@ -639,12 +639,16 @@ class ProductProjectRepository:
                     )
                 try:
                     spec = ProductProjectSpec.from_dict(parsed_spec)
-                except (KeyError, TypeError, ValueError) as exc:
+                except (AttributeError, KeyError, TypeError, ValueError) as exc:
                     raise ProductProjectError(
                         f"invalid ProductProject specification version {version}"
                     ) from exc
                 parent = spec.supersedes_spec_version
                 reason = spec.revision_reason
+                if type(reason) is not str:
+                    raise ProductProjectError(
+                        f"invalid ProductProject specification version {version} revision reason"
+                    )
                 if version == 1:
                     if parent is not None:
                         raise ProductProjectError(
@@ -776,7 +780,7 @@ class ProductProjectRepository:
             )
         try:
             spec = ProductProjectSpec.from_dict(parsed_spec)
-        except (KeyError, TypeError, ValueError) as exc:
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
             raise ProductProjectError("invalid current ProductProject specification") from exc
         return ProductProject(
             row["project_id"],
