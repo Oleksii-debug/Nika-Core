@@ -506,8 +506,11 @@ def _validate_snapshot(snapshot: TeamLifecycleSnapshot) -> None:
         role = assignment.role
         if not role.role_id.strip():
             raise TeamLifecycleError("role_id must not be empty")
-        if not role.permissions <= snapshot.permission_ceiling:
-            raise TeamLifecycleError("role permissions exceed project permission ceiling")
+        if (
+            assignment.status not in terminal
+            and not role.permissions <= snapshot.permission_ceiling
+        ):
+            raise TeamLifecycleError("current role permissions exceed project permission ceiling")
         seen_generations = generations.setdefault(role.role_id, set())
         if assignment.generation in seen_generations:
             raise TeamLifecycleError("role assignment generations must be unique")
