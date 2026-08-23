@@ -4,7 +4,7 @@ import pathlib
 
 import pytest
 
-import nika_core.toolsmith.execution as execution
+from nika_core.toolsmith import execution
 from nika_core.toolsmith.execution import (
     cleanup_private_git_workspace,
     prepare_private_git_workspace,

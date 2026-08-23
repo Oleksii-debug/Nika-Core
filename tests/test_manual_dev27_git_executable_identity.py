@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-import nika_core.toolsmith.execution as execution
+from nika_core.toolsmith import execution
 from nika_core.toolsmith.execution import prepare_private_git_workspace
 from nika_core.toolsmith.workspace_security import (
     WorkspaceSecurityError,
