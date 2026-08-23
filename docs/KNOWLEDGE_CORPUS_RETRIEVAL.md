@@ -17,8 +17,8 @@ Decision order is **REUSE -> ADAPT -> CUSTOM (thin)**.
   `chunk_text()` API. `SQLiteStore` initializes an independently versioned knowledge schema using
   the same pattern already used for ProductProject schema ownership.
 - **CUSTOM (thin):** Nika-owned artifact/version/provenance/ACL contracts, immutable chunk hashes,
-  current-version selection, integrity checks, and a small deterministic retrieval-evaluation
-  harness.
+  current-version selection, source-identity validation, integrity checks, and a small deterministic
+  retrieval-evaluation harness.
 - **Not adopted:** Qdrant/vector search. The current deterministic evaluation fixture reaches
   recall@3=1.0 and hit@1=1.0 for its exact-term corpus. A vector adapter may be proposed later only
   if a broader curated semantic-query evaluation demonstrates a material retrieval benefit. It may
@@ -62,6 +62,17 @@ Every new version records:
 - `approved_by` authority reference;
 - normalized text and immutable creation time.
 
+When `source_id` is supplied, ingestion validates it against the authoritative Universal Research
+source registries before any corpus row is written. Exactly one durable source identity must exist,
+it must belong to the same workspace, and its durable locator must match the requested locator.
+Cross-workspace source reuse fails with `PermissionError`; missing, ambiguous, or locator-mismatched
+source identity fails with `ValueError`. This closes the AUD03 cross-workspace provenance attack
+without importing DEV23 implementation or creating a second source registry.
+
+A handoff may omit `source_id` when it has no registered Universal Research source identity, but it
+must still provide an approved opaque `source_locator`. That locator is provenance only; it is not a
+filesystem/network authority grant.
+
 Each chunk records deterministic ordinal, exact `[start_char, end_char)` boundaries, chunk SHA-256
 and a deterministic chunk ID framed from workspace/artifact/version/ordinal/hash. Result provenance
 contains all of those fields so a caller can trace the returned text to the exact persisted version.
@@ -94,11 +105,13 @@ changes may accompany a new approved version, where they commit atomically with 
 User queries are normalized, split into terms, escaped as FTS phrases and joined with logical `AND`.
 This prevents raw FTS syntax from becoming the query language. Results order by SQLite BM25 rank,
 then stable artifact/version/chunk identities, so score ties are deterministic. Search limits are
-bounded to 1..100.
+strict integers bounded to 1..100; Python Boolean aliases are rejected.
 
 The evaluation harness in `retrieval_evaluation.py` accepts explicit query/scope/expected-artifact
 cases and reports recall-at-limit plus hit-at-1. It uses the production permission-filtered search
-path, so restricted data cannot receive evaluation credit for an unauthorized scope.
+path, so restricted data cannot receive evaluation credit for an unauthorized scope. Multiple
+matching chunks from one artifact are collapsed to one artifact identity before recall is computed,
+so chunk fan-out cannot inflate retrieval quality above the actual artifact-level result.
 
 ## Migration and restart
 
@@ -113,7 +126,9 @@ exact full-document chunk with boundaries `[0, len(normalized_text))`. Existing 
 retained when present. New ingestions use bounded overlapping chunks with exact offsets.
 
 Restart requires no in-memory reconstruction: current version, history, ACL, chunks, hashes and FTS
-rows are all durable SQLite state.
+rows are all durable SQLite state. Concurrent ingesters serialize through `BEGIN IMMEDIATE`, so an
+exact duplicate race produces one immutable version plus one deduplicated retry rather than two
+versions.
 
 ## Corruption behavior
 
@@ -124,9 +139,10 @@ rows are all durable SQLite state.
 - every chunk has a valid parent version;
 - chunk text matches its SHA-256 and exact source-text boundaries;
 - every authoritative chunk has exactly one matching FTS row;
-- no orphan, duplicate, or stale FTS metadata/body row exists.
+- FTS title/body and metadata match the authoritative version/chunk;
+- no orphan, duplicate, missing, or stale FTS row exists.
 
-Search independently rechecks the selected version hash, chunk hash, boundaries and FTS/body match
+Search independently rechecks the selected version hash, FTS title/body, chunk hash, and boundaries
 before returning a hit. Corrupt material fails closed with `CorpusCorruptionError`; it is not passed
 to an intelligence provider.
 
@@ -134,9 +150,10 @@ to an intelligence provider.
 
 Required repository evidence for this batch is the exact-head `scripts/verify.py` contract:
 `pip check`, Ruff, compileall and the complete pytest suite on Ubuntu and Windows. The focused tests
-cover duplicate/change/reversion/provenance-policy versioning, restart, ACL isolation,
-deterministic tie ranking, literal query handling, provenance and chunk boundaries, corruption and
-orphan FTS rejection, injected transaction rollback, legacy migration, future-schema rejection,
-retrieval evaluation, and real `SQLiteStore` integration.
+cover duplicate/change/reversion/provenance-policy versioning, restart, concurrent duplicate ingest,
+ACL/workspace isolation, DEV23 source-registry provenance binding, the AUD03 cross-workspace oracle,
+deterministic tie ranking, literal query handling, provenance and chunk boundaries, version/chunk/
+FTS corruption, injected transaction rollback, legacy migration, future-schema rejection,
+artifact-distinct retrieval evaluation, Boolean-limit rejection, and real `SQLiteStore` integration.
 
 `HUMAN_TESTED=false`. `NVDA_VERIFIED=false`. This backend batch does not claim a human/NVDA gate.
