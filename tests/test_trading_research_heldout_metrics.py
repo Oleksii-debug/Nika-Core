@@ -23,6 +23,7 @@ from nika_core.trading_research.metrics import (
 
 BASE = datetime(2026, 1, 1, tzinfo=UTC)
 HASH = "a" * 64
+UNIVERSE = "b" * 64
 CLEAN = ReplayDataQuality(0, 0, 0)
 
 
@@ -55,6 +56,7 @@ def score(strategy_id: str, value: str | None, *, partition=Partition.VALIDATION
         None if value is None else Decimal(value),
         HASH,
         CLEAN,
+        UNIVERSE,
         BASE + timedelta(days=9),
         BASE + timedelta(days=9),
         BASE + timedelta(days=15),
@@ -199,6 +201,7 @@ def test_selection_rejects_missing_metric_future_fit_and_survivorship_leakage() 
         future_fit.metric_value,
         future_fit.dataset_semantic_hash,
         CLEAN,
+        UNIVERSE,
         p.validation.start_at + timedelta(seconds=1),
         future_fit.universe_cutoff_at,
         future_fit.evaluated_at,
@@ -212,6 +215,7 @@ def test_selection_rejects_missing_metric_future_fit_and_survivorship_leakage() 
         Decimal(1),
         HASH,
         CLEAN,
+        UNIVERSE,
         BASE + timedelta(days=9),
         p.validation.start_at + timedelta(seconds=1),
         p.validation.end_at,
@@ -244,8 +248,9 @@ def test_heldout_binding_rejects_strategy_dataset_fit_and_universe_mismatch() ->
             "metric_value": Decimal("0.5"),
             "dataset_semantic_hash": HASH,
             "data_quality": CLEAN,
+            "universe_fingerprint": UNIVERSE,
             "fit_cutoff_at": p.test.start_at,
-            "universe_cutoff_at": p.test.start_at,
+            "universe_cutoff_at": selected.universe_cutoff_at,
             "evaluated_at": p.test.end_at,
         }
         values.update(changes)
@@ -256,6 +261,14 @@ def test_heldout_binding_rejects_strategy_dataset_fit_and_universe_mismatch() ->
         bind_held_out_test(p, selected, result(strategy_id="other"))
     with pytest.raises(TradingResearchError, match="dataset"):
         bind_held_out_test(p, selected, result(dataset_semantic_hash="b" * 64))
+    with pytest.raises(CausalityViolation, match="fixed validation universe"):
+        bind_held_out_test(p, selected, result(universe_fingerprint="c" * 64))
+    with pytest.raises(CausalityViolation, match="fixed universe cutoff"):
+        bind_held_out_test(
+            p,
+            selected,
+            result(universe_cutoff_at=selected.universe_cutoff_at - timedelta(seconds=1)),
+        )
     with pytest.raises(CausalityViolation, match="fit"):
         bind_held_out_test(
             p, selected, result(fit_cutoff_at=p.test.start_at + timedelta(seconds=1))
@@ -281,6 +294,7 @@ def test_dirty_data_quality_cannot_select_or_bind_heldout_evidence() -> None:
         Decimal(1),
         HASH,
         ReplayDataQuality(1, 0, 1),
+        UNIVERSE,
         BASE + timedelta(days=9),
         BASE + timedelta(days=9),
         p.validation.end_at,
@@ -298,8 +312,9 @@ def test_dirty_data_quality_cannot_select_or_bind_heldout_evidence() -> None:
         Decimal("0.5"),
         HASH,
         ReplayDataQuality(0, 1, 0),
+        UNIVERSE,
         p.test.start_at,
-        p.test.start_at,
+        selected.universe_cutoff_at,
         p.test.end_at,
     )
     with pytest.raises(TradingResearchError, match="duplicate"):
@@ -317,6 +332,26 @@ def test_metric_direction_and_temporal_evidence_are_reproducible() -> None:
     assert selected.strategy_id == "low"
     assert not selected.higher_is_better
 
+    alternate_universe = score("alternate", "0.3")
+    alternate_universe = CandidateScore(
+        alternate_universe.strategy_id,
+        alternate_universe.partition,
+        alternate_universe.metric_name,
+        alternate_universe.metric_value,
+        alternate_universe.dataset_semantic_hash,
+        alternate_universe.data_quality,
+        "c" * 64,
+        alternate_universe.fit_cutoff_at,
+        alternate_universe.universe_cutoff_at,
+        alternate_universe.evaluated_at,
+    )
+    with pytest.raises(TradingResearchError, match="fixed universe"):
+        select_validation_candidate(
+            p,
+            (score("base", "0.2"), alternate_universe),
+            selected_at=p.validation.end_at,
+        )
+
     too_early = CandidateScore(
         "early",
         Partition.VALIDATION,
@@ -324,6 +359,7 @@ def test_metric_direction_and_temporal_evidence_are_reproducible() -> None:
         Decimal(1),
         HASH,
         CLEAN,
+        UNIVERSE,
         BASE + timedelta(days=9),
         BASE + timedelta(days=9),
         p.validation.end_at - timedelta(seconds=1),
@@ -348,8 +384,9 @@ def test_unavailable_heldout_metric_cannot_be_used_as_promotion_evidence() -> No
             None,
             HASH,
             CLEAN,
+            UNIVERSE,
             p.test.start_at,
-            p.test.start_at,
+            selected.universe_cutoff_at,
             p.test.end_at,
         ),
     )

@@ -26,7 +26,7 @@ releases those paths. No real-money route is introduced.
 - ADAPT Batch 1 validation evidence into strict held-out data-quality evidence. Dirty datasets do
   not silently enter candidate selection or test evidence.
 - CUSTOM(thin) the Nika-owned safety semantics: fixed chronological train/validation/test windows,
-  validation-only candidate selection, deterministic tie-breaking, fit/universe cutoffs,
+  validation-only candidate selection, deterministic tie-breaking, fixed-universe identity/cutoff,
   held-out binding, and promotion-metric fail-closed behavior.
 - No pandas/NumPy/scikit-learn/Gymnasium/QuantStats/Empyrical dependency is added. Current generic
   analytics packages would add a materially larger float/pandas/scipy/plotting surface for a small
@@ -65,16 +65,16 @@ deterministic fingerprint. Candidate selection:
 2. requires a single dataset semantic hash and metric definition;
 3. requires clean duplicate/conflict/gap evidence;
 4. requires candidate fitting to end no later than the train boundary;
-5. requires the universe-construction cutoff to precede the validation window, preventing a
-   future/survivor universe from entering validation evidence;
+5. requires one fixed universe fingerprint and construction cutoff across every candidate; the
+   cutoff must precede validation, preventing a future/survivor universe from entering evidence;
 6. requires the validation metric to be finalized after the validation window and before selection;
 7. requires selection to finish no later than held-out test start;
 8. uses deterministic lexical strategy ID tie-breaking and records metric direction.
 
-Held-out binding accepts only the selected strategy on the test partition, on the same dataset and
-metric. Its fit/universe cutoffs cannot exceed test start, and the test metric cannot be finalized
-before the test window ends. Missing held-out metric evidence cannot be converted into promotion
-evidence.
+Held-out binding accepts only the selected strategy on the test partition, on the same dataset,
+metric, data-quality evidence, fixed universe fingerprint, and exact universe cutoff. Its fit cutoff
+cannot exceed test start, and the test metric cannot be finalized before the test window ends.
+Missing held-out metric evidence cannot be converted into promotion evidence.
 
 These contracts produce evaluation evidence only. They contain no order execution, broker,
 network, account-funding, or real-money authority, and do not weaken the risk-approved execution
@@ -92,7 +92,8 @@ Focused deterministic tests cover:
 - hostile caller Decimal precision without metric drift;
 - overlapping held-out partitions;
 - validation-only selection and deterministic tie-breaking;
-- future-fit, future-universe/survivorship, premature validation and premature held-out evidence;
+- future-fit, future-universe/survivorship, universe substitution, premature validation/test
+  evidence;
 - dirty duplicate/conflict/gap data rejection;
 - dataset/strategy/metric identity mismatch;
 - missing held-out metric rejection for promotion evidence.

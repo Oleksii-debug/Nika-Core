@@ -98,6 +98,7 @@ class CandidateScore:
     metric_value: Decimal | None
     dataset_semantic_hash: str
     data_quality: ReplayDataQuality
+    universe_fingerprint: str
     fit_cutoff_at: datetime
     universe_cutoff_at: datetime
     evaluated_at: datetime
@@ -106,6 +107,7 @@ class CandidateScore:
         if not self.strategy_id.strip() or not self.metric_name.strip():
             raise TradingResearchError("candidate score requires strategy and metric identity")
         _require_digest(self.dataset_semantic_hash, "dataset_semantic_hash")
+        _require_digest(self.universe_fingerprint, "universe_fingerprint")
         if self.metric_value is not None and not self.metric_value.is_finite():
             raise TradingResearchError("candidate metric must be finite when supplied")
         object.__setattr__(
@@ -131,6 +133,9 @@ class SelectionDecision:
     metric_name: str
     metric_value: Decimal
     dataset_semantic_hash: str
+    data_quality: ReplayDataQuality
+    universe_fingerprint: str
+    universe_cutoff_at: datetime
     selected_at: datetime
     protocol_fingerprint: str
     higher_is_better: bool
@@ -142,7 +147,13 @@ class SelectionDecision:
         if not self.metric_value.is_finite():
             raise TradingResearchError("selection metric must be finite")
         _require_digest(self.dataset_semantic_hash, "dataset_semantic_hash")
+        _require_digest(self.universe_fingerprint, "universe_fingerprint")
         _require_digest(self.protocol_fingerprint, "protocol_fingerprint")
+        object.__setattr__(
+            self,
+            "universe_cutoff_at",
+            require_aware_utc(self.universe_cutoff_at, "universe_cutoff_at"),
+        )
         object.__setattr__(
             self,
             "selected_at",
@@ -158,6 +169,7 @@ class PartitionResult:
     metric_value: Decimal | None
     dataset_semantic_hash: str
     data_quality: ReplayDataQuality
+    universe_fingerprint: str
     fit_cutoff_at: datetime
     universe_cutoff_at: datetime
     evaluated_at: datetime
@@ -166,6 +178,7 @@ class PartitionResult:
         if not self.strategy_id.strip() or not self.metric_name.strip():
             raise TradingResearchError("partition result requires strategy and metric identity")
         _require_digest(self.dataset_semantic_hash, "dataset_semantic_hash")
+        _require_digest(self.universe_fingerprint, "universe_fingerprint")
         if self.metric_value is not None and not self.metric_value.is_finite():
             raise TradingResearchError("partition metric must be finite when supplied")
         object.__setattr__(
@@ -215,6 +228,9 @@ def select_validation_candidate(
 
     metric_name = scores[0].metric_name
     dataset_hash = scores[0].dataset_semantic_hash
+    data_quality = scores[0].data_quality
+    universe_fingerprint = scores[0].universe_fingerprint
+    universe_cutoff_at = scores[0].universe_cutoff_at
     seen_strategies: set[str] = set()
     for score in scores:
         if score.partition is not Partition.VALIDATION:
@@ -223,6 +239,12 @@ def select_validation_candidate(
             raise TradingResearchError("candidate scores must use one metric")
         if score.dataset_semantic_hash != dataset_hash:
             raise TradingResearchError("candidate scores must use one dataset version")
+        if score.data_quality != data_quality:
+            raise TradingResearchError("candidate scores disagree on dataset quality evidence")
+        if score.universe_fingerprint != universe_fingerprint:
+            raise TradingResearchError("candidate scores must use one fixed universe")
+        if score.universe_cutoff_at != universe_cutoff_at:
+            raise TradingResearchError("candidate scores must use one universe cutoff")
         if score.strategy_id in seen_strategies:
             raise TradingResearchError("candidate strategy IDs must be unique")
         seen_strategies.add(score.strategy_id)
@@ -252,6 +274,9 @@ def select_validation_candidate(
         metric_name=metric_name,
         metric_value=best_value,
         dataset_semantic_hash=dataset_hash,
+        data_quality=data_quality,
+        universe_fingerprint=universe_fingerprint,
+        universe_cutoff_at=universe_cutoff_at,
         selected_at=selected_at,
         protocol_fingerprint=protocol.fingerprint,
         higher_is_better=higher_is_better,
@@ -279,6 +304,12 @@ def bind_held_out_test(
         raise TradingResearchError(
             "held-out dataset has duplicate, conflicting, or missing-sequence evidence"
         )
+    if result.data_quality != selection.data_quality:
+        raise TradingResearchError("held-out result changes dataset quality evidence")
+    if result.universe_fingerprint != selection.universe_fingerprint:
+        raise CausalityViolation("held-out result changes the fixed validation universe")
+    if result.universe_cutoff_at != selection.universe_cutoff_at:
+        raise CausalityViolation("held-out result changes the fixed universe cutoff")
     if result.fit_cutoff_at > protocol.test.start_at:
         raise CausalityViolation("held-out strategy fit includes test/future data")
     if result.universe_cutoff_at > protocol.test.start_at:
