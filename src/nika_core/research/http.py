@@ -3,13 +3,12 @@ from __future__ import annotations
 import socket
 from collections.abc import Callable
 from dataclasses import dataclass
-from enum import StrEnum
 from ipaddress import ip_address
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 
-from nika_core.research.models import RefreshDisposition
+from nika_core.research.models import RefreshDisposition, ResearchFetchFailureClass
 
 
 class NetworkPolicyError(RuntimeError):
@@ -26,16 +25,6 @@ class UnsupportedResearchSourceError(NetworkPolicyError):
 
 class ResponseTooLargeError(RuntimeError):
     pass
-
-
-class ResearchFetchFailureClass(StrEnum):
-    NETWORK = "network"
-    PRIVATE = "private"
-    AUTH = "auth"
-    UNSUPPORTED = "unsupported"
-    POLICY = "policy"
-    HTTP = "http"
-    RESOURCE = "resource"
 
 
 Resolver = Callable[[str, int], tuple[str, ...]]
