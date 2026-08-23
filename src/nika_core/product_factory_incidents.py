@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from threading import RLock
 
 from .product_factory_coordinator import (
     CoordinatorError,
@@ -52,6 +53,7 @@ class IncidentRepairReleaseCoordinator:
     project_id: str
     _incidents: dict[str, IncidentRecord] = field(default_factory=dict, init=False, repr=False)
     _fingerprints: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _incident_open_lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not self.project_id.strip():
@@ -84,24 +86,25 @@ class IncidentRepairReleaseCoordinator:
                     "incident evidence is not present in approved operations evidence"
                 )
 
-        existing = self._incidents.get(incident_id)
-        if existing is not None:
-            if existing.trigger.fingerprint != trigger.fingerprint:
-                raise ProductIncidentError("incident id conflicts with prior trigger")
-            return existing
+        with self._incident_open_lock:
+            existing = self._incidents.get(incident_id)
+            if existing is not None:
+                if existing.trigger.fingerprint != trigger.fingerprint:
+                    raise ProductIncidentError("incident id conflicts with prior trigger")
+                return existing
 
-        duplicate_id = self._fingerprints.get(trigger.fingerprint)
-        if duplicate_id is not None:
-            duplicate = self._incidents[duplicate_id]
-            if duplicate.state not in _TERMINAL_INCIDENT_STATES:
-                return duplicate
-            if trigger.observed_at <= self._terminal_observed_at(duplicate):
-                return duplicate
+            duplicate_id = self._fingerprints.get(trigger.fingerprint)
+            if duplicate_id is not None:
+                duplicate = self._incidents[duplicate_id]
+                if duplicate.state not in _TERMINAL_INCIDENT_STATES:
+                    return duplicate
+                if trigger.observed_at <= self._terminal_observed_at(duplicate):
+                    return duplicate
 
-        record = IncidentRecord(incident_id, trigger, IncidentState.OPEN)
-        self._incidents[incident_id] = record
-        self._fingerprints[trigger.fingerprint] = incident_id
-        return record
+            record = IncidentRecord(incident_id, trigger, IncidentState.OPEN)
+            self._incidents[incident_id] = record
+            self._fingerprints[trigger.fingerprint] = incident_id
+            return record
 
     def create_repair_work_order(self, work_order: RepairWorkOrder) -> IncidentRecord:
         record = self._require(work_order.incident_id)
