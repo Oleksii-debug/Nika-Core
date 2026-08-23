@@ -164,11 +164,13 @@ Cancelled and expired orders remain terminal and are excluded from the executabl
 6. dataset semantic fingerprint/cutoff mismatch and cutoff enforcement;
 7. simulated SQLite crash during the final session-row update, proving fill/order/session rollback;
 8. exact long -> short reversal with Decimal cash/fees/P&L/equity/gross/net invariants;
-9. two sessions producing the same engine raw fill identity without cross-session dedup collision;
-10. durable order/config tamper fail-closed;
-11. no held-out/promotion/real-money config surface and no network-client imports.
+9. same-slice multi-order fill reconstruction in durable queue order with path-dependent
+   realized P&L and average basis;
+10. two sessions producing the same engine raw fill identity without cross-session dedup collision;
+11. durable order/config tamper fail-closed;
+12. no held-out/promotion/real-money config surface and no network-client imports.
 
-The local isolated harness used during implementation passed all 11 focused tests. Repository CI on
+The local isolated harness used during implementation passed all 12 focused tests. Repository CI on
 the exact GitHub candidate remains the acceptance authority.
 
 ## Acceptance truth
