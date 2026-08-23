@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from pathlib import Path
 import re
+from pathlib import Path
 
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.action_registry import ActionDefinition, ActionRegistry, Keymap
-
 
 APP_JS = Path("src/nika_core/ui/web/app.js")
 
