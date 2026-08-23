@@ -19,6 +19,7 @@ from nika_core.experiments.contracts import (
     ReplayCase,
     StrategyRef,
 )
+from nika_core.experiments.decision import decide_terminal
 
 
 class ExperimentRepository(Protocol):
@@ -29,31 +30,6 @@ class ExperimentRepository(Protocol):
     def save(self, snapshot: ExperimentSnapshot) -> None: ...
 
 
-class InMemoryExperimentRepository:
-    """Deterministic test/prototype adapter behind the M8 repository port."""
-
-    def __init__(self) -> None:
-        self._items: dict[str, ExperimentSnapshot] = {}
-
-    def create(self, snapshot: ExperimentSnapshot) -> None:
-        experiment_id = snapshot.definition.experiment_id
-        if experiment_id in self._items:
-            raise ValueError(f"experiment already exists: {experiment_id}")
-        self._items[experiment_id] = deepcopy(snapshot)
-
-    def get(self, experiment_id: str) -> ExperimentSnapshot:
-        try:
-            return deepcopy(self._items[experiment_id])
-        except KeyError as exc:
-            raise KeyError(f"unknown experiment: {experiment_id}") from exc
-
-    def save(self, snapshot: ExperimentSnapshot) -> None:
-        experiment_id = snapshot.definition.experiment_id
-        if experiment_id not in self._items:
-            raise KeyError(f"unknown experiment: {experiment_id}")
-        self._items[experiment_id] = deepcopy(snapshot)
-
-
 _ALLOWED_TRANSITIONS = {
     (ExperimentStatus.DRAFT, ExperimentStatus.RUNNING),
     (ExperimentStatus.RUNNING, ExperimentStatus.COMPLETED),
@@ -62,15 +38,44 @@ _ALLOWED_TRANSITIONS = {
 }
 
 
+class InMemoryExperimentRepository:
+    """Deterministic test/prototype adapter behind the M8 repository port."""
+
+    def __init__(self) -> None:
+        self._items: dict[str, ExperimentSnapshot] = {}
+
+    def create(self, snapshot: ExperimentSnapshot) -> None:
+        _validate_new_snapshot(snapshot)
+        experiment_id = snapshot.definition.experiment_id
+        if experiment_id in self._items:
+            raise ValueError(f"experiment already exists: {experiment_id}")
+        self._items[experiment_id] = deepcopy(snapshot)
+
+    def get(self, experiment_id: str) -> ExperimentSnapshot:
+        try:
+            snapshot = deepcopy(self._items[experiment_id])
+        except KeyError as exc:
+            raise KeyError(f"unknown experiment: {experiment_id}") from exc
+        _validate_authority_state(snapshot)
+        return snapshot
+
+    def save(self, snapshot: ExperimentSnapshot) -> None:
+        experiment_id = snapshot.definition.experiment_id
+        if experiment_id not in self._items:
+            raise KeyError(f"unknown experiment: {experiment_id}")
+        current = self.get(experiment_id)
+        _validate_snapshot_change(current, snapshot)
+        self._items[experiment_id] = deepcopy(snapshot)
+
+
 class SQLiteExperimentRepository:
-    """Durable M8 adapter with immutable definition/evidence and atomic transitions."""
+    """Durable M8 adapter with immutable evidence and controlled transition authority."""
 
     def __init__(self, store: SQLiteStore) -> None:
         self._store = store
 
     def create(self, snapshot: ExperimentSnapshot) -> None:
-        if snapshot.status is not ExperimentStatus.DRAFT or snapshot.observations:
-            raise ValueError("new experiments must begin as an empty draft")
+        _validate_new_snapshot(snapshot)
         now = datetime.now(UTC).isoformat()
         payload = _encode_definition(snapshot.definition)
         with self._store.connection() as conn:
@@ -106,15 +111,7 @@ class SQLiteExperimentRepository:
         with self._store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             current = self._load(conn, experiment_id)
-            if _encode_definition(current.definition) != _encode_definition(snapshot.definition):
-                raise ValueError("experiment definition is immutable")
-            self._validate_evidence_append_only(current, snapshot)
-            transition = (current.status, snapshot.status)
-            if current.status != snapshot.status and transition not in _ALLOWED_TRANSITIONS:
-                raise ValueError(
-                    f"invalid experiment transition: {current.status.value} -> "
-                    f"{snapshot.status.value}"
-                )
+            _validate_snapshot_change(current, snapshot)
             current_keys = {_observation_key(item) for item in current.observations}
             now = datetime.now(UTC).isoformat()
             for item in snapshot.observations:
@@ -173,21 +170,6 @@ class SQLiteExperimentRepository:
         )
 
     @staticmethod
-    def _validate_evidence_append_only(
-        current: ExperimentSnapshot,
-        proposed: ExperimentSnapshot,
-    ) -> None:
-        proposed_map = {_observation_key(item): item for item in proposed.observations}
-        if len(proposed_map) != len(proposed.observations):
-            raise ValueError("duplicate observation evidence")
-        for item in current.observations:
-            candidate = proposed_map.get(_observation_key(item))
-            if candidate is None:
-                raise ValueError("experiment evidence is append-only")
-            if float(candidate.value) != float(item.value):
-                raise ValueError("recorded experiment evidence is immutable")
-
-    @staticmethod
     def _load(conn: sqlite3.Connection, experiment_id: str) -> ExperimentSnapshot:
         row = conn.execute(
             "SELECT definition_json, status, selected_candidate_id, previous_champion_id "
@@ -210,13 +192,91 @@ class SQLiteExperimentRepository:
             )
             for item in observation_rows
         )
-        return ExperimentSnapshot(
+        snapshot = ExperimentSnapshot(
             definition=_decode_definition(row["definition_json"]),
             status=ExperimentStatus(row["status"]),
             observations=observations,
             selected_candidate_id=row["selected_candidate_id"],
             previous_champion_id=row["previous_champion_id"],
         )
+        _validate_authority_state(snapshot)
+        return snapshot
+
+
+def _validate_new_snapshot(snapshot: ExperimentSnapshot) -> None:
+    if (
+        snapshot.status is not ExperimentStatus.DRAFT
+        or snapshot.observations
+        or snapshot.selected_candidate_id is not None
+        or snapshot.previous_champion_id is not None
+    ):
+        raise ValueError("new experiments must begin as an empty draft without decision state")
+
+
+def _validate_snapshot_change(
+    current: ExperimentSnapshot,
+    proposed: ExperimentSnapshot,
+) -> None:
+    if _encode_definition(current.definition) != _encode_definition(proposed.definition):
+        raise ValueError("experiment definition is immutable")
+    _validate_evidence_append_only(current, proposed)
+    transition = (current.status, proposed.status)
+    if current.status != proposed.status and transition not in _ALLOWED_TRANSITIONS:
+        raise ValueError(
+            f"invalid experiment transition: {current.status.value} -> {proposed.status.value}"
+        )
+    if proposed.observations != current.observations and not (
+        current.status is ExperimentStatus.RUNNING
+        and proposed.status is ExperimentStatus.RUNNING
+    ):
+        raise ValueError("experiment evidence may only be appended while remaining running")
+    _validate_authority_state(proposed)
+
+
+def _validate_authority_state(snapshot: ExperimentSnapshot) -> None:
+    if snapshot.status in (ExperimentStatus.DRAFT, ExperimentStatus.RUNNING):
+        if (
+            snapshot.selected_candidate_id is not None
+            or snapshot.previous_champion_id is not None
+        ):
+            raise ValueError("nonterminal experiment cannot contain decision state")
+        return
+
+    decision = decide_terminal(snapshot)
+    if snapshot.status in (ExperimentStatus.COMPLETED, ExperimentStatus.PROMOTED):
+        if snapshot.status is not decision.status:
+            raise ValueError("experiment terminal status conflicts with deterministic evidence")
+        if snapshot.selected_candidate_id != decision.selected_candidate_id:
+            raise ValueError("experiment selected candidate conflicts with deterministic evidence")
+        if snapshot.previous_champion_id != decision.previous_champion_id:
+            raise ValueError("experiment previous champion conflicts with deterministic evidence")
+        return
+
+    if snapshot.status is ExperimentStatus.ROLLED_BACK:
+        if decision.status is not ExperimentStatus.PROMOTED:
+            raise ValueError("rollback requires evidence for a prior promotion")
+        if snapshot.previous_champion_id != decision.previous_champion_id:
+            raise ValueError("rollback previous champion conflicts with promotion evidence")
+        if snapshot.selected_candidate_id != decision.previous_champion_id:
+            raise ValueError("rollback must restore the recorded previous champion")
+        return
+
+    raise ValueError(f"unsupported experiment status: {snapshot.status.value}")
+
+
+def _validate_evidence_append_only(
+    current: ExperimentSnapshot,
+    proposed: ExperimentSnapshot,
+) -> None:
+    proposed_map = {_observation_key(item): item for item in proposed.observations}
+    if len(proposed_map) != len(proposed.observations):
+        raise ValueError("duplicate observation evidence")
+    for item in current.observations:
+        candidate = proposed_map.get(_observation_key(item))
+        if candidate is None:
+            raise ValueError("experiment evidence is append-only")
+        if float(candidate.value) != float(item.value):
+            raise ValueError("recorded experiment evidence is immutable")
 
 
 def _observation_key(item: MetricObservation) -> tuple[str, str, str]:
