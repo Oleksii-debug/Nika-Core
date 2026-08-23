@@ -172,7 +172,10 @@ def test_review_authority_failure_is_fail_closed() -> None:
     assert "compliance-scope:untrusted-review-authority" in decision.findings
 
 
-def test_business_delivery_rejects_caller_fabricated_positive_decision(tmp_path) -> None:
+def test_business_delivery_rejects_caller_fabricated_positive_decision(
+    tmp_path,
+    business_authority,
+) -> None:
     factory = BusinessFactory.start(
         objective=BusinessObjective(
             objective_id="objective-authority",
@@ -193,6 +196,7 @@ def test_business_delivery_rejects_caller_fabricated_positive_decision(tmp_path)
             allowed_channel_ids=("sandbox-email",),
             communication_authority=CommunicationAuthority.APPROVAL_REQUIRED,
         ),
+        approval_authority=business_authority,
     )
     factory.identify_opportunity(
         opportunity_id="opportunity-authority",
@@ -209,7 +213,9 @@ def test_business_delivery_rejects_caller_fabricated_positive_decision(tmp_path)
         proposal_id="proposal-authority",
         scope_summary="Build the authorized test product.",
     )
+    business_authority.allow_once("approval:proposal:authority")
     factory.approve_proposal(approval_ref="approval:proposal:authority")
+    business_authority.allow_once("approval:work-order:authority")
     factory.create_work_order(
         work_order_id="work-order-authority",
         scope="Build the authorized test product.",
