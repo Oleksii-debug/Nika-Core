@@ -22,7 +22,6 @@ from nika_core.model_gateway.contracts import (
 )
 from nika_core.resources.contracts import ResourceObserverPort
 
-
 # FoundryLocalManager is a process-wide singleton. A single dedicated worker plus
 # a native-operation lock prevents separate provider instances from overlapping
 # in-process model load/download/inference/unload work.
