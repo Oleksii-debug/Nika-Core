@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-PRODUCT_PROJECT_SCHEMA_VERSION = 2
+PRODUCT_PROJECT_SCHEMA_VERSION = 3
 
 PRODUCT_PROJECT_MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -76,6 +76,28 @@ PRODUCT_PROJECT_MIGRATIONS: dict[int, tuple[str, ...]] = {
         (
             "CREATE INDEX IF NOT EXISTS idx_product_decisions_option "
             "ON product_decisions(project_id, option_id, decision_version DESC)"
+        ),
+    ),
+    3: (
+        """CREATE TABLE IF NOT EXISTS product_project_spec_idempotency (
+            operation_key TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            operation_kind TEXT NOT NULL,
+            expected_row_version INTEGER NOT NULL CHECK(expected_row_version >= 0),
+            previous_spec_version INTEGER NOT NULL CHECK(previous_spec_version > 0),
+            result_spec_version INTEGER NOT NULL CHECK(result_spec_version > 1),
+            result_row_version INTEGER NOT NULL CHECK(result_row_version > 0),
+            input_fingerprint TEXT NOT NULL CHECK(length(input_fingerprint) = 64),
+            spec_sha256 TEXT NOT NULL CHECK(length(spec_sha256) = 64),
+            change_reason TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(operation_key),
+            UNIQUE(project_id, result_spec_version),
+            FOREIGN KEY(project_id) REFERENCES product_projects(project_id)
+        )""",
+        (
+            "CREATE INDEX IF NOT EXISTS idx_product_project_spec_idempotency_result "
+            "ON product_project_spec_idempotency(project_id, result_row_version)"
         ),
     ),
 }
