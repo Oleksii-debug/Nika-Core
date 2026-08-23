@@ -4,7 +4,8 @@ import asyncio
 from dataclasses import replace
 
 from nika_core.kernel.audit import AuditLog
-from nika_core.model_gateway.contracts import (
+
+from .contracts import (
     ModelErrorCode,
     ModelGatewayError,
     ModelProvider,
