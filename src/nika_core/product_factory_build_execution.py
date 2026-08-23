@@ -21,14 +21,87 @@ class BuildExecutionError(ValueError):
     """Raised when PF5 build-execution invariants are violated."""
 
 
+class BuildExecutionPortError(RuntimeError):
+    """Normalized expected transport/provider failure after an execution dispatch."""
+
+
 class BuildExecutionState(StrEnum):
     PENDING = "pending"
     WAITING_FOR_NODE = "waiting_for_node"
+    WAITING_FOR_AUTHORITY = "waiting_for_authority"
     PREPARED = "prepared"
     DISPATCHING = "dispatching"
+    EFFECT_IN_FLIGHT = "effect_in_flight"
     RECONCILE_REQUIRED = "reconcile_required"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovedBuildCommand:
+    command_id: str
+    argv: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.command_id.strip():
+            raise BuildExecutionError("approved build command id must not be empty")
+        _validate_argv(self.argv)
+        executable = self.argv[0].replace("\\", "/").rsplit("/", 1)[-1].casefold()
+        if executable in _GENERIC_SHELL_EXECUTABLES:
+            raise BuildExecutionError("generic shell executables are not valid PF5 build commands")
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectExecutionAuthority:
+    """Host-owned execution authority returned by the trusted composition root."""
+
+    project_id: str
+    repository_id: str
+    work_id: str
+    permissions: frozenset[str]
+    allowed_node_ids: tuple[str, ...]
+    allowed_workspace_paths: tuple[str, ...]
+    network_scopes: tuple[str, ...]
+    credential_refs: tuple[str, ...]
+    commands: tuple[ApprovedBuildCommand, ...]
+    evidence_refs: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not all(value.strip() for value in (self.project_id, self.repository_id, self.work_id)):
+            raise BuildExecutionError("trusted execution authority identity must not be empty")
+        _validate_unique_nonempty(self.allowed_node_ids, "allowed node id")
+        if not self.allowed_node_ids:
+            raise BuildExecutionError("trusted execution authority requires an allowed node")
+        normalized_paths = tuple(
+            _normalize_project_relpath(path) for path in self.allowed_workspace_paths
+        )
+        if len(normalized_paths) != len(set(normalized_paths)) or not normalized_paths:
+            raise BuildExecutionError("trusted workspace authority must be non-empty and unique")
+        object.__setattr__(self, "allowed_workspace_paths", normalized_paths)
+        _validate_unique_nonempty(self.network_scopes, "network scope")
+        _validate_unique_nonempty(self.credential_refs, "credential reference")
+        _validate_unique_nonempty(self.evidence_refs, "authority evidence reference")
+        if not self.evidence_refs:
+            raise BuildExecutionError("trusted execution authority requires provenance evidence")
+        if any("*" in scope for scope in self.network_scopes):
+            raise BuildExecutionError("trusted network authority must not contain wildcard scopes")
+        for credential_ref in self.credential_refs:
+            _validate_credential_ref(credential_ref)
+        command_ids = [command.command_id for command in self.commands]
+        if not command_ids or len(command_ids) != len(set(command_ids)):
+            raise BuildExecutionError("trusted build command ids must be non-empty and unique")
+
+
+class TrustedExecutionAuthorityPort(Protocol):
+    """Trusted host capability; candidate/job payloads must never implement this boundary."""
+
+    def resolve(
+        self,
+        *,
+        project_id: str,
+        repository_id: str,
+        work_id: str,
+    ) -> ProjectExecutionAuthority: ...
 
 
 class ExecutionNodeAvailabilityPort(Protocol):
@@ -42,51 +115,77 @@ class BuildExecutionNodePort(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class ProjectExecutionAuthority:
-    project_id: str
+class BuildExecutionScopeRequest:
     repository_id: str
     workspace_relpath: str
-    allowed_node_ids: tuple[str, ...]
+    requested_node_ids: tuple[str, ...]
     network_scopes: tuple[str, ...] = ()
     credential_refs: tuple[str, ...] = ()
+    command_id: str = "build"
 
     def __post_init__(self) -> None:
-        if not self.project_id.strip() or not self.repository_id.strip():
-            raise BuildExecutionError("execution authority identity must not be empty")
+        if not self.repository_id.strip() or not self.command_id.strip():
+            raise BuildExecutionError(
+                "execution scope repository/command identity must not be empty"
+            )
         normalized = _normalize_project_relpath(self.workspace_relpath)
         object.__setattr__(self, "workspace_relpath", normalized)
-        _validate_unique_nonempty(self.allowed_node_ids, "allowed node id")
-        if not self.allowed_node_ids:
-            raise BuildExecutionError("execution authority requires at least one authorized node")
+        _validate_unique_nonempty(self.requested_node_ids, "requested node id")
+        if not self.requested_node_ids:
+            raise BuildExecutionError("execution scope requires at least one requested node")
         _validate_unique_nonempty(self.network_scopes, "network scope")
         _validate_unique_nonempty(self.credential_refs, "credential reference")
         if any("*" in scope for scope in self.network_scopes):
-            raise BuildExecutionError("network authority must not contain wildcard scopes")
+            raise BuildExecutionError("requested network scope must not contain wildcard scopes")
         for credential_ref in self.credential_refs:
-            if credential_ref != credential_ref.strip():
-                raise BuildExecutionError("credential reference must not contain edge whitespace")
-            if not credential_ref.startswith("credref:") or not credential_ref[8:].strip():
-                raise BuildExecutionError(
-                    "execution credentials must use non-empty opaque credref: references"
-                )
+            _validate_credential_ref(credential_ref)
 
 
 @dataclass(frozen=True, slots=True)
 class BuildExecutionSpec:
     request: ExecutionRequest
     source_sha: str
-    argv: tuple[str, ...]
-    authority: ProjectExecutionAuthority
+    scope: BuildExecutionScopeRequest
     lease_seconds: int = 900
 
     def __post_init__(self) -> None:
         _validate_sha(self.source_sha)
-        if not self.argv or not self.argv[0].strip():
-            raise BuildExecutionError("execution argv must contain a non-empty executable")
-        if self.request.project_id != self.authority.project_id:
-            raise BuildExecutionError("execution request and authority project mismatch")
+        if self.request.project_id.strip() == "":
+            raise BuildExecutionError("execution project identity must not be empty")
         if type(self.lease_seconds) is not int or self.lease_seconds <= 0:
             raise BuildExecutionError("execution node lease duration must be a positive integer")
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionGrant:
+    project_id: str
+    repository_id: str
+    work_id: str
+    workspace_relpath: str
+    allowed_node_ids: tuple[str, ...]
+    network_scopes: tuple[str, ...]
+    credential_refs: tuple[str, ...]
+    command_id: str
+    argv: tuple[str, ...]
+    authority_evidence_refs: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not all(value.strip() for value in (self.project_id, self.repository_id, self.work_id)):
+            raise BuildExecutionError("execution grant identity must not be empty")
+        object.__setattr__(
+            self, "workspace_relpath", _normalize_project_relpath(self.workspace_relpath)
+        )
+        _validate_unique_nonempty(self.allowed_node_ids, "granted node id")
+        if not self.allowed_node_ids:
+            raise BuildExecutionError("execution grant requires at least one node")
+        _validate_unique_nonempty(self.network_scopes, "granted network scope")
+        _validate_unique_nonempty(self.credential_refs, "granted credential reference")
+        _validate_unique_nonempty(self.authority_evidence_refs, "authority evidence reference")
+        if not self.authority_evidence_refs:
+            raise BuildExecutionError("execution grant requires authority provenance")
+        if not self.command_id.strip():
+            raise BuildExecutionError("execution grant command id must not be empty")
+        _validate_argv(self.argv)
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,8 +196,7 @@ class BuildExecutionDispatch:
     node_id: str
     platform: Platform
     source_sha: str
-    argv: tuple[str, ...]
-    authority: ProjectExecutionAuthority
+    grant: ExecutionGrant
     attempt: int
 
     def __post_init__(self) -> None:
@@ -107,8 +205,12 @@ class BuildExecutionDispatch:
             for value in (self.dispatch_id, self.project_id, self.work_id, self.node_id)
         ):
             raise BuildExecutionError("dispatch identity must not be empty")
-        if self.project_id != self.authority.project_id:
-            raise BuildExecutionError("dispatch authority project mismatch")
+        if (
+            self.project_id != self.grant.project_id
+            or self.work_id != self.grant.work_id
+            or self.node_id not in self.grant.allowed_node_ids
+        ):
+            raise BuildExecutionError("dispatch does not match trusted execution grant")
         _validate_sha(self.source_sha)
         if type(self.attempt) is not int or self.attempt <= 0:
             raise BuildExecutionError("dispatch attempt must be a positive integer")
@@ -139,6 +241,7 @@ class BuildExecutionResult:
 @dataclass(frozen=True, slots=True)
 class BuildExecutionRecord:
     spec: BuildExecutionSpec
+    grant: ExecutionGrant
     state: BuildExecutionState
     node_id: str | None = None
     lease_id: str | None = None
@@ -169,6 +272,7 @@ class BuildExecutionSnapshot:
 class BuildExecutionCoordinator:
     nodes: ExecutionNodeRegistry
     node_availability: ExecutionNodeAvailabilityPort
+    trusted_authority: TrustedExecutionAuthorityPort
     _records: dict[str, BuildExecutionRecord] = field(default_factory=dict, init=False, repr=False)
     _leases: dict[str, WorkLease] = field(default_factory=dict, init=False, repr=False)
 
@@ -178,14 +282,22 @@ class BuildExecutionCoordinator:
         *,
         now: datetime | None = None,
     ) -> BuildExecutionRecord:
+        instant = _aware(now or datetime.now(UTC))
+        grant = self._resolve_grant(spec)
         work_id = spec.request.work_id
         existing = self._records.get(work_id)
         if existing is not None:
-            if existing.spec != spec:
-                raise BuildExecutionError("work id conflicts with prior execution payload")
+            if existing.spec != spec or existing.grant != grant:
+                raise BuildExecutionError(
+                    "work id conflicts with durable execution identity/authority"
+                )
             return existing
-        instant = _aware(now or datetime.now(UTC))
-        record = BuildExecutionRecord(spec, BuildExecutionState.PENDING, updated_at=instant)
+        record = BuildExecutionRecord(
+            spec,
+            grant,
+            BuildExecutionState.PENDING,
+            updated_at=instant,
+        )
         self._records[work_id] = record
         return record
 
@@ -198,12 +310,29 @@ class BuildExecutionCoordinator:
         instant = _aware(now or datetime.now(UTC))
         record = self._record(work_id)
         if record.state in {
-            BuildExecutionState.PREPARED,
             BuildExecutionState.DISPATCHING,
+            BuildExecutionState.EFFECT_IN_FLIGHT,
             BuildExecutionState.RECONCILE_REQUIRED,
             BuildExecutionState.SUCCEEDED,
             BuildExecutionState.FAILED,
         }:
+            return record
+        if not self._current_grant_matches(record):
+            self._release_lease(work_id)
+            return self._save(
+                replace(
+                    record,
+                    state=BuildExecutionState.WAITING_FOR_AUTHORITY,
+                    node_id=None,
+                    lease_id=None,
+                    dispatch=None,
+                    block_reason=(
+                        "trusted execution authority changed; fresh work identity required"
+                    ),
+                    updated_at=instant,
+                )
+            )
+        if record.state is BuildExecutionState.PREPARED:
             return record
         self._release_lease(work_id)
         lease = self._acquire_authorized_available(record, instant)
@@ -246,6 +375,20 @@ class BuildExecutionCoordinator:
             return record.dispatch
         if record.state is not BuildExecutionState.PREPARED:
             raise BuildExecutionError("execution work must be prepared before dispatch")
+        if not self._current_grant_matches(record):
+            self._release_lease(work_id)
+            self._save(
+                replace(
+                    record,
+                    state=BuildExecutionState.WAITING_FOR_AUTHORITY,
+                    node_id=None,
+                    lease_id=None,
+                    dispatch=None,
+                    block_reason="trusted execution authority changed before dispatch",
+                    updated_at=instant,
+                )
+            )
+            raise BuildExecutionError("trusted execution authority changed before dispatch")
         lease = self._leases.get(work_id)
         if lease is None or lease.lease_id != record.lease_id or lease.node_id != record.node_id:
             raise BuildExecutionError("prepared execution work lost its exact node lease")
@@ -284,8 +427,7 @@ class BuildExecutionCoordinator:
             node_id=lease.node_id,
             platform=record.spec.request.platform,
             source_sha=record.spec.source_sha,
-            argv=record.spec.argv,
-            authority=record.spec.authority,
+            grant=record.grant,
             attempt=record.attempt,
         )
         self._save(
@@ -308,22 +450,40 @@ class BuildExecutionCoordinator:
     ) -> BuildExecutionRecord:
         instant = _aware(now or datetime.now(UTC))
         record = self._record(work_id)
+        if record.state is BuildExecutionState.EFFECT_IN_FLIGHT:
+            raise BuildExecutionError("in-flight execution must be reconciled, never replayed")
         if record.state is not BuildExecutionState.DISPATCHING or record.dispatch is None:
             return record
-        try:
-            result = port.run(record.dispatch)
-        except Exception:
+        if not self._current_grant_matches(record):
             self._release_lease(work_id)
             return self._save(
                 replace(
                     record,
+                    state=BuildExecutionState.WAITING_FOR_AUTHORITY,
+                    node_id=None,
+                    lease_id=None,
+                    dispatch=None,
+                    block_reason="trusted execution authority changed before node execution",
+                    updated_at=instant,
+                )
+            )
+        in_flight = self._save(
+            replace(record, state=BuildExecutionState.EFFECT_IN_FLIGHT, updated_at=instant)
+        )
+        try:
+            result = port.run(in_flight.dispatch)
+        except BuildExecutionPortError:
+            self._release_lease(work_id)
+            return self._save(
+                replace(
+                    in_flight,
                     state=BuildExecutionState.RECONCILE_REQUIRED,
                     lease_id=None,
                     block_reason="execution dispatch outcome is uncertain after node-port failure",
                     updated_at=instant,
                 )
             )
-        return self._accept_result(record, result, instant)
+        return self._accept_result(in_flight, result, instant)
 
     def reconcile(
         self,
@@ -334,6 +494,17 @@ class BuildExecutionCoordinator:
     ) -> BuildExecutionRecord:
         instant = _aware(now or datetime.now(UTC))
         record = self._record(work_id)
+        if record.state is BuildExecutionState.EFFECT_IN_FLIGHT:
+            self._release_lease(work_id)
+            record = self._save(
+                replace(
+                    record,
+                    state=BuildExecutionState.RECONCILE_REQUIRED,
+                    lease_id=None,
+                    block_reason="execution effect outcome requires exact inspection",
+                    updated_at=instant,
+                )
+            )
         if record.state is not BuildExecutionState.RECONCILE_REQUIRED:
             return record
         if record.dispatch is None:
@@ -350,7 +521,10 @@ class BuildExecutionCoordinator:
         now: datetime | None = None,
     ) -> BuildExecutionRecord:
         record = self._record(work_id)
-        if record.state is not BuildExecutionState.WAITING_FOR_NODE:
+        if record.state not in {
+            BuildExecutionState.WAITING_FOR_NODE,
+            BuildExecutionState.WAITING_FOR_AUTHORITY,
+        }:
             return record
         return self.prepare(work_id, now=now)
 
@@ -381,6 +555,16 @@ class BuildExecutionCoordinator:
         ephemeral: dict[str, WorkLease] = {}
         for record in snapshot.records:
             self._validate_snapshot_record(record)
+            try:
+                trusted_grant = self._resolve_grant(record.spec)
+            except BuildExecutionError as exc:
+                raise BuildExecutionError(
+                    "execution snapshot is no longer authorized by current trusted host authority"
+                ) from exc
+            if trusted_grant != record.grant:
+                raise BuildExecutionError(
+                    "execution snapshot grant does not match current trusted host authority"
+                )
             work_id = record.spec.request.work_id
             key = (record.spec.request.project_id, work_id)
             lease = registry_leases.get(key)
@@ -401,7 +585,10 @@ class BuildExecutionCoordinator:
                     )
                 else:
                     ephemeral[work_id] = lease
-            elif record.state is BuildExecutionState.DISPATCHING:
+            elif record.state in {
+                BuildExecutionState.DISPATCHING,
+                BuildExecutionState.EFFECT_IN_FLIGHT,
+            }:
                 self._validate_active_lease_binding(record, lease, registry_nodes)
                 if lease is not None:
                     self._safe_registry_release(lease.lease_id)
@@ -427,6 +614,60 @@ class BuildExecutionCoordinator:
     def get(self, work_id: str) -> BuildExecutionRecord:
         return self._record(work_id)
 
+    def _current_grant_matches(self, record: BuildExecutionRecord) -> bool:
+        try:
+            return self._resolve_grant(record.spec) == record.grant
+        except BuildExecutionError:
+            return False
+
+    def _resolve_grant(self, spec: BuildExecutionSpec) -> ExecutionGrant:
+        scope = spec.scope
+        authority = self.trusted_authority.resolve(
+            project_id=spec.request.project_id,
+            repository_id=scope.repository_id,
+            work_id=spec.request.work_id,
+        )
+        if (
+            authority.project_id != spec.request.project_id
+            or authority.repository_id != scope.repository_id
+            or authority.work_id != spec.request.work_id
+        ):
+            raise BuildExecutionError(
+                "trusted execution authority returned the wrong work identity"
+            )
+        if "build_release" not in authority.permissions:
+            raise BuildExecutionError(
+                "trusted team permission ceiling does not allow build execution"
+            )
+        requested_nodes = set(scope.requested_node_ids)
+        if not requested_nodes <= set(authority.allowed_node_ids):
+            raise BuildExecutionError("requested execution node exceeds trusted project authority")
+        if not set(scope.network_scopes) <= set(authority.network_scopes):
+            raise BuildExecutionError("requested network scope exceeds trusted project authority")
+        if not set(scope.credential_refs) <= set(authority.credential_refs):
+            raise BuildExecutionError("requested credential exceeds trusted project authority")
+        if not any(
+            _path_within(scope.workspace_relpath, allowed)
+            for allowed in authority.allowed_workspace_paths
+        ):
+            raise BuildExecutionError("requested workspace path exceeds trusted project authority")
+        commands = {command.command_id: command for command in authority.commands}
+        command = commands.get(scope.command_id)
+        if command is None:
+            raise BuildExecutionError("requested build command is not host-approved")
+        return ExecutionGrant(
+            project_id=spec.request.project_id,
+            repository_id=scope.repository_id,
+            work_id=spec.request.work_id,
+            workspace_relpath=scope.workspace_relpath,
+            allowed_node_ids=scope.requested_node_ids,
+            network_scopes=scope.network_scopes,
+            credential_refs=scope.credential_refs,
+            command_id=command.command_id,
+            argv=command.argv,
+            authority_evidence_refs=authority.evidence_refs,
+        )
+
     def _accept_result(
         self,
         record: BuildExecutionRecord,
@@ -444,9 +685,7 @@ class BuildExecutionCoordinator:
                     state=BuildExecutionState.RECONCILE_REQUIRED,
                     lease_id=None,
                     evidence=None,
-                    block_reason=(
-                        "execution result source SHA mismatch; exact inspection required"
-                    ),
+                    block_reason="execution result source SHA mismatch; exact inspection required",
                     updated_at=now,
                 )
             )
@@ -488,10 +727,14 @@ class BuildExecutionCoordinator:
     def _validate_snapshot_record(self, record: BuildExecutionRecord) -> None:
         _aware(record.updated_at)
         work_id = record.spec.request.work_id
-        if record.spec.request.project_id != record.spec.authority.project_id:
-            raise BuildExecutionError("snapshot execution authority project mismatch")
-        if record.node_id is not None and record.node_id not in record.spec.authority.allowed_node_ids:
-            raise BuildExecutionError("snapshot execution node is outside project authority")
+        if (
+            record.grant.project_id != record.spec.request.project_id
+            or record.grant.repository_id != record.spec.scope.repository_id
+            or record.grant.work_id != work_id
+        ):
+            raise BuildExecutionError("snapshot execution grant identity mismatch")
+        if record.node_id is not None and record.node_id not in record.grant.allowed_node_ids:
+            raise BuildExecutionError("snapshot execution node is outside trusted grant")
         if record.dispatch is not None:
             dispatch = record.dispatch
             expected_dispatch_id = (
@@ -503,8 +746,7 @@ class BuildExecutionCoordinator:
                 or dispatch.work_id != work_id
                 or dispatch.platform is not record.spec.request.platform
                 or dispatch.source_sha != record.spec.source_sha
-                or dispatch.argv != record.spec.argv
-                or dispatch.authority != record.spec.authority
+                or dispatch.grant != record.grant
                 or dispatch.attempt != record.attempt
                 or dispatch.node_id != record.node_id
             ):
@@ -514,12 +756,17 @@ class BuildExecutionCoordinator:
         if record.state in {
             BuildExecutionState.PENDING,
             BuildExecutionState.WAITING_FOR_NODE,
+            BuildExecutionState.WAITING_FOR_AUTHORITY,
             BuildExecutionState.PREPARED,
         } and record.dispatch is not None:
             raise BuildExecutionError(
                 "pre-dispatch execution snapshot must not contain a dispatch identity"
             )
-        active_states = {BuildExecutionState.PREPARED, BuildExecutionState.DISPATCHING}
+        active_states = {
+            BuildExecutionState.PREPARED,
+            BuildExecutionState.DISPATCHING,
+            BuildExecutionState.EFFECT_IN_FLIGHT,
+        }
         if record.state in active_states:
             if record.node_id is None or record.lease_id is None:
                 raise BuildExecutionError("active execution snapshot lacks node/lease identity")
@@ -529,6 +776,7 @@ class BuildExecutionCoordinator:
             )
         if record.state in {
             BuildExecutionState.DISPATCHING,
+            BuildExecutionState.EFFECT_IN_FLIGHT,
             BuildExecutionState.RECONCILE_REQUIRED,
             BuildExecutionState.SUCCEEDED,
             BuildExecutionState.FAILED,
@@ -580,7 +828,7 @@ class BuildExecutionCoordinator:
         now: datetime,
     ) -> WorkLease | None:
         skipped: list[WorkLease] = []
-        authorized = set(record.spec.authority.allowed_node_ids)
+        authorized = set(record.grant.allowed_node_ids)
         selected: WorkLease | None = None
         try:
             while True:
@@ -635,7 +883,7 @@ def _normalize_project_relpath(value: str) -> str:
     if value != value.strip() or not value:
         raise BuildExecutionError("workspace path must be a non-empty project-relative path")
     portable = value.replace("\\", "/")
-    if portable.startswith("/") or portable.startswith("//") or re.match(r"^[A-Za-z]:", portable):
+    if portable.startswith(("/", "//")) or re.match(r"^[A-Za-z]:", portable):
         raise BuildExecutionError("workspace path must stay project-relative")
     parts = portable.split("/")
     if any(part in {"", ".", ".."} for part in parts):
@@ -643,11 +891,31 @@ def _normalize_project_relpath(value: str) -> str:
     return "/".join(parts)
 
 
+def _path_within(candidate: str, allowed: str) -> bool:
+    candidate_parts = candidate.split("/")
+    allowed_parts = allowed.split("/")
+    return candidate_parts[: len(allowed_parts)] == allowed_parts
+
+
 def _validate_unique_nonempty(values: tuple[str, ...], label: str) -> None:
     if len(values) != len(set(values)):
         raise BuildExecutionError(f"{label}s must be unique")
     if any(not value.strip() for value in values):
         raise BuildExecutionError(f"{label} must not be empty")
+
+
+def _validate_credential_ref(value: str) -> None:
+    if value != value.strip():
+        raise BuildExecutionError("credential reference must not contain edge whitespace")
+    if not value.startswith("credref:") or not value[8:].strip():
+        raise BuildExecutionError(
+            "execution credentials must use non-empty opaque credref: references"
+        )
+
+
+def _validate_argv(argv: tuple[str, ...]) -> None:
+    if not argv or any(not isinstance(part, str) or not part.strip() for part in argv):
+        raise BuildExecutionError("build command argv must contain non-empty string arguments")
 
 
 def _validate_sha(value: str) -> None:
@@ -675,3 +943,21 @@ def _aware(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise BuildExecutionError("execution datetime must be timezone-aware")
     return value.astimezone(UTC)
+
+
+_GENERIC_SHELL_EXECUTABLES = frozenset(
+    {
+        "bash",
+        "cmd",
+        "cmd.exe",
+        "fish",
+        "powershell",
+        "powershell.exe",
+        "pwsh",
+        "pwsh.exe",
+        "sh",
+        "wsl",
+        "wsl.exe",
+        "zsh",
+    }
+)

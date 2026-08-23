@@ -1,64 +1,85 @@
-# MANUAL-DEV07 PF5 Build Execution Integrity Addendum — 2026-08-23
+# MANUAL-DEV07 PF5 Build Execution Integrity / Authority Addendum — 2026-08-23
 
-This addendum is part of the same MANUAL-DEV07 PF5 build-execution-fabric batch and supersedes the
-initial focused-test count in `docs/PRODUCT_FACTORY_PF5_BUILD_EXECUTION_FABRIC_2026-08-23.md`.
+This addendum records the current repair lineage for PR #177.
 
-## Why this hardening was added
+## Superseded exact head
 
-Exact-source review after the initial candidate found a restart corruption family: a coordinator
-`PREPARED` or `DISPATCHING` record could meet a registry lease for the same project/work identity but
-with a substituted lease ID or node. Treating that as ordinary capacity recovery can hide durable
-lineage corruption and can leave a substituted lease active. PF5 requires corrupted state to fail
-closed rather than normalize it into a plausible execution state.
+`ff30f63abbf03b061680b7bdce331c245d559235` is RED and receives no acceptance credit.
 
-## Current hardening
+Exact source-gate evidence:
 
-The coordinator now additionally requires on restart:
+- Core CI #1100 / run `32643958861`: failure on both Windows and Ubuntu at Ruff;
+- M12 #868 / run `32643958865`: failure in the same source-gate family;
+- PF3 Windows credential proof #332: skipped as expected/out of scope;
+- dependency consistency and exact candidate checkout passed before Ruff;
+- Ruff defects were exactly `BLE001` on broad node-port exception handling and `PIE810` on redundant
+  string-prefix checks.
 
-- exact active `lease_id` and `node_id` agreement between coordinator record and registry;
-- selected node must remain inside the project's explicit authorized-node set;
-- the registry node behind an active lease must still satisfy platform, enabled state, resources,
-  required features, toolchains and GPU requirement;
-- post-dispatch `dispatch_id` must equal the deterministic project/work/attempt identity rather than
-  merely being a non-empty candidate-controlled string;
-- persisted execution attempts and lease duration reject Python bool aliases and non-integer values;
-- execution result success/uncertainty fields must be exact booleans.
+The gate is not weakened or ignored.
 
-Missing or expired exact PREPARED lease remains a recoverable capacity event: the work returns to
-`WAITING_FOR_NODE`. A same-project/work lease with conflicting identity is different: it is ambiguous
-or corrupted authority and restore raises `BuildExecutionError`.
+## AUD02 BLOCK addressed by this repair
 
-The implementation still does not edit the active PF3 fleet-replacement production slice or the
-MANUAL-DEV09 promotion slice.
+AUD02 correctly reported that the old candidate was candidate-controlled authority:
 
-## Focused qualification delta
+1. caller-owned `BuildExecutionSpec` embedded node/path/network/credential authority;
+2. caller-owned `argv` could select arbitrary executable/shell behavior.
 
-The original focused suite has 23 pytest parameter instances. The integrity addendum adds 12 more,
-for a current focused total of **35**:
+The repaired contract removes both fields from candidate control.
 
-- same work with substituted lease identity;
-- same lease identity rebound to another node;
-- authorized node capability drift across restart;
-- restored node outside project authority;
-- forged dispatch identity;
-- bool/float/string lease-duration coercion;
-- integer/string status values masquerading as booleans;
-- bool dispatch-attempt alias.
+Candidate state now contains only a bounded `BuildExecutionScopeRequest`. A trusted composition-root
+`TrustedExecutionAuthorityPort` independently resolves exact `(project, repository, work)` authority,
+including permission provenance, node allowlist, workspace roots, network scopes, credential refs,
+approved build commands, and evidence refs.
 
-All new tests are deterministic and provider-free. No cloud, SSH, WinRM, macOS/Xcode, GPU, on-prem,
-staging, production or real credential action is performed.
+`submit()` requires `build_release` within that trusted permission authority and accepts only subset
+requests. The durable `ExecutionGrant` is derived from the host result, not supplied by the candidate.
+The authority is re-resolved before effect and on restart.
 
-## Acceptance truth
+Host-approved command IDs resolve to exact argv. Generic shell executables are rejected at this PF5
+boundary; DEV27 still owns low-level process/workspace containment.
 
-Only GitHub Actions on the final PR head after this addendum may receive exact-head acceptance credit.
-Earlier queued/superseded heads are lineage evidence only. Core CI and complete M12 must both be
-terminal GREEN on that same final SHA. PF3 credential-store proof may be skipped when the path filter
-correctly classifies this branch out of scope.
+## Restart / uncertain-effect hardening retained
+
+The earlier integrity family remains active:
+
+- exact lease ID/node binding;
+- node capability/resource/platform revalidation;
+- deterministic dispatch ID;
+- strict integer/boolean persisted identities;
+- corrupted grant/evidence rejection;
+- restart after possible external effect is inspection-only.
+
+The repaired state machine adds `EFFECT_IN_FLIGHT` before node-port invocation. Expected transport
+failure is typed as `BuildExecutionPortError`. Unexpected programming exceptions propagate while state
+remains in-flight, preventing a blind second `run()`.
+
+Authority revocation is safe by phase:
+
+- before external effect: release capacity and `WAITING_FOR_AUTHORITY`, no port call;
+- after a possible effect: preserve dispatch identity and permit inspection/reconciliation only.
+
+## Current deterministic preflight
+
+Against the integrated PF3 public contract shapes, repaired production/tests currently pass:
+
+- `python -m py_compile`: PASS;
+- focused deterministic pytest: **52 passed**;
+- line-length <=100: PASS.
+
+The 52 instances include the prior restart-corruption matrix plus new authority substitution,
+permission escalation, shell-command, TOCTOU revocation, and unexpected-exception replay attacks.
+
+Local Ruff is unavailable; fresh exact-head GitHub Core CI + complete M12 are mandatory. Earlier GREEN
+or queued heads do not transfer.
+
+## Evidence boundary
+
+No real provider, cloud, SSH, WinRM, remote host, macOS/Xcode, GPU, production, credential secret, or
+release action is executed by these tests. Snapshot/restart semantics are tested deterministically; a
+concrete production persistence host remains a separate integration proof and is not falsely claimed.
 
 `HUMAN_TESTED=false`
 
 `NVDA_VERIFIED=false`
 
 `NO_SELF_MERGE=true`
-
-Integration remains TECH02-owned.

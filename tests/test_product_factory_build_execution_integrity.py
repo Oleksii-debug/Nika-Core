@@ -6,10 +6,12 @@ from datetime import UTC, datetime
 import pytest
 
 from nika_core.product_factory_build_execution import (
+    ApprovedBuildCommand,
     BuildExecutionCoordinator,
     BuildExecutionDispatch,
     BuildExecutionError,
     BuildExecutionResult,
+    BuildExecutionScopeRequest,
     BuildExecutionSpec,
     ProjectExecutionAuthority,
 )
@@ -34,6 +36,20 @@ class AlwaysAvailable:
         return True
 
 
+@dataclass
+class FakeAuthority:
+    authority: ProjectExecutionAuthority
+
+    def resolve(
+        self,
+        *,
+        project_id: str,
+        repository_id: str,
+        work_id: str,
+    ) -> ProjectExecutionAuthority:
+        return self.authority
+
+
 def _node(
     node_id: str,
     *,
@@ -50,10 +66,14 @@ def _authority(*node_ids: str) -> ProjectExecutionAuthority:
     return ProjectExecutionAuthority(
         "project-1",
         "repo-main",
-        "products/build",
+        "work-1",
+        frozenset({"build_release"}),
         tuple(node_ids),
+        ("products/build",),
         ("pypi.org:443",),
         ("credref:package-index",),
+        (ApprovedBuildCommand("build", ("python", "-m", "build")),),
+        ("authority://team-plan/1",),
     )
 
 
@@ -68,8 +88,14 @@ def _spec(*node_ids: str, lease_seconds: int = 120) -> BuildExecutionSpec:
             ResourceEnvelope(2, 2048, 4096),
         ),
         SHA,
-        ("python", "-m", "build"),
-        _authority(*node_ids),
+        BuildExecutionScopeRequest(
+            "repo-main",
+            "products/build/output",
+            tuple(node_ids),
+            ("pypi.org:443",),
+            ("credref:package-index",),
+            "build",
+        ),
         lease_seconds,
     )
 
@@ -78,19 +104,21 @@ def _prepared() -> tuple[
     BuildExecutionCoordinator,
     ExecutionNodeRegistry,
     BuildExecutionSpec,
+    FakeAuthority,
 ]:
     registry = ExecutionNodeRegistry()
     registry.register(_node("linux-1"))
     registry.register(_node("linux-2"))
-    coordinator = BuildExecutionCoordinator(registry, AlwaysAvailable())
+    authority = FakeAuthority(_authority("linux-1", "linux-2"))
+    coordinator = BuildExecutionCoordinator(registry, AlwaysAvailable(), authority)
     spec = _spec("linux-1", "linux-2")
     coordinator.submit(spec, now=NOW)
     coordinator.prepare("work-1", now=NOW)
-    return coordinator, registry, spec
+    return coordinator, registry, spec, authority
 
 
 def test_restore_rejects_same_work_with_substituted_lease_identity() -> None:
-    coordinator, registry, spec = _prepared()
+    coordinator, registry, spec, authority = _prepared()
     coordinator_snapshot = coordinator.snapshot()
     registry_snapshot = registry.snapshot()
     old_lease = registry_snapshot.leases[0]
@@ -101,13 +129,13 @@ def test_restore_rejects_same_work_with_substituted_lease_identity() -> None:
     replacement = restarted_registry.acquire(spec.request, now=NOW, lease_seconds=120)
     assert replacement.lease_id != old_lease.lease_id
 
-    restarted = BuildExecutionCoordinator(restarted_registry, AlwaysAvailable())
+    restarted = BuildExecutionCoordinator(restarted_registry, AlwaysAvailable(), authority)
     with pytest.raises(BuildExecutionError, match="active lease identity does not match"):
         restarted.restore(coordinator_snapshot, now=NOW)
 
 
 def test_restore_rejects_same_lease_identity_rebound_to_other_node() -> None:
-    coordinator, registry, _ = _prepared()
+    coordinator, registry, _, authority = _prepared()
     coordinator_snapshot = coordinator.snapshot()
     registry_snapshot = registry.snapshot()
     old_lease = registry_snapshot.leases[0]
@@ -116,14 +144,14 @@ def test_restore_rejects_same_lease_identity_rebound_to_other_node() -> None:
 
     restarted_registry = ExecutionNodeRegistry()
     restarted_registry.restore(forged_registry_snapshot)
-    restarted = BuildExecutionCoordinator(restarted_registry, AlwaysAvailable())
+    restarted = BuildExecutionCoordinator(restarted_registry, AlwaysAvailable(), authority)
 
     with pytest.raises(BuildExecutionError, match="active lease identity does not match"):
         restarted.restore(coordinator_snapshot, now=NOW)
 
 
 def test_restore_rejects_authorized_node_capability_drift() -> None:
-    coordinator, registry, _ = _prepared()
+    coordinator, registry, _, authority = _prepared()
     coordinator_snapshot = coordinator.snapshot()
     registry_snapshot = registry.snapshot()
     drifted_nodes = tuple(
@@ -136,29 +164,26 @@ def test_restore_rejects_authorized_node_capability_drift() -> None:
 
     restarted_registry = ExecutionNodeRegistry()
     restarted_registry.restore(drifted_registry_snapshot)
-    restarted = BuildExecutionCoordinator(restarted_registry, AlwaysAvailable())
+    restarted = BuildExecutionCoordinator(restarted_registry, AlwaysAvailable(), authority)
 
     with pytest.raises(BuildExecutionError, match="no longer satisfies request contract"):
         restarted.restore(coordinator_snapshot, now=NOW)
 
 
-def test_restore_rejects_node_outside_project_authority() -> None:
-    coordinator, registry, spec = _prepared()
+def test_restore_rejects_node_outside_durable_trusted_grant() -> None:
+    coordinator, registry, _, authority = _prepared()
     prepared = coordinator.get("work-1")
-    forged_spec = replace(spec, authority=_authority("linux-2"))
-    forged_record = replace(prepared, spec=forged_spec)
+    forged_grant = replace(prepared.grant, allowed_node_ids=("linux-2",))
+    forged_record = replace(prepared, grant=forged_grant)
     forged_snapshot = replace(coordinator.snapshot(), records=(forged_record,))
 
-    restarted_registry = ExecutionNodeRegistry()
-    restarted_registry.restore(registry.snapshot())
-    restarted = BuildExecutionCoordinator(restarted_registry, AlwaysAvailable())
-
-    with pytest.raises(BuildExecutionError, match="outside project authority"):
+    restarted = BuildExecutionCoordinator(registry, AlwaysAvailable(), authority)
+    with pytest.raises(BuildExecutionError, match="outside trusted grant"):
         restarted.restore(forged_snapshot, now=NOW)
 
 
 def test_restore_rejects_forged_dispatch_identity() -> None:
-    coordinator, registry, _ = _prepared()
+    coordinator, registry, _, authority = _prepared()
     coordinator.begin_dispatch("work-1", now=NOW)
     record = coordinator.get("work-1")
     assert record.dispatch is not None
@@ -166,10 +191,7 @@ def test_restore_rejects_forged_dispatch_identity() -> None:
     forged_record = replace(record, dispatch=forged_dispatch)
     forged_snapshot = replace(coordinator.snapshot(), records=(forged_record,))
 
-    restarted_registry = ExecutionNodeRegistry()
-    restarted_registry.restore(registry.snapshot())
-    restarted = BuildExecutionCoordinator(restarted_registry, AlwaysAvailable())
-
+    restarted = BuildExecutionCoordinator(registry, AlwaysAvailable(), authority)
     with pytest.raises(BuildExecutionError, match="dispatch does not match"):
         restarted.restore(forged_snapshot, now=NOW)
 
@@ -200,6 +222,8 @@ def test_execution_result_status_requires_exact_booleans(
 
 
 def test_dispatch_attempt_rejects_bool_alias() -> None:
+    coordinator, _, _, _ = _prepared()
+    record = coordinator.get("work-1")
     with pytest.raises(BuildExecutionError, match="positive integer"):
         BuildExecutionDispatch(
             "dispatch:project-1:work-1:1",
@@ -208,7 +232,6 @@ def test_dispatch_attempt_rejects_bool_alias() -> None:
             "linux-1",
             Platform.LINUX,
             SHA,
-            ("python", "-m", "build"),
-            _authority("linux-1"),
+            record.grant,
             True,
         )

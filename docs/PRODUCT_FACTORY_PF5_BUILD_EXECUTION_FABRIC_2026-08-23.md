@@ -4,32 +4,35 @@
 
 MANUAL-DEV07 candidate for the Product Factory multi-platform build/execution gate.
 
-- Starting live `main`: `bd7517f38c04560aa7350b870d8a51bfb6c8113b`.
+- Original run start `main`: `bd7517f38c04560aa7350b870d8a51bfb6c8113b`.
+- Refreshed live `main` used by this branch: `e40691a6e2ff9c31fd413f63d004612e048d95ed`.
 - Branch: `work/manual-dev07/pf5-build-execution-fabric`.
+- PR: `#177`.
 - `HUMAN_TESTED=false`.
 - `NVDA_VERIFIED=false`.
 - No real cloud, SSH, WinRM, provider, staging, production, or credential-secret action is performed.
 
 ## Collision decision
 
-Live Issue #1 and open PR #130 establish an active PF3 writer for fleet replacement/rebalancing.
-MANUAL-DEV07 therefore does not edit or duplicate `product_factory_fleet_replacement.py`,
-`product_factory_fleet_maintenance.py`, or their replacement/provider coordination.
+Active PF3 fleet replacement/rebalancing ownership remains outside MANUAL-DEV07. Current successor
+PR #165 owns that production slice; historical PR #130 remains separate. MANUAL-DEV09 PR #172 owns
+production promotion authorization. This candidate edits none of those production paths.
 
-This batch stays below that layer and adds a build-execution coordinator over the already-integrated
-`ExecutionNodeRegistry`, `ExecutionRequest`, `WorkLease`, platform, capability, and resource contracts.
-It is intentionally additive so the active fleet owner can integrate independently.
+The batch stays on the independent PF5 build-execution surface and reuses the integrated
+`ExecutionNodeRegistry`, `ExecutionRequest`, `WorkLease`, platform, capability, resource, and
+`NormalizedBuildEvidence` contracts.
 
 ## Acceptance target
 
 The binding PF5 gate requires:
 
-1. explicit capability-based execution-node selection;
-2. at least two distinct execution environments returning normalized evidence through one contract;
-3. unavailable Windows/Linux/macOS/GPU capability must fail clearly or route to an authorized node;
+1. explicit platform/capability/resource node selection;
+2. multiple execution environments normalized through one evidence contract;
+3. unavailable Windows/Linux/macOS/GPU capability must wait or route to an authorized node;
 4. no fabricated successful evidence;
-5. project-scoped paths, network authority, and credential references only;
-6. restart/uncertain external dispatch must not blindly replay side effects.
+5. project-scoped path, network, credential, node, and command authority;
+6. restart/uncertain external dispatch must never cause blind replay;
+7. corrupted persisted state must fail closed.
 
 ## REUSE → ADAPT → CUSTOM(thin)
 
@@ -37,195 +40,230 @@ The binding PF5 gate requires:
 
 The candidate reuses:
 
-- `ExecutionNodeRegistry` for deterministic matching and lease ownership;
+- `ExecutionNodeRegistry` for deterministic matching and leases;
 - `ExecutionRequest` for project/work/platform/features/toolchains/GPU/resources;
 - `WorkLease` for capacity and expiry;
-- `NormalizedBuildEvidence` for normalized build-result evidence;
-- `Platform` for Windows, Linux, and macOS;
-- `NodeCapabilities.features` for traits such as `on-prem`;
-- `NodeCapabilities.gpu` plus `ExecutionRequest.require_gpu` for GPU routing.
+- `NormalizedBuildEvidence` for normalized result evidence;
+- `Platform.WINDOWS`, `Platform.LINUX`, and `Platform.MACOS`;
+- existing node feature/toolchain/GPU/resource matching;
+- Product Factory's established host-owned permission-ceiling model as the source that a trusted
+  composition-root adapter must use when implementing `TrustedExecutionAuthorityPort`.
 
-No generic scheduler, remote shell framework, cloud SDK, credential store, or persistence framework is
-reimplemented.
+No generic scheduler, remote-shell framework, cloud SDK, second credential store, or new dependency is
+introduced.
 
 ### ADAPT
 
-The integrated registry is adapted with:
+PF3 node contracts are adapted with:
 
-- project-specific authorized-node allowlists;
-- portable project-relative workspace authority;
-- explicit network scopes and opaque `credref:` references;
-- live node availability filtering;
-- rerouting past unavailable or unauthorized matching nodes;
-- exact pre-dispatch/post-dispatch state transitions;
-- normalized result validation;
-- restart cross-validation against live registry leases.
+- candidate **scope requests**, not candidate authority;
+- host-resolved exact project/repository/work execution authority;
+- `build_release` permission-ceiling enforcement;
+- requested-node subset intersection;
+- project-relative workspace containment;
+- bounded network-scope and opaque `credref:` subset checks;
+- host-approved typed build command IDs resolving to exact argv;
+- live availability rerouting;
+- explicit pre-effect and uncertain-effect states;
+- normalized evidence and restart corruption validation.
 
 ### CUSTOM(thin)
 
-Only Nika-specific orchestration/trust contracts are custom:
+Nika-specific thin contracts are:
 
-- `ProjectExecutionAuthority`;
-- `BuildExecutionSpec`;
-- `BuildExecutionDispatch`;
-- `BuildExecutionResult`;
-- `BuildExecutionRecord` / `BuildExecutionSnapshot`;
+- `BuildExecutionScopeRequest`;
+- `ApprovedBuildCommand`;
+- host-owned `ProjectExecutionAuthority`;
+- `TrustedExecutionAuthorityPort`;
+- `ExecutionGrant`;
+- `BuildExecutionSpec`, dispatch/result/record/snapshot;
 - `BuildExecutionCoordinator`;
-- `BuildExecutionNodePort` and `ExecutionNodeAvailabilityPort`.
+- normalized `BuildExecutionPortError`;
+- node availability/execution ports.
 
-A Windows worker, Linux CI executor, macOS/Xcode node, GPU worker, or on-prem worker can implement the
-same port later without changing the durable coordinator contract.
+DEV27 remains owner of low-level process, workspace, shell, reparse-point, and OS containment. PF5 does
+not claim those protections merely because its command authority is narrow.
 
-## Project-scoped authority
+## AUD02 authority repair
 
-Every work item carries one `ProjectExecutionAuthority` containing:
+The original candidate embedded `ProjectExecutionAuthority` and arbitrary `argv` in caller-constructible
+`BuildExecutionSpec`. AUD02 correctly classified that as `BLOCK`: candidate state was its own trust
+anchor and could mint wider node/network/credential/workspace authority or select a generic shell.
 
-- `project_id`;
-- `repository_id`;
-- normalized project-relative workspace path;
-- explicit non-empty authorized-node set;
-- exact network scopes;
-- opaque `credref:` references only.
+The repaired contract removes both capabilities from candidate input.
 
-Workspace paths accept Windows separators and normalize to `/`, including Unicode/Cyrillic names and
-spaces. Drive-qualified, UNC, absolute, empty-segment, `.`, and `..` paths fail closed.
+A candidate can now request only:
 
-Wildcard network authority is rejected. Raw passwords, tokens, cookies, API keys, OAuth payloads,
-browser profiles, and provider sessions have no field in the contract.
+- repository identity;
+- project-relative workspace path;
+- requested node IDs;
+- requested network scopes;
+- requested opaque credential refs;
+- an opaque build `command_id`.
 
-## Routing behavior
+`BuildExecutionCoordinator` receives a `TrustedExecutionAuthorityPort` from the trusted composition
+root. `submit()` resolves authority for the exact `(project_id, repository_id, work_id)` and rejects
+mismatched identities. The resolved authority must contain `build_release` permission provenance and
+independent evidence refs. Candidate scope is accepted only when every requested node/network/
+credential/path value is inside that host-owned authority.
 
-`prepare()` reuses the base allocator. It may temporarily lease and skip candidates that are outside
-the project-authorized node set or currently unavailable according to `ExecutionNodeAvailabilityPort`.
-Skipped leases are released before `prepare()` returns. The first matching authorized live candidate is
-retained.
+The trusted resolver is the integration boundary for the canonical ProductProject/team permission
+ceiling. Candidate/job payloads cannot implement or replace it through `submit()`.
 
-The base registry remains authoritative for platform, features, toolchains, GPU requirement,
-CPU/memory/disk envelope, enabled/cordoned state, busy-node exclusion, and lease expiry.
+## Command authority
 
-If no suitable node exists, the durable record becomes `WAITING_FOR_NODE` with a platform/GPU reason.
-No node port is called and no successful evidence can exist.
+The candidate no longer supplies `argv`.
 
-## Platform/capability identity
+A trusted authority exposes `ApprovedBuildCommand(command_id, argv)` entries. The candidate selects only
+a command ID already approved by the host. Dispatch carries the exact host-approved argv in the durable
+`ExecutionGrant`.
 
-The existing public contracts already express:
+Generic shell executables are rejected at the approved-command boundary, including `cmd.exe`,
+PowerShell/pwsh, bash/sh/zsh/fish, WSL, and path-qualified forms of those executables. This is an
+additional PF5 command-authority guard, not a replacement for DEV27 process containment.
 
-- Windows: `Platform.WINDOWS`;
-- Linux: `Platform.LINUX`;
-- macOS: `Platform.MACOS`;
-- GPU: `gpu=True` plus `require_gpu=True`;
-- on-prem: an explicit required feature such as `on-prem`;
-- toolchain identity through `required_toolchains`;
-- resource capacity through `ResourceEnvelope`.
+## Project-scoped path/network/credential authority
 
-The candidate does not introduce competing platform/resource enums.
+Workspace paths normalize Windows `\\` separators to `/` and preserve Unicode, spaces, and case.
+Drive-qualified, UNC/absolute, empty-segment, `.`, and `..` paths fail closed. Containment is checked by
+path segments, so sibling prefixes such as `products/app-secret` cannot satisfy authority for
+`products/app`.
 
-## Durable state machine
+Requested network scopes must be a subset of host authority and cannot contain wildcard `*` authority.
+Credentials are opaque `credref:` identities only; raw passwords, tokens, OAuth material, cookies,
+browser profiles, and provider sessions have no value-bearing field in this contract.
 
-States:
+## Routing and unavailable-platform behavior
 
-- `PENDING` — accepted, no node lease;
-- `WAITING_FOR_NODE` — no authorized/live/capable capacity;
-- `PREPARED` — exact node/lease selected, no external side effect;
-- `DISPATCHING` — immutable dispatch identity created before external execution;
-- `RECONCILE_REQUIRED` — outcome may have happened and must be inspected;
-- `SUCCEEDED` — definite success with normalized evidence;
-- `FAILED` — definite failure with normalized evidence.
+`prepare()` reuses `ExecutionNodeRegistry.acquire()`. The integrated registry remains authoritative for
+platform, required features/toolchains, GPU requirement, CPU/memory/disk capacity, enabled state,
+busy-node exclusion, and lease expiry.
 
-`begin_dispatch()` creates the explicit persistence boundary. A caller can persist the coordinator
-snapshot before invoking the external node port.
+A temporarily acquired candidate is retained only when its node is also inside the durable execution
+grant and currently available. Skipped leases are released. If no authorized capable node exists,
+work becomes `WAITING_FOR_NODE`; no node port is invoked and no success evidence exists.
 
-## Node loss and uncertainty
+This supports Windows/Linux/macOS identities, GPU matching, and traits such as `on-prem` without a
+second platform/resource model.
 
-Immediately before dispatch, availability is checked again. Node loss releases the lease, returns the
-work to `WAITING_FOR_NODE`, and performs no external run.
+## Authority revocation and TOCTOU
 
-After the dispatch boundary, a node-port exception or uncertain result never becomes a safe retry.
-The work becomes `RECONCILE_REQUIRED`, capacity is released, and only `inspect()` may resolve the exact
-prior dispatch. This prevents duplicate external work after process or transport failure.
+Trusted authority is re-resolved before capacity preparation, before dispatch, and immediately before
+external node execution.
+
+If authority changes before any external effect, the exact node lease is released and work becomes
+`WAITING_FOR_AUTHORITY`. The node port is never called. Restoring a snapshot whose durable grant no
+longer matches current host authority fails closed.
+
+Once an external effect may already exist, later authority revocation must **not** erase its dispatch
+identity. `DISPATCHING`, `EFFECT_IN_FLIGHT`, and `RECONCILE_REQUIRED` retain the exact prior dispatch so
+inspection/reconciliation remains possible and duplicate work is not manufactured.
+
+## Effect boundary and retry safety
+
+States are:
+
+- `PENDING`;
+- `WAITING_FOR_NODE`;
+- `WAITING_FOR_AUTHORITY`;
+- `PREPARED`;
+- `DISPATCHING`;
+- `EFFECT_IN_FLIGHT`;
+- `RECONCILE_REQUIRED`;
+- `SUCCEEDED`;
+- `FAILED`.
+
+`begin_dispatch()` creates deterministic immutable dispatch identity. `run_dispatch()` moves to
+`EFFECT_IN_FLIGHT` before calling the node port.
+
+Expected transport/provider uncertainty must be normalized by an adapter as `BuildExecutionPortError`.
+That becomes `RECONCILE_REQUIRED` and can only be resolved through `inspect()`.
+
+Unexpected programming exceptions are deliberately **not** hidden by a broad exception handler. They
+propagate, while the coordinator remains `EFFECT_IN_FLIGHT`. A second `run_dispatch()` is rejected; only
+reconciliation may continue. This both satisfies Ruff `BLE001` and preserves duplicate-effect safety.
+
+The coordinator exposes snapshot/restart semantics; a production composition must durably persist the
+post-dispatch/effect boundary before relying on crash-recovery guarantees. This PR does not claim a new
+SQLite persistence framework or a physical remote provider implementation.
 
 ## Evidence truth
 
-The node port result does not provide `node_id`, `work_id`, or project identity. Those values are taken
-from the immutable coordinator dispatch, preventing a response from attributing success to another
-node/work item.
+The node result cannot supply project/work/node authority. Those identities come from the exact trusted
+dispatch. A result must contain:
 
-A result must contain an exact lowercase 40-character source SHA, lowercase SHA-256 artifact digest,
-success/uncertainty truth, non-empty evidence references, and timezone-aware completion time.
+- exact lowercase 40-character source SHA;
+- lowercase SHA-256 artifact digest;
+- exact boolean success/uncertainty fields;
+- non-empty evidence refs;
+- timezone-aware completion time.
 
-A source-SHA mismatch becomes `RECONCILE_REQUIRED`; it never becomes success. Definite results are
-converted to the existing `NormalizedBuildEvidence` contract. Windows and Linux qualification uses
-that same evidence type.
+Source-SHA mismatch becomes `RECONCILE_REQUIRED`, never success. Definite results are converted to the
+existing `NormalizedBuildEvidence` type; Windows and Linux use the same contract.
 
 ## Restart and corrupted-state behavior
 
-Coordinator snapshots contain durable records; the base registry owns leases. Restore cross-validates
-both views.
+Restore validates the durable grant against **fresh independent host authority**. A forged snapshot
+cannot widen nodes, network scopes, credentials, workspace scope, command identity, argv, or authority
+provenance merely by remaining internally self-consistent.
 
-For `PREPARED`, the exact project/work/lease/node identity must still exist and be unexpired. Otherwise
-work safely returns to `WAITING_FOR_NODE`.
+Active PREPARED/DISPATCHING/EFFECT_IN_FLIGHT records are cross-checked against exact registry lease ID,
+node ID, node existence, platform, resources, features, toolchains, GPU requirement, and trusted grant.
+A same-project/work substituted lease is corruption and fails closed. A genuinely missing/expired
+PREPARED lease is recoverable capacity loss and returns to `WAITING_FOR_NODE`.
 
-For `DISPATCHING`, restart releases matching capacity and converts to `RECONCILE_REQUIRED`, preserving
-the exact dispatch for inspection rather than replaying `run()`.
+Restart across `DISPATCHING` or `EFFECT_IN_FLIGHT` releases matching capacity and transitions to
+`RECONCILE_REQUIRED`, preserving exact dispatch identity for inspection-only recovery.
 
-Restore rejects duplicate work IDs, duplicate registry leases for one project/work, dispatch/spec drift,
-pre-dispatch records containing dispatch identity, active records without exact node/lease identity,
-post-dispatch records without exact dispatch, terminal records without normalized evidence, forged
-work/node/source/success evidence, and non-terminal records claiming terminal evidence.
+Strict persisted scalar validation rejects Python bool aliases for integer attempts/lease duration and
+non-boolean status values. Forged dispatch IDs and inconsistent terminal evidence fail closed.
 
-## Idempotency and concurrency
+## Qualification
 
-`submit()` is idempotent for an identical `BuildExecutionSpec`. The same work ID with changed payload is
-rejected. Concurrency remains owned by the integrated execution-node lease contract; no parallel lease
-system is created.
+The prior exact head `ff30f63abbf03b061680b7bdce331c245d559235` was correctly RED:
 
-## Focused deterministic qualification
+- Core CI #1100: Windows and Ubuntu dependency consistency + exact checkout passed, Ruff failed;
+- M12 #868: same source-gate failure family;
+- exact Ruff findings were DEV07-owned `BLE001` and `PIE810` only;
+- PF3 credential-store proof #332 skipped as expected.
 
-The candidate focused suite contains 23 pytest cases/parameter instances covering:
+The repaired local contract harness currently has **52 passing pytest parameter instances** covering:
 
-- Unicode/Windows path normalization;
-- traversal, drive, UNC, raw-credential, and wildcard-network rejection;
-- Windows + Linux normalized evidence through one contract;
-- macOS unavailable fail-closed behavior;
-- GPU routing;
-- on-prem feature routing plus project node authorization;
-- reroute around an unavailable matching node;
-- busy-capacity wait/retry;
-- node loss before dispatch;
-- uncertain result and node-port exception reconciliation without second `run()`;
-- PREPARED restart with exact unexpired lease;
-- DISPATCHING restart to inspection-only recovery;
-- expired lease restart;
-- forged terminal evidence rejection;
-- duplicate-submit idempotency and changed-payload rejection;
-- wrong source SHA rejection without success/capacity leak;
-- duplicate active registry lease rejection;
-- forged pre-dispatch dispatch-state rejection.
+- candidate authority/argv removal;
+- exact host work binding and permission ceiling;
+- node/network/credential/workspace/command anti-escalation;
+- generic-shell command rejection;
+- Windows/Linux normalized evidence;
+- macOS unavailable, GPU/on-prem routing, busy capacity and node loss;
+- authority revocation before dispatch and before node execution;
+- post-effect authority revocation without dispatch loss;
+- typed transport uncertainty and unexpected-adapter-exception no-replay behavior;
+- restart inspection-only behavior;
+- forged durable grant/evidence/dispatch rejection;
+- substituted lease/node and capability drift;
+- strict integer/boolean identities.
 
-All execution tests use deterministic fake node availability and fake node ports. No remote/provider
-side effect occurs.
+Local authoring checks on the repaired files:
 
-## Local authoring preflight truth
+- Python `py_compile`: PASS;
+- focused semantic pytest: `52 passed`;
+- line-length <= 100: PASS;
+- local Ruff executable remains unavailable, so **no local Ruff GREEN is claimed**.
 
-The authoring container cannot resolve `github.com`, so a canonical local checkout and repository Ruff
-binary are unavailable. No local full-repository GREEN or local Ruff GREEN is claimed.
-
-Completed before publication:
-
-- production module `py_compile`: PASS;
-- focused test module `py_compile`: PASS;
-- focused semantic pytest harness against the visible integrated PF3 contract shapes: `23 passed`;
-- source/test maximum line length <= 100: PASS.
-
-## Exact-head acceptance still required
-
-After publication, acceptance credit requires one exact candidate SHA with repository CI proving
-Ubuntu + Windows, dependency consistency, Ruff/format, compile/import, relevant/full tests, and M12
-when triggered. A final live-main reread and collision check are also required. MANUAL-DEV07 does not
-self-merge; integration belongs to TECH02.
+Only a fresh exact GitHub candidate head after this repair may receive acceptance credit.
 
 ## Explicitly unverified
 
-This candidate does not claim a real macOS/Xcode worker, remote Linux CI worker, isolated Windows
-worker, GPU host, on-prem transport, cloud/provider credentials, SSH/WinRM/Ansible/Kubernetes action,
-production deployment, human NVDA test, or production release approval.
+This candidate does not claim:
+
+- physical macOS/Xcode execution;
+- remote Linux execution;
+- isolated physical Windows execution;
+- a real GPU/on-prem node;
+- SSH/WinRM/cloud/provider calls;
+- real credential resolution/use;
+- a concrete durable PF5 SQLite checkpoint host for every transition;
+- production deployment/promotion;
+- human NVDA verification.
+
+Integration remains TECH02-owned; MANUAL-DEV07 does not self-merge.
