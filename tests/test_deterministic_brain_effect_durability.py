@@ -42,12 +42,8 @@ class _CrashAfterCompleteJournal:
     def __init__(self, delegate: RuntimeIdempotencyEffectJournal) -> None:
         self._delegate = delegate
 
-    def reserve(self, *, task_id, execution_id, action):
-        return self._delegate.reserve(
-            task_id=task_id,
-            execution_id=execution_id,
-            action=action,
-        )
+    def reserve(self, *, task_id, action):
+        return self._delegate.reserve(task_id=task_id, action=action)
 
     def complete(self, operation_key: str) -> None:
         self._delegate.complete(operation_key)
@@ -92,13 +88,11 @@ def _run(
     action: DeterministicAction,
     *,
     task_id: str,
-    execution_id: str = "execution-1",
 ):
     return asyncio.run(
         brain.run(
             run_id="attempt-local",
             task_id=task_id,
-            execution_id=execution_id,
             state=WorldState(),
             goal=DeterministicGoal(required=frozenset({"done"})),
             actions=(action,),
@@ -322,7 +316,7 @@ def test_changed_effect_arguments_cannot_rebind_pending_identity(tmp_path) -> No
     assert calls == 1
 
 
-def test_effect_journal_requires_stable_task_and_execution_identity(tmp_path) -> None:
+def test_effect_journal_requires_stable_task_identity(tmp_path) -> None:
     store = _store(tmp_path)
     journal = RuntimeIdempotencyEffectJournal(IdempotencyLedger(store))
     tools = ToolExecutor()
