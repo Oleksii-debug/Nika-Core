@@ -131,6 +131,25 @@ class AgentDefinitionRepository:
             required = tuple(
                 str(item) for item in json.loads(row["required_approvals_json"])
             )
+            declared_highest = max(
+                (grant.max_risk for grant in definition.tool_grants),
+                default=0,
+            )
+            if int(row["highest_risk"]) != declared_highest:
+                raise PermissionError(
+                    "persisted risk metadata does not match immutable agent definition"
+                )
+            declared_high_impact = tuple(
+                sorted(
+                    grant.tool_id
+                    for grant in definition.tool_grants
+                    if grant.max_risk == 4
+                )
+            )
+            if required != declared_high_impact:
+                raise PermissionError(
+                    "persisted high-impact approval metadata does not match definition"
+                )
             if required:
                 if self._activation_authority is None:
                     raise PermissionError(

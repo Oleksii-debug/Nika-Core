@@ -46,6 +46,7 @@ class WorkspaceActivationRepository:
 
     def _initialize_schema(self) -> None:
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS workspace_activation_schema_migrations ("
                 "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
@@ -188,6 +189,11 @@ class WorkspaceActivationRepository:
 
             current_plugins = dict(self._plugin_manifests())
             self._catalog.validate(candidate.workspace, current_plugins)
+            expected_permissions = self._catalog.effective_permission_ids(candidate.workspace)
+            if candidate.effective_permission_ids != expected_permissions:
+                raise RuntimeError(
+                    "stored workspace effective permissions differ from manifest selection"
+                )
             for persisted_plugin in candidate.plugins:
                 current = current_plugins.get(persisted_plugin.plugin_id)
                 if current != persisted_plugin:
@@ -209,7 +215,7 @@ class WorkspaceActivationRepository:
                         item.model_dump(mode="json") for item in candidate.plugins
                     ],
                 },
-                permission_ids=candidate.effective_permission_ids,
+                permission_ids=expected_permissions,
                 high_impact_ids=high_impact_ids,
             )
             if subject.requires_authority:

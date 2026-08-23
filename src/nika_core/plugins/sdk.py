@@ -270,16 +270,36 @@ class PluginRuntime:
         self,
         plugin_id: str,
         *,
+        permission_ids: tuple[str, ...] | None = None,
         approval_refs: tuple[str, ...] = (),
     ) -> PluginAdapter:
-        if plugin_id in self._active:
-            return self._active[plugin_id]
         try:
             manifest, factory = self._factories[plugin_id]
         except KeyError as exc:
             raise KeyError(f"unknown plugin: {plugin_id}") from exc
         manifest.assert_compatible(self._core_api)
         self._policy_catalog.validate(manifest)
+
+        if permission_ids is None:
+            if manifest.permission_ids:
+                raise PermissionError("explicit plugin permission selection is required")
+            selected_permissions: tuple[str, ...] = ()
+        else:
+            if len(permission_ids) != len(set(permission_ids)):
+                raise ValueError("duplicate plugin activation permission ID")
+            selected_permissions = tuple(sorted(permission_ids))
+            undeclared = sorted(set(selected_permissions) - set(manifest.permission_ids))
+            if undeclared:
+                raise PermissionError(
+                    "plugin activation requests undeclared permissions: " + ", ".join(undeclared)
+                )
+
+        if plugin_id in self._active:
+            if self._effective_permissions[plugin_id] != selected_permissions:
+                raise PermissionError(
+                    "active plugin permission set differs from requested activation"
+                )
+            return self._active[plugin_id]
 
         high_impact_ids = tuple(
             sorted(
@@ -293,7 +313,7 @@ class PluginRuntime:
             subject_id=manifest.plugin_id,
             version=manifest.version,
             payload=manifest.model_dump(mode="json"),
-            permission_ids=manifest.permission_ids,
+            permission_ids=selected_permissions,
             high_impact_ids=high_impact_ids,
         )
         if subject.requires_authority:
@@ -313,7 +333,7 @@ class PluginRuntime:
                 "runtime plugin manifest differs from registered manifest"
             )
         self._active[plugin_id] = adapter
-        self._effective_permissions[plugin_id] = tuple(sorted(manifest.permission_ids))
+        self._effective_permissions[plugin_id] = selected_permissions
         return adapter
 
     def effective_permissions(self, plugin_id: str) -> tuple[str, ...]:
