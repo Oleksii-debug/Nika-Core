@@ -444,6 +444,49 @@ class KnowledgeCorpus:
             ),
         )
 
+    @staticmethod
+    def _prepare_permission_scoped_fts(
+        conn: sqlite3.Connection,
+        scope: RetrievalScope,
+    ) -> None:
+        placeholders = ",".join("?" for _ in scope.workspace_ids)
+        conn.execute("DROP TABLE IF EXISTS temp.knowledge_scope_fts")
+        conn.execute(
+            """CREATE VIRTUAL TABLE temp.knowledge_scope_fts USING fts5(
+                workspace_id UNINDEXED,
+                artifact_key UNINDEXED,
+                version UNINDEXED,
+                ordinal UNINDEXED,
+                chunk_id UNINDEXED,
+                title,
+                body,
+                tokenize='unicode61 remove_diacritics 2'
+            )"""
+        )
+        conn.execute(
+            f"""INSERT INTO knowledge_scope_fts(
+                workspace_id, artifact_key, version, ordinal, chunk_id, title, body
+            )
+            SELECT f.workspace_id, f.artifact_key, f.version, f.ordinal,
+                   f.chunk_id, f.title, f.body
+            FROM main.knowledge_fts AS f
+            JOIN main.knowledge_artifacts AS a
+              ON a.workspace_id=f.workspace_id
+             AND a.artifact_key=f.artifact_key
+             AND a.current_version=CAST(f.version AS INTEGER)
+            WHERE f.workspace_id IN ({placeholders})
+              AND (
+                a.visibility='workspace'
+                OR EXISTS (
+                    SELECT 1 FROM main.knowledge_acl AS acl
+                    WHERE acl.workspace_id=a.workspace_id
+                      AND acl.artifact_key=a.artifact_key
+                      AND acl.principal_id=?
+                )
+              )""",
+            [*scope.workspace_ids, scope.principal_id],
+        )
+
     def search(
         self,
         scope: RetrievalScope,
@@ -454,52 +497,41 @@ class KnowledgeCorpus:
         if type(limit) is not int or limit < 1 or limit > 100:
             raise ValueError("limit must be an integer between 1 and 100")
         fts_query = _safe_fts_query(query)
-        placeholders = ",".join("?" for _ in scope.workspace_ids)
-        sql = f"""SELECT
-            knowledge_fts.workspace_id,
-            knowledge_fts.artifact_key,
-            CAST(knowledge_fts.version AS INTEGER) AS version,
-            CAST(knowledge_fts.ordinal AS INTEGER) AS ordinal,
-            knowledge_fts.chunk_id,
-            knowledge_fts.title AS indexed_title,
-            knowledge_fts.body AS indexed_body,
-            snippet(knowledge_fts, 6, '[', ']', ' … ', 24) AS snippet,
-            bm25(knowledge_fts) AS rank,
+        sql = """SELECT
+            knowledge_scope_fts.workspace_id,
+            knowledge_scope_fts.artifact_key,
+            CAST(knowledge_scope_fts.version AS INTEGER) AS version,
+            CAST(knowledge_scope_fts.ordinal AS INTEGER) AS ordinal,
+            knowledge_scope_fts.chunk_id,
+            knowledge_scope_fts.title AS indexed_title,
+            knowledge_scope_fts.body AS indexed_body,
+            snippet(knowledge_scope_fts, 6, '[', ']', ' … ', 24) AS snippet,
+            bm25(knowledge_scope_fts) AS rank,
             c.start_char, c.end_char, c.chunk_sha256, c.text,
             v.title, v.source_id, v.source_locator, v.normalized_sha256, v.raw_sha256,
             v.parser_name, v.parser_version, v.normalization_version, v.chunker_version,
             v.chunk_max_chars, v.chunk_overlap_chars, v.approved_by, v.normalized_text
-        FROM knowledge_fts
-        JOIN knowledge_artifacts AS a
-          ON a.workspace_id=knowledge_fts.workspace_id
-         AND a.artifact_key=knowledge_fts.artifact_key
-         AND a.current_version=CAST(knowledge_fts.version AS INTEGER)
-        JOIN knowledge_chunks AS c
-          ON c.chunk_id=knowledge_fts.chunk_id
-         AND c.workspace_id=knowledge_fts.workspace_id
-         AND c.artifact_key=knowledge_fts.artifact_key
-         AND c.version=CAST(knowledge_fts.version AS INTEGER)
-         AND c.ordinal=CAST(knowledge_fts.ordinal AS INTEGER)
-        JOIN knowledge_versions AS v
-          ON v.workspace_id=knowledge_fts.workspace_id
-         AND v.artifact_key=knowledge_fts.artifact_key
-         AND v.version=CAST(knowledge_fts.version AS INTEGER)
-        WHERE knowledge_fts MATCH ?
-          AND knowledge_fts.workspace_id IN ({placeholders})
-          AND (
-            a.visibility='workspace'
-            OR EXISTS (
-                SELECT 1 FROM knowledge_acl AS acl
-                WHERE acl.workspace_id=a.workspace_id
-                  AND acl.artifact_key=a.artifact_key
-                  AND acl.principal_id=?
-            )
-          )
-        ORDER BY rank, knowledge_fts.artifact_key, version, ordinal, knowledge_fts.chunk_id
+        FROM knowledge_scope_fts
+        JOIN main.knowledge_chunks AS c
+          ON c.chunk_id=knowledge_scope_fts.chunk_id
+         AND c.workspace_id=knowledge_scope_fts.workspace_id
+         AND c.artifact_key=knowledge_scope_fts.artifact_key
+         AND c.version=CAST(knowledge_scope_fts.version AS INTEGER)
+         AND c.ordinal=CAST(knowledge_scope_fts.ordinal AS INTEGER)
+        JOIN main.knowledge_versions AS v
+          ON v.workspace_id=knowledge_scope_fts.workspace_id
+         AND v.artifact_key=knowledge_scope_fts.artifact_key
+         AND v.version=CAST(knowledge_scope_fts.version AS INTEGER)
+        WHERE knowledge_scope_fts MATCH ?
+        ORDER BY rank, knowledge_scope_fts.artifact_key, version, ordinal,
+                 knowledge_scope_fts.chunk_id
         LIMIT ?"""
-        params: list[object] = [fts_query, *scope.workspace_ids, scope.principal_id, limit]
         with self._store.connection() as conn:
-            rows = conn.execute(sql, params).fetchall()
+            try:
+                self._prepare_permission_scoped_fts(conn, scope)
+                rows = conn.execute(sql, (fts_query, limit)).fetchall()
+            finally:
+                conn.execute("DROP TABLE IF EXISTS temp.knowledge_scope_fts")
 
         checked_versions: set[tuple[str, str, int]] = set()
         hits: list[KnowledgeHit] = []
