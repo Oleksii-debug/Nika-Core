@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import nika_core.media.transcribers as transcribers
+from nika_core.media import transcribers
 from nika_core.media.contracts import ModelDescriptor
 from nika_core.media.errors import MediaError, MediaErrorCode
 from nika_core.media.model_evidence import inspect_model_directory, inspect_model_files
