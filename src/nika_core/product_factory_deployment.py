@@ -389,7 +389,8 @@ class DeploymentFabric:
         )
         try:
             health = self.provider.health(intent)
-        except Exception:
+        except Exception:  # noqa: BLE001
+            # Provider failures after an applied effect must become durable uncertainty.
             return self._mark_uncertain(record)
         try:
             return self._finish_health(record, health)
@@ -517,7 +518,8 @@ class DeploymentFabric:
             return self._save(updated)
         try:
             rollback = self.provider.rollback(intent, record.previous_release_sha)
-        except Exception:
+        except Exception:  # noqa: BLE001
+            # Provider failures after an applied effect must become durable uncertainty.
             return self._mark_uncertain(record, health.evidence_refs)
         if rollback.environment_id != intent.environment.environment_id:
             raise DeploymentFabricError("rollback evidence environment mismatch")
