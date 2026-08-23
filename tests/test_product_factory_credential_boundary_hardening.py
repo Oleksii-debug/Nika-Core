@@ -50,6 +50,22 @@ class _ProtectedStore:
     ) -> bool:
         return self.authorities.get((secret_ref, generation)) == authority_fingerprint
 
+    def retire_authority(
+        self,
+        *,
+        secret_ref: str,
+        generation: int,
+        current_authority_fingerprint: str,
+        retired_authority_fingerprint: str,
+    ) -> None:
+        key = (secret_ref, generation)
+        existing = self.authorities.get(key)
+        if existing == retired_authority_fingerprint:
+            return
+        if existing != current_authority_fingerprint:
+            raise AssertionError("authority retirement conflict")
+        self.authorities[key] = retired_authority_fingerprint
+
     def issue_handle(
         self,
         *,
