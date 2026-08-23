@@ -33,11 +33,15 @@ def _cache_files(root: Path) -> list[tuple[Path, os.stat_result]]:
     if not stat.S_ISDIR(root_info.st_mode):
         raise ValueError(f"model cache path is not a directory: {root}")
 
+    def fail_walk(error: OSError) -> None:
+        raise ValueError(f"model cache tree cannot be enumerated: {root}") from error
+
     files: list[tuple[Path, os.stat_result]] = []
     try:
         for directory, directory_names, file_names in os.walk(
             root,
             topdown=True,
+            onerror=fail_walk,
             followlinks=False,
         ):
             base = Path(directory)
@@ -61,6 +65,26 @@ def _cache_files(root: Path) -> list[tuple[Path, os.stat_result]]:
     return files
 
 
+def _file_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        int(info.st_dev),
+        int(info.st_ino),
+        int(info.st_size),
+        int(info.st_mtime_ns),
+        int(info.st_ctime_ns),
+    )
+
+
+def _inventory_identity(
+    root: Path,
+    files: list[tuple[Path, os.stat_result]],
+) -> tuple[tuple[str, tuple[int, int, int, int, int]], ...]:
+    return tuple(
+        (path.relative_to(root).as_posix(), _file_identity(info))
+        for path, info in files
+    )
+
+
 def foundry_cache_tree_sha256(root: Path) -> dict[str, object]:
     """Hash one concrete Foundry model cache tree with unambiguous framing.
 
@@ -70,6 +94,7 @@ def foundry_cache_tree_sha256(root: Path) -> dict[str, object]:
     """
 
     files = _cache_files(root)
+    initial_inventory = _inventory_identity(root, files)
     digest = hashlib.sha256()
     digest.update(_TREE_DIGEST_MAGIC)
     digest.update(_length_prefix(len(files)))
@@ -92,21 +117,13 @@ def foundry_cache_tree_sha256(root: Path) -> dict[str, object]:
             raise ValueError(f"model cache file cannot be read: {path}") from exc
 
         after = _lstat_plain(path)
-        before_identity = (
-            int(before.st_dev),
-            int(before.st_ino),
-            expected_size,
-            int(before.st_mtime_ns),
-        )
-        after_identity = (
-            int(after.st_dev),
-            int(after.st_ino),
-            int(after.st_size),
-            int(after.st_mtime_ns),
-        )
-        if observed_size != expected_size or after_identity != before_identity:
+        if observed_size != expected_size or _file_identity(after) != _file_identity(before):
             raise ValueError(f"model cache file changed while hashing: {path}")
         total_bytes += observed_size
+
+    final_files = _cache_files(root)
+    if _inventory_identity(root, final_files) != initial_inventory:
+        raise ValueError("model cache tree changed while hashing")
 
     return {
         "algorithm": "sha256-tree-v2",
