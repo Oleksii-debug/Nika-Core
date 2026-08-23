@@ -81,8 +81,13 @@ class ModelGateway:
         )
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
-        providers = self._select_candidates(request)
-        self._validate_route(request, providers)
+        try:
+            providers = self._select_candidates(request)
+            self._validate_route(request, providers)
+        except ModelGatewayError as error:
+            self._audit_preflight_failure(request, error)
+            raise
+
         loop = asyncio.get_running_loop()
         deadline = loop.time() + request.timeout_seconds
 
@@ -353,6 +358,14 @@ class ModelGateway:
         if capabilities.kind is ProviderKind.NO_LLM:
             return ProviderResourceClass.NONE
         return ProviderResourceClass.UNKNOWN
+
+    def _audit_preflight_failure(
+        self, request: ModelRequest, error: ModelGatewayError
+    ) -> None:
+        payload: dict[str, object] = {"code": error.code.value, "phase": "preflight"}
+        if error.provider_id is not None:
+            payload["provider_id"] = error.provider_id
+        self._audit(event_type="model.failed", request=request, payload=payload)
 
     def _audit_failure(
         self, request: ModelRequest, provider_id: str, error: ModelGatewayError
