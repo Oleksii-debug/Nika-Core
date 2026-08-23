@@ -14,6 +14,7 @@ from nika_core.product_project import (
     ProductProjectRepository,
     StaleProjectVersionError,
 )
+from nika_core.research_product_handoff import verify_sealed_handoffs_conn
 
 
 def _now() -> str:
@@ -77,12 +78,18 @@ class ProductDecisionRepository:
                     raise ProductProjectError(
                         "idempotency key was already used with different mutation input"
                     )
-                return self._get_version_conn(
+                stored = self._get_version_conn(
                     conn,
                     project_id,
                     decision.decision_id,
                     int(replay["entity_version"]),
                 )
+                verify_sealed_handoffs_conn(
+                    conn,
+                    project_id,
+                    stored.evidence_package_ids,
+                )
+                return stored
 
             project = conn.execute(
                 "SELECT row_version FROM product_projects WHERE project_id=?",
@@ -99,6 +106,7 @@ class ProductDecisionRepository:
             evidence_package_ids = self._option_evidence_conn(
                 conn, project_id, decision.option_id
             )
+            verify_sealed_handoffs_conn(conn, project_id, evidence_package_ids)
             current = self._latest_conn(conn, project_id, decision.decision_id)
             self._validate_transition(current, decision)
             if decision.state is ProductDecisionState.APPROVED:
@@ -229,28 +237,60 @@ class ProductDecisionRepository:
         if len(matching) > 1:
             raise ProductProjectError(f"ambiguous product requirement id: {requirement_id}")
         index, requirement = matching[0]
-        if decision_id in requirement.decision_ids:
+
+        already_linked = decision_id in requirement.decision_ids
+        if not already_linked and project.row_version != expected_row_version:
+            raise StaleProjectVersionError(
+                f"stale ProductProject write: expected {expected_row_version}, "
+                f"current {project.row_version}"
+            )
+
+        decision = self.get(project_id, decision_id)
+        if decision.decision.state is not ProductDecisionState.APPROVED:
+            raise ProductProjectError(
+                f"requirement requires approved product decision: {decision_id}"
+            )
+        with self.store.connection() as conn:
+            verify_sealed_handoffs_conn(
+                conn,
+                project_id,
+                decision.evidence_package_ids,
+            )
+
+        decision_ids = tuple(
+            dict.fromkeys((*requirement.decision_ids, decision_id))
+        )
+        evidence_package_ids = tuple(
+            dict.fromkeys(
+                (*requirement.evidence_package_ids, *decision.evidence_package_ids)
+            )
+        )
+        if (
+            decision_ids == requirement.decision_ids
+            and evidence_package_ids == requirement.evidence_package_ids
+        ):
             return project
         if project.row_version != expected_row_version:
             raise StaleProjectVersionError(
                 f"stale ProductProject write: expected {expected_row_version}, "
                 f"current {project.row_version}"
             )
-        decision = self.get(project_id, decision_id)
-        if decision.decision.state is not ProductDecisionState.APPROVED:
-            raise ProductProjectError(
-                f"requirement requires approved product decision: {decision_id}"
-            )
+
         requirements = list(project.spec.requirements)
         requirements[index] = replace(
             requirement,
-            decision_ids=(*requirement.decision_ids, decision_id),
+            evidence_package_ids=evidence_package_ids,
+            decision_ids=decision_ids,
         )
         spec = replace(project.spec, requirements=tuple(requirements))
         return self.projects.update_spec(
             project_id,
             spec,
             expected_row_version=expected_row_version,
+            change_reason=(
+                f"link approved decision {decision_id} and evidence "
+                f"to requirement {requirement_id}"
+            ),
         )
 
     @staticmethod
@@ -356,10 +396,37 @@ class ProductDecisionRepository:
         ).fetchall()
         matches: list[tuple[str, ...]] = []
         for row in rows:
-            payload = json.loads(row["payload_json"])
+            try:
+                payload = json.loads(row["payload_json"])
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ProductProjectError(
+                    "product research handoff contains invalid JSON"
+                ) from exc
+            if not isinstance(payload, dict):
+                raise ProductProjectError(
+                    "product research handoff must contain a JSON object"
+                )
             for option in payload.get("options", []):
+                if not isinstance(option, dict):
+                    raise ProductProjectError(
+                        "product research handoff contains invalid option data"
+                    )
                 if option.get("option_id") == option_id:
-                    matches.append(tuple(option.get("evidence_package_ids", ())))
+                    raw_package_ids = option.get("evidence_package_ids", ())
+                    if not isinstance(raw_package_ids, list):
+                        raise ProductProjectError(
+                            "product option evidence_package_ids must be a list"
+                        )
+                    package_ids = tuple(str(value) for value in raw_package_ids)
+                    if not package_ids or any(not value.strip() for value in package_ids):
+                        raise ProductProjectError(
+                            "product option requires evidence package ids"
+                        )
+                    if len(set(package_ids)) != len(package_ids):
+                        raise ProductProjectError(
+                            "product option contains duplicate evidence package ids"
+                        )
+                    matches.append(package_ids)
         if not matches:
             raise ProductProjectError(f"unknown product option: {option_id}")
         if len(matches) > 1:
