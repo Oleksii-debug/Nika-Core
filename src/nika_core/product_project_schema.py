@@ -91,7 +91,6 @@ PRODUCT_PROJECT_MIGRATIONS: dict[int, tuple[str, ...]] = {
             spec_sha256 TEXT NOT NULL CHECK(length(spec_sha256) = 64),
             change_reason TEXT NOT NULL,
             created_at TEXT NOT NULL,
-            PRIMARY KEY(operation_key),
             UNIQUE(project_id, result_spec_version),
             FOREIGN KEY(project_id) REFERENCES product_projects(project_id)
         )""",
