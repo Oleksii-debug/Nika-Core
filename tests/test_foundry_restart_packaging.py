@@ -125,6 +125,18 @@ def test_malformed_tool_capability_metadata_cannot_become_positive_evidence() ->
     assert evidence.supports_tool_calling is None
 
 
+def test_foundry_sdk_types_remain_adapter_local() -> None:
+    root = Path(__file__).resolve().parents[1]
+    model_gateway = root / "src" / "nika_core" / "model_gateway"
+
+    for path in model_gateway.glob("*.py"):
+        if path.name == "foundry_local.py":
+            continue
+        source = path.read_text(encoding="utf-8")
+        assert "foundry_local_sdk" not in source, path
+        assert "FoundryLocalManager" not in source, path
+
+
 def test_base_windows_package_keeps_foundry_optional_and_m11_excludes_extra() -> None:
     root = Path(__file__).resolve().parents[1]
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]
