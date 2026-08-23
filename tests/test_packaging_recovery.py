@@ -278,10 +278,12 @@ def test_restore_fails_closed_when_recovery_lock_is_already_held(tmp_path: Path)
     snapshot = tmp_path / "snapshot"
     create_database_snapshot(database, snapshot, source_release_sha=SHA_OLD)
 
-    with recovery_module._database_recovery_lock(database):
-        with pytest.raises(DatabaseRecoveryError, match="recovery operation is active"):
-            restore_database_snapshot(
-                snapshot,
-                database,
-                expected_source_release_sha=SHA_OLD,
-            )
+    with (
+        recovery_module._database_recovery_lock(database),
+        pytest.raises(DatabaseRecoveryError, match="recovery operation is active"),
+    ):
+        restore_database_snapshot(
+            snapshot,
+            database,
+            expected_source_release_sha=SHA_OLD,
+        )
