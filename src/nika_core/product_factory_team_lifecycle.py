@@ -280,12 +280,15 @@ class DynamicTeamLifecycle:
         current = _current_assignment(snapshot, role_id)
         if current.status not in {RoleAssignmentStatus.BLOCKED, RoleAssignmentStatus.FAILED}:
             raise TeamLifecycleError("only blocked or failed assignments can be replaced")
+        if current.transition_reason is None or not current.evidence_refs:
+            raise TeamLifecycleError("unavailable assignment is missing its transition evidence")
 
+        unavailable_reason = f"{current.status.value}: {current.transition_reason}"
         retired = replace(
             current,
             status=RoleAssignmentStatus.REPLACED,
-            transition_reason=reason,
-            evidence_refs=evidence_refs,
+            transition_reason=unavailable_reason,
+            evidence_refs=current.evidence_refs,
         )
         generation = current.generation + 1
         replacement = TeamRoleAssignment(
