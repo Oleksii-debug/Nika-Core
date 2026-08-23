@@ -5,6 +5,7 @@ import time
 
 import pytest
 
+from nika_core.data.sqlite import SQLiteStore
 from nika_core.intelligence.brain import DeterministicBrain
 from nika_core.intelligence.contracts import (
     DeterministicAction,
@@ -14,7 +15,10 @@ from nika_core.intelligence.contracts import (
     PlanStep,
     WorldState,
 )
+from nika_core.intelligence.runtime_effect_journal import RuntimeIdempotencyEffectJournal
 from nika_core.intelligence.unified_planning_adapter import UnifiedPlanningAdapter
+from nika_core.kernel.task_queue import TaskQueue
+from nika_core.runtime.idempotency import IdempotencyLedger
 from nika_core.tools import ToolExecutor, ToolRisk, ToolSpec
 
 
@@ -33,7 +37,7 @@ def test_deterministic_brain_plans_and_executes_without_model_gateway() -> None:
     tools.register(ToolSpec(tool_id="research.fetch", description="fetch"), fetch)
     tools.register(ToolSpec(tool_id="research.filter", description="filter"), filter_pages)
     brain = DeterministicBrain(
-        planner=UnifiedPlanningAdapter(engine_name="pyperplan"),
+        planner=UnifiedPlanningAdapter(),
         tools=tools,
     )
     actions = (
@@ -67,7 +71,7 @@ def test_deterministic_brain_plans_and_executes_without_model_gateway() -> None:
 
 
 def test_deterministic_planner_fails_cleanly_for_impossible_goal() -> None:
-    planner = UnifiedPlanningAdapter(engine_name="pyperplan")
+    planner = UnifiedPlanningAdapter()
 
     with pytest.raises(DeterministicPlanningError):
         planner.plan(
@@ -78,7 +82,7 @@ def test_deterministic_planner_fails_cleanly_for_impossible_goal() -> None:
 
 
 def test_replanning_from_changed_state_skips_already_completed_work() -> None:
-    planner = UnifiedPlanningAdapter(engine_name="pyperplan")
+    planner = UnifiedPlanningAdapter()
     actions = (
         DeterministicAction(
             action_id="fetch-pages",
@@ -101,7 +105,7 @@ def test_replanning_from_changed_state_skips_already_completed_work() -> None:
     assert tuple(step.action_id for step in plan.steps) == ("filter-pages",)
 
 
-def test_deterministic_brain_cannot_bypass_high_impact_tool_approval() -> None:
+def test_deterministic_brain_cannot_bypass_high_impact_tool_approval(tmp_path) -> None:
     called = False
 
     async def publish(_arguments: dict[str, object]) -> object:
@@ -109,6 +113,9 @@ def test_deterministic_brain_cannot_bypass_high_impact_tool_approval() -> None:
         called = True
         return "published"
 
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    task = TaskQueue(store).create(workspace_id="proof", agent_id="deterministic")
     tools = ToolExecutor()
     tools.register(
         ToolSpec(
@@ -119,8 +126,9 @@ def test_deterministic_brain_cannot_bypass_high_impact_tool_approval() -> None:
         publish,
     )
     brain = DeterministicBrain(
-        planner=UnifiedPlanningAdapter(engine_name="pyperplan"),
+        planner=UnifiedPlanningAdapter(),
         tools=tools,
+        effect_journal=RuntimeIdempotencyEffectJournal(IdempotencyLedger(store)),
     )
     action = DeterministicAction(
         action_id="publish-result",
@@ -132,6 +140,7 @@ def test_deterministic_brain_cannot_bypass_high_impact_tool_approval() -> None:
     result = asyncio.run(
         brain.run(
             run_id="approval-proof",
+            task_id=task.task_id,
             state=WorldState(frozenset({"draft-ready"})),
             goal=DeterministicGoal(required=frozenset({"published"})),
             actions=(action,),
@@ -142,6 +151,7 @@ def test_deterministic_brain_cannot_bypass_high_impact_tool_approval() -> None:
     assert result.error == "approval required"
     assert called is False
     assert "published" not in result.final_state.facts
+    assert IdempotencyLedger(store).list_for_task(task.task_id) == ()
 
 
 def test_deterministic_brain_rejects_plan_over_step_budget_before_execution() -> None:
@@ -219,7 +229,7 @@ def test_deterministic_brain_times_out_slow_planner() -> None:
 
 def test_deterministic_brain_rejects_invalid_budget_values() -> None:
     brain = DeterministicBrain(
-        planner=UnifiedPlanningAdapter(engine_name="pyperplan"),
+        planner=UnifiedPlanningAdapter(),
         tools=ToolExecutor(),
     )
 
