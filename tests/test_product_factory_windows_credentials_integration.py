@@ -203,20 +203,21 @@ def test_windows_authority_binding_is_durable_conflict_safe_and_retirable() -> N
     backend = FakePersistentWinVault()
     store = WindowsCredentialStore(backend)
     store.provision_secret("secret-a", 1, RAW_SECRET)
-    authority = hashlib.sha256(b"project-a-authority").hexdigest()
-    conflicting = hashlib.sha256(b"project-b-authority").hexdigest()
+    active_authority = hashlib.sha256(b"project-a-authority-active").hexdigest()
+    retired_authority = hashlib.sha256(b"project-a-authority-revoked").hexdigest()
+    conflicting = hashlib.sha256(b"project-b-authority-active").hexdigest()
 
     store.bind_authority(
         secret_ref="secret-a",
         generation=1,
-        authority_fingerprint=authority,
+        authority_fingerprint=active_authority,
     )
     restarted = WindowsCredentialStore(backend)
 
     assert restarted.authority_matches(
         secret_ref="secret-a",
         generation=1,
-        authority_fingerprint=authority,
+        authority_fingerprint=active_authority,
     )
     assert not restarted.authority_matches(
         secret_ref="secret-a",
@@ -229,20 +230,51 @@ def test_windows_authority_binding_is_durable_conflict_safe_and_retirable() -> N
             generation=1,
             authority_fingerprint=conflicting,
         )
-    with pytest.raises(ProtectedCredentialStoreError, match="cannot be retired"):
-        restarted.delete_authority("secret-a", 1)
 
-    assert restarted.delete_secret("secret-a", 1) is True
-    assert restarted.authority_matches(
+    restarted.retire_authority(
         secret_ref="secret-a",
         generation=1,
-        authority_fingerprint=authority,
+        current_authority_fingerprint=active_authority,
+        retired_authority_fingerprint=retired_authority,
     )
-    assert restarted.delete_authority("secret-a", 1) is True
-    assert not restarted.authority_matches(
+    restarted.retire_authority(
         secret_ref="secret-a",
         generation=1,
-        authority_fingerprint=authority,
+        current_authority_fingerprint=active_authority,
+        retired_authority_fingerprint=retired_authority,
+    )
+    after_retirement_restart = WindowsCredentialStore(backend)
+    assert not after_retirement_restart.authority_matches(
+        secret_ref="secret-a",
+        generation=1,
+        authority_fingerprint=active_authority,
+    )
+    assert after_retirement_restart.authority_matches(
+        secret_ref="secret-a",
+        generation=1,
+        authority_fingerprint=retired_authority,
+    )
+    with pytest.raises(ProtectedCredentialStoreError, match="retirement conflicts"):
+        after_retirement_restart.retire_authority(
+            secret_ref="secret-a",
+            generation=1,
+            current_authority_fingerprint=conflicting,
+            retired_authority_fingerprint=active_authority,
+        )
+    with pytest.raises(ProtectedCredentialStoreError, match="cannot be retired"):
+        after_retirement_restart.delete_authority("secret-a", 1)
+
+    assert after_retirement_restart.delete_secret("secret-a", 1) is True
+    assert after_retirement_restart.authority_matches(
+        secret_ref="secret-a",
+        generation=1,
+        authority_fingerprint=retired_authority,
+    )
+    assert after_retirement_restart.delete_authority("secret-a", 1) is True
+    assert not after_retirement_restart.authority_matches(
+        secret_ref="secret-a",
+        generation=1,
+        authority_fingerprint=retired_authority,
     )
 
 
