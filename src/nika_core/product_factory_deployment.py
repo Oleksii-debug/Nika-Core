@@ -337,7 +337,7 @@ class DeploymentRecord:
 @dataclass(frozen=True, slots=True)
 class DeploymentFabricSnapshot:
     records: tuple[DeploymentRecord, ...]
-    healthy_staging: tuple[tuple[str, str], ...]
+    healthy_staging: tuple[tuple[str, ...], ...]
     current_releases: tuple[tuple[str, ...], ...]
 
 
@@ -345,7 +345,7 @@ class DeploymentFabricSnapshot:
 class DeploymentFabric:
     provider: DeploymentProviderPort
     _records: dict[str, DeploymentRecord] = field(default_factory=dict, init=False, repr=False)
-    _healthy_staging: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _healthy_staging: dict[str, ReleaseRef] = field(default_factory=dict, init=False, repr=False)
     _current_releases: dict[tuple[str, str], str] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -426,9 +426,18 @@ class DeploymentFabric:
                 self._current_releases.items()
             )
         )
+        healthy_staging = tuple(
+            (
+                project_id,
+                release.version,
+                release.source_sha,
+                release.artifact_digest,
+            )
+            for project_id, release in sorted(self._healthy_staging.items())
+        )
         return DeploymentFabricSnapshot(
             tuple(self._records[key] for key in sorted(self._records)),
-            tuple(sorted(self._healthy_staging.items())),
+            healthy_staging,
             current_releases,
         )
 
@@ -439,18 +448,16 @@ class DeploymentFabric:
         for record in snapshot.records:
             _validate_record(record)
 
-        healthy_staging: dict[str, str] = {}
-        for project_id, source_sha in snapshot.healthy_staging:
-            if not project_id.strip():
-                raise DeploymentFabricError("staging snapshot project identity must not be empty")
-            _validate_sha(source_sha)
+        healthy_staging: dict[str, ReleaseRef] = {}
+        for entry in snapshot.healthy_staging:
+            project_id, release = _normalize_healthy_staging_entry(entry, snapshot.records)
             if project_id in healthy_staging:
                 raise DeploymentFabricError("deployment snapshot contains duplicate staging state")
-            if not _has_healthy_staging_record(snapshot.records, project_id, source_sha):
+            if not _has_healthy_staging_record(snapshot.records, release):
                 raise DeploymentFabricError(
                     "healthy staging snapshot is not backed by a healthy staging record"
                 )
-            healthy_staging[project_id] = source_sha
+            healthy_staging[project_id] = release
 
         current_releases: dict[tuple[str, str], str] = {}
         for entry in snapshot.current_releases:
@@ -492,7 +499,7 @@ class DeploymentFabric:
             )
             self._current_releases[_environment_key(intent)] = intent.release.source_sha
             if intent.environment.tier is EnvironmentTier.STAGING:
-                self._healthy_staging[intent.project_id] = intent.release.source_sha
+                self._healthy_staging[intent.project_id] = intent.release
             return self._save(updated)
         rollback = self.provider.rollback(intent, record.previous_release_sha)
         if rollback.environment_id != intent.environment.environment_id:
@@ -517,7 +524,7 @@ class DeploymentFabric:
     def _enforce_staging_first(self, intent: DeploymentIntent) -> None:
         if (
             intent.environment.tier is EnvironmentTier.PRODUCTION
-            and self._healthy_staging.get(intent.project_id) != intent.release.source_sha
+            and self._healthy_staging.get(intent.project_id) != intent.release
         ):
             raise DeploymentFabricError(
                 "production deploy requires healthy staging proof for exact release"
@@ -558,6 +565,34 @@ def _environment_key(intent: DeploymentIntent) -> tuple[str, str]:
     return intent.project_id, intent.environment.environment_id
 
 
+def _normalize_healthy_staging_entry(
+    entry: tuple[str, ...], records: tuple[DeploymentRecord, ...]
+) -> tuple[str, ReleaseRef]:
+    if len(entry) == 4:
+        project_id, version, source_sha, artifact_digest = entry
+        release = ReleaseRef(project_id, version, source_sha, artifact_digest)
+        return project_id, release
+    if len(entry) == 2:
+        project_id, source_sha = entry
+        if not project_id.strip():
+            raise DeploymentFabricError("staging snapshot project identity must not be empty")
+        _validate_sha(source_sha)
+        matches = {
+            record.intent.release
+            for record in records
+            if record.state is DeploymentState.HEALTHY
+            and record.intent.project_id == project_id
+            and record.intent.environment.tier is EnvironmentTier.STAGING
+            and record.intent.release.source_sha == source_sha
+        }
+        if len(matches) != 1:
+            raise DeploymentFabricError(
+                "legacy staging snapshot is ambiguous or not backed by one exact release"
+            )
+        return project_id, next(iter(matches))
+    raise DeploymentFabricError("healthy staging snapshot entry has invalid shape")
+
+
 def _normalize_current_release_entry(
     entry: tuple[str, ...], records: tuple[DeploymentRecord, ...]
 ) -> tuple[str, str, str]:
@@ -588,13 +623,13 @@ def _normalize_current_release_entry(
 
 
 def _has_healthy_staging_record(
-    records: tuple[DeploymentRecord, ...], project_id: str, source_sha: str
+    records: tuple[DeploymentRecord, ...], release: ReleaseRef
 ) -> bool:
     return any(
         record.state is DeploymentState.HEALTHY
-        and record.intent.project_id == project_id
+        and record.intent.project_id == release.project_id
         and record.intent.environment.tier is EnvironmentTier.STAGING
-        and record.intent.release.source_sha == source_sha
+        and record.intent.release == release
         for record in records
     )
 
