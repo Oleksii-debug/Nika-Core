@@ -1,7 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+import hmac
+import json
+import secrets
+from dataclasses import dataclass, field
 from enum import StrEnum
+
+
+_DECISION_AUTHORITY_KEY = secrets.token_bytes(32)
 
 
 class ProductComplianceError(ValueError):
@@ -80,6 +87,10 @@ class CompetitorResearchEvidence:
         _require_text(self.evidence_id, "competitor evidence_id")
         _require_text(self.source_ref, "competitor source_ref")
         _require_text(self.provenance_ref, "competitor provenance_ref")
+        if not isinstance(self.permitted_public_evidence, bool):
+            raise ProductComplianceError("permitted_public_evidence must be a boolean")
+        if not isinstance(self.proprietary_material, bool):
+            raise ProductComplianceError("proprietary_material must be a boolean")
         if self.proprietary_material and self.permitted_public_evidence:
             raise ProductComplianceError(
                 "competitor evidence cannot be both proprietary material and public evidence"
@@ -98,26 +109,49 @@ class CompetitorResearchEvidence:
 
 @dataclass(frozen=True, slots=True)
 class ProductComplianceDecision:
+    """PF10 decision result whose positive authority is issued only by this process's gate.
+
+    The proof prevents an ordinary caller from turning an arbitrary dataclass into an allowed
+    release decision. It is deliberately process-local and is not a signature or durable trust
+    anchor. A decision that is copied or modified loses positive authority and reads as blocked.
+    """
+
     project_id: str
     allowed: bool
     findings: tuple[str, ...]
     evidence_refs: tuple[str, ...]
+    _authority_proof: str | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         _require_text(self.project_id, "compliance decision project_id")
+        if not isinstance(object.__getattribute__(self, "allowed"), bool):
+            raise ProductComplianceError("compliance decision allowed must be a boolean")
         _require_unique_text(self.findings, "compliance finding", allow_empty=True)
         _require_unique_text(self.evidence_refs, "compliance evidence_ref", allow_empty=True)
-        if self.allowed and self.findings:
+        raw_allowed = object.__getattribute__(self, "allowed")
+        if raw_allowed and self.findings:
             raise ProductComplianceError("allowed compliance decision cannot contain findings")
-        if not self.allowed and not self.findings:
+        if not raw_allowed and not self.findings:
             raise ProductComplianceError("blocked compliance decision requires findings")
+        if self._authority_proof is not None:
+            _require_text(self._authority_proof, "compliance decision authority proof")
+
+    def __getattribute__(self, name: str):
+        if name == "allowed":
+            raw_allowed = object.__getattribute__(self, "allowed")
+            if not raw_allowed:
+                return False
+            return _valid_decision_proof(self)
+        return object.__getattribute__(self, name)
 
 
 class ProductComplianceGate:
     """PF10 fail-closed adoption/release policy over recorded evidence.
 
-    This gate does not invent legal conclusions. License disposition and any proprietary
-    reuse authorization must already come from an authorized review/policy process.
+    This gate does not invent legal conclusions. License disposition and proprietary reuse
+    authorization must already come from an authorized review/policy process. A product with no
+    other review-bearing evidence needs an explicit scope_review_ref to prove that an empty
+    compliance inventory was reviewed rather than silently omitted.
     """
 
     def evaluate(
@@ -127,11 +161,23 @@ class ProductComplianceGate:
         dependencies: tuple[DependencyAdoption, ...] = (),
         obligation_evidence: tuple[DistributionObligationEvidence, ...] = (),
         competitor_evidence: tuple[CompetitorResearchEvidence, ...] = (),
+        scope_review_ref: str | None = None,
     ) -> ProductComplianceDecision:
         _require_text(project_id, "project_id")
+        _require_tuple(dependencies, "dependencies")
+        _require_tuple(obligation_evidence, "obligation_evidence")
+        _require_tuple(competitor_evidence, "competitor_evidence")
+        if scope_review_ref is not None:
+            _require_text(scope_review_ref, "scope_review_ref")
+
         findings: list[str] = []
         evidence_refs: list[str] = []
+        scope_review_refs: set[str] = set()
         component_ids: set[str] = set()
+
+        if scope_review_ref is not None:
+            evidence_refs.append(scope_review_ref)
+            scope_review_refs.add(scope_review_ref)
 
         obligations: dict[tuple[str, str], DistributionObligationEvidence] = {}
         for item in obligation_evidence:
@@ -159,6 +205,7 @@ class ProductComplianceGate:
             evidence_refs.extend((dependency.source_ref, dependency.provenance_ref))
             if dependency.review_ref:
                 evidence_refs.append(dependency.review_ref)
+                scope_review_refs.add(dependency.review_ref)
             evidence_refs.extend(dependency.notice_refs)
 
             if dependency.license_disposition is LicenseDisposition.BLOCKED:
@@ -192,10 +239,13 @@ class ProductComplianceGate:
             evidence_refs.extend((evidence.source_ref, evidence.provenance_ref))
             if evidence.permission_basis_ref:
                 evidence_refs.append(evidence.permission_basis_ref)
+                scope_review_refs.add(evidence.permission_basis_ref)
             if evidence.legal_basis_ref:
                 evidence_refs.append(evidence.legal_basis_ref)
+                scope_review_refs.add(evidence.legal_basis_ref)
             if evidence.reuse_authorization_ref:
                 evidence_refs.append(evidence.reuse_authorization_ref)
+                scope_review_refs.add(evidence.reuse_authorization_ref)
 
             if evidence.proprietary_material:
                 if not evidence.legal_basis_ref or not evidence.reuse_authorization_ref:
@@ -203,9 +253,12 @@ class ProductComplianceGate:
             elif not evidence.permitted_public_evidence:
                 findings.append(f"research-source:not-permitted:{evidence.evidence_id}")
 
+        if not scope_review_refs:
+            findings.append("compliance-scope:unreviewed")
+
         normalized_findings = tuple(dict.fromkeys(findings))
         normalized_evidence = tuple(dict.fromkeys(evidence_refs))
-        return ProductComplianceDecision(
+        return _issue_decision(
             project_id=project_id,
             allowed=not normalized_findings,
             findings=normalized_findings,
@@ -213,14 +266,82 @@ class ProductComplianceGate:
         )
 
     def require_release_allowed(self, decision: ProductComplianceDecision) -> None:
+        if not isinstance(decision, ProductComplianceDecision):
+            raise ProductComplianceError("release requires ProductComplianceDecision")
         if not decision.allowed:
-            joined = ", ".join(decision.findings)
+            findings = decision.findings
+            raw_allowed = object.__getattribute__(decision, "allowed")
+            if raw_allowed and not _valid_decision_proof(decision):
+                findings = (*findings, "decision:untrusted-origin")
+            joined = ", ".join(dict.fromkeys(findings))
             raise ProductComplianceError(f"release blocked by PF10 compliance gate: {joined}")
 
 
-def _require_text(value: str, label: str) -> None:
+def _issue_decision(
+    *,
+    project_id: str,
+    allowed: bool,
+    findings: tuple[str, ...],
+    evidence_refs: tuple[str, ...],
+) -> ProductComplianceDecision:
+    proof = _decision_proof(
+        project_id=project_id,
+        allowed=allowed,
+        findings=findings,
+        evidence_refs=evidence_refs,
+    )
+    return ProductComplianceDecision(
+        project_id=project_id,
+        allowed=allowed,
+        findings=findings,
+        evidence_refs=evidence_refs,
+        _authority_proof=proof,
+    )
+
+
+def _decision_proof(
+    *,
+    project_id: str,
+    allowed: bool,
+    findings: tuple[str, ...],
+    evidence_refs: tuple[str, ...],
+) -> str:
+    payload = json.dumps(
+        {
+            "schema": "nika-pf10-decision-authority-v1",
+            "project_id": project_id,
+            "allowed": allowed,
+            "findings": list(findings),
+            "evidence_refs": list(evidence_refs),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hmac.new(_DECISION_AUTHORITY_KEY, payload, hashlib.sha256).hexdigest()
+
+
+def _valid_decision_proof(decision: ProductComplianceDecision) -> bool:
+    proof = object.__getattribute__(decision, "_authority_proof")
+    if not isinstance(proof, str) or not proof:
+        return False
+    expected = _decision_proof(
+        project_id=object.__getattribute__(decision, "project_id"),
+        allowed=object.__getattribute__(decision, "allowed"),
+        findings=object.__getattribute__(decision, "findings"),
+        evidence_refs=object.__getattribute__(decision, "evidence_refs"),
+    )
+    return hmac.compare_digest(proof, expected)
+
+
+def _require_text(value: object, label: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ProductComplianceError(f"{label} must be non-empty text")
+
+
+def _require_tuple(value: object, label: str) -> None:
+    if not isinstance(value, tuple):
+        raise ProductComplianceError(f"{label} must be a tuple")
 
 
 def _require_unique_text(
