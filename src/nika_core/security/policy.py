@@ -269,6 +269,21 @@ class ApprovalEvidence:
 
 
 class ApprovalVerifier(Protocol):
+    """Host-owned verifier participating in the same atomic commit as budget use."""
+
+    @property
+    def authorization_lock(self) -> RLock: ...
+
+    def validate_locked(
+        self,
+        intent: ActionIntent,
+        approval: ApprovalEvidence,
+        *,
+        now: datetime,
+    ) -> None: ...
+
+    def commit_locked(self, approval: ApprovalEvidence) -> None: ...
+
     def verify(
         self,
         intent: ActionIntent,
@@ -360,22 +375,26 @@ def authorize_action(
     if current.tzinfo is None:
         raise ValueError("current time must be timezone-aware")
 
-    # Fixed lock order: approval ledger first, budget ledger second. Validation is
-    # non-mutating; both resources are committed only after every check succeeds.
-    with approvals._lock, budgets._lock:
-        next_usage = budgets._next_usage_unlocked(intent)
-        validated_approval: ApprovalEvidence | None = None
-        if requires_approval:
-            if policy.approval_verifier is None:
-                raise PermissionError("trusted approval verifier is required")
-            if approval is None:
-                raise PermissionError("explicit approval is required")
-            policy.approval_verifier.verify(intent, approval, now=current)
+    verifier = policy.approval_verifier
+    if requires_approval:
+        if verifier is None:
+            raise PermissionError("trusted approval verifier is required")
+        if approval is None:
+            raise PermissionError("explicit approval is required")
+        # Fixed global lock order: trusted host verifier -> local approval ledger -> budget.
+        # Every check is non-mutating; host replay state, local replay state, and budget are
+        # committed together only after all checks succeed.
+        with verifier.authorization_lock, approvals._lock, budgets._lock:
+            next_usage = budgets._next_usage_unlocked(intent)
+            verifier.validate_locked(intent, approval, now=current)
             validated_approval = approvals._validate_unlocked(intent, approval, now=current)
-
-        budgets._commit_usage_unlocked(next_usage)
-        if validated_approval is not None:
+            budgets._commit_usage_unlocked(next_usage)
             approvals._mark_used_unlocked(validated_approval)
+            verifier.commit_locked(validated_approval)
+    else:
+        with budgets._lock:
+            next_usage = budgets._next_usage_unlocked(intent)
+            budgets._commit_usage_unlocked(next_usage)
 
     return SecurityDecision(
         action_id=intent.action_id,
