@@ -48,7 +48,7 @@ class RecoveryFileLease:
             if not stat.S_ISREG(opened.st_mode):
                 raise RecoveryLeaseError("SQLite recovery lease is not a regular file")
             self._reject_indirect_lock_path()
-            current = os.stat(self._path)
+            current = os.lstat(self._path)
             if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
                 raise RecoveryLeaseError("SQLite recovery lease path changed while opening")
             if opened.st_size == 0:
@@ -130,14 +130,16 @@ def exclusive_sqlite_lease(path: Path) -> Iterator[sqlite3.Connection]:
     except sqlite3.Error as exc:
         raise RecoveryLeaseError("live SQLite database cannot be opened for recovery") from exc
     try:
-        mode_row = connection.execute("PRAGMA locking_mode = EXCLUSIVE").fetchone()
-        mode = str(mode_row[0]).casefold() if mode_row else ""
-        if mode != "exclusive":
-            raise RecoveryLeaseError("SQLite refused exclusive recovery locking mode")
         try:
+            mode_row = connection.execute("PRAGMA locking_mode = EXCLUSIVE").fetchone()
+            mode = str(mode_row[0]).casefold() if mode_row else ""
+            if mode != "exclusive":
+                raise RecoveryLeaseError("SQLite refused exclusive recovery locking mode")
             connection.execute("BEGIN EXCLUSIVE")
             connection.execute("SELECT count(*) FROM sqlite_schema").fetchone()
             connection.execute("COMMIT")
+        except RecoveryLeaseError:
+            raise
         except sqlite3.OperationalError as exc:
             if connection.in_transaction:
                 connection.execute("ROLLBACK")
