@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 
 class ResearchSourceIdentityError(ValueError):
@@ -9,6 +9,36 @@ class ResearchSourceIdentityError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+_SENSITIVE_QUERY_KEYS = frozenset(
+    {
+        "access_token",
+        "api_key",
+        "apikey",
+        "auth_token",
+        "authorization",
+        "client_secret",
+        "credential",
+        "key",
+        "password",
+        "secret",
+        "sig",
+        "signature",
+        "token",
+        "x_amz_credential",
+        "x_goog_credential",
+    }
+)
+_SENSITIVE_QUERY_SUFFIXES = ("_token", "_secret", "_password", "_signature")
+
+
+def _query_contains_credentials(query: str) -> bool:
+    for key, _value in parse_qsl(query, keep_blank_values=True):
+        normalized = key.casefold().replace("-", "_")
+        if normalized in _SENSITIVE_QUERY_KEYS or normalized.endswith(_SENSITIVE_QUERY_SUFFIXES):
+            return True
+    return False
 
 
 def canonical_http_locator(locator: str) -> str:
@@ -40,7 +70,9 @@ def canonical_http_locator(locator: str) -> str:
         )
     if parts.hostname is None:
         raise ResearchSourceIdentityError("invalid_source", "HTTP source URL has no hostname")
-    if parts.username is not None or parts.password is not None:
+    if parts.username is not None or parts.password is not None or _query_contains_credentials(
+        parts.query
+    ):
         raise ResearchSourceIdentityError(
             "credentials_forbidden",
             "credentials must not be embedded in a research source URL",
