@@ -73,34 +73,45 @@ class BusinessFactoryRepository:
         objective_id = snapshot.objective.objective_id
         now = datetime.now(UTC).isoformat()
         with self.store.connection() as conn:
-            row = conn.execute(
-                "SELECT row_version FROM business_factory_snapshots WHERE objective_id = ?",
-                (objective_id,),
-            ).fetchone()
-            if row is None:
-                if expected_row_version != 0:
-                    raise StaleBusinessStateError(
-                        "business aggregate does not exist at expected row version"
-                    )
-                conn.execute(
+            if expected_row_version == 0:
+                inserted = conn.execute(
                     "INSERT INTO business_factory_snapshots("
-                    "objective_id, row_version, payload_json, updated_at) VALUES (?, ?, ?, ?)",
+                    "objective_id, row_version, payload_json, updated_at) VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(objective_id) DO NOTHING",
                     (objective_id, snapshot.row_version, payload, now),
                 )
-            else:
-                current = int(row["row_version"])
-                if current != expected_row_version:
+                if inserted.rowcount != 1:
+                    row = conn.execute(
+                        "SELECT row_version FROM business_factory_snapshots "
+                        "WHERE objective_id = ?",
+                        (objective_id,),
+                    ).fetchone()
+                    current = "missing" if row is None else str(int(row["row_version"]))
                     raise StaleBusinessStateError(
                         "business aggregate row version changed: "
                         f"{current} != {expected_row_version}"
                     )
+            else:
                 updated = conn.execute(
                     "UPDATE business_factory_snapshots SET row_version = ?, payload_json = ?, "
                     "updated_at = ? WHERE objective_id = ? AND row_version = ?",
                     (snapshot.row_version, payload, now, objective_id, expected_row_version),
                 )
                 if updated.rowcount != 1:
-                    raise StaleBusinessStateError("business aggregate changed during save")
+                    row = conn.execute(
+                        "SELECT row_version FROM business_factory_snapshots "
+                        "WHERE objective_id = ?",
+                        (objective_id,),
+                    ).fetchone()
+                    if row is None:
+                        raise StaleBusinessStateError(
+                            "business aggregate does not exist at expected row version"
+                        )
+                    current = int(row["row_version"])
+                    raise StaleBusinessStateError(
+                        "business aggregate row version changed: "
+                        f"{current} != {expected_row_version}"
+                    )
         return snapshot
 
     def load(self, objective_id: str) -> BusinessFactorySnapshot | None:
