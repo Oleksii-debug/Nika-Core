@@ -13,6 +13,7 @@ from nika_core.kernel.workspace_registry import WorkspaceDefinition, WorkspaceRe
 from nika_core.runtime.contracts import AgentRuntimePort, RuntimeRequest
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
 from nika_core.runtime.reference import ReferenceRuntime
+from nika_core.security import ApprovalAuthority
 from nika_core.ui.bridge_models import UIResult
 
 _DEFAULT_AGENT_ID = "nika.default"
@@ -31,6 +32,10 @@ class DesktopBackend:
     The first packaged path uses the deterministic no-LLM runtime so task controls are real
     even without external model credentials. Provider/model selection can replace the runtime
     behind the same coordinator later; the UI never talks to framework objects directly.
+
+    Approval/review state is owned by the trusted Python host. The web UI receives only safe
+    request views and submits opaque request IDs to explicit approve/deny handlers. Authority
+    secrets, signatures, and approval evidence never cross the pywebview bridge.
     """
 
     def __init__(
@@ -41,12 +46,14 @@ class DesktopBackend:
         workspaces: WorkspaceRegistry,
         audit: AuditLog,
         runtime: AgentRuntimePort | None = None,
+        approval_authority: ApprovalAuthority | None = None,
     ) -> None:
         self._queue = queue
         self._agents = agents
         self._workspaces = workspaces
         self._coordinator = TaskRuntimeCoordinator(queue, audit)
         self._runtime = runtime or ReferenceRuntime()
+        self._approval_authority = approval_authority
         self._ensure_defaults()
 
     def create_task(self, payload: Mapping[str, Any]) -> UIResult:
@@ -140,7 +147,62 @@ class DesktopBackend:
             focus_id="tasks-heading",
         )
 
+    def approve_action(self, payload: Mapping[str, Any]) -> UIResult:
+        authority = self._require_approval_authority()
+        request_id = self._approval_request_id(payload)
+        authority.approve(request_id)
+        return UIResult(
+            request_id="desktop-handler",
+            status="completed",
+            message="Небезпечну дію явно підтверджено лише для її точних параметрів.",
+            focus_id="approvals-heading",
+        )
+
+    def deny_action(self, payload: Mapping[str, Any]) -> UIResult:
+        authority = self._require_approval_authority()
+        request_id = self._approval_request_id(payload)
+        authority.deny(request_id)
+        return UIResult(
+            request_id="desktop-handler",
+            status="completed",
+            message="Небезпечну дію відхилено.",
+            focus_id="approvals-heading",
+        )
+
+    def approve_review(self, payload: Mapping[str, Any]) -> UIResult:
+        authority = self._require_approval_authority()
+        request_id = self._approval_request_id(payload)
+        authority.approve_review(request_id)
+        return UIResult(
+            request_id="desktop-handler",
+            status="completed",
+            message="Точний предмет перевірки явно схвалено.",
+            focus_id="approvals-heading",
+        )
+
+    def deny_review(self, payload: Mapping[str, Any]) -> UIResult:
+        authority = self._require_approval_authority()
+        request_id = self._approval_request_id(payload)
+        authority.deny_review(request_id)
+        return UIResult(
+            request_id="desktop-handler",
+            status="completed",
+            message="Запит на перевірку відхилено.",
+            focus_id="approvals-heading",
+        )
+
     def snapshot(self) -> dict[str, Any]:
+        pending_actions: list[dict[str, object]] = []
+        pending_reviews: list[dict[str, object]] = []
+        if self._approval_authority is not None:
+            pending_actions = [
+                {"request_type": "action", **item.as_dict()}
+                for item in self._approval_authority.pending_views()
+            ]
+            pending_reviews = [
+                {"request_type": "review", **item.as_dict()}
+                for item in self._approval_authority.pending_review_views()
+            ]
         return {
             "tasks": [self._task_view(record) for record in self._queue.list_recent(limit=50)],
             "agents": [
@@ -162,6 +224,7 @@ class DesktopBackend:
                 }
                 for item in self._workspaces.list_latest()
             ],
+            "pending_approvals": [*pending_actions, *pending_reviews],
         }
 
     def _ensure_defaults(self) -> None:
@@ -187,6 +250,18 @@ class DesktopBackend:
                     description="Основний локальний робочий простір Nika Core.",
                 )
             )
+
+    def _require_approval_authority(self) -> ApprovalAuthority:
+        if self._approval_authority is None:
+            raise ValueError("Канал людського підтвердження недоступний; дію відхилено.")
+        return self._approval_authority
+
+    @staticmethod
+    def _approval_request_id(payload: Mapping[str, Any]) -> str:
+        request_id = str(payload.get("request_id", "")).strip()
+        if not request_id:
+            raise ValueError("Не вказано ідентифікатор запиту на підтвердження.")
+        return request_id
 
     def _latest_controllable(self) -> TaskRecord | None:
         for record in self._queue.list_recent(limit=50):
