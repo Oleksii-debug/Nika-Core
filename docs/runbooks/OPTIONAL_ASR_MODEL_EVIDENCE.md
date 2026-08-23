@@ -56,7 +56,7 @@ This is a Nika local-bundle digest. An upstream checksum for one individual mode
 
 Model paths may contain spaces and Unicode. Runtime APIs receive resolved paths as arguments, never shell text.
 
-The evidence boundary rejects symbolic links and Windows junctions for the selected model root/files and nested directory entries. That prevents a nominal model directory from causing integrity inspection to traverse unrelated credential/profile/private-data locations.
+The evidence boundary rejects symbolic links and Windows junctions for the selected model root/files, every lexical ancestor of those paths, and nested directory entries. That prevents a nominal model path such as `parent-link/model` from causing integrity inspection to traverse unrelated credential/profile/private-data locations.
 
 ## Failure semantics
 
@@ -64,7 +64,7 @@ The model preflight happens before optional runtime import/construction.
 
 - missing local directory/file → `COMPONENT_MISSING`;
 - empty local model directory → `COMPONENT_MISSING`;
-- symlink/junction indirection → `PATH_ESCAPE`;
+- symlink/junction indirection, including ancestor indirection → `PATH_ESCAPE`;
 - approved size/checksum mismatch → `CHECKSUM_MISMATCH`, non-retryable;
 - blank model license reference → validation failure;
 - engine package missing → existing `COMPONENT_MISSING` behavior;
@@ -83,7 +83,7 @@ No failure path downloads a model or falls through to a remote identifier.
 - checksum success and mismatch before runtime import;
 - size mismatch fail-closed behavior;
 - no payload read when checksum verification was not explicitly requested;
-- portable filesystem-indirection rejection;
+- portable selected-entry and parent-path indirection rejection;
 - explicit empty model directory failure;
 - sherpa encoder/decoder/tokens role-bound identity.
 
