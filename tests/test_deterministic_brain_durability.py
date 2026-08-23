@@ -32,7 +32,7 @@ def test_planner_action_id_cannot_manufacture_high_impact_approval() -> None:
         publish,
     )
     brain = DeterministicBrain(
-        planner=UnifiedPlanningAdapter(engine_name="pyperplan"),
+        planner=UnifiedPlanningAdapter(),
         tools=tools,
     )
     action = DeterministicAction(
@@ -92,7 +92,7 @@ def test_changed_state_replans_without_repeating_completed_effect() -> None:
     tools.register(ToolSpec(tool_id="finish", description="finish"), finish)
     tools.register(ToolSpec(tool_id="recover", description="recover"), recover)
     brain = DeterministicBrain(
-        planner=UnifiedPlanningAdapter(engine_name="pyperplan"),
+        planner=UnifiedPlanningAdapter(),
         tools=tools,
     )
     actions = (
@@ -169,7 +169,7 @@ def test_restart_resume_does_not_repeat_completed_tool_effect() -> None:
 
     first = asyncio.run(
         DeterministicBrain(
-            planner=UnifiedPlanningAdapter(engine_name="pyperplan"),
+            planner=UnifiedPlanningAdapter(),
             tools=tools,
         ).run(
             run_id="restart-before",
@@ -185,7 +185,7 @@ def test_restart_resume_does_not_repeat_completed_tool_effect() -> None:
     fail_index = False
     second = asyncio.run(
         DeterministicBrain(
-            planner=UnifiedPlanningAdapter(engine_name="pyperplan"),
+            planner=UnifiedPlanningAdapter(),
             tools=tools,
         ).run(
             run_id="restart-after",
@@ -398,7 +398,7 @@ def test_changed_state_replanning_is_bounded() -> None:
 
 def test_resume_rejects_invalid_completed_action_identity() -> None:
     brain = DeterministicBrain(
-        planner=UnifiedPlanningAdapter(engine_name="pyperplan"),
+        planner=UnifiedPlanningAdapter(),
         tools=ToolExecutor(),
     )
     action = DeterministicAction(action_id="known", adds=frozenset({"done"}))
@@ -427,7 +427,7 @@ def test_resume_rejects_invalid_completed_action_identity() -> None:
 
 
 def test_unified_planning_impossible_goal_has_typed_error() -> None:
-    planner = UnifiedPlanningAdapter(engine_name="pyperplan")
+    planner = UnifiedPlanningAdapter()
 
     with pytest.raises(DeterministicPlanningError) as raised:
         planner.plan(
