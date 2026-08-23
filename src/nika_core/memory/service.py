@@ -102,16 +102,14 @@ class MemoryService:
                         "retention_trimmed": trimmed,
                     },
                 )
-        record = self.get(
-            scope=scope,
-            owner_id=owner_id,
-            namespace=namespace,
-            key=key,
-            now=current,
-        )
-        if record is None:
+            committed_row = conn.execute(
+                "SELECT * FROM memory_records WHERE scope = ? AND owner_id = ? "
+                "AND namespace = ? AND memory_key = ?",
+                (scope.value, owner_id, namespace, key),
+            ).fetchone()
+        if committed_row is None:
             raise RuntimeError("memory record expired or was removed by retention during write")
-        return record
+        return _record_from_row(committed_row)
 
     def get(
         self,
