@@ -509,6 +509,13 @@ def _validate_snapshot(snapshot: TeamLifecycleSnapshot) -> None:
         role = assignment.role
         if not role.role_id.strip():
             raise TeamLifecycleError("role_id must not be empty")
+        expected_assignment_id = _assignment_id(
+            snapshot.project_id,
+            role.role_id,
+            assignment.generation,
+        )
+        if assignment.assignment_id != expected_assignment_id:
+            raise TeamLifecycleError("assignment identity does not match deterministic derivation")
         if (
             assignment.status not in terminal
             and not role.permissions <= snapshot.permission_ceiling
