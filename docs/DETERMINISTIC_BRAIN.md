@@ -76,6 +76,13 @@ changed external/local state but before the brain returns to its caller. Determi
 uses the existing runtime idempotency/recovery mechanism for that boundary instead of inventing
 another checkpoint store.
 
+Before planner invocation, a Brain configured with an effect journal inspects the whole task for
+`PENDING` or `UNCERTAIN` durable operations. Any unresolved operation fails immediately with
+`SIDE_EFFECT_RECONCILIATION_REQUIRED`; the planner is not invoked, so restart cannot evade an
+uncertain effect by choosing a different side-effect action or a purely deterministic alternative
+plan. The journal repeats this task-level unresolved check when reserving a later mutation, which
+closes the preflight-to-side-effect race if another unresolved operation appears concurrently.
+
 For a registered tool whose `ToolRisk` is not `READ_ONLY`:
 
 1. execution fails closed with `SIDE_EFFECT_JOURNAL_REQUIRED` if no durable effect journal exists;
@@ -91,23 +98,24 @@ For a registered tool whose `ToolRisk` is not `READ_ONLY`:
    is advanced in memory;
 8. timeout, cancellation or an adapter failure with uncertain external outcome becomes
    `UNCERTAIN`; abrupt process loss can leave the already-durable reservation `PENDING`;
-9. an existing `PENDING` or `UNCERTAIN` reservation blocks the action with
-   `SIDE_EFFECT_RECONCILIATION_REQUIRED` and the handler is not replayed;
+9. an existing `PENDING` or `UNCERTAIN` operation blocks the entire deterministic task with
+   `SIDE_EFFECT_RECONCILIATION_REQUIRED`, not only replay of the same action;
 10. an existing matching `COMPLETED` reservation lets restart reconstruct the declared
     deterministic action effects without calling the handler again;
 11. changing the tool/arguments/effect semantics while reusing the same `(task_id, action_id)`
     identity fails closed as `SIDE_EFFECT_IDENTITY_CONFLICT`.
 
-The existing `RuntimeRecoveryService` already classifies any task with `PENDING` or `UNCERTAIN`
-idempotency records as `RECONCILE_SIDE_EFFECTS`, so startup auto-resume cannot cross an unresolved
-deterministic tool effect. Reconciliation remains an external-system/operator concern using the
-existing ledger contract: if completion can be proved, reconcile it as completed; if a pending
-operation can be proved not to have happened, release it explicitly under the normal runtime
-policy.
+The existing `RuntimeRecoveryService` independently classifies any task with `PENDING` or
+`UNCERTAIN` idempotency records as `RECONCILE_SIDE_EFFECTS`, so the outer startup-recovery path and
+the Brain itself enforce the same fail-closed boundary. Reconciliation remains an
+external-system/operator concern using the existing ledger contract: if completion can be proved,
+reconcile it as completed; if a pending operation can be proved not to have happened, release it
+explicitly under the normal runtime policy.
 
 This is deliberately **not** an exactly-once claim. Nika guarantees durable pre-effect identity
-and fail-closed no-replay under uncertainty. The external system still needs its own idempotency
-or inspection/reconciliation capability when it can apply an effect and lose the response.
+and fail-closed no-replay/no-alternative-progress under uncertainty. The external system still
+needs its own idempotency or inspection/reconciliation capability when it can apply an effect and
+lose the response.
 
 Read-only tool calls do not require the effect journal because they are not declared mutation
 boundaries. Misclassifying an effectful tool as `READ_ONLY` is a Tool Registry/policy defect and is
@@ -147,7 +155,7 @@ can be written without relying on chat/model memory.
 For non-read-only tool actions, the effect journal is the additional crash-window authority. A
 completed durable effect can reconstruct its declared state transition even when process loss
 occurred before the enclosing brain result/checkpoint was returned. Pending or uncertain effects
-must be reconciled before continuation.
+block all deterministic continuation for that task until reconciliation.
 
 No second persistence engine is introduced; authoritative state remains in Nika's existing
 runtime/task SQLite and idempotency/recovery layers.
