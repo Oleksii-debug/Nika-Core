@@ -17,7 +17,6 @@ from .product_factory_deployment import (
 )
 from .product_factory_incident_contracts import (
     INCIDENT_LIFECYCLE_SCHEMA,
-    INCIDENT_LIFECYCLE_SCHEMA_V1,
     IncidentKind,
     IncidentLifecycleSnapshot,
     IncidentRecord,
@@ -364,7 +363,7 @@ class IncidentRepairReleaseCoordinator:
         incidents = {record.incident_id: record for record in snapshot.incidents}
         if any(incident_id not in incidents for incident_id in mapped_ids):
             raise ProductIncidentError("incident snapshot fingerprint maps unknown incident")
-        if snapshot.schema == INCIDENT_LIFECYCLE_SCHEMA_V1:
+        if snapshot.schema != INCIDENT_LIFECYCLE_SCHEMA:
             if set(mapped_ids) != set(incident_ids):
                 raise ProductIncidentError("incident snapshot fingerprint index is incomplete")
         else:
@@ -423,7 +422,7 @@ class IncidentRepairReleaseCoordinator:
                 self._validate_candidate_authority(record, candidate, matches[0])
             if record.trigger.project_id != self.project_id:
                 raise ProductIncidentError("incident snapshot crosses project boundary")
-            if snapshot.schema == INCIDENT_LIFECYCLE_SCHEMA_V1:
+            if snapshot.schema != INCIDENT_LIFECYCLE_SCHEMA:
                 expected = record.trigger.fingerprint
                 if fingerprint_index.get(expected) != record.incident_id:
                     raise ProductIncidentError("incident snapshot fingerprint mapping is corrupt")
@@ -431,7 +430,7 @@ class IncidentRepairReleaseCoordinator:
                 for release in record.release_events:
                     self._validate_release_authority(record, release, deployments)
 
-        if snapshot.schema != INCIDENT_LIFECYCLE_SCHEMA_V1:
+        if snapshot.schema == INCIDENT_LIFECYCLE_SCHEMA:
             self._validate_occurrence_families(snapshot.incidents, fingerprint_index)
 
         self._incidents = incidents
@@ -540,7 +539,9 @@ class IncidentRepairReleaseCoordinator:
                 raise ProductIncidentError(
                     "repeat incident occurrences require unique observation times"
                 )
-            for previous, current in zip(ordered, ordered[1:], strict=False):
+            for index in range(1, len(ordered)):
+                previous = ordered[index - 1]
+                current = ordered[index]
                 if previous.state not in _TERMINAL_INCIDENT_STATES:
                     raise ProductIncidentError(
                         "repeat incident cannot follow a non-terminal predecessor"
