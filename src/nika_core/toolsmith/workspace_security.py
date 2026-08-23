@@ -185,7 +185,9 @@ def _is_reparse_point(file_stat: os.stat_result) -> bool:
     )
 
 
-def _guard_real_directory_root(root: pathlib.Path, *, label: str) -> pathlib.Path:
+def ensure_real_directory_root(root: pathlib.Path, *, label: str) -> pathlib.Path:
+    """Validate a trusted directory identity before canonical path resolution."""
+
     try:
         root_stat = root.lstat()
     except OSError as exc:
@@ -262,7 +264,7 @@ def ensure_path_policy(
     if not policy.allows(normalized.as_posix()):
         raise WorkspaceSecurityError("path is outside the allowed workspace roots")
 
-    root_resolved = _guard_real_directory_root(root, label="workspace root")
+    root_resolved = ensure_real_directory_root(root, label="workspace root")
     candidate = root_resolved.joinpath(*normalized.parts)
     if must_exist:
         candidate.resolve(strict=True)
@@ -313,7 +315,7 @@ def sterile_process_environment(
     *,
     temp_root: pathlib.Path,
 ) -> dict[str, str]:
-    resolved_temp = _guard_real_directory_root(temp_root, label="worker temp root")
+    resolved_temp = ensure_real_directory_root(temp_root, label="worker temp root")
     environment = sterile_git_environment(source)
     for key in tuple(environment):
         if key.upper() in {"TEMP", "TMP", "TMPDIR"}:
@@ -424,7 +426,7 @@ def collect_tree_evidence(
     max_file_bytes: int = 32 * 1024 * 1024,
     max_total_bytes: int = 256 * 1024 * 1024,
 ) -> TreeEvidence:
-    root = _guard_real_directory_root(root, label="tree evidence root")
+    root = ensure_real_directory_root(root, label="tree evidence root")
 
     records: list[FileEvidence] = []
     total_bytes = 0
