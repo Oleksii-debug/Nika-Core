@@ -141,6 +141,10 @@ class ProductOperationsCoordinator:
                         "service observation timestamp conflicts with prior evidence"
                     )
                 return record
+        if record.rollback is not None:
+            raise ProductOperationsError(
+                "service observation cannot advance after terminal rollback evidence"
+            )
         updated = ServiceRecord(
             record.service,
             self._health(record, observation),
@@ -209,6 +213,7 @@ class ProductOperationsCoordinator:
             probe = ServiceRecord(
                 record.service,
                 observation=record.observation,
+                rollback=record.rollback,
                 blocked_credentials=blocked,
                 node_loss=record.node_loss,
             )
@@ -447,6 +452,8 @@ class ProductOperationsCoordinator:
     ) -> ServiceHealth:
         if record.blocked_credentials:
             return ServiceHealth.BLOCKED
+        if record.rollback is not None:
+            return ServiceHealth.ROLLED_BACK if record.rollback.succeeded else ServiceHealth.FAILED
         assert observation is not None
         loss = set(cls._loss_for(record.service, down_nodes))
         healthy = set(observation.healthy_replica_ids) - loss
@@ -520,16 +527,15 @@ class ProductOperationsCoordinator:
                     "operations snapshot observation references unknown replica"
                 )
         rollback = record.rollback
-        if rollback is not None:
-            if (
-                rollback.service_id != record.service.service_id
-                or rollback.failed_release_sha != record.service.release_sha
-                or observation is None
-                or rollback.observed_at < observation.observed_at
-            ):
-                raise ProductOperationsError(
-                    "operations snapshot rollback evidence identity is invalid"
-                )
+        if rollback is not None and (
+            rollback.service_id != record.service.service_id
+            or rollback.failed_release_sha != record.service.release_sha
+            or observation is None
+            or rollback.observed_at < observation.observed_at
+        ):
+            raise ProductOperationsError(
+                "operations snapshot rollback evidence identity is invalid"
+            )
         if expected_blocked:
             expected_health = ServiceHealth.BLOCKED
         elif rollback is not None:
