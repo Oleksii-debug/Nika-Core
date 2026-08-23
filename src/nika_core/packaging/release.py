@@ -4,11 +4,12 @@ import hashlib
 import json
 import re
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_MANIFEST_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,7 +25,7 @@ class ReleaseManifest:
     version: str
     source_sha: str
     files: tuple[ReleaseFile, ...]
-    manifest_version: int = 2
+    manifest_version: int = _MANIFEST_VERSION
 
 
 def _sha256(path: Path) -> str:
@@ -52,6 +53,68 @@ def _safe_files(bundle_dir: Path) -> tuple[Path, ...]:
     return tuple(sorted(files, key=lambda item: item.relative_to(root).as_posix()))
 
 
+def _canonical_release_path(value: object) -> bool:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return False
+    if "\\" in value or ":" in value or value in {".", ".."}:
+        return False
+    path = PurePosixPath(value)
+    if path.is_absolute() or path.as_posix() != value:
+        return False
+    if any(part in {".", ".."} for part in path.parts):
+        return False
+    return value != "release-manifest.json"
+
+
+def _manifest_structure_findings(manifest: ReleaseManifest) -> tuple[str, ...]:
+    findings: list[str] = []
+    if type(manifest.manifest_version) is not int or manifest.manifest_version != _MANIFEST_VERSION:
+        findings.append("manifest:schema-version")
+    if (
+        not isinstance(manifest.product, str)
+        or not manifest.product
+        or manifest.product != manifest.product.strip()
+    ):
+        findings.append("manifest:product")
+    if (
+        not isinstance(manifest.version, str)
+        or not manifest.version
+        or manifest.version != manifest.version.strip()
+    ):
+        findings.append("manifest:product-version")
+    if (
+        not isinstance(manifest.source_sha, str)
+        or not _SOURCE_SHA_RE.fullmatch(manifest.source_sha)
+    ):
+        findings.append("manifest:source-sha")
+    if not isinstance(manifest.files, tuple) or not manifest.files:
+        findings.append("manifest:files")
+        return tuple(findings)
+
+    seen_paths: set[str] = set()
+    for index, entry in enumerate(manifest.files):
+        if not isinstance(entry, ReleaseFile):
+            findings.append(f"manifest:file-type:{index}")
+            continue
+        if not _canonical_release_path(entry.path):
+            findings.append(f"manifest:path:{index}")
+        elif entry.path in seen_paths:
+            findings.append(f"manifest:duplicate-path:{entry.path}")
+        else:
+            seen_paths.add(entry.path)
+        if type(entry.size) is not int or entry.size < 0:
+            findings.append(f"manifest:size-format:{index}")
+        if not isinstance(entry.sha256, str) or not _SHA256_RE.fullmatch(entry.sha256):
+            findings.append(f"manifest:sha256-format:{index}")
+    return tuple(findings)
+
+
+def _require_valid_manifest(manifest: ReleaseManifest) -> None:
+    findings = _manifest_structure_findings(manifest)
+    if findings:
+        raise ValueError(f"invalid release manifest: {findings}")
+
+
 def build_release_manifest(
     bundle_dir: Path,
     *,
@@ -71,15 +134,18 @@ def build_release_manifest(
     )
     if not entries:
         raise ValueError("release bundle is empty")
-    return ReleaseManifest(
+    manifest = ReleaseManifest(
         product=product,
         version=version,
         source_sha=source_sha,
         files=entries,
     )
+    _require_valid_manifest(manifest)
+    return manifest
 
 
 def write_release_manifest(bundle_dir: Path, manifest: ReleaseManifest) -> Path:
+    _require_valid_manifest(manifest)
     target = bundle_dir / "release-manifest.json"
     payload = {
         "manifest_version": manifest.manifest_version,
@@ -93,6 +159,10 @@ def write_release_manifest(bundle_dir: Path, manifest: ReleaseManifest) -> Path:
 
 
 def verify_release_manifest(bundle_dir: Path, manifest: ReleaseManifest) -> tuple[str, ...]:
+    structure_findings = _manifest_structure_findings(manifest)
+    if structure_findings:
+        return structure_findings
+
     root = bundle_dir.resolve(strict=True)
     expected = {entry.path: entry for entry in manifest.files}
     actual_paths = {
