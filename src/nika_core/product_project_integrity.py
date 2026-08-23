@@ -56,24 +56,39 @@ class ProductProjectIntegrityService:
             raise ProductProjectError("project_id must not be empty")
         with self.store.connection() as conn:
             conn.execute("BEGIN")
-            row = conn.execute(
-                "SELECT p.project_id,p.current_spec_version,p.row_version,s.spec_json "
-                "FROM product_projects p JOIN product_project_specs s "
-                "ON s.project_id=p.project_id "
-                "AND s.spec_version=p.current_spec_version WHERE p.project_id=?",
+            project_row = conn.execute(
+                "SELECT project_id,current_spec_version,row_version "
+                "FROM product_projects WHERE project_id=?",
                 (project_id,),
             ).fetchone()
-            if row is None:
+            if project_row is None:
                 raise KeyError(project_id)
-            spec_version = int(row["current_spec_version"])
-            row_version = int(row["row_version"])
+            try:
+                spec_version = int(project_row["current_spec_version"])
+                row_version = int(project_row["row_version"])
+            except (TypeError, ValueError) as exc:
+                raise ProductProjectError(
+                    "invalid durable ProductProject version metadata"
+                ) from exc
+            if spec_version < 1 or row_version < 0:
+                raise ProductProjectError("invalid durable ProductProject version metadata")
+            spec_row = conn.execute(
+                "SELECT spec_json FROM product_project_specs "
+                "WHERE project_id=? AND spec_version=?",
+                (project_id, spec_version),
+            ).fetchone()
+            if spec_row is None:
+                raise ProductProjectError(
+                    "current ProductProject specification is missing: "
+                    f"project_id={project_id}, spec_version={spec_version}"
+                )
             self._validate_expected_versions(
                 spec_version,
                 row_version,
                 expected_spec_version=expected_spec_version,
                 expected_row_version=expected_row_version,
             )
-            spec = self._parse_spec(row["spec_json"], label="current specification")
+            spec = self._parse_spec(spec_row["spec_json"], label="current specification")
             revision_count, legacy_lineage_count = self._validate_spec_lineage(
                 conn,
                 project_id,
