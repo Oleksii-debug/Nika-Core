@@ -1,11 +1,37 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Protocol
+
+
+class DeterministicErrorCode(StrEnum):
+    DEPENDENCY_UNAVAILABLE = "dependency_unavailable"
+    GOAL_UNREACHABLE = "goal_unreachable"
+    NO_PLAN_FOUND = "no_plan_found"
+    PLANNING_TIMEOUT = "planning_timeout"
+    PLANNER_RESOURCE_LIMIT = "planner_resource_limit"
+    UNSUPPORTED_PROBLEM = "unsupported_problem"
+    PLANNER_FAILURE = "planner_failure"
+    PLAN_TOO_LONG = "plan_too_long"
+    INVALID_PLAN = "invalid_plan"
+    REPLAN_LIMIT = "replan_limit"
+    ACTION_UNAVAILABLE = "action_unavailable"
+    TOOL_EXECUTION_FAILED = "tool_execution_failed"
+    GOAL_UNSATISFIED = "goal_unsatisfied"
 
 
 class DeterministicPlanningError(RuntimeError):
     """Raised when an explicit-state goal cannot be planned safely."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: DeterministicErrorCode = DeterministicErrorCode.PLANNER_FAILURE,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,3 +98,7 @@ class DeterministicPlanner(Protocol):
         goal: DeterministicGoal,
         actions: tuple[DeterministicAction, ...],
     ) -> DeterministicPlan: ...
+
+
+class WorldStateObserver(Protocol):
+    async def observe(self) -> WorldState: ...
