@@ -29,6 +29,42 @@ def _replace_job_root_with_symlink(
     return original
 
 
+def test_plan_rejects_initial_symlink_job_root_before_canonicalization(
+    tmp_path: pathlib.Path,
+) -> None:
+    repository = tmp_path / "production"
+    repository.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    job_root = tmp_path / "job-link"
+    try:
+        job_root.symlink_to(external, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlink creation unavailable on this host")
+
+    with pytest.raises(WorkspaceSecurityError, match="job workspace root"):
+        make_sterile_git_plan(
+            repository_root=repository,
+            job_root=job_root,
+            branch_name="toolsmith/dev27-initial-root-link",
+            base_sha="0" * 40,
+        )
+
+
+def test_plan_requires_precreated_job_root(tmp_path: pathlib.Path) -> None:
+    repository = tmp_path / "production"
+    repository.mkdir()
+    missing_job_root = tmp_path / "jobs" / "missing-job"
+
+    with pytest.raises(WorkspaceSecurityError, match="job workspace root must exist"):
+        make_sterile_git_plan(
+            repository_root=repository,
+            job_root=missing_job_root,
+            branch_name="toolsmith/dev27-missing-root",
+            base_sha="1" * 40,
+        )
+
+
 def test_prepare_refuses_replaced_job_root_before_git_or_external_write(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
