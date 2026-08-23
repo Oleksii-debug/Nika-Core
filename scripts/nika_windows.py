@@ -138,8 +138,14 @@ def _require_current_product_result(
         f"Поточний ProductProject: {project_id}; "
         f"spec version {spec_version}; state {state}; goal: {goal}."
     )
-    if response.get("status") != "completed" or response.get("message") != expected_message:
-        raise RuntimeError("PF11 packaged Current ProductProject command returned inconsistent identity")
+    if (
+        response.get("status") != "completed"
+        or response.get("message") != expected_message
+        or response.get("focus_id") != "tasks-heading"
+    ):
+        raise RuntimeError(
+            "PF11 packaged Current ProductProject command returned inconsistent identity/focus"
+        )
 
 
 def _run_pf11_proof(
@@ -191,6 +197,7 @@ def _run_pf11_proof(
         "state": detail.summary.state,
         "command_center_state_proven": True,
         "current_command_proven": True,
+        "current_command_focus_proven": True,
         "bridge_state_project_id": product_state["project_id"],
         "bridge_state_spec_version": product_state["spec_version"],
         "bridge_state_status_count": product_state["status_count"],
