@@ -33,6 +33,10 @@ class MaintenanceRecord:
     result: MaintenanceResult
     reconciled: bool = False
 
+    def __post_init__(self) -> None:
+        if type(self.reconciled) is not bool:
+            raise ProductOperationsError("maintenance reconciled flag must be boolean")
+
 
 @dataclass(frozen=True, slots=True)
 class ProductOperationsSnapshot:
@@ -128,6 +132,15 @@ class ProductOperationsCoordinator:
         seen = set(observation.healthy_replica_ids) | set(observation.failed_replica_ids)
         if not seen <= known:
             raise ProductOperationsError("service observation references unknown replica")
+        if record.observation is not None:
+            if observation.observed_at < record.observation.observed_at:
+                raise ProductOperationsError("service observation cannot rewind evidence time")
+            if observation.observed_at == record.observation.observed_at:
+                if observation != record.observation:
+                    raise ProductOperationsError(
+                        "service observation timestamp conflicts with prior evidence"
+                    )
+                return record
         updated = ServiceRecord(
             record.service,
             self._health(record, observation),
@@ -218,6 +231,12 @@ class ProductOperationsCoordinator:
         record = self._require(observation.service_id)
         if observation.failed_release_sha != record.service.release_sha:
             raise ProductOperationsError("rollback failed release SHA mismatch")
+        if record.rollback is not None:
+            if record.rollback != observation:
+                raise ProductOperationsError("rollback evidence conflicts with prior payload")
+            return record
+        if record.observation is not None and observation.observed_at < record.observation.observed_at:
+            raise ProductOperationsError("rollback evidence cannot predate service observation")
         if record.health is not ServiceHealth.ROLLBACK_REQUIRED:
             raise ProductOperationsError(
                 "rollback evidence is not expected for service state"
@@ -249,7 +268,10 @@ class ProductOperationsCoordinator:
             raise ProductOperationsError(
                 "maintenance side effect requires configured port and explicit approval"
             )
+        self._validate_maintenance_authority(record, request)
         result = self.port.apply(request)
+        if not isinstance(result, MaintenanceResult):
+            raise ProductOperationsError("maintenance port returned invalid result evidence")
         saved = MaintenanceRecord(request, result)
         self._maintenance[request.request_id] = saved
         self._services[request.service_id] = ServiceRecord(
@@ -271,10 +293,13 @@ class ProductOperationsCoordinator:
             return current
         if self.port is None:
             raise ProductOperationsError("maintenance side-effect port is not configured")
+        record = self._require(current.request.service_id)
+        self._validate_maintenance_authority(record, current.request)
         result = self.port.inspect(current.request)
+        if not isinstance(result, MaintenanceResult):
+            raise ProductOperationsError("maintenance port returned invalid inspection evidence")
         saved = MaintenanceRecord(current.request, result, reconciled=True)
         self._maintenance[request_id] = saved
-        record = self._require(current.request.service_id)
         self._services[record.service.service_id] = ServiceRecord(
             record.service,
             record.health,
@@ -321,12 +346,25 @@ class ProductOperationsCoordinator:
                 "operations snapshot service identities are invalid"
             )
         services = {record.service.service_id: record for record in snapshot.services}
-        if any(
-            dependency not in services
-            for record in snapshot.services
-            for dependency in record.service.dependencies
-        ):
-            raise ProductOperationsError("operations snapshot dependency is missing")
+        for record in snapshot.services:
+            for dependency in record.service.dependencies:
+                prior = services.get(dependency)
+                if prior is None or prior.service.wave >= record.service.wave:
+                    raise ProductOperationsError(
+                        "operations snapshot dependency is missing or not an earlier wave"
+                    )
+
+        revoked = self._validated_snapshot_refs(
+            snapshot.revoked_credentials,
+            "revoked credential",
+        )
+        down_nodes = self._validated_snapshot_refs(
+            snapshot.unavailable_nodes,
+            "unavailable node",
+        )
+        for record in snapshot.services:
+            self._validate_restored_service(record, revoked, down_nodes)
+
         request_ids = [
             record.request.request_id for record in snapshot.maintenance_records
         ]
@@ -334,13 +372,45 @@ class ProductOperationsCoordinator:
             raise ProductOperationsError(
                 "operations snapshot contains duplicate maintenance identities"
             )
+        maintenance_by_service: dict[str, list[MaintenanceRecord]] = {}
+        for maintenance in snapshot.maintenance_records:
+            service = services.get(maintenance.request.service_id)
+            if service is None:
+                raise ProductOperationsError(
+                    "operations snapshot maintenance references unknown service"
+                )
+            if maintenance.request.approval_ref is None:
+                raise ProductOperationsError(
+                    "operations snapshot maintenance lacks durable approval evidence"
+                )
+            self._validate_maintenance_authority(service, maintenance.request)
+            maintenance_by_service.setdefault(maintenance.request.service_id, []).append(
+                maintenance
+            )
+
+        for service_id, record in services.items():
+            related = maintenance_by_service.get(service_id, [])
+            if not related:
+                if record.maintenance is not MaintenanceState.IDLE:
+                    raise ProductOperationsError(
+                        "operations snapshot maintenance state lacks durable request evidence"
+                    )
+                continue
+            possible_states = {
+                _maintenance_state(item.request.action, item.result) for item in related
+            }
+            if record.maintenance not in possible_states:
+                raise ProductOperationsError(
+                    "operations snapshot maintenance state is not backed by result evidence"
+                )
+
         self._services = services
         self._maintenance = {
             record.request.request_id: record
             for record in snapshot.maintenance_records
         }
-        self._revoked = set(snapshot.revoked_credentials)
-        self._down_nodes = set(snapshot.unavailable_nodes)
+        self._revoked = revoked
+        self._down_nodes = down_nodes
 
     def _require(self, service_id: str) -> ServiceRecord:
         try:
@@ -349,11 +419,15 @@ class ProductOperationsCoordinator:
             raise ProductOperationsError("unknown deployable service") from exc
 
     def _loss(self, service: DeployableService) -> tuple[str, ...]:
+        return self._loss_for(service, self._down_nodes)
+
+    @staticmethod
+    def _loss_for(service: DeployableService, down_nodes: set[str]) -> tuple[str, ...]:
         return tuple(
             sorted(
                 replica.replica_id
                 for replica in service.replicas
-                if replica.node_id in self._down_nodes
+                if replica.node_id in down_nodes
             )
         )
 
@@ -362,10 +436,19 @@ class ProductOperationsCoordinator:
         record: ServiceRecord,
         observation: ServiceObservation | None,
     ) -> ServiceHealth:
+        return self._health_for(record, observation, self._down_nodes)
+
+    @classmethod
+    def _health_for(
+        cls,
+        record: ServiceRecord,
+        observation: ServiceObservation | None,
+        down_nodes: set[str],
+    ) -> ServiceHealth:
         if record.blocked_credentials:
             return ServiceHealth.BLOCKED
         assert observation is not None
-        loss = set(self._loss(record.service))
+        loss = set(cls._loss_for(record.service, down_nodes))
         healthy = set(observation.healthy_replica_ids) - loss
         failed = set(observation.failed_replica_ids) | loss
         if len(healthy) >= record.service.min_healthy_replicas:
@@ -373,6 +456,108 @@ class ProductOperationsCoordinator:
                 return ServiceHealth.DEGRADED
             return ServiceHealth.HEALTHY
         return ServiceHealth.DEGRADED if healthy else ServiceHealth.ROLLBACK_REQUIRED
+
+    @staticmethod
+    def _known_maintenance_evidence(record: ServiceRecord) -> set[str]:
+        refs: set[str] = set()
+        if record.observation is not None:
+            refs.update(record.observation.evidence_refs)
+        if record.rollback is not None:
+            refs.update(record.rollback.evidence_refs)
+        return refs
+
+    @classmethod
+    def _validate_maintenance_authority(
+        cls,
+        record: ServiceRecord,
+        request: MaintenanceRequest,
+    ) -> None:
+        known = cls._known_maintenance_evidence(record)
+        if not known:
+            raise ProductOperationsError(
+                "maintenance requires approved service health/rollback evidence"
+            )
+        if not set(request.evidence_refs) <= known:
+            raise ProductOperationsError(
+                "maintenance evidence is not bound to the requested service"
+            )
+
+    @classmethod
+    def _validate_restored_service(
+        cls,
+        record: ServiceRecord,
+        revoked: set[str],
+        down_nodes: set[str],
+    ) -> None:
+        if not isinstance(record.health, ServiceHealth) or not isinstance(
+            record.maintenance,
+            MaintenanceState,
+        ):
+            raise ProductOperationsError("operations snapshot service state is invalid")
+        expected_blocked = tuple(sorted(set(record.service.credential_refs) & revoked))
+        if record.blocked_credentials != expected_blocked:
+            raise ProductOperationsError(
+                "operations snapshot blocked credential lineage is invalid"
+            )
+        expected_loss = cls._loss_for(record.service, down_nodes)
+        if record.node_loss != expected_loss:
+            raise ProductOperationsError("operations snapshot node-loss lineage is invalid")
+        observation = record.observation
+        if observation is not None:
+            if (
+                observation.service_id != record.service.service_id
+                or observation.release_sha != record.service.release_sha
+            ):
+                raise ProductOperationsError(
+                    "operations snapshot service observation identity is invalid"
+                )
+            known_replicas = {replica.replica_id for replica in record.service.replicas}
+            observed_replicas = set(observation.healthy_replica_ids) | set(
+                observation.failed_replica_ids
+            )
+            if not observed_replicas <= known_replicas:
+                raise ProductOperationsError(
+                    "operations snapshot observation references unknown replica"
+                )
+        rollback = record.rollback
+        if rollback is not None:
+            if (
+                rollback.service_id != record.service.service_id
+                or rollback.failed_release_sha != record.service.release_sha
+                or observation is None
+                or rollback.observed_at < observation.observed_at
+            ):
+                raise ProductOperationsError(
+                    "operations snapshot rollback evidence identity is invalid"
+                )
+        if expected_blocked:
+            expected_health = ServiceHealth.BLOCKED
+        elif rollback is not None:
+            expected_health = (
+                ServiceHealth.ROLLED_BACK if rollback.succeeded else ServiceHealth.FAILED
+            )
+        elif observation is None:
+            expected_health = ServiceHealth.PENDING
+        else:
+            probe = ServiceRecord(
+                record.service,
+                observation=observation,
+                blocked_credentials=expected_blocked,
+                node_loss=expected_loss,
+            )
+            expected_health = cls._health_for(probe, observation, down_nodes)
+        if record.health is not expected_health:
+            raise ProductOperationsError(
+                "operations snapshot service health is not derivable from durable evidence"
+            )
+
+    @staticmethod
+    def _validated_snapshot_refs(values: tuple[str, ...], label: str) -> set[str]:
+        if any(type(value) is not str or not value.strip() for value in values):
+            raise ProductOperationsError(f"operations snapshot {label} identity is invalid")
+        if len(values) != len(set(values)):
+            raise ProductOperationsError(f"operations snapshot contains duplicate {label} ids")
+        return set(values)
 
 
 def _maintenance_state(
