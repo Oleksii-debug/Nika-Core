@@ -13,6 +13,9 @@ from .dataset import ValidationReport
 _HELDOUT_SCHEMA = "nika-trader-heldout-v2"
 _STRATEGY_ARTIFACT_SCHEMA = "nika-trader-strategy-artifact-v1"
 _QUALITY_SCHEMA = "nika-trader-data-quality-v1"
+_CANDIDATE_SCHEMA = "nika-trader-candidate-score-v1"
+_SELECTION_SCHEMA = "nika-trader-selection-v1"
+_RESULT_SCHEMA = "nika-trader-partition-result-v1"
 _ASSESSMENT_SCHEMA = "nika-trader-heldout-assessment-v1"
 
 
@@ -160,6 +163,7 @@ class HeldOutProtocol:
     validation: PartitionWindow
     test: PartitionWindow
     refit_policy: RefitPolicy = RefitPolicy.NO_REFIT
+    _sealed_fingerprint: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.refit_policy, RefitPolicy):
@@ -174,17 +178,11 @@ class HeldOutProtocol:
             raise CausalityViolation("train and validation windows overlap")
         if self.validation.end_at > self.test.start_at:
             raise CausalityViolation("validation and held-out test windows overlap")
+        object.__setattr__(self, "_sealed_fingerprint", _protocol_fingerprint(self))
 
     @property
     def fingerprint(self) -> str:
-        payload = (
-            f"{_HELDOUT_SCHEMA}|{self.refit_policy.value}|{self.train.partition.value}|"
-            f"{self.train.start_at.isoformat()}|{self.train.end_at.isoformat()}|"
-            f"{self.validation.partition.value}|{self.validation.start_at.isoformat()}|"
-            f"{self.validation.end_at.isoformat()}|{self.test.partition.value}|"
-            f"{self.test.start_at.isoformat()}|{self.test.end_at.isoformat()}"
-        )
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        return self._sealed_fingerprint
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +198,7 @@ class CandidateScore:
     universe_cutoff_at: datetime
     evaluated_at: datetime
     _artifact_fingerprint: str = field(init=False, repr=False)
+    _evidence_fingerprint: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         artifact = _validated_strategy_artifact(self.strategy_artifact)
@@ -220,6 +219,7 @@ class CandidateScore:
         object.__setattr__(self, "universe_cutoff_at", universe_cutoff_at)
         object.__setattr__(self, "evaluated_at", evaluated_at)
         object.__setattr__(self, "_artifact_fingerprint", artifact.fingerprint)
+        object.__setattr__(self, "_evidence_fingerprint", _candidate_fingerprint(self))
 
     @property
     def strategy_id(self) -> str:
@@ -245,6 +245,7 @@ class SelectionDecision:
     protocol_fingerprint: str
     higher_is_better: bool
     source_partition: Partition = Partition.VALIDATION
+    _evidence_fingerprint: str = field(init=False, repr=False)
 
     def __init__(self, *_args: object, **_kwargs: object) -> None:
         raise TypeError(
@@ -289,6 +290,7 @@ class SelectionDecision:
         }
         for name, value in values.items():
             object.__setattr__(obj, name, value)
+        object.__setattr__(obj, "_evidence_fingerprint", _selection_fingerprint(obj))
         _validate_selection_identity(obj)
         return obj
 
@@ -310,6 +312,7 @@ class PartitionResult:
     universe_cutoff_at: datetime
     evaluated_at: datetime
     _artifact_fingerprint: str = field(init=False, repr=False)
+    _evidence_fingerprint: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         artifact = _validated_strategy_artifact(self.strategy_artifact)
@@ -330,6 +333,7 @@ class PartitionResult:
         object.__setattr__(self, "universe_cutoff_at", universe_cutoff_at)
         object.__setattr__(self, "evaluated_at", evaluated_at)
         object.__setattr__(self, "_artifact_fingerprint", artifact.fingerprint)
+        object.__setattr__(self, "_evidence_fingerprint", _result_fingerprint(self))
 
     @property
     def strategy_id(self) -> str:
@@ -592,6 +596,8 @@ def _validated_protocol(protocol: HeldOutProtocol) -> HeldOutProtocol:
     windows = (protocol.train, protocol.validation, protocol.test)
     if any(not isinstance(window, PartitionWindow) for window in windows):
         raise TradingResearchError("protocol windows must be PartitionWindow evidence")
+    if _protocol_fingerprint(protocol) != protocol._sealed_fingerprint:
+        raise TradingResearchError("held-out protocol evidence changed after construction")
     return HeldOutProtocol(
         PartitionWindow(
             protocol.train.partition,
@@ -646,6 +652,8 @@ def _validate_candidate_score(score: CandidateScore) -> CandidateScore:
     _require_digest(score.universe_fingerprint, "universe_fingerprint")
     _require_aware_utc(score.universe_cutoff_at, "universe_cutoff_at")
     _require_aware_utc(score.evaluated_at, "evaluated_at")
+    if _candidate_fingerprint(score) != score._evidence_fingerprint:
+        raise TradingResearchError("candidate score evidence changed after construction")
     return score
 
 
@@ -675,6 +683,8 @@ def _validate_selection_identity(
         selection.universe_cutoff_at,
         "universe_cutoff_at",
     )
+    if _selection_fingerprint(selection) != selection._evidence_fingerprint:
+        raise TradingResearchError("selection evidence changed after construction")
     return selected_at, universe_cutoff_at
 
 
@@ -692,6 +702,8 @@ def _validate_partition_result_identity(result: PartitionResult) -> None:
     _require_data_quality(result.data_quality)
     _require_aware_utc(result.universe_cutoff_at, "universe_cutoff_at")
     _require_aware_utc(result.evaluated_at, "evaluated_at")
+    if _result_fingerprint(result) != result._evidence_fingerprint:
+        raise TradingResearchError("partition result evidence changed after construction")
 
 
 def _copy_selection(selection: SelectionDecision) -> SelectionDecision:
@@ -737,6 +749,37 @@ def _copy_quality(value: ReplayDataQuality) -> ReplayDataQuality:
     )
 
 
+def _protocol_fingerprint(protocol: HeldOutProtocol) -> str:
+    payload = (
+        f"{_HELDOUT_SCHEMA}|{protocol.refit_policy.value}|{protocol.train.partition.value}|"
+        f"{protocol.train.start_at.isoformat()}|{protocol.train.end_at.isoformat()}|"
+        f"{protocol.validation.partition.value}|{protocol.validation.start_at.isoformat()}|"
+        f"{protocol.validation.end_at.isoformat()}|{protocol.test.partition.value}|"
+        f"{protocol.test.start_at.isoformat()}|{protocol.test.end_at.isoformat()}"
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _candidate_fingerprint(score: CandidateScore) -> str:
+    metric_value = "none" if score.metric_value is None else str(score.metric_value)
+    payload = "|".join(
+        (
+            _CANDIDATE_SCHEMA,
+            score._artifact_fingerprint,
+            score.partition.value,
+            score.metric_name,
+            score.metric_fingerprint,
+            metric_value,
+            score.dataset_semantic_hash,
+            _quality_fingerprint(score.data_quality),
+            score.universe_fingerprint,
+            score.universe_cutoff_at.isoformat(),
+            score.evaluated_at.isoformat(),
+        )
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _assessment_fingerprint(
     protocol: HeldOutProtocol,
     selection: SelectionDecision,
@@ -757,6 +800,7 @@ def _selection_fingerprint(selection: SelectionDecision) -> str:
     value = selection.metric_value
     payload = "|".join(
         (
+            _SELECTION_SCHEMA,
             selection.strategy_artifact_fingerprint,
             selection.metric_name,
             selection.metric_fingerprint,
@@ -778,6 +822,7 @@ def _result_fingerprint(result: PartitionResult) -> str:
     metric_value = "none" if result.metric_value is None else str(result.metric_value)
     payload = "|".join(
         (
+            _RESULT_SCHEMA,
             result._artifact_fingerprint,
             result.partition.value,
             result.metric_name,
