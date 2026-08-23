@@ -191,12 +191,13 @@ def test_maintenance_requires_approval_and_uncertain_result_reconciles() -> None
     coordinator = ProductOperationsCoordinator("p-social", port)
     api = _service("api", sha=60)
     coordinator.register(api)
+    coordinator.record_observation(_observation(api, (0, 1)))
     unapproved = MaintenanceRequest(
         "maint-1",
         "api",
         MaintenanceAction.RESTART,
         "dependency upgrade",
-        ("plan:maint-1",),
+        ("health:api",),
     )
     with pytest.raises(ProductOperationsError, match="explicit approval"):
         coordinator.request_maintenance(unapproved)
@@ -207,7 +208,7 @@ def test_maintenance_requires_approval_and_uncertain_result_reconciles() -> None
         "api",
         MaintenanceAction.RESTART,
         "dependency upgrade",
-        ("plan:maint-1",),
+        ("health:api",),
         approval_ref="approval:operator-42",
     )
     first = coordinator.request_maintenance(approved)
