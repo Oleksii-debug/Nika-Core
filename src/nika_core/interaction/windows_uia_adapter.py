@@ -445,12 +445,19 @@ class PywinautoUIABackend:
             if view == "control"
             else "is_content_element"
         )
-        pairs = tuple(
-            (wrapper, self._record(wrapper))
-            for wrapper in wrappers
-            if getattr(wrapper.element_info, flag_name, None) is not False
-        )
-        return self._assign_generations(hwnd, pairs)
+        pairs: list[tuple[object, UIAControlRecord]] = []
+        for wrapper in wrappers:
+            if getattr(wrapper.element_info, flag_name, None) is False:
+                continue
+            record = self._record(wrapper)
+            if record.runtime_id is None:
+                logger.debug(
+                    "Ignoring UIA element without usable RuntimeId; "
+                    "it cannot receive semantic action authority"
+                )
+                continue
+            pairs.append((wrapper, record))
+        return self._assign_generations(hwnd, tuple(pairs))
 
     def enumerate_controls(
         self,
@@ -521,7 +528,7 @@ class PywinautoUIABackend:
         wrapper = self._wrapper(hwnd, runtime_id, generation)
         try:
             getattr(getattr(wrapper, attribute), method)(*args)
-        except Exception as exc:  # noqa: BLE001 - normalize optional COM patterns
+        except Exception as exc:
             raise UnsupportedInteractionError(
                 f"{label} pattern is unavailable"
             ) from exc
