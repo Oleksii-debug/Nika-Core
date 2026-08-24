@@ -22,12 +22,13 @@ _SENSITIVE_QUERY = re.compile(
 )
 _BEARER = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
 _COOKIE_HEADER = re.compile(r"(?im)\b((?:set-)?cookie)\s*:\s*[^\r\n]*")
+_AUTHORIZATION_HEADER = re.compile(r"(?im)\b((?:proxy-)?authorization)\s*:\s*[^\r\n]*")
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)(?<![A-Za-z0-9_])"
     r"((?:api[-_]?key|access[-_]?token|refresh[-_]?token|client[-_]?secret|"
     r"authorization|password|token|secret|cookie|cookies|session[-_]?id)"
     r"\s*[:=]\s*)"
-    r"([^\s,;]+)"
+    r"([^\s,;&#]+)"
 )
 _SENSITIVE_ARGV_OPTIONS = frozenset(
     {
@@ -56,8 +57,12 @@ _SENSITIVE_ARGV_OPTIONS = frozenset(
 
 
 def redact_text(value: str) -> str:
-    redacted = _BEARER.sub("Bearer [REDACTED]", value)
+    redacted = _AUTHORIZATION_HEADER.sub(
+        lambda match: f"{match.group(1)}: [REDACTED]",
+        value,
+    )
     redacted = _COOKIE_HEADER.sub(lambda match: f"{match.group(1)}: [REDACTED]", redacted)
+    redacted = _BEARER.sub("Bearer [REDACTED]", redacted)
     redacted = _SECRET_ASSIGNMENT.sub(
         lambda match: f"{match.group(1)}[REDACTED]",
         redacted,
