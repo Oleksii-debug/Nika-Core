@@ -2,125 +2,132 @@
 
 Status: ONE-SHOT-16 current-main convergence implementation/evidence contract.
 
-## Collision and scope boundary
+## Scope and ownership
 
-The original DEV10 maintenance/evidence workstream (#200) and repeat-incident workstream (#178) were non-overlapping at the file level but could not be merged directly: #200 had an active AUD02 authority block and both branches became stale after release-workflow/current-main convergence. ONE-SHOT-16 therefore preserves both semantics on one current-main convergence branch rather than stacking the stale PRs.
+This lane converges the non-overlapping repeat-incident semantics from historical #178 and maintenance/evidence semantics from historical #200 on one current-main PF8 branch. It owns Product Operations maintenance/incident evidence plus thin adapters to already-integrated Nika authorities. It does not own M10 approval issuance, PF6 deployment implementation, provider-specific execution, credential storage, replica-placement authority, or a second persistence framework.
 
-This maintenance slice owns Product Operations maintenance/evidence semantics and a thin adapter to the already-integrated runtime idempotency ledger. It does not own M10 approval issuance, deployment provider implementation, production promotion, credential storage, or a second persistence framework.
-
-PF6 exact-release convergence remains a separate shared-contract dependency. Current-main PF8 release/rollback observations are still SHA-level and must not be silently rewritten against the unmerged PF6 #280 contract. When canonical PF6 exact `ReleaseRef` authority integrates, PF8 release/rollback validation requires an explicit compatibility migration and combined replay so same-SHA/different-artifact releases cannot alias.
+Current PF6 integration vehicle is #390. Its exact `ReleaseRef` contract is not yet canonical main and is therefore not imported speculatively. When PF6 exact-release authority integrates, PF8 must explicitly migrate/replay rollback validation so same-SHA/different-artifact releases cannot alias.
 
 ## REUSE → ADAPT → CUSTOM (thin)
 
-REUSE the existing `ProductOperationsCoordinator`, `ProductOperationsPort`, Product Operations snapshots, service observations, rollback evidence, maintenance request identity, canonical runtime `IdempotencyLedger`/SQLite store, and the project-wide rule that high-impact authority must be host-owned and fail closed.
+REUSE:
+- `ProductOperationsCoordinator`, Product Operations snapshots and existing provider port;
+- canonical runtime `IdempotencyLedger`, `SQLiteStore` and `TaskQueue` host identity;
+- existing service/health/rollback evidence;
+- project-wide fail-closed approval/authority rules.
 
-ADAPT two existing host authorities behind PF8-owned framework-neutral ports:
+ADAPT:
+- `MaintenanceApprovalAuthorityPort` consumes exact host-owned approval authority without issuing it;
+- `MaintenanceEffectJournalPort` consumes durable pre-effect/reconciliation authority;
+- `RuntimeIdempotencyMaintenanceJournal` is a thin adapter over canonical `IdempotencyLedger` and requires an existing host `task_id`.
 
-- `MaintenanceApprovalAuthorityPort` consumes exact trusted approval authority. It receives the exact project, immutable `DeployableService` including release SHA, and complete `MaintenanceRequest`. It verifies host authority; it does not issue, sign, persist, or manufacture approvals.
-- `MaintenanceEffectJournalPort` consumes durable pre-effect reservation/reconciliation authority. `RuntimeIdempotencyMaintenanceJournal` is the concrete thin adapter over the canonical runtime `IdempotencyLedger`; it requires an existing host `task_id` and never invents one.
-
-CUSTOM is limited to exact evidence lineage, strict result identity, rollback sealing, occurrence/retry serialization, PF8 operation/fingerprint mapping and durable result schema normalization. No shell path, permission bypass, signer, HMAC key, approval database, second SQLite schema, provider-specific API, or self-modifying production mechanism is added.
+CUSTOM(thin) is limited to PF8 operation identity/fingerprint/result mapping, evidence-lineage validation, rollback sealing, occurrence/retry serialization and snapshot↔journal consistency checks. No new dependency, DB/schema, signer, HMAC authority, generic scheduler, permission system or provider framework is introduced.
 
 ## Approval and evidence invariants
 
-- A non-empty caller-provided `approval_ref` is not positive authority.
-- Maintenance requires both a configured side-effect port and a configured trusted approval verifier before provider dispatch.
-- Missing verifier, verifier exception, or any verifier result other than literal `True` fails closed.
-- The trusted verifier receives the exact project, service/environment/release identity, request id, action, reason, evidence refs and approval ref through immutable service/request objects.
-- Before authority verification and before provider dispatch, every `MaintenanceRequest.evidence_refs` item must be present in the requested service's recorded health or rollback evidence.
-- Cross-service or forged evidence is rejected before effect.
-- The production regression derived from AUD02 #263 proves that `approval_ref="candidate-controlled:approved:R4"` cannot authorize a side effect when no trusted host verifier exists.
-- Positive production maintenance remains dependent on an adapter to canonical integrated M10/R4 authority. Deterministic test resolvers prove only this consumer contract and do not become an approval issuer.
+- Caller-provided `approval_ref` is evidence/reference only, never positive authority.
+- Maintenance requires a configured provider port, exact service evidence and a configured trusted approval verifier.
+- Missing verifier, verifier exception or anything other than literal `True` fails closed before provider mutation.
+- Approval verification binds exact project + immutable service/environment/release + full request/action/reason/evidence/approval reference.
+- Cross-service, stale-release and forged evidence is rejected before the effect.
+- Positive production maintenance remains dependent on an integrated canonical M10/R4 adapter; deterministic test resolvers prove only the consumer contract.
 
-## Durable external-effect protocol
+## Durable effect journal
 
-Every maintenance provider effect additionally requires `MaintenanceEffectJournalPort`. Missing journal blocks provider dispatch even when request evidence and approval verification are otherwise valid.
-
-The integrated adapter reuses `IdempotencyLedger` with:
-
+Every external maintenance effect also requires `MaintenanceEffectJournalPort`. The runtime adapter stores one stable operation under canonical SQLite:
 - operation type `product_operations.maintenance`;
-- a stable operation key derived from exact `(project_id, request_id)`;
-- an input fingerprint binding project, immutable service identity including release SHA/replicas/dependencies/credential references, and the complete maintenance request including action/evidence/approval reference;
-- canonical host `task_id` supplied by the caller; SQLite foreign-key authority rejects a candidate-invented task identity;
-- durable states `PENDING`, `UNCERTAIN`, `COMPLETED`;
-- schema-versioned durable `MaintenanceResult` evidence for completed effects.
+- operation key derived from exact `(project_id, request_id)`;
+- fingerprint over complete project/service/release/request/evidence/approval subject;
+- canonical host `task_id`, enforced by the existing task foreign key;
+- states `PENDING`, `UNCERTAIN`, `COMPLETED`;
+- schema-versioned durable `MaintenanceResult` for `COMPLETED`.
 
-Ordering is deliberate:
+The journal exposes non-mutating `lookup(...)` as well as reserve/complete/uncertain/reconcile operations. Lookup independently verifies task identity, operation type and input fingerprint and never creates authority.
 
-1. exact request/service/approval evidence is validated;
-2. the canonical SQLite ledger commits `PENDING` before any provider call;
-3. only a newly-created reservation may execute `ProductOperationsPort.apply`;
-4. an existing `PENDING` or `UNCERTAIN` reservation can only use `inspect`, never blindly replay `apply`;
-5. a determinate result is committed to the ledger before Product Operations in-memory/snapshot state advances;
-6. `COMPLETED` replay reconstructs the exact durable result with zero provider calls;
-7. uncertain inspection remains unresolved; determinate inspection reconciles the existing durable reservation;
-8. durable identity conflict or malformed durable result fails closed before provider mutation.
+## Exact dispatch/recovery ordering
 
-This is a reconciliation/idempotency protocol, not a false claim that SQLite and an external provider form one atomic transaction.
+1. Validate service evidence and trusted approval.
+2. Commit canonical `PENDING` before provider execution.
+3. Only the caller that **created** that reservation may call `apply`.
+4. A determinate result is committed as `COMPLETED` before local Product Operations state advances.
+5. A returned uncertain result or catchable/abrupt provider failure is durably marked `UNCERTAIN`.
+6. Existing `COMPLETED` reconstructs the exact durable result with zero provider calls.
+7. Existing `UNCERTAIN` may use read/reconcile `inspect`; determinate inspection closes it, uncertain inspection leaves it unresolved.
+8. Existing `PENDING` is **not** inspected and is never replayed by an ordinary request. It fails closed until a trusted host can prove the prior effect owner is gone and explicitly transition the operation to recovery authority.
+9. `reconcile(PENDING)` is prohibited; reconciliation accepts only `UNCERTAIN`.
 
-## Crash/restart boundaries
+The distinction between `PENDING` and `UNCERTAIN` is deliberate. A second coordinator/process may observe another live owner while that owner is still inside `apply`; allowing immediate inspection would let the second process prematurely close the journal. The deterministic two-coordinator regression holds the first provider call open and proves the second exact request performs neither `apply` nor `inspect`.
 
-The maintenance external-effect crash window is now covered by the canonical runtime ledger rather than by `ProductOperationsSnapshot` itself:
+This protocol provides fail-closed replay/reconciliation; it does not claim SQLite and an external provider form one atomic transaction.
 
-- crash after reservation but before provider mutation leaves durable `PENDING`; restart inspects and never redispatches blindly;
-- hard process loss after provider mutation but before local Product Operations save still leaves the pre-effect `PENDING`; restart inspects external state rather than invoking `apply` again;
-- catchable provider failure/abrupt test loss marks the reservation `UNCERTAIN`; restart also inspects rather than replaying;
-- provider success followed by a crash before local Product Operations save leaves durable `COMPLETED` result evidence; restart reconstructs the result without provider access;
-- corrupt completed result JSON or semantic rebinding under the same operation identity fails closed;
-- missing or candidate-created host task identity cannot reserve the canonical ledger and therefore cannot reach provider dispatch.
+## Crash/restart truth
 
-The ordinary in-memory Product Operations snapshot remains responsible for service/health/maintenance presentation state. The runtime ledger is the authoritative pre-effect/reconciliation record for external maintenance mutation. No second PF8 persistence authority is introduced.
+Proven:
+- reservation survives adapter/process recreation;
+- provider exception/process-loss test after the external effect leaves `UNCERTAIN`, then restart reconciles through `inspect` without a second `apply`;
+- `COMPLETED` before local state save restores the exact durable result without provider access;
+- corrupt result JSON, rebound request/release identity and fake host task identity fail closed;
+- raw hard-loss `PENDING` survives restart and blocks both dispatch and inspection until host owner-loss authority exists;
+- an explicitly host-marked `UNCERTAIN` operation can then reconcile inspection-only.
 
-## Runtime and concurrency invariants
+Not claimed:
+- generic cross-process owner-death/lease proof is not created by PF8;
+- `PENDING` is therefore safe but may require external host recovery coordination for liveness.
 
-- Request-id replay is exact and idempotent; a conflicting payload under the same request id is rejected by both Product Operations state and durable journal fingerprinting.
-- `request_maintenance()` and uncertain-result reconciliation are serialized with an in-process `RLock`, so concurrent exact retries cannot race local state or double-dispatch within one coordinator process.
-- The SQLite journal independently protects restart/cross-instance replay; in-process locking is not treated as crash durability.
-- Service observation timestamps cannot move backwards; a different payload at the same timestamp is rejected rather than overwriting evidence.
-- Exact rollback evidence replay is idempotent; conflicting rollback evidence is rejected.
-- A terminal rollback seals the failed-release observation lineage: later observations for that failed release are rejected.
-- Node-availability recomputation cannot resurrect a failed release after terminal rollback. Credential blocking may temporarily surface `BLOCKED`; when the credential is restored the service returns to rollback-derived terminal state rather than health derived from the failed release.
-- Maintenance adapter apply/inspect results must cross the boundary as `MaintenanceResult`, with exact boolean flags and non-duplicate evidence references.
+## Snapshot ↔ journal authority
 
-## Restart reconciliation of Product Operations snapshots
+Independent QA #398 found that the earlier candidate accepted maintenance-bearing `ProductOperationsSnapshot` state without proving the same result in the canonical effect journal. A valid approval could therefore launder a fabricated applied/result state while the journal was missing, unresolved or held a different completed result.
 
-`restore()` validates the complete Product Operations snapshot before replacing coordinator state. It re-derives and checks:
+Current repair makes journal authority mandatory on every maintenance-bearing restore and existing-record fast path:
+- missing journal operation → reject;
+- `PENDING` or `UNCERTAIN` while snapshot claims resolved state → reject;
+- `COMPLETED` with different `MaintenanceResult` → reject;
+- exact `COMPLETED` + exact result → accept;
+- validation is non-mutating: failed restore cannot create/complete/reconcile an effect record;
+- local existing uncertain state is valid only while the journal is exactly `UNCERTAIN`;
+- local existing resolved state must equal exact durable `COMPLETED` evidence.
 
-- project/service identities and earlier-wave dependencies;
-- revoked credential identity and each service's exact blocked-credential set;
-- unavailable-node identity and exact per-service replica loss;
-- service observation release/service/replica binding;
-- rollback service/release/timeline binding;
-- service health from durable observation, credential, node-loss and rollback evidence, with terminal rollback taking precedence once credential blocking clears;
-- maintenance request uniqueness, target service, durable approval reference and exact service evidence binding;
-- trusted host approval authority for each persisted maintenance request;
-- maintenance state backed by persisted result evidence for that service.
+The production regression `tests/test_product_factory_operations_snapshot_journal.py` reproduces the #398 attack family using real `SQLiteStore`, real `TaskQueue` and real `IdempotencyLedger`, including a positive exact-result control.
 
-Snapshot corruption therefore fails closed without partially replacing the coordinator's prior in-memory state. External-effect replay safety is separately anchored by the canonical runtime ledger as described above.
+## Other restart/data-integrity invariants
 
-## Test evidence boundaries
+`restore()` still validates the full snapshot before replacing coordinator state:
+- project/service identities and dependency waves;
+- revoked credentials and derived blocked sets;
+- unavailable nodes and derived replica loss;
+- service observation release/service/replica identity;
+- rollback service/release/timeline identity;
+- health derived from durable observation/credential/node/rollback evidence;
+- maintenance request uniqueness, service evidence and trusted approval authority;
+- maintenance state derived from its exact result;
+- exact journal result authority as described above.
 
-Focused tests cover:
+Corruption therefore fails closed without partially replacing prior in-memory state.
 
-- AUD02 forged approval and exact action/service/release/request substitution;
-- missing durable journal -> zero provider dispatch;
-- concurrent exact retry -> one provider dispatch;
-- real canonical `SQLiteStore` + real `TaskQueue` host identity + real `IdempotencyLedger` recreation;
-- candidate-created/fake task identity rejected by canonical persistence authority;
-- PENDING/UNCERTAIN restart -> inspection without re-apply;
-- simulated provider effect followed by process loss -> one apply total across restart;
-- COMPLETED-before-local-save -> exact durable result restoration with zero provider calls;
-- rebound request/release identity conflict and corrupt result evidence fail closed;
-- 50-service maintenance isolation and existing 60-service Product Operations isolation;
+## Test evidence
+
+Focused coverage includes:
+- AUD02 forged approval and action/service/release/request substitution;
+- missing journal → zero provider dispatch;
+- in-process exact retry → one provider dispatch;
+- cross-coordinator live-`PENDING` race → second caller performs zero provider access;
+- canonical SQLite/TaskQueue/IdempotencyLedger recreation;
+- fake host task rejection;
+- exception-after-effect → `UNCERTAIN` → inspection-only reconciliation;
+- raw hard-loss `PENDING` fail-closed and explicit host-marked-uncertain recovery;
+- `COMPLETED` before local save → zero-provider reconstruction;
+- snapshot↔journal missing/unresolved/conflicting-result laundering attacks and exact positive control;
+- corrupt durable result and rebound identity rejection;
+- 50-service maintenance restart isolation and existing 60-service Product Operations isolation;
 - rollback sealing, node/credential changes and late observation rejection.
 
-`tests/pf8_effect_journal_fake.py` is intentionally only a deterministic unit-test contract fake. It is not cited as durability evidence. Durability credit comes from the SQLite/runtime-ledger integration tests.
+`tests/pf8_effect_journal_fake.py` remains a unit-contract fake and is never durability evidence.
 
 ## Truth
 
-This is automated engineering evidence only. Exact candidate SHA, current-main compatibility, Core/M12 and independent audit status are recorded on the convergence PR; this document does not grant GREEN or integration credit by itself.
+Exact SHA/current-main compatibility, Core/M12 and independent auditor classification live on PR #286. This document does not grant GREEN or integration credit.
 
-PF6 exact-release shared-contract compatibility remains pending until its canonical successor integrates and PF8 is replayed against that exact contract.
+PF6 #390 exact-release compatibility, canonical M10/R4 positive authority, and wider PF3 replica-placement convergence remain separate shared-contract dependencies and are not silently absorbed here.
 
 `HUMAN_TESTED=false`
 
