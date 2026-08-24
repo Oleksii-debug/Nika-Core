@@ -524,31 +524,54 @@ class ProductRepositoryGraph:
         repos = {component.repository_id for component in components}
         result: list[tuple[str, str]] = []
         for raw_path in lease.allowed_paths:
-            path = _normalize_repo_path(raw_path)
-            matches = [
-                component
-                for component in components
+            paths_by_repo: dict[str, str] = {}
+            errors_by_repo: dict[str, RepositoryGraphError] = {}
+            matches: list[ProductComponent] = []
+            for component in components:
+                repository_id = component.repository_id
+                if repository_id in errors_by_repo:
+                    continue
+                repository = self._repositories_by_id[repository_id]
+                if repository_id not in paths_by_repo:
+                    try:
+                        paths_by_repo[repository_id] = _normalize_repo_path(
+                            raw_path,
+                            windows_path_semantics=repository.windows_path_semantics,
+                        )
+                    except RepositoryGraphError as exc:
+                        errors_by_repo[repository_id] = exc
+                        continue
+                path = paths_by_repo[repository_id]
                 if any(
                     _path_within(
                         path,
-                        _normalize_repo_path(root),
-                        self._repositories_by_id[component.repository_id].case_sensitive_paths,
+                        _normalize_repo_path(
+                            root,
+                            windows_path_semantics=repository.windows_path_semantics,
+                        ),
+                        repository.case_sensitive_paths,
                     )
                     for root in component.paths
-                )
-            ]
+                ):
+                    matches.append(component)
             if not matches:
-                raise RepositoryGraphError(f"lease path {path} is outside component ownership")
+                if len(repos) == 1:
+                    only_repository = next(iter(repos))
+                    repository_error = errors_by_repo.get(only_repository)
+                    if repository_error is not None:
+                        raise repository_error
+                display_path = _normalize_repo_path(raw_path)
+                raise RepositoryGraphError(
+                    f"lease path {display_path} is outside component ownership"
+                )
             matching_repos = {component.repository_id for component in matches}
             if len(matching_repos) != 1:
-                raise RepositoryGraphError(f"lease path {path} is ambiguous across repositories")
+                display_path = _normalize_repo_path(raw_path)
+                raise RepositoryGraphError(
+                    f"lease path {display_path} is ambiguous across repositories"
+                )
             repository_id = next(iter(matching_repos))
-            repository = self._repositories_by_id[repository_id]
-            path = _normalize_repo_path(
-                raw_path,
-                windows_path_semantics=repository.windows_path_semantics,
-            )
-            result.append((repository_id, path))
+            result.append((repository_id, paths_by_repo[repository_id]))
         if not {repo_id for repo_id, _ in result}.issubset(repos):
             raise RepositoryGraphError("lease path repository mismatch")
         return tuple(result)
