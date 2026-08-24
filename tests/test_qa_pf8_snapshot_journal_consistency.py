@@ -80,6 +80,20 @@ class ExactApprovalAuthority:
         )
 
 
+class CountingPort:
+    def __init__(self) -> None:
+        self.apply_calls = 0
+        self.inspect_calls = 0
+
+    def apply(self, request: MaintenanceRequest) -> MaintenanceResult:
+        self.apply_calls += 1
+        return MaintenanceResult(True, False, (f"provider:{request.request_id}:applied",))
+
+    def inspect(self, request: MaintenanceRequest) -> MaintenanceResult:
+        self.inspect_calls += 1
+        return MaintenanceResult(True, False, (f"provider:{request.request_id}:inspected",))
+
+
 def _snapshot(result: MaintenanceResult) -> ProductOperationsSnapshot:
     service = _service()
     request = _request()
@@ -109,11 +123,11 @@ def _journal(tmp_path):
     )
     ledger = IdempotencyLedger(store)
     journal = RuntimeIdempotencyMaintenanceJournal(ledger, task_id=task.task_id)
-    return task.task_id, ledger, journal
+    return store, task.task_id, ledger, journal
 
 
 def test_restore_rejects_applied_snapshot_when_canonical_journal_has_no_effect(tmp_path) -> None:
-    task_id, ledger, journal = _journal(tmp_path)
+    _, task_id, ledger, journal = _journal(tmp_path)
     forged = MaintenanceResult(True, False, ("snapshot:forged-applied",))
     coordinator = ProductOperationsCoordinator(
         "project-a",
@@ -128,7 +142,7 @@ def test_restore_rejects_applied_snapshot_when_canonical_journal_has_no_effect(t
 
 
 def test_restore_rejects_snapshot_result_that_conflicts_with_completed_journal(tmp_path) -> None:
-    _, ledger, journal = _journal(tmp_path)
+    _, _, ledger, journal = _journal(tmp_path)
     service = _service()
     request = _request()
     reservation = journal.reserve(
@@ -157,7 +171,7 @@ def test_restore_rejects_resolved_snapshot_while_journal_is_unresolved(
     tmp_path,
     durable_state: str,
 ) -> None:
-    _, ledger, journal = _journal(tmp_path)
+    _, _, ledger, journal = _journal(tmp_path)
     service = _service()
     request = _request()
     reservation = journal.reserve(
@@ -180,3 +194,36 @@ def test_restore_rejects_resolved_snapshot_while_journal_is_unresolved(
         )
 
     assert ledger.require(reservation.operation_key).status is before
+
+
+def test_existing_record_fast_path_revalidates_canonical_journal(tmp_path) -> None:
+    store, _, _, journal = _journal(tmp_path)
+    service = _service()
+    request = _request()
+    reservation = journal.reserve(
+        project_id="project-a",
+        service=service,
+        request=request,
+    )
+    durable = MaintenanceResult(True, False, ("provider:durable",))
+    journal.complete(reservation.operation_key, durable)
+    port = CountingPort()
+    coordinator = ProductOperationsCoordinator(
+        "project-a",
+        port=port,
+        approval_authority=ExactApprovalAuthority(),
+        effect_journal=journal,
+    )
+    coordinator.restore(_snapshot(durable))
+
+    with store.connection() as conn:
+        conn.execute(
+            "DELETE FROM idempotency_records WHERE operation_key = ?",
+            (reservation.operation_key,),
+        )
+
+    with pytest.raises(ProductOperationsError, match="maintenance effect"):
+        coordinator.request_maintenance(request)
+
+    assert port.apply_calls == 0
+    assert port.inspect_calls == 0
