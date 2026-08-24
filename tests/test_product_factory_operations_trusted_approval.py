@@ -19,6 +19,7 @@ from nika_core.product_factory_operations_contracts import (
     ServiceObservation,
     ServiceReplica,
 )
+from pf8_effect_journal_fake import MemoryEffectJournal
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
@@ -143,6 +144,7 @@ def _coordinator(
         "project-a",
         port=port,
         approval_authority=authority,
+        effect_journal=MemoryEffectJournal(),
     )
     service = _service("service-a", SHA_A)
     coordinator.register(service)
@@ -192,6 +194,26 @@ def test_trusted_approval_is_bound_to_exact_service_release_and_request() -> Non
     saved = coordinator.request_maintenance(approved)
     assert saved.request == approved
     assert port.apply_calls == 1
+
+
+def test_missing_durable_effect_journal_blocks_provider_dispatch() -> None:
+    port = CountingPort()
+    authority = ExactApprovalAuthority()
+    coordinator = ProductOperationsCoordinator(
+        "project-a",
+        port=port,
+        approval_authority=authority,
+    )
+    service = _service("service-a", SHA_A)
+    coordinator.register(service)
+    coordinator.record_observation(_healthy(service))
+    approved = _request(service)
+    authority.allow(service, approved)
+
+    with pytest.raises(ProductOperationsError, match="durable host-bound effect journal"):
+        coordinator.request_maintenance(approved)
+
+    assert port.apply_calls == 0
 
 
 def test_concurrent_exact_retry_dispatches_provider_once() -> None:
