@@ -149,6 +149,7 @@ class AuthorizedAnsibleStagingAdapter:
             applied,
             False,
             (execution.evidence_ref,),
+            release=intent.release if applied else None,
         )
 
     def health(self, intent: DeploymentIntent) -> HealthEvidence:
@@ -185,51 +186,9 @@ class AuthorizedAnsibleStagingAdapter:
     def rollback(
         self,
         intent: DeploymentIntent,
-        previous_release_sha: str | None,
-    ) -> RollbackEvidence:
-        """Legacy SHA-only rollback contract retained for provider compatibility."""
-        self._validate_intent(intent)
-        execution = self._run(
-            "rollback",
-            self.config.rollback_playbook,
-            intent,
-            previous_release_sha=previous_release_sha,
-        )
-        if execution.status != "successful" or execution.rc != 0:
-            return RollbackEvidence(
-                intent.environment.environment_id,
-                intent.release.source_sha,
-                previous_release_sha,
-                False,
-                (execution.evidence_ref,),
-            )
-        contract = _require_contract(execution, "rollback")
-        succeeded = _require_bool(contract, "succeeded")
-        restored = contract.get("restored_release_sha")
-        if restored is not None:
-            if not isinstance(restored, str):
-                raise StagingAdapterError(
-                    "rollback restored_release_sha must be text or null"
-                )
-            _require_sha({"value": restored}, "value")
-        if succeeded and restored != previous_release_sha:
-            raise StagingAdapterError(
-                "rollback did not restore the requested previous release"
-            )
-        return RollbackEvidence(
-            intent.environment.environment_id,
-            intent.release.source_sha,
-            restored,
-            succeeded,
-            (execution.evidence_ref,),
-        )
-
-    def rollback_exact(
-        self,
-        intent: DeploymentIntent,
         previous_release: ReleaseRef | None,
     ) -> RollbackEvidence:
-        """Rollback using the complete previous ReleaseRef identity."""
+        """Rollback using the canonical complete previous ReleaseRef identity."""
         self._validate_intent(intent)
         if previous_release is not None and previous_release.project_id != intent.project_id:
             raise StagingAdapterError(
@@ -245,7 +204,7 @@ class AuthorizedAnsibleStagingAdapter:
             return RollbackEvidence(
                 intent.environment.environment_id,
                 intent.release.source_sha,
-                previous_release.source_sha if previous_release is not None else None,
+                None,
                 False,
                 (execution.evidence_ref,),
                 failed_release=intent.release,
@@ -271,6 +230,14 @@ class AuthorizedAnsibleStagingAdapter:
             failed_release=intent.release,
             restored_release=restored_release,
         )
+
+    def rollback_exact(
+        self,
+        intent: DeploymentIntent,
+        previous_release: ReleaseRef | None,
+    ) -> RollbackEvidence:
+        """Compatibility alias; canonical runtime authority is ``rollback``."""
+        return self.rollback(intent, previous_release)
 
     def inspect(self, intent: DeploymentIntent) -> ProviderInspection:
         self._validate_intent(intent)
@@ -340,13 +307,8 @@ class AuthorizedAnsibleStagingAdapter:
         playbook: str,
         intent: DeploymentIntent,
         *,
-        previous_release_sha: str | None = None,
         previous_release: ReleaseRef | None = None,
     ) -> RunnerExecution:
-        if previous_release_sha is not None and previous_release is not None:
-            raise StagingAdapterError(
-                "rollback target must use either legacy SHA or exact release identity"
-            )
         extravars: dict[str, object] = {
             "nika_pf3_operation": operation,
             "nika_project_id": intent.project_id,
@@ -366,8 +328,6 @@ class AuthorizedAnsibleStagingAdapter:
                     "nika_previous_artifact_digest": previous_release.artifact_digest,
                 }
             )
-        elif previous_release_sha is not None:
-            extravars["nika_previous_release_sha"] = previous_release_sha
         _reject_secret_values(extravars)
         ident = _runner_ident(
             operation,
