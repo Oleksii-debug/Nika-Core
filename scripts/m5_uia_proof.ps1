@@ -241,22 +241,19 @@ try {
         [string]$Expected,
         [System.Windows.Automation.ControlType]$ExpectedControlType = $null
     ) {
-        $conditions = New-Object 'System.Collections.Generic.List[System.Windows.Automation.Condition]'
-        $conditions.Add((New-Object System.Windows.Automation.PropertyCondition(
+        $nameLocatorCondition = New-Object System.Windows.Automation.PropertyCondition(
             [System.Windows.Automation.AutomationElement]::NameProperty,
             $Expected
-        )))
-        if ($null -ne $ExpectedControlType) {
-            $conditions.Add((New-Object System.Windows.Automation.PropertyCondition(
+        )
+        if ($null -eq $ExpectedControlType) {
+            $condition = $nameLocatorCondition
+        } else {
+            $typeLocatorCondition = New-Object System.Windows.Automation.PropertyCondition(
                 [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
                 $ExpectedControlType
-            )))
-        }
-        if ($conditions.Count -eq 1) {
-            $condition = $conditions.Item(0)
-        } else {
+            )
             $condition = [System.Windows.Automation.AndCondition]::new(
-                [System.Windows.Automation.Condition[]]$conditions.ToArray()
+                [System.Windows.Automation.Condition[]]@($nameLocatorCondition, $typeLocatorCondition)
             )
         }
 
@@ -368,11 +365,7 @@ try {
             )) {
                 throw "Captured UI Automation control '$($Identity.ExpectedName)' changed RuntimeId inside generation $($Identity.ElementGeneration)."
             }
-            if (-not (Test-ElementMatchesSemanticLocator
-                $Identity.Element
-                $Identity.ExpectedName
-                $Identity.ExpectedControlType
-            )) {
+            if (-not (Test-ElementMatchesSemanticLocator $Identity.Element $Identity.ExpectedName $Identity.ExpectedControlType)) {
                 throw "Captured UI Automation control '$($Identity.ExpectedName)' changed semantic locator inside generation $($Identity.ElementGeneration)."
             }
         } catch [System.Windows.Automation.ElementNotAvailableException] {
@@ -383,10 +376,7 @@ try {
         if ($null -eq $currentWindow) {
             throw "Bound top-level window disappeared while resolving '$($Identity.ExpectedName)'."
         }
-        $resolved = Find-BoundDescendantName \
-            $currentWindow \
-            $Identity.ExpectedName \
-            $Identity.ExpectedControlType
+        $resolved = Find-BoundDescendantName $currentWindow $Identity.ExpectedName $Identity.ExpectedControlType
         if ($null -eq $resolved) {
             throw "Bound UI Automation control '$($Identity.ExpectedName)' disappeared."
         }
@@ -462,10 +452,7 @@ try {
             $currentWindow = Find-ExactWindow
             if ($null -eq $currentWindow) { continue }
             try {
-                $element = Find-BoundDescendantName \
-                    $currentWindow \
-                    $Expected \
-                    $ExpectedControlType
+                $element = Find-BoundDescendantName $currentWindow $Expected $ExpectedControlType
                 if ($null -ne $element) {
                     return New-BoundControlIdentity $element $Expected $ExpectedControlType
                 }
@@ -536,15 +523,9 @@ try {
     # ready status so this gate tests keyboard behavior rather than an initialization race.
     Wait-DescendantName 'Nika Core готова до роботи.' | Out-Null
 
-    $startControl = Wait-DescendantName \
-        'Створити завдання' \
-        ([System.Windows.Automation.ControlType]::Button)
-    $tasksControl = Wait-DescendantName \
-        'Завдання' \
-        ([System.Windows.Automation.ControlType]::Text)
-    $commandControl = Wait-DescendantName \
-        'Що має зробити Nika?' \
-        ([System.Windows.Automation.ControlType]::Edit)
+    $startControl = Wait-DescendantName 'Створити завдання' ([System.Windows.Automation.ControlType]::Button)
+    $tasksControl = Wait-DescendantName 'Завдання' ([System.Windows.Automation.ControlType]::Text)
+    $commandControl = Wait-DescendantName 'Що має зробити Nika?' ([System.Windows.Automation.ControlType]::Edit)
 
     Set-BoundControlFocus $startControl
     [System.Windows.Forms.SendKeys]::SendWait('%1')
