@@ -18,6 +18,7 @@
     <button type="button" data-action-id="nav.agents" data-focus-target="agents-heading">Агенти</button>
     <button type="button" data-action-id="nav.logs" data-focus-target="logs-heading">Журнал</button>
     <button type="button" data-action-id="nav.workspaces" data-focus-target="workspaces-heading">Робочі простори</button>
+    <a href="#approvals-heading">Підтвердження</a>
     <a href="#keyboard-heading">Клавіатура</a>
   </nav>
 
@@ -41,6 +42,13 @@
       <ol id="tasks-list" aria-label="Список завдань"></ol>
     </section>
 
+    <section aria-labelledby="approvals-heading">
+      <h2 id="approvals-heading" tabindex="-1">Підтвердження та перевірки</h2>
+      <p id="approvals-help">Перед схваленням перевірте всі параметри. Підтвердження небезпечної дії є одноразовим; перевірка стосується лише точного вказаного предмета і має обмежений строк.</p>
+      <p id="approvals-empty" role="status" aria-live="polite">Немає запитів, що очікують людського рішення.</p>
+      <ol id="approvals-list" aria-label="Запити, що очікують людського рішення" aria-describedby="approvals-help"></ol>
+    </section>
+
     <section aria-labelledby="agents-heading">
       <h2 id="agents-heading" tabindex="-1">Агенти</h2>
       <p id="agents-empty">Агентів ще немає.</p>
@@ -60,7 +68,7 @@
 
     <section aria-labelledby="keyboard-heading">
       <h2 id="keyboard-heading" tabindex="-1">Клавіатура</h2>
-      <p>Комбінації Nika можна змінювати, очищати, відновлювати, експортувати та імпортувати. Стандартні клавіші редагування в полях вводу не перехоплюються.</p>
+      <p>Комбінації Nika можна змінювати, очищати, відновлювати, експортувати та імпортувати. Стандартні клавіші редагування в полях вводу не перехоплюються. Схвалення небезпечних дій і довірених перевірок не має глобальної комбінації: використовуйте явну кнопку конкретного запиту після перевірки параметрів.</p>
       <table>
         <caption>Комбінації клавіш Nika Core</caption>
         <thead>

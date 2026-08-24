@@ -3,7 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from nika_core.security import ActionIntent, ExecutionBudget, SandboxPolicy, SecurityPolicy
+from nika_core.security import (
+    ActionIntent,
+    ApprovalVerifier,
+    ExecutionBudget,
+    SandboxPolicy,
+    SecurityPolicy,
+)
 from nika_core.tools import ToolRisk
 from nika_core.toolsmith import AllowedPathPolicy, CodingJob, IsolationClass, NetworkMode
 
@@ -100,9 +106,7 @@ class ToolsmithSecurityEnvelope:
                 for item in self.security_policy.sandbox.allowed_executables
             }
             if executable.strip().casefold() not in allowed_executables:
-                raise PermissionError(
-                    "executable is outside exact Toolsmith process policy"
-                )
+                raise PermissionError("executable is outside exact Toolsmith process policy")
         return ActionIntent(
             action_id=action_id,
             tool_id=binding.tool_id,
@@ -131,6 +135,7 @@ def build_toolsmith_security_envelope(
     bindings: tuple[CapabilityToolBinding, ...],
     budget: DownstreamBudgetLimits,
     require_untrusted_execution: bool = False,
+    approval_verifier: ApprovalVerifier | None = None,
 ) -> ToolsmithSecurityEnvelope:
     """Adapt a canonical Toolsmith job into downstream M10 guardrails.
 
@@ -138,6 +143,9 @@ def build_toolsmith_security_envelope(
     PROCESS_CONTAINED are not treated as a filesystem/network sandbox for untrusted
     candidate execution. Callers that intend to execute candidate code must request
     ``require_untrusted_execution`` and provide an OS/remote-sandboxed lease.
+
+    R4 evidence remains host-owned: the bridge accepts an already trusted verifier but never
+    constructs approval evidence or an approval authority for runtime agents.
     """
     if not bindings:
         raise ValueError("at least one downstream capability binding is required")
@@ -184,6 +192,7 @@ def build_toolsmith_security_envelope(
             allowed_executables=job.process_policy.allowed_executables,
         ),
         budget=execution_budget,
+        approval_verifier=approval_verifier,
     )
     return ToolsmithSecurityEnvelope(
         job_id=job.job_id,

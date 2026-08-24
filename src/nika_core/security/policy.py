@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from threading import RLock
+from typing import Protocol
 
 from nika_core.tools import ToolRisk
 
@@ -182,8 +185,9 @@ class ExecutionBudgetLedger:
     write_bytes: int = 0
     network_calls: int = 0
     process_launches: int = 0
+    _lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
 
-    def reserve(self, intent: ActionIntent) -> None:
+    def _next_usage_unlocked(self, intent: ActionIntent) -> tuple[int, int, int]:
         next_write = self.write_bytes + intent.write_bytes
         next_network = self.network_calls + int(intent.network_host is not None)
         next_process = self.process_launches + int(intent.executable is not None)
@@ -193,9 +197,14 @@ class ExecutionBudgetLedger:
             raise PermissionError("network call budget exceeded")
         if next_process > self.budget.max_process_launches:
             raise PermissionError("process launch budget exceeded")
-        self.write_bytes = next_write
-        self.network_calls = next_network
-        self.process_launches = next_process
+        return next_write, next_network, next_process
+
+    def _commit_usage_unlocked(self, usage: tuple[int, int, int]) -> None:
+        self.write_bytes, self.network_calls, self.process_launches = usage
+
+    def reserve(self, intent: ActionIntent) -> None:
+        with self._lock:
+            self._commit_usage_unlocked(self._next_usage_unlocked(intent))
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,40 +229,98 @@ class ActionIntent:
 
     @property
     def approval_fingerprint(self) -> str:
-        payload = "\x1f".join(
+        payload = json.dumps(
             (
+                "nika-action-intent-v1",
                 self.action_id,
                 self.tool_id,
                 self.risk.value,
                 self.target,
-                self.write_path or "",
-                str(self.write_bytes),
-                self.network_host or "",
-                self.executable or "",
-            )
+                self.write_path,
+                self.write_bytes,
+                self.network_host,
+                self.executable,
+                self.approval_required,
+            ),
+            ensure_ascii=True,
+            separators=(",", ":"),
         )
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        return hashlib.sha256(payload.encode("ascii")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
 class ApprovalEvidence:
     approval_id: str
+    request_id: str
+    issuer_id: str
     action_fingerprint: str
     approved_at: datetime
     expires_at: datetime
+    signature: str
 
     def __post_init__(self) -> None:
-        if not self.approval_id.strip() or not self.action_fingerprint.strip():
-            raise ValueError("approval identity must not be empty")
+        identity = (self.approval_id, self.request_id, self.issuer_id, self.action_fingerprint)
+        if any(not item.strip() for item in identity) or not self.signature.strip():
+            raise ValueError("approval identity, provenance and signature must not be empty")
         if self.approved_at.tzinfo is None or self.expires_at.tzinfo is None:
             raise ValueError("approval timestamps must be timezone-aware")
         if self.expires_at <= self.approved_at:
             raise ValueError("approval expiry must follow approval time")
 
 
+class ApprovalVerifier(Protocol):
+    """Host-owned verifier participating in the same atomic commit as budget use."""
+
+    @property
+    def authorization_lock(self) -> RLock: ...
+
+    def validate_locked(
+        self,
+        intent: ActionIntent,
+        approval: ApprovalEvidence,
+        *,
+        now: datetime,
+    ) -> None: ...
+
+    def commit_locked(self, approval: ApprovalEvidence) -> None: ...
+
+    def verify(
+        self,
+        intent: ActionIntent,
+        approval: ApprovalEvidence,
+        *,
+        now: datetime,
+    ) -> None: ...
+
+
 @dataclass(slots=True)
 class ApprovalLedger:
-    _used: set[str] = field(default_factory=set)
+    _used: set[tuple[str, str]] = field(default_factory=set)
+    _lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
+
+    def _validate_unlocked(
+        self,
+        intent: ActionIntent,
+        approval: ApprovalEvidence | None,
+        *,
+        now: datetime | None = None,
+    ) -> ApprovalEvidence:
+        if approval is None:
+            raise PermissionError("explicit approval is required")
+        current = now or datetime.now(UTC)
+        if current.tzinfo is None:
+            raise ValueError("current time must be timezone-aware")
+        approval_key = (approval.issuer_id, approval.approval_id)
+        if approval_key in self._used:
+            raise PermissionError("approval evidence was already used")
+        if approval.action_fingerprint != intent.approval_fingerprint:
+            raise PermissionError("approval does not match the exact action")
+        if current < approval.approved_at or current >= approval.expires_at:
+            raise PermissionError("approval is not currently valid")
+        return approval
+
+    def _mark_used_unlocked(self, approval: ApprovalEvidence) -> None:
+        self._used.add((approval.issuer_id, approval.approval_id))
 
     def consume(
         self,
@@ -262,18 +329,9 @@ class ApprovalLedger:
         *,
         now: datetime | None = None,
     ) -> None:
-        if approval is None:
-            raise PermissionError("explicit approval is required")
-        current = now or datetime.now(UTC)
-        if current.tzinfo is None:
-            raise ValueError("current time must be timezone-aware")
-        if approval.approval_id in self._used:
-            raise PermissionError("approval evidence was already used")
-        if approval.action_fingerprint != intent.approval_fingerprint:
-            raise PermissionError("approval does not match the exact action")
-        if current < approval.approved_at or current >= approval.expires_at:
-            raise PermissionError("approval is not currently valid")
-        self._used.add(approval.approval_id)
+        with self._lock:
+            validated = self._validate_unlocked(intent, approval, now=now)
+            self._mark_used_unlocked(validated)
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,6 +339,7 @@ class SecurityPolicy:
     granted_tools: frozenset[str]
     sandbox: SandboxPolicy
     budget: ExecutionBudget
+    approval_verifier: ApprovalVerifier | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,10 +371,31 @@ def authorize_action(
         policy.sandbox.authorize_executable(intent.executable)
 
     requires_approval = intent.approval_required or intent.risk is ToolRisk.HIGH_IMPACT
-    if requires_approval:
-        approvals.consume(intent, approval, now=now)
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        raise ValueError("current time must be timezone-aware")
 
-    budgets.reserve(intent)
+    verifier = policy.approval_verifier
+    if requires_approval:
+        if verifier is None:
+            raise PermissionError("trusted approval verifier is required")
+        if approval is None:
+            raise PermissionError("explicit approval is required")
+        # Fixed global lock order: trusted host verifier -> local approval ledger -> budget.
+        # Every check is non-mutating; host replay state, local replay state, and budget are
+        # committed together only after all checks succeed.
+        with verifier.authorization_lock, approvals._lock, budgets._lock:
+            next_usage = budgets._next_usage_unlocked(intent)
+            verifier.validate_locked(intent, approval, now=current)
+            validated_approval = approvals._validate_unlocked(intent, approval, now=current)
+            budgets._commit_usage_unlocked(next_usage)
+            approvals._mark_used_unlocked(validated_approval)
+            verifier.commit_locked(validated_approval)
+    else:
+        with budgets._lock:
+            next_usage = budgets._next_usage_unlocked(intent)
+            budgets._commit_usage_unlocked(next_usage)
+
     return SecurityDecision(
         action_id=intent.action_id,
         approved=True,
