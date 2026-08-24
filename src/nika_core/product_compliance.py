@@ -213,19 +213,21 @@ class ProductComplianceGate:
         dependency_identities: set[tuple[str, str, str, str]] = set()
         package_versions: dict[tuple[str, str], tuple[str, str]] = {}
 
-        if not dependencies:
-            findings.append("dependency-inventory:empty")
-
+        closure_trusted = False
         if dependency_closure_ref is None:
             findings.append("dependency-closure:unverified")
         else:
             evidence_refs.append(dependency_closure_ref)
-            if not self._review_allowed(
+            closure_trusted = self._review_allowed(
                 project_id=project_id,
                 evidence_ref=dependency_closure_ref,
                 purpose=f"dependency-closure:{input_fingerprint}",
-            ):
+            )
+            if not closure_trusted:
                 findings.append("dependency-closure:untrusted-review-authority")
+
+        if not dependencies and not closure_trusted:
+            findings.append("dependency-inventory:empty")
 
         if scope_review_ref is None:
             findings.append("compliance-scope:unreviewed")
