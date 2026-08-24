@@ -10,6 +10,7 @@ from pathlib import Path
 
 from nika_core.packaging.notices import (
     build_third_party_notices,
+    verified_third_party_notice_reference,
     verify_third_party_notices,
 )
 from nika_core.product_compliance import (
@@ -310,6 +311,11 @@ def _release_findings(snapshot: ReleaseComplianceSnapshot) -> tuple[str, ...]:
         else:
             package_map[package_name] = item
 
+        provenance_digest = adoption.provenance_ref.rsplit(":", 1)[-1].casefold()
+        if provenance_digest != item.source_sha256.casefold():
+            findings.append(
+                f"dependency-provenance:source-digest-mismatch:{adoption.component_id}"
+            )
         if adoption.license_expression.strip().upper() in _UNKNOWN_LICENSE_MARKERS:
             findings.append(f"license:unknown:{adoption.component_id}")
 
@@ -367,6 +373,18 @@ def _notice_bundle_findings(
             findings.append("packaging:notices-digest-mismatch")
     elif "packaging:missing:THIRD_PARTY_NOTICES.txt" not in findings:
         findings.append("packaging:missing:THIRD_PARTY_NOTICES.txt")
+    if not findings:
+        for notice in snapshot.notice_evidence:
+            expected_ref = verified_third_party_notice_reference(
+                directory,
+                package_name=notice.package_name,
+                version=notice.version,
+            )
+            if expected_ref is None or not hmac.compare_digest(
+                expected_ref,
+                notice.notice_ref,
+            ):
+                findings.append(f"packaging:notice-ref-unverified:{notice.component_id}")
     return tuple(dict.fromkeys(findings))
 
 
