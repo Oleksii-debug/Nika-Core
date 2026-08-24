@@ -18,7 +18,7 @@ from nika_core.media.contracts import (
     Transcript,
 )
 from nika_core.media.errors import MediaError, MediaErrorCode
-from nika_core.media.files import promote_partial_file
+from nika_core.media.files import PromotedFile, promote_partial_file
 from nika_core.media.hashing import sha256_file, sha256_json
 from nika_core.media.process import ProcessResult, SafeProcessRunner
 from nika_core.media.subtitles import SubtitlePolicy, normalize_subtitle_file
@@ -334,24 +334,13 @@ class YtDlpSubtitleAcquirer:
             "remote-"
             f"{sha256_json({'version': version_fingerprint, 'track_id': refreshed.track_id})[:32]}"
         )
-        final_path = root / f"{stable_stem}.subtitle.{refreshed.format.lower()}"
-        partial_path = Path(f"{final_path}.partial")
-        if final_path.exists():
-            raise FileExistsError(
-                f"refusing to overwrite existing subtitle asset: {final_path.name}"
-            )
-        if partial_path.exists():
-            raise MediaError(
-                MediaErrorCode.PROCESS_FAILED,
-                "stale subtitle partial requires explicit reconciliation before retry",
-            )
-
         staging = Path(
             tempfile.mkdtemp(
                 prefix=f".{stable_stem}.subtitle-staging-",
                 dir=root,
             )
         )
+        partial_path: Path | None = None
         monitor = _StagingMonitor(
             staging,
             root=root,
@@ -429,9 +418,12 @@ class YtDlpSubtitleAcquirer:
                     "downloaded subtitle format did not match rediscovered track identity",
                 )
 
+            attempt_token = staging.name.rsplit("-", 1)[-1]
+            partial_path = root / f".{stable_stem}-{attempt_token}.partial"
             os.replace(candidate, partial_path)
             shutil.rmtree(staging)
             source_sha256 = sha256_file(partial_path, max_bytes=active.max_bytes)
+            source_size_bytes = partial_path.stat().st_size
             transcript = normalize_subtitle_file(
                 partial_path,
                 track=refreshed,
@@ -451,13 +443,28 @@ class YtDlpSubtitleAcquirer:
                     MediaErrorCode.CHECKSUM_MISMATCH,
                     "normalized transcript is not bound to the acquired subtitle bytes",
                 )
-            promoted = promote_partial_file(
-                partial_path,
-                final_path,
-                allowed_root=root,
-                expected_sha256=source_sha256,
-                max_bytes=active.max_bytes,
+
+            final_path = root / (
+                f"{stable_stem}-{source_sha256}.subtitle.{refreshed.format.lower()}"
             )
+            try:
+                promoted = promote_partial_file(
+                    partial_path,
+                    final_path,
+                    allowed_root=root,
+                    expected_sha256=source_sha256,
+                    max_bytes=active.max_bytes,
+                )
+            except FileExistsError:
+                promoted = _reuse_content_addressed_file(
+                    final_path,
+                    root=root,
+                    expected_sha256=source_sha256,
+                    expected_size_bytes=source_size_bytes,
+                    max_bytes=active.max_bytes,
+                )
+                partial_path.unlink(missing_ok=True)
+
             asset = MediaAsset(
                 asset_id=(
                     "subtitle-asset:"
@@ -480,7 +487,7 @@ class YtDlpSubtitleAcquirer:
         finally:
             if staging.exists():
                 shutil.rmtree(staging)
-            if partial_path.exists():
+            if partial_path is not None and partial_path.exists():
                 partial_path.unlink()
 
     @staticmethod
@@ -574,6 +581,50 @@ def _materialization_selector(track: SubtitleTrack) -> tuple[SubtitleKind, str, 
         track.kind,
         _normalize_language(track.language),
         track.format.strip().lower(),
+    )
+
+
+def _reuse_content_addressed_file(
+    path: Path,
+    *,
+    root: Path,
+    expected_sha256: str,
+    expected_size_bytes: int,
+    max_bytes: int,
+) -> PromotedFile:
+    if path.is_symlink():
+        raise MediaError(
+            MediaErrorCode.PATH_ESCAPE,
+            "existing subtitle asset must not be a symbolic link",
+        )
+    resolved = path.resolve(strict=True)
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise MediaError(
+            MediaErrorCode.PATH_ESCAPE,
+            "existing subtitle asset escapes the allowed root",
+        ) from exc
+    if not resolved.is_file():
+        raise MediaError(
+            MediaErrorCode.INVALID_SOURCE,
+            "existing subtitle asset must be a regular file",
+        )
+    if resolved.stat().st_size != expected_size_bytes:
+        raise MediaError(
+            MediaErrorCode.CHECKSUM_MISMATCH,
+            "content-addressed subtitle asset size does not match acquired bytes",
+        )
+    checksum = sha256_file(resolved, max_bytes=max_bytes)
+    if checksum != expected_sha256:
+        raise MediaError(
+            MediaErrorCode.CHECKSUM_MISMATCH,
+            "content-addressed subtitle asset does not match acquired bytes",
+        )
+    return PromotedFile(
+        path=resolved,
+        sha256=checksum,
+        size_bytes=expected_size_bytes,
     )
 
 
