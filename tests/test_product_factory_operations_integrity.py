@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from pf8_effect_journal_fake import MemoryEffectJournal
 
 from nika_core.product_factory_operations import ProductOperationsCoordinator
 from nika_core.product_factory_operations_contracts import (
@@ -18,7 +19,6 @@ from nika_core.product_factory_operations_contracts import (
     ServiceObservation,
     ServiceReplica,
 )
-from pf8_effect_journal_fake import MemoryEffectJournal
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 
