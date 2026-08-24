@@ -19,6 +19,33 @@ class MemoryEffectJournal:
             tuple[tuple[object, ...], MaintenanceEffectState, MaintenanceResult | None],
         ] = {}
 
+    @staticmethod
+    def _identity(
+        project_id: str,
+        service: DeployableService,
+        request: MaintenanceRequest,
+    ) -> tuple[str, tuple[object, ...]]:
+        return (
+            f"test-pf8:{project_id}:{request.request_id}",
+            (project_id, service, request),
+        )
+
+    def lookup(
+        self,
+        *,
+        project_id: str,
+        service: DeployableService,
+        request: MaintenanceRequest,
+    ) -> MaintenanceEffectReservation | None:
+        key, fingerprint = self._identity(project_id, service, request)
+        existing = self._records.get(key)
+        if existing is None:
+            return None
+        prior_fingerprint, state, result = existing
+        if prior_fingerprint != fingerprint:
+            raise ProductOperationsError("test maintenance effect identity conflict")
+        return MaintenanceEffectReservation(key, state, False, result)
+
     def reserve(
         self,
         *,
@@ -26,12 +53,7 @@ class MemoryEffectJournal:
         service: DeployableService,
         request: MaintenanceRequest,
     ) -> MaintenanceEffectReservation:
-        key = f"test-pf8:{project_id}:{request.request_id}"
-        fingerprint = (
-            project_id,
-            service,
-            request,
-        )
+        key, fingerprint = self._identity(project_id, service, request)
         existing = self._records.get(key)
         if existing is None:
             self._records[key] = (fingerprint, MaintenanceEffectState.PENDING, None)
@@ -67,6 +89,10 @@ class MemoryEffectJournal:
 
     def reconcile(self, operation_key: str, result: MaintenanceResult) -> None:
         fingerprint, state, prior = self._require(operation_key)
+        if state is MaintenanceEffectState.PENDING:
+            raise ProductOperationsError(
+                "test pending maintenance effect requires prior owner-loss proof"
+            )
         if state is MaintenanceEffectState.COMPLETED:
             if prior != result:
                 raise ProductOperationsError("test maintenance reconciliation conflict")
