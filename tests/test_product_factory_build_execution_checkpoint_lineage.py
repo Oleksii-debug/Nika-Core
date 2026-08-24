@@ -271,3 +271,41 @@ def test_fresh_sequence_cannot_semantically_rewind_succeeded_work_to_prepared(tm
     ):
         checkpoints.latest()
     assert port.run_calls == 1
+
+
+def test_middle_checkpoint_deletion_is_rejected_as_sequence_gap(tmp_path) -> None:
+    host, checkpoints, port, store, task_id = _make_host(tmp_path)
+    _complete_once(host)
+    assert checkpoints.latest().snapshot.sequence == 5
+
+    with store.connection() as conn:
+        middle = conn.execute(
+            "SELECT checkpoint_id FROM checkpoints "
+            "WHERE task_id=? AND stage=? ORDER BY rowid LIMIT 1 OFFSET 2",
+            (task_id, STAGE),
+        ).fetchone()
+        conn.execute(
+            "DELETE FROM checkpoints WHERE checkpoint_id=?",
+            (middle["checkpoint_id"],),
+        )
+
+    with pytest.raises(BuildExecutionDurabilityError, match="sequence history"):
+        checkpoints.latest()
+    assert port.run_calls == 1
+
+
+def test_deterministic_checkpoint_id_substitution_is_rejected(tmp_path) -> None:
+    host, checkpoints, port, store, task_id = _make_host(tmp_path)
+    _complete_once(host)
+    terminal = checkpoints.latest()
+    assert terminal.snapshot.sequence == 5
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE checkpoints SET checkpoint_id=? WHERE checkpoint_id=?",
+            ("pf5-substituted-id", terminal.checkpoint_id),
+        )
+
+    with pytest.raises(BuildExecutionDurabilityError, match="checkpoint identity"):
+        checkpoints.latest()
+    assert port.run_calls == 1
