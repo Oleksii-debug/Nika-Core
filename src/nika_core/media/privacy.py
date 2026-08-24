@@ -60,12 +60,14 @@ _SENSITIVE_ARGV_OPTIONS = frozenset(
         "--token",
     }
 )
+_ACRONYM_BOUNDARY = re.compile(r"(?<=[A-Z])(?=[A-Z][a-z])")
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _KEY_SEPARATOR = re.compile(r"[^A-Za-z0-9]+")
 
 
 def _normalized_key_tokens(key: str) -> tuple[str, ...]:
-    expanded = _CAMEL_BOUNDARY.sub("_", key)
+    expanded = _ACRONYM_BOUNDARY.sub("_", key)
+    expanded = _CAMEL_BOUNDARY.sub("_", expanded)
     return tuple(token.casefold() for token in _KEY_SEPARATOR.split(expanded) if token)
 
 
@@ -120,17 +122,23 @@ def redact_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(result)
 
 
+def _redact_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, Mapping):
+        return redact_mapping(value)
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_value(item) for item in value)
+    return value
+
+
 def redact_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, item in value.items():
         if _is_secret_key(key):
             result[key] = "[REDACTED]"
-        elif isinstance(item, str):
-            result[key] = redact_text(item)
-        elif isinstance(item, Mapping):
-            result[key] = redact_mapping(item)
-        elif isinstance(item, list):
-            result[key] = [redact_text(part) if isinstance(part, str) else part for part in item]
         else:
-            result[key] = item
+            result[key] = _redact_value(item)
     return result
