@@ -362,11 +362,21 @@ class FoundryLocalProvider:
             raise ValueError("model_alias must not be empty")
         if alias != alias.strip():
             raise ValueError("model_alias must not contain surrounding whitespace")
-        with _FOUNDRY_NATIVE_LOCK:
-            model = self._get_model(alias)
-            if self._expected_model_id is not None:
-                self._validate_model_identity(model, self._expected_model_id)
-            return self._model_evidence(model)
+        try:
+            with _FOUNDRY_NATIVE_LOCK:
+                model = self._get_model(alias)
+                if self._expected_model_id is not None:
+                    self._validate_model_identity(model, self._expected_model_id)
+                return self._model_evidence(model)
+        except ModelGatewayError:
+            raise
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                "Foundry Local returned invalid model metadata",
+                provider_id=self.capabilities.provider_id,
+                retryable=False,
+            ) from exc
 
     def close(self) -> None:
         """Unload only models loaded by this provider instance.
@@ -740,9 +750,9 @@ class FoundryLocalProvider:
     def _optional_bool(value: object) -> bool | None:
         if value is None:
             return None
-        if isinstance(value, bool):
-            return value
-        return None
+        if not isinstance(value, bool):
+            raise TypeError("Foundry Local tool capability metadata must be bool or None")
+        return value
 
     @staticmethod
     def _version_from_model_id(model_id: str) -> str | None:
