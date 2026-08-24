@@ -95,6 +95,27 @@ function Add-UniqueElement($List, [System.Windows.Automation.AutomationElement]$
     [void]$List.Add($Candidate)
 }
 
+function Get-ProcessExecutablePath([System.Diagnostics.Process]$Process, [int]$Attempts = 40) {
+    for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+        $Process.Refresh()
+        if ($Process.HasExited) {
+            throw "Nika process $($Process.Id) exited before executable identity was readable."
+        }
+        try {
+            $mainModule = $Process.MainModule
+            if ($null -ne $mainModule -and -not [string]::IsNullOrWhiteSpace([string]$mainModule.FileName)) {
+                return [System.IO.Path]::GetFullPath([string]$mainModule.FileName)
+            }
+        } catch [System.InvalidOperationException] {
+            # The process can exist briefly before MainModule is readable. Retry within the bound.
+        } catch [System.ComponentModel.Win32Exception] {
+            # Treat transient module-query failure as startup uncertainty; never skip identity validation.
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    throw "Nika process $($Process.Id) did not expose executable identity within the bounded startup window."
+}
+
 function Assert-ProcessGeneration {
     if ($null -eq $script:session) { throw 'No active packaged Nika session.' }
     $process = $script:session.Process
@@ -104,7 +125,7 @@ function Assert-ProcessGeneration {
     if ($process.StartTime.ToUniversalTime().Ticks -ne $script:session.StartTicks) {
         throw 'Nika PID was rebound to another process generation.'
     }
-    $currentExe = [System.IO.Path]::GetFullPath($process.MainModule.FileName)
+    $currentExe = Get-ProcessExecutablePath $process
     if (-not [string]::Equals($currentExe, $script:session.ExePath, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Nika executable identity changed to '$currentExe'."
     }
@@ -255,10 +276,13 @@ function Set-CommandText([string]$Text) {
     return $edit
 }
 
-function Dispatch-CreateShortcut([string]$Text) {
-    $edit = Set-CommandText $Text
-    [System.Windows.Forms.SendKeys]::SendWait('^n')
-    return $edit
+function Dispatch-CreateFromCommandInput([string]$Text) {
+    Set-CommandText $Text | Out-Null
+    [System.Windows.Forms.SendKeys]::SendWait('{TAB}')
+    $create = Wait-UniqueElement 'Створити завдання' ([System.Windows.Automation.ControlType]::Button)
+    Assert-ExactFocus $create 'create task button after Tab from command input'
+    [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+    return $create
 }
 
 function Start-NikaSession {
@@ -268,14 +292,12 @@ function Start-NikaSession {
         Process = $process
         ProcessId = $process.Id
         StartTicks = $process.StartTime.ToUniversalTime().Ticks
-        ExePath = [System.IO.Path]::GetFullPath($process.MainModule.FileName)
+        ExePath = $ExePath
         WindowHandle = $null
         WindowRuntimeId = $null
     }
     $script:session = $sessionObject
-    if (-not [string]::Equals($script:session.ExePath, $ExePath, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "Started executable '$($script:session.ExePath)' is not exact requested '$ExePath'."
-    }
+    Assert-ProcessGeneration
     $deadline = [DateTime]::UtcNow.AddSeconds($StartupTimeoutSeconds)
     $window = $null
     while ([DateTime]::UtcNow -lt $deadline -and $null -eq $window) {
@@ -393,7 +415,7 @@ try {
         } | Out-Null
 
         Invoke-Check 'session1.create_product_project' {
-            Dispatch-CreateShortcut $productCommand | Out-Null
+            Dispatch-CreateFromCommandInput $productCommand | Out-Null
             $status = Wait-UniqueElement '' ([System.Windows.Automation.ControlType]::Text) '^ProductProject створено або відкрито: (product-[0-9a-f]{64}); spec version 1\.$'
             $message = [string]$status.Current.Name
             if ($message -notmatch '^ProductProject створено або відкрито: (product-[0-9a-f]{64}); spec version 1\.$') {
@@ -407,31 +429,33 @@ try {
 
         if ($null -ne $productId) {
             Invoke-Check 'session1.explicit_select_product_project' {
-                Dispatch-CreateShortcut "Open ProductProject $script:productId" | Out-Null
+                Dispatch-CreateFromCommandInput "Open ProductProject $script:productId" | Out-Null
                 Wait-UniqueElement '' ([System.Windows.Automation.ControlType]::Text) "^ProductProject відкрито: $([regex]::Escape($script:productId)); spec version 1; state .+\.$" | Out-Null
                 "explicit reopen/select retained $script:productId"
             } | Out-Null
 
             Invoke-Check 'session1.show_current_product_project' {
-                Dispatch-CreateShortcut 'Show current ProductProject' | Out-Null
+                Dispatch-CreateFromCommandInput 'Show current ProductProject' | Out-Null
                 Wait-UniqueElement '' ([System.Windows.Automation.ControlType]::Text) "^Поточний ProductProject: $([regex]::Escape($script:productId)); spec version 1; state .+; goal: $([regex]::Escape($productCommand))\.$" | Out-Null
                 'current durable ProductProject is visible as semantic text'
             } | Out-Null
         }
 
         Invoke-Check 'session1.safe_deterministic_local_goal' {
-            Dispatch-CreateShortcut $localGoal | Out-Null
+            Dispatch-CreateFromCommandInput $localGoal | Out-Null
             Wait-UniqueElement "Завдання виконано в безпечному режимі без LLM: $localGoal" ([System.Windows.Automation.ControlType]::Text) | Out-Null
             Wait-UniqueElement "$localGoal — completed" ([System.Windows.Automation.ControlType]::Text) | Out-Null
             'ordinary goal completed through packaged deterministic ReferenceRuntime and persisted task view'
         } | Out-Null
 
         Invoke-Check 'session1.recoverable_error_and_focus' {
-            $command = Focus-CommandInput
+            $tasks = Wait-UniqueElement 'Завдання' ([System.Windows.Automation.ControlType]::Text)
+            $tasks.SetFocus()
+            Assert-ExactFocus $tasks 'tasks heading before rejected pause'
             [System.Windows.Forms.SendKeys]::SendWait('^p')
             Wait-UniqueElement 'Немає активного завдання, яке можна призупинити.' ([System.Windows.Automation.ControlType]::Text) | Out-Null
-            Assert-ExactFocus $command 'command input after rejected pause'
-            'rejected pause is readable and focus remains deterministic'
+            Assert-ExactFocus $tasks 'tasks heading after rejected pause'
+            'rejected pause is readable and the semantic trigger retains deterministic focus'
         } | Out-Null
 
         Invoke-Check 'session1.editable_shortcut_override_setup' {
@@ -441,6 +465,7 @@ try {
             [System.Windows.Forms.SendKeys]::SendWait('^a')
             [System.Windows.Forms.SendKeys]::SendWait('Backspace')
             [System.Windows.Forms.SendKeys]::SendWait('{TAB}')
+            Start-Sleep -Milliseconds 150
             $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
             Require ($null -ne $focused) 'Focus disappeared after Tab from key binding input.'
             Require ($focused.Current.ControlType.Equals([System.Windows.Automation.ControlType]::Button)) 'Tab did not reach a semantic save button.'
@@ -472,6 +497,7 @@ try {
             $binding.SetFocus()
             [System.Windows.Forms.SendKeys]::SendWait('{TAB}')
             [System.Windows.Forms.SendKeys]::SendWait('{TAB}')
+            Start-Sleep -Milliseconds 150
             $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
             Require ($null -ne $focused) 'Focus disappeared before default-restore button.'
             Require ($focused.Current.ControlType.Equals([System.Windows.Automation.ControlType]::Button)) 'Expected default-restore button.'
@@ -516,7 +542,7 @@ try {
     Invoke-Check 'session2.restart_launch' { Start-NikaSession } | Out-Null
     if ($null -ne $session -and $null -ne $productId) {
         Invoke-Check 'session2.recover_and_show_current' {
-            Dispatch-CreateShortcut 'Show current ProductProject' | Out-Null
+            Dispatch-CreateFromCommandInput 'Show current ProductProject' | Out-Null
             Wait-UniqueElement '' ([System.Windows.Automation.ControlType]::Text) "^Поточний ProductProject: $([regex]::Escape($script:productId)); spec version 1; state .+; goal: $([regex]::Escape($productCommand))\.$" | Out-Null
             'restart recovered durable presentation selection and showed exact current project'
         } | Out-Null
@@ -528,7 +554,7 @@ try {
     Invoke-Check 'session3.reopen_after_close' { Start-NikaSession } | Out-Null
     if ($null -ne $session -and $null -ne $productId) {
         Invoke-Check 'session3.current_state_still_recoverable' {
-            Dispatch-CreateShortcut 'Show current ProductProject' | Out-Null
+            Dispatch-CreateFromCommandInput 'Show current ProductProject' | Out-Null
             Wait-UniqueElement '' ([System.Windows.Automation.ControlType]::Text) "^Поточний ProductProject: $([regex]::Escape($script:productId)); spec version 1; state .+; goal: $([regex]::Escape($productCommand))\.$" | Out-Null
             'second reopen preserved same ProductProject identity/state'
         } | Out-Null
@@ -568,10 +594,10 @@ finally {
         approval_ui = $approvalState
         coordinate_fallback_used = $false
         semantic_tiers = @('UIAutomation exact process/window generation', 'WebView2 semantic descendants', 'keyboard shortcuts/focus', 'UIA ValuePattern readback')
-        checks = @($checks)
+        checks = $checks.ToArray()
         pass = ($failures.Count -eq 0)
         failure_count = $failures.Count
-        failures = @($failures)
+        failures = $failures.ToArray()
         human_tested = $false
         nvda_verified = $false
         production_release_ready = $false
