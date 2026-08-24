@@ -126,7 +126,7 @@ class SQLiteBuildExecutionCheckpointStore:
         payload = _encode_payload(snapshot)
         checksum = hashlib.sha256(payload.encode("utf-8")).hexdigest()
         checkpoint_id = "pf5-" + hashlib.sha256(
-            f"{self.host_task_id}:{snapshot.sequence}:{checksum}".encode("utf-8")
+            f"{self.host_task_id}:{snapshot.sequence}:{checksum}".encode()
         ).hexdigest()
         with self.store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
