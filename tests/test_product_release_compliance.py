@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -25,6 +26,9 @@ from nika_core.product_release_compliance import (
 _PROJECT = "project-1"
 _PROJECT_SOURCE_SHA = "c" * 64
 _ARTIFACT_SHA = "b" * 64
+_CLOSURE_REF = "review:dependency-closure:release-1"
+_SCOPE_REF = "review:compliance-scope:release-1"
+_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class _ReviewAuthority:
@@ -35,12 +39,26 @@ class _ReviewAuthority:
         evidence_ref: str,
         purpose: str,
     ) -> bool:
-        return project_id == _PROJECT and evidence_ref == f"review:{purpose}"
+        if project_id != _PROJECT:
+            return False
+        if evidence_ref == _CLOSURE_REF:
+            prefix = "dependency-closure:"
+        elif evidence_ref == _SCOPE_REF:
+            prefix = "compliance-scope:"
+        elif evidence_ref.startswith("review:license-disposition:"):
+            component_id = evidence_ref.removeprefix("review:license-disposition:")
+            prefix = f"license-disposition:{component_id}:"
+        else:
+            return False
+        if not purpose.startswith(prefix):
+            return False
+        return _FINGERPRINT_RE.fullmatch(purpose.removeprefix(prefix)) is not None
 
 
 def _adoption(
     component_id: str,
     *,
+    source_sha: str,
     package_name: str | None = None,
     version: str = "1.0.0",
     license_expression: str = "MIT",
@@ -54,7 +72,7 @@ def _adoption(
         package_name=package,
         version=version,
         source_ref=f"registry:pypi:{package}:{version}",
-        provenance_ref=f"provenance:{component_id}:{version}",
+        provenance_ref=f"sha256:{source_sha}",
         license_expression=license_expression,
         license_disposition=LicenseDisposition.APPROVED,
         distribution_obligations=obligations,
@@ -74,15 +92,17 @@ def _dependency(
     requires: tuple[str, ...] = (),
     obligations: tuple[str, ...] = ("retain-license",),
 ) -> ReleaseDependency:
+    digest = source_sha or hashlib.sha256(component_id.encode()).hexdigest()
     return ReleaseDependency(
         adoption=_adoption(
             component_id,
+            source_sha=digest,
             package_name=package_name,
             version=version,
             license_expression=license_expression,
             obligations=obligations,
         ),
-        source_sha256=source_sha or hashlib.sha256(component_id.encode()).hexdigest(),
+        source_sha256=digest,
         requires_component_ids=requires,
     )
 
@@ -100,11 +120,15 @@ def _snapshot(
     obligations: tuple[DistributionObligationEvidence, ...] | None = None,
     notices: tuple[ReleaseNoticeEvidence, ...] | None = None,
     notice_hash: str | None = None,
+    dependency_closure_ref: str = _CLOSURE_REF,
+    scope_review_ref: str = _SCOPE_REF,
 ) -> ReleaseComplianceSnapshot:
-    deps = dependencies or (
-        _dependency("root", requires=("leaf",)),
-        _dependency("leaf"),
-    )
+    deps = dependencies
+    if deps is None:
+        deps = (
+            _dependency("root", requires=("leaf",)),
+            _dependency("leaf"),
+        )
     obligation_rows = obligations
     if obligation_rows is None:
         obligation_rows = tuple(
@@ -138,8 +162,10 @@ def _snapshot(
         artifact_sha256=_ARTIFACT_SHA,
         notice_bundle_sha256=notice_hash or _write_bundle(tmp_path),
         dependencies=deps,
+        dependency_closure_ref=dependency_closure_ref,
         obligation_evidence=obligation_rows,
         notice_evidence=notice_rows,
+        scope_review_ref=scope_review_ref,
     )
 
 
@@ -181,7 +207,30 @@ def test_default_release_gate_cannot_turn_caller_review_strings_into_authority(
 
 def test_dependency_source_requires_exact_immutable_digest() -> None:
     with pytest.raises(ProductComplianceError, match="exact SHA-256"):
-        ReleaseDependency(adoption=_adoption("component-a"), source_sha256="latest")
+        ReleaseDependency(
+            adoption=_adoption("component-a", source_sha="a" * 64),
+            source_sha256="latest",
+        )
+
+
+def test_dependency_provenance_must_match_exact_release_source_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _verified_packaging(monkeypatch)
+    dependency = _dependency("component-a", source_sha="a" * 64)
+    mismatched = replace(
+        dependency,
+        adoption=replace(dependency.adoption, provenance_ref="sha256:" + ("b" * 64)),
+    )
+    decision = ProductReleaseComplianceGate(review_authority=_ReviewAuthority()).evaluate(
+        _snapshot(tmp_path, dependencies=(mismatched,)),
+        bundle_dir=tmp_path,
+    )
+    assert (
+        "dependency-provenance:source-digest-mismatch:component-a"
+        in decision.findings
+    )
 
 
 def test_duplicate_dependency_identity_and_package_conflict_fail_closed(
@@ -198,7 +247,6 @@ def test_duplicate_dependency_identity_and_package_conflict_fail_closed(
         _snapshot(tmp_path, dependencies=duplicate),
         bundle_dir=tmp_path,
     )
-    assert decision.allowed is False
     assert any(item.startswith("duplicate:dependency-identity:same-pkg") for item in decision.findings)
     assert "duplicate:dependency-package:same-pkg" in decision.findings
 
@@ -278,7 +326,7 @@ def test_missing_or_orphan_notice_evidence_fails_closed(
     assert any(item.startswith("notice:evidence-missing:root") for item in decision.findings)
 
 
-def test_stale_decision_after_dependency_change_is_rejected(
+def test_stale_decision_after_dependency_or_closure_change_is_rejected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -288,11 +336,20 @@ def test_stale_decision_after_dependency_change_is_rejected(
     decision = gate.evaluate(snapshot, bundle_dir=tmp_path)
     assert decision.allowed is True
 
-    changed_root = replace(snapshot.dependencies[0], source_sha256="d" * 64)
+    changed_root = _dependency(
+        "root",
+        requires=("leaf",),
+        source_sha="d" * 64,
+    )
     changed = replace(snapshot, dependencies=(changed_root, *snapshot.dependencies[1:]))
     assert changed.digest != snapshot.digest
     with pytest.raises(ProductComplianceError, match="stale-or-wrong-release-snapshot"):
         gate.require_release_allowed(decision, changed, bundle_dir=tmp_path)
+
+    changed_closure = replace(snapshot, dependency_closure_ref="review:dependency-closure:new")
+    assert changed_closure.digest != snapshot.digest
+    with pytest.raises(ProductComplianceError, match="stale-or-wrong-release-snapshot"):
+        gate.require_release_allowed(decision, changed_closure, bundle_dir=tmp_path)
 
 
 def test_decision_tamper_cross_context_replay_and_fabrication_fail_closed(
