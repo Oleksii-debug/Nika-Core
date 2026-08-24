@@ -9,7 +9,6 @@ import pytest
 
 from nika_core.packaging import release
 
-
 _SOURCE_SHA = "a" * 40
 _CANARY = b"QA53_SYNTHETIC_PACKAGE_SECRET_9a4e71c2"
 
