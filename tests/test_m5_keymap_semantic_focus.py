@@ -3,10 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 
 
+_WEB_ROOT = Path(__file__).parents[1] / "src" / "nika_core" / "ui" / "web"
+
+
 def _app_source() -> str:
-    return (
-        Path(__file__).parents[1] / "src" / "nika_core" / "ui" / "web" / "app.js"
-    ).read_text(encoding="utf-8")
+    return (_WEB_ROOT / "app.js").read_text(encoding="utf-8")
+
+
+def _index_source() -> str:
+    return (_WEB_ROOT / "index.html").read_text(encoding="utf-8")
 
 
 def _between(source: str, start: str, end: str) -> str:
@@ -52,3 +57,23 @@ def test_keymap_restore_default_restores_semantic_focus_after_table_rebuild() ->
     restore_focus = restore_block.index("focusElementById(restoreFocusId);")
     assert refresh < restore_focus
     assert "querySelector" not in restore_block
+
+
+def test_rejected_task_create_returns_focus_to_command_editor() -> None:
+    html = _index_source()
+    source = _app_source()
+    assert (
+        'data-action-id="task.create" data-error-focus-target="command-input"'
+        in html
+    )
+    dispatch_block = _between(
+        source,
+        "async function dispatch(actionId, trigger = null) {",
+        "async function refreshKeymap() {",
+    )
+    assert (
+        "result.focus_id || (failed ? trigger?.dataset?.errorFocusTarget : "
+        "trigger?.dataset?.focusTarget)"
+    ) in dispatch_block
+    assert "focusElementById(focusId);" in dispatch_block
+    assert "querySelector" not in dispatch_block
