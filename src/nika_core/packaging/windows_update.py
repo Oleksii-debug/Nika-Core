@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import tempfile
 import zipfile
 from dataclasses import asdict, dataclass, replace
@@ -531,10 +532,16 @@ class WindowsUpdateLifecycle:
         if not self._valid_sha256(backup_sha):
             return False
         backup_name = self._backup_path(journal.operation_id).name
-        events = AuditLog(SQLiteStore(database_path)).list_for(
-            entity_type="database",
-            entity_id=str(database_path),
-        )
+        try:
+            events = AuditLog(SQLiteStore(database_path)).list_for(
+                entity_type="database",
+                entity_id=str(database_path),
+            )
+        except (OSError, sqlite3.DatabaseError):
+            # During canonical interrupted recovery the live path may still contain
+            # the corrupt pre-restore bytes. Absence of readable receipt evidence is
+            # not success; it means recovery must reconcile the durable marker first.
+            return False
         return any(
             event.event_type == "reliability.restore_completed"
             and event.payload.get("backup_file") == backup_name
