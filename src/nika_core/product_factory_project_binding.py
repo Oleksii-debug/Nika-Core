@@ -4,7 +4,7 @@ import hashlib
 import hmac
 import json
 import secrets
-from dataclasses import dataclass, field, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from enum import Enum
 from typing import Any
 
@@ -12,6 +12,7 @@ from nika_core.product_factory_coordinator import (
     CoordinatorError,
     CoordinatorSnapshot,
     ProductFactoryCoordinator,
+    WorkRecord,
 )
 from nika_core.product_factory_coordinator import (
     trusted_plan_fingerprint as compute_trusted_plan_fingerprint,
@@ -21,6 +22,7 @@ from nika_core.product_project import ProductProject
 
 _LIVE_AUTHORITY_SCHEMA = "nika-product-factory-live-plan-authority-v2"
 _LIVE_AUTHORITY_KEY = secrets.token_bytes(32)
+_DURABLE_WORKER_DIAGNOSTIC_OMITTED = "worker diagnostic omitted from durable checkpoint"
 
 
 class ProductProjectBindingError(ValueError):
@@ -52,6 +54,15 @@ class ProductProjectCoordinatorCheckpoint:
         repr=False,
         compare=False,
     )
+
+    def __post_init__(self) -> None:
+        # Free-form worker diagnostics are runtime evidence, not durable authority.
+        # Normalize them before any checkpoint can be signed or handed to persistence.
+        object.__setattr__(
+            self,
+            "coordinator",
+            _minimize_durable_worker_diagnostics(self.coordinator),
+        )
 
 
 def verify_live_checkpoint_authority(
@@ -167,7 +178,7 @@ class ProductProjectCoordinatorBinding:
                 spec_version=checkpoint.spec_version,
                 row_version=checkpoint.row_version,
                 fingerprint=fingerprint,
-                coordinator=snapshot,
+                coordinator=checkpoint.coordinator,
             ),
         )
         return checkpoint
@@ -210,6 +221,55 @@ class ProductProjectCoordinatorBinding:
             raise StaleProductProjectBindingError(
                 "ProductProject changed after orchestration checkpoint; explicit reconciliation required"
             )
+
+
+def _minimize_durable_worker_diagnostics(
+    snapshot: CoordinatorSnapshot,
+) -> CoordinatorSnapshot:
+    records = tuple(_minimize_durable_work_record(record) for record in snapshot.records)
+    if records == snapshot.records:
+        return snapshot
+    return replace(snapshot, records=records)
+
+
+def _minimize_durable_work_record(record: WorkRecord) -> WorkRecord:
+    result = record.result
+    if result is None:
+        return record
+
+    coding_result = result.coding_result
+    recovery = coding_result.recovery_state
+    failure = coding_result.failure
+    safe_recovery = (
+        None if recovery is None else replace(recovery, opaque_token=None)
+    )
+    safe_failure = (
+        None
+        if failure is None
+        else replace(failure, message=_DURABLE_WORKER_DIAGNOSTIC_OMITTED)
+    )
+    safe_blocker = (
+        _DURABLE_WORKER_DIAGNOSTIC_OMITTED
+        if failure is not None and record.blocker is not None
+        else record.blocker
+    )
+    if (
+        safe_recovery == recovery
+        and safe_failure == failure
+        and safe_blocker == record.blocker
+    ):
+        return record
+
+    safe_coding_result = replace(
+        coding_result,
+        recovery_state=safe_recovery,
+        failure=safe_failure,
+    )
+    return replace(
+        record,
+        result=replace(result, coding_result=safe_coding_result),
+        blocker=safe_blocker,
+    )
 
 
 def _sign_live_authority(
