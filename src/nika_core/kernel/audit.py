@@ -21,6 +21,7 @@ _CAMEL_ACRONYM_BOUNDARY = re.compile(r"([A-Z]+)([A-Z][a-z])")
 _CAMEL_WORD_BOUNDARY = re.compile(r"([a-z0-9])([A-Z])")
 _KEY_SEPARATOR = re.compile(r"[^0-9A-Za-z]+")
 _URL_USERINFO = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/\s@]+@")
+_URL_QUERY_SECRET = re.compile(r"(?i)([?&](?:token|auth|key|sig)=)[^&#\s]+")
 _AUTHORIZATION_VALUE = re.compile(
     r"(?i)(\b(?:proxy[-_ ]*)?authorization\s*[:=]\s*)"
     r"(?:bearer|basic)?\s*(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;\r\n]+)"
@@ -107,6 +108,7 @@ def _is_sensitive_key(key: str) -> bool:
 def _redact_string(value: str) -> str:
     """Remove credential material embedded in otherwise benign diagnostic text."""
     redacted = _URL_USERINFO.sub(r"\1[REDACTED]@", value)
+    redacted = _URL_QUERY_SECRET.sub(r"\1[REDACTED]", redacted)
     redacted = _AUTHORIZATION_VALUE.sub(r"\1[REDACTED]", redacted)
     redacted = _COOKIE_HEADER_VALUE.sub(r"\1[REDACTED]", redacted)
     redacted = _SECRET_ASSIGNMENT.sub(r"\1[REDACTED]", redacted)
