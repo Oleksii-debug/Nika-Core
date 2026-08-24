@@ -69,6 +69,7 @@ jobs:
           tests/test_security_policy.py
           tests/test_m11_m12_release.py
           tests/test_qa_workflow_lineage.py
+          tests/test_windows_update_lifecycle.py
       - name: Install Chromium
         run: python -m playwright install --with-deps chromium
       - name: Re-prove browser semantic interaction on the exact candidate
@@ -107,6 +108,7 @@ jobs:
           tests/test_security_policy.py
           tests/test_m11_m12_release.py
           tests/test_qa_workflow_lineage.py
+          tests/test_windows_update_lifecycle.py
       - name: Re-prove Windows semantic interaction on the exact candidate
         run: python scripts/m9_windows_uia_proof.py
 
@@ -142,7 +144,12 @@ jobs:
         shell: pwsh
         run: ./scripts/m5_uia_proof.ps1 -ExePath ./dist/NikaCore/NikaCore.exe -WindowTitle 'Nika Core ${{ steps.release.outputs.version }}'
       - name: Run release-gate truth regressions
-        run: python -m pytest tests/test_m11_m12_release.py tests/test_qa_workflow_lineage.py -q
+        run: >-
+          python -m pytest
+          tests/test_m11_m12_release.py
+          tests/test_qa_workflow_lineage.py
+          tests/test_windows_update_lifecycle.py
+          -q
       - name: Create distributable ZIP
         shell: pwsh
         run: Compress-Archive -Path ./dist/NikaCore/* -DestinationPath ./dist/NikaCore-${{ steps.release.outputs.version }}-windows-x64.zip -Force
@@ -197,6 +204,15 @@ jobs:
             production_release_ready = $false
           }
           $evidence | ConvertTo-Json | Set-Content -Encoding UTF8 ./dist/m12-prehuman-evidence.json
+      - name: Prove exact M12 ZIP through local update lifecycle
+        run: >-
+          python scripts/m11_m12_update_lifecycle.py
+          --artifact '${{ steps.distributable.outputs.zip_path }}'
+          --artifact-reference '${{ steps.distributable.outputs.zip_path }}'
+          --source-sha '${{ env.NIKA_CANDIDATE_SHA }}'
+          --version '${{ steps.release.outputs.version }}'
+          --candidate-evidence ./dist/m12-prehuman-evidence.json
+          --output ./dist/m12-update-lifecycle-evidence.json
       - name: Verify exact final distributable evidence binding
         run: >-
           python scripts/m12_release_evidence.py
@@ -213,6 +229,7 @@ jobs:
             dist/NikaCore/release-manifest.json
             dist/NikaCore/THIRD_PARTY_NOTICES.txt
             dist/m12-prehuman-evidence.json
+            dist/m12-update-lifecycle-evidence.json
           if-no-files-found: error
 
   attest-main-distributable:
