@@ -67,6 +67,7 @@ jobs:
           tests/test_media_resource_evidence.py
           tests/test_media_semantic_corrector.py
           tests/test_media_subtitle_acquisition.py
+          tests/test_media_subtitle_byte_binding.py
       - name: Lint media foundation
         run: >-
           python -m ruff check
@@ -87,6 +88,7 @@ jobs:
           tests/test_media_resource_evidence.py
           tests/test_media_semantic_corrector.py
           tests/test_media_subtitle_acquisition.py
+          tests/test_media_subtitle_byte_binding.py
       - name: Run focused DEV05 media tests
         run: >-
           python -m pytest -q
@@ -105,3 +107,4 @@ jobs:
           tests/test_media_resource_evidence.py
           tests/test_media_semantic_corrector.py
           tests/test_media_subtitle_acquisition.py
+          tests/test_media_subtitle_byte_binding.py
