@@ -18,6 +18,7 @@ from nika_core.product_factory_operations_contracts import (
     ServiceObservation,
     ServiceReplica,
 )
+from pf8_effect_journal_fake import MemoryEffectJournal
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 
@@ -112,7 +113,12 @@ def request(service_id: str, request_id: str | None = None) -> MaintenanceReques
 
 def test_maintenance_side_effect_rejects_missing_and_cross_service_evidence() -> None:
     port = Port()
-    coordinator = ProductOperationsCoordinator("project-a", port, port)
+    coordinator = ProductOperationsCoordinator(
+        "project-a",
+        port,
+        port,
+        MemoryEffectJournal(),
+    )
     api = service("api", release=10)
     web = service("web", release=11)
     coordinator.register(api)
@@ -248,7 +254,12 @@ def test_restore_rejects_derived_health_credential_and_node_loss_tamper_atomical
 
 def test_restore_rejects_maintenance_without_service_evidence_or_approval() -> None:
     port = Port()
-    coordinator = ProductOperationsCoordinator("project-a", port, port)
+    coordinator = ProductOperationsCoordinator(
+        "project-a",
+        port,
+        port,
+        MemoryEffectJournal(),
+    )
     api = service("api", release=50)
     coordinator.register(api)
     coordinator.record_observation(healthy(api))
@@ -317,7 +328,12 @@ def test_contracts_reject_boolean_numeric_and_duplicate_evidence_identity() -> N
 
 def test_fifty_service_maintenance_remains_service_isolated_after_restart() -> None:
     port = Port()
-    coordinator = ProductOperationsCoordinator("project-a", port, port)
+    coordinator = ProductOperationsCoordinator(
+        "project-a",
+        port,
+        port,
+        MemoryEffectJournal(),
+    )
     maintained: set[str] = set()
     for index in range(50):
         service_id = f"svc-{index:02d}"
