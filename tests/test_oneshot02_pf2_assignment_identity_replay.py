@@ -6,6 +6,8 @@ import pytest
 
 from nika_core import (
     product_factory_orchestration as orchestration,
+)
+from nika_core import (
     product_factory_team_lifecycle as team_lifecycle,
 )
 
