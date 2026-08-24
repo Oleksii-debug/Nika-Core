@@ -143,7 +143,7 @@ class ExecutionNodeRegistry:
         lease_seconds: int = 300,
     ) -> WorkLease:
         if lease_seconds <= 0:
-            raise DeploymentFabricError("lease_seconds must be positive")
+            raise ValueError("lease_seconds must be positive")
         instant = _aware(now or datetime.now(UTC))
         self._expire(instant)
         leased_nodes = {lease.node_id for lease in self._leases.values()}
@@ -308,15 +308,13 @@ class RollbackEvidence:
             raise DeploymentFabricError(
                 "rollback exact failed release disagrees with failed release SHA"
             )
-        if self.restored_release is not None:
-            if self.restored_release_sha is None:
-                raise DeploymentFabricError(
-                    "rollback exact restored release requires restored release SHA"
-                )
-            if self.restored_release.source_sha != self.restored_release_sha:
-                raise DeploymentFabricError(
-                    "rollback exact restored release disagrees with restored release SHA"
-                )
+        if self.restored_release is not None and (
+            self.restored_release_sha is None
+            or self.restored_release.source_sha != self.restored_release_sha
+        ):
+            raise DeploymentFabricError(
+                "rollback exact restored release disagrees with restored release SHA"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,6 +322,13 @@ class ProviderDeploymentResult:
     applied: bool
     uncertain: bool
     evidence_refs: tuple[str, ...]
+    release: ReleaseRef | None = None
+
+    def __post_init__(self) -> None:
+        if self.applied and self.uncertain:
+            raise DeploymentFabricError(
+                "provider deployment result cannot be both applied and uncertain"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,11 +341,12 @@ class ProviderInspection:
     def __post_init__(self) -> None:
         if self.release_sha is not None:
             _validate_sha(self.release_sha)
-        if self.release is not None:
-            if self.release_sha is None or self.release.source_sha != self.release_sha:
-                raise DeploymentFabricError(
-                    "inspection exact release disagrees with release SHA"
-                )
+        if self.release is not None and (
+            self.release_sha is None or self.release.source_sha != self.release_sha
+        ):
+            raise DeploymentFabricError(
+                "inspection exact release disagrees with release SHA"
+            )
 
 
 class DeploymentProviderPort(Protocol):
@@ -349,18 +355,22 @@ class DeploymentProviderPort(Protocol):
     def health(self, intent: DeploymentIntent) -> HealthEvidence: ...
 
     def rollback(
-        self, intent: DeploymentIntent, previous_release_sha: str | None
+        self,
+        intent: DeploymentIntent,
+        previous_release: ReleaseRef | None,
     ) -> RollbackEvidence: ...
 
     def inspect(self, intent: DeploymentIntent) -> ProviderInspection: ...
 
 
-class ExactReleaseRollbackProviderPort(Protocol):
-    def rollback_exact(
-        self,
-        intent: DeploymentIntent,
-        previous_release: ReleaseRef | None,
-    ) -> RollbackEvidence: ...
+class DeploymentEffectJournalPort(Protocol):
+    """Durable pre-effect authority used by production deployment hosts."""
+
+    def before_effect(self, intent: DeploymentIntent) -> bool: ...
+
+    def mark_uncertain(self, intent: DeploymentIntent) -> None: ...
+
+    def complete(self, intent: DeploymentIntent, state: DeploymentState) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -384,6 +394,7 @@ class DeploymentFabricSnapshot:
 @dataclass(slots=True)
 class DeploymentFabric:
     provider: DeploymentProviderPort
+    effect_journal: DeploymentEffectJournalPort | None = None
     _records: dict[str, DeploymentRecord] = field(default_factory=dict, init=False, repr=False)
     _healthy_staging: dict[str, ReleaseRef] = field(default_factory=dict, init=False, repr=False)
     _current_releases: dict[tuple[str, str], ReleaseRef] = field(
@@ -409,13 +420,19 @@ class DeploymentFabric:
             previous_release_sha=previous_sha,
             previous_release=previous_release,
         )
+        if self.effect_journal is not None:
+            created = self.effect_journal.before_effect(intent)
+            if not created:
+                return self._save(uncertain)
         self._save(uncertain)
         try:
             result = self.provider.deploy(intent)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - provider may fail after mutating target
             return self._mark_uncertain(uncertain)
         if not result.evidence_refs:
             return self._mark_uncertain(uncertain)
+        if result.release is not None and result.release != intent.release:
+            return self._mark_uncertain(uncertain, result.evidence_refs)
         if result.uncertain:
             return self._mark_uncertain(
                 DeploymentRecord(
@@ -427,7 +444,7 @@ class DeploymentFabric:
                 )
             )
         if not result.applied:
-            return self._save(
+            return self._finalize(
                 DeploymentRecord(
                     intent,
                     DeploymentState.REJECTED,
@@ -445,7 +462,7 @@ class DeploymentFabric:
         )
         try:
             health = self.provider.health(intent)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - applied effect is not safe to replay
             return self._mark_uncertain(record)
         try:
             return self._finish_health(record, health)
@@ -467,7 +484,7 @@ class DeploymentFabric:
             self._current_releases.pop(_environment_key(record.intent), None)
             if record.intent.environment.tier is EnvironmentTier.STAGING:
                 self._healthy_staging.pop(record.intent.project_id, None)
-            return self._save(
+            return self._finalize(
                 DeploymentRecord(
                     record.intent,
                     DeploymentState.REJECTED,
@@ -517,7 +534,7 @@ class DeploymentFabric:
                     failed_release=record.intent.release,
                     restored_release=previous,
                 )
-                return self._save(
+                return self._finalize(
                     DeploymentRecord(
                         record.intent,
                         DeploymentState.ROLLED_BACK,
@@ -528,7 +545,7 @@ class DeploymentFabric:
                         previous_release=previous,
                     )
                 )
-            return self._save(
+            return self._finalize(
                 DeploymentRecord(
                     record.intent,
                     DeploymentState.REJECTED,
@@ -621,15 +638,17 @@ class DeploymentFabric:
         self._current_releases = current_releases
 
     def _finish_health(
-        self, record: DeploymentRecord, health: HealthEvidence
+        self,
+        record: DeploymentRecord,
+        health: HealthEvidence,
     ) -> DeploymentRecord:
         intent = record.intent
         if health.environment_id != intent.environment.environment_id:
             raise DeploymentFabricError("health evidence environment mismatch")
         if health.release_sha != intent.release.source_sha:
             raise DeploymentFabricError("health evidence release mismatch")
-        if health.release is not None and health.release != intent.release:
-            raise DeploymentFabricError("health evidence exact release mismatch")
+        if health.release != intent.release:
+            raise DeploymentFabricError("health evidence requires exact release identity")
         if health.healthy:
             updated = DeploymentRecord(
                 intent,
@@ -642,49 +661,38 @@ class DeploymentFabric:
             self._current_releases[_environment_key(intent)] = intent.release
             if intent.environment.tier is EnvironmentTier.STAGING:
                 self._healthy_staging[intent.project_id] = intent.release
-            return self._save(updated)
+            return self._finalize(updated)
 
         rollback_record = replace(record, health=health)
-        rollback_exact = getattr(self.provider, "rollback_exact", None)
-        if record.previous_release is not None and not callable(rollback_exact):
-            return self._mark_uncertain(rollback_record, health.evidence_refs)
         try:
-            if callable(rollback_exact):
-                rollback = rollback_exact(intent, record.previous_release)
-            else:
-                rollback = self.provider.rollback(intent, record.previous_release_sha)
-        except Exception:  # noqa: BLE001
+            rollback = self.provider.rollback(intent, record.previous_release)
+        except Exception:  # noqa: BLE001 - rollback may have applied before failure
             return self._mark_uncertain(rollback_record, health.evidence_refs)
+        evidence = health.evidence_refs + rollback.evidence_refs
         if rollback.environment_id != intent.environment.environment_id:
-            return self._mark_uncertain(
-                rollback_record, health.evidence_refs + rollback.evidence_refs
-            )
+            return self._mark_uncertain(rollback_record, evidence)
         if rollback.failed_release_sha != intent.release.source_sha:
-            return self._mark_uncertain(
-                rollback_record, health.evidence_refs + rollback.evidence_refs
-            )
-        if rollback.failed_release is not None and rollback.failed_release != intent.release:
-            return self._mark_uncertain(
-                rollback_record, health.evidence_refs + rollback.evidence_refs
-            )
+            return self._mark_uncertain(rollback_record, evidence)
+        if rollback.failed_release != intent.release:
+            return self._mark_uncertain(rollback_record, evidence)
         if not rollback.succeeded:
-            return self._mark_uncertain(
-                rollback_record,
-                health.evidence_refs + rollback.evidence_refs,
-            )
+            return self._mark_uncertain(rollback_record, evidence)
         if record.previous_release is None:
             if (
                 rollback.restored_release_sha is not None
                 or rollback.restored_release is not None
             ):
-                return self._mark_uncertain(
-                    rollback_record, health.evidence_refs + rollback.evidence_refs
-                )
+                return self._mark_uncertain(rollback_record, evidence)
+            self._current_releases.pop(_environment_key(intent), None)
+            if intent.environment.tier is EnvironmentTier.STAGING:
+                self._healthy_staging.pop(intent.project_id, None)
         elif rollback.restored_release != record.previous_release:
-            return self._mark_uncertain(
-                rollback_record, health.evidence_refs + rollback.evidence_refs
-            )
-        return self._save(
+            return self._mark_uncertain(rollback_record, evidence)
+        else:
+            self._current_releases[_environment_key(intent)] = record.previous_release
+            if intent.environment.tier is EnvironmentTier.STAGING:
+                self._healthy_staging[intent.project_id] = record.previous_release
+        return self._finalize(
             DeploymentRecord(
                 intent,
                 DeploymentState.ROLLED_BACK,
@@ -723,6 +731,8 @@ class DeploymentFabric:
     ) -> DeploymentRecord:
         if record.intent.environment.tier is EnvironmentTier.STAGING:
             self._healthy_staging.pop(record.intent.project_id, None)
+        if self.effect_journal is not None:
+            self.effect_journal.mark_uncertain(record.intent)
         return self._save(
             DeploymentRecord(
                 record.intent,
@@ -734,6 +744,17 @@ class DeploymentFabric:
                 previous_release=record.previous_release,
             )
         )
+
+    def _finalize(self, record: DeploymentRecord) -> DeploymentRecord:
+        if record.state not in {
+            DeploymentState.HEALTHY,
+            DeploymentState.REJECTED,
+            DeploymentState.ROLLED_BACK,
+        }:
+            raise DeploymentFabricError("only terminal deployment state may be finalized")
+        if self.effect_journal is not None:
+            self.effect_journal.complete(record.intent, record.state)
+        return self._save(record)
 
     def _record(self, intent_id: str) -> DeploymentRecord:
         try:
@@ -821,11 +842,14 @@ def _normalize_record(
             and rollback.restored_release_sha == previous.source_sha
         ):
             restored_release = previous
-        if rollback.succeeded and rollback.restored_release_sha is not None:
-            if restored_release is None:
-                raise DeploymentFabricError(
-                    "legacy rollback snapshot is ambiguous or lacks exact restored release"
-                )
+        if (
+            rollback.succeeded
+            and rollback.restored_release_sha is not None
+            and restored_release is None
+        ):
+            raise DeploymentFabricError(
+                "legacy rollback snapshot is ambiguous or lacks exact restored release"
+            )
         rollback = replace(
             rollback,
             failed_release=failed_release,
@@ -836,7 +860,8 @@ def _normalize_record(
 
 
 def _normalize_healthy_staging_entry(
-    entry: tuple[str, ...], records: tuple[DeploymentRecord, ...]
+    entry: tuple[str, ...],
+    records: tuple[DeploymentRecord, ...],
 ) -> tuple[str, ReleaseRef]:
     if len(entry) == 4:
         project_id, version, source_sha, artifact_digest = entry
@@ -864,7 +889,8 @@ def _normalize_healthy_staging_entry(
 
 
 def _normalize_current_release_entry(
-    entry: tuple[str, ...], records: tuple[DeploymentRecord, ...]
+    entry: tuple[str, ...],
+    records: tuple[DeploymentRecord, ...],
 ) -> tuple[str, str, ReleaseRef]:
     if len(entry) == 5:
         project_id, environment_id, version, source_sha, artifact_digest = entry
@@ -912,7 +938,8 @@ def _normalize_current_release_entry(
 
 
 def _has_healthy_staging_record(
-    records: tuple[DeploymentRecord, ...], release: ReleaseRef
+    records: tuple[DeploymentRecord, ...],
+    release: ReleaseRef,
 ) -> bool:
     return any(
         record.state is DeploymentState.HEALTHY
@@ -970,17 +997,14 @@ def _validate_record(record: DeploymentRecord) -> None:
             raise DeploymentFabricError("snapshot health evidence environment mismatch")
         if record.health.release_sha != intent.release.source_sha:
             raise DeploymentFabricError("snapshot health evidence release mismatch")
-        if record.health.release is not None and record.health.release != intent.release:
+        if record.health.release != intent.release:
             raise DeploymentFabricError("snapshot health exact release mismatch")
     if record.rollback is not None:
         if record.rollback.environment_id != intent.environment.environment_id:
             raise DeploymentFabricError("snapshot rollback evidence environment mismatch")
         if record.rollback.failed_release_sha != intent.release.source_sha:
             raise DeploymentFabricError("snapshot rollback evidence failed release mismatch")
-        if (
-            record.rollback.failed_release is not None
-            and record.rollback.failed_release != intent.release
-        ):
+        if record.rollback.failed_release != intent.release:
             raise DeploymentFabricError("snapshot rollback exact failed release mismatch")
         if record.rollback.succeeded:
             if record.previous_release is None:
