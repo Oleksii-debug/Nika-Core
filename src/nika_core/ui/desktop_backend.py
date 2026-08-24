@@ -98,6 +98,7 @@ class DesktopBackend:
         self._active_lock = threading.Lock()
         self._active_threads: dict[str, str] = {}
         self._active_futures: dict[str, Future[Any]] = {}
+        self._cancel_futures: dict[str, Future[bool]] = {}
         self._ensure_defaults()
 
     def create_task(self, payload: Mapping[str, Any]) -> UIResult:
@@ -113,7 +114,7 @@ class DesktopBackend:
         self._schedule_start(record.task_id, command)
         return UIResult(
             request_id="desktop-handler",
-            status="completed",
+            status="accepted",
             message=f"Завдання прийнято до виконання: {command}",
             focus_id="tasks-heading",
         )
@@ -165,7 +166,7 @@ class DesktopBackend:
             )
             return UIResult(
                 request_id="desktop-handler",
-                status="completed",
+                status="accepted",
                 message="Збережене runtime-виконання поставлено на безпечне продовження.",
                 focus_id="tasks-heading",
             )
@@ -182,7 +183,7 @@ class DesktopBackend:
         self._schedule_start(record.task_id, command)
         return UIResult(
             request_id="desktop-handler",
-            status="completed",
+            status="accepted",
             message="Завдання повернуто до черги виконання.",
             focus_id="tasks-heading",
         )
@@ -199,23 +200,11 @@ class DesktopBackend:
                     "Активна runtime-сесія належить іншому runtime; "
                     "безпечне скасування відхилено."
                 )
-            accepted = bool(
-                self._host()
-                .submit(
-                    self._coordinator.cancel(
-                        self._runtime,
-                        task_id=record.task_id,
-                        thread_id=session.thread_id,
-                    )
-                )
-                .result()
-            )
-            if not accepted:
-                raise ValueError("Runtime не підтвердив зупинку; стан завдання не змінено.")
+            self._schedule_cancel(record.task_id, session.thread_id)
             return UIResult(
                 request_id="desktop-handler",
-                status="completed",
-                message="Поточне завдання агента скасовано.",
+                status="accepted",
+                message="Запит на зупинку runtime прийнято.",
                 focus_id="tasks-heading",
             )
 
@@ -234,25 +223,11 @@ class DesktopBackend:
                 "Неможливо безпечно скасувати активне runtime-завдання без "
                 "збереженої або локально активної runtime-сесії."
             )
-
-        accepted = bool(
-            self._host()
-            .submit(
-                self._coordinator.cancel(
-                    self._runtime,
-                    task_id=record.task_id,
-                    thread_id=thread_id,
-                )
-            )
-            .result()
-        )
-        if not accepted:
-            raise ValueError("Runtime не підтвердив зупинку; стан завдання не змінено.")
-
+        self._schedule_cancel(record.task_id, thread_id)
         return UIResult(
             request_id="desktop-handler",
-            status="completed",
-            message="Поточне завдання агента скасовано.",
+            status="accepted",
+            message="Запит на зупинку runtime прийнято.",
             focus_id="tasks-heading",
         )
 
@@ -283,7 +258,10 @@ class DesktopBackend:
     def close(self) -> None:
         """Stop the private bridge event loop after all submitted runtime work has settled."""
         with self._active_lock:
-            futures = tuple(self._active_futures.values())
+            futures = (
+                *self._active_futures.values(),
+                *self._cancel_futures.values(),
+            )
         for future in futures:
             try:
                 future.result(timeout=2)
@@ -294,6 +272,7 @@ class DesktopBackend:
         with self._active_lock:
             self._active_threads.clear()
             self._active_futures.clear()
+            self._cancel_futures.clear()
         if self._runtime_loop is not None:
             self._runtime_loop.close()
             self._runtime_loop = None
@@ -328,6 +307,21 @@ class DesktopBackend:
                 return None
             raise
 
+    def _schedule_cancel(self, task_id: str, thread_id: str) -> None:
+        with self._active_lock:
+            existing = self._cancel_futures.get(task_id)
+            if existing is not None and not existing.done():
+                raise ValueError("Запит на зупинку цього завдання вже виконується.")
+            future = self._host().submit(
+                self._coordinator.cancel(
+                    self._runtime,
+                    task_id=task_id,
+                    thread_id=thread_id,
+                )
+            )
+            self._cancel_futures[task_id] = future
+        future.add_done_callback(lambda done: self._cancel_done(task_id, done))
+
     def _submit_runtime(
         self,
         task_id: str,
@@ -343,6 +337,19 @@ class DesktopBackend:
             self._active_futures[task_id] = future
         future.add_done_callback(lambda done: self._runtime_done(task_id, done))
 
+    def _cancel_done(self, task_id: str, future: Future[bool]) -> None:
+        with self._active_lock:
+            self._cancel_futures.pop(task_id, None)
+        if future.cancelled():
+            self._record_background_failure(task_id, "desktop.runtime_cancel_interrupted")
+            return
+        error = future.exception()
+        if error is not None:
+            self._record_background_failure(task_id, "desktop.runtime_cancel_failed")
+            return
+        if future.result() is not True:
+            self._record_background_failure(task_id, "desktop.runtime_cancel_rejected")
+
     def _runtime_done(self, task_id: str, future: Future[Any]) -> None:
         with self._active_lock:
             self._active_threads.pop(task_id, None)
@@ -352,12 +359,15 @@ class DesktopBackend:
         current = self._queue.get(task_id)
         if current.state == TaskState.RUNNING:
             self._queue.transition(task_id, TaskState.FAILED)
-            self._audit.append(
-                event_type="desktop.runtime_host_failed",
-                entity_type="task",
-                entity_id=task_id,
-                payload={"runtime_id": self._runtime.runtime_id},
-            )
+        self._record_background_failure(task_id, "desktop.runtime_host_failed")
+
+    def _record_background_failure(self, task_id: str, event_type: str) -> None:
+        self._audit.append(
+            event_type=event_type,
+            entity_type="task",
+            entity_id=task_id,
+            payload={"runtime_id": self._runtime.runtime_id},
+        )
 
     def _active_thread(self, task_id: str) -> str | None:
         with self._active_lock:
