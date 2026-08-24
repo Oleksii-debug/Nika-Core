@@ -50,7 +50,7 @@ def test_duplicate_structural_snapshot_keeps_unique_named_control_actionable() -
     assert handoff.requires_approval is True
 
 
-def test_duplicate_exact_control_identity_fails_closed_before_action_handoff() -> None:
+def test_duplicate_exact_control_identity_fails_closed_before_action_or_helper_handoff() -> None:
     snapshot = _uia_evidence(("Button:Repair now", "Button:Repair now"))
     service = AccessibilityRepairService(Semantic(snapshot))
 
@@ -58,6 +58,13 @@ def test_duplicate_exact_control_identity_fails_closed_before_action_handoff() -
 
     with pytest.raises(AccessibilityRepairError, match="identity is ambiguous"):
         service.prepare_action_handoff(
+            resolved,
+            control_name="Button:Repair now",
+            expected_target_revision="uia-tree-44",
+        )
+
+    with pytest.raises(AccessibilityRepairError, match="identity is ambiguous"):
+        service.build_helper_spec(
             resolved,
             control_name="Button:Repair now",
             expected_target_revision="uia-tree-44",
