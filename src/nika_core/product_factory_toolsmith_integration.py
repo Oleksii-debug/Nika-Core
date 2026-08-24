@@ -5,7 +5,10 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.product_factory_checkpoint_host import ProductFactoryCheckpointHost
+from nika_core.product_factory_checkpoint_host import (
+    ProductFactoryCheckpointError,
+    ProductFactoryCheckpointHost,
+)
 from nika_core.product_factory_coding_worker_adapter import (
     CodingWorkerAdapterError,
     CodingWorkerComponentAdapter,
@@ -162,8 +165,12 @@ class ProductFactoryToolsmithBridge:
         reason: str,
         attempted_methods: tuple[str, ...] = (),
     ) -> ComponentCapabilityGap:
-        """Reserve exact PF attempt identity before starting durable Toolsmith escalation."""
+        """Reserve an already-durable failed PF attempt before Toolsmith escalation."""
         _validate_gap_input(capability_id, reason)
+        self._require_durable_failed_request(
+            host_task_id=host_task_id,
+            request=request,
+        )
         bindings = self._require_bindings()
         try:
             durable = bindings.reserve(
@@ -327,6 +334,47 @@ class ProductFactoryToolsmithBridge:
                 "finalization requires restart reconciliation"
             ) from exc
         return resume
+
+    def _require_durable_failed_request(
+        self,
+        *,
+        host_task_id: str,
+        request: ComponentWorkRequest,
+    ) -> WorkRecord:
+        checkpoints = self._require_checkpoints()
+        try:
+            persisted = checkpoints.latest(
+                host_task_id=host_task_id,
+                project_id=request.project_id,
+            )
+        except ProductFactoryCheckpointError as exc:
+            raise ProductFactoryToolsmithError(
+                f"durable Product Factory checkpoint is not authoritative: {exc}"
+            ) from exc
+        if persisted is None:
+            raise ProductFactoryToolsmithError(
+                "capability escalation requires a durable Product Factory checkpoint"
+            )
+        matches = tuple(
+            record
+            for record in persisted.checkpoint.coordinator.records
+            if record.request.component_id == request.component_id
+        )
+        if len(matches) != 1:
+            raise ProductFactoryToolsmithError(
+                "durable Product Factory checkpoint has ambiguous component identity"
+            )
+        record = matches[0]
+        if record.request != request:
+            raise ProductFactoryToolsmithError(
+                "capability escalation request does not match the durable failed attempt"
+            )
+        _require_repair_required(record)
+        if record.result is None or record.result.coding_result.failure is None:
+            raise ProductFactoryToolsmithError(
+                "capability escalation requires durable worker-failure evidence"
+            )
+        return record
 
     def _ensure_gap_begun(
         self,
