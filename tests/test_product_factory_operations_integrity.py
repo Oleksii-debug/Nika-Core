@@ -328,11 +328,12 @@ def test_contracts_reject_boolean_numeric_and_duplicate_evidence_identity() -> N
 
 def test_fifty_service_maintenance_remains_service_isolated_after_restart() -> None:
     port = Port()
+    journal = MemoryEffectJournal()
     coordinator = ProductOperationsCoordinator(
         "project-a",
         port,
         port,
-        MemoryEffectJournal(),
+        journal,
     )
     maintained: set[str] = set()
     for index in range(50):
@@ -345,7 +346,11 @@ def test_fifty_service_maintenance_remains_service_isolated_after_restart() -> N
             coordinator.request_maintenance(request(service_id))
 
     snapshot = coordinator.snapshot()
-    restarted = ProductOperationsCoordinator("project-a", approval_authority=port)
+    restarted = ProductOperationsCoordinator(
+        "project-a",
+        approval_authority=port,
+        effect_journal=journal,
+    )
     restarted.restore(snapshot)
     records = {item.service.service_id: item for item in restarted.snapshot().services}
 
