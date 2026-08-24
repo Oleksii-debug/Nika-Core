@@ -235,8 +235,8 @@ def test_no_trade_zero_volatility_and_no_downside_are_typed() -> None:
 def test_irregular_sampling_never_silently_annualizes_ratios() -> None:
     points = (
         equity(0, "100"),
-        EquityPoint(BASE + timedelta(days=2), Decimal("101")),
-        EquityPoint(BASE + timedelta(days=5), Decimal("99")),
+        EquityPoint(BASE + timedelta(days=2), Decimal(101)),
+        EquityPoint(BASE + timedelta(days=5), Decimal(99)),
     )
     metrics = calculate_performance(
         points,

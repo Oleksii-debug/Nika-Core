@@ -194,7 +194,7 @@ def test_mutating_bound_metric_value_or_identity_breaks_authority_seal() -> None
         selected_at=p.validation.end_at,
     )
     assessment = bind_held_out_test(p, selected, result_for(selected))
-    object.__setattr__(assessment.test_result, "metric_value", Decimal("999"))
+    object.__setattr__(assessment.test_result, "metric_value", Decimal(999))
     with pytest.raises(TradingResearchError, match="changed after binding"):
         assessment.require_promotion_metric()
 
