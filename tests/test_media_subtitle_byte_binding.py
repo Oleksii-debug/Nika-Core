@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-import nika_core.media.subtitle_acquisition as subtitle_acquisition
+from nika_core.media import subtitle_acquisition
 from nika_core.media.contracts import (
     MediaSource,
     MediaSourceKind,
