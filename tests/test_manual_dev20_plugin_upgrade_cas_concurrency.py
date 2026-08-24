@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-from threading import Barrier, Thread
+from threading import Barrier, Event, Thread
 
-from nika_core.plugins import PluginManifest, PluginRuntime
+from nika_core.plugins import (
+    PluginCompatibilityError,
+    PluginManifest,
+    PluginRuntime,
+)
 
 
 class _BarrierCatalog:
@@ -14,6 +18,15 @@ class _BarrierCatalog:
         del manifest
         if self.enabled:
             self._barrier.wait(timeout=5)
+
+
+class _Adapter:
+    def __init__(self, manifest: PluginManifest) -> None:
+        self.manifest = manifest
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def _manifest(version: str) -> PluginManifest:
@@ -58,3 +71,47 @@ def test_concurrent_plugin_upgrade_compare_and_swap_has_exactly_one_winner() -> 
     assert len(failures) == 1
     assert isinstance(failures[0], ValueError)
     assert "expected_version" in str(failures[0])
+
+
+def test_activation_revalidates_registration_after_concurrent_upgrade() -> None:
+    runtime = PluginRuntime()
+    original = _manifest("1.0.0")
+    replacement = _manifest("2.0.0")
+    factory_entered = Event()
+    release_factory = Event()
+    created: list[_Adapter] = []
+    failures: list[Exception] = []
+
+    def original_factory() -> _Adapter:
+        adapter = _Adapter(original)
+        created.append(adapter)
+        factory_entered.set()
+        assert release_factory.wait(timeout=5)
+        return adapter
+
+    runtime.register(original, original_factory)
+
+    def activate_original() -> None:
+        try:
+            runtime.activate(original.plugin_id)
+        except Exception as exc:  # noqa: BLE001 - test records the exact race result.
+            failures.append(exc)
+
+    activation = Thread(target=activate_original)
+    activation.start()
+    assert factory_entered.wait(timeout=5)
+
+    runtime.upgrade(
+        replacement,
+        lambda: _Adapter(replacement),
+        expected_version=original.version,
+    )
+    release_factory.set()
+    activation.join(timeout=10)
+
+    assert not activation.is_alive()
+    assert len(failures) == 1
+    assert isinstance(failures[0], PluginCompatibilityError)
+    assert "changed during activation" in str(failures[0])
+    assert created and created[0].closed is True
+    assert runtime.manifests()[original.plugin_id].version == replacement.version
