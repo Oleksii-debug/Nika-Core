@@ -8,6 +8,7 @@ import pytest
 
 from nika_core.model_gateway.contracts import (
     ModelErrorCode,
+    ModelFailureEffect,
     ModelGatewayError,
     ModelMessage,
     ModelRequest,
@@ -313,9 +314,10 @@ def test_fallback_attempt_receives_only_remaining_total_deadline() -> None:
             await asyncio.sleep(0.02)
             raise ModelGatewayError(
                 ModelErrorCode.RATE_LIMITED,
-                "busy",
+                "busy before model effect",
                 provider_id=self.capabilities.provider_id,
                 retryable=True,
+                failure_effect=ModelFailureEffect.NO_EFFECT,
             )
 
     class RecordingFallback(_CapabilityProvider):
