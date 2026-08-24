@@ -589,9 +589,9 @@ def _validate_windows_repo_path(path: str, *, original: str) -> None:
     }
     invalid_characters = frozenset('<>:"|?*')
     for component in path.split("/"):
-        if component.endswith((" ", ".")):
+        if component.startswith(" ") or component.endswith((" ", ".")):
             raise RepositoryGraphError(
-                f"Windows repository path component has unsafe trailing identity: {original!r}"
+                f"Windows repository path component has unsafe edge identity: {original!r}"
             )
         if any(character in invalid_characters or ord(character) < 32 for character in component):
             raise RepositoryGraphError(
