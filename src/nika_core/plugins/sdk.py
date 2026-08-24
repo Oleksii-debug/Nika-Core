@@ -302,12 +302,14 @@ class PluginRuntime:
                     "plugin activation requests undeclared permissions: " + ", ".join(undeclared)
                 )
 
-        if plugin_id in self._active:
-            if self._effective_permissions[plugin_id] != selected_permissions:
-                raise PermissionError(
-                    "active plugin permission set differs from requested activation"
-                )
-            return self._active[plugin_id]
+        with self._registry_lock:
+            active = self._active.get(plugin_id)
+            if active is not None:
+                if self._effective_permissions[plugin_id] != selected_permissions:
+                    raise PermissionError(
+                        "active plugin permission set differs from requested activation"
+                    )
+                return active
 
         high_impact_ids = tuple(
             sorted(
@@ -340,17 +342,36 @@ class PluginRuntime:
             raise PluginCompatibilityError(
                 "runtime plugin manifest differs from registered manifest"
             )
-        self._active[plugin_id] = adapter
-        self._effective_permissions[plugin_id] = selected_permissions
-        return adapter
+
+        with self._registry_lock:
+            current = self._factories.get(plugin_id)
+            if current != (manifest, factory):
+                adapter.close()
+                raise PluginCompatibilityError(
+                    "plugin registration changed during activation; retry activation"
+                )
+            active = self._active.get(plugin_id)
+            if active is not None:
+                if self._effective_permissions[plugin_id] != selected_permissions:
+                    adapter.close()
+                    raise PermissionError(
+                        "active plugin permission set differs from requested activation"
+                    )
+                adapter.close()
+                return active
+            self._active[plugin_id] = adapter
+            self._effective_permissions[plugin_id] = selected_permissions
+            return adapter
 
     def effective_permissions(self, plugin_id: str) -> tuple[str, ...]:
-        if plugin_id not in self._active:
-            raise KeyError(f"plugin is not active: {plugin_id}")
-        return self._effective_permissions[plugin_id]
+        with self._registry_lock:
+            if plugin_id not in self._active:
+                raise KeyError(f"plugin is not active: {plugin_id}")
+            return self._effective_permissions[plugin_id]
 
     def deactivate(self, plugin_id: str) -> None:
-        adapter = self._active.pop(plugin_id, None)
-        self._effective_permissions.pop(plugin_id, None)
+        with self._registry_lock:
+            adapter = self._active.pop(plugin_id, None)
+            self._effective_permissions.pop(plugin_id, None)
         if adapter is not None:
             adapter.close()
