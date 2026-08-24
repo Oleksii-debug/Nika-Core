@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, Self
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.interaction import (
@@ -27,6 +27,7 @@ from nika_core.interaction import (
     resolve_strict,
     validate_snapshot,
 )
+from nika_core.kernel.task_queue import TaskQueue
 from nika_core.packaging.release import (
     build_release_manifest,
     verify_release_manifest,
@@ -44,7 +45,6 @@ from nika_core.product_project import (
     ProductProjectSpec,
     ProductRequirement,
 )
-from nika_core.kernel.task_queue import TaskQueue
 
 PROJECT_ID = "c3-browser-agent-product"
 REPOSITORY_LOCATOR = "local/c3-browser-agent"
@@ -63,7 +63,7 @@ def _html(title: str, body: str) -> bytes:
     return (
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
         f"<title>{title}</title></head><body><main>{body}</main></body></html>"
-    ).encode("utf-8")
+    ).encode()
 
 
 def _handler(state: CommerceState) -> type[BaseHTTPRequestHandler]:
@@ -91,7 +91,7 @@ def _handler(state: CommerceState) -> type[BaseHTTPRequestHandler]:
             values = urllib.parse.parse_qs(raw, keep_blank_values=True)
             return {key: items[-1] for key, items in values.items()}
 
-        def do_GET(self) -> None:  # noqa: N802
+        def do_GET(self) -> None:
             parsed = urllib.parse.urlparse(self.path)
             query = urllib.parse.parse_qs(parsed.query)
             if parsed.path == "/":
@@ -207,7 +207,7 @@ def _handler(state: CommerceState) -> type[BaseHTTPRequestHandler]:
                 return
             self._send(404, _html("Missing", "<h1>Not found</h1>"))
 
-        def do_POST(self) -> None:  # noqa: N802
+        def do_POST(self) -> None:
             if self.path == "/cart":
                 form = self._form()
                 note = urllib.parse.quote(form.get("note", ""), safe="")
@@ -282,7 +282,7 @@ class FixtureServer:
         host, port = self._server.server_address
         return f"http://{host}:{port}"
 
-    def __enter__(self) -> "FixtureServer":
+    def __enter__(self) -> Self:
         self._thread.start()
         return self
 
