@@ -225,6 +225,24 @@ def test_pause_resume_and_stop_use_persisted_task_state(tmp_path: Path) -> None:
     assert queue.get(task.task_id).state == TaskState.CANCELLED
 
 
+def test_resume_started_paused_task_without_session_fails_closed(tmp_path: Path) -> None:
+    backend, queue, _store = build_backend(tmp_path)
+    task = queue.create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": "x"},
+    )
+    queue.transition(task.task_id, TaskState.READY)
+    queue.transition(task.task_id, TaskState.RUNNING)
+    queue.transition(task.task_id, TaskState.PAUSED)
+
+    with pytest.raises(ValueError, match="не має збереженої runtime-сесії"):
+        backend.resume_task({})
+
+    assert queue.get(task.task_id).state is TaskState.PAUSED
+    backend.close()
+
+
 def test_stop_fails_closed_for_running_task_without_runtime_session(tmp_path: Path) -> None:
     backend, queue, _store = build_backend(tmp_path)
     task = queue.create(
