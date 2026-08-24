@@ -35,6 +35,12 @@ class MaintenanceState(StrEnum):
     PAUSED = "paused"
 
 
+class MaintenanceEffectState(StrEnum):
+    PENDING = "pending"
+    COMPLETED = "completed"
+    UNCERTAIN = "uncertain"
+
+
 @dataclass(frozen=True, slots=True)
 class ServiceReplica:
     replica_id: str
@@ -163,6 +169,41 @@ class MaintenanceResult:
         _refs(self.evidence_refs, "maintenance result evidence")
         if self.applied and self.uncertain:
             raise ProductOperationsError("maintenance result is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class MaintenanceEffectReservation:
+    operation_key: str
+    state: MaintenanceEffectState
+    created: bool
+    result: MaintenanceResult | None = None
+
+    def __post_init__(self) -> None:
+        if not self.operation_key.strip() or type(self.created) is not bool:
+            raise ProductOperationsError("maintenance effect reservation identity is invalid")
+        if not isinstance(self.state, MaintenanceEffectState):
+            raise ProductOperationsError("maintenance effect reservation state is invalid")
+        if self.state is MaintenanceEffectState.COMPLETED:
+            if self.result is None:
+                raise ProductOperationsError("completed maintenance effect lacks durable result")
+        elif self.result is not None:
+            raise ProductOperationsError("unresolved maintenance effect cannot carry result")
+
+
+class MaintenanceEffectJournalPort(Protocol):
+    """Durable pre-effect reservation boundary for one maintenance task host."""
+
+    def reserve(
+        self,
+        *,
+        project_id: str,
+        service: DeployableService,
+        request: MaintenanceRequest,
+    ) -> MaintenanceEffectReservation: ...
+
+    def complete(self, operation_key: str, result: MaintenanceResult) -> None: ...
+    def mark_uncertain(self, operation_key: str) -> None: ...
+    def reconcile(self, operation_key: str, result: MaintenanceResult) -> None: ...
 
 
 class ProductOperationsPort(Protocol):
