@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from threading import Event, Lock
 
 import pytest
+from pf8_effect_journal_fake import MemoryEffectJournal
 
 from nika_core.product_factory_operations import ProductOperationsCoordinator
 from nika_core.product_factory_operations_contracts import (
@@ -19,7 +20,6 @@ from nika_core.product_factory_operations_contracts import (
     ServiceObservation,
     ServiceReplica,
 )
-from pf8_effect_journal_fake import MemoryEffectJournal
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
