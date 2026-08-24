@@ -20,12 +20,12 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 20
     env:
-      NIKA_CANDIDATE_SHA: ${{ github.sha }}
+      NIKA_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Checkout exact QA candidate
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ env.NIKA_CANDIDATE_SHA }}
           persist-credentials: false
 
       - name: Set up Python 3.12
