@@ -8,7 +8,7 @@ PF10 is an evidence and release-policy boundary. It does not make legal conclusi
 
 The release path is:
 
-`dependency -> exact source/version -> license evidence/disposition -> provenance -> distribution obligations -> notice evidence -> trusted review evidence -> exact release snapshot -> compliance decision -> release grant`.
+`dependency -> exact source/version -> license evidence/disposition -> provenance -> distribution obligations -> notice evidence -> trusted review evidence -> exact release snapshot -> compliance decision -> release grant -> delivery authorization`.
 
 `DependencyAdoption` retains the existing PF10 project/component/package/version/source/provenance/license/obligation/review semantics. `ReleaseDependency` adds an exact SHA-256 source-artifact binding and explicit transitive component edges. Missing or non-SHA-256 source identity is rejected before evaluation.
 
@@ -30,13 +30,15 @@ The release layer rejects:
 - proprietary competitor evidence without separately trusted legal/reuse authority;
 - dependency, project, artifact, release, or notice changes after a decision;
 - caller-constructed or tampered positive decisions;
-- replay of a decision against a different release snapshot.
+- replay of a decision against a different release snapshot;
+- use of a base `ProductComplianceDecision`, even when legitimately gate-issued, as delivery authority;
+- release-grant project or artifact substitution at the Business Factory delivery boundary.
 
-The decision proof is process-local integrity evidence, not a human approval, legal opinion, durable signature, credential-store secret, or hostile-code sandbox.
+The decision/grant proof is process-local integrity evidence, not a human approval, legal opinion, durable signature, credential-store secret, or hostile-code sandbox.
 
 ## Restart rule
 
-A serialized positive decision is not durable authority. Process-local decision proofs intentionally do not survive process restart. After restart the host must reconstruct the current release snapshot and obtain a fresh PF10 evaluation against the current trusted review authority. This prevents persisted `allowed=true` state from becoming replayable release authority.
+A serialized positive decision or grant is not durable authority. Process-local proofs intentionally do not survive process restart. After restart the host must reconstruct the current release snapshot and obtain a fresh PF10 evaluation plus release grant against the current trusted review authority. This prevents persisted `allowed=true` state from becoming replayable release authority.
 
 ## Packaging integration
 
@@ -50,7 +52,9 @@ The dependency notice list and the packaging notice generator are intentionally 
 
 `ReleaseComplianceGrant` is the exact-artifact release authority produced only after current-snapshot and current-packaging revalidation. It contains project, release, artifact, artifact SHA-256, snapshot digest, and evidence refs, protected by process-local integrity proof.
 
-PF9 `BusinessFactory.record_delivery()` currently consumes the older `ProductComplianceDecision` contract. That PF9 lifecycle contract has not been silently rewritten by this lane. Until the canonical trusted review authority is integrated and PF9 explicitly adopts `ReleaseComplianceGrant`, PF10 production-positive release/delivery integration remains blocked/partial. This is a deliberate fail-closed boundary, not a claim of release readiness.
+PF9 `BusinessFactory.record_delivery()` accepts only `ReleaseComplianceGrant`. It rejects a base `ProductComplianceDecision` even when that decision came from the base PF10 gate, and it independently requires the grant project identity and artifact reference to match the linked ProductProject and requested delivery artifact before the separate Business authorization intent is evaluated. The Business authorization fingerprint continues to bind the artifact, passing QA evidence and exact compliance evidence refs.
+
+This closes the exact-release bypass without creating a second legal authority. Production-positive PF10 remains fail closed until a canonical trusted review-authority adapter is integrated; tests may use deterministic fake authorities only to prove contract semantics.
 
 ## REUSE -> ADAPT -> CUSTOM (thin)
 
@@ -58,7 +62,7 @@ PF9 `BusinessFactory.record_delivery()` currently consumes the older `ProductCom
 - REUSE canonical packaging notice generator and verifier.
 - REUSE standard-library SHA-256/HMAC for deterministic fingerprints and process-local tamper detection.
 - ADAPT PF10 evidence into an exact immutable release snapshot and revalidation grant.
-- CUSTOM(thin) only release identity, dependency-graph/notice cross-checks, snapshot digest, stale/replay detection, and release grant.
+- CUSTOM(thin) only release identity, dependency-graph/notice cross-checks, snapshot digest, stale/replay detection and the Business Factory grant-consumption compatibility boundary.
 
 No new dependency is introduced.
 
@@ -67,4 +71,4 @@ No new dependency is introduced.
 - `HUMAN_TESTED=false`.
 - `NVDA_VERIFIED=false`.
 - `PRODUCTION_RELEASE_READY=false`.
-- Positive production authority remains unavailable until a canonical trusted review-authority adapter is integrated and the delivery boundary is explicitly upgraded to consume the exact release grant.
+- Delivery now requires the exact release grant; production-positive release authority remains unavailable until a canonical trusted review-authority adapter is integrated and independently proven.
