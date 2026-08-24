@@ -27,6 +27,14 @@ _REOPEN_PREFIXES = (
     "відкрити productproject",
     "перейди до productproject",
 )
+_CURRENT_PROJECT_COMMANDS = frozenset(
+    {
+        "current productproject",
+        "show current productproject",
+        "поточний productproject",
+        "покажи поточний productproject",
+    }
+)
 
 
 class PackagedProductJourneyError(ValueError):
@@ -59,6 +67,12 @@ def packaged_product_reopen_target(command: str) -> str | None:
             "Вкажіть повний ProductProject ID у форматі product- і 64 hex-символи."
         )
     return remainder.lower()
+
+
+def packaged_current_product_command(command: str) -> bool:
+    """Recognize an exact keyboard command that reports the durable presentation selection."""
+    normalized = " ".join(command.split()).casefold().strip(" :")
+    return normalized in _CURRENT_PROJECT_COMMANDS
 
 
 class PackagedProductSelectionStore:
@@ -157,12 +171,43 @@ class PackagedProductCommandRouter:
             focus_id="tasks-heading",
         )
 
+    def _describe_current_project(self) -> UIResult:
+        project_id = self._active_project_id
+        if project_id is None:
+            raise PackagedProductJourneyError(
+                "Поточний ProductProject не вибрано. Створіть продукт або відкрийте його за ID."
+            )
+        try:
+            detail = self._products.inspect_project(project_id)
+        except KeyError as exc:
+            self.clear_stale_selection()
+            raise PackagedProductJourneyError(
+                "Збережений ProductProject більше не існує. Застарілий вибір очищено."
+            ) from exc
+        except ProductProjectPresentationConsistencyError as exc:
+            raise PackagedProductJourneyError(
+                "ProductProject changed while packaged state was read; retry the current command."
+            ) from exc
+        return UIResult(
+            request_id="desktop-handler",
+            status="completed",
+            message=(
+                f"Поточний ProductProject: {project_id}; "
+                f"spec version {detail.summary.version}; state {detail.summary.state}; "
+                f"goal: {detail.summary.goal}."
+            ),
+            focus_id="tasks-heading",
+        )
+
     def create(self, payload: Mapping[str, Any]) -> UIResult:
         command = str(payload.get("command", "")).strip()
         if not command:
             raise PackagedProductJourneyError(
                 "Введіть команду перед створенням завдання."
             )
+
+        if packaged_current_product_command(command):
+            return self._describe_current_project()
 
         reopen_target = packaged_product_reopen_target(command)
         if reopen_target is not None:
