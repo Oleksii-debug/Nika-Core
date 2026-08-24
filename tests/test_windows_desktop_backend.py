@@ -59,6 +59,33 @@ class BlockingRuntime:
         return True
 
 
+class PausingDurableRuntime:
+    runtime_id = "desktop-pausing-durable-test"
+    capabilities = frozenset(
+        {RuntimeCapability.CANCELLATION, RuntimeCapability.DURABLE_RESUME}
+    )
+
+    def __init__(self) -> None:
+        self.cancelled = threading.Event()
+
+    def initial_resume_token(self, *, task_id: str, thread_id: str) -> str:
+        return f"initial:{task_id}:{thread_id}"
+
+    async def run(self, request: RuntimeRequest) -> RuntimeResult:
+        return RuntimeResult(
+            outcome=RuntimeOutcome.PAUSED,
+            resume_token=f"paused:{request.task_id}:{request.thread_id}",
+        )
+
+    async def resume(self, request: RuntimeResumeRequest) -> RuntimeResult:
+        return RuntimeResult(outcome=RuntimeOutcome.COMPLETED)
+
+    async def cancel(self, *, task_id: str, thread_id: str) -> bool:
+        del task_id, thread_id
+        self.cancelled.set()
+        return True
+
+
 def build_backend(
     tmp_path: Path,
     *,
@@ -168,6 +195,23 @@ def test_stop_cancels_live_non_durable_runtime_through_coordinator(tmp_path: Pat
     assert backend.stop_agent({}).status == "completed"
     assert runtime.cancelled.is_set()
     wait_for_state(queue, task.task_id, TaskState.CANCELLED)
+    backend.close()
+
+
+def test_stop_uses_persisted_runtime_session_before_local_paused_state(
+    tmp_path: Path,
+) -> None:
+    runtime = PausingDurableRuntime()
+    backend, queue, _store = build_backend(tmp_path, runtime=runtime)
+    backend.create_task({"command": "pause from runtime"})
+    task = queue.list_recent()[0]
+    wait_for_state(queue, task.task_id, TaskState.PAUSED)
+    assert backend._coordinator.sessions.get(task.task_id) is not None
+
+    assert backend.stop_agent({}).status == "completed"
+    assert runtime.cancelled.is_set()
+    assert queue.get(task.task_id).state == TaskState.CANCELLED
+    assert backend._coordinator.sessions.get(task.task_id) is None
     backend.close()
 
 
