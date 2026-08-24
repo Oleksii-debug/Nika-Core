@@ -79,15 +79,18 @@ class SQLiteStore:
             "CREATE TABLE IF NOT EXISTS m3_extension_schema_migrations ("
             "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
         )
-        row = conn.execute(
-            "SELECT MAX(version) AS version FROM m3_extension_schema_migrations"
-        ).fetchone()
-        current = int(row["version"] or 0)
+        version_rows = conn.execute(
+            "SELECT version FROM m3_extension_schema_migrations ORDER BY version"
+        ).fetchall()
+        versions = [int(row["version"]) for row in version_rows]
+        current = versions[-1] if versions else 0
         if current > M3_EXTENSION_SCHEMA_VERSION:
             raise RuntimeError(
                 "M3 extension database schema "
                 f"{current} is newer than supported schema {M3_EXTENSION_SCHEMA_VERSION}"
             )
+        if versions != list(range(1, current + 1)):
+            raise RuntimeError("M3 extension migration history is non-contiguous")
         for version in range(current + 1, M3_EXTENSION_SCHEMA_VERSION + 1):
             statements = M3_EXTENSION_MIGRATIONS.get(version)
             if statements is None:
@@ -98,6 +101,49 @@ class SQLiteStore:
                 "INSERT INTO m3_extension_schema_migrations(version, applied_at) VALUES (?, ?)",
                 (version, datetime.now(UTC).isoformat()),
             )
+        SQLiteStore._validate_m3_extension_schema(conn)
+
+    @staticmethod
+    def _validate_m3_extension_schema(conn: sqlite3.Connection) -> None:
+        required_columns = {
+            "resource_budgets": {
+                "max_disk_percent",
+                "max_gpu_percent",
+                "max_process_memory_bytes",
+            },
+            "scheduled_job_bindings": {
+                "job_id",
+                "scope",
+                "owner_id",
+                "dedup_key",
+                "product_project_id",
+                "created_at",
+            },
+            "resource_requests": {
+                "sequence",
+                "scope",
+                "owner_id",
+                "request_id",
+                "product_project_id",
+                "state",
+                "lease_owner_id",
+                "lease_owner_process_id",
+                "lease_owner_started_at",
+                "created_at",
+                "updated_at",
+            },
+        }
+        for table_name, expected_columns in required_columns.items():
+            rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+            if not rows:
+                raise RuntimeError(f"M3 extension schema table missing: {table_name}")
+            present_columns = {row["name"] for row in rows}
+            missing_columns = sorted(expected_columns - present_columns)
+            if missing_columns:
+                missing = ", ".join(missing_columns)
+                raise RuntimeError(
+                    f"M3 extension schema columns missing from {table_name}: {missing}"
+                )
 
     @staticmethod
     def _initialize_product_project_schema(conn: sqlite3.Connection) -> None:
