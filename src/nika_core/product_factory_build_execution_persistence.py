@@ -109,36 +109,42 @@ class SQLiteBuildExecutionCheckpointStore:
     def has_checkpoint(self) -> bool:
         with self.store.connection() as conn:
             self._assert_host_task(conn)
-            return self._latest_row(conn) is not None
+            rows = self._history_rows(conn)
+            if not rows:
+                return False
+            self._validate_history(rows)
+            return True
 
     def latest(self) -> SavedBuildExecutionCheckpoint:
         with self.store.connection() as conn:
             self._assert_host_task(conn)
-            row = self._latest_row(conn)
-            if row is None:
+            rows = self._history_rows(conn)
+            if not rows:
                 raise BuildExecutionDurabilityError(
                     "no durable PF5 build-execution checkpoint exists"
                 )
-            return self._decode_row(row)
+            return self._validate_history(rows)[-1]
 
     def save(self, snapshot: DurableBuildExecutionSnapshot) -> SavedBuildExecutionCheckpoint:
         self._validate_project_binding(snapshot)
         payload = _encode_payload(snapshot)
         checksum = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-        checkpoint_id = "pf5-" + hashlib.sha256(
-            f"{self.host_task_id}:{snapshot.sequence}:{checksum}".encode()
-        ).hexdigest()
+        checkpoint_id = _checkpoint_identity(
+            self.host_task_id,
+            snapshot.sequence,
+            checksum,
+        )
         with self.store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             self._assert_host_task(conn)
-            previous_row = self._latest_row(conn)
-            if previous_row is None:
+            history_rows = self._history_rows(conn)
+            if not history_rows:
                 if snapshot.sequence != 1:
                     raise BuildExecutionDurabilityError(
                         "first durable PF5 transition must have sequence 1"
                     )
             else:
-                previous = self._decode_row(previous_row)
+                previous = self._validate_history(history_rows)[-1]
                 if snapshot.sequence == previous.snapshot.sequence:
                     if checksum != previous.checksum_sha256:
                         raise BuildExecutionDurabilityError(
@@ -149,6 +155,7 @@ class SQLiteBuildExecutionCheckpointStore:
                     raise BuildExecutionDurabilityError(
                         "PF5 durable transition sequence skipped or regressed"
                     )
+                _validate_snapshot_transition(previous.snapshot, snapshot)
             try:
                 conn.execute(
                     "INSERT INTO checkpoints("
@@ -181,17 +188,50 @@ class SQLiteBuildExecutionCheckpointStore:
             )
         return SavedBuildExecutionCheckpoint(checkpoint_id, snapshot, checksum)
 
-    def _latest_row(self, conn: sqlite3.Connection):
+    def _history_rows(self, conn: sqlite3.Connection):
         return conn.execute(
-            "SELECT checkpoint_id, payload_json, checksum_sha256 "
-            "FROM checkpoints WHERE task_id=? AND stage=? ORDER BY rowid DESC LIMIT 1",
+            "SELECT rowid AS checkpoint_rowid, checkpoint_id, payload_json, checksum_sha256 "
+            "FROM checkpoints WHERE task_id=? AND stage=? ORDER BY rowid",
             (self.host_task_id, _CHECKPOINT_STAGE),
-        ).fetchone()
+        ).fetchall()
+
+    def _validate_history(self, rows) -> tuple[SavedBuildExecutionCheckpoint, ...]:
+        validated: list[SavedBuildExecutionCheckpoint] = []
+        previous: SavedBuildExecutionCheckpoint | None = None
+        for expected_sequence, row in enumerate(rows, start=1):
+            row_id = row["checkpoint_rowid"]
+            if type(row_id) is not int or row_id <= 0:
+                raise BuildExecutionCheckpointIntegrityError(
+                    "PF5 checkpoint row identity is malformed"
+                )
+            current = self._decode_row(row)
+            if current.snapshot.sequence != expected_sequence:
+                raise BuildExecutionCheckpointIntegrityError(
+                    "PF5 checkpoint sequence history is not contiguous"
+                )
+            if previous is not None:
+                _validate_snapshot_transition(previous.snapshot, current.snapshot)
+            validated.append(current)
+            previous = current
+        return tuple(validated)
 
     def _decode_row(self, row) -> SavedBuildExecutionCheckpoint:
+        checkpoint_id = row["checkpoint_id"]
         payload = row["payload_json"]
+        stored_checksum = row["checksum_sha256"]
+        if (
+            type(checkpoint_id) is not str
+            or type(payload) is not str
+            or type(stored_checksum) is not str
+            or not checkpoint_id
+            or not payload
+            or not stored_checksum
+        ):
+            raise BuildExecutionCheckpointIntegrityError(
+                "PF5 checkpoint storage types are malformed"
+            )
         checksum = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-        if checksum != row["checksum_sha256"]:
+        if checksum != stored_checksum:
             raise BuildExecutionCheckpointIntegrityError("PF5 checkpoint checksum mismatch")
         try:
             raw = json.loads(payload)
@@ -208,7 +248,16 @@ class SQLiteBuildExecutionCheckpointStore:
             raise BuildExecutionCheckpointIntegrityError("PF5 checkpoint root type is invalid")
         _validate_durable_types(decoded)
         self._validate_project_binding(decoded)
-        return SavedBuildExecutionCheckpoint(row["checkpoint_id"], decoded, checksum)
+        expected_id = _checkpoint_identity(
+            self.host_task_id,
+            decoded.sequence,
+            checksum,
+        )
+        if checkpoint_id != expected_id:
+            raise BuildExecutionCheckpointIntegrityError(
+                "PF5 checkpoint identity does not match durable sequence/checksum"
+            )
+        return SavedBuildExecutionCheckpoint(checkpoint_id, decoded, checksum)
 
     def _assert_host_task(self, conn: sqlite3.Connection) -> None:
         row = conn.execute(
@@ -234,12 +283,106 @@ class SQLiteBuildExecutionCheckpointStore:
             raise BuildExecutionDurabilityError(
                 "PF5 durable checkpoint must contain execution work"
             )
+        work_ids = [record.spec.request.work_id for record in snapshot.coordinator.records]
+        if len(work_ids) != len(set(work_ids)) or work_ids != sorted(work_ids):
+            raise BuildExecutionCheckpointIntegrityError(
+                "PF5 checkpoint work identities are duplicate or non-canonical"
+            )
         for record in snapshot.coordinator.records:
             if record.spec.request.project_id != self.project_id:
                 raise BuildExecutionDurabilityError(
                     "PF5 checkpoint contains work outside its ProductProject identity"
                 )
+        evidence_ids = [item.work_id for item in snapshot.file_evidence]
+        if len(evidence_ids) != len(set(evidence_ids)) or evidence_ids != sorted(evidence_ids):
+            raise BuildExecutionCheckpointIntegrityError(
+                "PF5 checkpoint file-evidence identities are duplicate or non-canonical"
+            )
         _validate_lease_record_bindings(snapshot)
+
+
+def _checkpoint_identity(host_task_id: str, sequence: int, checksum: str) -> str:
+    return "pf5-" + hashlib.sha256(
+        f"{host_task_id}:{sequence}:{checksum}".encode()
+    ).hexdigest()
+
+
+def _validate_snapshot_transition(
+    previous: DurableBuildExecutionSnapshot,
+    current: DurableBuildExecutionSnapshot,
+) -> None:
+    if current.sequence != previous.sequence + 1:
+        raise BuildExecutionCheckpointIntegrityError(
+            "PF5 durable transition sequence skipped or regressed"
+        )
+    if current.registry_next_lease < previous.registry_next_lease:
+        raise BuildExecutionCheckpointIntegrityError(
+            "PF5 registry lease counter regressed across durable transition"
+        )
+
+    previous_records = {
+        record.spec.request.work_id: record for record in previous.coordinator.records
+    }
+    current_records = {
+        record.spec.request.work_id: record for record in current.coordinator.records
+    }
+    if not set(previous_records) <= set(current_records):
+        raise BuildExecutionCheckpointIntegrityError(
+            "PF5 durable transition removed existing execution work"
+        )
+
+    for work_id in set(current_records) - set(previous_records):
+        record = current_records[work_id]
+        if (
+            record.state is not BuildExecutionState.PENDING
+            or record.attempt != 0
+            or record.node_id is not None
+            or record.lease_id is not None
+            or record.dispatch is not None
+            or record.evidence is not None
+            or record.block_reason is not None
+        ):
+            raise BuildExecutionCheckpointIntegrityError(
+                "new PF5 durable work did not enter through PENDING"
+            )
+
+    for work_id, old in previous_records.items():
+        new = current_records[work_id]
+        if new.spec != old.spec or new.grant != old.grant:
+            raise BuildExecutionCheckpointIntegrityError(
+                "PF5 durable execution identity changed across checkpoint lineage"
+            )
+        if new.attempt < old.attempt:
+            raise BuildExecutionCheckpointIntegrityError(
+                "PF5 durable execution attempt regressed"
+            )
+        if new.updated_at < old.updated_at:
+            raise BuildExecutionCheckpointIntegrityError(
+                "PF5 durable execution timestamp regressed"
+            )
+        if new.state not in _DURABLE_STATE_TRANSITIONS[old.state]:
+            raise BuildExecutionCheckpointIntegrityError(
+                "PF5 durable execution state transition is not legal"
+            )
+        if old.state in _DISPATCH_LOCKED_STATES and new.dispatch != old.dispatch:
+            raise BuildExecutionCheckpointIntegrityError(
+                "PF5 durable dispatch identity changed after the external-effect boundary"
+            )
+        if old.state in _TERMINAL_STATES and new != old:
+            raise BuildExecutionCheckpointIntegrityError(
+                "terminal PF5 execution changed after durable completion"
+            )
+
+    previous_evidence = {item.work_id: item for item in previous.file_evidence}
+    current_evidence = {item.work_id: item for item in current.file_evidence}
+    if not set(previous_evidence) <= set(current_evidence):
+        raise BuildExecutionCheckpointIntegrityError(
+            "PF5 durable transition removed prior file evidence"
+        )
+    if any(current_evidence[work_id] != item for work_id, item in previous_evidence.items()):
+        raise BuildExecutionCheckpointIntegrityError(
+            "PF5 durable transition rewrote prior file evidence"
+        )
 
 
 def _validate_lease_record_bindings(snapshot: DurableBuildExecutionSnapshot) -> None:
@@ -418,6 +561,78 @@ def _aware(value: datetime) -> datetime:
         raise BuildExecutionDurabilityError("PF5 durable datetime must be timezone-aware")
     return value.astimezone(UTC)
 
+
+_DURABLE_STATE_TRANSITIONS = {
+    BuildExecutionState.PENDING: frozenset(
+        {
+            BuildExecutionState.PENDING,
+            BuildExecutionState.WAITING_FOR_NODE,
+            BuildExecutionState.WAITING_FOR_AUTHORITY,
+            BuildExecutionState.PREPARED,
+        }
+    ),
+    BuildExecutionState.WAITING_FOR_NODE: frozenset(
+        {
+            BuildExecutionState.WAITING_FOR_NODE,
+            BuildExecutionState.WAITING_FOR_AUTHORITY,
+            BuildExecutionState.PREPARED,
+        }
+    ),
+    BuildExecutionState.WAITING_FOR_AUTHORITY: frozenset(
+        {
+            BuildExecutionState.WAITING_FOR_NODE,
+            BuildExecutionState.WAITING_FOR_AUTHORITY,
+            BuildExecutionState.PREPARED,
+        }
+    ),
+    BuildExecutionState.PREPARED: frozenset(
+        {
+            BuildExecutionState.PREPARED,
+            BuildExecutionState.WAITING_FOR_NODE,
+            BuildExecutionState.WAITING_FOR_AUTHORITY,
+            BuildExecutionState.DISPATCHING,
+        }
+    ),
+    BuildExecutionState.DISPATCHING: frozenset(
+        {
+            BuildExecutionState.DISPATCHING,
+            BuildExecutionState.WAITING_FOR_AUTHORITY,
+            BuildExecutionState.EFFECT_IN_FLIGHT,
+            BuildExecutionState.RECONCILE_REQUIRED,
+        }
+    ),
+    BuildExecutionState.EFFECT_IN_FLIGHT: frozenset(
+        {
+            BuildExecutionState.EFFECT_IN_FLIGHT,
+            BuildExecutionState.RECONCILE_REQUIRED,
+            BuildExecutionState.SUCCEEDED,
+            BuildExecutionState.FAILED,
+        }
+    ),
+    BuildExecutionState.RECONCILE_REQUIRED: frozenset(
+        {
+            BuildExecutionState.RECONCILE_REQUIRED,
+            BuildExecutionState.SUCCEEDED,
+            BuildExecutionState.FAILED,
+        }
+    ),
+    BuildExecutionState.SUCCEEDED: frozenset({BuildExecutionState.SUCCEEDED}),
+    BuildExecutionState.FAILED: frozenset({BuildExecutionState.FAILED}),
+}
+_DISPATCH_LOCKED_STATES = frozenset(
+    {
+        BuildExecutionState.EFFECT_IN_FLIGHT,
+        BuildExecutionState.RECONCILE_REQUIRED,
+        BuildExecutionState.SUCCEEDED,
+        BuildExecutionState.FAILED,
+    }
+)
+_TERMINAL_STATES = frozenset(
+    {
+        BuildExecutionState.SUCCEEDED,
+        BuildExecutionState.FAILED,
+    }
+)
 
 _DATACLASS_TYPES = {
     cls.__name__: cls
