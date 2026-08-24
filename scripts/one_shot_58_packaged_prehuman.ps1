@@ -444,8 +444,22 @@ try {
         Invoke-Check 'session1.safe_deterministic_local_goal' {
             Dispatch-CreateFromCommandInput $localGoal | Out-Null
             Wait-UniqueElement "Завдання виконано в безпечному режимі без LLM: $localGoal" ([System.Windows.Automation.ControlType]::Text) | Out-Null
-            Wait-UniqueElement "$localGoal — completed" ([System.Windows.Automation.ControlType]::Text) | Out-Null
+            Wait-UniqueElement "$localGoal — completed" ([System.Windows.Automation.ControlType]::ListItem) | Out-Null
             'ordinary goal completed through packaged deterministic ReferenceRuntime and persisted task view'
+        } | Out-Null
+
+        Invoke-Check 'session1.rejected_create_returns_focus_to_editor' {
+            $edit = Focus-CommandInput
+            [System.Windows.Forms.SendKeys]::SendWait('^a')
+            [System.Windows.Forms.SendKeys]::SendWait('{BACKSPACE}')
+            Require ((Get-EditValue $edit) -eq '') 'Command input was not cleared before rejected create.'
+            [System.Windows.Forms.SendKeys]::SendWait('{TAB}')
+            $create = Wait-UniqueElement 'Створити завдання' ([System.Windows.Automation.ControlType]::Button)
+            Assert-ExactFocus $create 'create task button before rejected empty command'
+            [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+            Wait-UniqueElement 'Введіть команду перед створенням завдання.' ([System.Windows.Automation.ControlType]::Text) | Out-Null
+            Assert-ExactFocus $edit 'command input after rejected empty command'
+            'integrated task.create error feedback returns focus to the command editor'
         } | Out-Null
 
         Invoke-Check 'session1.recoverable_error_and_focus' {
@@ -459,7 +473,7 @@ try {
         } | Out-Null
 
         Invoke-Check 'session1.editable_shortcut_override_setup' {
-            $binding = Wait-UniqueElement 'Комбінація для Open agents' ([System.Windows.Automation.ControlType]::Edit)
+            $binding = Wait-UniqueElement 'Комбінація для Open agents (nav.agents)' ([System.Windows.Automation.ControlType]::Edit)
             $binding.SetFocus()
             Assert-ExactFocus $binding 'Open agents binding field'
             [System.Windows.Forms.SendKeys]::SendWait('^a')
@@ -469,7 +483,7 @@ try {
             $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
             Require ($null -ne $focused) 'Focus disappeared after Tab from key binding input.'
             Require ($focused.Current.ControlType.Equals([System.Windows.Automation.ControlType]::Button)) 'Tab did not reach a semantic save button.'
-            Require ($focused.Current.Name -eq 'Зберегти / очистити') "Unexpected save control '$($focused.Current.Name)'."
+            Require ($focused.Current.Name -eq 'Зберегти або очистити комбінацію для Open agents (nav.agents)') "Unexpected save control '$($focused.Current.Name)'."
             [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
             Wait-UniqueElement 'Shortcut saved.' ([System.Windows.Automation.ControlType]::Text) | Out-Null
             'nav.agents temporarily mapped to Backspace using keyboard-accessible Settings control'
@@ -493,7 +507,7 @@ try {
         } | Out-Null
 
         Invoke-Check 'session1.restore_keymap_default' {
-            $binding = Wait-UniqueElement 'Комбінація для Open agents' ([System.Windows.Automation.ControlType]::Edit)
+            $binding = Wait-UniqueElement 'Комбінація для Open agents (nav.agents)' ([System.Windows.Automation.ControlType]::Edit)
             $binding.SetFocus()
             [System.Windows.Forms.SendKeys]::SendWait('{TAB}')
             [System.Windows.Forms.SendKeys]::SendWait('{TAB}')
@@ -501,7 +515,7 @@ try {
             $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
             Require ($null -ne $focused) 'Focus disappeared before default-restore button.'
             Require ($focused.Current.ControlType.Equals([System.Windows.Automation.ControlType]::Button)) 'Expected default-restore button.'
-            Require ($focused.Current.Name -eq 'За замовчуванням') "Unexpected restore control '$($focused.Current.Name)'."
+            Require ($focused.Current.Name -eq 'Відновити комбінацію за замовчуванням для Open agents (nav.agents)') "Unexpected restore control '$($focused.Current.Name)'."
             [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
             Wait-UniqueElement 'Default shortcut restored.' ([System.Windows.Automation.ControlType]::Text) | Out-Null
             'temporary keymap mutation restored'
@@ -527,8 +541,19 @@ try {
         Invoke-Check 'persisted_product_factory_state_via_packaged_cli' {
             $proofPath = Join-Path (Split-Path -Parent $EvidencePath) 'one-shot-58-pf11-restart-proof.json'
             Remove-Item -LiteralPath $proofPath -Force -ErrorAction SilentlyContinue
-            & $ExePath --pf11-proof --pf11-proof-output $proofPath --pf11-proof-command $productCommand
-            if ($LASTEXITCODE -ne 0) { throw "Packaged --pf11-proof exited $LASTEXITCODE." }
+            $proofStart = [System.Diagnostics.ProcessStartInfo]::new()
+            $proofStart.FileName = $ExePath
+            $proofStart.UseShellExecute = $false
+            [void]$proofStart.ArgumentList.Add('--pf11-proof')
+            [void]$proofStart.ArgumentList.Add('--pf11-proof-output')
+            [void]$proofStart.ArgumentList.Add($proofPath)
+            [void]$proofStart.ArgumentList.Add('--pf11-proof-command')
+            [void]$proofStart.ArgumentList.Add($productCommand)
+            $proofProcess = [System.Diagnostics.Process]::Start($proofStart)
+            if ($null -eq $proofProcess) { throw 'Packaged --pf11-proof process did not start.' }
+            $proofProcess.WaitForExit()
+            if ($proofProcess.ExitCode -ne 0) { throw "Packaged --pf11-proof exited $($proofProcess.ExitCode)." }
+            Require (Test-Path -LiteralPath $proofPath -PathType Leaf) 'Packaged --pf11-proof did not produce evidence.'
             $proof = Get-Content -LiteralPath $proofPath -Raw -Encoding UTF8 | ConvertFrom-Json
             Require ($proof.project_id -eq $script:productId) "Persisted project id '$($proof.project_id)' != UI-created '$script:productId'."
             Require ($proof.spec_version -eq 1) 'Persisted ProductProject spec_version changed.'
