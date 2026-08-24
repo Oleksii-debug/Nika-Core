@@ -109,6 +109,7 @@ def _allowed_release_grant(
     artifact_ref: str,
     bundle_dir,
 ):
+    bundle_dir.mkdir(parents=True, exist_ok=True)
     notice_bundle_sha256 = build_verified_notice_bundle(bundle_dir)
     snapshot = ReleaseComplianceSnapshot(
         project_id=project_id,
