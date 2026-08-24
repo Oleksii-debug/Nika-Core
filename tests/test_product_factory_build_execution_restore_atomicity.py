@@ -18,11 +18,9 @@ from nika_core.product_factory_build_execution import (
     ProjectExecutionAuthority,
 )
 from nika_core.product_factory_build_execution_host import (
+    BuildExecutionDurabilityError,
     BuildOutputPolicy,
     DurableBuildExecutionHost,
-)
-from nika_core.product_factory_build_execution_persistence import (
-    BuildExecutionDurabilityError,
     SQLiteBuildExecutionCheckpointStore,
 )
 from nika_core.product_factory_coding_worker_adapter import RepositoryPathIdentity
