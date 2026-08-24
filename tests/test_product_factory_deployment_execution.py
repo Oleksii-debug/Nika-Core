@@ -5,7 +5,11 @@ from datetime import UTC, datetime
 
 import pytest
 
-from nika_core.product_factory_credentials import CredentialBroker, SecretRef
+from nika_core.product_factory_credentials import (
+    CredentialBroker,
+    SecretRef,
+    credential_authority_fingerprint,
+)
 from nika_core.product_factory_deployment import (
     DeploymentFabric,
     DeploymentIntent,
@@ -217,17 +221,20 @@ def _coordinator(
     nodes.register(local_linux_node())
     store = FakeProtectedStore({("secret:project-a", 1)})
     credentials = CredentialBroker(store)
-    credentials.register_secret(
-        SecretRef(
-            "secret:project-a",
-            "project-a",
-            "fake-staging",
-            "staging deployment",
-            frozenset({"deploy:staging"}),
-            frozenset({"staging-provider"}),
-        ),
-        now=NOW,
+    reference = SecretRef(
+        "secret:project-a",
+        "project-a",
+        "fake-staging",
+        "staging deployment",
+        frozenset({"deploy:staging"}),
+        frozenset({"staging-provider"}),
     )
+    store.bind_authority(
+        secret_ref=reference.secret_ref,
+        generation=reference.generation,
+        authority_fingerprint=credential_authority_fingerprint(reference),
+    )
+    credentials.register_secret(reference, now=NOW)
     actual_provider = provider or FakeProvider()
     actual_health = health or FakeNodeHealth()
     coordinator = DeploymentExecutionCoordinator(

@@ -10,6 +10,7 @@ from nika_core.product_factory_credentials import (
     CredentialBroker,
     CredentialBrokerError,
     SecretRef,
+    credential_authority_fingerprint,
 )
 from nika_core.product_factory_windows_credentials import (
     ProtectedCredentialStoreError,
@@ -48,12 +49,22 @@ def secret(generation: int = 1) -> SecretRef:
     )
 
 
+def _enroll(store: WindowsCredentialStore, reference: SecretRef) -> None:
+    store.bind_authority(
+        secret_ref=reference.secret_ref,
+        generation=reference.generation,
+        authority_fingerprint=credential_authority_fingerprint(reference),
+    )
+
+
 def test_windows_store_satisfies_broker_handle_and_revocation_contract() -> None:
     backend = FakePersistentWinVault()
     store = WindowsCredentialStore(backend)
     store.provision_secret("secret-a", 1, RAW_SECRET)
+    reference = secret()
+    _enroll(store, reference)
     broker = CredentialBroker(store)
-    broker.register_secret(secret(), now=NOW)
+    broker.register_secret(reference, now=NOW)
 
     lease = broker.issue_lease(
         project_id=PROJECT,
@@ -100,8 +111,10 @@ def test_broker_rotation_uses_preprovisioned_windows_generation_and_invalidates_
     store = WindowsCredentialStore(backend)
     store.provision_secret("secret-a", 1, RAW_SECRET)
     store.provision_secret("secret-a", 2, "rotated-integration-secret")
+    reference = secret()
+    _enroll(store, reference)
     broker = CredentialBroker(store)
-    broker.register_secret(secret(), now=NOW)
+    broker.register_secret(reference, now=NOW)
     old_lease = broker.issue_lease(
         project_id=PROJECT,
         secret_ref="secret-a",
@@ -149,8 +162,10 @@ def test_broker_and_windows_store_restart_preserve_reference_not_lease() -> None
     backend = FakePersistentWinVault()
     first_store = WindowsCredentialStore(backend)
     first_store.provision_secret("secret-a", 1, RAW_SECRET)
+    reference = secret()
+    _enroll(first_store, reference)
     first_broker = CredentialBroker(first_store)
-    first_broker.register_secret(secret(), now=NOW)
+    first_broker.register_secret(reference, now=NOW)
     old_lease = first_broker.issue_lease(
         project_id=PROJECT,
         secret_ref="secret-a",
@@ -282,6 +297,12 @@ def test_windows_handle_operation_is_idempotent_and_reconcilable() -> None:
     backend = FakePersistentWinVault()
     store = WindowsCredentialStore(backend)
     store.provision_secret("secret-a", 1, RAW_SECRET)
+    active_authority = hashlib.sha256(b"handle-operation-active-authority").hexdigest()
+    store.bind_authority(
+        secret_ref="secret-a",
+        generation=1,
+        authority_fingerprint=active_authority,
+    )
     expires_at = NOW + timedelta(minutes=5)
     request = {
         "operation_id": "credential-lease-00000001",
