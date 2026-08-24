@@ -138,6 +138,12 @@ all immutable `knowledge_versions` and `knowledge_chunks`, removes historical in
 DEV24 candidate databases, and fails closed if an artifact points to a missing current version.
 This makes the BM25/current-authority repair restart-safe rather than relying only on future writes.
 
+Every canonical `SQLiteStore.initialize()` also runs SQLite `PRAGMA foreign_key_check` and rejects
+violations whose child table belongs to the knowledge schema. This closes a corruption class that
+`quick_check` does not cover: a raw/corrupt database cannot retain internally consistent corpus rows
+while silently losing their authoritative workspace/artifact/version parent. Foreign-key failures in
+unrelated subsystem tables are not reclassified as DEV24 corruption.
+
 Restart requires no in-memory reconstruction: current version, history, ACL, chunks and hashes are
 durable SQLite authority; FTS is a deterministic current-version projection rebuilt by ordered
 migration when required. Concurrent ingesters serialize through `BEGIN IMMEDIATE`, so an exact
@@ -156,6 +162,12 @@ duplicate race creates one immutable version plus one deduplicated retry rather 
 - FTS title/body and metadata match the authoritative current version/chunk;
 - no orphan, duplicate, missing, historical, or stale FTS row exists.
 
+On canonical restart, `initialize_knowledge_schema()` additionally rejects knowledge-table foreign-key
+violations before the database is returned to the application. A focused regression deletes the
+parent research workspace through a raw SQLite connection with FK enforcement disabled and proves
+that reopening through `SQLiteStore.initialize()` fails closed rather than accepting the orphaned
+corpus.
+
 Search independently rechecks the selected version hash, FTS title/body, chunk hash, and boundaries
 before returning a hit. Corrupt material fails closed with `CorpusCorruptionError`; it is not passed
 to an intelligence provider.
@@ -167,8 +179,8 @@ Required repository evidence for this batch is the exact-head `scripts/verify.py
 cover duplicate/change/reversion/provenance-policy versioning, restart/concurrency, ACL/workspace
 isolation, DEV23 source-registry provenance binding, the AUD03 cross-workspace oracle, deterministic
 tie ranking, literal query handling, provenance and chunk boundaries, current-only FTS projection,
-v2-to-v3 index rebuild, version/chunk/FTS corruption, injected transaction rollback, legacy and
-future-schema migration behavior, artifact-distinct retrieval evaluation, Boolean-limit rejection,
-and real `SQLiteStore` integration.
+v2-to-v3 index rebuild, version/chunk/FTS corruption, knowledge foreign-key corruption at restart,
+injected transaction rollback, legacy and future-schema migration behavior, artifact-distinct
+retrieval evaluation, Boolean-limit rejection, and real `SQLiteStore` integration.
 
 `HUMAN_TESTED=false`. `NVDA_VERIFIED=false`. This backend batch does not claim a human/NVDA gate.
