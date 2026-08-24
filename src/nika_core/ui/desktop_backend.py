@@ -199,15 +199,6 @@ class DesktopBackend:
             raise ValueError("Немає активного завдання агента для зупинки.")
 
         live = self._live_run(record.task_id)
-        if record.state is TaskState.READY and live is not None:
-            self._queue.transition(record.task_id, TaskState.CANCELLED)
-            return UIResult(
-                request_id="desktop-handler",
-                status="completed",
-                message="Завдання скасовано до початку runtime-виконання.",
-                focus_id="tasks-heading",
-            )
-
         session = self._coordinator.sessions.get(record.task_id)
         if live is not None:
             return self._request_runtime_cancel(
