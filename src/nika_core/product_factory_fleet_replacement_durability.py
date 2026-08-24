@@ -40,7 +40,7 @@ class SQLiteFleetReplacementDispatchJournal:
         attempt: int,
         source_was_enabled: bool,
     ) -> DurableReplacementDispatch:
-        if attempt <= 0:
+        if type(attempt) is not int or attempt <= 0:
             raise FleetReplacementError("durable replacement dispatch attempt must be positive")
         if not isinstance(source_was_enabled, bool):
             raise FleetReplacementError(
@@ -183,7 +183,19 @@ class SQLiteFleetReplacementDispatchJournal:
             row = conn.execute(
                 f"SELECT MAX(version) AS version FROM {_SCHEMA_TABLE}"
             ).fetchone()
-            current = int(row["version"] or 0)
+            raw_version = row["version"]
+            if raw_version is None:
+                current = 0
+            elif type(raw_version) is int:
+                current = raw_version
+            else:
+                raise FleetReplacementError(
+                    "fleet replacement journal schema version storage type is invalid"
+                )
+            if current < 0:
+                raise FleetReplacementError(
+                    "fleet replacement journal schema version is invalid"
+                )
             if current > _SCHEMA_VERSION:
                 raise FleetReplacementError(
                     "fleet replacement journal schema is newer than supported"
@@ -223,27 +235,42 @@ class SQLiteFleetReplacementDispatchJournal:
 
     @staticmethod
     def _row_to_record(row: sqlite3.Row) -> DurableReplacementDispatch:
+        attempt = _require_sqlite_integer(row["attempt"], "attempt")
+        source_raw = _require_sqlite_integer(
+            row["source_was_enabled"],
+            "source_was_enabled",
+        )
+        request_json = _require_sqlite_text(row["request_json"], "request_json")
+        stored_request_checksum = _require_sqlite_text(
+            row["request_checksum_sha256"],
+            "request_checksum_sha256",
+        )
+        request_id = _require_sqlite_text(row["request_id"], "request_id")
+        plan_id = _require_sqlite_text(row["plan_id"], "plan_id")
+        project_id = _require_sqlite_text(row["project_id"], "project_id")
+        service_id = _require_sqlite_text(row["service_id"], "service_id")
+        replica_id = _require_sqlite_text(row["replica_id"], "replica_id")
+        _require_sqlite_text(row["created_at"], "created_at")
+        if row["resolved_at"] is not None:
+            _require_sqlite_text(row["resolved_at"], "resolved_at")
         try:
-            attempt = int(row["attempt"])
-            source_raw = int(row["source_was_enabled"])
-            request_payload = json.loads(str(row["request_json"]))
+            request_payload = json.loads(request_json)
             request = _request_from_payload(request_payload)
-            stored_request_checksum = str(row["request_checksum_sha256"])
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise FleetReplacementError(
                 "durable replacement dispatch row is malformed"
             ) from exc
         if attempt <= 0 or source_raw not in {0, 1}:
             raise FleetReplacementError("durable replacement dispatch metadata is invalid")
-        if row["request_id"] != request.request_id:
+        if request_id != request.request_id:
             raise FleetReplacementError(
                 "durable replacement dispatch row request identity is inconsistent"
             )
         if (
-            row["plan_id"] != request.plan_id
-            or row["project_id"] != request.project_id
-            or row["service_id"] != request.service_id
-            or row["replica_id"] != request.replica_id
+            plan_id != request.plan_id
+            or project_id != request.project_id
+            or service_id != request.service_id
+            or replica_id != request.replica_id
         ):
             raise FleetReplacementError(
                 "durable replacement dispatch row scope identity is inconsistent"
@@ -263,9 +290,13 @@ class SQLiteFleetReplacementDispatchJournal:
                 "durable replacement terminal evidence is partially persisted"
             )
         if result_json is not None:
+            result_json_text = _require_sqlite_text(result_json, "result_json")
+            result_checksum = _require_sqlite_text(
+                result_checksum_raw,
+                "result_checksum_sha256",
+            )
             try:
-                result = _result_from_payload(json.loads(str(result_json)))
-                result_checksum = str(result_checksum_raw)
+                result = _result_from_payload(json.loads(result_json_text))
             except (TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise FleetReplacementError(
                     "durable replacement terminal evidence is malformed"
@@ -286,6 +317,22 @@ class SQLiteFleetReplacementDispatchJournal:
             terminal_result=result,
             result_checksum_sha256=result_checksum,
         )
+
+
+def _require_sqlite_integer(value: object, field: str) -> int:
+    if type(value) is not int:
+        raise FleetReplacementError(
+            f"durable replacement {field} storage type must be INTEGER"
+        )
+    return value
+
+
+def _require_sqlite_text(value: object, field: str) -> str:
+    if type(value) is not str:
+        raise FleetReplacementError(
+            f"durable replacement {field} storage type must be TEXT"
+        )
+    return value
 
 
 def _request_payload(request: ReplicaReplacementRequest) -> dict[str, Any]:
