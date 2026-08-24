@@ -61,7 +61,24 @@ def _factory(approval_authority=None) -> BusinessFactory:
     )
 
 
-def _advance_to_work_order(factory: BusinessFactory, approval_authority) -> None:
+def _product_spec(
+    *,
+    goal: str = "Build the authorized expense app test product",
+    desired_outcome: str = "A QA-verified delivery candidate",
+) -> ProductProjectSpec:
+    return ProductProjectSpec(
+        goal=goal,
+        desired_outcome=desired_outcome,
+        compliance={"business_work_order_ref": "work-order-1"},
+    )
+
+
+def _advance_to_work_order(
+    factory: BusinessFactory,
+    approval_authority,
+    *,
+    product_spec: ProductProjectSpec | None = None,
+) -> ProductProjectSpec:
     factory.identify_opportunity(
         opportunity_id="opportunity-1",
         title="Small-team expense approval workflow",
@@ -79,12 +96,15 @@ def _advance_to_work_order(factory: BusinessFactory, approval_authority) -> None
     )
     approval_authority.allow_once("approval:proposal:1")
     factory.approve_proposal(approval_ref="approval:proposal:1")
+    approved_spec = product_spec or _product_spec()
     approval_authority.allow_once("approval:work-order:1")
     factory.create_work_order(
         work_order_id="work-order-1",
         scope="Implement the approved expense-app test scope.",
         authorization_ref="approval:work-order:1",
+        product_spec=approved_spec,
     )
+    return approved_spec
 
 
 class _ReviewAuthority:
@@ -168,23 +188,23 @@ def test_business_flow_links_real_product_project_and_survives_restart(
     assert first.row_version == 1
     business_store.save(first, expected_row_version=0)
 
-    _advance_to_work_order(factory, business_authority)
+    spec = _advance_to_work_order(factory, business_authority)
     order = factory.handoff_to_product_factory(
         repository=product_projects,
         project_id="product-project-1",
         project_name="Expense App Test Product",
-        spec=ProductProjectSpec(
-            goal="Build the authorized expense app test product",
-            desired_outcome="A QA-verified delivery candidate",
-            compliance={"business_work_order_ref": "work-order-1"},
-        ),
+        spec=spec,
         idempotency_key="business-work-order-1-product-project",
     )
     assert order.product_project_id == "product-project-1"
+    assert order.product_spec_fingerprint is not None
     stored_product = product_projects.get("product-project-1")
     assert stored_product.project_id == "product-project-1"
     assert stored_product.spec.compliance["business_work_order_authorization_fingerprint"] == (
         order.authorization_fingerprint
+    )
+    assert stored_product.spec.compliance["business_product_spec_fingerprint"] == (
+        order.product_spec_fingerprint
     )
 
     factory.record_qa(state=QAState.PASSED, evidence_ref="qa:report:1")
@@ -278,16 +298,13 @@ def test_delivery_requires_qa_and_matching_allowed_compliance(
     store = SQLiteStore(tmp_path / "nika.sqlite")
     store.initialize()
     factory = _factory(business_authority)
-    _advance_to_work_order(factory, business_authority)
+    spec = _product_spec(goal="Build test product", desired_outcome="Verified output")
+    _advance_to_work_order(factory, business_authority, product_spec=spec)
     factory.handoff_to_product_factory(
         repository=ProductProjectRepository(store),
         project_id="product-project-1",
         project_name="Expense App Test Product",
-        spec=ProductProjectSpec(
-            goal="Build test product",
-            desired_outcome="Verified output",
-            compliance={"business_work_order_ref": "work-order-1"},
-        ),
+        spec=spec,
         idempotency_key="work-order-1",
     )
 
@@ -330,12 +347,93 @@ def test_delivery_requires_qa_and_matching_allowed_compliance(
         )
 
 
+def test_work_order_rejects_same_id_different_product_spec_before_effect(
+    tmp_path,
+    business_authority,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.sqlite")
+    store.initialize()
+    repository = ProductProjectRepository(store)
+    factory = _factory(business_authority)
+    _advance_to_work_order(factory, business_authority)
+
+    substituted = _product_spec(
+        goal="Attacker-substituted product",
+        desired_outcome="Different effect under the same WorkOrder",
+    )
+    with pytest.raises(BusinessFactoryError, match="authorized WorkOrder specification"):
+        factory.handoff_to_product_factory(
+            repository=repository,
+            project_id="product-project-substituted",
+            project_name="Substituted product",
+            spec=substituted,
+            idempotency_key="same-work-order-different-spec",
+        )
+
+    with pytest.raises(KeyError):
+        repository.get("product-project-substituted")
+
+
+def test_underbound_legacy_work_order_cannot_create_product_effect(
+    tmp_path,
+    business_authority,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.sqlite")
+    store.initialize()
+    repository = ProductProjectRepository(store)
+    factory = _factory(business_authority)
+    factory.identify_opportunity(
+        opportunity_id="opportunity-1",
+        title="Small-team expense approval workflow",
+        evidence_ids=("evidence-demand",),
+    )
+    factory.create_lead(
+        lead_id="lead-1",
+        channel_id="sandbox-email",
+        counterparty_ref="counterparty:test:1",
+    )
+    factory.qualify_lead(qualification_ref="qualification:review:1")
+    factory.draft_proposal(proposal_id="proposal-1", scope_summary="Legacy scope")
+    business_authority.allow_once("approval:proposal:legacy")
+    factory.approve_proposal(approval_ref="approval:proposal:legacy")
+    business_authority.allow_once("approval:work-order:legacy")
+    factory.create_work_order(
+        work_order_id="work-order-1",
+        scope="Legacy underbound WorkOrder",
+        authorization_ref="approval:work-order:legacy",
+    )
+
+    with pytest.raises(BusinessFactoryError, match="lacks exact ProductProject"):
+        factory.handoff_to_product_factory(
+            repository=repository,
+            project_id="product-project-underbound",
+            project_name="Underbound product",
+            spec=_product_spec(),
+            idempotency_key="underbound",
+        )
+    with pytest.raises(KeyError):
+        repository.get("product-project-underbound")
+
+
 def test_authorization_fingerprint_detects_scope_substitution(business_authority) -> None:
     factory = _factory(business_authority)
     _advance_to_work_order(factory, business_authority)
     snapshot = factory.snapshot()
     assert snapshot.work_order is not None
     forged_order = replace(snapshot.work_order, scope="Attacker-changed scope")
+    forged = replace(snapshot, work_order=forged_order)
+    with pytest.raises(BusinessFactoryError, match="fingerprint does not match scope"):
+        dump_business_snapshot(forged)
+
+
+def test_authorization_fingerprint_detects_product_spec_binding_substitution(
+    business_authority,
+) -> None:
+    factory = _factory(business_authority)
+    _advance_to_work_order(factory, business_authority)
+    snapshot = factory.snapshot()
+    assert snapshot.work_order is not None
+    forged_order = replace(snapshot.work_order, product_spec_fingerprint="0" * 64)
     forged = replace(snapshot, work_order=forged_order)
     with pytest.raises(BusinessFactoryError, match="fingerprint does not match scope"):
         dump_business_snapshot(forged)
