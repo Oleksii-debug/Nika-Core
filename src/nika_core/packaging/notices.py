@@ -35,6 +35,7 @@ RUNTIME_DISTRIBUTIONS = (
 )
 
 SUPPLY_CHAIN_FILE = "THIRD_PARTY_SUPPLY_CHAIN.json"
+SBOM_FILE = "THIRD_PARTY_SBOM.cdx.json"
 _ALLOWED_BUNDLE_EXTRAS = frozenset({"gui"})
 _BUILD_ONLY_EXTRAS = frozenset({"dev", "qa"})
 _RELEASE_CRITICAL_TOOLS = frozenset({"setuptools", "wheel", "pip-audit", "pyinstaller"})
@@ -346,6 +347,63 @@ def build_supply_chain_evidence(bundle_dir: Path) -> dict[str, object]:
     }
 
 
+def build_cyclonedx_sbom(supply_chain: dict[str, object]) -> dict[str, object]:
+    runtime = supply_chain.get("bundle_runtime_distributions", [])
+    if not isinstance(runtime, list):
+        raise TypeError("supply-chain runtime distributions must be a list")
+    components: list[dict[str, object]] = []
+    for item in runtime:
+        if not isinstance(item, dict):
+            raise TypeError("supply-chain runtime distribution must be an object")
+        name = item.get("name")
+        version = item.get("resolved_version")
+        if not isinstance(name, str) or not name or not isinstance(version, str) or not version:
+            raise ValueError("SBOM component requires exact package name and version")
+        component: dict[str, object] = {
+            "type": "library",
+            "name": name,
+            "version": version,
+            "purl": f"pkg:pypi/{name}@{version}",
+        }
+        license_name = item.get("license")
+        if isinstance(license_name, str) and license_name:
+            component["licenses"] = [{"license": {"name": license_name}}]
+        properties: list[dict[str, str]] = []
+        for key in ("installer", "record_sha256", "license_risk"):
+            value = item.get(key)
+            if value is not None:
+                properties.append({"name": f"nika:{key}", "value": str(value)})
+        for url in item.get("project_urls", []):
+            if isinstance(url, str) and url:
+                properties.append({"name": "nika:project_url", "value": url})
+        if properties:
+            component["properties"] = properties
+        components.append(component)
+
+    policy = supply_chain.get("policy", {})
+    model_license_separate = (
+        isinstance(policy, dict) and policy.get("model_licenses_separate_from_engine") is True
+    )
+    return {
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.6",
+        "version": 1,
+        "metadata": {
+            "component": {
+                "type": "application",
+                "name": str(supply_chain.get("artifact") or "NikaCore Windows base runtime"),
+            },
+            "properties": [
+                {
+                    "name": "nika:model_licenses_separate_from_engine",
+                    "value": "true" if model_license_separate else "false",
+                }
+            ],
+        },
+        "components": sorted(components, key=lambda item: (str(item["name"]), str(item["version"]))),
+    }
+
+
 def supply_chain_findings(payload: dict[str, object]) -> tuple[str, ...]:
     findings: list[str] = []
     declarations = payload.get("release_critical_declarations", [])
@@ -417,6 +475,12 @@ def build_third_party_notices(bundle_dir: Path) -> Path:
     supply_target = bundle_dir / SUPPLY_CHAIN_FILE
     supply_target.write_text(
         json.dumps(supply_chain, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    sbom_target = bundle_dir / SBOM_FILE
+    sbom_target.write_text(
+        json.dumps(build_cyclonedx_sbom(supply_chain), ensure_ascii=False, indent=2, sort_keys=True)
+        + "\n",
         encoding="utf-8",
     )
     return target
@@ -501,4 +565,16 @@ def verify_third_party_notices(bundle_dir: Path) -> tuple[str, ...]:
     findings.extend(supply_chain_findings(expected_supply))
     if actual_supply != expected_supply:
         findings.append("supply-chain:mismatch")
+
+    sbom_target = bundle_dir / SBOM_FILE
+    if not sbom_target.is_file():
+        findings.append(f"missing:{SBOM_FILE}")
+        return tuple(dict.fromkeys(findings))
+    try:
+        actual_sbom = json.loads(sbom_target.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        findings.append("sbom:invalid-json")
+        return tuple(dict.fromkeys(findings))
+    if actual_sbom != build_cyclonedx_sbom(expected_supply):
+        findings.append("sbom:mismatch")
     return tuple(dict.fromkeys(findings))
