@@ -26,12 +26,8 @@ class MemoryEffectJournal:
         service: DeployableService,
         request: MaintenanceRequest,
     ) -> MaintenanceEffectReservation:
-        key = f"test-pf8:{project_id}:{request.request_id}"
-        fingerprint = (
-            project_id,
-            service,
-            request,
-        )
+        key = self._key(project_id, request)
+        fingerprint = self._fingerprint(project_id, service, request)
         existing = self._records.get(key)
         if existing is None:
             self._records[key] = (fingerprint, MaintenanceEffectState.PENDING, None)
@@ -40,6 +36,23 @@ class MemoryEffectJournal:
                 MaintenanceEffectState.PENDING,
                 True,
             )
+        prior_fingerprint, state, result = existing
+        if prior_fingerprint != fingerprint:
+            raise ProductOperationsError("test maintenance effect identity conflict")
+        return MaintenanceEffectReservation(key, state, False, result)
+
+    def lookup(
+        self,
+        *,
+        project_id: str,
+        service: DeployableService,
+        request: MaintenanceRequest,
+    ) -> MaintenanceEffectReservation | None:
+        key = self._key(project_id, request)
+        existing = self._records.get(key)
+        if existing is None:
+            return None
+        fingerprint = self._fingerprint(project_id, service, request)
         prior_fingerprint, state, result = existing
         if prior_fingerprint != fingerprint:
             raise ProductOperationsError("test maintenance effect identity conflict")
@@ -76,6 +89,18 @@ class MemoryEffectJournal:
             MaintenanceEffectState.COMPLETED,
             result,
         )
+
+    @staticmethod
+    def _key(project_id: str, request: MaintenanceRequest) -> str:
+        return f"test-pf8:{project_id}:{request.request_id}"
+
+    @staticmethod
+    def _fingerprint(
+        project_id: str,
+        service: DeployableService,
+        request: MaintenanceRequest,
+    ) -> tuple[object, ...]:
+        return (project_id, service, request)
 
     def _require(
         self,
