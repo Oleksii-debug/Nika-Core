@@ -13,8 +13,8 @@ from nika_core.packaging.notices import (
     verify_third_party_notices,
 )
 from nika_core.product_compliance import (
-    ComplianceReviewAuthorityPort,
     CompetitorResearchEvidence,
+    ComplianceReviewAuthorityPort,
     DependencyAdoption,
     DistributionObligationEvidence,
     ProductComplianceError,
