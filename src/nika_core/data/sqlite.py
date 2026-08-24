@@ -64,15 +64,33 @@ class SQLiteStore:
     @staticmethod
     def _initialize_m3_extension_schema(conn: sqlite3.Connection) -> None:
         prerequisite_tables = {"resource_budgets", "scheduled_jobs"}
+        extension_state_tables = {
+            "m3_extension_schema_migrations",
+            "scheduled_job_bindings",
+            "resource_requests",
+        }
         rows = conn.execute(
             """SELECT name FROM sqlite_master
-            WHERE type = 'table' AND name IN ('resource_budgets', 'scheduled_jobs')"""
+            WHERE type = 'table' AND name IN (
+                'resource_budgets',
+                'scheduled_jobs',
+                'm3_extension_schema_migrations',
+                'scheduled_job_bindings',
+                'resource_requests'
+            )"""
         ).fetchall()
-        present = {row["name"] for row in rows}
-        if not present:
+        table_names = {row["name"] for row in rows}
+        present_prerequisites = table_names & prerequisite_tables
+        present_extension_state = table_names & extension_state_tables
+        if not present_prerequisites:
+            if present_extension_state:
+                orphaned = ", ".join(sorted(present_extension_state))
+                raise RuntimeError(
+                    "M3 extension state exists without prerequisite tables: " + orphaned
+                )
             return
-        if present != prerequisite_tables:
-            missing = ", ".join(sorted(prerequisite_tables - present))
+        if present_prerequisites != prerequisite_tables:
+            missing = ", ".join(sorted(prerequisite_tables - present_prerequisites))
             raise RuntimeError(f"M3 extension prerequisite table missing: {missing}")
 
         conn.execute(
