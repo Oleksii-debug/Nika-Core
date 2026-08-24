@@ -11,7 +11,6 @@ from nika_core import (
     product_factory_team_lifecycle as team_lifecycle,
 )
 
-
 CEILING = frozenset({"read_source", "write_source", "run_tests"})
 
 
