@@ -100,6 +100,8 @@ def _executable_scope(value: str) -> tuple[str, str, str]:
 
     if not posix_path.is_absolute():
         raise ValueError("POSIX executable path scope must be absolute")
+    if ".." in posix_path.parts:
+        raise ValueError("POSIX executable path scope must not contain traversal")
     basename = posix_path.name
     if not basename:
         raise ValueError("process executable path must identify a file")
@@ -148,17 +150,14 @@ class SandboxPolicy:
 
     def authorize_executable(self, executable: str) -> None:
         try:
-            requested_kind, requested_identity, requested_name = _executable_scope(executable)
+            requested_kind, requested_identity, _ = _executable_scope(executable)
         except ValueError as exc:
             raise PermissionError("process executable is not allowed") from exc
 
         for allowed_executable in self.allowed_executables:
             allowed_kind, allowed_identity, _ = _executable_scope(allowed_executable)
-            if allowed_kind == "name" and requested_name == allowed_identity:
-                return
             if (
-                allowed_kind != "name"
-                and requested_kind == allowed_kind
+                requested_kind == allowed_kind
                 and requested_identity == allowed_identity
             ):
                 return
