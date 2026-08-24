@@ -10,6 +10,7 @@ from mcp.server import MCPServer
 from nika_core.mcp_boundary import MCPClientAdapter, MCPServerConfig
 from nika_core.model_gateway.contracts import (
     ModelErrorCode,
+    ModelFailureEffect,
     ModelGatewayError,
     ModelMessage,
     ModelRequest,
@@ -121,7 +122,14 @@ def test_http_provider_failure_maps_to_typed_gateway_error() -> None:
     )
 
     with pytest.raises(ModelGatewayError) as exc_info:
-        asyncio.run(gateway.complete(request(provider_kind=ProviderKind.CLOUD)))
+        asyncio.run(
+            gateway.complete(
+                request(
+                    provider_kind=ProviderKind.CLOUD,
+                    privacy=PrivacyClass.PUBLIC,
+                )
+            )
+        )
 
     assert exc_info.value.code is ModelErrorCode.RATE_LIMITED
     assert exc_info.value.retryable is True
@@ -194,7 +202,7 @@ def test_sensitive_data_fails_closed_for_untrusted_provider() -> None:
             )
         )
 
-    assert exc_info.value.code is ModelErrorCode.INVALID_REQUEST
+    assert exc_info.value.code is ModelErrorCode.POLICY_DENIED
 
 
 def test_gateway_uses_explicit_fallback_after_retryable_failure() -> None:
@@ -205,9 +213,10 @@ def test_gateway_uses_explicit_fallback_after_retryable_failure() -> None:
             calls.append("primary")
             raise ModelGatewayError(
                 ModelErrorCode.UNAVAILABLE,
-                "temporarily unavailable",
+                "temporarily unavailable before model effect",
                 provider_id=self.capabilities.provider_id,
                 retryable=True,
+                failure_effect=ModelFailureEffect.NO_EFFECT,
             )
 
     class FallbackProvider(DeterministicMockProvider):
@@ -348,7 +357,7 @@ def test_sensitive_fallback_route_is_rejected_before_primary_execution() -> None
             )
         )
 
-    assert exc_info.value.code is ModelErrorCode.INVALID_REQUEST
+    assert exc_info.value.code is ModelErrorCode.POLICY_DENIED
     assert exc_info.value.provider_id == "unsafe-cloud"
     assert primary_called is False
 
