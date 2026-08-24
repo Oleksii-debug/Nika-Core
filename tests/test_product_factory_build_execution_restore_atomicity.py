@@ -22,6 +22,7 @@ from nika_core.product_factory_build_execution_host import (
     DurableBuildExecutionHost,
 )
 from nika_core.product_factory_build_execution_persistence import (
+    BuildExecutionDurabilityError,
     SQLiteBuildExecutionCheckpointStore,
 )
 from nika_core.product_factory_coding_worker_adapter import RepositoryPathIdentity
@@ -201,5 +202,5 @@ def test_failed_restore_rolls_back_registry_after_temporary_lease_resurrection(t
 
     assert restarted_registry.snapshot() == registry_before
     assert restarted_registry.snapshot().leases == ()
-    with pytest.raises(Exception, match="restore_latest is required"):
+    with pytest.raises(BuildExecutionDurabilityError, match="restore_latest is required"):
         restarted_host.snapshot()
