@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import sys
 from importlib import metadata
@@ -29,6 +30,7 @@ RUNTIME_DISTRIBUTIONS = (
 )
 
 _SECTION_RE = re.compile(r"^===== (?P<title>.+?) =====$")
+_PACKAGE_SEPARATORS_RE = re.compile(r"[-_.]+")
 
 
 def _python_license() -> str:
@@ -174,3 +176,50 @@ def verify_third_party_notices(bundle_dir: Path) -> tuple[str, ...]:
         if sections.get(title) != expected_body:
             findings.append(base_finding)
     return tuple(dict.fromkeys(findings))
+
+
+def verified_third_party_notice_reference(
+    bundle_dir: Path,
+    *,
+    package_name: str,
+    version: str,
+) -> str | None:
+    """Return the content-bound evidence ref for one verified packaged notice section."""
+
+    if not isinstance(package_name, str) or not package_name.strip():
+        return None
+    if not isinstance(version, str) or not version.strip():
+        return None
+    directory = Path(bundle_dir)
+    if verify_third_party_notices(directory):
+        return None
+    target = directory / "THIRD_PARTY_NOTICES.txt"
+    text = target.read_text(encoding="utf-8", errors="replace")
+    sections, duplicates = _sections(text)
+    if duplicates:
+        return None
+
+    requested_name = _canonical_package_name(package_name)
+    requested_version = version.strip()
+    for distribution_name in RUNTIME_DISTRIBUTIONS:
+        try:
+            dist = metadata.distribution(distribution_name)
+            installed_name = dist.metadata.get("Name") or distribution_name
+            if _canonical_package_name(installed_name) != requested_name:
+                continue
+            if dist.version != requested_version:
+                return None
+            title, expected_body = _distribution_section(distribution_name, dist)
+        except (metadata.PackageNotFoundError, RuntimeError):
+            return None
+        actual_body = sections.get(title)
+        if actual_body != expected_body:
+            return None
+        payload = f"{title}\n{actual_body}".encode("utf-8")
+        digest = hashlib.sha256(payload).hexdigest()
+        return f"artifact:THIRD_PARTY_NOTICES.txt#sha256:{digest}"
+    return None
+
+
+def _canonical_package_name(value: str) -> str:
+    return _PACKAGE_SEPARATORS_RE.sub("-", value.strip().casefold())
