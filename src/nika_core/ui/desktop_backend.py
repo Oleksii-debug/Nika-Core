@@ -167,6 +167,11 @@ class DesktopBackend:
             raise ValueError("Немає призупиненого завдання для продовження.")
         session = self._coordinator.sessions.get(record.task_id)
         if session is None:
+            if self._has_started(record.task_id):
+                raise ValueError(
+                    "Призупинене завдання вже входило в RUNNING, але не має збереженої "
+                    "runtime-сесії; повторний старт відхилено, щоб не дублювати побічні ефекти."
+                )
             self._queue.transition(record.task_id, TaskState.READY)
             return UIResult(
                 request_id="desktop-handler",
@@ -369,6 +374,14 @@ class DesktopBackend:
             if live is None or live.future.done():
                 return None
             return live
+
+    def _has_started(self, task_id: str) -> bool:
+        with self._queue.store.connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM task_events WHERE task_id = ? AND new_state = ? LIMIT 1",
+                (task_id, TaskState.RUNNING.value),
+            ).fetchone()
+        return row is not None
 
     def _ensure_defaults(self) -> None:
         try:
