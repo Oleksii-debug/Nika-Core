@@ -20,6 +20,19 @@ _REDACTED = "[REDACTED]"
 _CAMEL_ACRONYM_BOUNDARY = re.compile(r"([A-Z]+)([A-Z][a-z])")
 _CAMEL_WORD_BOUNDARY = re.compile(r"([a-z0-9])([A-Z])")
 _KEY_SEPARATOR = re.compile(r"[^0-9A-Za-z]+")
+_URL_USERINFO = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/\s@]+@")
+_AUTHORIZATION_VALUE = re.compile(
+    r"(?i)(\b(?:proxy[-_ ]*)?authorization\s*[:=]\s*)"
+    r"(?:bearer|basic)?\s*(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;\r\n]+)"
+)
+_COOKIE_HEADER_VALUE = re.compile(r"(?i)(\b(?:set-cookie|cookie)\s*:\s*)[^\r\n]*")
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)(\b(?:access[_-]?token|refresh[_-]?token|api[_-]?key|client[_-]?secret|"
+    r"secret[_-]?key|private[_-]?key|password|passwd|pwd|"
+    r"session(?:[_-]?(?:id|token))?|credential|credentials)\b\s*[:=]\s*)"
+    r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^&;\s,<>]+)"
+)
+_BEARER_VALUE = re.compile(r"(?i)(\bbearer\s+)[A-Za-z0-9._~+/=-]{8,}")
 _SENSITIVE_KEYS = frozenset(
     {
         "access_token",
@@ -91,6 +104,15 @@ def _is_sensitive_key(key: str) -> bool:
     return normalized in _SENSITIVE_KEYS or normalized.endswith(_SENSITIVE_SUFFIXES)
 
 
+def _redact_string(value: str) -> str:
+    """Remove credential material embedded in otherwise benign diagnostic text."""
+    redacted = _URL_USERINFO.sub(r"\1[REDACTED]@", value)
+    redacted = _AUTHORIZATION_VALUE.sub(r"\1[REDACTED]", redacted)
+    redacted = _COOKIE_HEADER_VALUE.sub(r"\1[REDACTED]", redacted)
+    redacted = _SECRET_ASSIGNMENT.sub(r"\1[REDACTED]", redacted)
+    return _BEARER_VALUE.sub(r"\1[REDACTED]", redacted)
+
+
 def _redact(value: object) -> object:
     if isinstance(value, Mapping):
         redacted: dict[str, object] = {}
@@ -103,6 +125,8 @@ def _redact(value: object) -> object:
         return [_redact(child) for child in value]
     if isinstance(value, tuple):
         return [_redact(child) for child in value]
+    if isinstance(value, str):
+        return _redact_string(value)
     return value
 
 
