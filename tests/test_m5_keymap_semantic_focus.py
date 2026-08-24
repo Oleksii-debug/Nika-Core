@@ -19,17 +19,26 @@ def _between(source: str, start: str, end: str) -> str:
     return source[start_index:end_index]
 
 
-def test_keymap_row_controls_have_action_specific_accessible_names_and_ids() -> None:
+def test_keymap_row_controls_bind_semantics_to_stable_action_ids() -> None:
     source = _app_source()
-    assert 'return `keymap-${control}-${actionId}`;' in source
+    assert (
+        'return `keymap-${control}-${encodeURIComponent(String(actionId))}`;'
+        in source
+    )
+    assert 'return `${action.label} (${action.action_id})`;' in source
+    assert "const accessibleActionLabel = keymapAccessibleActionLabel(action);" in source
     assert 'input.id = keymapControlId(action.action_id, "binding");' in source
     assert 'const saveFocusId = keymapControlId(action.action_id, "save");' in source
     assert 'const restoreFocusId = keymapControlId(action.action_id, "restore");' in source
     assert 'save.id = saveFocusId;' in source
     assert 'restore.id = restoreFocusId;' in source
-    assert '`Зберегти або очистити комбінацію для ${action.label}`' in source
-    assert '`Зберегти комбінацію для ${action.label}`' in source
-    assert '`Відновити комбінацію за замовчуванням для ${action.label}`' in source
+    assert '`Комбінація для ${accessibleActionLabel}`' in source
+    assert '`Зберегти або очистити комбінацію для ${accessibleActionLabel}`' in source
+    assert '`Зберегти комбінацію для ${accessibleActionLabel}`' in source
+    assert (
+        '`Відновити комбінацію за замовчуванням для ${accessibleActionLabel}`'
+        in source
+    )
 
 
 def test_keymap_save_restores_semantic_focus_after_table_rebuild() -> None:
