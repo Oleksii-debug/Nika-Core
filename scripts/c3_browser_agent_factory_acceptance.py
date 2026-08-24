@@ -1,11 +1,10 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import hashlib
 import json
-import os
 import runpy
-import shutil
 import subprocess
 import sys
 import zipfile
@@ -13,8 +12,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
-
-from scripts import c3_browser_agent_factory_proof as browser_proof
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
@@ -51,6 +48,7 @@ from nika_core.toolsmith.contracts import (
     WorkerFailureKind,
     normalize_relative_path,
 )
+from scripts import c3_browser_agent_factory_proof as browser_proof
 
 _PROJECT_ID = browser_proof.PROJECT_ID
 _REPOSITORY_ID = "c3-repo"
@@ -64,7 +62,7 @@ class C3FactoryAcceptanceError(RuntimeError):
 
 @dataclass(slots=True)
 class SandboxC3Worker:
-    """Deterministic acceptance worker that writes only coordinator-owned sandbox paths."""
+    """Deterministic acceptance worker constrained to coordinator-owned sandbox paths."""
 
     workspace: Path
     dispatch_calls: list[str] = field(default_factory=list)
@@ -86,9 +84,8 @@ class SandboxC3Worker:
         return self._execute(request)
 
     def _execute(self, request: ComponentWorkRequest) -> WorkerResultEnvelope:
-        files = _component_files(request.component_id)
         changed_files: list[ChangedFile] = []
-        for relative, text in files.items():
+        for relative, text in _component_files(request.component_id).items():
             if not _path_allowed(relative, request.allowed_paths):
                 raise C3FactoryAcceptanceError(
                     f"worker attempted path outside component ownership: {relative}"
@@ -96,12 +93,12 @@ class SandboxC3Worker:
             target = self.workspace / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text, encoding="utf-8", newline="\n")
-            encoded = text.encode()
+            payload = text.encode()
             changed_files.append(
                 ChangedFile(
                     path=relative,
-                    sha256=hashlib.sha256(encoded).hexdigest(),
-                    size_bytes=len(encoded),
+                    sha256=hashlib.sha256(payload).hexdigest(),
+                    size_bytes=len(payload),
                 )
             )
 
@@ -111,12 +108,9 @@ class SandboxC3Worker:
             argv = list(declared)
             if argv[0].casefold() in {"python", "python.exe", "python3"}:
                 argv[0] = sys.executable
-            env = dict(os.environ)
-            env["PYTHONUTF8"] = "1"
             completed = subprocess.run(
                 argv,
                 cwd=self.workspace,
-                env=env,
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -134,7 +128,7 @@ class SandboxC3Worker:
                 failure = WorkerFailure(
                     kind=WorkerFailureKind.PROCESS_FAILED,
                     message=(
-                        f"generated component acceptance failed: {request.component_id} "
+                        f"generated component acceptance failed: {request.component_id}; "
                         f"exit={completed.returncode}"
                     ),
                     retryable=True,
@@ -168,6 +162,19 @@ class SandboxC3Worker:
         )
 
 
+def _test_command(filename: str) -> tuple[str, ...]:
+    return (
+        "python",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "generated/tests",
+        "-p",
+        filename,
+    )
+
+
 def _graph() -> ProductRepositoryGraph:
     return ProductRepositoryGraph(
         project_id=_PROJECT_ID,
@@ -187,18 +194,7 @@ def _graph() -> ProductRepositoryGraph:
                     "generated/c3_browser_agent/fixture.py",
                     "generated/tests/test_fixture.py",
                 ),
-                test_commands=(
-                    (
-                        "python",
-                        "-m",
-                        "unittest",
-                        "discover",
-                        "-s",
-                        "generated/tests",
-                        "-p",
-                        "test_fixture.py",
-                    ),
-                ),
+                test_commands=(_test_command("test_fixture.py"),),
             ),
             ProductComponent(
                 component_id="semantic-browser-agent",
@@ -208,18 +204,7 @@ def _graph() -> ProductRepositoryGraph:
                     "generated/tests/test_agent.py",
                 ),
                 dependencies=("commerce-fixture",),
-                test_commands=(
-                    (
-                        "python",
-                        "-m",
-                        "unittest",
-                        "discover",
-                        "-s",
-                        "generated/tests",
-                        "-p",
-                        "test_agent.py",
-                    ),
-                ),
+                test_commands=(_test_command("test_agent.py"),),
             ),
             ProductComponent(
                 component_id="package",
@@ -229,18 +214,7 @@ def _graph() -> ProductRepositoryGraph:
                     "generated/tests/test_package.py",
                 ),
                 dependencies=("semantic-browser-agent",),
-                test_commands=(
-                    (
-                        "python",
-                        "-m",
-                        "unittest",
-                        "discover",
-                        "-s",
-                        "generated/tests",
-                        "-p",
-                        "test_package.py",
-                    ),
-                ),
+                test_commands=(_test_command("test_package.py"),),
             ),
         ),
     )
@@ -250,25 +224,25 @@ def _spec() -> ProductProjectSpec:
     return ProductProjectSpec(
         goal="Generate a sandbox semantic browser-agent commerce product through Product Factory",
         desired_outcome=(
-            "Component-scoped generated source drives the local-only semantic acceptance flow, "
-            "is independently reviewed, packaged, and restart-safe"
+            "Component-owned generated source is tested, independently reviewed, restart-safe, "
+            "and packaged with exact semantic browser evidence"
         ),
         repository_refs=(_REPOSITORY_LOCATOR,),
         requirements=(
             ProductRequirement(
                 requirement_id="c3-factory-generation",
-                text="Product Factory must materialize component-owned source and passing tests",
+                text="Product Factory materializes component-owned source with passing tests",
                 acceptance=(
                     "all components reach accepted through ProductFactoryProgramHost",
-                    "generated source stays within component ownership",
+                    "generated files remain inside component ownership",
                 ),
             ),
             ProductRequirement(
                 requirement_id="c3-safe-browser-flow",
-                text="Browser interaction stays semantic and local-only",
+                text="Browser interaction stays semantic and loopback-only",
                 acceptance=(
-                    "search through confirmation succeeds on loopback fixture",
-                    "uncertain simulated submit reconciles before bounded retry",
+                    "search through confirmation succeeds",
+                    "uncertain submit reconciles before bounded idempotent retry",
                 ),
             ),
         ),
@@ -279,18 +253,20 @@ def _component_goals() -> dict[str, str]:
     return {
         "commerce-fixture": "Generate a loopback-only commerce fixture contract and tests",
         "semantic-browser-agent": "Generate exact semantic browser-agent policy and tests",
-        "package": "Generate package/restart contract and tests",
+        "package": "Generate package and restart contract tests",
     }
 
 
 def _component_files(component_id: str) -> dict[str, str]:
-    if component_id == "commerce-fixture":
-        return _fixture_files()
-    if component_id == "semantic-browser-agent":
-        return _agent_files()
-    if component_id == "package":
-        return _package_files()
-    raise C3FactoryAcceptanceError(f"unknown C3 component: {component_id}")
+    builders = {
+        "commerce-fixture": _fixture_files,
+        "semantic-browser-agent": _agent_files,
+        "package": _package_files,
+    }
+    try:
+        return builders[component_id]()
+    except KeyError as exc:
+        raise C3FactoryAcceptanceError(f"unknown C3 component: {component_id}") from exc
 
 
 def _fixture_files() -> dict[str, str]:
@@ -322,8 +298,7 @@ from pathlib import Path
 class FixtureContractTest(unittest.TestCase):
     def test_fixture_is_loopback_and_non_commercial(self) -> None:
         target = Path(__file__).resolve().parents[1] / "c3_browser_agent" / "fixture.py"
-        namespace = runpy.run_path(str(target))
-        policy = namespace["fixture_policy"]()
+        policy = runpy.run_path(str(target))["fixture_policy"]()
         self.assertEqual(policy["host"], "127.0.0.1")
         self.assertEqual(policy["scheme"], "http")
         self.assertFalse(policy["real_purchase"])
@@ -382,8 +357,7 @@ class AgentContractTest(unittest.TestCase):
         target = Path(__file__).resolve().parents[1] / "c3_browser_agent" / "agent.py"
         namespace = runpy.run_path(str(target))
         locator = namespace["semantic_target"]("button", "Search")
-        self.assertEqual(locator.role, "button")
-        self.assertEqual(locator.name, "Search")
+        self.assertEqual((locator.role, locator.name), ("button", "Search"))
         self.assertFalse(namespace["USES_CSS_XPATH"])
         self.assertFalse(namespace["USES_POSITIONAL_TARGETING"])
         self.assertFalse(namespace["USES_COORDINATES"])
@@ -429,10 +403,9 @@ from pathlib import Path
 
 
 class PackageContractTest(unittest.TestCase):
-    def test_package_requires_manifest_and_restart_without_false_human_credit(self) -> None:
+    def test_package_has_manifest_restart_and_truthful_human_state(self) -> None:
         target = Path(__file__).resolve().parents[1] / "c3_browser_agent" / "package.py"
-        namespace = runpy.run_path(str(target))
-        policy = namespace["package_policy"]()
+        policy = runpy.run_path(str(target))["package_policy"]()
         self.assertTrue(policy["canonical_manifest"])
         self.assertTrue(policy["restart_evidence"])
         self.assertFalse(policy["human_tested"])
@@ -463,8 +436,7 @@ def _run_factory_program(
     db_path = root / "factory-program.db"
     store = SQLiteStore(db_path)
     store.initialize()
-    projects = ProductProjectRepository(store)
-    project = projects.create(
+    project = ProductProjectRepository(store).create(
         project_id=_PROJECT_ID,
         name="C3 Browser Agent Product",
         spec=_spec(),
@@ -491,7 +463,10 @@ def _run_factory_program(
     host = ProductFactoryProgramHost(store=store, worker=worker)
     restart_exact = False
 
-    while any(record.state is not WorkState.ACCEPTED for record in coordinator.snapshot().records):
+    for _cycle in range(12):
+        if all(record.state is WorkState.ACCEPTED for record in coordinator.snapshot().records):
+            break
+        progressed = False
         ready = coordinator.ready_requests()
         if ready:
             outcomes = asyncio.run(
@@ -503,66 +478,64 @@ def _run_factory_program(
                     max_count=1,
                 )
             )
-            if any(outcome.state is WorkState.REPAIR_REQUIRED for outcome in outcomes):
-                raise C3FactoryAcceptanceError("generated component failed declared acceptance tests")
-
-        progressed = False
-        for record in coordinator.snapshot().records:
-            if record.state is WorkState.REPAIR_REQUIRED:
+            if any(outcome.state is not WorkState.REVIEW_REQUIRED for outcome in outcomes):
                 raise C3FactoryAcceptanceError(
-                    f"generated component requires repair: {record.request.component_id}: {record.blocker}"
+                    "generated component did not reach review_required with passing evidence"
                 )
-            if record.state is WorkState.REVIEW_REQUIRED:
-                host.review_and_checkpoint(
-                    host_task_id=task.task_id,
-                    binding=binding,
-                    coordinator=coordinator,
-                    component_id=record.request.component_id,
-                    decision=ReviewDecision(
-                        reviewer_id="c3-independent-qa",
-                        accepted=True,
-                        reason="generated component passed declared tests and path-scope review",
-                        evidence_refs=(
-                            f"c3:qa:{record.request.component_id}:attempt-{record.request.attempt}",
-                        ),
-                    ),
-                )
-                progressed = True
-                break
+            progressed = True
 
-        fixture_record = next(
-            record
+        review_record = next(
+            (
+                record
+                for record in coordinator.snapshot().records
+                if record.state is WorkState.REVIEW_REQUIRED
+            ),
+            None,
+        )
+        if review_record is not None:
+            host.review_and_checkpoint(
+                host_task_id=task.task_id,
+                binding=binding,
+                coordinator=coordinator,
+                component_id=review_record.request.component_id,
+                decision=ReviewDecision(
+                    reviewer_id="c3-independent-qa",
+                    accepted=True,
+                    reason="generated component passed declared tests and path-scope review",
+                    evidence_refs=(
+                        "c3:qa:"
+                        f"{review_record.request.component_id}:"
+                        f"attempt-{review_record.request.attempt}",
+                    ),
+                ),
+            )
+            progressed = True
+
+        fixture_state = next(
+            record.state
             for record in coordinator.snapshot().records
             if record.request.component_id == "commerce-fixture"
         )
-        if fixture_record.state is WorkState.ACCEPTED and not restart_exact:
+        if fixture_state is WorkState.ACCEPTED and not restart_exact:
             before_restart = coordinator.snapshot()
             reopened_store = SQLiteStore(db_path)
             reopened_store.initialize()
-            reopened_project = ProductProjectRepository(reopened_store).get(_PROJECT_ID)
-            reopened_binding = ProductProjectCoordinatorBinding(
-                project=reopened_project,
-                graph=graph,
-            )
-            reopened_host = ProductFactoryProgramHost(store=reopened_store, worker=worker)
-            restored = reopened_host.restore_latest(
+            project = ProductProjectRepository(reopened_store).get(_PROJECT_ID)
+            binding = ProductProjectCoordinatorBinding(project=project, graph=graph)
+            host = ProductFactoryProgramHost(store=reopened_store, worker=worker)
+            coordinator = host.restore_latest(
                 host_task_id=task.task_id,
-                binding=reopened_binding,
+                binding=binding,
             )
-            if restored.snapshot() != before_restart:
+            if coordinator.snapshot() != before_restart:
                 raise C3FactoryAcceptanceError("factory restart changed durable coordinator state")
-            store = reopened_store
-            project = reopened_project
-            binding = reopened_binding
-            host = reopened_host
-            coordinator = restored
             restart_exact = True
             progressed = True
 
-        if not ready and not progressed and any(
-            record.state is not WorkState.ACCEPTED for record in coordinator.snapshot().records
-        ):
+        if not progressed:
             raise C3FactoryAcceptanceError("C3 Product Factory made no progress")
+    else:
+        raise C3FactoryAcceptanceError("C3 Product Factory exceeded bounded convergence cycles")
 
     records = coordinator.snapshot().records
     if not restart_exact:
@@ -577,33 +550,30 @@ def _run_factory_program(
             target = workspace / relative
             if not target.is_file():
                 raise C3FactoryAcceptanceError(f"generated file is missing: {relative}")
-            text = target.read_text(encoding="utf-8")
-            generated_sources[relative] = text
+            generated_sources[relative] = target.read_text(encoding="utf-8")
             generated_sha256[relative] = hashlib.sha256(target.read_bytes()).hexdigest()
 
-    return (
-        {
-            "project_id": project.project_id,
-            "spec_version": project.spec_version,
-            "task_id": task.task_id,
-            "factory_program_host_used": True,
-            "restart_exact": restart_exact,
-            "all_components_accepted": True,
-            "component_states": {
-                record.request.component_id: record.state.value for record in records
-            },
-            "component_attempts": {
-                record.request.component_id: record.request.attempt for record in records
-            },
-            "worker_dispatches": list(worker.dispatch_calls),
-            "components": {
-                component.component_id: list(component.paths) for component in graph.components
-            },
-            "generated_files": sorted(generated_sources),
-            "generated_sha256": dict(sorted(generated_sha256.items())),
+    evidence: dict[str, Any] = {
+        "project_id": project.project_id,
+        "spec_version": project.spec_version,
+        "task_id": task.task_id,
+        "factory_program_host_used": True,
+        "restart_exact": True,
+        "all_components_accepted": True,
+        "component_states": {
+            record.request.component_id: record.state.value for record in records
         },
-        generated_sources,
-    )
+        "component_attempts": {
+            record.request.component_id: record.request.attempt for record in records
+        },
+        "worker_dispatches": list(worker.dispatch_calls),
+        "components": {
+            component.component_id: list(component.paths) for component in graph.components
+        },
+        "generated_files": sorted(generated_sources),
+        "generated_sha256": dict(sorted(generated_sha256.items())),
+    }
+    return evidence, generated_sources
 
 
 def _augment_package_with_generated_product(
@@ -630,7 +600,7 @@ def _augment_package_with_generated_product(
     findings = verify_release_manifest(bundle, manifest)
     if findings:
         raise C3FactoryAcceptanceError(
-            "augmented C3 package failed canonical release manifest verification: "
+            "augmented C3 package failed canonical manifest verification: "
             + ", ".join(findings)
         )
 
@@ -641,6 +611,7 @@ def _augment_package_with_generated_product(
         for path in sorted(bundle.rglob("*")):
             if path.is_file():
                 archive.write(path, path.relative_to(output_root).as_posix())
+
     updated = dict(package)
     updated["manifest_files"] = len(manifest.files)
     updated["zip_sha256"] = hashlib.sha256(zip_path.read_bytes()).hexdigest()
@@ -655,28 +626,30 @@ def run(output_root: Path) -> dict[str, Any]:
         temp_root = Path(temp)
         factory, generated_sources = _run_factory_program(temp_root, source_sha)
         browser = browser_proof._run_browser_flow(temp_root)
-        agent_contract_path = (
+
+        agent_path = (
             temp_root
             / "generated-product"
             / "generated"
             / "c3_browser_agent"
             / "agent.py"
         )
-        agent_contract = runpy.run_path(str(agent_contract_path))
+        agent_contract = runpy.run_path(str(agent_path))
         if tuple(browser["safe_flow"]) != tuple(agent_contract["SAFE_FLOW"]):
             raise C3FactoryAcceptanceError(
                 "executed browser flow does not match generated semantic-agent contract"
             )
-        fixture_contract_path = (
+
+        fixture_path = (
             temp_root
             / "generated-product"
             / "generated"
             / "c3_browser_agent"
             / "fixture.py"
         )
-        fixture_contract = runpy.run_path(str(fixture_contract_path))
+        fixture_contract = runpy.run_path(str(fixture_path))
         if fixture_contract["FIXTURE_HOST"] != "127.0.0.1":
-            raise C3FactoryAcceptanceError("generated fixture contract is not loopback-only")
+            raise C3FactoryAcceptanceError("generated fixture is not loopback-only")
 
     package = browser_proof._package(output_root, source_sha, factory, browser)
     package = _augment_package_with_generated_product(
@@ -701,8 +674,6 @@ def run(output_root: Path) -> dict[str, Any]:
 
 
 def main() -> None:
-    import argparse
-
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--output",
