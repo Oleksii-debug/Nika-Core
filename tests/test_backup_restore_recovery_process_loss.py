@@ -74,19 +74,18 @@ def _task_value(path: Path) -> str:
     return str(json.loads(row[0])["value"])
 
 
-def _hold_sqlite_reader(
+def _hold_sqlite_writer_reservation(
     database_path: str,
     ready: multiprocessing.synchronize.Event,
     release: multiprocessing.synchronize.Event,
 ) -> None:
     connection = sqlite3.connect(database_path, timeout=5.0)
     try:
-        assert connection.execute("PRAGMA journal_mode = WAL").fetchone()[0] == "wal"
-        connection.execute("BEGIN")
-        connection.execute("SELECT count(*) FROM sqlite_schema").fetchone()
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        connection.execute("BEGIN IMMEDIATE")
         ready.set()
         if not release.wait(20):
-            raise AssertionError("parent did not release SQLite reader")
+            raise AssertionError("parent did not release SQLite writer reservation")
         connection.execute("ROLLBACK")
     finally:
         connection.close()
@@ -156,7 +155,7 @@ def _spawn_and_require_exit(
     assert process.exitcode == expected_exit_code
 
 
-def test_cross_process_sqlite_reader_blocks_native_recovery_ownership(
+def test_cross_process_sqlite_writer_blocks_native_recovery_ownership(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "cross process sqlite.db"
@@ -166,27 +165,29 @@ def test_cross_process_sqlite_reader_blocks_native_recovery_ownership(
     backup = tmp_path / "snapshot.db"
     manager.create_backup(backup)
     _set_task_value(database, "must-survive")
+    with closing(sqlite3.connect(database)) as setup:
+        assert setup.execute("PRAGMA journal_mode = WAL").fetchone()[0] == "wal"
     plan = manager.prepare_restore(backup)
 
     context = multiprocessing.get_context("spawn")
     ready = context.Event()
     release = context.Event()
     process = context.Process(
-        target=_hold_sqlite_reader,
+        target=_hold_sqlite_writer_reservation,
         args=(str(database), ready, release),
     )
     process.start()
     try:
-        assert ready.wait(20), "child SQLite reader did not acquire WAL read state"
+        assert ready.wait(20), "child SQLite writer did not reserve WAL write ownership"
         try:
             manager.restore(
                 plan,
                 confirmation_fingerprint=plan.confirmation_fingerprint,
             )
         except RestoreSafetyError as exc:
-            assert "prevent exclusive recovery ownership" in str(exc)
+            assert "writer prevents exclusive recovery ownership" in str(exc)
         else:
-            raise AssertionError("restore bypassed a live cross-process SQLite client")
+            raise AssertionError("restore bypassed a live cross-process SQLite writer")
         assert _task_value(database) == "must-survive"
         assert not tuple(tmp_path.glob("cross process sqlite.db.pre-restore-*.sqlite3"))
     finally:
