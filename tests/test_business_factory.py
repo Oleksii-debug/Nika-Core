@@ -18,19 +18,17 @@ from nika_core.business_factory import (
 )
 from nika_core.business_factory_persistence import BusinessFactoryRepository
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.product_compliance import (
-    CompetitorResearchEvidence,
-    DependencyAdoption,
-    DistributionObligationEvidence,
-    LicenseDisposition,
-    ProductComplianceDecision,
-    ProductComplianceGate,
-)
+from nika_core.product_compliance import ProductComplianceDecision
 from nika_core.product_project import (
     EvidenceRef,
     ProductProjectRepository,
     ProductProjectSpec,
     ResearchEvidencePackage,
+)
+from nika_core.product_release_compliance import (
+    ProductReleaseComplianceGate,
+    ReleaseComplianceSnapshot,
+    build_verified_notice_bundle,
 )
 
 
@@ -87,7 +85,7 @@ def _advance_to_work_order(factory: BusinessFactory, approval_authority) -> None
     )
 
 
-class _ReviewAuthority:
+class _ReleaseReviewAuthority:
     def __init__(self, project_id: str) -> None:
         self._project_id = project_id
 
@@ -98,59 +96,39 @@ class _ReviewAuthority:
         evidence_ref: str,
         purpose: str,
     ) -> bool:
-        if project_id != self._project_id:
-            return False
-        expected = {
-            (
-                "review:license:httpx-0.28.1",
-                "license-disposition:component-httpx",
-            ),
-            (
-                "terms-review:public-source:competitor-1",
-                "public-source-permission:competitor-public-1",
-            ),
-        }
-        return (evidence_ref, purpose) in expected
+        return (
+            project_id == self._project_id
+            and evidence_ref == f"review:release-scope:{project_id}"
+            and purpose == "compliance-scope"
+        )
 
 
-def _allowed_compliance(project_id: str) -> ProductComplianceDecision:
-    return ProductComplianceGate(review_authority=_ReviewAuthority(project_id)).evaluate(
+def _allowed_release_grant(
+    project_id: str,
+    *,
+    artifact_ref: str,
+    bundle_dir,
+):
+    notice_bundle_sha256 = build_verified_notice_bundle(bundle_dir)
+    snapshot = ReleaseComplianceSnapshot(
         project_id=project_id,
-        dependencies=(
-            DependencyAdoption(
-                project_id=project_id,
-                component_id="component-httpx",
-                package_name="httpx",
-                version="0.28.1",
-                source_ref="registry:pypi:httpx:0.28.1",
-                provenance_ref="hash:sha256:httpx-fixture",
-                license_expression="BSD-3-Clause",
-                license_disposition=LicenseDisposition.APPROVED,
-                distribution_obligations=("retain-license-notice",),
-                notice_required=True,
-                notice_refs=("artifact:THIRD_PARTY_NOTICES.txt#httpx",),
-                review_ref="review:license:httpx-0.28.1",
-            ),
-        ),
-        obligation_evidence=(
-            DistributionObligationEvidence(
-                project_id=project_id,
-                component_id="component-httpx",
-                obligation="retain-license-notice",
-                fulfillment_ref="artifact:THIRD_PARTY_NOTICES.txt#httpx",
-            ),
-        ),
-        competitor_evidence=(
-            CompetitorResearchEvidence(
-                project_id=project_id,
-                evidence_id="competitor-public-1",
-                source_ref="public:https://example.test/product",
-                provenance_ref="research:source:public:competitor-1",
-                permitted_public_evidence=True,
-                permission_basis_ref="terms-review:public-source:competitor-1",
-            ),
-        ),
+        release_id="release:test:1",
+        project_source_ref="git:test:project-source",
+        project_source_sha256="1" * 64,
+        artifact_ref=artifact_ref,
+        artifact_sha256="2" * 64,
+        notice_bundle_sha256=notice_bundle_sha256,
+        dependencies=(),
+        scope_review_ref=f"review:release-scope:{project_id}",
     )
+    gate = ProductReleaseComplianceGate(
+        review_authority=_ReleaseReviewAuthority(project_id),
+    )
+    decision = gate.evaluate(snapshot, bundle_dir=bundle_dir)
+    assert decision.allowed is True
+    grant = gate.require_release_allowed(decision, snapshot, bundle_dir=bundle_dir)
+    assert grant.allowed is True
+    return grant
 
 
 def test_business_flow_links_real_product_project_and_survives_restart(
@@ -188,14 +166,18 @@ def test_business_flow_links_real_product_project_and_survives_restart(
     )
 
     factory.record_qa(state=QAState.PASSED, evidence_ref="qa:report:1")
-    decision = _allowed_compliance("product-project-1")
-    assert decision.allowed is True
+    artifact_ref = "artifact:expense-app:test:1"
+    grant = _allowed_release_grant(
+        "product-project-1",
+        artifact_ref=artifact_ref,
+        bundle_dir=tmp_path / "release-bundle",
+    )
     business_authority.allow_once("approval:delivery:1")
     factory.record_delivery(
         delivery_id="delivery-1",
-        artifact_ref="artifact:expense-app:test:1",
+        artifact_ref=artifact_ref,
         authorization_ref="approval:delivery:1",
-        compliance=decision,
+        compliance=grant,
     )
     factory.record_payment_state(
         invoice_ref="invoice:test:1",
@@ -271,7 +253,7 @@ def test_business_flow_fails_closed_before_required_policy_gates() -> None:
         )
 
 
-def test_delivery_requires_qa_and_matching_allowed_compliance(
+def test_delivery_requires_qa_and_exact_release_grant(
     tmp_path,
     business_authority,
 ) -> None:
@@ -291,11 +273,16 @@ def test_delivery_requires_qa_and_matching_allowed_compliance(
         idempotency_key="work-order-1",
     )
 
-    allowed = _allowed_compliance("product-project-1")
+    artifact_ref = "artifact:1"
+    allowed = _allowed_release_grant(
+        "product-project-1",
+        artifact_ref=artifact_ref,
+        bundle_dir=tmp_path / "release-bundle",
+    )
     with pytest.raises(BusinessFactoryError, match="passing QA"):
         factory.record_delivery(
             delivery_id="delivery-1",
-            artifact_ref="artifact:1",
+            artifact_ref=artifact_ref,
             authorization_ref="approval:delivery:1",
             compliance=allowed,
         )
@@ -307,24 +294,31 @@ def test_delivery_requires_qa_and_matching_allowed_compliance(
         findings=("license:blocked:component-1",),
         evidence_refs=("review:license:1",),
     )
-    with pytest.raises(BusinessFactoryError, match="PF10 compliance"):
+    with pytest.raises(BusinessFactoryError, match="exact PF10 release compliance grant"):
         factory.record_delivery(
             delivery_id="delivery-1",
-            artifact_ref="artifact:1",
+            artifact_ref=artifact_ref,
             authorization_ref="approval:delivery:1",
-            compliance=blocked,
+            compliance=blocked,  # type: ignore[arg-type]
         )
-    with pytest.raises(BusinessFactoryError, match="PF10 compliance"):
+    with pytest.raises(BusinessFactoryError, match="exact-artifact PF10 release compliance grant"):
         factory.record_delivery(
             delivery_id="delivery-1",
-            artifact_ref="artifact:1",
+            artifact_ref=artifact_ref,
             authorization_ref="approval:delivery:1",
             compliance=replace(allowed, project_id="other-project"),
+        )
+    with pytest.raises(BusinessFactoryError, match="exact-artifact PF10 release compliance grant"):
+        factory.record_delivery(
+            delivery_id="delivery-1",
+            artifact_ref="artifact:substituted",
+            authorization_ref="approval:delivery:1",
+            compliance=allowed,
         )
     with pytest.raises(BusinessFactoryError, match="trusted business approval authority"):
         factory.record_delivery(
             delivery_id="delivery-1",
-            artifact_ref="artifact:1",
+            artifact_ref=artifact_ref,
             authorization_ref="caller:self-minted-delivery-approval",
             compliance=allowed,
         )
