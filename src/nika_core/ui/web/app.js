@@ -64,7 +64,11 @@
   }
 
   function keymapControlId(actionId, control) {
-    return `keymap-${control}-${actionId}`;
+    return `keymap-${control}-${encodeURIComponent(String(actionId))}`;
+  }
+
+  function keymapAccessibleActionLabel(action) {
+    return `${action.label} (${action.action_id})`;
   }
 
   function renderItems(list, emptyNode, items, formatter) {
@@ -116,6 +120,7 @@
     actions = await globalThis.pywebview.api.list_actions();
     keymapBody.replaceChildren();
     for (const action of actions) {
+      const accessibleActionLabel = keymapAccessibleActionLabel(action);
       const row = document.createElement("tr");
       const labelCell = document.createElement("th");
       labelCell.scope = "row";
@@ -126,7 +131,7 @@
       input.id = keymapControlId(action.action_id, "binding");
       input.value = action.binding || "";
       input.dataset.actionId = action.action_id;
-      input.setAttribute("aria-label", `Комбінація для ${action.label}`);
+      input.setAttribute("aria-label", `Комбінація для ${accessibleActionLabel}`);
       bindingCell.appendChild(input);
       const controlCell = document.createElement("td");
       const save = document.createElement("button");
@@ -137,8 +142,8 @@
       save.setAttribute(
         "aria-label",
         action.may_be_unbound
-          ? `Зберегти або очистити комбінацію для ${action.label}`
-          : `Зберегти комбінацію для ${action.label}`,
+          ? `Зберегти або очистити комбінацію для ${accessibleActionLabel}`
+          : `Зберегти комбінацію для ${accessibleActionLabel}`,
       );
       save.addEventListener("click", async () => {
         const response = await globalThis.pywebview.api.set_binding(action.action_id, input.value.trim() || null);
@@ -155,7 +160,7 @@
       restore.textContent = "За замовчуванням";
       restore.setAttribute(
         "aria-label",
-        `Відновити комбінацію за замовчуванням для ${action.label}`,
+        `Відновити комбінацію за замовчуванням для ${accessibleActionLabel}`,
       );
       restore.addEventListener("click", async () => {
         const response = await globalThis.pywebview.api.restore_default(action.action_id);
