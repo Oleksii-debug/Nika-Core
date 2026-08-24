@@ -1,19 +1,18 @@
 # M10 target-scope hardening
 
-Updated: 2026-08-19.
+Updated: 2026-08-25.
 
 Status: implementation candidate. `HUMAN_TESTED=false`; `NVDA_VERIFIED=false`.
 
 ## Scope
 
 This slice hardens the already integrated M10 downstream `SandboxPolicy` after the durable
-Toolsmith→M10 bridge exposed two generic ambiguity classes:
-
-1. platform-dependent parsing of Windows-style write paths when policy tests run on Linux;
-2. executable allowlists that previously reduced every configured entry to its basename.
+Toolsmith→M10 bridge exposed generic cross-platform path and executable-authority ambiguity.
 
 The change stays entirely inside M10 security policy, its focused tests and this document. It does
-not edit M1-M4, Toolsmith, runtime, storage or GUI implementation.
+not edit M1-M4, Toolsmith, runtime, storage or GUI implementation. Low-level CodingWorker launch,
+canonical executable resolution, symlink/reparse handling and `Popen` containment remain owned by
+the existing DEV27/ONE-SHOT-45 Toolsmith lane rather than being duplicated here.
 
 ## REUSE / ADAPT / CUSTOM
 
@@ -27,12 +26,14 @@ ADAPT:
 
 - Windows naming rules are applied as a deterministic precondition even when the test runner is
   Linux, because Nika's primary packaged target is Windows;
-- executable entries now have two explicit meanings: a bare executable name is a basename grant,
-  while an absolute Windows/POSIX path is an exact path-scoped grant.
+- executable entries retain two explicit meanings: a bare executable name is a name-scoped grant,
+  while an absolute Windows/POSIX path is an exact path-scoped grant;
+- grant and request must now have the same scope kind before identity equality can authorize them.
 
 CUSTOM thin:
 
-- fail-closed rejection for ambiguous write targets and executable scopes at the M10 boundary.
+- fail-closed rejection for ambiguous write targets, executable scope widening and executable parent
+  traversal at the M10 boundary.
 
 No new dependency is added.
 
@@ -62,22 +63,28 @@ isolation and safe file-opening strategy appropriate to their threat model.
 
 ## Executable-scope invariants
 
-Backward-compatible bare-name grants remain supported. For example, an allowlist entry `pytest`
-may authorize an absolute executable whose basename is `pytest`.
+Bare-name grants remain supported only as name-scoped authority. For example, an allowlist entry
+`pytest` authorizes the unqualified request `pytest`; it does **not** authorize `/tmp/pytest`,
+`/usr/bin/pytest`, `C:\\Temp\\pytest` or another path merely because the basename matches.
 
-A path-scoped allowlist is stricter:
+Path-scoped allowlists are stricter:
 
-- it must be absolute; relative `bin/python`, `./python` and drive-relative `C:python.exe` entries
+- they must be absolute; relative `bin/python`, `./python` and drive-relative `C:python.exe` entries
   fail at policy construction;
+- parent traversal such as `/usr/bin/../python` or `C:\\Tools\\..\\python.exe` fails closed before
+  identity comparison;
 - Windows absolute paths compare with Windows case-insensitive semantics;
 - POSIX absolute paths compare case-sensitively;
 - an exact path-scoped grant never falls back to basename matching;
+- a name-scoped grant never widens into a path-scoped request;
 - malformed or reserved requested executable strings fail as `PermissionError` rather than being
-  treated as a different policy shape.
+  treated as a different policy shape;
+- an empty executable allowlist authorizes no process.
 
-Path-scoped string equality is not binary identity. A deployment that needs to bind execution to a
-specific binary must additionally use stronger provenance such as a verified executable digest and
-OS-enforced isolation. The policy deliberately does not pretend otherwise.
+These rules are intentionally lexical authority semantics. Path-scoped string equality is not
+binary identity and does not prove a canonical target, symlink chain, executable digest or Windows
+reparse-point state. Those physical launch-time guarantees stay at the Toolsmith/process adapter
+boundary; M10 does not introduce a second sandbox or competing executable resolver.
 
 ## Primary-source basis
 
@@ -98,11 +105,13 @@ The exact candidate must prove on Ubuntu and Windows that:
 2. `.git`, ADS/colon, reserved devices, invalid characters and trailing-dot/space targets fail;
 3. ordinary backslash workspace children normalize to the expected contained path;
 4. invalid writable roots fail during policy construction;
-5. bare-name executable grants keep documented compatibility;
-6. exact POSIX path grants remain exact and case-sensitive;
-7. exact Windows path grants remain exact and case-insensitive;
-8. relative/ambiguous executable path grants fail closed;
-9. the complete repository verification remains green with no weakened tests.
+5. bare-name executable grants authorize only the same unqualified executable identity;
+6. a same-basename POSIX or Windows path cannot inherit a bare-name grant;
+7. exact POSIX path grants remain exact and case-sensitive;
+8. exact Windows path grants remain exact and case-insensitive;
+9. parent-traversing and relative/ambiguous executable path grants fail closed;
+10. an empty executable allowlist denies process authorization;
+11. the complete repository verification remains green with no weakened tests.
 
 No `PACKAGED`, `HUMAN_TESTED` or `NVDA_VERIFIED` credit is claimed until the corresponding exact
 candidate evidence exists.
