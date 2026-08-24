@@ -214,10 +214,12 @@ def test_concurrent_independent_submits_linearize_without_poisoning_or_lost_stat
 
         second = pool.submit(host.submit, _spec("work:b", "linux-b"), now=NOW)
         second_reached_same_boundary = blocking_store.second_save_entered.wait(timeout=1)
-        if second_reached_same_boundary:
-            second.result(timeout=5)
+        try:
+            if second_reached_same_boundary:
+                second.result(timeout=5)
+        finally:
+            blocking_store.release_first_save.set()
 
-        blocking_store.release_first_save.set()
         first_record = first.result(timeout=5)
         second_record = second.result(timeout=5)
 
