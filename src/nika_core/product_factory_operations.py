@@ -277,6 +277,7 @@ class ProductOperationsCoordinator:
                     raise ProductOperationsError(
                         "maintenance request id conflicts with prior payload"
                     )
+                self._validate_maintenance_effect_record(record, existing)
                 return existing
             if self.port is None or request.approval_ref is None:
                 raise ProductOperationsError(
@@ -385,6 +386,7 @@ class ProductOperationsCoordinator:
                     "operations snapshot maintenance lacks durable approval evidence"
                 )
             self._validate_maintenance_authority(service, maintenance.request)
+            self._validate_maintenance_effect_record(service, maintenance)
             maintenance_by_service.setdefault(maintenance.request.service_id, []).append(
                 maintenance
             )
@@ -576,6 +578,43 @@ class ProductOperationsCoordinator:
         if approved is not True:
             raise ProductOperationsError(
                 "maintenance approval is not authorized for exact service/release/request"
+            )
+
+    def _validate_maintenance_effect_record(
+        self,
+        record: ServiceRecord,
+        maintenance: MaintenanceRecord,
+    ) -> None:
+        if self.effect_journal is None:
+            raise ProductOperationsError(
+                "maintenance effect requires durable journal evidence"
+            )
+        reservation = self.effect_journal.lookup(
+            project_id=self.project_id,
+            service=record.service,
+            request=maintenance.request,
+        )
+        if reservation is None:
+            raise ProductOperationsError(
+                "maintenance effect is missing from durable journal"
+            )
+        if not isinstance(reservation, MaintenanceEffectReservation):
+            raise ProductOperationsError(
+                "maintenance effect journal returned invalid lookup evidence"
+            )
+        if reservation.state is MaintenanceEffectState.PENDING:
+            raise ProductOperationsError(
+                "maintenance effect remains pending in durable journal"
+            )
+        if reservation.state is MaintenanceEffectState.UNCERTAIN:
+            if not maintenance.result.uncertain:
+                raise ProductOperationsError(
+                    "maintenance effect result conflicts with unresolved durable journal"
+                )
+            return
+        if reservation.result != maintenance.result:
+            raise ProductOperationsError(
+                "maintenance effect result conflicts with durable journal"
             )
 
     @classmethod
