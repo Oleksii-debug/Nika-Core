@@ -221,7 +221,7 @@ def test_aud03_bound_snapshot_mutation_invalidates_promotion_authority() -> None
     selection = selected(p)
     assessment = bind_held_out_test(p, selection, result_for(p, selection))
     object.__setattr__(assessment.test_result, "metric_value", Decimal(999))
-    with pytest.raises(TradingResearchError, match="changed after construction"):
+    with pytest.raises(TradingResearchError, match="changed after binding"):
         assessment.require_promotion_metric()
 
 
