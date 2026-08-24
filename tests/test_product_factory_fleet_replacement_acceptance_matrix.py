@@ -62,17 +62,17 @@ def test_target_selection_enforces_service_anti_affinity_and_max_replicas_per_no
 def test_target_selection_reuses_platform_capability_and_resource_constraints() -> None:
     coordinator, _, _, nodes, _, placements = _fixture(
         service_count=1,
-        replica_count=3,
-        node_count=5,
+        replica_count=2,
+        node_count=6,
     )
-    windows_candidate = _node(1)
+    windows_candidate = _node(2)
     nodes.register(
         replace(
             windows_candidate,
             identity=replace(windows_candidate.identity, platform=Platform.WINDOWS),
         )
     )
-    linux_without_replacement = _node(2)
+    linux_without_replacement = _node(3)
     nodes.register(
         replace(
             linux_without_replacement,
@@ -82,10 +82,11 @@ def test_target_selection_reuses_platform_capability_and_resource_constraints() 
             ),
         )
     )
-    nodes.register(_node(3, memory_mb=128))
-    nodes.register(_node(4))
+    nodes.register(_node(4, memory_mb=128))
+    nodes.register(_node(5))
 
     key = ("service-000", "service-000-replica-0")
+    assert placements[("service-000", "service-000-replica-1")][1] == "node-1"
     plan, authority, review_ref = _authorized_plan(placements, (key,))
     _submit(coordinator, plan, authority, review_ref)
     finished = coordinator.advance(
@@ -94,7 +95,7 @@ def test_target_selection_reuses_platform_capability_and_resource_constraints() 
     )
 
     assert finished.state is FleetReplacementState.SUCCEEDED
-    assert finished.replacements[0].target_node_id == "node-4"
+    assert finished.replacements[0].target_node_id == "node-5"
 
 
 def test_min_healthy_replicas_blocks_second_healthy_source_disruption() -> None:
