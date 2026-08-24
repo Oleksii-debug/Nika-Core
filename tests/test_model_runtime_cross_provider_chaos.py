@@ -25,10 +25,7 @@ from nika_core.model_gateway.contracts import (
 )
 from nika_core.model_gateway.foundry_local import FoundryLocalProvider
 from nika_core.model_gateway.gateway import ModelGateway
-from nika_core.model_gateway.providers import (
-    OllamaProvider,
-    OpenAICompatibleProvider,
-)
+from nika_core.model_gateway.providers import OllamaProvider, OpenAICompatibleProvider
 from nika_core.resources.contracts import ResourceSnapshot
 
 
