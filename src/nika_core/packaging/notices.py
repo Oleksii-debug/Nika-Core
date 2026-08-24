@@ -43,6 +43,18 @@ _NATIVE_SUFFIXES = frozenset({".dll", ".exe", ".pyd", ".so", ".dylib"})
 _REVIEW_LICENSE_TOKENS = ("agpl", "gpl", "lgpl", "sspl", "bsl", "busl", "proprietary")
 _SECTION_RE = re.compile(r"^===== (?P<title>.+?) =====$")
 
+# Some upstream distributions intentionally publish only a license file and omit both
+# License-Expression and legacy License/Classifiers metadata.  Such packages must not be
+# approved by name alone: the exact version and normalized bundled license-file digest are
+# reviewed together.  A version or license-text change therefore fails closed until reviewed.
+_REVIEWED_LICENSE_FILE_FINGERPRINTS: dict[tuple[str, str, str], str] = {
+    (
+        "clr-loader",
+        "0.3.1",
+        "d41c18f66fbc6dccb6a48bde483569a9ca3067636b9f8f33ad64de8ea2ee3f26",
+    ): "MIT",
+}
+
 
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -93,6 +105,27 @@ def _license_texts(dist: metadata.Distribution) -> tuple[tuple[str, str], ...]:
         except OSError:
             continue
     return tuple(sorted(collected))
+
+
+def _resolve_license_evidence(
+    distribution_name: str,
+    version: str,
+    declared_license: str | None,
+    license_texts: tuple[tuple[str, str], ...],
+) -> tuple[str | None, str]:
+    if declared_license:
+        return declared_license, "package-metadata"
+    normalized_name = canonicalize_name(distribution_name)
+    for _, text in license_texts:
+        digest = _sha256_bytes(text.encode("utf-8"))
+        reviewed = _REVIEWED_LICENSE_FILE_FINGERPRINTS.get(
+            (normalized_name, version, digest)
+        )
+        if reviewed:
+            return reviewed, "reviewed-license-file-fingerprint"
+    if license_texts:
+        return None, "unclassified-license-file"
+    return None, "missing"
 
 
 def _distribution_section(
@@ -174,12 +207,19 @@ def _distribution_evidence(distribution_name: str) -> dict[str, object]:
         raise RuntimeError(
             f"Required runtime distribution is missing: {distribution_name}"
         ) from exc
+    package_name = canonicalize_name(dist.metadata.get("Name") or distribution_name)
     declared_license = _metadata_license(dist)
     license_texts = _license_texts(dist)
     if not declared_license and not license_texts:
         raise RuntimeError(
             f"No license evidence found for runtime distribution: {distribution_name}"
         )
+    resolved_license, license_source = _resolve_license_evidence(
+        package_name,
+        dist.version,
+        declared_license,
+        license_texts,
+    )
     urls = _project_urls(dist)
     if not urls:
         raise RuntimeError(
@@ -187,11 +227,17 @@ def _distribution_evidence(distribution_name: str) -> dict[str, object]:
         )
     installer = (dist.read_text("INSTALLER") or "").strip() or None
     return {
-        "name": canonicalize_name(dist.metadata.get("Name") or distribution_name),
+        "name": package_name,
         "resolved_version": dist.version,
-        "license": declared_license,
+        "license": resolved_license,
+        "license_metadata": declared_license,
+        "license_source": license_source,
         "license_evidence_files": [path for path, _ in license_texts],
-        "license_risk": _license_risk(declared_license),
+        "license_evidence_sha256": [
+            {"path": path, "sha256": _sha256_bytes(text.encode("utf-8"))}
+            for path, text in license_texts
+        ],
+        "license_risk": _license_risk(resolved_license),
         "project_urls": list(urls),
         "installer": installer,
         "record_sha256": _record_sha256(dist),
@@ -369,7 +415,7 @@ def build_cyclonedx_sbom(supply_chain: dict[str, object]) -> dict[str, object]:
         if isinstance(license_name, str) and license_name:
             component["licenses"] = [{"license": {"name": license_name}}]
         properties: list[dict[str, str]] = []
-        for key in ("installer", "record_sha256", "license_risk"):
+        for key in ("installer", "record_sha256", "license_risk", "license_source"):
             value = item.get(key)
             if value is not None:
                 properties.append({"name": f"nika:{key}", "value": str(value)})
