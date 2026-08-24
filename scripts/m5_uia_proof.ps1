@@ -57,6 +57,7 @@ $expectedProcessStartTicks = $null
 $expectedExecutablePath = $null
 $boundWindowHandle = $null
 $boundWindowRuntimeId = $null
+$script:nextControlGeneration = 1
 
 function Get-ElementRuntimeId([System.Windows.Automation.AutomationElement]$Element) {
     $runtimeId = $Element.GetRuntimeId()
@@ -70,6 +71,9 @@ function Test-SameAutomationElement(
     [System.Windows.Automation.AutomationElement]$Left,
     [System.Windows.Automation.AutomationElement]$Right
 ) {
+    # System.Windows.Automation.Compare compares RuntimeIds. It is safe here only
+    # for collapsing overlapping observations inside one live enumeration. It is
+    # never used to restore authority after the captured original element is stale.
     return [System.Windows.Automation.Automation]::Compare($Left, $Right)
 }
 
@@ -169,9 +173,10 @@ try {
     # even when the exact host window's initial UIA descendant query is empty. Walk
     # only HWNDs that are descendants of the already PID+title+generation-bound host
     # window, convert them back into UIA elements, and query semantics there. Search
-    # roots can overlap, so semantic candidates are later deduplicated only with
-    # Automation.Compare (same UIA element identity), never by accessible Name.
-    # The proof stays within this exact bound generation without coordinates, another process, or a relaunch.
+    # roots can overlap, so candidates are collapsed only inside one live enumeration.
+    # Captured control authority is separately bound to a live element reference,
+    # RuntimeId, semantic locator and Nika generation. The proof stays within this
+    # exact bound generation without coordinates, another process, or a relaunch.
     function Get-BoundSearchRoots([System.Windows.Automation.AutomationElement]$ExactWindow) {
         $searchRoots = New-Object 'System.Collections.Generic.List[System.Windows.Automation.AutomationElement]'
         Add-UniqueAutomationElement $searchRoots $ExactWindow
@@ -218,18 +223,47 @@ try {
         return @($collected)
     }
 
+    function Test-ElementMatchesSemanticLocator(
+        [System.Windows.Automation.AutomationElement]$Element,
+        [string]$Expected,
+        [System.Windows.Automation.ControlType]$ExpectedControlType = $null
+    ) {
+        if ($Element.Current.Name -ne $Expected) { return $false }
+        if ($null -ne $ExpectedControlType -and
+            -not $Element.Current.ControlType.Equals($ExpectedControlType)) {
+            return $false
+        }
+        return $true
+    }
+
     function Find-BoundDescendantName(
         [System.Windows.Automation.AutomationElement]$ExactWindow,
-        [string]$Expected
+        [string]$Expected,
+        [System.Windows.Automation.ControlType]$ExpectedControlType = $null
     ) {
-        $condition = New-Object System.Windows.Automation.PropertyCondition(
+        $conditions = New-Object 'System.Collections.Generic.List[System.Windows.Automation.Condition]'
+        $conditions.Add((New-Object System.Windows.Automation.PropertyCondition(
             [System.Windows.Automation.AutomationElement]::NameProperty,
             $Expected
-        )
+        )))
+        if ($null -ne $ExpectedControlType) {
+            $conditions.Add((New-Object System.Windows.Automation.PropertyCondition(
+                [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+                $ExpectedControlType
+            )))
+        }
+        if ($conditions.Count -eq 1) {
+            $condition = $conditions.Item(0)
+        } else {
+            $condition = [System.Windows.Automation.AndCondition]::new(
+                [System.Windows.Automation.Condition[]]$conditions.ToArray()
+            )
+        }
+
         $candidates = New-Object 'System.Collections.Generic.List[System.Windows.Automation.AutomationElement]'
         foreach ($searchRoot in (Get-BoundSearchRoots $ExactWindow)) {
             try {
-                if ($searchRoot.Current.Name -eq $Expected) {
+                if (Test-ElementMatchesSemanticLocator $searchRoot $Expected $ExpectedControlType) {
                     Add-UniqueAutomationElement $candidates $searchRoot
                 }
                 $matches = $searchRoot.FindAll(
@@ -247,13 +281,23 @@ try {
         }
 
         if ($candidates.Count -gt 1) {
-            $runtimeIds = @(
+            $typeLabel = if ($null -eq $ExpectedControlType) {
+                '<any>'
+            } else {
+                $ExpectedControlType.ProgrammaticName
+            }
+            $candidateDescriptions = @(
                 foreach ($candidate in $candidates) {
-                    try { (Get-ElementRuntimeId $candidate) -join '.' }
-                    catch [System.Windows.Automation.ElementNotAvailableException] { '<stale>' }
+                    try {
+                        $runtimeId = (Get-ElementRuntimeId $candidate) -join '.'
+                        $candidateType = $candidate.Current.ControlType.ProgrammaticName
+                        "${candidateType}:$runtimeId"
+                    } catch [System.Windows.Automation.ElementNotAvailableException] {
+                        '<stale>'
+                    }
                 }
             ) -join ' | '
-            throw "Multiple distinct UI Automation descendants matched exact accessible name '$Expected'. RuntimeIds: $runtimeIds"
+            throw "Multiple distinct UI Automation descendants matched exact semantic locator Name='$Expected', ControlType='$typeLabel'. Candidates: $candidateDescriptions"
         }
         if ($candidates.Count -eq 1) { return $candidates.Item(0) }
         return $null
@@ -261,12 +305,27 @@ try {
 
     function New-BoundControlIdentity(
         [System.Windows.Automation.AutomationElement]$Element,
-        [string]$ExpectedName
+        [string]$ExpectedName,
+        [System.Windows.Automation.ControlType]$ExpectedControlType = $null
     ) {
         $runtimeId = Get-ElementRuntimeId $Element
+        $actualControlType = $Element.Current.ControlType
+        if ($null -ne $ExpectedControlType -and
+            -not $actualControlType.Equals($ExpectedControlType)) {
+            throw "UI Automation control '$ExpectedName' did not expose expected ControlType '$($ExpectedControlType.ProgrammaticName)'."
+        }
+        $controlType = if ($null -eq $ExpectedControlType) {
+            $actualControlType
+        } else {
+            $ExpectedControlType
+        }
+        $elementGeneration = $script:nextControlGeneration
+        $script:nextControlGeneration += 1
         return [pscustomobject]@{
             ExpectedName = $ExpectedName
+            ExpectedControlType = $controlType
             RuntimeId = [int[]]$runtimeId
+            ElementGeneration = $elementGeneration
             ProcessId = $expectedProcessId
             ProcessStartTicks = $expectedProcessStartTicks
             ExecutablePath = $expectedExecutablePath
@@ -294,12 +353,40 @@ try {
             )) {
             throw "Control '$($Identity.ExpectedName)' belongs to a different top-level window generation."
         }
+        if ($Identity.ElementGeneration -lt 1) {
+            throw "Control '$($Identity.ExpectedName)' has an invalid UI Automation element generation."
+        }
+
+        # RuntimeId is documented as reusable over time. A stale captured element
+        # cannot regain action/focus authority merely because a later element exposes
+        # the same RuntimeId. Require the original generation to remain live first.
+        try {
+            $originalRuntimeId = Get-ElementRuntimeId $Identity.Element
+            if (-not [System.Windows.Automation.Automation]::Compare(
+                [int[]]$Identity.RuntimeId,
+                [int[]]$originalRuntimeId
+            )) {
+                throw "Captured UI Automation control '$($Identity.ExpectedName)' changed RuntimeId inside generation $($Identity.ElementGeneration)."
+            }
+            if (-not (Test-ElementMatchesSemanticLocator
+                $Identity.Element
+                $Identity.ExpectedName
+                $Identity.ExpectedControlType
+            )) {
+                throw "Captured UI Automation control '$($Identity.ExpectedName)' changed semantic locator inside generation $($Identity.ElementGeneration)."
+            }
+        } catch [System.Windows.Automation.ElementNotAvailableException] {
+            throw "Captured UI Automation control '$($Identity.ExpectedName)' generation $($Identity.ElementGeneration) became stale; RuntimeId reuse cannot restore control authority."
+        }
 
         $currentWindow = Find-ExactWindow
         if ($null -eq $currentWindow) {
             throw "Bound top-level window disappeared while resolving '$($Identity.ExpectedName)'."
         }
-        $resolved = Find-BoundDescendantName $currentWindow $Identity.ExpectedName
+        $resolved = Find-BoundDescendantName \
+            $currentWindow \
+            $Identity.ExpectedName \
+            $Identity.ExpectedControlType
         if ($null -eq $resolved) {
             throw "Bound UI Automation control '$($Identity.ExpectedName)' disappeared."
         }
@@ -308,7 +395,10 @@ try {
             [int[]]$Identity.RuntimeId,
             [int[]]$resolvedRuntimeId
         )) {
-            throw "UI Automation control '$($Identity.ExpectedName)' was re-resolved to a different RuntimeId after becoming stale or being replaced."
+            throw "UI Automation control '$($Identity.ExpectedName)' was re-resolved to a different RuntimeId after capture."
+        }
+        if (-not [System.Windows.Automation.Automation]::Compare($Identity.Element, $resolved)) {
+            throw "UI Automation control '$($Identity.ExpectedName)' was re-resolved to a different live element generation."
         }
         $Identity.Element = $resolved
         return $resolved
@@ -361,23 +451,35 @@ try {
     $semanticElapsed = [Math]::Round($startupWatch.Elapsed.TotalSeconds, 1)
     Write-Host "Required packaged WebView2 UIA semantics became discoverable after ${semanticElapsed}s."
 
-    function Wait-DescendantName([string]$Expected, [int]$Attempts = 80) {
+    function Wait-DescendantName(
+        [string]$Expected,
+        [System.Windows.Automation.ControlType]$ExpectedControlType = $null,
+        [int]$Attempts = 80
+    ) {
         for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
             Start-Sleep -Milliseconds 250
             Assert-BoundProcessGeneration
             $currentWindow = Find-ExactWindow
             if ($null -eq $currentWindow) { continue }
             try {
-                $element = Find-BoundDescendantName $currentWindow $Expected
+                $element = Find-BoundDescendantName \
+                    $currentWindow \
+                    $Expected \
+                    $ExpectedControlType
                 if ($null -ne $element) {
-                    return New-BoundControlIdentity $element $Expected
+                    return New-BoundControlIdentity $element $Expected $ExpectedControlType
                 }
             } catch [System.Windows.Automation.ElementNotAvailableException] {
                 # An incomplete enumeration is never accepted. Retry from fresh roots.
                 continue
             }
         }
-        throw "Expected unique UI Automation descendant '$Expected' did not appear."
+        $typeLabel = if ($null -eq $ExpectedControlType) {
+            '<any>'
+        } else {
+            $ExpectedControlType.ProgrammaticName
+        }
+        throw "Expected unique UI Automation descendant Name='$Expected', ControlType='$typeLabel' did not appear."
     }
 
     function Wait-FocusName($ExpectedControl) {
@@ -396,9 +498,8 @@ try {
                 $sameElement = [System.Windows.Automation.Automation]::Compare($target, $focused)
                 if ($sameRuntimeId -and $sameElement) { return }
             } catch [System.Windows.Automation.ElementNotAvailableException] {
-                # A provider transition can stale either the stored element reference,
-                # a search root, or FocusedElement. Retry only after resolving the same
-                # captured RuntimeId/process/window generation from a fresh full search.
+                # FocusedElement can transiently become unavailable. The stored target
+                # generation is never reauthorized after staleness; resolver fails closed.
                 continue
             }
         }
@@ -414,7 +515,7 @@ try {
                 $actualRuntimeId = '<stale>'
             }
         }
-        throw "Expected keyboard focus on exact '$($ExpectedControl.ExpectedName)' RuntimeId '$($ExpectedControl.RuntimeId -join '.')', got '$actualName' RuntimeId '$actualRuntimeId'."
+        throw "Expected keyboard focus on exact '$($ExpectedControl.ExpectedName)' generation '$($ExpectedControl.ElementGeneration)' RuntimeId '$($ExpectedControl.RuntimeId -join '.')', got '$actualName' RuntimeId '$actualRuntimeId'."
     }
 
     function Set-BoundControlFocus($Control) {
@@ -435,9 +536,15 @@ try {
     # ready status so this gate tests keyboard behavior rather than an initialization race.
     Wait-DescendantName 'Nika Core готова до роботи.' | Out-Null
 
-    $startControl = Wait-DescendantName 'Створити завдання'
-    $tasksControl = Wait-DescendantName 'Завдання'
-    $commandControl = Wait-DescendantName 'Що має зробити Nika?'
+    $startControl = Wait-DescendantName \
+        'Створити завдання' \
+        ([System.Windows.Automation.ControlType]::Button)
+    $tasksControl = Wait-DescendantName \
+        'Завдання' \
+        ([System.Windows.Automation.ControlType]::Text)
+    $commandControl = Wait-DescendantName \
+        'Що має зробити Nika?' \
+        ([System.Windows.Automation.ControlType]::Edit)
 
     Set-BoundControlFocus $startControl
     [System.Windows.Forms.SendKeys]::SendWait('%1')
