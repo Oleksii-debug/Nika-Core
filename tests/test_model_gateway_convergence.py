@@ -6,6 +6,7 @@ import pytest
 
 from nika_core.model_gateway.contracts import (
     ModelErrorCode,
+    ModelFailureEffect,
     ModelGatewayError,
     ModelMessage,
     ModelRequest,
@@ -63,11 +64,12 @@ def _request(*, provider_id: str = "primary", fallbacks: tuple[str, ...] = ()) -
     )
 
 
-def test_usage_total_must_equal_known_components_even_when_components_sum_to_zero() -> None:
-    with pytest.raises(ValueError, match="must equal"):
-        ModelUsage(input_tokens=0, output_tokens=0, total_tokens=1)
-    with pytest.raises(ValueError, match="must equal"):
-        ModelUsage(input_tokens=2, output_tokens=3, total_tokens=6)
+def test_usage_total_must_cover_known_components_but_may_include_extra_provider_tokens() -> None:
+    with pytest.raises(ValueError, match="known component tokens"):
+        ModelUsage(input_tokens=2, output_tokens=3, total_tokens=4)
+
+    extended = ModelUsage(input_tokens=2, output_tokens=3, total_tokens=6)
+    assert extended.total_tokens == 6
 
 
 def test_resource_policy_rejects_boolean_and_non_finite_numeric_values() -> None:
@@ -100,6 +102,7 @@ def test_retryable_generic_provider_error_cannot_trigger_fallback() -> None:
             "generic failure",
             provider_id="primary",
             retryable=True,
+            failure_effect=ModelFailureEffect.NO_EFFECT,
         ),
     )
     fallback = _Provider("fallback")
@@ -115,6 +118,53 @@ def test_retryable_generic_provider_error_cannot_trigger_fallback() -> None:
     assert fallback.calls == 0
 
 
+def test_retryable_unavailable_without_no_effect_evidence_cannot_fallback() -> None:
+    primary = _Provider(
+        "primary",
+        error=ModelGatewayError(
+            ModelErrorCode.UNAVAILABLE,
+            "ambiguous provider failure after possible effect",
+            provider_id="primary",
+            retryable=True,
+        ),
+    )
+    fallback = _Provider("fallback")
+    gateway = ModelGateway()
+    gateway.register(primary)
+    gateway.register(fallback)
+
+    with pytest.raises(ModelGatewayError) as raised:
+        asyncio.run(gateway.complete(_request(fallbacks=("fallback",))))
+
+    assert raised.value.code is ModelErrorCode.UNAVAILABLE
+    assert raised.value.failure_effect is ModelFailureEffect.UNKNOWN
+    assert primary.calls == 1
+    assert fallback.calls == 0
+
+
+def test_retryable_unavailable_with_explicit_no_effect_evidence_can_fallback() -> None:
+    primary = _Provider(
+        "primary",
+        error=ModelGatewayError(
+            ModelErrorCode.UNAVAILABLE,
+            "provider rejected before model effect",
+            provider_id="primary",
+            retryable=True,
+            failure_effect=ModelFailureEffect.NO_EFFECT,
+        ),
+    )
+    fallback = _Provider("fallback")
+    gateway = ModelGateway()
+    gateway.register(primary)
+    gateway.register(fallback)
+
+    response = asyncio.run(gateway.complete(_request(fallbacks=("fallback",))))
+
+    assert response.provider_id == "fallback"
+    assert primary.calls == 1
+    assert fallback.calls == 1
+
+
 def test_non_boolean_retryable_flag_is_normalized_fail_closed() -> None:
     primary = _Provider(
         "primary",
@@ -123,6 +173,7 @@ def test_non_boolean_retryable_flag_is_normalized_fail_closed() -> None:
             "malformed retry flag",
             provider_id="primary",
             retryable=True,
+            failure_effect=ModelFailureEffect.NO_EFFECT,
         ),
     )
     primary._error.retryable = 1  # type: ignore[union-attr]
@@ -136,4 +187,30 @@ def test_non_boolean_retryable_flag_is_normalized_fail_closed() -> None:
 
     assert raised.value.code is ModelErrorCode.PROVIDER_ERROR
     assert raised.value.retryable is False
+    assert fallback.calls == 0
+
+
+def test_invalid_failure_effect_state_is_normalized_fail_closed() -> None:
+    primary = _Provider(
+        "primary",
+        error=ModelGatewayError(
+            ModelErrorCode.UNAVAILABLE,
+            "malformed effect state",
+            provider_id="primary",
+            retryable=True,
+            failure_effect=ModelFailureEffect.NO_EFFECT,
+        ),
+    )
+    primary._error.failure_effect = "no_effect"  # type: ignore[union-attr,assignment]
+    fallback = _Provider("fallback")
+    gateway = ModelGateway()
+    gateway.register(primary)
+    gateway.register(fallback)
+
+    with pytest.raises(ModelGatewayError) as raised:
+        asyncio.run(gateway.complete(_request(fallbacks=("fallback",))))
+
+    assert raised.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert raised.value.retryable is False
+    assert raised.value.failure_effect is ModelFailureEffect.UNKNOWN
     assert fallback.calls == 0
