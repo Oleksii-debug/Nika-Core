@@ -45,6 +45,19 @@ class ModelErrorCode(StrEnum):
     PROVIDER_ERROR = "provider_error"
 
 
+class ModelFailureEffect(StrEnum):
+    """Effect certainty attached to a typed provider failure.
+
+    ``NO_EFFECT`` is a positive provider-adapter assertion that the failed
+    attempt did not start/commit model inference, consume a billable effect,
+    or otherwise leave an externally ambiguous outcome. Missing/unknown
+    evidence is deliberately not fallback-safe.
+    """
+
+    UNKNOWN = "unknown"
+    NO_EFFECT = "no_effect"
+
+
 @dataclass(frozen=True, slots=True)
 class ModelMessage:
     role: str
@@ -217,18 +230,15 @@ class ModelUsage:
             if value < 0:
                 raise ValueError(f"{name} must not be negative")
         if self.total_tokens is not None:
-            known_components = (
-                self.input_tokens is not None,
-                self.output_tokens is not None,
-            )
             known_total = sum(
                 value
                 for value in (self.input_tokens, self.output_tokens)
                 if value is not None
             )
-            if all(known_components) and self.total_tokens != known_total:
-                raise ValueError("total_tokens must equal input_tokens plus output_tokens")
-            if any(known_components) and self.total_tokens < known_total:
+            if (
+                (self.input_tokens is not None or self.output_tokens is not None)
+                and self.total_tokens < known_total
+            ):
                 raise ValueError("total_tokens must not be smaller than known component tokens")
 
 
@@ -315,11 +325,13 @@ class ModelGatewayError(RuntimeError):
         *,
         provider_id: str | None = None,
         retryable: bool = False,
+        failure_effect: ModelFailureEffect = ModelFailureEffect.UNKNOWN,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.provider_id = provider_id
         self.retryable = retryable
+        self.failure_effect = failure_effect
 
 
 class ModelProvider(Protocol):
