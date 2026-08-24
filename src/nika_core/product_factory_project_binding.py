@@ -57,12 +57,13 @@ class ProductProjectCoordinatorCheckpoint:
 def verify_live_checkpoint_authority(
     checkpoint: ProductProjectCoordinatorCheckpoint,
 ) -> str:
-    """Verify the process-ephemeral host binding proof for a first checkpoint.
+    """Verify the process-ephemeral host binding proof for an authority boundary.
 
     The proof binds both immutable plan authority and the exact live checkpoint snapshot.
-    It is intentionally not durable. After the first atomic checkpoint save, the
-    host-task anchor is authoritative across process restart. Merely knowing or
-    recomputing the public plan fingerprint cannot mint this keyed proof.
+    It is intentionally not durable. The checkpoint host uses it for initial anchor
+    establishment and for the first durable state of a new repair generation; durable
+    restart authority still comes from the independently persisted host-task anchor.
+    Merely knowing or recomputing the public plan fingerprint cannot mint this keyed proof.
     """
 
     plan = checkpoint.coordinator.trusted_plan
@@ -100,10 +101,12 @@ class ProductProjectCoordinatorBinding:
     checkpoint wherever orchestration state is durably owned and must re-bind it against
     the current ProductProject before resume.
 
-    A live checkpoint receives a process-ephemeral keyed proof for the initial trusted
-    plan and exact snapshot. The proof cannot be reconstructed from checkpoint bytes or
-    from the public plan fingerprint alone. It only authorizes first-anchor establishment;
-    restart authority subsequently comes from the independently persisted host-task anchor.
+    Every live checkpoint receives a process-ephemeral keyed proof for the immutable
+    trusted plan and exact snapshot. The proof cannot be reconstructed from checkpoint
+    bytes or from the public plan fingerprint alone. The checkpoint host consumes it only
+    at security-significant boundaries: first-anchor establishment and first durable
+    `ready` state for a new repair generation. Restart authority subsequently comes from
+    the independently persisted host-task anchor.
     """
 
     project: ProductProject
