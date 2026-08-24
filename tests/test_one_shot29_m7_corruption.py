@@ -60,7 +60,7 @@ def test_team_quota_rejects_bool_string_and_float_numeric_coercion(
         "max_parallel": 2,
     }
     data[field] = value
-    with pytest.raises(ValueError, match="must be an integer"):
+    with pytest.raises(TypeError, match="must be an integer"):
         TeamQuota(**data)  # type: ignore[arg-type]
 
 
@@ -82,7 +82,7 @@ def test_persisted_quota_corruption_fails_closed_on_restart_read(tmp_path: Path)
             ),
         )
 
-    with pytest.raises(ValueError, match="max_parallel must be an integer"):
+    with pytest.raises(TypeError, match="max_parallel must be an integer"):
         store.quota("team-corrupt")
 
 
@@ -134,7 +134,7 @@ def test_cancel_expected_count_type_corruption_is_detected_after_restart(tmp_pat
         )
 
     restarted = TeamCancellationJournal(store)
-    with pytest.raises(RuntimeError, match="expected effect count is corrupt"):
+    with pytest.raises(TypeError, match="expected effect count is corrupt"):
         restarted.get("team-corrupt")
 
 
