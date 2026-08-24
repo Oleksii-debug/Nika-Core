@@ -74,20 +74,22 @@ jobs:
         run: python -m pip install -e "./source[gui,qa,dev]"
 
       - name: Run focused exact-target source gates
+        working-directory: source
         run: >-
           python -m pytest
-          source/tests/test_packaged_current_product_project.py
-          source/tests/test_m11_m12_release.py
-          source/tests/test_m5_ui_foundation.py
+          tests/test_packaged_current_product_project.py
+          tests/test_m11_m12_release.py
+          tests/test_m5_ui_foundation.py
           -q
 
       - name: Run Ruff on exact-target journey surfaces
+        working-directory: source
         run: >-
           python -m ruff check
-          source/scripts/nika_windows.py
-          source/src/nika_core/product_factory_packaged_journey.py
-          source/src/nika_core/ui
-          source/tests/test_packaged_current_product_project.py
+          scripts/nika_windows.py
+          src/nika_core/product_factory_packaged_journey.py
+          src/nika_core/ui
+          tests/test_packaged_current_product_project.py
 
       - name: Resolve canonical package version
         id: release
