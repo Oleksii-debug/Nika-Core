@@ -302,7 +302,7 @@ def load_corpus_media_handoff_v2(payload: str) -> CorpusMediaHandoffV2:
     except json.JSONDecodeError as exc:
         raise ValueError("media handoff checkpoint is invalid JSON") from exc
     if not isinstance(decoded, dict):
-        raise ValueError("media handoff checkpoint root must be an object")
+        raise TypeError("media handoff checkpoint root must be an object")
     return CorpusMediaHandoffV2.model_validate(decoded)
 
 
