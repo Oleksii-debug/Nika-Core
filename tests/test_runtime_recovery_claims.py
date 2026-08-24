@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import UTC
+from datetime import UTC, timedelta
 from datetime import datetime as RealDateTime
-from datetime import timedelta
 from pathlib import Path
 
 import pytest
