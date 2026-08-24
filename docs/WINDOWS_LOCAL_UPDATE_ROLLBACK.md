@@ -1,134 +1,148 @@
 # Windows local update and rollback
 
-Status: ONE-SHOT-55 candidate contract. This document does not claim integration or release readiness.
+Status: ONE-SHOT-55 implementation candidate. This document records engineering behavior only; it does not grant release, human, or NVDA acceptance.
 
-## Purpose
+## Scope and architecture
 
-Nika Core needs one local Windows update transaction that can move an already installed package and durable SQLite database to one explicitly authorized new release, then either prove startup/health or restore the old package and data. This is not a public auto-update service and does not discover releases.
-
-The transaction is:
-
-`installed old package + durable DB -> exact candidate verification -> canonical pre-update backup -> canonical ordered migration -> package replacement -> startup/health -> COMPLETED`
-
-or, after a migration/startup failure:
-
-`failure -> restore old package -> canonical restore preview/confirmation -> canonical data restore/recovery -> restart old package -> ROLLED_BACK`.
-
-## Authority boundaries
-
-The updater is deliberately thin.
+Nika local Windows package update is deliberately a thin orchestration layer over existing release and recovery authorities.
 
 **REUSE**
-
-- `nika_core.packaging.release.verify_distributable_evidence` binds the exact candidate bytes to outer evidence, exact source SHA and artifact reference.
-- `nika_core.packaging.release.verify_release_archive` is the release ZIP/manifest/path/hash authority from ONE-SHOT-01 #333/current successor.
-- `SQLiteStore.initialize()` is the ordered application migration authority.
-- `SQLiteRecoveryManager` is the only SQLite backup/verify/restore/interrupted-restore authority.
-- canonical `reliability.restore_completed` audit evidence is the post-restore receipt used to reconcile a crash after restore side effects but before update-journal advancement.
+- canonical `nika_core.packaging.release.verify_distributable_evidence()` for the exact outer artifact/evidence binding;
+- canonical `nika_core.packaging.release.verify_release_archive()` for final ZIP/member/manifest/source-SHA validation;
+- canonical `SQLiteStore.initialize()` ordered migrations;
+- canonical `SQLiteRecoveryManager` backup, verification, restore-preview confirmation, safety rollback, quarantine, and interrupted-restore recovery;
+- canonical `AuditLog` `reliability.restore_completed` receipt as post-crash restore evidence.
 
 **ADAPT**
-
-- the verified ZIP and evidence are copied into a private operation directory before mutation, closing candidate path/byte substitution after authorization;
-- the canonical pre-update `BackupArtifact` is retained under the update operation identity;
-- the exact canonical `RestorePlan.confirmation_fingerprint` is persisted before destructive rollback and is reused, never silently regenerated after a stale-plan failure.
+- the exact release candidate is copied into a private operation directory before verification and use;
+- canonical pre-update database backup is sequenced before migration/package replacement;
+- canonical restore confirmation is persisted inside the updater operation journal so a restart cannot silently obtain a fresh destructive restore authorization;
+- final M11/M12 Windows ZIPs are exercised through the same updater path before acceptance evidence is uploaded.
 
 **CUSTOM (thin)**
+- one update operation identity;
+- a cross-process install update lease;
+- an atomic/fsync-backed JSON operation journal;
+- same-volume package-directory replacement and rollback sequencing;
+- a host-provided startup/health boundary.
 
-- one OS-released per-installation updater lease;
-- one atomic JSON install-operation journal outside the installed package and live database;
-- same-parent directory rename/swap for package replacement and rollback;
-- deterministic restart/reconciliation phases;
-- `StartupHealthPort`, because startup/health semantics belong to the host application rather than to the package/recovery engines.
+The updater does **not** implement another ZIP verifier, SQLite backup engine, migration framework, deployment fabric, credential authority, or release signer.
 
-There is no second package manifest verifier, SQLite backup engine, migration stream, release-signing authority or network update channel.
+## Operation identity and durable journal
 
-## Trusted input
+An operation ID binds the resolved installation directory, resolved database path, product, target version, and exact target source SHA. The operation owns a private copy of the candidate ZIP/evidence and a canonical pre-update backup.
 
-`UpdateRequest.expected_product`, `expected_version`, `expected_source_sha` and `artifact_reference` are host control-plane authorization inputs. A candidate archive cannot authorize itself by declaring a version/SHA in its own manifest. The updater checks candidate outer evidence and the embedded manifest against those exact host values.
+Durable phases are:
 
-This layer intentionally does **not** infer a release channel, compare semantic versions or decide that one version is globally "newer" than another. A valid historical ZIP is rejected when it does not match the exact target identity authorized by the host.
+`CANDIDATE_VERIFIED -> BACKUP_CREATED -> MIGRATION_STARTED -> MIGRATED -> REPLACEMENT_STARTED -> REPLACED -> HEALTH_CHECKING -> COMPLETED`
 
-## Durable operation journal
+Rollback phases are:
 
-The journal is stored under the configured updater state directory, not inside the install directory or SQLite database. An operation ID is derived from the normalized install path, database path and exact authorized product/version/source SHA.
+`ROLLBACK_PACKAGE -> ROLLBACK_DATA_PREPARED -> ROLLBACK_DATA -> RESTARTING_OLD -> ROLLED_BACK`
 
-Durable phases include:
+An unrecoverable/ambiguous state becomes `BLOCKED`; the implementation does not guess or silently restart from a new authority source.
 
-- `candidate_verified`
-- `backup_created`
-- `migration_started`
-- `migrated`
-- `replacement_started`
-- `replaced`
-- `health_checking`
-- `rollback_package`
-- `rollback_data_prepared`
-- `rollback_data`
-- `restarting_old`
-- terminal `completed`, `rolled_back`, or `blocked`.
+Repeated invocation of an already completed operation returns its durable terminal result only after revalidating that the installed package still matches the journal identity.
 
-Journal writes use a same-directory temporary file, file flush/fsync, atomic replacement, and directory fsync where the host OS supports that operation. Windows does not expose a portable Python directory-fsync primitive here, so the implementation does not claim stronger filesystem durability than the underlying Windows rename semantics provide.
+## Candidate verification
 
-Repeated invocation of the same operation resumes the durable phase or returns its terminal result. A different non-terminal operation for the same installation fails closed.
+Before any backup/migration/package mutation:
 
-## Crash boundaries
+1. the selected ZIP and its evidence file must exist;
+2. current installed product identity must be valid and different from the target source SHA;
+3. candidate ZIP/evidence are copied into the private operation directory;
+4. outer distributable evidence verifies exact source SHA/path/size/hash;
+5. the canonical final ZIP verifier checks the embedded release manifest and exact members;
+6. the embedded product/version/source SHA must equal the host-authorized target;
+7. the verified candidate is extracted to a same-volume private staging directory.
 
-### Crash after backup
+Candidate-controlled release SHA is correlation evidence, not trusted signing authority. Trusted-main provenance/attestation remains a separate release-control-plane responsibility.
 
-The backup phase is journaled only after `SQLiteRecoveryManager.create_backup()` returns a canonical verified artifact. Restart verifies and reuses the same backup instead of creating a second update lineage.
+## Backup and migration
 
-### Crash during migration
+The updater calls `SQLiteRecoveryManager.create_backup()` before running the candidate migration port. It never copies the live SQLite file itself.
 
-`migration_started` is durable before invoking the canonical ordered migration adapter. `SQLiteStore.initialize()` is designed to be rerun against an already partially/current migrated database; a migration error switches to rollback.
+The default migration port calls canonical `SQLiteStore.initialize()` and requires the resulting main schema to equal the supported current schema.
 
-### Crash during package replacement
+If migration raises, rollback begins immediately. The exact pre-update backup remains the rollback source.
 
-`replacement_started` is durable before the old install directory is moved. Restart reconciles only the expected states:
+## Package replacement and crash windows
 
-- old install present, rollback absent -> retry old-package move;
-- install absent, old rollback present, verified stage present -> publish candidate;
-- candidate installed and old rollback present -> continue at `replaced`.
+Package replacement uses deterministic same-parent-directory identities:
 
-Unexpected package identities or paths block instead of overwriting evidence.
+- verified candidate stage;
+- pre-update package rollback directory;
+- failed-candidate evidence directory.
 
-### Crash during data rollback
+The updater writes `REPLACEMENT_STARTED` before the first directory move. Therefore process loss can be reconciled from observable package identities:
 
-The exact canonical restore preview is persisted before restore. For corrupt/unrecoverable updater-mutated data, canonical `recover_interrupted_restore()` owns marker/quarantine recovery. For the crash window after a restore side effect completed but before the update journal advanced, the updater recognizes only the canonical `reliability.restore_completed` event that matches the operation-unique pre-update backup filename and SHA-256.
+- old install still live -> move it to rollback then install stage;
+- old already moved, stage present -> install stage;
+- candidate already installed and rollback present -> validate identities and continue;
+- unknown/changed install or missing rollback/stage evidence -> `BLOCKED`.
 
-If recovery reports that a destructive restore was rolled back, the original persisted restore plan may be retried only if canonical stale-plan validation still accepts it.
+The package swap does not claim to be one atomic filesystem transaction. Durability comes from the pre-effect journal plus deterministic exact-identity reconciliation.
 
-## Failure policy
+## Startup and health
 
-- corrupt ZIP, file/hash/path violation, wrong source SHA, stale historical ZIP, wrong artifact reference or other provenance mismatch: reject before backup/migration/replacement;
-- migration failure: old package remains (or is restored if necessary), then data rolls back from the exact pre-update canonical backup and old startup/health must pass;
-- startup/health failure after replacement: failed candidate directory is retained as evidence, old package is restored, data rolls back, then old startup/health must pass;
-- stale rollback confirmation: transition to `blocked`; never generate a fresh confirmation automatically;
-- canonical rollback error or missing rollback evidence: `blocked`; no destructive best-effort overwrite.
+After the candidate is installed, the updater enters `HEALTH_CHECKING` and calls a narrow host `StartupHealthPort`. Any provider-specific startup implementation is outside this state machine.
 
-The pre-update backup and old package rollback directory are intentionally retained after a successful update. Cleanup/retention policy is a separate product decision; deleting rollback evidence inside the critical transaction would weaken recovery.
+M11/M12 evidence uses a real packaged Windows health adapter which launches the replaced `NikaCore.exe --pf11-proof` against the same migrated database and requires a valid zero-exit JSON proof before the update may reach `COMPLETED`.
 
-## Process and filesystem preconditions
+## Automatic rollback authorization boundary
 
-The updater must execute from a host/updater process outside the installation directory being replaced. The application must not retain package-file handles that prevent directory rename. Canonical SQLite recovery process/lease rules still apply. ONE-SHOT-47 #311/current successor owns stronger cross-process SQLite/WAL recovery semantics; this lane consumes that public recovery authority after integration rather than copying it.
+Starting an update authorizes rollback **only to the updater's exact canonical pre-update backup** if migration/startup/health fails. It does not authorize arbitrary database replacement or a caller-selected unrelated restore source.
 
-DEV29 #218/current successor remains the separate release-database metadata adapter. This local updater does not duplicate its release snapshot format.
+The pre-update backup is created and verified before migration. If the updater later finds the live database corrupt because the candidate/migration path failed, it may pass the canonical destructive-recovery flag only for restoring that exact pre-update backup within the same durable operation. `SQLiteRecoveryManager` still owns quarantine, exact restore confirmation, stale-plan rejection, safety behavior, and interrupted recovery.
 
-## Windows and path support
+A stale restore confirmation is fail-closed. The updater does not call `prepare_restore()` again merely to manufacture new authority after the journaled plan became stale.
 
-The operation uses `pathlib`/argument arrays and does not invoke a shell for package replacement. Focused tests use Cyrillic and space-containing install/data/state paths. M11/M12 packaged proof also creates its fixture under a Unicode/space path.
+## Rollback restart and audit receipt
 
-## Exact artifact evidence
+Before canonical restore, the updater durably stores the `RestorePlan` fields and enters `ROLLBACK_DATA`.
 
-`scripts/m11_m12_update_lifecycle.py` performs a packaged success proof with a deterministic old-package fixture and a schema-v1 durable SQLite fixture.
+If the process disappears during canonical destructive recovery, the next invocation first treats unreadable/corrupt live SQLite audit state as absence of success evidence, then calls `recover_interrupted_restore()` so the canonical restore marker/quarantine state is authoritative.
 
-For M11, the script binds the exact ZIP produced by that exact checkout to local M11 evidence, then installs it, migrates the fixture DB, verifies the canonical backup and starts the installed `NikaCore.exe --pf11-proof`. `m11-update-lifecycle-evidence.json` is uploaded with the M11 artifact.
+If a restore completed but the updater process disappeared before advancing its own journal, the restored database contains canonical `reliability.restore_completed` audit evidence. The updater requires that receipt to bind both:
 
-For M12, the same proof consumes `m12-prehuman-evidence.json` for the exact M12 ZIP and emits `m12-update-lifecycle-evidence.json`, uploaded in the same pre-human evidence artifact. The proof marks the old package as a fixture and never represents it as a historical production build.
+- the operation-unique pre-update backup filename; and
+- the exact pre-update backup SHA-256.
 
-Automated evidence always records:
+Only that bound receipt permits advancing to restart the old package without executing the restore again.
 
-- `human_tested=false`
-- `nvda_verified=false`
-- `production_release_ready=false`.
+## Filesystem and platform assumptions
 
-Physical human NVDA acceptance remains a separate M12 human gate.
+The install stage/rollback directories are siblings of the installation directory so replacement remains on one filesystem. Database backup/recovery follows the stronger canonical `SQLiteRecoveryManager` guarantees current at integration time.
+
+Unicode and whitespace in installation, database, and updater-state paths are supported and covered by focused tests.
+
+The updater's file lease is a local cross-process serialization primitive. It is not an authenticated sandbox against unrestricted same-user filesystem rewriting.
+
+## Parallel-lane compatibility truth
+
+ONE-SHOT-55 consumes release-integrity work from ONE-SHOT-01/#333 and does not duplicate it. Canonical SQLite WAL/cross-process restore ownership remains with ONE-SHOT-47/#311 or its integrated successor. Release database metadata adapter work remains separate from the updater state machine.
+
+The M12 workflow is a shared release surface. Any independently integrated M12 attestation/governance changes must be converged into this lane with an explicit compatibility decision before exact-head acceptance or merge credit.
+
+## Automated evidence and non-claims
+
+Focused deterministic tests cover:
+- successful update and repeated invocation;
+- crash after backup and restart;
+- corrupt package;
+- wrong source SHA;
+- stale/old ZIP substitution;
+- outer provenance/reference mismatch;
+- migration failure rollback;
+- startup/health failure after package replacement;
+- stale restore confirmation;
+- interrupted canonical destructive restore and restart;
+- Unicode/space paths.
+
+M11 and M12 additionally exercise the final exact Windows ZIP through the update lifecycle and run the installed executable health proof.
+
+Automated evidence does not grant human acceptance.
+
+`HUMAN_TESTED=false`.
+`NVDA_VERIFIED=false`.
+`PRODUCTION_RELEASE_READY=false`.
