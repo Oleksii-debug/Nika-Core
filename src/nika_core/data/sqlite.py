@@ -134,7 +134,10 @@ class SQLiteStore:
             },
         }
         for table_name, expected_columns in required_columns.items():
-            rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+            rows = conn.execute(
+                "SELECT name FROM pragma_table_info(?)",
+                (table_name,),
+            ).fetchall()
             if not rows:
                 raise RuntimeError(f"M3 extension schema table missing: {table_name}")
             present_columns = {row["name"] for row in rows}
