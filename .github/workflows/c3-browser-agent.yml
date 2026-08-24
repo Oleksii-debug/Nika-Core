@@ -99,7 +99,7 @@ jobs:
         env:
           NIKA_CANDIDATE_SHA: ${{ steps.candidate.outputs.sha }}
         run: |
-          python scripts/c3_browser_agent_factory_acceptance.py \
+          python -m scripts.c3_browser_agent_factory_acceptance \
             --output artifacts/c3-browser-agent
 
       - name: Upload exact C3 product package and evidence
