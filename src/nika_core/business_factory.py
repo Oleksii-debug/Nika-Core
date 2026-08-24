@@ -506,18 +506,19 @@ class BusinessFactory:
         qa = self._snapshot.qa
         if qa is None or qa.state is not QAState.PASSED:
             raise BusinessFactoryError("delivery requires passing QA evidence")
+        _text(delivery_id, "delivery_id")
+        _text(artifact_ref, "delivery artifact_ref")
+        _text(authorization_ref, "delivery authorization_ref")
         project_id = order.product_project_id or ""
         if not isinstance(compliance, ReleaseComplianceGrant):
             raise BusinessFactoryError("delivery requires an exact PF10 release compliance grant")
         if (
             compliance.project_id != project_id
+            or compliance.release_id != delivery_id
             or compliance.artifact_ref != artifact_ref
             or not compliance.allowed
         ):
             raise BusinessFactoryError("delivery requires an exact PF10 release compliance grant")
-        _text(delivery_id, "delivery_id")
-        _text(artifact_ref, "delivery artifact_ref")
-        _text(authorization_ref, "delivery authorization_ref")
         intent = _delivery_authorization_intent(
             self._snapshot.objective.objective_id,
             delivery_id=delivery_id,
