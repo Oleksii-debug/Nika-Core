@@ -983,7 +983,7 @@ class FleetReplacementCoordinator:
                 attempt=record.attempt,
                 source_was_enabled=record.source_was_enabled,
             )
-        except Exception as exc:  # noqa: BLE001 - durable boundary may fail independently.
+        except Exception as exc:
             if isinstance(exc, FleetReplacementError):
                 raise
             raise FleetReplacementError(
@@ -1007,7 +1007,7 @@ class FleetReplacementCoordinator:
     ) -> None:
         try:
             durable = self._journal().record_terminal(request, result)
-        except Exception as exc:  # noqa: BLE001 - post-effect durability must reconcile.
+        except Exception as exc:
             if isinstance(exc, FleetReplacementError):
                 raise
             raise FleetReplacementError(
@@ -1031,7 +1031,7 @@ class FleetReplacementCoordinator:
         journal = self._journal()
         try:
             durable_records = journal.list_plan(plan.plan_id)
-        except Exception as exc:  # noqa: BLE001 - corrupt durable state must fail closed.
+        except Exception as exc:
             if isinstance(exc, FleetReplacementError):
                 raise
             raise FleetReplacementError(
