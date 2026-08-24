@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from nika_core.runtime.idempotency import (
     IdempotencyConflictError,
     IdempotencyLedger,
+    IdempotencyRecord,
     IdempotencyStatus,
 )
 
@@ -37,6 +38,26 @@ class RuntimeIdempotencyMaintenanceJournal:
         self._ledger = ledger
         self._task_id = task_id
 
+    def lookup(
+        self,
+        *,
+        project_id: str,
+        service: DeployableService,
+        request: MaintenanceRequest,
+    ) -> MaintenanceEffectReservation | None:
+        operation_key = self._operation_key(project_id, request.request_id)
+        fingerprint = self._fingerprint(project_id, service, request)
+        try:
+            record = self._ledger.get(operation_key)
+        except (sqlite3.Error, ValueError) as exc:
+            raise ProductOperationsError(
+                "maintenance effect lookup failed against durable runtime authority"
+            ) from exc
+        if record is None:
+            return None
+        self._require_identity(record, fingerprint)
+        return self._reservation(record, created=False)
+
     def reserve(
         self,
         *,
@@ -57,14 +78,7 @@ class RuntimeIdempotencyMaintenanceJournal:
             raise ProductOperationsError(
                 "maintenance effect reservation conflicts with durable runtime authority"
             ) from exc
-        return MaintenanceEffectReservation(
-            operation_key=record.operation_key,
-            state=MaintenanceEffectState(record.status.value),
-            created=created,
-            result=self._decode_result(record.result)
-            if record.status is IdempotencyStatus.COMPLETED
-            else None,
-        )
+        return self._reservation(record, created=created)
 
     def complete(self, operation_key: str, result: MaintenanceResult) -> None:
         try:
@@ -90,8 +104,9 @@ class RuntimeIdempotencyMaintenanceJournal:
         try:
             current = self._ledger.require(operation_key)
             if current.status is IdempotencyStatus.PENDING:
-                self._ledger.complete(operation_key, encoded)
-                return
+                raise ProductOperationsError(
+                    "pending maintenance effect requires host proof of prior owner loss"
+                )
             if current.status is IdempotencyStatus.UNCERTAIN:
                 self._ledger.reconcile_completed(operation_key, encoded)
                 return
@@ -106,6 +121,31 @@ class RuntimeIdempotencyMaintenanceJournal:
             raise ProductOperationsError(
                 "maintenance effect reconciliation conflicts with durable runtime authority"
             ) from exc
+
+    def _require_identity(self, record: IdempotencyRecord, fingerprint: str) -> None:
+        if (
+            record.task_id != self._task_id
+            or record.operation_type != _OPERATION_TYPE
+            or record.input_fingerprint != fingerprint
+        ):
+            raise ProductOperationsError(
+                "maintenance effect identity conflicts with durable runtime authority"
+            )
+
+    def _reservation(
+        self,
+        record: IdempotencyRecord,
+        *,
+        created: bool,
+    ) -> MaintenanceEffectReservation:
+        return MaintenanceEffectReservation(
+            operation_key=record.operation_key,
+            state=MaintenanceEffectState(record.status.value),
+            created=created,
+            result=self._decode_result(record.result)
+            if record.status is IdempotencyStatus.COMPLETED
+            else None,
+        )
 
     @staticmethod
     def _operation_key(project_id: str, request_id: str) -> str:
