@@ -1,7 +1,7 @@
 # Product Factory fleet replacement durability
 
 Status: PF3 replacement/rebalance/recovery implementation note for PR #165/current successor.
-Updated: 2026-08-23.
+Updated: 2026-08-24.
 
 ## Scope
 
@@ -55,7 +55,7 @@ If the process dies after durable intent but before/during/after the external ef
 
 ## Reuse decision after DEV16 integration
 
-Current `main` now contains the generic runtime `IdempotencyLedger` and `RuntimeIdempotencyEffectJournal`; these were explicitly re-evaluated before retaining the PF3 journal.
+Current `main` contains the generic runtime `IdempotencyLedger` and `RuntimeIdempotencyEffectJournal`; these were explicitly re-evaluated before retaining the PF3 journal.
 
 **REUSE compatibility decision:** PF3 must not synthesize a runtime task merely to use that ledger. `IdempotencyLedger` is foreign-keyed to canonical runtime `tasks(task_id)`, while fleet-replacement authority is currently owned by a Product Factory replacement plan plus its Product Factory authorization work. Those identities are not a canonical runtime task today. Creating a shadow runtime task would introduce a second task/claim authority, contrary to the runtime ownership boundary documented by the integrated Deterministic Brain.
 
@@ -78,13 +78,17 @@ Focused tests cover:
 - stale-snapshot recovery from durable terminal provider evidence without reapply;
 - corrupt durable request fail-closed behavior;
 - uncertain and exception paths with inspection-only reconciliation;
-- wrong release SHA and wrong release version rejection;
+- wrong target, release SHA, release version, artifact digest and health evidence rejection;
 - live release provenance drift rejection on restore;
-- source lease, capacity, credential and disruption-budget blocking;
+- isolated platform/capability/resource selection, same-service anti-affinity and node replica caps;
+- source lease, capacity, credential, service-minimum-health and environment disruption-budget blocking;
+- already-unavailable source healing;
 - 60 services / 180 replacements across two environments with restart and partial node loss mid-wave.
 
 Automated evidence does not set `HUMAN_TESTED` or `NVDA_VERIFIED`.
 
 ## Shared-contract / dependency boundary
 
-This lane does not import or cherry-pick unmerged PF6 #172, PF7 #162, PF8 #200 or PF12/trusted-plan #164 implementation. Their owners remain independent. In particular, this durability journal does not solve the existing trusted-plan authority audit finding: fleet replacement must consume the canonical independently anchored Product Factory authority after that authority is integrated, rather than inventing a second signature/trust scheme locally.
+This lane does not import or cherry-pick unmerged PF6 #172, PF7 #162, PF8 #200, or the trusted-plan/checkpoint authority family. Their owners remain independent. The current authority integration vehicle is PR #340/current successor, with QA-only recompute-aware replay in #341/current successor; historical #164/#270 are lineage evidence only.
+
+This durability journal does not solve that authority audit family: fleet replacement must consume the canonical independently host-anchored Product Factory authority only after it is integrated and independently cleared, rather than inventing a second signature/trust scheme locally.
