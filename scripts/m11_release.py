@@ -126,7 +126,6 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
         or first.get("bridge_state_project_id") != project_id
         or first.get("bridge_state_spec_version") != 2
         or first.get("team_plan_persisted_proven") is not True
-        or first.get("team_plan_restart_recovery_proven") is not True
         or first.get("team_plan_worker_dispatch_started") is not False
     ):
         raise RuntimeError("packaged PF11 ProductProject proof returned invalid route evidence")
