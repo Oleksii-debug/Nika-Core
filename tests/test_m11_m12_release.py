@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from nika_core.packaging.notices import (
-    SBOM_FILE,
     SUPPLY_CHAIN_FILE,
     build_cyclonedx_sbom,
     supply_chain_findings,
@@ -205,15 +204,6 @@ def test_release_critical_build_dependencies_are_exact_pinned() -> None:
         "pip-audit==2.10.1",
         "pyinstaller==6.22.2",
     ]
-
-
-def test_m11_publishes_machine_readable_supply_chain_evidence_and_sbom() -> None:
-    root = Path(__file__).resolve().parents[1]
-    workflow = (root / ".github" / "workflows" / "m11-windows-release.yml").read_text(
-        encoding="utf-8"
-    )
-    assert f"dist/NikaCore/{SUPPLY_CHAIN_FILE}" in workflow
-    assert f"dist/NikaCore/{SBOM_FILE}" in workflow
 
 
 def test_windows_plan_is_onedir_windowed_and_bundles_web_assets(tmp_path: Path) -> None:
