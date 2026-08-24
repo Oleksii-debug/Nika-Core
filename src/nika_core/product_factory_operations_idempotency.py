@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from nika_core.runtime.idempotency import (
     IdempotencyConflictError,
     IdempotencyLedger,
+    IdempotencyRecord,
     IdempotencyStatus,
 )
 
@@ -57,14 +58,36 @@ class RuntimeIdempotencyMaintenanceJournal:
             raise ProductOperationsError(
                 "maintenance effect reservation conflicts with durable runtime authority"
             ) from exc
-        return MaintenanceEffectReservation(
-            operation_key=record.operation_key,
-            state=MaintenanceEffectState(record.status.value),
-            created=created,
-            result=self._decode_result(record.result)
-            if record.status is IdempotencyStatus.COMPLETED
-            else None,
-        )
+        return self._reservation(record, created=created)
+
+    def lookup(
+        self,
+        *,
+        project_id: str,
+        service: DeployableService,
+        request: MaintenanceRequest,
+    ) -> MaintenanceEffectReservation | None:
+        operation_key = self._operation_key(project_id, request.request_id)
+        fingerprint = self._fingerprint(project_id, service, request)
+        try:
+            record = self._ledger.get(operation_key)
+            if record is None:
+                return None
+            if (
+                record.task_id != self._task_id
+                or record.operation_type != _OPERATION_TYPE
+                or record.input_fingerprint != fingerprint
+            ):
+                raise ProductOperationsError(
+                    "maintenance effect identity conflicts with durable runtime authority"
+                )
+            return self._reservation(record, created=False)
+        except ProductOperationsError:
+            raise
+        except (sqlite3.Error, KeyError, ValueError) as exc:
+            raise ProductOperationsError(
+                "maintenance effect lookup conflicts with durable runtime authority"
+            ) from exc
 
     def complete(self, operation_key: str, result: MaintenanceResult) -> None:
         try:
@@ -106,6 +129,21 @@ class RuntimeIdempotencyMaintenanceJournal:
             raise ProductOperationsError(
                 "maintenance effect reconciliation conflicts with durable runtime authority"
             ) from exc
+
+    def _reservation(
+        self,
+        record: IdempotencyRecord,
+        *,
+        created: bool,
+    ) -> MaintenanceEffectReservation:
+        return MaintenanceEffectReservation(
+            operation_key=record.operation_key,
+            state=MaintenanceEffectState(record.status.value),
+            created=created,
+            result=self._decode_result(record.result)
+            if record.status is IdempotencyStatus.COMPLETED
+            else None,
+        )
 
     @staticmethod
     def _operation_key(project_id: str, request_id: str) -> str:
