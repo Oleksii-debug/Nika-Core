@@ -12,6 +12,7 @@ from nika_core.media.contracts import (
     OCRPage,
     Segment,
     StructuredMediaArtifact,
+    TextRevision,
     Transcript,
     TranscriptMethod,
 )
@@ -162,6 +163,32 @@ def test_handoff_rejects_duplicate_ocr_page_identity() -> None:
     artifact = _artifact(ocr_document=ocr)
 
     with pytest.raises(ValueError, match="OCR page identities must be unique"):
+        build_corpus_media_handoff(artifact)
+
+
+def test_handoff_rejects_duplicate_text_revision_identity() -> None:
+    revisions = (
+        TextRevision(
+            revision_id="same-revision",
+            artifact_id="artifact-1",
+            ordinal=0,
+            text="first revision",
+            reason="initial",
+            accepted=False,
+        ),
+        TextRevision(
+            revision_id="same-revision",
+            artifact_id="artifact-1",
+            parent_revision_id="same-revision",
+            ordinal=1,
+            text="accepted revision",
+            reason="correction",
+            accepted=True,
+        ),
+    )
+    artifact = _artifact(revisions=revisions)
+
+    with pytest.raises(ValueError, match="text revision identities must be unique"):
         build_corpus_media_handoff(artifact)
 
 
