@@ -181,6 +181,19 @@ def _fixture(tmp_path: Path) -> tuple[UpdateRequest, Path]:
     return request, tmp_path / "updater state"
 
 
+def _replace_target_sha(request: UpdateRequest, source_sha: str) -> UpdateRequest:
+    return UpdateRequest(
+        artifact_path=request.artifact_path,
+        evidence_path=request.evidence_path,
+        artifact_reference=request.artifact_reference,
+        install_dir=request.install_dir,
+        database_path=request.database_path,
+        expected_product=request.expected_product,
+        expected_version=request.expected_version,
+        expected_source_sha=source_sha,
+    )
+
+
 def _installed_source(install: Path) -> str:
     payload = json.loads((install / "release-manifest.json").read_text(encoding="utf-8"))
     return str(payload["source_sha"])
@@ -256,12 +269,7 @@ def test_corrupt_candidate_is_rejected_before_backup(tmp_path: Path) -> None:
 
 def test_wrong_source_sha_is_rejected_before_backup(tmp_path: Path) -> None:
     request, state = _fixture(tmp_path)
-    request = UpdateRequest(
-        **{
-            **request.__dict__,
-            "expected_source_sha": _OTHER_SHA,
-        }
-    )
+    request = _replace_target_sha(request, _OTHER_SHA)
 
     with pytest.raises(CandidateVerificationError, match="outer evidence"):
         WindowsUpdateLifecycle(state_dir=state, health=_Health()).run(request)
@@ -386,10 +394,7 @@ def test_interrupted_canonical_restore_is_recovered_on_updater_restart(
     def process_loss_replace(source, destination) -> None:
         source_path = Path(source)
         destination_path = Path(destination)
-        if (
-            ".restore-stage." in source_path.name
-            and destination_path == request.database_path
-        ):
+        if ".restore-stage." in source_path.name and destination_path == request.database_path:
             raise _SimulatedProcessLoss()
         real_replace(source, destination)
 
