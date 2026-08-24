@@ -536,13 +536,13 @@ def test_missing_fallback_fails_preflight_before_primary_execution() -> None:
 def test_overall_deadline_is_shared_across_primary_and_fallback() -> None:
     fallback_timeouts: list[float] = []
 
-    class DelayedUnavailable(_RecordingProvider):
+    class DelayedSafeTimeout(_RecordingProvider):
         async def complete(self, request: ModelRequest) -> ModelResponse:
             self.calls.append(request.request_id)
             await asyncio.sleep(0.08)
             raise ModelGatewayError(
-                ModelErrorCode.UNAVAILABLE,
-                "primary unavailable",
+                ModelErrorCode.TIMEOUT,
+                "typed provider timeout with hard-cancellation evidence",
                 provider_id=self.capabilities.provider_id,
                 retryable=True,
             )
@@ -561,7 +561,7 @@ def test_overall_deadline_is_shared_across_primary_and_fallback() -> None:
             )
 
     gateway = ModelGateway()
-    gateway.register(DelayedUnavailable("primary"))
+    gateway.register(DelayedSafeTimeout("primary", supports_hard_cancellation=True))
     gateway.register(SlowFallback("fallback"))
 
     started = time.perf_counter()
@@ -591,14 +591,12 @@ def test_ambiguous_first_provider_effect_blocks_retryable_fallback() -> None:
         async def complete(self, request: ModelRequest) -> ModelResponse:
             self.calls.append(request.request_id)
             effects.append("native-effect-observed")
-            error = ModelGatewayError(
+            raise ModelGatewayError(
                 ModelErrorCode.UNAVAILABLE,
                 "provider failed after an externally visible effect",
                 provider_id=self.capabilities.provider_id,
                 retryable=True,
             )
-            error.observed_effect = True
-            raise error
 
     gateway = ModelGateway()
     gateway.register(EffectfulPrimary("primary"))
