@@ -16,6 +16,8 @@ Binding the complete live snapshot prevents a valid host-issued proof from being
 
 After the first successful save, the canonical restart authority is the fingerprint anchored in the Product Factory host-task payload. Every later save and restore validates the candidate snapshot against that durable host-task anchor. A legacy checkpoint that exists without that anchor fails closed and requires explicit reconciliation.
 
+The same live proof is reused at the next security-significant authority boundary: the first durable checkpoint of every new repair generation. This does not create a second authority system. It prevents a candidate from manufacturing attempt `N + 1` by choosing a different repair goal or repository base and recomputing its work ID/checkpoint identity. A legitimate host-mediated repair may still select a newer `base_sha`; `ProductProjectCoordinatorBinding.checkpoint()` authenticates that exact new `ready` snapshot before it becomes durable.
+
 The process-ephemeral proof is a host-process capability, not a Python sandbox. Its trust assumption is that untrusted Product Factory workers execute behind the worker port and do not execute arbitrary code inside the authority-owning Nika host process. If arbitrary hostile code already executes in that trusted process, Python module privacy or an in-memory key is not a security boundary; stronger process isolation belongs to the worker/sandbox lanes.
 
 ## Durable predecessor requirement
@@ -32,10 +34,12 @@ The predecessor contract is:
 - an attempt may advance by exactly one generation;
 - attempt `N + 1` requires attempt `N` to have been durably saved as `repair_required`;
 - the first durable checkpoint for attempt `N + 1` must be `ready`, before execution can begin;
+- that first durable `N + 1` checkpoint requires a valid live host proof over the exact new snapshot;
 - repair keeps project, component, repository, path scope, permission ceiling, and acceptance commands unchanged;
-- repair goal lineage is the previous durable goal plus exactly one non-empty `Repair:` reason.
+- repair goal lineage is the previous durable goal plus exactly one non-empty `Repair:` reason;
+- a newer repair `base_sha` is permitted only as part of that host-authenticated new-generation snapshot and then becomes immutable for the rest of the attempt.
 
-Ordinary progress does not require a database write after every pure in-memory coordinator call. For example, `ready -> running -> review_required -> accepted` may be persisted as one later accepted checkpoint within the same already-durable attempt. Security-significant repair-generation creation is stricter: the prior failed attempt must already exist durably as `repair_required`, and the new attempt must itself cross the durable boundary as `ready` before any `running` or later state is accepted.
+Ordinary progress does not require a database write after every pure in-memory coordinator call. For example, `ready -> running -> review_required -> accepted` may be persisted as one later accepted checkpoint within the same already-durable attempt. Security-significant repair-generation creation is stricter: the prior failed attempt must already exist durably as `repair_required`, the exact new generation must carry a valid live host proof, and it must itself cross the durable boundary as `ready` before any `running` or later state is accepted.
 
 ## Crash and restart semantics
 
@@ -45,11 +49,11 @@ Consequently:
 
 1. a crash after `running` but before worker result leaves a durable running record for worker recovery/reconciliation;
 2. a crash after a failed result but before repair preparation leaves durable `repair_required` evidence;
-3. a crash after repair preparation leaves exactly the next durable `ready` attempt and its deterministic work identity;
-4. a candidate cannot create a new attempt in memory, start it, and then make `running` or later state its first durable generation checkpoint;
+3. a crash after host-mediated repair preparation leaves exactly the next durable `ready` attempt, its selected base, and its deterministic work identity;
+4. a candidate cannot make a recomputed new repair generation durable without the live host proof, and cannot make `running` or later state its first durable generation checkpoint;
 5. a restart restores only after host-task authority, ProductProject binding, checkpoint integrity, trusted-plan semantics, and coordinator restore validation all agree.
 
-No recovery path is allowed to infer a missing repair-generation boundary from candidate-controlled hashes or a newly recomputed snapshot.
+No recovery path is allowed to infer a missing repair-generation boundary from candidate-controlled hashes or a newly recomputed snapshot. After restart from durable `repair_required`, the host may legitimately prepare a fresh newer-base repair and issue a new process-local proof for that exact `ready` state before saving it.
 
 ## Concurrency and idempotency
 
@@ -83,6 +87,11 @@ Focused tests introduced or extended with this contract:
   - a newly prepared repair that is started only in memory cannot make `running` its first durable generation state;
   - rejection leaves the previous durable `repair_required` checkpoint unchanged;
   - the canonical `ProductFactoryProgramHost.prepare_repair_and_checkpoint()` path persists attempt `N + 1` as `ready` before dispatch.
+- `tests/test_product_factory_repair_generation_authority.py`
+  - a self-consistent candidate-created `N + 1` `ready` checkpoint without live proof is rejected before becoming durable;
+  - the rejected candidate leaves attempt `N=repair_required` unchanged;
+  - the same exact host-prepared repair snapshot succeeds when issued through `ProductProjectCoordinatorBinding.checkpoint()`;
+  - a legitimate newer repair base remains supported and becomes durable only with the host-authenticated generation boundary.
 - existing `tests/test_product_factory_scale_recovery.py`
   - 100 components complete across ten restart waves; this is the regression that guards legal sparse checkpointing at scale.
 
