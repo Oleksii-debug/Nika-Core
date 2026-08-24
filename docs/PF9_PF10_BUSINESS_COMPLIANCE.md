@@ -19,13 +19,13 @@ The implementation deliberately does **not** provide autonomous external-message
 - Nika's existing `SQLiteStore.connection()` transaction boundary is reused for durable PF9 snapshots and communication records.
 - ProductProject's existing durable idempotency ledger is reused to reconcile an uncertain WorkOrder handoff rather than creating a second side-effect ledger.
 - Existing packaging notice generation/verification remains responsible for Nika runtime bundle notices. PF10 project compliance records dependency-specific notice/obligation evidence instead of replacing that packaging subsystem.
-- Python stdlib SHA-256 is reused for deterministic PF9 authorization fingerprints and ProductProject handoff identity. Stdlib HMAC/SHA-256 is used only for PF10 process-local positive-decision integrity.
+- Python stdlib SHA-256 is reused for deterministic PF9 authorization fingerprints, exact ProductProject-spec identity and ProductProject handoff identity. Stdlib HMAC/SHA-256 is used only for PF10 process-local positive-decision integrity.
 
 ### ADAPT
 
 - Research evidence IDs are constrained to the exact objective research package before an opportunity can be created.
-- ProductProject handoff is bound to an authorized WorkOrder and a PF9-derived durable operation identity.
-- `BusinessAuthorizationAuthorityPort` is a framework-neutral trusted-host boundary for PF9 proposal, WorkOrder, delivery and communication authorization. It is designed to adapt the canonical M10/R4 authority after that authority is integrated; DEV30 does not create a second signer.
+- ProductProject handoff is bound to an authorized WorkOrder, the exact normalized initial `ProductProjectSpec`, and a PF9-derived durable operation identity.
+- `BusinessAuthorizationAuthorityPort` is a framework-neutral trusted-host boundary for PF9 proposal, WorkOrder, delivery and communication authorization. It is designed to adapt the canonical M10/R4 authority after that authority is integrated; PF9 does not create a second signer.
 - Communication policy is adapted into durable `DRAFT -> AUTHORIZED -> SENT/FAILED` evidence without adding a sender to PF9 core.
 - PF10 dependency records add project-level source/version/license/provenance, authorized review evidence and distribution-obligation decisions needed before delivery.
 - `ComplianceReviewAuthorityPort` is a separate framework-neutral boundary for resolving PF10 review/legal/permission evidence against canonical authority.
@@ -56,7 +56,7 @@ The intent has a deterministic versioned SHA-256 fingerprint. `BusinessAuthoriza
 
 For `ONE_TIME` evidence, the trusted implementation contract requires freshness plus protection against reuse for a different intent. It may allow idempotent replay of the exact same evidence/fingerprint pair so `authority accepted -> process loss before PF9 save -> retry` can reconcile instead of permanently consuming approval without durable business state. `STANDING_POLICY` is separate: a trusted host may reuse an active policy only while that policy covers the exact requested intent; the Business worker cannot mint or widen the policy.
 
-Current `main` does not yet provide an integrated authenticated M10/R4 authority that can implement this port. PR #61 and stacked PR #62 remain separate security-owner work and are not consumed by DEV30 while unmerged. Deterministic test authorities prove the port and state-machine contract only. They are not production approval evidence.
+Current `main` does not yet provide an integrated authenticated M10/R4 authority that can implement this port. PR #61 and stacked PR #62 remain separate security-owner work and are not consumed while unmerged. Deterministic test authorities prove the port and state-machine contract only. They are not production approval evidence.
 
 Therefore source tests may be GREEN while **PF9 production positive-authority integration remains partial/blocked** until a canonical trusted M10/R4 adapter is integrated and independently proven.
 
@@ -75,15 +75,19 @@ These contracts do not grant a provider/account credential and do not bypass Nik
 
 ## Durable authorization binding
 
-PF9 persists the exact authorization fingerprint alongside the evidence reference for approved proposals, WorkOrders and deliveries. Restore recomputes the fingerprint from the persisted scope and fails closed if the durable state was altered after authorization.
+PF9 persists the exact authorization fingerprint alongside the evidence reference for approved proposals, WorkOrders and deliveries. Restore recomputes the fingerprint from persisted authority-bearing fields and fails closed if durable state was altered after authorization.
 
 The bindings include:
 
 - proposal: exact lead + proposal scope summary;
-- WorkOrder: exact proposal + proposal approval fingerprint + WorkOrder scope;
+- WorkOrder: exact proposal + proposal approval fingerprint + WorkOrder scope +, for Product Factory handoff authority, SHA-256 of the exact normalized initial `ProductProjectSpec`;
 - delivery: exact ProductProject + artifact + passing QA evidence + exact PF10 compliance-evidence references.
 
-The WorkOrder authorization fingerprint is also propagated into ProductProject compliance/provenance metadata. A changed WorkOrder scope therefore cannot silently retain the old approval identity when handed to Product Factory.
+The ProductProject-spec fingerprint uses the same initial-spec normalization that the canonical `ProductProjectRepository.create(...)` applies: `supersedes_spec_version=None` and `revision_reason="initial specification"`, followed by canonical sorted JSON and SHA-256. This avoids authorizing one representation and executing another merely because repository-owned initial revision metadata is normalized at persistence time.
+
+The WorkOrder authorization fingerprint and exact ProductProject-spec fingerprint are propagated into ProductProject compliance/provenance metadata. A changed WorkOrder scope or changed ProductProject spec therefore cannot silently retain the old approval identity when handed to Product Factory.
+
+A historical/underbound WorkOrder that lacks `product_spec_fingerprint` remains loadable for compatibility and audit visibility, but it is **not ProductProject effect authority**. Handoff from such a WorkOrder fails before `ProductProjectRepository.create(...)`; a fresh exact authority decision is required rather than silently upgrading legacy evidence.
 
 ## Durable communication state
 
@@ -103,18 +107,22 @@ PF9 core intentionally has no `send`, `publish`, account-login, CAPTCHA-bypass o
 
 ## WorkOrder -> ProductProject authority and crash recovery
 
-The ProductProject handoff treats the authorized PF9 WorkOrder as authority, not caller-supplied ProductProject identity.
+The ProductProject handoff treats the authorized PF9 WorkOrder as authority, not caller-supplied ProductProject identity or a caller assertion that a WorkOrder ID is sufficient.
 
 Before any durable ProductProject effect:
 
 - `ProductProjectSpec.compliance.business_work_order_ref` must equal the exact current authorized WorkOrder;
-- PF9 adds the WorkOrder authorization reference, exact authorization fingerprint and BusinessObjective reference to stored ProductProject compliance metadata;
+- the current spec's normalized SHA-256 fingerprint must equal the fingerprint that participated in the trusted WorkOrder authorization intent;
+- a WorkOrder without that exact spec authority fails closed before repository mutation;
+- PF9 adds the WorkOrder authorization reference, exact WorkOrder authorization fingerprint, exact ProductProject-spec fingerprint and BusinessObjective reference to stored ProductProject compliance metadata;
 - the caller request key is retained only as lineage evidence;
 - the actual ProductProject idempotency operation key is deterministically derived by PF9 from `(objective_id, work_order_id)` and is therefore not caller-controlled.
 
-This closes the crash window between ProductProject commit and later PF9 aggregate save. If the ProductProject effect committed but the PF9 link did not, an exact retry uses the same durable ProductProject operation identity and reconciles the already-created project. A retry that substitutes a new project/name/spec/request identity for the same WorkOrder conflicts with that durable idempotency record and fails closed instead of creating a second ProductProject.
+This closes both the authority-substitution boundary and the crash window between ProductProject commit and later PF9 aggregate save. A caller cannot keep the authorized WorkOrder ID while replacing the ProductProject goal/outcome/requirements/risk/compliance or another spec field: the spec fingerprint mismatch is rejected before the ProductProject effect.
 
-An already-linked WorkOrder also rechecks that the durable ProductProject exists and carries the expected WorkOrder binding before returning it.
+If the exact ProductProject effect committed but the PF9 link did not, an exact retry uses the same durable ProductProject operation identity and reconciles the already-created project. A retry that substitutes a new project/name/spec/request identity for the same WorkOrder conflicts with exact authority and/or the canonical ProductProject idempotency record and fails closed instead of creating a second ProductProject.
+
+An already-linked WorkOrder rechecks that the durable ProductProject exists and carries the expected WorkOrder ID, WorkOrder authorization fingerprint and ProductProject-spec fingerprint before returning it.
 
 ## PF10 compliance model
 
@@ -140,17 +148,21 @@ Tests use deterministic fake implementations only to prove exact project/ref/pur
 
 `ProductComplianceDecision` is a result, not caller-owned release authority. A caller-constructed `allowed=True` object has no positive authority at the PF9 delivery boundary.
 
-`ProductComplianceGate.evaluate(...)` is the only production path that issues a positive decision after all applicable input references resolve through the trusted review-authority port. It binds project ID, state, findings and exact evidence-reference set with a process-local HMAC-SHA256 integrity proof. Copying/tampering with a valid decision, including project or evidence substitution, invalidates positive authority.
+`ProductComplianceGate.evaluate(...)` is the only production path that issues a positive decision after all applicable input references resolve through the trusted review-authority port. It binds project ID, state, findings and exact evidence-reference/input set with a process-local HMAC-SHA256 integrity proof. Copying/tampering with a valid decision, including project or evidence substitution, invalidates positive authority.
 
-This proof is deliberately **not** a durable signature, human approval, secret-store authority or hostile-code sandbox. It prevents ordinary caller fabrication/tamper of the final PF10 result inside the trusted process; canonical review/approval authority remains a separate dependency.
+The PF10 release layer additionally binds exact release identity, project source SHA-256, delivery artifact SHA-256, verified notice-bundle SHA-256 and current compliance snapshot. Its release grant is not treated as a substitute for the still-missing canonical trusted review authority, and PF9 does not silently manufacture that authority.
+
+These process-local proofs are deliberately **not** durable human signatures, secret-store authority or hostile-code sandboxes. They prevent ordinary caller fabrication/tamper of downstream PF10 results inside the trusted process; canonical review/approval authority remains a separate dependency.
 
 ## Persistence and restart integrity
 
 `BusinessFactoryRepository` stores one canonical JSON aggregate per BusinessObjective through Nika's SQLite transaction boundary. It uses a PF9-owned migration table rather than editing shared research/ProductProject migrations.
 
-Writes use optimistic row-version checks. Non-advancing writes and stale writers fail closed. Restore revalidates schema, research binding, lifecycle linkage, channel policy, persisted authorization fingerprints, ProductProject linkage, QA-before-delivery ordering, delivery-before-payment/support ordering and contiguous audit sequence/row-version equality.
+Writes use optimistic row-version checks. First-writer creation uses an atomic insert/no-overwrite boundary; competing writers receive a typed stale-state result instead of relying on a raw SQLite uniqueness failure. Existing-state writes use optimistic compare-and-swap row versions. Non-advancing writes, stale writers and corrupt snapshots fail closed.
 
-`BusinessCommunicationRepository` uses a separate PF9-owned migration stream in the same canonical SQLite store so communication-state evolution does not edit shared ProductProject or Universal Research migrations.
+Restore revalidates schema, research binding, lifecycle linkage, channel policy, persisted authorization fingerprints, exact WorkOrder ProductProject-spec authority where a ProductProject is linked, QA-before-delivery ordering, delivery-before-payment/support ordering and contiguous audit sequence/row-version equality.
+
+`BusinessCommunicationRepository` uses a separate PF9-owned migration stream in the same canonical SQLite store so communication-state evolution does not edit shared ProductProject or Universal Research migrations. Its first-writer and update paths follow the same typed optimistic-concurrency/fail-closed principle.
 
 ## Acceptance evidence in this lane
 
@@ -161,15 +173,19 @@ Focused regressions cover:
 - exact one-time intent binding, idempotent exact replay and cross-intent reuse rejection in test authority semantics;
 - standing communication policy trust/revocation and exact message-scope binding;
 - persisted proposal/WorkOrder/delivery/message authorization fingerprint tamper rejection;
-- exact WorkOrder binding before ProductProject creation;
+- exact WorkOrder ID and exact normalized ProductProject-spec binding before ProductProject creation;
+- same-WorkOrder/different-spec substitution rejected before any ProductProject effect;
+- legacy/underbound WorkOrder prevented from creating a ProductProject effect;
 - uncertain ProductProject handoff exact-retry reconciliation and duplicate-identity rejection;
+- durable ProductProject WorkOrder/spec lineage revalidation after restart;
+- atomic first-writer and optimistic update concurrency with typed stale outcomes;
 - SQLite restart and continuation;
 - durable communication authorization/result/restart/stale-writer behavior;
 - unknown research evidence, unapproved channel and lifecycle ordering rejection;
 - contract and money authority non-expansion;
 - QA and exact-project PF10 delivery gate;
 - caller-fabricated positive compliance decision rejection;
-- positive compliance decision project/evidence tamper invalidation;
+- positive compliance decision project/evidence/input tamper invalidation;
 - opaque scope-review and approved-license review strings rejected without trusted resolver;
 - exact project/ref/purpose review-authority binding and resolver exception fail-closed behavior;
 - dependency identity/provenance/license, notices and distribution-obligation enforcement;
