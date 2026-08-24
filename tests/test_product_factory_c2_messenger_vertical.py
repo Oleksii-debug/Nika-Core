@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
-import subprocess
 import sys
 import textwrap
 import zipfile
@@ -593,9 +592,7 @@ class DeterministicMessengerCodingWorker:
             target.write_text(content, encoding="utf-8")
 
         test_evidence = []
-        env = os.environ.copy()
-        env["PYTHONPATH"] = os.pathsep.join(str(path) for path in self.roots.values())
-        env["C2_DESKTOP_ROOT"] = str(self.roots["repo-desktop-client"])
+        env = self._child_env()
         failure = None
         for command in job.acceptance_commands:
             if command.argv[0] not in job.process_policy.allowed_executables:
@@ -605,23 +602,52 @@ class DeterministicMessengerCodingWorker:
                     retryable=False,
                 )
                 break
-            completed = subprocess.run(
-                command.argv,
+            timeout_seconds = command.timeout_seconds or job.resource_budget.timeout_seconds
+            process = await asyncio.create_subprocess_exec(
+                *command.argv,
                 cwd=root / command.cwd,
                 env=env,
-                capture_output=True,
-                check=False,
-                text=True,
-                timeout=command.timeout_seconds or job.resource_budget.timeout_seconds,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            output = (completed.stdout + completed.stderr).encode("utf-8")
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=timeout_seconds,
+                )
+            except TimeoutError:
+                if process.returncode is None:
+                    process.kill()
+                    await process.wait()
+                failure = WorkerFailure(
+                    WorkerFailureKind.TIMEOUT,
+                    f"acceptance command exceeded {timeout_seconds}s",
+                    retryable=True,
+                )
+                break
+            except asyncio.CancelledError:
+                if process.returncode is None:
+                    process.kill()
+                    await process.wait()
+                raise
+
+            output = stdout + stderr
+            if len(output) > job.resource_budget.max_output_bytes:
+                failure = WorkerFailure(
+                    WorkerFailureKind.INTERNAL_ERROR,
+                    "acceptance command output exceeded resource budget",
+                    retryable=False,
+                )
+                break
+            return_code = process.returncode
+            assert return_code is not None
             test_evidence.append(
-                WorkerTestEvidence(command.argv, completed.returncode, _digest(output))
+                WorkerTestEvidence(command.argv, return_code, _digest(output))
             )
-            if completed.returncode != 0:
+            if return_code != 0:
                 failure = WorkerFailure(
                     WorkerFailureKind.PROCESS_FAILED,
-                    f"acceptance command failed with {completed.returncode}",
+                    f"acceptance command failed with {return_code}",
                     retryable=True,
                 )
                 break
@@ -643,6 +669,19 @@ class DeterministicMessengerCodingWorker:
             artifacts=artifacts,
             failure=failure,
         )
+
+    def _child_env(self) -> dict[str, str]:
+        env = {
+            "PYTHONPATH": os.pathsep.join(str(path) for path in self.roots.values()),
+            "C2_DESKTOP_ROOT": str(self.roots["repo-desktop-client"]),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONIOENCODING": "utf-8",
+        }
+        for name in ("SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL"):
+            value = os.environ.get(name)
+            if value:
+                env[name] = value
+        return env
 
     async def cancel(self, job_id: str) -> None:
         del job_id
