@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, Self
 
 from nika_core.data.schema import SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
@@ -157,7 +157,7 @@ class _UpdateFileLease:
         self._path = path
         self._handle: Any | None = None
 
-    def __enter__(self) -> _UpdateFileLease:
+    def __enter__(self) -> Self:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         handle = self._path.open("a+b")
         try:
@@ -326,7 +326,7 @@ class WindowsUpdateLifecycle:
             self._after_phase(UpdatePhase.MIGRATION_STARTED)
         try:
             self._migrator.migrate(request.database_path)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - host migration port may raise arbitrary failure.
             return self._start_rollback(
                 journal,
                 f"database migration failed: {type(exc).__name__}: {exc}",
@@ -387,7 +387,7 @@ class WindowsUpdateLifecycle:
                 database_path=request.database_path,
                 expected=new,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - host health port may raise arbitrary failure.
             return self._start_rollback(
                 journal,
                 f"startup/health failed: {type(exc).__name__}: {exc}",
@@ -490,7 +490,7 @@ class WindowsUpdateLifecycle:
                 "rollback confirmation became stale; refusing to re-authorize restore: "
                 f"{exc}",
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - canonical restore failures must block safely.
             return self._block(
                 journal,
                 f"canonical data rollback failed: {type(exc).__name__}: {exc}",
@@ -514,7 +514,7 @@ class WindowsUpdateLifecycle:
                 database_path=request.database_path,
                 expected=old,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - host health port may raise arbitrary failure.
             return self._block(
                 journal,
                 "old package restart/health failed after rollback: "
@@ -824,7 +824,8 @@ class WindowsUpdateLifecycle:
         temporary = destination.with_name(f".{destination.name}.copying")
         try:
             shutil.copyfile(source, temporary)
-            with temporary.open("rb") as handle:
+            with temporary.open("r+b") as handle:
+                handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, destination)
             self._fsync_dir(destination.parent)
