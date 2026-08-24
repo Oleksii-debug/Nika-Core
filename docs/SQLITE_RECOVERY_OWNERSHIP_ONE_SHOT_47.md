@@ -1,10 +1,16 @@
 # SQLite recovery ownership — ONE-SHOT-47
 
-## Exact starting point
+## Exact lineage
 
 This batch started from live `main`
 `3fbfabfc93d59183f174ff44098db886cff93bd8` and first converged the exact DEV28
 #220 WAL/audit-continuity blobs without importing DEV29 #218 release-layer recovery.
+
+The branch was then synchronized non-force as `main` advanced. The latest compatibility
+sync parent for this evidence batch is
+`23c7c1ce97b263b4aafa61bdcbace207b4476a3d`. The main movement after
+`af43e41dca1066f95debafef360d61b2bf38b2ec` had no file delta; it only repaired
+accidental main ancestry. No recovery bytes were taken from an unmerged sibling branch.
 
 The canonical recovery authority remains
 `nika_core.reliability.backup.SQLiteRecoveryManager`.
@@ -13,7 +19,7 @@ The canonical recovery authority remains
 
 **REUSE**
 
-- SQLite Online Backup API for live/safety/restore copies;
+- SQLite Online Backup API for live, safety and restore copies;
 - SQLite native locking (`PRAGMA locking_mode=EXCLUSIVE` plus `BEGIN EXCLUSIVE`);
 - existing restore preview, safety backup, quarantine, marker, rollback and audit logic;
 - stdlib OS advisory file locking only.
@@ -25,14 +31,18 @@ The canonical recovery authority remains
   SQLite exclusive ownership may itself create an empty WAL file;
 - a non-empty WAL remains byte-for-byte part of restore authority;
 - healthy restore uses one exclusive live SQLite connection continuously across final
-  preview revalidation, safety backup, replacement, validation and rollback.
+  preview revalidation, safety backup, replacement, validation and rollback;
+- canonical backup artifacts remain single-file manifest-bound SQLite snapshots and are
+  revalidated under native SQLite ownership immediately before restore staging.
 
 **CUSTOM (thin)**
 
 - one persistent sibling recovery-lock file serializes recovery managers across
   processes, including missing/corrupt-target cases;
 - a no-clobber hard-link publication primitive prevents a missing/quarantined target
-  from being silently replaced if another creator wins the path race.
+  from being silently replaced if another creator wins the path race;
+- quarantine rollback refuses to overwrite a target whose bytes are neither the exact
+  pre-restore database nor the exact staged restore image.
 
 No dependency, database migration, permission, R-level authority, credential, workflow
 or release adapter is added.
@@ -45,7 +55,7 @@ conditions:
 1. the recovery file lease is held for the full operation;
 2. SQLite itself grants an exclusive locking-mode connection.
 
-The second condition is the important cross-process writer boundary. Existing ordinary
+The second condition is the cross-process SQLite-writer boundary. Existing ordinary
 SQLite clients do not need a new Nika API: they already participate in SQLite file/WAL
 locking. An existing WAL reader/writer that prevents exclusive ownership therefore makes
 restore fail closed before the safety backup or live replacement.
@@ -63,8 +73,8 @@ pre-publication `reliability.restore_completed` event.
 ## Recovery-manager ownership
 
 `.<database>.nika-recovery.lock` is a persistent sibling lock file. It is intentionally
-not unlinked on release; deleting a lock file can split concurrent owners across old and
-new inodes. POSIX uses non-blocking `flock`; Windows uses a one-byte non-blocking
+not unlinked on release; deleting a file-backed lock can split concurrent owners across
+old and new inodes. POSIX uses non-blocking `flock`; Windows uses a one-byte non-blocking
 `msvcrt.locking` lock. Process termination releases the OS lock.
 
 The lock path must be a direct regular file. Symlink/reparse-point and non-regular lock
@@ -72,6 +82,44 @@ paths fail closed. The lock contains no database content or secret material.
 
 This lease serializes `create_backup`, `prepare_restore`, `restore`, and
 `recover_interrupted_restore` against another canonical recovery manager.
+
+## Restore preview and WAL authority
+
+The restore confirmation fingerprint binds both the raw main-file SHA used by existing
+quarantine evidence and a versioned logical durable commitment over main+WAL bytes.
+A committed WAL-only transaction therefore invalidates an older confirmation even when
+the main-file SHA did not change.
+
+A missing WAL and a zero-byte WAL are normalized to the same empty durable state because
+SQLite may create an empty WAL while exclusive ownership is established. A non-empty WAL
+is never normalized away. SHM is excluded from the content commitment because it is
+transient coordination state, but unsafe SHM filesystem identity still fails closed.
+
+Restore also rejects an indirect/non-regular target, indirect/non-regular WAL or SHM, and
+orphan sidecars when the main database is absent.
+
+## Backup source authority
+
+A canonical backup manifest binds one SQLite database file by exact filename, byte size,
+SHA-256 and schema version. WAL/SHM state is not part of that manifest, so a backup with
+sidecars cannot be treated as the same authorized artifact.
+
+`verify_backup()` therefore requires a direct database and manifest and rejects any
+backup-side WAL/SHM before accepting the artifact. It rechecks sidecar coherence, size and
+SHA after database validation so a mutation during verification does not silently pass.
+
+Restore staging then closes the later source TOCTOU window:
+
+1. require the manifest-bound backup to be sidecar-free;
+2. obtain SQLite native exclusive ownership of the backup source;
+3. revalidate direct file identity, exact size, exact SHA-256 and exact schema;
+4. allow only a transient zero-byte WAL created by SQLite ownership; reject any non-empty
+   WAL as durable state not bound by the manifest;
+5. use SQLite Online Backup from that held source connection into the staged database;
+6. revalidate the same source authority before releasing the lock.
+
+Thus a committed WAL mutation of the backup after restore preview cannot be consumed as a
+manifest-authorized restore source.
 
 ## Publication, quarantine and interrupted recovery
 
@@ -86,17 +134,22 @@ after quarantine but before publication can resume; a crash after stage publicat
 before manifest/marker cleanup is recognized by the exact staged SHA and completed without
 repeating replacement.
 
-## Sidecar and preview authority
+Rollback is also fail-closed against path races. If a target exists during quarantine
+rollback, it may be treated as recoverable only when its SHA equals either the exact
+pre-restore SHA or the exact staged-image SHA. Any third value is an unknown competing
+target: it is preserved in place, the quarantine is preserved, and the durable restore
+marker remains for explicit recovery rather than deleting another process's bytes.
 
-Restore fails closed for:
+## Audit continuity
 
-- an indirect or non-regular target path;
-- indirect, non-regular WAL/SHM sidecars;
-- WAL/SHM sidecars with a missing main database;
-- a committed non-empty WAL change after preview.
+Public backup still records `reliability.backup_created`. The restore-internal safety
+backup deliberately uses the same canonical copy/verification implementation with audit
+recording disabled, so it does not append a live event that would disappear when the live
+database is replaced.
 
-SHM remains excluded from the logical content digest because it is transient coordination
-state, but unsafe SHM filesystem identities still fail closed.
+The final `reliability.restore_completed` event is appended to the fully staged database
+before publication and records the exact source backup plus the generated safety-backup
+filename. The surviving restored database therefore retains final restore evidence.
 
 ## Explicit residual boundary
 
@@ -118,15 +171,18 @@ before the recovery manager changes the live logical database.
 Focused deterministic tests cover:
 
 - WAL-only stale confirmation and zero-WAL normalization;
+- committed WAL mutation of a manifest-bound backup after preview;
 - live WAL client exclusion;
 - cross-process recovery-owner conflict;
 - crash after safety backup but before live copy;
 - crash after committed healthy live copy with durable final audit;
 - crash after corrupt-stage publication followed by interrupted recovery;
 - no-clobber publication race;
-- unsafe sidecar rejection;
+- unknown competing target preservation during quarantine rollback;
+- unsafe/orphan/indirect sidecar rejection;
 - existing safety-backup audit continuity, quarantine, rollback and interrupted-recovery
   suites.
 
-Exact-head Core CI and M12 remain required. Owner tests do not self-clear AUD02/AUD03.
-`HUMAN_TESTED=false`; `NVDA_VERIFIED=false`; `PRODUCTION_RELEASE_READY=false`.
+Exact-head Core CI on Ubuntu+Windows and complete M12 remain required. Owner tests do not
+self-clear AUD02/AUD03. `HUMAN_TESTED=false`; `NVDA_VERIFIED=false`;
+`PRODUCTION_RELEASE_READY=false`.
