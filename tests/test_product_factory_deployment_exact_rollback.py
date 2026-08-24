@@ -29,7 +29,6 @@ from nika_core.product_factory_deployment import (
 SHA = "a" * 40
 DIGEST_A = "1" * 64
 DIGEST_B = "2" * 64
-DIGEST_C = "3" * 64
 NOW = datetime(2026, 8, 23, 21, 0, tzinfo=UTC)
 
 
@@ -52,16 +51,22 @@ def _intent(intent_id: str, release: ReleaseRef) -> DeploymentIntent:
 
 
 @dataclass
-class _LegacyShaProvider:
+class _ExactProvider:
     unhealthy_versions: set[str] = field(default_factory=set)
     deploy_calls: int = 0
     rollback_calls: int = 0
+    rollback_targets: list[ReleaseRef | None] = field(default_factory=list)
     current: ReleaseRef | None = None
 
     def deploy(self, intent: DeploymentIntent) -> ProviderDeploymentResult:
         self.deploy_calls += 1
         self.current = intent.release
-        return ProviderDeploymentResult(True, False, (f"deploy://{intent.intent_id}",))
+        return ProviderDeploymentResult(
+            True,
+            False,
+            (f"deploy://{intent.intent_id}",),
+            release=intent.release,
+        )
 
     def health(self, intent: DeploymentIntent) -> HealthEvidence:
         return HealthEvidence(
@@ -76,15 +81,19 @@ class _LegacyShaProvider:
     def rollback(
         self,
         intent: DeploymentIntent,
-        previous_release_sha: str | None,
+        previous_release: ReleaseRef | None,
     ) -> RollbackEvidence:
         self.rollback_calls += 1
+        self.rollback_targets.append(previous_release)
+        self.current = previous_release
         return RollbackEvidence(
             intent.environment.environment_id,
             intent.release.source_sha,
-            previous_release_sha,
+            previous_release.source_sha if previous_release is not None else None,
             True,
             (f"rollback://{intent.intent_id}",),
+            failed_release=intent.release,
+            restored_release=previous_release,
         )
 
     def inspect(self, intent: DeploymentIntent) -> ProviderInspection:
@@ -99,61 +108,10 @@ class _LegacyShaProvider:
         )
 
 
-@dataclass
-class _ExactRollbackProvider(_LegacyShaProvider):
-    exact_targets: list[ReleaseRef | None] = field(default_factory=list)
-
-    def rollback_exact(
-        self,
-        intent: DeploymentIntent,
-        previous_release: ReleaseRef | None,
-    ) -> RollbackEvidence:
-        self.rollback_calls += 1
-        self.exact_targets.append(previous_release)
-        self.current = previous_release
-        return RollbackEvidence(
-            intent.environment.environment_id,
-            intent.release.source_sha,
-            previous_release.source_sha if previous_release is not None else None,
-            True,
-            (f"rollback-exact://{intent.intent_id}",),
-            failed_release=intent.release,
-            restored_release=previous_release,
-        )
-
-
-def test_legacy_sha_only_provider_is_not_asked_to_restore_ambiguous_previous_release() -> None:
+def test_canonical_provider_rollback_receives_full_previous_release_identity() -> None:
     release_a = _release("1.0.0", DIGEST_A)
     release_b = _release("2.0.0", DIGEST_B)
-    release_c = _release("3.0.0", DIGEST_C)
-    provider = _LegacyShaProvider(unhealthy_versions={"2.0.0"})
-    fabric = DeploymentFabric(provider)
-
-    first = fabric.deploy(_intent("deploy-a", release_a))
-    second_intent = _intent("deploy-b", release_b)
-    second = fabric.deploy(second_intent)
-
-    assert first.state is DeploymentState.HEALTHY
-    assert second.state is DeploymentState.UNCERTAIN
-    assert second.previous_release == release_a
-    assert provider.rollback_calls == 0
-    assert provider.current == release_b
-    assert fabric.snapshot().healthy_staging == ()
-
-    duplicate = fabric.deploy(second_intent)
-    assert duplicate == second
-    assert provider.deploy_calls == 2
-    assert provider.rollback_calls == 0
-
-    with pytest.raises(DeploymentFabricError, match="unresolved deployment effect"):
-        fabric.deploy(_intent("deploy-c", release_c))
-    assert provider.deploy_calls == 2
-
-
-def test_exact_capable_provider_must_restore_full_previous_release_identity() -> None:
-    release_a = _release("1.0.0", DIGEST_A)
-    release_b = _release("2.0.0", DIGEST_B)
-    provider = _ExactRollbackProvider(unhealthy_versions={"2.0.0"})
+    provider = _ExactProvider(unhealthy_versions={"2.0.0"})
     fabric = DeploymentFabric(provider)
 
     first = fabric.deploy(_intent("deploy-a", release_a))
@@ -165,7 +123,7 @@ def test_exact_capable_provider_must_restore_full_previous_release_identity() ->
     assert second.rollback is not None
     assert second.rollback.failed_release == release_b
     assert second.rollback.restored_release == release_a
-    assert provider.exact_targets == [release_a]
+    assert provider.rollback_targets == [release_a]
     assert provider.current == release_a
     assert fabric.snapshot().current_releases == (
         ("project-exact", "staging-exact", "1.0.0", SHA, DIGEST_A),
@@ -174,7 +132,7 @@ def test_exact_capable_provider_must_restore_full_previous_release_identity() ->
 
 def test_current_release_snapshot_uses_full_release_identity_and_unique_legacy_migration() -> None:
     release_a = _release("1.0.0", DIGEST_A)
-    provider = _LegacyShaProvider()
+    provider = _ExactProvider()
     fabric = DeploymentFabric(provider)
     fabric.deploy(_intent("deploy-a", release_a))
 
@@ -195,7 +153,7 @@ def test_current_release_snapshot_uses_full_release_identity_and_unique_legacy_m
 def test_legacy_current_release_snapshot_fails_closed_when_same_sha_is_ambiguous() -> None:
     release_a = _release("1.0.0", DIGEST_A)
     release_b = _release("2.0.0", DIGEST_B)
-    provider = _LegacyShaProvider()
+    provider = _ExactProvider()
     fabric = DeploymentFabric(provider)
     fabric.deploy(_intent("deploy-a", release_a))
     fabric.deploy(_intent("deploy-b", release_b))
@@ -238,7 +196,7 @@ class _SingleExecutionRunner:
         return self.execution
 
 
-def test_ansible_exact_rollback_binds_requested_and_restored_release_identity() -> None:
+def test_ansible_canonical_rollback_binds_requested_and_restored_release_identity() -> None:
     previous = ReleaseRef("project-exact", "1.0.0", SHA, DIGEST_A)
     failed = ReleaseRef("project-exact", "2.0.0", SHA, DIGEST_B)
     runner = _SingleExecutionRunner(
@@ -267,7 +225,7 @@ def test_ansible_exact_rollback_binds_requested_and_restored_release_identity() 
     )
     intent = _intent("deploy-b", failed)
 
-    evidence = adapter.rollback_exact(intent, previous)
+    evidence = adapter.rollback(intent, previous)
 
     assert evidence.succeeded is True
     assert evidence.failed_release == failed
@@ -279,7 +237,7 @@ def test_ansible_exact_rollback_binds_requested_and_restored_release_identity() 
     assert extravars["nika_previous_artifact_digest"] == previous.artifact_digest
 
 
-def test_ansible_exact_rollback_rejects_partial_restored_release_identity() -> None:
+def test_ansible_canonical_rollback_rejects_partial_restored_release_identity() -> None:
     previous = ReleaseRef("project-exact", "1.0.0", SHA, DIGEST_A)
     failed = ReleaseRef("project-exact", "2.0.0", SHA, DIGEST_B)
     runner = _SingleExecutionRunner(
@@ -310,4 +268,4 @@ def test_ansible_exact_rollback_rejects_partial_restored_release_identity() -> N
         DeploymentFabricError,
         match="must report version, SHA and artifact digest together",
     ):
-        adapter.rollback_exact(_intent("deploy-b", failed), previous)
+        adapter.rollback(_intent("deploy-b", failed), previous)
