@@ -24,9 +24,13 @@ def _workflows() -> tuple[Path, ...]:
     )
 
 
+def _indentation(line: str) -> int:
+    return len(line) - len(line.lstrip())
+
+
 def _step_bounds(lines: list[str], uses_index: int) -> tuple[int, int]:
     uses_line = lines[uses_index]
-    uses_indent = len(uses_line) - len(uses_line.lstrip())
+    uses_indent = _indentation(uses_line)
     step_start: int | None = None
     step_indent: int | None = None
 
@@ -53,9 +57,33 @@ def _step_bounds(lines: list[str], uses_index: int) -> tuple[int, int]:
     return step_start, step_end
 
 
+def _uses_key_indent(line: str) -> int:
+    indentation = _indentation(line)
+    if line.lstrip().startswith("- uses:"):
+        return indentation + 2
+    return indentation
+
+
 def _checkout_disables_persisted_credentials(lines: list[str], uses_index: int) -> bool:
     step_start, step_end = _step_bounds(lines, uses_index)
-    return any(_PERSIST_FALSE.fullmatch(line) for line in lines[step_start:step_end])
+    sibling_indent = _uses_key_indent(lines[uses_index])
+
+    for candidate in range(step_start, step_end):
+        line = lines[candidate]
+        if line.strip().casefold() != "with:" or _indentation(line) != sibling_indent:
+            continue
+
+        with_indent = _indentation(line)
+        for following in lines[candidate + 1 : step_end]:
+            if not following.strip():
+                continue
+            if _indentation(following) <= with_indent:
+                break
+            if _PERSIST_FALSE.fullmatch(following):
+                return True
+        return False
+
+    return False
 
 
 def test_every_external_action_is_pinned_to_an_immutable_commit() -> None:
@@ -115,10 +143,23 @@ def test_checkout_step_parser_handles_named_steps_and_negative_controls() -> Non
         "        with:",
         "          persist-credentials: true",
     ]
+    misplaced_env = [
+        "      - name: Misplaced credential setting",
+        f"        uses: {action}",
+        "        env:",
+        "          persist-credentials: false",
+    ]
+    inline_step = [
+        f"      - uses: {action}",
+        "        with:",
+        "          persist-credentials: false",
+    ]
 
     assert _checkout_disables_persisted_credentials(positive, 1)
     assert not _checkout_disables_persisted_credentials(missing, 1)
     assert not _checkout_disables_persisted_credentials(explicit_true, 1)
+    assert not _checkout_disables_persisted_credentials(misplaced_env, 1)
+    assert _checkout_disables_persisted_credentials(inline_step, 0)
 
 
 def test_checkout_never_persists_ci_credentials() -> None:
