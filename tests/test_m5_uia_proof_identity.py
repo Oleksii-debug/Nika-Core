@@ -97,12 +97,30 @@ def test_named_control_resolution_collects_all_bound_root_candidates_and_rejects
     assert ".FindFirst(" not in resolver
     assert ".FindAll(" in resolver
     assert "Add-UniqueAutomationElement" in resolver
-    assert "Automation]::Compare" in source
+    assert "ControlTypeProperty" in resolver
+    assert "[System.Windows.Automation.AndCondition]::new" in resolver
     assert "$candidates.Count -gt 1" in resolver
-    assert "Multiple distinct UI Automation descendants matched exact accessible name" in resolver
+    assert "Multiple distinct UI Automation descendants matched exact semantic locator" in resolver
 
 
-def test_focus_verification_uses_exact_runtime_id_and_automation_element_identity() -> None:
+def test_packaged_hotkey_targets_use_exact_name_and_control_type_locators() -> None:
+    source = _source()
+
+    assert (
+        "$startControl = Wait-DescendantName 'Створити завдання' "
+        "([System.Windows.Automation.ControlType]::Button)"
+    ) in source
+    assert (
+        "$tasksControl = Wait-DescendantName 'Завдання' "
+        "([System.Windows.Automation.ControlType]::Text)"
+    ) in source
+    assert (
+        "$commandControl = Wait-DescendantName 'Що має зробити Nika?' "
+        "([System.Windows.Automation.ControlType]::Edit)"
+    ) in source
+
+
+def test_focus_verification_uses_captured_runtime_id_generation_and_live_target() -> None:
     source = _source()
     start = source.index("function Wait-FocusName")
     end = source.index("function Set-BoundControlFocus", start)
@@ -110,12 +128,16 @@ def test_focus_verification_uses_exact_runtime_id_and_automation_element_identit
 
     assert "GetRuntimeId" in verifier
     assert "ExpectedControl.RuntimeId" in verifier
+    assert "ExpectedControl.ElementGeneration" in verifier
     assert "Automation]::Compare($target, $focused)" in verifier
     assert "Current.Name -eq" not in verifier
 
 
-def test_control_identity_is_bound_to_process_window_generation_and_fails_closed_on_replacement() -> None:
+def test_control_identity_is_bound_to_process_window_and_live_element_generation() -> None:
     source = _source()
+    start = source.index("function Resolve-BoundControlIdentity")
+    end = source.index("$window = $null", start)
+    resolver = source[start:end]
 
     for token in (
         "ProcessStartTicks",
@@ -123,8 +145,17 @@ def test_control_identity_is_bound_to_process_window_generation_and_fails_closed
         "WindowHandle",
         "WindowRuntimeId",
         "RuntimeId",
+        "ElementGeneration",
+        "ExpectedControlType",
         "Resolve-BoundControlIdentity",
     ):
         assert token in source
-    assert "re-resolved to a different RuntimeId after becoming stale or being replaced" in source
+    assert "RuntimeId reuse cannot restore control authority" in resolver
+    assert "Get-ElementRuntimeId $Identity.Element" in resolver
+    assert "Test-ElementMatchesSemanticLocator $Identity.Element" in resolver
+    assert "Automation]::Compare($Identity.Element, $resolved)" in resolver
+    assert "re-resolved to a different live element generation" in resolver
+    assert resolver.index("Get-ElementRuntimeId $Identity.Element") < resolver.index(
+        "$resolved = Find-BoundDescendantName"
+    )
     assert "Discard the incomplete snapshot and retry all bound roots" in source
