@@ -20,7 +20,7 @@ def test_base_declared_dependency_cannot_disappear_from_runtime_inventory() -> N
 
     findings = supply_chain_findings(payload)
 
-    assert findings, (
+    assert any("httpx" in finding for finding in findings), (
         "base-declared dependency omitted from bundle runtime inventory was accepted; "
         "release notices/SBOM can therefore be incomplete by construction"
     )
@@ -45,7 +45,11 @@ def test_runtime_component_requires_immutable_distribution_source_identity() -> 
 
     findings = supply_chain_findings(payload)
 
-    assert findings, (
+    assert any(
+        "example-runtime" in finding
+        and ("source" in finding or "provenance" in finding or "artifact" in finding)
+        for finding in findings
+    ), (
         "runtime component with only mutable project URL metadata and an installed RECORD digest "
         "was accepted without immutable wheel/sdist/source-artifact provenance"
     )
