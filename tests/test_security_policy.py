@@ -165,6 +165,58 @@ def test_empty_executable_allowlist_denies_every_process(tmp_path: Path) -> None
         sandbox.authorize_executable("pytest")
 
 
+def test_executable_denial_precedes_approval_and_budget_consumption(tmp_path: Path) -> None:
+    intent = ActionIntent(
+        action_id="danger-process-1",
+        tool_id="danger.execute",
+        risk=ToolRisk.HIGH_IMPACT,
+        target="approved process",
+        executable="/untrusted/bin/pytest",
+    )
+    approval = _approval(intent, approval_id="approval-process-1")
+    approvals = ApprovalLedger()
+    budget = ExecutionBudget(max_process_launches=1)
+    budgets = ExecutionBudgetLedger(budget)
+    basename_only_policy = SecurityPolicy(
+        granted_tools=frozenset({"danger.execute"}),
+        sandbox=SandboxPolicy(
+            workspace_root=tmp_path / "workspace",
+            allowed_executables=("pytest",),
+        ),
+        budget=budget,
+    )
+    now = datetime(2026, 8, 18, 19, 0, tzinfo=UTC)
+
+    with pytest.raises(PermissionError, match="process executable"):
+        authorize_action(
+            intent,
+            basename_only_policy,
+            budgets,
+            approvals,
+            approval=approval,
+            now=now,
+        )
+    assert budgets.process_launches == 0
+
+    exact_path_policy = SecurityPolicy(
+        granted_tools=frozenset({"danger.execute"}),
+        sandbox=SandboxPolicy(
+            workspace_root=tmp_path / "workspace",
+            allowed_executables=("/untrusted/bin/pytest",),
+        ),
+        budget=budget,
+    )
+    authorize_action(
+        intent,
+        exact_path_policy,
+        budgets,
+        approvals,
+        approval=approval,
+        now=now,
+    )
+    assert budgets.process_launches == 1
+
+
 def test_high_impact_approval_is_exact_expiring_and_single_use(tmp_path: Path) -> None:
     policy = _policy(tmp_path)
     intent = ActionIntent(
