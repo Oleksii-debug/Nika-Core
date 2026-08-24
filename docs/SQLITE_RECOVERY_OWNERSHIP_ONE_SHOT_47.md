@@ -30,8 +30,8 @@ The canonical recovery authority remains
 - missing WAL and a zero-byte WAL are the same logical durable state because obtaining
   SQLite exclusive ownership may itself create an empty WAL file;
 - a non-empty WAL remains byte-for-byte part of restore authority;
-- healthy restore uses one exclusive live SQLite connection continuously across final
-  preview revalidation, safety backup, replacement, validation and rollback;
+- healthy restore uses one exclusive locking-mode live SQLite connection continuously
+  across final preview revalidation, safety backup, replacement, validation and rollback;
 - canonical backup artifacts remain single-file manifest-bound SQLite snapshots and are
   revalidated under native SQLite ownership immediately before restore staging.
 
@@ -47,28 +47,35 @@ The canonical recovery authority remains
 No dependency, database migration, permission, R-level authority, credential, workflow
 or release adapter is added.
 
-## Healthy live database quiescence
+## Healthy live database writer ownership
 
 For a healthy live database, destructive restore now requires two independent ownership
 conditions:
 
 1. the recovery file lease is held for the full operation;
-2. SQLite itself grants an exclusive locking-mode connection.
+2. SQLite grants the recovery connection write ownership in exclusive locking mode.
 
-The second condition is the cross-process SQLite-writer boundary. Existing ordinary
-SQLite clients do not need a new Nika API: they already participate in SQLite file/WAL
-locking. An existing WAL reader/writer that prevents exclusive ownership therefore makes
-restore fail closed before the safety backup or live replacement.
+The second condition closes the cross-process **writer** race without changing
+`SQLiteStore`. An already-active WAL writer prevents the recovery connection from acquiring
+its write transaction. Once recovery has acquired and retained the exclusive locking-mode
+connection, competing writers cannot commit into the live database through the remaining
+restore interval.
 
-The exclusive connection stays open while:
+This is deliberately not described as eviction of every reader. WAL permits a reader that
+already owns a read snapshot to finish that snapshot. That does not expose partially
+restored pages: healthy publication uses SQLite Online Backup into the live connection,
+whose destination update is one SQLite write transaction. Existing readers therefore see
+a consistent old snapshot, while later access observes the committed restored state.
+
+The recovery connection stays open while:
 
 `revalidate preview -> safety backup -> append restore_completed to stage -> online backup stage into live -> validate live`
 
 If an ordinary exception occurs after the live copy, rollback from the safety backup is
-performed through that same exclusive destination connection before it is released.
-An abrupt process loss during SQLite Online Backup relies on SQLite transaction atomicity;
-a loss after the copy has committed leaves the complete restored database, including the
-pre-publication `reliability.restore_completed` event.
+performed through that same connection before it is released. An abrupt process loss
+during SQLite Online Backup inherits SQLite transaction atomicity; a loss after the copy
+has committed leaves the complete restored database, including the pre-publication
+`reliability.restore_completed` event.
 
 ## Recovery-manager ownership
 
@@ -91,7 +98,7 @@ A committed WAL-only transaction therefore invalidates an older confirmation eve
 the main-file SHA did not change.
 
 A missing WAL and a zero-byte WAL are normalized to the same empty durable state because
-SQLite may create an empty WAL while exclusive ownership is established. A non-empty WAL
+SQLite may create an empty WAL while recovery ownership is established. A non-empty WAL
 is never normalized away. SHM is excluded from the content commitment because it is
 transient coordination state, but unsafe SHM filesystem identity still fails closed.
 
@@ -111,12 +118,12 @@ SHA after database validation so a mutation during verification does not silentl
 Restore staging then closes the later source TOCTOU window:
 
 1. require the manifest-bound backup to be sidecar-free;
-2. obtain SQLite native exclusive ownership of the backup source;
+2. obtain SQLite native recovery ownership of the backup source;
 3. revalidate direct file identity, exact size, exact SHA-256 and exact schema;
-4. allow only a transient zero-byte WAL created by SQLite ownership; reject any non-empty
-   WAL as durable state not bound by the manifest;
+4. allow only a transient zero-byte WAL created while SQLite ownership is established;
+   reject any non-empty WAL as durable state not bound by the manifest;
 5. use SQLite Online Backup from that held source connection into the staged database;
-6. revalidate the same source authority before releasing the lock.
+6. revalidate the same source authority before releasing the connection.
 
 Thus a committed WAL mutation of the backup after restore preview cannot be consumed as a
 manifest-authorized restore source.
@@ -161,8 +168,8 @@ SQLite connections while unwinding an exception.
 `os._exit()` at exact recovery boundaries. The parent process proves durable filesystem
 and SQLite state after the child exits without Python cleanup:
 
-- a separate process holding an active WAL read transaction prevents native exclusive
-  restore ownership;
+- a separate process holding a WAL `BEGIN IMMEDIATE` writer reservation prevents recovery
+  writer ownership without changing committed database content;
 - process loss after the safety backup but before staged audit/live copy preserves the
   live logical database and leaves a verifiable safety artifact;
 - process loss immediately after SQLite Online Backup commits the staged database into the
@@ -180,15 +187,16 @@ filesystem containment.
 This work does **not** claim an authenticated filesystem transaction or a sandbox against
 an unrestricted process that rewrites/renames database files outside SQLite semantics.
 
-For a truly corrupt/non-SQLite current target, SQLite cannot grant a meaningful native
-exclusive database lock. The explicit destructive override path therefore retains the
-recovery file lease plus durable quarantine/rollback marker, but it is not described as
-universal SQLite-client quiescence. Likewise POSIX advisory file locks cannot constrain a
-hostile process that deliberately ignores them.
+For a truly corrupt/non-SQLite current target, SQLite cannot grant meaningful database
+writer ownership. The explicit destructive override path therefore retains the recovery
+file lease plus durable quarantine/rollback marker, but it is not described as universal
+SQLite-client quiescence. Likewise POSIX advisory file locks cannot constrain a hostile
+process that deliberately ignores them.
 
-The closed cross-process gap is the canonical healthy SQLite-client case: ordinary SQLite
-connections, including direct `sqlite3` clients, must permit native exclusive ownership
-before the recovery manager changes the live logical database.
+The closed healthy-database gap is the canonical competing-writer interval. Pre-existing
+WAL readers may retain their old SQLite snapshot; they are not allowed to mutate the live
+database through the recovery transaction and are not claimed to have been forcibly
+evicted.
 
 ## Evidence requirements
 
@@ -196,7 +204,7 @@ Focused deterministic tests cover:
 
 - WAL-only stale confirmation and zero-WAL normalization;
 - committed WAL mutation of a manifest-bound backup after preview;
-- same-process and cross-process live WAL client exclusion;
+- same-process and cross-process live WAL writer exclusion;
 - cross-process recovery-owner conflict;
 - real `os._exit` process loss after safety backup but before live copy;
 - real `os._exit` process loss immediately after committed healthy live copy with durable
