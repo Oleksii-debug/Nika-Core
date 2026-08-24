@@ -191,18 +191,17 @@ def test_uncertain_snapshot_survives_restart_and_reconciles_without_redispatch(
 
 
 def test_uncertain_snapshot_rejects_pending_journal_without_provider_access(tmp_path) -> None:
-    _, _, ledger, journal = _runtime_journal(tmp_path)
+    store, task_id, ledger, journal = _runtime_journal(tmp_path)
     port = UncertainThenResolvedPort()
     first = _coordinator(port=port, journal=journal)
     uncertain = first.request_maintenance(_request())
     snapshot = first.snapshot()
+    operation = ledger.list_for_task(task_id)[0]
 
-    operation = ledger.list_for_task(snapshot.maintenance_records[0].request.request_id)
-    # Rebuild the durable state as PENDING to simulate an authority rewind.
-    with journal._ledger._store.connection() as conn:  # noqa: SLF001 - adversarial durable-state fixture
+    with store.connection() as conn:
         conn.execute(
             "UPDATE idempotency_records SET status = ?, result_json = NULL WHERE operation_key = ?",
-            (IdempotencyStatus.PENDING.value, journal._operation_key("project-a", _request().request_id)),  # noqa: SLF001
+            (IdempotencyStatus.PENDING.value, operation.operation_key),
         )
 
     restarted = ProductOperationsCoordinator(
@@ -215,5 +214,6 @@ def test_uncertain_snapshot_rejects_pending_journal_without_provider_access(tmp_
         restarted.restore(snapshot)
 
     assert uncertain.result.uncertain is True
+    assert ledger.require(operation.operation_key).status is IdempotencyStatus.PENDING
     assert port.apply_calls == 1
     assert port.inspect_calls == 0
