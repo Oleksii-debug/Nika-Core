@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 env:
-  NIKA_TARGET_SHA: ${{ github.event.pull_request.base.sha }}
+  NIKA_TARGET_SHA: af478f84be8b69fa881844dcd5b1a13e927d4078
   NIKA_HARNESS_SHA: ${{ github.event.pull_request.head.sha }}
 
 concurrency:
