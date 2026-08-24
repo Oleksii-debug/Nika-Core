@@ -68,6 +68,17 @@ def _intent(
     )
 
 
+def _release(
+    *,
+    project_id: str = "p-social",
+    sha: int = 9,
+    version: str = "0.9.0",
+    digest: int | None = None,
+) -> ReleaseRef:
+    digest_value = sha if digest is None else digest
+    return ReleaseRef(project_id, version, _sha(sha), _digest(digest_value))
+
+
 def _exact_release_contract(
     *,
     sha: int = 1,
@@ -79,6 +90,14 @@ def _exact_release_contract(
         "release_version": version,
         "release_sha": _sha(sha),
         "artifact_digest": _digest(digest_value),
+    }
+
+
+def _restored_release_contract(release: ReleaseRef) -> dict[str, object]:
+    return {
+        "restored_release_version": release.version,
+        "restored_release_sha": release.source_sha,
+        "restored_artifact_digest": release.artifact_digest,
     }
 
 
@@ -144,15 +163,13 @@ def _execution(
 
 
 def test_deploy_uses_exact_authorized_staging_identity_and_safe_extravars() -> None:
-    adapter, runner = _adapter(
-        _execution("deploy", {"applied": True})
-    )
-    result = adapter.deploy(_intent())
+    adapter, runner = _adapter(_execution("deploy", {"applied": True}))
+    intent = _intent()
+    result = adapter.deploy(intent)
     assert result.applied is True
     assert result.uncertain is False
-    assert result.evidence_refs == (
-        "ansible-runner:evidence-deploy",
-    )
+    assert result.release == intent.release
+    assert result.evidence_refs == ("ansible-runner:evidence-deploy",)
     call = runner.calls[0]
     assert call["playbook"] == "nika_pf3_deploy.yml"
     assert call["inventory"] == "inventory/staging.ini"
@@ -169,13 +186,8 @@ def test_deploy_uses_exact_authorized_staging_identity_and_safe_extravars() -> N
 
 def test_production_intent_is_rejected_before_runner_call() -> None:
     adapter, runner = _adapter()
-    with pytest.raises(
-        StagingAdapterError,
-        match="restricted to staging",
-    ):
-        adapter.deploy(
-            _intent(tier=EnvironmentTier.PRODUCTION)
-        )
+    with pytest.raises(StagingAdapterError, match="restricted to staging"):
+        adapter.deploy(_intent(tier=EnvironmentTier.PRODUCTION))
     assert runner.calls == []
 
 
@@ -192,34 +204,24 @@ def test_target_identity_mismatch_is_rejected(
     kwargs: dict[str, str],
 ) -> None:
     adapter, runner = _adapter()
-    with pytest.raises(
-        StagingAdapterError,
-        match="outside the authorized staging target",
-    ):
+    with pytest.raises(StagingAdapterError, match="outside the authorized staging target"):
         adapter.deploy(_intent(**kwargs))
     assert runner.calls == [], field
 
 
 def test_failed_or_timed_out_deploy_is_uncertain_not_rejected_as_safe() -> None:
     adapter, _ = _adapter(
-        _execution(
-            "deploy",
-            None,
-            status="timeout",
-            rc=254,
-        )
+        _execution("deploy", None, status="timeout", rc=254)
     )
     result = adapter.deploy(_intent())
     assert result.applied is False
     assert result.uncertain is True
+    assert result.release is None
 
 
 def test_successful_deploy_requires_explicit_applied_contract() -> None:
     adapter, _ = _adapter(_execution("deploy", {}))
-    with pytest.raises(
-        StagingAdapterError,
-        match="applied must be boolean",
-    ):
+    with pytest.raises(StagingAdapterError, match="applied must be boolean"):
         adapter.deploy(_intent())
 
 
@@ -230,20 +232,13 @@ def test_health_binds_exact_release_and_timestamp() -> None:
         "healthy": True,
         "observed_at": observed_at,
     }
-    adapter, _ = _adapter(
-        _execution("health", contract)
-    )
+    adapter, _ = _adapter(_execution("health", contract))
     intent = _intent()
     evidence = adapter.health(intent)
     assert evidence.release_sha == _sha(1)
     assert evidence.release == intent.release
     assert evidence.healthy is True
-    assert evidence.checked_at == datetime(
-        2026,
-        8,
-        21,
-        tzinfo=UTC,
-    )
+    assert evidence.checked_at == datetime(2026, 8, 21, tzinfo=UTC)
 
 
 @pytest.mark.parametrize(
@@ -270,17 +265,11 @@ def test_health_rejects_exact_release_substitution(
     contract: dict[str, object],
 ) -> None:
     adapter, _ = _adapter(_execution("health", contract))
-    with pytest.raises(
-        StagingAdapterError,
-        match="different exact release identity",
-    ):
+    with pytest.raises(StagingAdapterError, match="different exact release identity"):
         adapter.health(_intent())
 
 
-@pytest.mark.parametrize(
-    "missing_field",
-    ["release_version", "artifact_digest"],
-)
+@pytest.mark.parametrize("missing_field", ["release_version", "artifact_digest"])
 def test_health_requires_complete_exact_release_contract(
     missing_field: str,
 ) -> None:
@@ -291,77 +280,66 @@ def test_health_requires_complete_exact_release_contract(
     }
     del contract[missing_field]
     adapter, _ = _adapter(_execution("health", contract))
-    with pytest.raises(
-        StagingAdapterError,
-        match=f"contract field {missing_field}",
-    ):
+    with pytest.raises(StagingAdapterError, match=f"contract field {missing_field}"):
         adapter.health(_intent())
 
 
 def test_health_transport_failure_does_not_claim_unhealthy_release() -> None:
-    adapter, _ = _adapter(
-        _execution(
-            "health",
-            None,
-            status="failed",
-            rc=2,
-        )
-    )
-    with pytest.raises(
-        StagingAdapterError,
-        match="did not complete successfully",
-    ):
+    adapter, _ = _adapter(_execution("health", None, status="failed", rc=2))
+    with pytest.raises(StagingAdapterError, match="did not complete successfully"):
         adapter.health(_intent())
 
 
-def test_rollback_must_restore_exact_requested_previous_release() -> None:
-    previous = _sha(9)
+def test_rollback_restores_exact_requested_previous_release() -> None:
+    previous = _release()
     adapter, runner = _adapter(
         _execution(
             "rollback",
             {
                 "succeeded": True,
-                "restored_release_sha": previous,
+                **_restored_release_contract(previous),
             },
         )
     )
-    evidence = adapter.rollback(_intent(), previous)
+    intent = _intent()
+    evidence = adapter.rollback(intent, previous)
     assert evidence.succeeded is True
-    assert evidence.restored_release_sha == previous
+    assert evidence.failed_release == intent.release
+    assert evidence.restored_release == previous
     extravars = runner.calls[0]["extravars"]
     assert isinstance(extravars, dict)
-    assert extravars["nika_previous_release_sha"] == previous
+    assert extravars["nika_previous_release_version"] == previous.version
+    assert extravars["nika_previous_release_sha"] == previous.source_sha
+    assert extravars["nika_previous_artifact_digest"] == previous.artifact_digest
 
 
-def test_rollback_rejects_wrong_restored_sha() -> None:
+def test_rollback_rejects_wrong_restored_exact_release() -> None:
+    previous = _release()
+    wrong = _release(version="0.8.0", digest=8)
     adapter, _ = _adapter(
         _execution(
             "rollback",
             {
                 "succeeded": True,
-                "restored_release_sha": _sha(8),
+                **_restored_release_contract(wrong),
             },
         )
     )
-    with pytest.raises(
-        StagingAdapterError,
-        match="did not restore",
-    ):
-        adapter.rollback(_intent(), _sha(9))
+    with pytest.raises(StagingAdapterError, match="did not restore"):
+        adapter.rollback(_intent(), previous)
 
 
 def test_failed_rollback_reports_failure_without_false_success() -> None:
+    previous = _release()
     adapter, _ = _adapter(
-        _execution(
-            "rollback",
-            None,
-            status="failed",
-            rc=2,
-        )
+        _execution("rollback", None, status="failed", rc=2)
     )
-    evidence = adapter.rollback(_intent(), _sha(9))
+    intent = _intent()
+    evidence = adapter.rollback(intent, previous)
     assert evidence.succeeded is False
-    assert evidence.restored_release_sha == _sha(9)
+    assert evidence.failed_release == intent.release
+    assert evidence.restored_release is None
+    assert evidence.restored_release_sha is None
 
 
 def test_inspect_returns_only_exact_release_health_and_evidence() -> None:
@@ -380,30 +358,20 @@ def test_inspect_returns_only_exact_release_health_and_evidence() -> None:
     assert inspection.release_sha == _sha(1)
     assert inspection.release == intent.release
     assert inspection.healthy is False
-    assert inspection.evidence_refs == (
-        "ansible-runner:evidence-inspect",
-    )
+    assert inspection.evidence_refs == ("ansible-runner:evidence-inspect",)
 
 
 @pytest.mark.parametrize(
     "contract",
     [
-        {
-            **_exact_release_contract(digest=2),
-            "healthy": True,
-        },
-        {
-            **_exact_release_contract(version="1.0.1"),
-            "healthy": True,
-        },
+        {**_exact_release_contract(digest=2), "healthy": True},
+        {**_exact_release_contract(version="1.0.1"), "healthy": True},
     ],
 )
 def test_inspection_reports_complete_different_exact_release_for_fabric_reconciliation(
     contract: dict[str, object],
 ) -> None:
-    adapter, _ = _adapter(
-        _execution("inspect", contract)
-    )
+    adapter, _ = _adapter(_execution("inspect", contract))
     inspection = adapter.inspect(_intent())
     assert inspection.release is not None
     assert inspection.release.version == contract["release_version"]
@@ -424,43 +392,22 @@ def test_inspection_missing_release_has_no_partial_identity() -> None:
             },
         )
     )
-    with pytest.raises(
-        StagingAdapterError,
-        match="missing release SHA",
-    ):
+    with pytest.raises(StagingAdapterError, match="missing release SHA"):
         adapter.inspect(_intent())
 
 
 def test_inspection_failure_preserves_uncertainty_by_raising() -> None:
-    adapter, _ = _adapter(
-        _execution(
-            "inspect",
-            None,
-            status="timeout",
-            rc=254,
-        )
-    )
-    with pytest.raises(
-        StagingAdapterError,
-        match="did not complete successfully",
-    ):
+    adapter, _ = _adapter(_execution("inspect", None, status="timeout", rc=254))
+    with pytest.raises(StagingAdapterError, match="did not complete successfully"):
         adapter.inspect(_intent())
 
 
 def test_uncertain_reconcile_rejects_same_sha_wrong_artifact() -> None:
     adapter, _ = _adapter(
-        _execution(
-            "deploy",
-            None,
-            status="timeout",
-            rc=254,
-        ),
+        _execution("deploy", None, status="timeout", rc=254),
         _execution(
             "inspect",
-            {
-                **_exact_release_contract(digest=2),
-                "healthy": True,
-            },
+            {**_exact_release_contract(digest=2), "healthy": True},
         ),
     )
     fabric = DeploymentFabric(adapter)
@@ -468,16 +415,10 @@ def test_uncertain_reconcile_rejects_same_sha_wrong_artifact() -> None:
     uncertain = fabric.deploy(intent)
     assert uncertain.state is DeploymentState.UNCERTAIN
 
-    with pytest.raises(
-        DeploymentFabricError,
-        match="different exact release",
-    ):
+    with pytest.raises(DeploymentFabricError, match="different exact release"):
         fabric.reconcile(intent.intent_id)
 
-    assert (
-        fabric.snapshot().records[0].state
-        is DeploymentState.UNCERTAIN
-    )
+    assert fabric.snapshot().records[0].state is DeploymentState.UNCERTAIN
 
 
 def test_rejected_health_becomes_uncertain_without_staging_authority() -> None:
@@ -517,10 +458,7 @@ def test_rejected_health_becomes_uncertain_without_staging_authority() -> None:
 
 
 def test_authorization_reference_rejects_raw_secret_shape() -> None:
-    with pytest.raises(
-        StagingAdapterError,
-        match="opaque reference",
-    ):
+    with pytest.raises(StagingAdapterError, match="opaque reference"):
         AuthorizedStagingTarget(
             "p-social",
             "staging-eu",
@@ -531,10 +469,7 @@ def test_authorization_reference_rejects_raw_secret_shape() -> None:
 
 
 def test_playbook_names_cannot_escape_trusted_runner_project() -> None:
-    with pytest.raises(
-        StagingAdapterError,
-        match="trusted relative leaf",
-    ):
+    with pytest.raises(StagingAdapterError, match="trusted relative leaf"):
         AnsibleRunnerConfig(
             _trusted_data_dir(),
             deploy_playbook="../deploy.yml",
@@ -542,10 +477,7 @@ def test_playbook_names_cannot_escape_trusted_runner_project() -> None:
 
 
 def test_private_data_dir_must_be_absolute_trusted_configuration() -> None:
-    with pytest.raises(
-        StagingAdapterError,
-        match="absolute trusted local path",
-    ):
+    with pytest.raises(StagingAdapterError, match="absolute trusted local path"):
         AnsibleRunnerConfig(Path("relative/runner-data"))
 
 
@@ -579,9 +511,7 @@ def test_ansible_runner_client_extracts_only_named_contract_and_hash_evidence() 
             events=events,
         )
 
-    client = AnsibleRunnerClient(
-        SimpleNamespace(run=run)
-    )
+    client = AnsibleRunnerClient(SimpleNamespace(run=run))
     execution = client.execute(
         private_data_dir=_trusted_data_dir(),
         playbook="nika_pf3_deploy.yml",
@@ -590,9 +520,7 @@ def test_ansible_runner_client_extracts_only_named_contract_and_hash_evidence() 
         extravars={"nika_release_sha": _sha(1)},
     )
     assert execution.contract == {"applied": True}
-    assert execution.evidence_ref.startswith(
-        "ansible-runner:"
-    )
+    assert execution.evidence_ref.startswith("ansible-runner:")
     assert "must-not-escape" not in execution.evidence_ref
     assert captured["quiet"] is True
 
@@ -613,9 +541,7 @@ def test_ansible_runner_client_rejects_duplicate_result_contracts() -> None:
             events=[event, event],
         )
 
-    client = AnsibleRunnerClient(
-        SimpleNamespace(run=run)
-    )
+    client = AnsibleRunnerClient(SimpleNamespace(run=run))
     with pytest.raises(
         StagingAdapterError,
         match="multiple nika_pf3 result contracts",
@@ -667,10 +593,7 @@ def test_default_runner_loader_rejects_native_windows(
         "win32",
     )
     client = AnsibleRunnerClient()
-    with pytest.raises(
-        StagingAdapterError,
-        match="native Windows",
-    ):
+    with pytest.raises(StagingAdapterError, match="native Windows"):
         client.execute(
             private_data_dir=_trusted_data_dir(),
             playbook="nika_pf3_deploy.yml",
