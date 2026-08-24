@@ -126,10 +126,9 @@ class PackagedProductRefinementRouter:
             after.summary.project_id != project_id
             or after.summary.version != before.summary.version + 1
             or after.summary.goal != goal
-            or after.summary.state != before.summary.state
         ):
             raise PackagedProductJourneyError(
-                "ProductProject goal update returned inconsistent durable identity or state."
+                "ProductProject goal update returned inconsistent durable identity or version."
             )
         return UIResult(
             request_id="desktop-handler",
