@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from pf8_effect_journal_fake import MemoryEffectJournal
 
 from nika_core.product_factory_operations import ProductOperationsCoordinator
 from nika_core.product_factory_operations_contracts import (
@@ -18,7 +19,6 @@ from nika_core.product_factory_operations_contracts import (
     ServiceObservation,
     ServiceReplica,
 )
-from pf8_effect_journal_fake import MemoryEffectJournal
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 
@@ -328,11 +328,12 @@ def test_contracts_reject_boolean_numeric_and_duplicate_evidence_identity() -> N
 
 def test_fifty_service_maintenance_remains_service_isolated_after_restart() -> None:
     port = Port()
+    journal = MemoryEffectJournal()
     coordinator = ProductOperationsCoordinator(
         "project-a",
         port,
         port,
-        MemoryEffectJournal(),
+        journal,
     )
     maintained: set[str] = set()
     for index in range(50):
@@ -345,7 +346,11 @@ def test_fifty_service_maintenance_remains_service_isolated_after_restart() -> N
             coordinator.request_maintenance(request(service_id))
 
     snapshot = coordinator.snapshot()
-    restarted = ProductOperationsCoordinator("project-a", approval_authority=port)
+    restarted = ProductOperationsCoordinator(
+        "project-a",
+        approval_authority=port,
+        effect_journal=journal,
+    )
     restarted.restore(snapshot)
     records = {item.service.service_id: item for item in restarted.snapshot().services}
 
