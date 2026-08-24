@@ -1142,11 +1142,13 @@ def _service(database: Path) -> ExpenseService:
     return ExpenseService(ExpenseRepository(database))
 
 def main() -> int:
-    if len(sys.argv) == 3 and sys.argv[1] == "--self-test":
+    if len(sys.argv) == 4 and sys.argv[1] == "--self-test":
         service = _service(Path(sys.argv[2]))
         if not service.list_expenses():
             service.add_expense("1.23", "Packaged restart proof", "Proof")
-        print(len(service.list_expenses()))
+        proof = Path(sys.argv[3])
+        proof.parent.mkdir(parents=True, exist_ok=True)
+        proof.write_text(str(len(service.list_expenses())), encoding="utf-8")
         return 0
     settings_path = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "NikaC1ExpenseManager" / "settings.json"
     settings = SettingsRepository(settings_path).load()
@@ -1163,13 +1165,14 @@ if __name__ == "__main__":
     [Parameter(Mandatory=$true)][string]$Destination
 )
 $ErrorActionPreference = 'Stop'
-$bundle = [System.IO.Path]::GetFullPath($BundlePath)
-$destinationPath = [System.IO.Path]::GetFullPath($Destination)
-$windowsPath = [System.IO.Path]::GetFullPath($env:WINDIR)
+$separator = [System.IO.Path]::DirectorySeparatorChar
+$bundle = [System.IO.Path]::GetFullPath($BundlePath).TrimEnd($separator)
+$destinationPath = [System.IO.Path]::GetFullPath($Destination).TrimEnd($separator)
+$windowsPath = [System.IO.Path]::GetFullPath($env:WINDIR).TrimEnd($separator)
 if (-not (Test-Path -LiteralPath $bundle -PathType Container)) { throw 'BundlePath does not exist' }
-if ($destinationPath.StartsWith($windowsPath, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'System directory install is forbidden' }
-if ([System.StringComparer]::OrdinalIgnoreCase.Equals($bundle.TrimEnd('\\'), $destinationPath.TrimEnd('\\'))) { throw 'Bundle and destination must differ' }
-New-Item -ItemType Directory -LiteralPath $destinationPath -Force | Out-Null
+if ([System.StringComparer]::OrdinalIgnoreCase.Equals($destinationPath, $windowsPath) -or $destinationPath.StartsWith($windowsPath + $separator, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'System directory install is forbidden' }
+if ([System.StringComparer]::OrdinalIgnoreCase.Equals($bundle, $destinationPath) -or $destinationPath.StartsWith($bundle + $separator, [System.StringComparison]::OrdinalIgnoreCase) -or $bundle.StartsWith($destinationPath + $separator, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Bundle and destination must not overlap' }
+New-Item -ItemType Directory -Path $destinationPath -Force | Out-Null
 Get-ChildItem -LiteralPath $bundle -Force | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination $destinationPath -Recurse -Force
 }
@@ -1189,6 +1192,7 @@ class PackageContractTest(unittest.TestCase):
         installer = (root / "installer" / "install.ps1").read_text(encoding="utf-8")
         self.assertIn("Get-ChildItem -LiteralPath $bundle", installer)
         self.assertIn("Copy-Item -LiteralPath $_.FullName", installer)
+        self.assertIn("Bundle and destination must not overlap", installer)
         self.assertNotIn("Copy-Item -LiteralPath (Join-Path $BundlePath '*')", installer)
         self.assertNotIn("Start-Process -Verb RunAs", installer)
 
@@ -1360,9 +1364,10 @@ def _build_and_install_package(
 
     restart_db = workspace / "installed-data" / "expenses.db"
     outputs: list[str] = []
-    for _attempt in (1, 2):
+    for attempt in (1, 2):
+        proof_file = workspace / "installed-data" / f"proof-{attempt}.txt"
         proof = subprocess.run(
-            [str(installed_exe), "--self-test", str(restart_db)],
+            [str(installed_exe), "--self-test", str(restart_db), str(proof_file)],
             cwd=install_root,
             capture_output=True,
             text=True,
@@ -1374,7 +1379,11 @@ def _build_and_install_package(
                 "installed executable self-test failed: "
                 + (proof.stderr or proof.stdout or "no output")
             )
-        outputs.append(proof.stdout.strip())
+        if not proof_file.is_file():
+            raise C1MediumAppAcceptanceError(
+                "installed executable self-test did not emit proof file"
+            )
+        outputs.append(proof_file.read_text(encoding="utf-8").strip())
     if outputs != ["1", "1"]:
         raise C1MediumAppAcceptanceError(
             f"packaged restart proof changed durable row count: {outputs}"
