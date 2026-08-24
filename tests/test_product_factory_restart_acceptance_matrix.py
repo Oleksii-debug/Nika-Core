@@ -107,6 +107,26 @@ def test_every_boundary_has_one_canonical_owner_and_exact_route() -> None:
         assert boundary["blocker"].strip()
 
 
+def test_every_cell_has_injection_route_and_required_assertions() -> None:
+    matrix = _load_matrix()
+    global_invariants = set(matrix["global_invariants"])
+    cells: set[str] = set()
+
+    for boundary, fault_mode in product(matrix["boundaries"], matrix["fault_modes"]):
+        cell_id = f'{boundary["id"]}::{fault_mode["id"]}'
+        assert cell_id not in cells
+        cells.add(cell_id)
+
+        assert boundary["primary_pr"] > 0
+        assert boundary["canonical_owner"].strip()
+        assert boundary["blocker"].strip()
+        assert fault_mode["inject"].strip()
+        assert len(fault_mode["must_assert"]) >= 3
+        assert set(fault_mode["required_invariants"]) == global_invariants
+
+    assert len(cells) == 112
+
+
 def test_no_exact_head_credit_is_claimed_without_exact_green_evidence() -> None:
     matrix = _load_matrix()
     baseline = matrix["baseline_assessment"]
