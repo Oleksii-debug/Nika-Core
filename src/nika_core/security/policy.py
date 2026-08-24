@@ -90,6 +90,8 @@ def _executable_scope(value: str) -> tuple[str, str, str]:
             raise ValueError("Windows executable path scope must be absolute")
         if not windows_path.name:
             raise ValueError("process executable path must identify a file")
+        if ".." in windows_path.parts[1:]:
+            raise ValueError("process executable path must not contain parent traversal")
         for component in windows_path.parts[1:]:
             _validate_windows_component(component, label="process executable")
         return (
@@ -100,6 +102,8 @@ def _executable_scope(value: str) -> tuple[str, str, str]:
 
     if not posix_path.is_absolute():
         raise ValueError("POSIX executable path scope must be absolute")
+    if ".." in posix_path.parts:
+        raise ValueError("process executable path must not contain parent traversal")
     basename = posix_path.name
     if not basename:
         raise ValueError("process executable path must identify a file")
@@ -148,13 +152,17 @@ class SandboxPolicy:
 
     def authorize_executable(self, executable: str) -> None:
         try:
-            requested_kind, requested_identity, requested_name = _executable_scope(executable)
+            requested_kind, requested_identity, _ = _executable_scope(executable)
         except ValueError as exc:
             raise PermissionError("process executable is not allowed") from exc
 
         for allowed_executable in self.allowed_executables:
             allowed_kind, allowed_identity, _ = _executable_scope(allowed_executable)
-            if allowed_kind == "name" and requested_name == allowed_identity:
+            if (
+                allowed_kind == "name"
+                and requested_kind == "name"
+                and requested_identity == allowed_identity
+            ):
                 return
             if (
                 allowed_kind != "name"
