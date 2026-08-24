@@ -18,7 +18,11 @@ from nika_core.product_factory_packaged_refinement import (
     PackagedProductRefinementRouter,
     packaged_product_goal_refinement,
 )
-from nika_core.product_project import ProductProjectRepository, StaleProjectVersionError
+from nika_core.product_project import (
+    ProductProjectError,
+    ProductProjectRepository,
+    StaleProjectVersionError,
+)
 from nika_core.ui.bridge_models import UIResult
 
 
@@ -93,6 +97,10 @@ def test_refine_current_productproject_persists_new_version_and_survives_restart
     assert durable.project_id == project_id
     assert durable.spec_version == 2
     assert durable.spec.goal == refined_goal
+    assert product_project_identity(refined_goal) != project_id
+    history = repository.spec_history(project_id)
+    assert tuple(item.spec_version for item in history) == (1, 2)
+    assert history[1].supersedes_spec_version == 1
     assert selection.load() == project_id
     assert base.active_project_id == project_id
     assert ordinary.calls == []
@@ -130,6 +138,7 @@ def test_refine_same_goal_is_idempotent_at_packaged_boundary(tmp_path: Path) -> 
         f"spec version 1; state active; goal: {goal}."
     )
     assert repository.get(project_id).spec_version == 1
+    assert tuple(item.spec_version for item in repository.spec_history(project_id)) == (1,)
 
 
 @pytest.mark.parametrize(
@@ -227,6 +236,25 @@ def test_refinement_normalizes_optimistic_concurrency_failure(
 
     assert repository.get(product_project_identity(goal)).spec_version == 1
     assert ordinary.calls == []
+
+
+def test_refinement_rejects_token_shaped_raw_secret_without_new_version(
+    tmp_path: Path,
+) -> None:
+    goal = "Create accessible product application for review"
+    project_id = product_project_identity(goal)
+    router, _base, _products, repository, _selection, _ordinary = _durable_refinement_router(
+        tmp_path / "secret rejection.db"
+    )
+    router.create({"command": goal})
+    secret_goal = "Use credential sk-" + "A" * 24
+
+    with pytest.raises(ProductProjectError, match="token-shaped raw credential material"):
+        router.create({"command": f"Set current ProductProject goal: {secret_goal}"})
+
+    durable = repository.get(project_id)
+    assert durable.spec_version == 1
+    assert durable.spec.goal == goal
 
 
 @pytest.mark.parametrize(
