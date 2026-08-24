@@ -7,7 +7,9 @@ from pathlib import Path
 import pytest
 
 from nika_core.packaging.notices import (
+    SBOM_FILE,
     SUPPLY_CHAIN_FILE,
+    build_cyclonedx_sbom,
     supply_chain_findings,
     verify_third_party_notices,
 )
@@ -155,6 +157,45 @@ def test_supply_chain_policy_fails_closed_on_unpinned_optional_and_license_risk(
     assert "supply-chain:installed-record:example" in findings
 
 
+def test_cyclonedx_sbom_records_exact_runtime_components_and_model_license_boundary() -> None:
+    supply_chain = {
+        "artifact": "NikaCore Windows base runtime",
+        "policy": {"model_licenses_separate_from_engine": True},
+        "bundle_runtime_distributions": [
+            {
+                "name": "example-runtime",
+                "resolved_version": "1.2.3",
+                "license": "MIT",
+                "license_risk": "no-known-restrictive-token",
+                "installer": "pip",
+                "record_sha256": "a" * 64,
+                "project_urls": ["https://example.invalid/runtime"],
+            }
+        ],
+    }
+    sbom = build_cyclonedx_sbom(supply_chain)
+    assert sbom["bomFormat"] == "CycloneDX"
+    assert sbom["specVersion"] == "1.6"
+    assert sbom["components"] == [
+        {
+            "type": "library",
+            "name": "example-runtime",
+            "version": "1.2.3",
+            "purl": "pkg:pypi/example-runtime@1.2.3",
+            "licenses": [{"license": {"name": "MIT"}}],
+            "properties": [
+                {"name": "nika:installer", "value": "pip"},
+                {"name": "nika:record_sha256", "value": "a" * 64},
+                {"name": "nika:license_risk", "value": "no-known-restrictive-token"},
+                {"name": "nika:project_url", "value": "https://example.invalid/runtime"},
+            ],
+        }
+    ]
+    assert sbom["metadata"]["properties"] == [
+        {"name": "nika:model_licenses_separate_from_engine", "value": "true"}
+    ]
+
+
 def test_release_critical_build_dependencies_are_exact_pinned() -> None:
     root = Path(__file__).resolve().parents[1]
     with (root / "pyproject.toml").open("rb") as handle:
@@ -166,12 +207,13 @@ def test_release_critical_build_dependencies_are_exact_pinned() -> None:
     ]
 
 
-def test_m11_publishes_machine_readable_supply_chain_evidence() -> None:
+def test_m11_publishes_machine_readable_supply_chain_evidence_and_sbom() -> None:
     root = Path(__file__).resolve().parents[1]
     workflow = (root / ".github" / "workflows" / "m11-windows-release.yml").read_text(
         encoding="utf-8"
     )
     assert f"dist/NikaCore/{SUPPLY_CHAIN_FILE}" in workflow
+    assert f"dist/NikaCore/{SBOM_FILE}" in workflow
 
 
 def test_windows_plan_is_onedir_windowed_and_bundles_web_assets(tmp_path: Path) -> None:
