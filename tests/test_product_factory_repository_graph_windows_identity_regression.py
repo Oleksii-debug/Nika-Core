@@ -12,10 +12,11 @@ from nika_core.product_factory_orchestration import (
 
 
 def _windows_repository(*, repository_id: str = "repo") -> RepositoryRef:
+    locator_name = repository_id.replace(":", "-")
     return RepositoryRef(
         repository_id,
         "github",
-        f"owner/{repository_id}",
+        f"owner/{locator_name}",
         "main",
         windows_path_semantics=True,
     )
