@@ -16,8 +16,6 @@
   let actionsReady = false;
   let bridgeInitializationStarted = false;
 
-  const reservedEditingKeys = new Set(["a", "c", "x", "v", "z", "y"]);
-
   function announce(message, assertive = false) {
     statusNode.setAttribute("aria-live", assertive ? "assertive" : "polite");
     statusNode.textContent = message || "Готово.";
@@ -37,7 +35,8 @@
 
   function isEditable(target) {
     if (!(target instanceof Element)) return false;
-    return target.matches("input, textarea, select, [contenteditable='true']");
+    if (target.matches("input, textarea, select")) return true;
+    return target instanceof HTMLElement && target.isContentEditable;
   }
 
   function eventBinding(event) {
@@ -192,7 +191,7 @@
   });
 
   document.addEventListener("keydown", (event) => {
-    if (isEditable(event.target) && event.ctrlKey && !event.altKey && !event.metaKey && reservedEditingKeys.has(event.key.toLowerCase())) return;
+    if (isEditable(event.target)) return;
     if (!actionsReady) return;
     const pressed = eventBinding(event);
     if (!pressed) return;
