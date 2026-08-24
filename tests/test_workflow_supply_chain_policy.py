@@ -19,6 +19,29 @@ def _workflows() -> tuple[Path, ...]:
     )
 
 
+def _checkout_credential_findings(workflow: Path) -> list[str]:
+    findings: list[str] = []
+    lines = workflow.read_text(encoding="utf-8").splitlines()
+    for index, line in enumerate(lines):
+        if _CHECKOUT_USE not in line:
+            continue
+        indentation = len(line) - len(line.lstrip())
+        block: list[str] = []
+        for following in lines[index + 1 :]:
+            stripped = following.strip()
+            next_indent = len(following) - len(following.lstrip())
+            if stripped and (
+                next_indent < indentation
+                or (next_indent == indentation and stripped.startswith("- "))
+            ):
+                break
+            block.append(following)
+        normalized = "\n".join(block).casefold().replace(" ", "")
+        if "persist-credentials:false" not in normalized:
+            findings.append(f"{workflow}:{index + 1}")
+    return findings
+
+
 def test_every_external_action_is_pinned_to_an_immutable_commit() -> None:
     mutable: list[str] = []
     for workflow in _workflows():
@@ -34,25 +57,64 @@ def test_every_external_action_is_pinned_to_an_immutable_commit() -> None:
 
 
 def test_checkout_never_persists_ci_credentials() -> None:
-    findings: list[str] = []
-    for workflow in _workflows():
-        lines = workflow.read_text(encoding="utf-8").splitlines()
-        for index, line in enumerate(lines):
-            if _CHECKOUT_USE not in line:
-                continue
-            indentation = len(line) - len(line.lstrip())
-            block: list[str] = []
-            for following in lines[index + 1 :]:
-                stripped = following.strip()
-                next_indent = len(following) - len(following.lstrip())
-                if stripped and next_indent <= indentation:
-                    break
-                block.append(following)
-            normalized = "\n".join(block).casefold().replace(" ", "")
-            if "persist-credentials:false" not in normalized:
-                findings.append(f"{workflow}:{index + 1}")
+    findings = [
+        finding
+        for workflow in _workflows()
+        for finding in _checkout_credential_findings(workflow)
+    ]
 
     assert not findings, f"checkout persists CI credentials: {findings}"
+
+
+def test_checkout_policy_handles_named_steps_and_rejects_unsafe_settings(
+    tmp_path: Path,
+) -> None:
+    action = "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
+    safe = tmp_path / "safe.yml"
+    missing = tmp_path / "missing.yml"
+    explicitly_true = tmp_path / "true.yml"
+
+    safe.write_text(
+        "jobs:\n"
+        "  verify:\n"
+        "    steps:\n"
+        "      - name: Checkout\n"
+        f"        uses: {action}\n"
+        "        with:\n"
+        "          ref: main\n"
+        "          persist-credentials: false\n"
+        "      - name: Later step\n"
+        "        run: echo safe\n",
+        encoding="utf-8",
+    )
+    missing.write_text(
+        "jobs:\n"
+        "  verify:\n"
+        "    steps:\n"
+        "      - name: Checkout\n"
+        f"        uses: {action}\n"
+        "        with:\n"
+        "          ref: main\n"
+        "      - name: Later step\n"
+        "        run: echo unsafe\n",
+        encoding="utf-8",
+    )
+    explicitly_true.write_text(
+        "jobs:\n"
+        "  verify:\n"
+        "    steps:\n"
+        "      - name: Checkout\n"
+        f"        uses: {action}\n"
+        "        with:\n"
+        "          persist-credentials: true\n"
+        "      - name: Later step\n"
+        "        run: echo unsafe\n",
+        encoding="utf-8",
+    )
+
+    assert _checkout_credential_findings(safe) == []
+    assert len(_checkout_credential_findings(missing)) == 1
+    assert len(_checkout_credential_findings(explicitly_true)) == 1
 
 
 def test_workflows_do_not_pipe_remote_installers_to_shells() -> None:
