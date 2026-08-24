@@ -15,12 +15,13 @@ from typing import Any, Protocol
 
 from nika_core.data.schema import SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.audit import AuditLog
 from nika_core.packaging.release import (
     verify_distributable_evidence,
     verify_release_archive,
 )
 from nika_core.reliability.backup import (
-    BackupArtifact,
+    InterruptedRestoreDisposition,
     RestorePlan,
     RestorePlanStaleError,
     SQLiteRecoveryManager,
@@ -132,7 +133,7 @@ class StartupHealthPort(Protocol):
         database_path: Path,
         expected: ReleaseIdentity,
     ) -> None:
-        """Start/check the installed product or raise when health is not acceptable."""
+        """Start/check the installed product or raise when health is unacceptable."""
 
 
 class CanonicalSQLiteMigrator:
@@ -195,30 +196,30 @@ class _UpdateFileLease:
 class WindowsUpdateLifecycle:
     """Crash-aware local package update orchestration.
 
-    Package integrity is delegated to the canonical release-manifest/archive verifier.
-    Database backup/restore is delegated to SQLiteRecoveryManager. The custom surface is
-    limited to update operation identity, a durable journal, package directory replacement,
-    and exact rollback sequencing.
+    Package integrity is delegated to the canonical release verifier. Database backup,
+    restore, restore confirmation and interrupted-restore recovery are delegated to
+    SQLiteRecoveryManager. This class owns only the install-operation journal, package
+    directory swap, sequencing and host startup/health boundary.
     """
 
     def __init__(
         self,
         *,
         state_dir: Path,
-        migrator: DatabaseMigratorPort | None = None,
         health: StartupHealthPort,
+        migrator: DatabaseMigratorPort | None = None,
     ) -> None:
         self._state_dir = Path(state_dir).resolve()
         self._state_dir.mkdir(parents=True, exist_ok=True)
-        self._migrator = migrator or CanonicalSQLiteMigrator()
         self._health = health
+        self._migrator = migrator or CanonicalSQLiteMigrator()
 
     def run(self, request: UpdateRequest) -> UpdateResult:
         normalized = self._normalize_request(request)
         operation_id = self._operation_id(normalized)
         with _UpdateFileLease(self._lease_path(normalized.install_dir)):
             self._reject_other_active_operations(operation_id, normalized.install_dir)
-            journal = self._load_journal(operation_id)
+            journal = self._load_journal(operation_id, normalized.install_dir)
             if journal is None:
                 journal = self._begin_operation(operation_id, normalized)
             else:
@@ -234,38 +235,25 @@ class WindowsUpdateLifecycle:
             if phase == UpdatePhase.ROLLED_BACK:
                 return self._rolled_back_result(journal, request)
             if phase == UpdatePhase.BLOCKED:
-                raise UpdateRollbackError(
-                    journal.failure_reason or "update rollback is blocked"
-                )
-
+                raise UpdateRollbackError(journal.failure_reason or "update rollback is blocked")
             if phase == UpdatePhase.CANDIDATE_VERIFIED:
                 journal = self._create_pre_update_backup(journal, request)
-                continue
-            if phase in {UpdatePhase.BACKUP_CREATED, UpdatePhase.MIGRATION_STARTED}:
+            elif phase in {UpdatePhase.BACKUP_CREATED, UpdatePhase.MIGRATION_STARTED}:
                 journal = self._migrate(journal, request)
-                continue
-            if phase in {
-                UpdatePhase.MIGRATED,
-                UpdatePhase.REPLACEMENT_STARTED,
-            }:
+            elif phase in {UpdatePhase.MIGRATED, UpdatePhase.REPLACEMENT_STARTED}:
                 journal = self._replace_package(journal, request)
-                continue
-            if phase in {UpdatePhase.REPLACED, UpdatePhase.HEALTH_CHECKING}:
+            elif phase in {UpdatePhase.REPLACED, UpdatePhase.HEALTH_CHECKING}:
                 journal = self._check_health(journal, request)
-                continue
-            if phase == UpdatePhase.ROLLBACK_PACKAGE:
+            elif phase == UpdatePhase.ROLLBACK_PACKAGE:
                 journal = self._rollback_package(journal, request)
-                continue
-            if phase == UpdatePhase.ROLLBACK_DATA_PREPARED:
+            elif phase == UpdatePhase.ROLLBACK_DATA_PREPARED:
                 journal = self._execute_data_rollback(journal, request)
-                continue
-            if phase == UpdatePhase.ROLLBACK_DATA:
+            elif phase == UpdatePhase.ROLLBACK_DATA:
                 journal = self._recover_or_execute_data_rollback(journal, request)
-                continue
-            if phase == UpdatePhase.RESTARTING_OLD:
+            elif phase == UpdatePhase.RESTARTING_OLD:
                 journal = self._restart_old(journal, request)
-                continue
-            raise UpdateLifecycleError(f"unsupported update phase: {phase}")
+            else:
+                raise UpdateLifecycleError(f"unsupported update phase: {phase}")
 
     def _begin_operation(self, operation_id: str, request: UpdateRequest) -> _Journal:
         installed = self._read_installed_identity(request.install_dir)
@@ -274,48 +262,26 @@ class WindowsUpdateLifecycle:
         if installed.source_sha == request.expected_source_sha:
             raise CandidateVerificationError("candidate is already the installed source SHA")
 
-        operation_root = self._operation_root(operation_id)
-        operation_root.mkdir(parents=True, exist_ok=True)
-        private_artifact = self._private_artifact(operation_id)
-        private_evidence = self._private_evidence(operation_id)
-        self._copy_private_file(request.artifact_path, private_artifact)
-        self._copy_private_file(request.evidence_path, private_evidence)
+        root = self._operation_root(operation_id)
+        root.mkdir(parents=True, exist_ok=True)
+        artifact = self._private_artifact(operation_id)
+        evidence = self._private_evidence(operation_id)
+        self._copy_private_file(request.artifact_path, artifact)
+        self._copy_private_file(request.evidence_path, evidence)
+        self._verify_candidate_files(artifact, evidence, request)
 
-        findings = verify_distributable_evidence(
-            private_artifact,
-            private_evidence,
-            source_sha=request.expected_source_sha,
-            artifact_reference=request.artifact_reference,
-        )
-        if findings:
-            raise CandidateVerificationError(
-                "candidate outer evidence failed: " + ", ".join(findings)
-            )
-        archive_findings = verify_release_archive(
-            private_artifact,
-            source_sha=request.expected_source_sha,
-        )
-        if archive_findings:
-            raise CandidateVerificationError(
-                "candidate archive verification failed: " + ", ".join(archive_findings)
-            )
-        candidate = self._read_archive_identity(private_artifact)
-        expected = ReleaseIdentity(
-            request.expected_product,
-            request.expected_version,
-            request.expected_source_sha,
-        )
-        if candidate != expected:
+        candidate = self._read_archive_identity(artifact)
+        if candidate != self._expected_request_identity(request):
             raise CandidateVerificationError(
                 "candidate release identity does not match authorized target"
             )
+        self._extract_verified_candidate(operation_id, artifact, request.install_dir)
 
-        self._extract_verified_candidate(operation_id, private_artifact)
         now = datetime.now(UTC).isoformat()
         journal = _Journal(
             schema_version=_JOURNAL_VERSION,
             operation_id=operation_id,
-            phase=UpdatePhase.CANDIDATE_VERIFIED,
+            phase=UpdatePhase.CANDIDATE_VERIFIED.value,
             install_dir=str(request.install_dir),
             database_path=str(request.database_path),
             artifact_reference=request.artifact_reference,
@@ -325,7 +291,7 @@ class WindowsUpdateLifecycle:
             installed_product=installed.product,
             installed_version=installed.version,
             installed_source_sha=installed.source_sha,
-            candidate_sha256=self._sha256(private_artifact),
+            candidate_sha256=self._sha256(artifact),
             restore_plan=None,
             failure_reason=None,
             created_at=now,
@@ -340,13 +306,13 @@ class WindowsUpdateLifecycle:
         journal: _Journal,
         request: UpdateRequest,
     ) -> _Journal:
-        backup_path = self._backup_path(journal.operation_id)
+        path = self._backup_path(journal.operation_id)
         manager = self._recovery_manager(request.database_path)
-        if backup_path.exists() or self._backup_manifest_path(backup_path).exists():
-            artifact = manager.verify_backup(backup_path)
+        if path.exists() or self._backup_manifest_path(path).exists():
+            artifact = manager.verify_backup(path)
         else:
-            artifact = manager.create_backup(backup_path)
-        if artifact.database_path != backup_path:
+            artifact = manager.create_backup(path)
+        if artifact.database_path != path:
             raise UpdateLifecycleError("canonical backup path changed unexpectedly")
         journal = self._advance(journal, UpdatePhase.BACKUP_CREATED)
         self._after_phase(UpdatePhase.BACKUP_CREATED)
@@ -361,7 +327,6 @@ class WindowsUpdateLifecycle:
         except Exception as exc:
             return self._begin_rollback(
                 journal,
-                request,
                 f"database migration failed: {type(exc).__name__}: {exc}",
             )
         journal = self._advance(journal, UpdatePhase.MIGRATED)
@@ -375,7 +340,8 @@ class WindowsUpdateLifecycle:
 
         staged = self._staged_dir(journal.operation_id, request.install_dir)
         rollback = self._rollback_dir(journal.operation_id, request.install_dir)
-        expected = self._expected_identity(journal)
+        expected = self._expected_journal_identity(journal)
+        old = self._old_identity(journal)
 
         if request.install_dir.exists():
             current = self._read_installed_identity(request.install_dir)
@@ -383,21 +349,20 @@ class WindowsUpdateLifecycle:
                 journal = self._advance(journal, UpdatePhase.REPLACED)
                 self._after_phase(UpdatePhase.REPLACED)
                 return journal
-            if current.source_sha != journal.installed_source_sha:
-                return self._block(
-                    journal,
-                    "install directory changed during package replacement",
-                )
+            if current != old:
+                return self._block(journal, "install directory changed during replacement")
             if rollback.exists():
                 return self._block(
                     journal,
-                    "package rollback directory appeared before old package move",
+                    "rollback directory appeared before the old package move",
                 )
             os.replace(request.install_dir, rollback)
             self._fsync_directory(request.install_dir.parent)
 
         if not rollback.is_dir():
             return self._block(journal, "pre-update package is unavailable for rollback")
+        if self._read_installed_identity(rollback) != old:
+            return self._block(journal, "pre-update rollback package identity changed")
         if not staged.is_dir():
             return self._block(journal, "verified staged candidate is unavailable")
         if request.install_dir.exists():
@@ -415,7 +380,7 @@ class WindowsUpdateLifecycle:
         if UpdatePhase(journal.phase) == UpdatePhase.REPLACED:
             journal = self._advance(journal, UpdatePhase.HEALTH_CHECKING)
             self._after_phase(UpdatePhase.HEALTH_CHECKING)
-        expected = self._expected_identity(journal)
+        expected = self._expected_journal_identity(journal)
         try:
             if self._read_installed_identity(request.install_dir) != expected:
                 raise UpdateLifecycleError("installed candidate changed before health check")
@@ -427,19 +392,13 @@ class WindowsUpdateLifecycle:
         except Exception as exc:
             return self._begin_rollback(
                 journal,
-                request,
                 f"startup/health failed: {type(exc).__name__}: {exc}",
             )
         journal = self._advance(journal, UpdatePhase.COMPLETED)
         self._after_phase(UpdatePhase.COMPLETED)
         return journal
 
-    def _begin_rollback(
-        self,
-        journal: _Journal,
-        request: UpdateRequest,
-        reason: str,
-    ) -> _Journal:
+    def _begin_rollback(self, journal: _Journal, reason: str) -> _Journal:
         journal = replace(journal, failure_reason=reason)
         journal = self._advance(journal, UpdatePhase.ROLLBACK_PACKAGE)
         self._after_phase(UpdatePhase.ROLLBACK_PACKAGE)
@@ -447,28 +406,23 @@ class WindowsUpdateLifecycle:
 
     def _rollback_package(self, journal: _Journal, request: UpdateRequest) -> _Journal:
         rollback = self._rollback_dir(journal.operation_id, request.install_dir)
-        expected_old = ReleaseIdentity(
-            journal.installed_product,
-            journal.installed_version,
-            journal.installed_source_sha,
-        )
+        old = self._old_identity(journal)
         if rollback.is_dir():
-            if self._read_installed_identity(rollback) != expected_old:
+            if self._read_installed_identity(rollback) != old:
                 return self._block(journal, "rollback package identity is invalid")
             if request.install_dir.exists():
-                current = self._read_installed_identity(request.install_dir)
-                if current == expected_old:
+                if self._read_installed_identity(request.install_dir) == old:
                     return self._prepare_data_rollback(journal, request)
                 failed = self._failed_dir(journal.operation_id, request.install_dir)
                 if failed.exists():
-                    return self._block(journal, "failed-candidate evidence path already exists")
+                    return self._block(journal, "failed candidate evidence already exists")
                 os.replace(request.install_dir, failed)
             os.replace(rollback, request.install_dir)
             self._fsync_directory(request.install_dir.parent)
         elif not request.install_dir.is_dir():
             return self._block(journal, "pre-update package is missing during rollback")
 
-        if self._read_installed_identity(request.install_dir) != expected_old:
+        if self._read_installed_identity(request.install_dir) != old:
             return self._block(journal, "old package was not restored exactly")
         return self._prepare_data_rollback(journal, request)
 
@@ -477,20 +431,19 @@ class WindowsUpdateLifecycle:
         journal: _Journal,
         request: UpdateRequest,
     ) -> _Journal:
-        if journal.restore_plan is not None:
-            return self._advance(journal, UpdatePhase.ROLLBACK_DATA_PREPARED)
-        manager = self._recovery_manager(request.database_path)
-        backup = manager.verify_backup(self._backup_path(journal.operation_id))
-        plan = manager.prepare_restore(backup.database_path)
-        restore_plan = {
-            "backup_sha256": backup.sha256,
-            "current_exists": plan.current_exists,
-            "current_sha256": plan.current_sha256,
-            "current_schema_version": plan.current_schema_version,
-            "current_is_healthy": plan.current_is_healthy,
-            "confirmation_fingerprint": plan.confirmation_fingerprint,
-        }
-        journal = replace(journal, restore_plan=restore_plan)
+        if journal.restore_plan is None:
+            manager = self._recovery_manager(request.database_path)
+            backup = manager.verify_backup(self._backup_path(journal.operation_id))
+            plan = manager.prepare_restore(backup.database_path)
+            restore_plan = {
+                "backup_sha256": backup.sha256,
+                "current_exists": plan.current_exists,
+                "current_sha256": plan.current_sha256,
+                "current_schema_version": plan.current_schema_version,
+                "current_is_healthy": plan.current_is_healthy,
+                "confirmation_fingerprint": plan.confirmation_fingerprint,
+            }
+            journal = replace(journal, restore_plan=restore_plan)
         journal = self._advance(journal, UpdatePhase.ROLLBACK_DATA_PREPARED)
         self._after_phase(UpdatePhase.ROLLBACK_DATA_PREPARED)
         return journal
@@ -510,52 +463,90 @@ class WindowsUpdateLifecycle:
         request: UpdateRequest,
     ) -> _Journal:
         manager = self._recovery_manager(request.database_path)
+        if self._restore_completed_receipt(journal, request):
+            return self._to_restarting_old(journal)
+
         recovered = manager.recover_interrupted_restore()
-        if recovered is None:
-            plan = self._restore_plan_from_journal(journal, request, manager)
-            try:
-                manager.restore(
-                    plan,
-                    confirmation_fingerprint=plan.confirmation_fingerprint,
-                    allow_replace_unrecoverable_current=not plan.current_is_healthy,
-                )
-            except RestorePlanStaleError as exc:
-                return self._block(
-                    journal,
-                    "rollback confirmation became stale; refusing to re-authorize restore: "
-                    f"{exc}",
-                )
-            except Exception as exc:
-                return self._block(
-                    journal,
-                    f"canonical data rollback failed: {type(exc).__name__}: {exc}",
-                )
+        if recovered is not None:
+            if recovered.disposition == InterruptedRestoreDisposition.COMPLETED:
+                if not self._restore_completed_receipt(journal, request):
+                    return self._block(
+                        journal,
+                        "canonical interrupted restore completed without bound audit receipt",
+                    )
+                return self._to_restarting_old(journal)
+            if recovered.disposition != InterruptedRestoreDisposition.ROLLED_BACK:
+                return self._block(journal, "unknown interrupted restore disposition")
+
+        plan = self._restore_plan_from_journal(journal, request, manager)
+        try:
+            manager.restore(
+                plan,
+                confirmation_fingerprint=plan.confirmation_fingerprint,
+                allow_replace_unrecoverable_current=not plan.current_is_healthy,
+            )
+        except RestorePlanStaleError as exc:
+            return self._block(
+                journal,
+                "rollback confirmation became stale; refusing to re-authorize restore: "
+                f"{exc}",
+            )
+        except Exception as exc:
+            return self._block(
+                journal,
+                f"canonical data rollback failed: {type(exc).__name__}: {exc}",
+            )
+        if not self._restore_completed_receipt(journal, request):
+            return self._block(journal, "canonical data rollback lacks its durable audit receipt")
+        return self._to_restarting_old(journal)
+
+    def _to_restarting_old(self, journal: _Journal) -> _Journal:
         journal = self._advance(journal, UpdatePhase.RESTARTING_OLD)
         self._after_phase(UpdatePhase.RESTARTING_OLD)
         return journal
 
     def _restart_old(self, journal: _Journal, request: UpdateRequest) -> _Journal:
-        expected_old = ReleaseIdentity(
-            journal.installed_product,
-            journal.installed_version,
-            journal.installed_source_sha,
-        )
+        old = self._old_identity(journal)
         try:
-            if self._read_installed_identity(request.install_dir) != expected_old:
+            if self._read_installed_identity(request.install_dir) != old:
                 raise UpdateRollbackError("old package identity changed before restart")
             self._health.start_and_check(
                 install_dir=request.install_dir,
                 database_path=request.database_path,
-                expected=expected_old,
+                expected=old,
             )
         except Exception as exc:
             return self._block(
                 journal,
-                f"old package restart/health failed after rollback: {type(exc).__name__}: {exc}",
+                "old package restart/health failed after rollback: "
+                f"{type(exc).__name__}: {exc}",
             )
         journal = self._advance(journal, UpdatePhase.ROLLED_BACK)
         self._after_phase(UpdatePhase.ROLLED_BACK)
         return journal
+
+    def _restore_completed_receipt(
+        self,
+        journal: _Journal,
+        request: UpdateRequest,
+    ) -> bool:
+        payload = journal.restore_plan
+        if payload is None:
+            return False
+        backup_sha = payload.get("backup_sha256")
+        if not self._valid_sha256(backup_sha):
+            return False
+        backup_file = self._backup_path(journal.operation_id).name
+        events = AuditLog(SQLiteStore(request.database_path)).list_for(
+            entity_type="database",
+            entity_id=str(request.database_path),
+        )
+        return any(
+            event.event_type == "reliability.restore_completed"
+            and event.payload.get("backup_file") == backup_file
+            and event.payload.get("backup_sha256") == backup_sha
+            for event in events
+        )
 
     def _restore_plan_from_journal(
         self,
@@ -564,9 +555,7 @@ class WindowsUpdateLifecycle:
         manager: SQLiteRecoveryManager,
     ) -> RestorePlan:
         payload = journal.restore_plan
-        if payload is None:
-            raise UpdateRollbackError("rollback restore plan is missing from durable journal")
-        expected_keys = {
+        required = {
             "backup_sha256",
             "current_exists",
             "current_sha256",
@@ -574,18 +563,17 @@ class WindowsUpdateLifecycle:
             "current_is_healthy",
             "confirmation_fingerprint",
         }
-        if set(payload) != expected_keys:
+        if payload is None or set(payload) != required:
             raise UpdateRollbackError("rollback restore plan has an invalid schema")
         backup = manager.verify_backup(self._backup_path(journal.operation_id))
-        backup_sha = payload["backup_sha256"]
-        fingerprint = payload["confirmation_fingerprint"]
-        if backup_sha != backup.sha256 or not self._valid_sha256(backup_sha):
+        if payload["backup_sha256"] != backup.sha256:
             raise UpdateRollbackError("rollback backup identity no longer matches journal")
+        fingerprint = payload["confirmation_fingerprint"]
         if not self._valid_sha256(fingerprint):
             raise UpdateRollbackError("rollback confirmation fingerprint is malformed")
         current_exists = payload["current_exists"]
-        current_is_healthy = payload["current_is_healthy"]
-        if type(current_exists) is not bool or type(current_is_healthy) is not bool:
+        current_healthy = payload["current_is_healthy"]
+        if type(current_exists) is not bool or type(current_healthy) is not bool:
             raise UpdateRollbackError("rollback restore booleans are malformed")
         current_sha = payload["current_sha256"]
         if current_sha is not None and not self._valid_sha256(current_sha):
@@ -599,25 +587,21 @@ class WindowsUpdateLifecycle:
             current_exists=current_exists,
             current_sha256=current_sha,
             current_schema_version=schema,
-            current_is_healthy=current_is_healthy,
+            current_is_healthy=current_healthy,
             confirmation_fingerprint=fingerprint,
         )
 
     def _completed_result(self, journal: _Journal, request: UpdateRequest) -> UpdateResult:
-        expected = self._expected_identity(journal)
+        expected = self._expected_journal_identity(journal)
         if self._read_installed_identity(request.install_dir) != expected:
             raise UpdateLifecycleError("completed update no longer matches installed package")
         return self._result(journal, expected)
 
     def _rolled_back_result(self, journal: _Journal, request: UpdateRequest) -> UpdateResult:
-        expected = ReleaseIdentity(
-            journal.installed_product,
-            journal.installed_version,
-            journal.installed_source_sha,
-        )
-        if self._read_installed_identity(request.install_dir) != expected:
+        old = self._old_identity(journal)
+        if self._read_installed_identity(request.install_dir) != old:
             raise UpdateRollbackError("rolled-back update no longer matches old package")
-        return self._result(journal, expected)
+        return self._result(journal, old)
 
     def _result(self, journal: _Journal, installed: ReleaseIdentity) -> UpdateResult:
         return UpdateResult(
@@ -639,6 +623,38 @@ class WindowsUpdateLifecycle:
             raise CandidateVerificationError("durable private candidate evidence is missing")
         if self._sha256(artifact) != journal.candidate_sha256:
             raise CandidateVerificationError("durable private candidate bytes changed")
+        self._verify_candidate_files(artifact, evidence, request)
+
+    @staticmethod
+    def _expected_request_identity(request: UpdateRequest) -> ReleaseIdentity:
+        return ReleaseIdentity(
+            request.expected_product,
+            request.expected_version,
+            request.expected_source_sha,
+        )
+
+    @staticmethod
+    def _expected_journal_identity(journal: _Journal) -> ReleaseIdentity:
+        return ReleaseIdentity(
+            journal.expected_product,
+            journal.expected_version,
+            journal.expected_source_sha,
+        )
+
+    @staticmethod
+    def _old_identity(journal: _Journal) -> ReleaseIdentity:
+        return ReleaseIdentity(
+            journal.installed_product,
+            journal.installed_version,
+            journal.installed_source_sha,
+        )
+
+    def _verify_candidate_files(
+        self,
+        artifact: Path,
+        evidence: Path,
+        request: UpdateRequest,
+    ) -> None:
         findings = verify_distributable_evidence(
             artifact,
             evidence,
@@ -647,12 +663,12 @@ class WindowsUpdateLifecycle:
         )
         if findings:
             raise CandidateVerificationError(
-                "durable candidate outer evidence failed: " + ", ".join(findings)
+                "candidate outer evidence failed: " + ", ".join(findings)
             )
         findings = verify_release_archive(artifact, source_sha=request.expected_source_sha)
         if findings:
             raise CandidateVerificationError(
-                "durable candidate archive verification failed: " + ", ".join(findings)
+                "candidate archive verification failed: " + ", ".join(findings)
             )
 
     def _validate_journal_request(self, journal: _Journal, request: UpdateRequest) -> None:
@@ -696,17 +712,17 @@ class WindowsUpdateLifecycle:
         if not database.is_file():
             raise UpdateLifecycleError("database_path must be the durable live database")
         source_sha = request.expected_source_sha.strip().lower()
-        if not _SOURCE_SHA_RE.fullmatch(source_sha):
-            raise CandidateVerificationError("authorized target source SHA is invalid")
         product = request.expected_product.strip()
         version = request.expected_version.strip()
-        artifact_reference = request.artifact_reference.strip()
-        if not product or not version or not artifact_reference:
+        reference = request.artifact_reference.strip()
+        if not _SOURCE_SHA_RE.fullmatch(source_sha):
+            raise CandidateVerificationError("authorized target source SHA is invalid")
+        if not product or not version or not reference:
             raise CandidateVerificationError("authorized candidate identity is incomplete")
         return UpdateRequest(
             artifact_path=artifact,
             evidence_path=evidence,
-            artifact_reference=artifact_reference,
+            artifact_reference=reference,
             install_dir=install,
             database_path=database,
             expected_product=product,
@@ -730,28 +746,34 @@ class WindowsUpdateLifecycle:
         return hashlib.sha256(payload).hexdigest()[:32]
 
     def _advance(self, journal: _Journal, phase: UpdatePhase) -> _Journal:
-        updated = replace(
-            journal,
-            phase=phase,
-            updated_at=datetime.now(UTC).isoformat(),
+        return self._write_journal(
+            replace(
+                journal,
+                phase=phase.value,
+                updated_at=datetime.now(UTC).isoformat(),
+            )
         )
-        return self._write_journal(updated)
 
     def _block(self, journal: _Journal, reason: str) -> _Journal:
-        blocked = replace(
-            journal,
-            phase=UpdatePhase.BLOCKED,
-            failure_reason=reason,
-            updated_at=datetime.now(UTC).isoformat(),
+        journal = self._write_journal(
+            replace(
+                journal,
+                phase=UpdatePhase.BLOCKED.value,
+                failure_reason=reason,
+                updated_at=datetime.now(UTC).isoformat(),
+            )
         )
-        blocked = self._write_journal(blocked)
         self._after_phase(UpdatePhase.BLOCKED)
-        return blocked
+        return journal
 
     def _write_journal(self, journal: _Journal) -> _Journal:
         path = self._journal_path(journal.operation_id, Path(journal.install_dir))
-        payload = asdict(journal)
-        serialized = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        serialized = json.dumps(
+            asdict(journal),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ) + "\n"
         temporary: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -773,13 +795,9 @@ class WindowsUpdateLifecycle:
                 temporary.unlink(missing_ok=True)
         return journal
 
-    def _load_journal(self, operation_id: str) -> _Journal | None:
-        matches = tuple(self._state_dir.glob(f"*-{operation_id}.json"))
-        if not matches:
-            return None
-        if len(matches) != 1:
-            raise UpdateLifecycleError("duplicate durable journals exist for one operation")
-        return self._read_journal(matches[0])
+    def _load_journal(self, operation_id: str, install_dir: Path) -> _Journal | None:
+        path = self._journal_path(operation_id, install_dir)
+        return self._read_journal(path) if path.exists() else None
 
     def _read_journal(self, path: Path) -> _Journal:
         try:
@@ -798,23 +816,47 @@ class WindowsUpdateLifecycle:
             UpdatePhase(journal.phase)
         except (TypeError, ValueError) as exc:
             raise UpdateLifecycleError("durable update journal values are invalid") from exc
+        string_fields = (
+            journal.operation_id,
+            journal.phase,
+            journal.install_dir,
+            journal.database_path,
+            journal.artifact_reference,
+            journal.expected_product,
+            journal.expected_version,
+            journal.expected_source_sha,
+            journal.installed_product,
+            journal.installed_version,
+            journal.installed_source_sha,
+            journal.candidate_sha256,
+            journal.created_at,
+            journal.updated_at,
+        )
+        if not all(isinstance(value, str) and value for value in string_fields):
+            raise UpdateLifecycleError("durable update journal contains invalid strings")
         for source_sha in (journal.expected_source_sha, journal.installed_source_sha):
             if not _SOURCE_SHA_RE.fullmatch(source_sha):
                 raise UpdateLifecycleError("durable update journal source SHA is invalid")
         if not self._valid_sha256(journal.candidate_sha256):
             raise UpdateLifecycleError("durable update journal candidate digest is invalid")
+        if journal.restore_plan is not None and not isinstance(journal.restore_plan, dict):
+            raise UpdateLifecycleError("durable update journal restore plan is invalid")
         if journal.failure_reason is not None and not isinstance(journal.failure_reason, str):
             raise UpdateLifecycleError("durable update journal failure reason is invalid")
         return journal
 
-    def _extract_verified_candidate(self, operation_id: str, artifact: Path) -> None:
-        staged = self._staged_dir(operation_id, self._install_path_from_operation(operation_id))
+    def _extract_verified_candidate(
+        self,
+        operation_id: str,
+        artifact: Path,
+        install_dir: Path,
+    ) -> None:
+        staged = self._staged_dir(operation_id, install_dir)
+        archive_identity = self._read_archive_identity(artifact)
         if staged.exists():
-            identity = self._read_installed_identity(staged)
-            if identity.source_sha != self._read_archive_identity(artifact).source_sha:
+            if not staged.is_dir() or self._read_installed_identity(staged) != archive_identity:
                 raise CandidateVerificationError("existing staged candidate has another identity")
             return
-        staged.parent.mkdir(parents=True, exist_ok=True)
         temporary = staged.with_name(f"{staged.name}.extracting")
         if temporary.exists():
             shutil.rmtree(temporary)
@@ -822,7 +864,7 @@ class WindowsUpdateLifecycle:
         try:
             with zipfile.ZipFile(artifact, "r") as archive:
                 archive.extractall(temporary)
-            if self._read_installed_identity(temporary) != self._read_archive_identity(artifact):
+            if self._read_installed_identity(temporary) != archive_identity:
                 raise CandidateVerificationError("extracted candidate identity changed")
             os.replace(temporary, staged)
             self._fsync_directory(staged.parent)
@@ -830,25 +872,17 @@ class WindowsUpdateLifecycle:
             if temporary.exists():
                 shutil.rmtree(temporary)
 
-    def _install_path_from_operation(self, operation_id: str) -> Path:
-        journal = self._load_journal(operation_id)
-        if journal is not None:
-            return Path(journal.install_dir)
-        marker = self._operation_root(operation_id) / "install-path.txt"
-        if not marker.is_file():
-            raise UpdateLifecycleError("operation install path marker is missing")
-        return Path(marker.read_text(encoding="utf-8")).resolve()
-
     def _copy_private_file(self, source: Path, destination: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.exists():
-            return
         temporary = destination.with_name(f".{destination.name}.copying")
-        shutil.copyfile(source, temporary)
-        with temporary.open("rb") as handle:
-            os.fsync(handle.fileno())
-        os.replace(temporary, destination)
-        self._fsync_directory(destination.parent)
+        try:
+            shutil.copyfile(source, temporary)
+            with temporary.open("rb") as handle:
+                os.fsync(handle.fileno())
+            os.replace(temporary, destination)
+            self._fsync_directory(destination.parent)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def _read_installed_identity(self, install_dir: Path) -> ReleaseIdentity:
         manifest = install_dir / "release-manifest.json"
@@ -867,11 +901,15 @@ class WindowsUpdateLifecycle:
         try:
             with zipfile.ZipFile(artifact, "r") as archive:
                 content = archive.read("release-manifest.json").decode("utf-8-sig")
-        except (OSError, UnicodeError, KeyError, zipfile.BadZipFile) as exc:
-            raise CandidateVerificationError("candidate release manifest cannot be read") from exc
-        try:
             payload = json.loads(content, object_pairs_hook=self._unique_json_object)
-        except (json.JSONDecodeError, _DuplicateJsonKey) as exc:
+        except (
+            OSError,
+            UnicodeError,
+            KeyError,
+            zipfile.BadZipFile,
+            json.JSONDecodeError,
+            _DuplicateJsonKey,
+        ) as exc:
             raise CandidateVerificationError("candidate release manifest is invalid") from exc
         return self._identity_from_manifest_payload(payload)
 
@@ -884,6 +922,7 @@ class WindowsUpdateLifecycle:
         product = payload.get("product")
         version = payload.get("version")
         source_sha = payload.get("source_sha")
+        files = payload.get("files")
         if (
             not isinstance(product, str)
             or not product
@@ -893,10 +932,10 @@ class WindowsUpdateLifecycle:
             or version != version.strip()
             or not isinstance(source_sha, str)
             or not _SOURCE_SHA_RE.fullmatch(source_sha)
+            or not isinstance(files, list)
+            or not files
         ):
             raise CandidateVerificationError("release manifest identity is malformed")
-        if not isinstance(payload.get("files"), list) or not payload["files"]:
-            raise CandidateVerificationError("release manifest file inventory is invalid")
         return ReleaseIdentity(product, version, source_sha)
 
     @staticmethod
@@ -907,14 +946,6 @@ class WindowsUpdateLifecycle:
                 raise _DuplicateJsonKey(key)
             result[key] = value
         return result
-
-    @staticmethod
-    def _expected_identity(journal: _Journal) -> ReleaseIdentity:
-        return ReleaseIdentity(
-            journal.expected_product,
-            journal.expected_version,
-            journal.expected_source_sha,
-        )
 
     def _recovery_manager(self, database_path: Path) -> SQLiteRecoveryManager:
         return SQLiteRecoveryManager(SQLiteStore(database_path))
@@ -929,7 +960,7 @@ class WindowsUpdateLifecycle:
         return self._operation_root(operation_id) / "candidate-evidence.json"
 
     def _backup_path(self, operation_id: str) -> Path:
-        return self._operation_root(operation_id) / "pre-update.sqlite3"
+        return self._operation_root(operation_id) / f"pre-update-{operation_id}.sqlite3"
 
     @staticmethod
     def _backup_manifest_path(backup_path: Path) -> Path:
