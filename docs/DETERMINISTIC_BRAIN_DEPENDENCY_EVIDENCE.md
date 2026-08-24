@@ -1,6 +1,6 @@
 # Deterministic Brain planning dependency evidence
 
-Evidence date: 2026-08-23.
+Evidence date: 2026-08-24.
 Scope: optional model-free formal-planning adapter only.
 
 ## Adopted surface
@@ -41,6 +41,16 @@ Authoritative publication/upstream evidence checked on 2026-08-23:
 - current maintained upstream is `plaans/aries`; that repository exposes the Unified Planning plugin and is dual-licensed Apache-2.0 OR MIT at the upstream source-tree level.
 
 The historical `aiplan4eu/up-aries` repository is archived and explicitly points development to the main Aries repository; it is not treated as the current maintained source.
+
+## Upstream runtime dependency caveat
+
+The exact `up-aries` 0.5.0 packaging metadata, and the current maintained upstream plugin metadata checked on 2026-08-24, declare runtime requirements for `unified_planning`, `grpcio`, `grpcio-tools`, and `pytest` without exact version bounds. Therefore the two direct adopted pins do **not** by themselves constitute an immutable transitive lock.
+
+Fresh Ubuntu and Windows CI resolution for the exact planning branch observed `grpcio==1.83.0`, `grpcio-tools==1.83.0`, `ConfigSpace==1.2.2`, `networkx==3.6.1`, `pyparsing==3.3.2`, `protobuf==7.36.0`, `numpy==2.5.2`, `scipy==1.18.1`, `more-itertools==11.1.0`, and related shared dependencies. Those versions are resolver evidence for that run, not a claim that upstream metadata pins them.
+
+Aries also declares `pytest` as a runtime dependency. GitHub Advisory `GHSA-6w46-j5rx-g56g` / `CVE-2025-71176` marks pytest versions below 9.0.3 affected by insecure temporary-directory handling and identifies 9.0.3 as the patched boundary. Nika therefore raises its development/test floor to `pytest>=9.0.3,<10`; exact CI must prove compatibility before this change receives integration credit. This is a security floor, not a legal or compatibility conclusion about future pytest releases.
+
+A future immutable planning-closure mechanism must be a narrow project-wide dependency/release decision, not an ad-hoc pile of transitive pins injected into the optional extra. Until that mechanism exists, release evidence must record the exact resolved closure and refresh it after any resolver, Python, platform, source, or dependency change.
 
 ## Rejected default engine
 
