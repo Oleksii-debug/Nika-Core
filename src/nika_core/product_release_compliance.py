@@ -85,6 +85,7 @@ class ReleaseComplianceSnapshot:
     obligation_evidence: tuple[DistributionObligationEvidence, ...] = ()
     notice_evidence: tuple[ReleaseNoticeEvidence, ...] = ()
     competitor_evidence: tuple[CompetitorResearchEvidence, ...] = ()
+    dependency_closure_ref: str | None = None
     scope_review_ref: str | None = None
 
     def __post_init__(self) -> None:
@@ -99,6 +100,8 @@ class ReleaseComplianceSnapshot:
         _tuple(self.obligation_evidence, "release obligation_evidence")
         _tuple(self.notice_evidence, "release notice_evidence")
         _tuple(self.competitor_evidence, "release competitor_evidence")
+        if self.dependency_closure_ref is not None:
+            _text(self.dependency_closure_ref, "release dependency_closure_ref")
         if self.scope_review_ref is not None:
             _text(self.scope_review_ref, "release scope_review_ref")
 
@@ -203,6 +206,7 @@ class ProductReleaseComplianceGate:
             dependencies=tuple(item.adoption for item in snapshot.dependencies),
             obligation_evidence=snapshot.obligation_evidence,
             competitor_evidence=snapshot.competitor_evidence,
+            dependency_closure_ref=snapshot.dependency_closure_ref,
             scope_review_ref=snapshot.scope_review_ref,
         )
         findings.extend(base.findings)
@@ -428,7 +432,7 @@ def _snapshot_payload(snapshot: ReleaseComplianceSnapshot) -> dict[str, object]:
         for item in sorted(snapshot.competitor_evidence, key=lambda value: value.evidence_id)
     ]
     return {
-        "schema": "nika-pf10-release-snapshot-v1",
+        "schema": "nika-pf10-release-snapshot-v2",
         "project_id": snapshot.project_id,
         "release_id": snapshot.release_id,
         "project_source_ref": snapshot.project_source_ref,
@@ -440,6 +444,7 @@ def _snapshot_payload(snapshot: ReleaseComplianceSnapshot) -> dict[str, object]:
         "obligation_evidence": obligations,
         "notice_evidence": notices,
         "competitor_evidence": competitor,
+        "dependency_closure_ref": snapshot.dependency_closure_ref,
         "scope_review_ref": snapshot.scope_review_ref,
     }
 
