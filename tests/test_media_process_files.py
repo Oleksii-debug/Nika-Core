@@ -11,7 +11,7 @@ from nika_core.media import Page
 from nika_core.media.errors import MediaError, MediaErrorCode
 from nika_core.media.files import promote_partial_file
 from nika_core.media.hashing import sha256_bytes
-from nika_core.media.privacy import redact_text
+from nika_core.media.privacy import redact_mapping, redact_text
 from nika_core.media.process import SafeProcessRunner
 
 
@@ -120,8 +120,22 @@ def test_safe_process_runner_redacts_sensitive_public_argv_evidence(tmp_path: Pa
     assert public_argv.count("[REDACTED]") == 3
 
 
-def test_redact_text_preserves_nonsecret_token_count_metadata() -> None:
+def test_redaction_preserves_nonsecret_count_metadata() -> None:
     assert redact_text("token_count=17 cookieCount=2") == "token_count=17 cookieCount=2"
+    redacted = redact_mapping(
+        {
+            "apiKey": "secret-api",
+            "accessToken": "secret-access",
+            "sessionCookie": "secret-cookie",
+            "tokenCount": 17,
+            "cookie_count": 2,
+        }
+    )
+    assert redacted["apiKey"] == "[REDACTED]"
+    assert redacted["accessToken"] == "[REDACTED]"
+    assert redacted["sessionCookie"] == "[REDACTED]"
+    assert redacted["tokenCount"] == 17
+    assert redacted["cookie_count"] == 2
 
 
 def test_partial_promotion_validates_checksum_and_renames_atomically(tmp_path: Path) -> None:
