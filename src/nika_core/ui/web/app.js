@@ -63,6 +63,10 @@
     return document.activeElement === element;
   }
 
+  function keymapControlId(actionId, control) {
+    return `keymap-${control}-${actionId}`;
+  }
+
   function renderItems(list, emptyNode, items, formatter) {
     list.replaceChildren();
     emptyNode.hidden = items.length > 0;
@@ -119,27 +123,47 @@
       const bindingCell = document.createElement("td");
       const input = document.createElement("input");
       input.type = "text";
+      input.id = keymapControlId(action.action_id, "binding");
       input.value = action.binding || "";
       input.dataset.actionId = action.action_id;
       input.setAttribute("aria-label", `Комбінація для ${action.label}`);
       bindingCell.appendChild(input);
       const controlCell = document.createElement("td");
       const save = document.createElement("button");
+      const saveFocusId = keymapControlId(action.action_id, "save");
       save.type = "button";
+      save.id = saveFocusId;
       save.textContent = action.may_be_unbound ? "Зберегти / очистити" : "Зберегти";
+      save.setAttribute(
+        "aria-label",
+        action.may_be_unbound
+          ? `Зберегти або очистити комбінацію для ${action.label}`
+          : `Зберегти комбінацію для ${action.label}`,
+      );
       save.addEventListener("click", async () => {
         const response = await globalThis.pywebview.api.set_binding(action.action_id, input.value.trim() || null);
         announce(response.message, !response.ok);
-        if (response.ok) await refreshKeymap();
-        else input.focus();
+        if (response.ok) {
+          await refreshKeymap();
+          focusElementById(saveFocusId);
+        } else input.focus();
       });
       const restore = document.createElement("button");
+      const restoreFocusId = keymapControlId(action.action_id, "restore");
       restore.type = "button";
+      restore.id = restoreFocusId;
       restore.textContent = "За замовчуванням";
+      restore.setAttribute(
+        "aria-label",
+        `Відновити комбінацію за замовчуванням для ${action.label}`,
+      );
       restore.addEventListener("click", async () => {
         const response = await globalThis.pywebview.api.restore_default(action.action_id);
         announce(response.message, !response.ok);
-        if (response.ok) await refreshKeymap();
+        if (response.ok) {
+          await refreshKeymap();
+          focusElementById(restoreFocusId);
+        }
       });
       controlCell.append(save, document.createTextNode(" "), restore);
       row.append(labelCell, bindingCell, controlCell);
