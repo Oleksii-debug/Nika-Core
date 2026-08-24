@@ -6,6 +6,7 @@ import pytest
 
 from nika_core.model_gateway.contracts import (
     ModelErrorCode,
+    ModelFailureEffect,
     ModelGatewayError,
     ModelMessage,
     ModelRequest,
@@ -73,14 +74,15 @@ def test_untyped_provider_timeout_never_falls_through_even_with_hard_cancel_clai
     assert fallback.called is False
 
 
-def test_typed_retryable_timeout_can_fallback_only_with_hard_cancellation_evidence() -> None:
+def test_typed_retryable_timeout_can_fallback_only_with_hard_cancellation_and_no_effect() -> None:
     class TypedTimeoutProvider(_HardCancellableProvider):
         async def complete(self, request: ModelRequest) -> ModelResponse:
             raise ModelGatewayError(
                 ModelErrorCode.TIMEOUT,
-                "typed provider timeout",
+                "typed provider timeout before model effect",
                 provider_id=self.capabilities.provider_id,
                 retryable=True,
+                failure_effect=ModelFailureEffect.NO_EFFECT,
             )
 
     primary = TypedTimeoutProvider(provider_id="primary")
@@ -93,6 +95,30 @@ def test_typed_retryable_timeout_can_fallback_only_with_hard_cancellation_eviden
 
     assert response.provider_id == "fallback"
     assert fallback.called is True
+
+
+def test_typed_retryable_timeout_without_no_effect_evidence_never_falls_back() -> None:
+    class AmbiguousTimeoutProvider(_HardCancellableProvider):
+        async def complete(self, request: ModelRequest) -> ModelResponse:
+            raise ModelGatewayError(
+                ModelErrorCode.TIMEOUT,
+                "typed timeout after unknown provider effect",
+                provider_id=self.capabilities.provider_id,
+                retryable=True,
+            )
+
+    primary = AmbiguousTimeoutProvider(provider_id="primary")
+    fallback = _RecordingFallback()
+    gateway = ModelGateway()
+    gateway.register(primary)
+    gateway.register(fallback)
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        asyncio.run(gateway.complete(_request()))
+
+    assert exc_info.value.code is ModelErrorCode.TIMEOUT
+    assert exc_info.value.failure_effect is ModelFailureEffect.UNKNOWN
+    assert fallback.called is False
 
 
 @pytest.mark.parametrize("timeout_seconds", [True, "1"])
