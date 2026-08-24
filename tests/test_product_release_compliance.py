@@ -29,6 +29,7 @@ _ARTIFACT_SHA = "b" * 64
 _CLOSURE_REF = "review:dependency-closure:release-1"
 _SCOPE_REF = "review:compliance-scope:release-1"
 _FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
+_PACKAGE_SEPARATORS_RE = re.compile(r"[-_.]+")
 
 
 class _ReviewAuthority:
@@ -55,6 +56,12 @@ class _ReviewAuthority:
         return _FINGERPRINT_RE.fullmatch(purpose.removeprefix(prefix)) is not None
 
 
+def _notice_ref(package_name: str, version: str) -> str:
+    canonical = _PACKAGE_SEPARATORS_RE.sub("-", package_name.strip().casefold())
+    digest = hashlib.sha256(f"{canonical}:{version}".encode()).hexdigest()
+    return f"artifact:THIRD_PARTY_NOTICES.txt#sha256:{digest}"
+
+
 def _adoption(
     component_id: str,
     *,
@@ -65,7 +72,7 @@ def _adoption(
     obligations: tuple[str, ...] = ("retain-license",),
 ) -> DependencyAdoption:
     package = package_name or component_id
-    notice_ref = f"artifact:THIRD_PARTY_NOTICES.txt#{component_id}"
+    notice_ref = _notice_ref(package, version)
     return DependencyAdoption(
         project_id=_PROJECT,
         component_id=component_id,
@@ -171,6 +178,11 @@ def _snapshot(
 
 def _verified_packaging(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(release_module, "verify_third_party_notices", lambda _path: ())
+    monkeypatch.setattr(
+        release_module,
+        "verified_third_party_notice_reference",
+        lambda _path, *, package_name, version: _notice_ref(package_name, version),
+    )
 
 
 def test_exact_release_gate_issues_current_snapshot_delivery_grant(
@@ -324,6 +336,31 @@ def test_missing_or_orphan_notice_evidence_fails_closed(
     )
     assert any(item.startswith("orphan:notice:ghost") for item in decision.findings)
     assert any(item.startswith("notice:evidence-missing:root") for item in decision.findings)
+
+
+def test_opaque_notice_reference_cannot_launder_packaging_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _verified_packaging(monkeypatch)
+    dependency = _dependency("root")
+    opaque_ref = "artifact:THIRD_PARTY_NOTICES.txt#caller-claims-section"
+    dependency = replace(
+        dependency,
+        adoption=replace(dependency.adoption, notice_refs=(opaque_ref,)),
+    )
+    notice = ReleaseNoticeEvidence(
+        project_id=_PROJECT,
+        component_id="root",
+        notice_ref=opaque_ref,
+        package_name=dependency.adoption.package_name,
+        version=dependency.adoption.version,
+    )
+    decision = ProductReleaseComplianceGate(review_authority=_ReviewAuthority()).evaluate(
+        _snapshot(tmp_path, dependencies=(dependency,), notices=(notice,)),
+        bundle_dir=tmp_path,
+    )
+    assert "packaging:notice-ref-unverified:root" in decision.findings
 
 
 def test_stale_decision_after_dependency_or_closure_change_is_rejected(
