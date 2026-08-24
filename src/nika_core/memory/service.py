@@ -30,6 +30,8 @@ class MemoryService:
         owner_id = _required("owner_id", owner_id)
         namespace = _required("namespace", namespace)
         key = _required("key", key)
+        if not isinstance(user_approved, bool):
+            raise TypeError("user_approved must be a boolean")
         if scope is MemoryScope.USER and not user_approved:
             raise PermissionError("user long-term memory requires explicit approval")
         current = _as_utc(now) if now else datetime.now(UTC)
@@ -224,13 +226,19 @@ def _trim_namespace(
 
 
 def _record_from_row(row: Any) -> MemoryRecord:
+    scope = MemoryScope(row["scope"])
+    approved = row["user_approved"]
+    if isinstance(approved, bool) or not isinstance(approved, int) or approved not in {0, 1}:
+        raise RuntimeError("memory user approval flag is corrupt")
+    if scope is MemoryScope.USER and approved != 1:
+        raise RuntimeError("user long-term memory record lacks explicit approval")
     return MemoryRecord(
-        scope=MemoryScope(row["scope"]),
+        scope=scope,
         owner_id=row["owner_id"],
         namespace=row["namespace"],
         key=row["memory_key"],
         value=json.loads(row["value_json"]),
-        user_approved=bool(row["user_approved"]),
+        user_approved=bool(approved),
         expires_at=_parse_optional(row["expires_at"]),
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
