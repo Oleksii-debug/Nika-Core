@@ -55,8 +55,16 @@ jobs:
             throw "Harness checkout mismatch: $harness"
           }
           $targetDetached = (git -C source symbolic-ref -q HEAD)
-          if ($LASTEXITCODE -eq 0 -or $targetDetached) {
+          $symbolicRefExit = $LASTEXITCODE
+          if ($symbolicRefExit -eq 0 -or $targetDetached) {
             throw "Exact integrated target unexpectedly checked out a symbolic branch ref: $targetDetached"
+          }
+          if ($symbolicRefExit -ne 1) {
+            throw "Detached-head probe failed unexpectedly with exit code $symbolicRefExit."
+          }
+          git -C source rev-parse --verify HEAD | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not neutralize detached-head probe after exact target verification."
           }
           Write-Host "Exact integrated target: $target"
           Write-Host "Exact QA harness: $harness"
