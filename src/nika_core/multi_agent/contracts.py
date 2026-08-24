@@ -71,7 +71,7 @@ class TeamQuota:
         }
         for name, value in values.items():
             if isinstance(value, bool) or not isinstance(value, int):
-                raise ValueError(f"{name} must be an integer")
+                raise TypeError(f"{name} must be an integer")
         if self.max_depth < 1:
             raise ValueError("max_depth must be at least 1")
         if self.max_children_per_parent < 1:
@@ -161,7 +161,7 @@ class CancellationEffect:
         if any(not value.strip() for value in values):
             raise ValueError("cancellation effect identity must be complete")
         if isinstance(self.sequence, bool) or not isinstance(self.sequence, int):
-            raise ValueError("cancellation effect sequence must be an integer")
+            raise TypeError("cancellation effect sequence must be an integer")
         if self.sequence < 0:
             raise ValueError("cancellation effect sequence must not be negative")
 
@@ -180,7 +180,7 @@ class CancellationOperation:
         if isinstance(self.expected_effect_count, bool) or not isinstance(
             self.expected_effect_count, int
         ):
-            raise ValueError("cancellation expected effect count must be an integer")
+            raise TypeError("cancellation expected effect count must be an integer")
         if self.expected_effect_count < 0:
             raise ValueError("cancellation expected effect count must not be negative")
 
