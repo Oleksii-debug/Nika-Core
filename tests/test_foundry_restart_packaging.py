@@ -5,7 +5,11 @@ import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from nika_core.model_gateway.contracts import (
+    ModelErrorCode,
+    ModelGatewayError,
     ModelMessage,
     ModelRequest,
     PrivacyClass,
@@ -111,7 +115,7 @@ def test_foundry_provider_lifecycle_restart_has_no_stale_runtime_ownership() -> 
     assert model.unload_count == 2
 
 
-def test_malformed_tool_capability_metadata_cannot_become_positive_evidence() -> None:
+def test_malformed_tool_capability_metadata_is_rejected() -> None:
     model = _RestartModel()
     model.supports_tool_calling = "true"
     provider = FoundryLocalProvider(
@@ -120,9 +124,11 @@ def test_malformed_tool_capability_metadata_cannot_become_positive_evidence() ->
         manager_factory=lambda: _Manager(model),
     )
 
-    evidence = provider.inspect_model()
+    with pytest.raises(ModelGatewayError) as exc_info:
+        provider.inspect_model()
 
-    assert evidence.supports_tool_calling is None
+    assert exc_info.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert exc_info.value.retryable is False
 
 
 def test_foundry_sdk_types_remain_adapter_local() -> None:
