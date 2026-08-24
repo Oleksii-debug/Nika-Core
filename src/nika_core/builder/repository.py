@@ -41,7 +41,15 @@ class AgentDefinitionRepository:
                 "SELECT MAX(version) AS version FROM agent_definitions WHERE agent_id = ?",
                 (agent_id,),
             ).fetchone()
-        return int(row["version"] or 0) + 1
+        latest = (
+            0
+            if row["version"] is None
+            else _exact_positive_int(
+                row["version"],
+                field="latest agent version",
+            )
+        )
+        return latest + 1
 
     def save_draft(self, compilation: CompilationResult) -> None:
         definition = compilation.definition
@@ -58,7 +66,15 @@ class AgentDefinitionRepository:
                 "SELECT MAX(version) AS version FROM agent_definitions WHERE agent_id = ?",
                 (definition.agent_id,),
             ).fetchone()
-            expected = int(latest["version"] or 0) + 1
+            latest_version = (
+                0
+                if latest["version"] is None
+                else _exact_positive_int(
+                    latest["version"],
+                    field="latest persisted agent version",
+                )
+            )
+            expected = latest_version + 1
             if definition.version != expected:
                 raise ValueError(
                     f"definition version must be the next immutable version: expected {expected}"
@@ -101,15 +117,30 @@ class AgentDefinitionRepository:
         with self._store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT definition_json, required_approvals_json, highest_risk, status "
+                "SELECT version, definition_json, required_approvals_json, highest_risk, status "
                 "FROM agent_definitions WHERE agent_id = ? AND version = ?",
                 (definition.agent_id, definition.version),
             ).fetchone()
             if row is None:
                 raise KeyError("agent definition draft does not exist")
+            row_version = _exact_positive_int(
+                row["version"],
+                field="persisted agent version",
+            )
             persisted = AgentDefinition.model_validate_json(row["definition_json"])
-            if persisted != definition:
+            if row_version != definition.version or persisted != definition:
                 raise ValueError("activation definition differs from persisted immutable draft")
+
+            required = _decode_required_approvals(row["required_approvals_json"])
+            highest_risk = _exact_nonnegative_int(
+                row["highest_risk"],
+                field="persisted highest risk",
+            )
+            _validate_authority_metadata(
+                definition,
+                required=required,
+                highest_risk=highest_risk,
+            )
 
             active_row = conn.execute(
                 "SELECT version FROM agent_definitions "
@@ -117,7 +148,7 @@ class AgentDefinitionRepository:
                 (definition.agent_id,),
             ).fetchone()
             if active_row is not None:
-                active_version = _exact_nonnegative_int(
+                active_version = _exact_positive_int(
                     active_row["version"],
                     field="active agent version",
                 )
@@ -131,16 +162,6 @@ class AgentDefinitionRepository:
             if row["status"] != "draft":
                 raise ValueError(f"cannot activate definition in status {row['status']}")
 
-            required = _decode_required_approvals(row["required_approvals_json"])
-            highest_risk = _exact_nonnegative_int(
-                row["highest_risk"],
-                field="persisted highest risk",
-            )
-            _validate_authority_metadata(
-                definition,
-                required=required,
-                highest_risk=highest_risk,
-            )
             if required:
                 if self._activation_authority is None:
                     raise PermissionError(
@@ -182,7 +203,7 @@ class AgentDefinitionRepository:
     def active(self, agent_id: str) -> StoredAgentDefinition | None:
         with self._store.connection() as conn:
             row = conn.execute(
-                "SELECT definition_json, status, required_approvals_json, highest_risk, "
+                "SELECT version, definition_json, status, required_approvals_json, highest_risk, "
                 "created_at, activated_at FROM agent_definitions "
                 "WHERE agent_id = ? AND status = 'active' ORDER BY version DESC LIMIT 1",
                 (agent_id,),
@@ -203,7 +224,7 @@ class AgentDefinitionRepository:
     def get(self, agent_id: str, version: int) -> StoredAgentDefinition | None:
         with self._store.connection() as conn:
             row = conn.execute(
-                "SELECT definition_json, status, required_approvals_json, highest_risk, "
+                "SELECT version, definition_json, status, required_approvals_json, highest_risk, "
                 "created_at, activated_at FROM agent_definitions "
                 "WHERE agent_id = ? AND version = ?",
                 (agent_id, version),
@@ -212,7 +233,15 @@ class AgentDefinitionRepository:
 
     @staticmethod
     def _decode(row) -> StoredAgentDefinition:
+        row_version = _exact_positive_int(
+            row["version"],
+            field="persisted agent version",
+        )
         definition = AgentDefinition.model_validate_json(row["definition_json"])
+        if definition.version != row_version:
+            raise PermissionError(
+                "stored agent definition version does not match durable row identity"
+            )
         required = _decode_required_approvals(row["required_approvals_json"])
         highest_risk = _exact_nonnegative_int(
             row["highest_risk"],
@@ -248,6 +277,12 @@ def _decode_required_approvals(payload: object) -> tuple[str, ...]:
     if required != tuple(sorted(set(required))):
         raise PermissionError("persisted high-impact approval metadata is not canonical")
     return required
+
+
+def _exact_positive_int(value: object, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise PermissionError(f"{field} must be an exact positive integer")
+    return value
 
 
 def _exact_nonnegative_int(value: object, *, field: str) -> int:
