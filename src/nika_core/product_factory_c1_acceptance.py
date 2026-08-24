@@ -14,10 +14,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.product_factory_checkpoint_host import ProductFactoryCheckpointHost
 from nika_core.product_factory_coordinator import (
     ComponentWorkRequest,
-    ProductFactoryCoordinator,
     ReviewDecision,
     WorkerResultEnvelope,
     WorkState,
@@ -32,14 +30,20 @@ from nika_core.product_factory_orchestration import (
     RepositoryRef,
     TeamCompositionRequest,
 )
-from nika_core.product_factory_program_host import ProductFactoryProgramHost
+from nika_core.product_factory_program_host import (
+    ProductFactoryProgramHost,
+    ProgramWorkDisposition,
+)
 from nika_core.product_factory_project_binding import ProductProjectCoordinatorBinding
 from nika_core.product_project import (
+    EvidenceRef,
     ProductAcceptanceCriterion,
+    ProductOption,
     ProductProjectRepository,
     ProductProjectSpec,
     ProductRequirement,
     ProductRequirementKind,
+    ResearchEvidencePackage,
 )
 from nika_core.toolsmith.contracts import (
     ChangedFile,
@@ -55,10 +59,13 @@ _C1_REPOSITORY_ID = "repo-c1-medium-expense-manager"
 _C1_REPOSITORY_LOCATOR = "sandbox://c1-medium-expense-manager"
 _C1_HOST_TASK_ID = "pf11-c1-medium-app-host"
 _BASE_SHA = "0" * 40
+_MAX_FACTORY_CYCLES = 32
+_WORKER_COMMAND_TIMEOUT_SECONDS = 30
+_FACTORY_DISPATCH_TIMEOUT_SECONDS = 45
 
 
 class C1MediumAppAcceptanceError(RuntimeError):
-    pass
+    """Raised when the deterministic C1 Product Factory proof cannot continue safely."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +74,8 @@ class C1MediumAppEvidence:
     project_id: str
     spec_version: int
     spec_history_versions: tuple[int, ...]
+    research_package_id: str
+    selected_option_id: str
     team_plan_id: str
     independent_qa_role_ids: tuple[str, ...]
     ownership_lease_ids: tuple[str, ...]
@@ -80,6 +89,7 @@ class C1MediumAppEvidence:
     package_sha256: str | None
     installer_sha256: str
     installed_executable_proven: bool
+    packaged_restart_proven: bool
     upgrade_safe_data_proven: bool
     accessible_control_contract_proven: bool
     human_tested: bool = False
@@ -88,11 +98,13 @@ class C1MediumAppEvidence:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema": "nika-pf11-c1-medium-app-evidence-v1",
+            "schema": "nika-pf11-c1-medium-app-evidence-v2",
             "source_sha": self.source_sha,
             "project_id": self.project_id,
             "spec_version": self.spec_version,
             "spec_history_versions": list(self.spec_history_versions),
+            "research_package_id": self.research_package_id,
+            "selected_option_id": self.selected_option_id,
             "team_plan_id": self.team_plan_id,
             "independent_qa_role_ids": list(self.independent_qa_role_ids),
             "ownership_lease_ids": list(self.ownership_lease_ids),
@@ -109,6 +121,7 @@ class C1MediumAppEvidence:
             "package_sha256": self.package_sha256,
             "installer_sha256": self.installer_sha256,
             "installed_executable_proven": self.installed_executable_proven,
+            "packaged_restart_proven": self.packaged_restart_proven,
             "upgrade_safe_data_proven": self.upgrade_safe_data_proven,
             "accessible_control_contract_proven": self.accessible_control_contract_proven,
             "human_tested": self.human_tested,
@@ -119,11 +132,7 @@ class C1MediumAppEvidence:
 
 @dataclass(slots=True)
 class SandboxMediumAppWorker:
-    """Deterministic local PF worker used only for C1 acceptance.
-
-    It materializes component-scoped files inside one sandbox workspace, executes only the
-    coordinator-declared Python acceptance commands, and never touches a production repo.
-    """
+    """Bounded deterministic worker that may write only its component lease."""
 
     workspace: Path
     fail_storage_attempt_one: bool = True
@@ -154,69 +163,21 @@ class SandboxMediumAppWorker:
                 "controlled C1 storage worker failure",
                 retryable=True,
             )
-            digest = hashlib.sha256(f"{request.work_id}:controlled-failure".encode()).hexdigest()
+            digest = hashlib.sha256(
+                f"{request.work_id}:controlled-failure".encode("utf-8")
+            ).hexdigest()
             return WorkerResultEnvelope(
                 work_id=request.work_id,
                 component_id=request.component_id,
                 repository_id=request.repository_id,
                 base_sha=request.base_sha,
-                result_sha=hashlib.sha1(digest.encode()).hexdigest(),
+                result_sha=hashlib.sha1(digest.encode("ascii")).hexdigest(),
                 diff_digest=digest,
                 coding_result=CodingResult(job_id=request.work_id, failure=failure),
             )
 
-        files = _component_files(request.component_id, request.attempt)
-        changed_files: list[ChangedFile] = []
-        for relative, text in files.items():
-            if not _path_allowed(relative, request.allowed_paths):
-                raise C1MediumAppAcceptanceError(
-                    f"worker attempted path outside component lease: {relative}"
-                )
-            target = self.workspace / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(text, encoding="utf-8", newline="\n")
-            encoded = text.encode("utf-8")
-            changed_files.append(
-                ChangedFile(
-                    path=relative,
-                    sha256=hashlib.sha256(encoded).hexdigest(),
-                    size_bytes=len(encoded),
-                )
-            )
-
-        test_evidence: list[TestEvidence] = []
-        failed: WorkerFailure | None = None
-        for declared in request.acceptance_commands:
-            argv = list(declared)
-            if argv and argv[0].casefold() in {"python", "python.exe", "python3"}:
-                argv[0] = sys.executable
-            env = dict(os.environ)
-            completed = subprocess.run(
-                argv,
-                cwd=self.workspace,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=60,
-                check=False,
-            )
-            output = (completed.stdout or "") + (completed.stderr or "")
-            output_digest = hashlib.sha256(output.encode("utf-8", errors="replace")).hexdigest()
-            test_evidence.append(
-                TestEvidence(
-                    command=declared,
-                    exit_code=completed.returncode,
-                    output_digest=output_digest,
-                )
-            )
-            if completed.returncode != 0:
-                failed = WorkerFailure(
-                    WorkerFailureKind.PROCESS_FAILED,
-                    f"component acceptance command failed with exit {completed.returncode}",
-                    retryable=True,
-                )
-                break
-
+        changed_files = self._write_component(request)
+        evidence, failure = self._run_acceptance_commands(request)
         material = json.dumps(
             {
                 "base_sha": request.base_sha,
@@ -226,28 +187,87 @@ class SandboxMediumAppWorker:
             },
             sort_keys=True,
             separators=(",", ":"),
-        ).encode()
-        diff_digest = hashlib.sha256(material).hexdigest()
-        result_sha = hashlib.sha1(material).hexdigest()
+        ).encode("utf-8")
         return WorkerResultEnvelope(
             work_id=request.work_id,
             component_id=request.component_id,
             repository_id=request.repository_id,
             base_sha=request.base_sha,
-            result_sha=result_sha,
-            diff_digest=diff_digest,
+            result_sha=hashlib.sha1(material).hexdigest(),
+            diff_digest=hashlib.sha256(material).hexdigest(),
             coding_result=CodingResult(
                 job_id=request.work_id,
-                changed_files=tuple(changed_files),
-                test_evidence=tuple(test_evidence),
-                failure=failed,
+                changed_files=changed_files,
+                test_evidence=evidence,
+                failure=failure,
             ),
         )
+
+    def _write_component(self, request: ComponentWorkRequest) -> tuple[ChangedFile, ...]:
+        changed: list[ChangedFile] = []
+        for relative, text in _component_files(request.component_id, request.attempt).items():
+            if not _path_allowed(relative, request.allowed_paths):
+                raise C1MediumAppAcceptanceError(
+                    f"worker attempted path outside component lease: {relative}"
+                )
+            target = self.workspace / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8", newline="\n")
+            encoded = text.encode("utf-8")
+            changed.append(
+                ChangedFile(
+                    path=relative,
+                    sha256=hashlib.sha256(encoded).hexdigest(),
+                    size_bytes=len(encoded),
+                )
+            )
+        return tuple(changed)
+
+    def _run_acceptance_commands(
+        self,
+        request: ComponentWorkRequest,
+    ) -> tuple[tuple[TestEvidence, ...], WorkerFailure | None]:
+        evidence: list[TestEvidence] = []
+        for declared in request.acceptance_commands:
+            argv = list(declared)
+            if argv[0].casefold() in {"python", "python.exe", "python3", "python3.exe"}:
+                argv[0] = sys.executable
+            completed = subprocess.run(
+                argv,
+                cwd=self.workspace,
+                env=_sterile_test_environment(),
+                capture_output=True,
+                text=True,
+                timeout=_WORKER_COMMAND_TIMEOUT_SECONDS,
+                check=False,
+            )
+            output = (completed.stdout or "") + (completed.stderr or "")
+            evidence.append(
+                TestEvidence(
+                    command=declared,
+                    exit_code=completed.returncode,
+                    output_digest=hashlib.sha256(
+                        output.encode("utf-8", errors="replace")
+                    ).hexdigest(),
+                )
+            )
+            if completed.returncode != 0:
+                return (
+                    tuple(evidence),
+                    WorkerFailure(
+                        WorkerFailureKind.PROCESS_FAILED,
+                        f"component acceptance command failed with exit {completed.returncode}",
+                        retryable=True,
+                    ),
+                )
+        return tuple(evidence), None
 
 
 class C1MediumAppAcceptanceRunner:
     def __init__(self, *, root: Path, source_sha: str) -> None:
-        if len(source_sha) != 40 or any(char not in "0123456789abcdef" for char in source_sha):
+        if len(source_sha) != 40 or any(
+            char not in "0123456789abcdef" for char in source_sha
+        ):
             raise ValueError("C1 acceptance requires exact lowercase 40-character source SHA")
         self.root = Path(root)
         self.workspace = self.root / "product"
@@ -267,11 +287,17 @@ class C1MediumAppAcceptanceRunner:
             spec=_initial_spec(),
             idempotency_key="pf11-c1-project-create-v1",
         )
+        research_package, options = _research_handoff()
+        projects.record_research_handoff(project.project_id, research_package, options)
+        selected_option = options[0]
         project = projects.update_spec(
             _C1_PROJECT_ID,
-            _revised_spec(),
+            _revised_spec(selected_option.option_id),
             expected_row_version=project.row_version,
-            change_reason="Require upgrade-safe user data and keyboard-operable Windows UI",
+            change_reason=(
+                "Select local Windows desktop option; require upgrade-safe data and "
+                "keyboard-operable controls"
+            ),
         )
         if project.spec_version != 2:
             raise C1MediumAppAcceptanceError("controlled ProductProject spec revision was not durable")
@@ -287,73 +313,56 @@ class C1MediumAppAcceptanceRunner:
         coordinator = binding.plan(
             base_shas={_C1_REPOSITORY_ID: _BASE_SHA},
             component_goals=_component_goals(),
-            permission_ceiling=frozenset({"read_source", "write_source", "run_tests", "build_release"}),
+            permission_ceiling=frozenset(
+                {"read_source", "write_source", "run_tests", "build_release"}
+            ),
         )
         _ensure_host_task(store, project_id=project.project_id)
-        worker = SandboxMediumAppWorker(self.workspace)
-        host = ProductFactoryProgramHost(store=store, worker=worker)
+        host = ProductFactoryProgramHost(
+            store=store,
+            worker=SandboxMediumAppWorker(self.workspace),
+        )
 
         rejected_qa_component = "04-desktop-ui"
         worker_repair_component = "01-storage"
         restart_recovery_proven = False
         restarted = False
 
-        while any(record.state is not WorkState.ACCEPTED for record in coordinator.snapshot().records):
+        for _cycle in range(1, _MAX_FACTORY_CYCLES + 1):
+            snapshot = coordinator.snapshot()
+            if all(record.state is WorkState.ACCEPTED for record in snapshot.records):
+                break
+
             ready = coordinator.ready_requests()
             if ready:
-                asyncio.run(
-                    host.dispatch_ready(
-                        host_task_id=_C1_HOST_TASK_ID,
+                outcomes = asyncio.run(
+                    _bounded_dispatch(
+                        host=host,
                         binding=binding,
                         coordinator=coordinator,
-                        max_parallel=1,
-                        max_count=1,
                     )
                 )
+                for outcome in outcomes:
+                    if outcome.disposition in {
+                        ProgramWorkDisposition.NEEDS_RECOVERY,
+                        ProgramWorkDisposition.NEEDS_RECONCILIATION,
+                        ProgramWorkDisposition.BLOCKED_MISSING_WORKER_STATE,
+                        ProgramWorkDisposition.UNCERTAIN,
+                    }:
+                        raise C1MediumAppAcceptanceError(
+                            "C1 worker dispatch requires reconciliation: "
+                            f"{outcome.component_id}:{outcome.disposition.value}"
+                        )
 
-            progressed = False
-            for record in coordinator.snapshot().records:
-                if record.state is WorkState.REPAIR_REQUIRED:
-                    if record.result is None:
-                        raise C1MediumAppAcceptanceError("repair state is missing worker result")
-                    host.prepare_repair_and_checkpoint(
-                        host_task_id=_C1_HOST_TASK_ID,
-                        binding=binding,
-                        coordinator=coordinator,
-                        component_id=record.request.component_id,
-                        base_sha=record.result.result_sha,
-                        reason=record.blocker or "repair rejected candidate",
-                    )
-                    progressed = True
-                    break
-                if record.state is WorkState.REVIEW_REQUIRED:
-                    accepted = True
-                    reason = "independent deterministic QA accepted component evidence"
-                    if record.request.component_id == rejected_qa_component and record.request.attempt == 1:
-                        accepted = False
-                        reason = "keyboard accelerator acceptance evidence missing from first UI candidate"
-                    host.review_and_checkpoint(
-                        host_task_id=_C1_HOST_TASK_ID,
-                        binding=binding,
-                        coordinator=coordinator,
-                        component_id=record.request.component_id,
-                        decision=ReviewDecision(
-                            reviewer_id=qa_roles[0],
-                            accepted=accepted,
-                            reason=reason,
-                            evidence_refs=(
-                                f"c1-qa:{record.request.component_id}:attempt-{record.request.attempt}",
-                            ),
-                        ),
-                    )
-                    progressed = True
-                    break
-
-            storage = next(
-                record
-                for record in coordinator.snapshot().records
-                if record.request.component_id == worker_repair_component
+            progressed = _advance_review_or_repair(
+                host=host,
+                binding=binding,
+                coordinator=coordinator,
+                qa_role_id=qa_roles[0],
+                workspace=self.workspace,
             )
+
+            storage = _record_for(coordinator, worker_repair_component)
             if storage.state is WorkState.ACCEPTED and not restarted:
                 before_restart = coordinator.snapshot()
                 reopened_store = SQLiteStore(self.database)
@@ -388,10 +397,15 @@ class C1MediumAppAcceptanceRunner:
                 restarted = True
                 progressed = True
 
-            if not ready and not progressed and any(
-                record.state is not WorkState.ACCEPTED for record in coordinator.snapshot().records
-            ):
-                raise C1MediumAppAcceptanceError("C1 factory made no progress")
+            if not ready and not progressed:
+                raise C1MediumAppAcceptanceError(
+                    "C1 factory made no progress: " + _state_summary(coordinator)
+                )
+        else:
+            raise C1MediumAppAcceptanceError(
+                "C1 factory exceeded bounded transition budget: "
+                + _state_summary(coordinator)
+            )
 
         attempts = tuple(
             (record.request.component_id, record.request.attempt)
@@ -401,24 +415,32 @@ class C1MediumAppAcceptanceRunner:
             raise C1MediumAppAcceptanceError("controlled worker repair was not proven")
         if dict(attempts).get(rejected_qa_component) != 2:
             raise C1MediumAppAcceptanceError("rejected QA candidate was not repaired")
+        if not restart_recovery_proven:
+            raise C1MediumAppAcceptanceError("controlled Product Factory restart was not proven")
 
         generated_test_digest = _run_generated_suite(self.workspace)
         upgrade_safe = _run_named_generated_test(self.workspace, "test_storage_upgrade.py")
-        accessible_contract = _run_named_generated_test(self.workspace, "test_accessibility_contract.py")
+        accessible_contract = _run_named_generated_test(
+            self.workspace,
+            "test_accessibility_contract.py",
+        )
         installer = self.workspace / "installer" / "install.ps1"
         installer_sha = _sha256_file(installer)
 
         package_path: str | None = None
         package_sha: str | None = None
         installed_executable_proven = False
+        packaged_restart_proven = False
         if build_windows_package:
             if os.name != "nt":
                 raise C1MediumAppAcceptanceError("Windows C1 package proof requires Windows")
-            package, installed_executable_proven = _build_and_install_package(
-                self.workspace,
-                source_sha=self.source_sha,
-                project=project,
-                team_plan_id=team.plan_id,
+            package, installed_executable_proven, packaged_restart_proven = (
+                _build_and_install_package(
+                    self.workspace,
+                    source_sha=self.source_sha,
+                    project=project,
+                    team_plan_id=team.plan_id,
+                )
             )
             package_path = str(package)
             package_sha = _sha256_file(package)
@@ -427,7 +449,11 @@ class C1MediumAppAcceptanceRunner:
             source_sha=self.source_sha,
             project_id=project.project_id,
             spec_version=project.spec_version,
-            spec_history_versions=tuple(item.spec_version for item in projects.spec_history(project.project_id)),
+            spec_history_versions=tuple(
+                item.spec_version for item in projects.spec_history(project.project_id)
+            ),
+            research_package_id=research_package.package_id,
+            selected_option_id=selected_option.option_id,
             team_plan_id=team.plan_id,
             independent_qa_role_ids=qa_roles,
             ownership_lease_ids=lease_ids,
@@ -436,16 +462,104 @@ class C1MediumAppAcceptanceRunner:
             worker_repair_component=worker_repair_component,
             restart_recovery_proven=restart_recovery_proven,
             all_components_accepted=all(
-                record.state is WorkState.ACCEPTED for record in coordinator.snapshot().records
+                record.state is WorkState.ACCEPTED
+                for record in coordinator.snapshot().records
             ),
             generated_test_digest=generated_test_digest,
             package_path=package_path,
             package_sha256=package_sha,
             installer_sha256=installer_sha,
             installed_executable_proven=installed_executable_proven,
+            packaged_restart_proven=packaged_restart_proven,
             upgrade_safe_data_proven=upgrade_safe,
             accessible_control_contract_proven=accessible_contract,
         )
+
+
+async def _bounded_dispatch(
+    *,
+    host: ProductFactoryProgramHost,
+    binding: ProductProjectCoordinatorBinding,
+    coordinator,
+):
+    return await asyncio.wait_for(
+        host.dispatch_ready(
+            host_task_id=_C1_HOST_TASK_ID,
+            binding=binding,
+            coordinator=coordinator,
+            max_parallel=1,
+            max_count=1,
+        ),
+        timeout=_FACTORY_DISPATCH_TIMEOUT_SECONDS,
+    )
+
+
+def _advance_review_or_repair(
+    *,
+    host: ProductFactoryProgramHost,
+    binding: ProductProjectCoordinatorBinding,
+    coordinator,
+    qa_role_id: str,
+    workspace: Path,
+) -> bool:
+    for record in coordinator.snapshot().records:
+        if record.state is WorkState.REPAIR_REQUIRED:
+            if record.result is None:
+                raise C1MediumAppAcceptanceError("repair state is missing worker result")
+            host.prepare_repair_and_checkpoint(
+                host_task_id=_C1_HOST_TASK_ID,
+                binding=binding,
+                coordinator=coordinator,
+                component_id=record.request.component_id,
+                base_sha=record.result.result_sha,
+                reason=record.blocker or "repair rejected candidate",
+            )
+            return True
+        if record.state is WorkState.REVIEW_REQUIRED:
+            accepted, reason = _qa_decision(record.request, workspace)
+            host.review_and_checkpoint(
+                host_task_id=_C1_HOST_TASK_ID,
+                binding=binding,
+                coordinator=coordinator,
+                component_id=record.request.component_id,
+                decision=ReviewDecision(
+                    reviewer_id=qa_role_id,
+                    accepted=accepted,
+                    reason=reason,
+                    evidence_refs=(
+                        f"c1-qa:{record.request.component_id}:attempt-{record.request.attempt}",
+                    ),
+                ),
+            )
+            return True
+    return False
+
+
+def _qa_decision(request: ComponentWorkRequest, workspace: Path) -> tuple[bool, str]:
+    if request.component_id != "04-desktop-ui":
+        return True, "independent deterministic QA accepted component evidence"
+    source = (workspace / "src" / "c1_expense_manager" / "desktop" / "ui.py").read_text(
+        encoding="utf-8"
+    )
+    required = ("<Alt-a>", "<Alt-r>")
+    if not all(token in source for token in required):
+        return False, "keyboard accelerator acceptance evidence missing from UI candidate"
+    return True, "independent QA verified named controls and keyboard accelerators"
+
+
+def _record_for(coordinator, component_id: str):
+    return next(
+        record
+        for record in coordinator.snapshot().records
+        if record.request.component_id == component_id
+    )
+
+
+def _state_summary(coordinator) -> str:
+    return ",".join(
+        f"{record.request.component_id}={record.state.value}/attempt-{record.request.attempt}"
+        for record in coordinator.snapshot().records
+    )
 
 
 def _initial_spec() -> ProductProjectSpec:
@@ -469,7 +583,41 @@ def _initial_spec() -> ProductProjectSpec:
     )
 
 
-def _revised_spec() -> ProductProjectSpec:
+def _research_handoff() -> tuple[ResearchEvidencePackage, tuple[ProductOption, ...]]:
+    package = ResearchEvidencePackage(
+        package_id="c1-research-local-windows-v1",
+        evidence=(
+            EvidenceRef(
+                evidence_id="local-first-data",
+                provenance_ref="acceptance://c1/constraint/local-only",
+                claim="C1 acceptance requires local storage and no external provider dependency",
+            ),
+            EvidenceRef(
+                evidence_id="windows-keyboard",
+                provenance_ref="acceptance://c1/constraint/windows-keyboard",
+                claim="C1 acceptance requires a Windows keyboard-operable desktop surface",
+            ),
+        ),
+        research_artifact_ref="acceptance://c1/research/local-windows-options-v1",
+    )
+    options = (
+        ProductOption(
+            option_id="local-tk-sqlite",
+            title="Local standard-control desktop app with SQLite",
+            summary="Thin Windows desktop UI over deterministic domain and SQLite storage",
+            evidence_package_ids=(package.package_id,),
+        ),
+        ProductOption(
+            option_id="network-web-service",
+            title="Hosted service",
+            summary="Rejected for this local/sandbox acceptance because it needs network authority",
+            evidence_package_ids=(package.package_id,),
+        ),
+    )
+    return package, options
+
+
+def _revised_spec(selected_option_id: str) -> ProductProjectSpec:
     criteria = (
         ProductAcceptanceCriterion(
             criterion_id="upgrade-preserves-data",
@@ -489,6 +637,7 @@ def _revised_spec() -> ProductProjectSpec:
         desired_outcome=(
             "A packaged accessible desktop expense tracker with upgrade-safe local SQLite data"
         ),
+        hypothesis=f"Selected product option: {selected_option_id}",
         repository_refs=(_C1_REPOSITORY_LOCATOR,),
         requirements=(
             ProductRequirement(
@@ -528,51 +677,61 @@ def _revised_spec() -> ProductProjectSpec:
 
 
 def _repository_graph() -> ProductRepositoryGraph:
-    repository = RepositoryRef(
-        repository_id=_C1_REPOSITORY_ID,
-        provider="local-sandbox",
-        locator=_C1_REPOSITORY_LOCATOR,
-        default_branch="main",
-        case_sensitive_paths=False,
+    command = (
+        "python",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests",
+        "-p",
     )
     components = (
         ProductComponent(
-            component_id="01-storage",
-            repository_id=_C1_REPOSITORY_ID,
-            paths=("src/c1_expense_manager/data", "tests/test_storage_upgrade.py"),
-            test_commands=(("python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_storage_upgrade.py"),),
+            "01-storage",
+            _C1_REPOSITORY_ID,
+            ("src/c1_expense_manager/data", "tests/test_storage_upgrade.py"),
+            test_commands=((*command, "test_storage_upgrade.py"),),
         ),
         ProductComponent(
-            component_id="02-settings",
-            repository_id=_C1_REPOSITORY_ID,
-            paths=("src/c1_expense_manager/config", "tests/test_settings.py"),
-            test_commands=(("python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_settings.py"),),
+            "02-settings",
+            _C1_REPOSITORY_ID,
+            ("src/c1_expense_manager/config", "tests/test_settings.py"),
+            test_commands=((*command, "test_settings.py"),),
         ),
         ProductComponent(
-            component_id="03-domain",
-            repository_id=_C1_REPOSITORY_ID,
-            paths=("src/c1_expense_manager/domain", "tests/test_domain.py"),
+            "03-domain",
+            _C1_REPOSITORY_ID,
+            ("src/c1_expense_manager/domain", "tests/test_domain.py"),
             dependencies=("01-storage",),
-            test_commands=(("python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_domain.py"),),
+            test_commands=((*command, "test_domain.py"),),
         ),
         ProductComponent(
-            component_id="04-desktop-ui",
-            repository_id=_C1_REPOSITORY_ID,
-            paths=("src/c1_expense_manager/desktop", "tests/test_accessibility_contract.py"),
+            "04-desktop-ui",
+            _C1_REPOSITORY_ID,
+            ("src/c1_expense_manager/desktop", "tests/test_accessibility_contract.py"),
             dependencies=("02-settings", "03-domain"),
-            test_commands=(("python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_accessibility_contract.py"),),
+            test_commands=((*command, "test_accessibility_contract.py"),),
         ),
         ProductComponent(
-            component_id="05-package",
-            repository_id=_C1_REPOSITORY_ID,
-            paths=("src/c1_expense_manager/main.py", "installer", "tests/test_package_contract.py"),
+            "05-package",
+            _C1_REPOSITORY_ID,
+            ("src/c1_expense_manager/main.py", "installer", "tests/test_package_contract.py"),
             dependencies=("04-desktop-ui",),
-            test_commands=(("python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_package_contract.py"),),
+            test_commands=((*command, "test_package_contract.py"),),
         ),
     )
     return ProductRepositoryGraph(
         project_id=_C1_PROJECT_ID,
-        repositories=(repository,),
+        repositories=(
+            RepositoryRef(
+                repository_id=_C1_REPOSITORY_ID,
+                provider="local-sandbox",
+                locator=_C1_REPOSITORY_LOCATOR,
+                default_branch="main",
+                case_sensitive_paths=False,
+            ),
+        ),
         components=components,
     )
 
@@ -593,7 +752,14 @@ def _team_request() -> TeamCompositionRequest:
             "package release and non-admin install",
         ),
         permission_ceiling=frozenset(
-            {"read_source", "write_source", "run_tests", "read_project", "update_project", "build_release"}
+            {
+                "read_source",
+                "write_source",
+                "run_tests",
+                "read_project",
+                "update_project",
+                "build_release",
+            }
         ),
         scale=ProjectScale.MEDIUM,
         evidence_refs=("pf11:c1:acceptance-spec-v2",),
@@ -623,15 +789,16 @@ def _prove_ownership(graph: ProductRepositoryGraph, team) -> tuple[str, ...]:
             None,
         )
         if owner is None:
-            raise C1MediumAppAcceptanceError(f"component has no implementation owner: {component.component_id}")
+            raise C1MediumAppAcceptanceError(
+                f"component has no implementation owner: {component.component_id}"
+            )
         lease = OwnershipLease(
             lease_id=f"lease:{component.component_id}",
             worker_id=owner,
             component_ids=(component.component_id,),
             allowed_paths=component.paths,
         )
-        assessment = graph.assess_lease(lease, active)
-        if not assessment.grantable:
+        if not graph.assess_lease(lease, active).grantable:
             raise C1MediumAppAcceptanceError(
                 f"component ownership conflicts: {component.component_id}"
             )
@@ -649,9 +816,18 @@ def _ensure_host_task(store: SQLiteStore, *, project_id: str) -> None:
     )
     with store.connection() as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO tasks(task_id,workspace_id,agent_id,state,payload_json,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (_C1_HOST_TASK_ID, "pf11-c1", "product-factory", "running", payload, now, now),
+            "INSERT OR IGNORE INTO tasks("
+            "task_id,workspace_id,agent_id,state,payload_json,created_at,updated_at"
+            ") VALUES (?,?,?,?,?,?,?)",
+            (
+                _C1_HOST_TASK_ID,
+                "pf11-c1",
+                "product-factory",
+                "running",
+                payload,
+                now,
+                now,
+            ),
         )
 
 
@@ -665,17 +841,18 @@ def _path_allowed(path: str, allowed_paths: tuple[str, ...]) -> bool:
 
 
 def _component_files(component_id: str, attempt: int) -> dict[str, str]:
-    if component_id == "01-storage":
-        return _storage_files()
-    if component_id == "02-settings":
-        return _settings_files()
-    if component_id == "03-domain":
-        return _domain_files()
+    builders = {
+        "01-storage": _storage_files,
+        "02-settings": _settings_files,
+        "03-domain": _domain_files,
+        "05-package": _package_files,
+    }
     if component_id == "04-desktop-ui":
         return _ui_files(repaired=attempt > 1)
-    if component_id == "05-package":
-        return _package_files()
-    raise C1MediumAppAcceptanceError(f"unknown C1 component: {component_id}")
+    try:
+        return builders[component_id]()
+    except KeyError as exc:
+        raise C1MediumAppAcceptanceError(f"unknown C1 component: {component_id}") from exc
 
 
 def _storage_files() -> dict[str, str]:
@@ -738,20 +915,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from c1_expense_manager.data.storage import ExpenseRepository
 
 class StorageUpgradeTest(unittest.TestCase):
-    def test_v1_data_survives_v2_upgrade(self):
+    def test_v1_data_survives_v2_upgrade_and_reopen(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "expenses.db"
             with sqlite3.connect(path) as conn:
                 conn.execute("CREATE TABLE expenses (expense_id INTEGER PRIMARY KEY AUTOINCREMENT, amount_cents INTEGER NOT NULL, note TEXT NOT NULL)")
                 conn.execute("INSERT INTO expenses(amount_cents,note) VALUES (?,?)", (1250, "Legacy row"))
                 conn.execute("PRAGMA user_version = 1")
-            repo = ExpenseRepository(path)
-            repo.migrate()
-            rows = repo.list_all()
-            self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0].amount_cents, 1250)
-            self.assertEqual(rows[0].note, "Legacy row")
-            self.assertEqual(rows[0].category, "General")
+            ExpenseRepository(path).migrate()
+            rows = ExpenseRepository(path).list_all()
+            self.assertEqual([(r.amount_cents, r.note, r.category) for r in rows], [(1250, "Legacy row", "General")])
             with sqlite3.connect(path) as conn:
                 self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 2)
 
@@ -847,8 +1020,7 @@ class ExpenseService:
             raise ValueError("amount must be a decimal number") from exc
         if amount < 0:
             raise ValueError("amount must be non-negative")
-        cents = int(amount * 100)
-        return self.repository.add(cents, note, category)
+        return self.repository.add(int(amount * 100), note, category)
 
     def list_expenses(self) -> tuple[Expense, ...]:
         return self.repository.list_all()
@@ -869,8 +1041,7 @@ class DomainTest(unittest.TestCase):
             service = ExpenseService(ExpenseRepository(Path(tmp) / "expenses.db"))
             service.add_expense("12.34", "Taxi", "Travel")
             row = service.list_expenses()[0]
-            self.assertEqual(row.amount_cents, 1234)
-            self.assertEqual(row.category, "Travel")
+            self.assertEqual((row.amount_cents, row.category), (1234, "Travel"))
 
 if __name__ == "__main__":
     unittest.main()
@@ -882,7 +1053,9 @@ if __name__ == "__main__":
 
 
 def _ui_files(*, repaired: bool) -> dict[str, str]:
-    accelerator_lines = "" if not repaired else '''\n        self.root.bind("<Alt-a>", lambda _event: self._add())\n        self.root.bind("<Alt-r>", lambda _event: self.refresh())'''
+    accelerators = ""
+    if repaired:
+        accelerators = '''\n        root.bind("<Alt-a>", lambda _event: self._add())\n        root.bind("<Alt-r>", lambda _event: self.refresh())'''
     ui = f'''from __future__ import annotations
 
 import tkinter as tk
@@ -896,13 +1069,13 @@ class ExpenseWindow:
         root.title("C1 Accessible Expense Manager")
         frame = ttk.Frame(root, padding=12)
         frame.grid(sticky="nsew")
-        ttk.Label(frame, text="&Amount", underline=0).grid(row=0, column=0, sticky="w")
+        ttk.Label(frame, text="Amount").grid(row=0, column=0, sticky="w")
         self.amount = ttk.Entry(frame, width=20, takefocus=True)
         self.amount.grid(row=0, column=1, sticky="ew")
-        ttk.Label(frame, text="&Note", underline=0).grid(row=1, column=0, sticky="w")
+        ttk.Label(frame, text="Note").grid(row=1, column=0, sticky="w")
         self.note = ttk.Entry(frame, width=40, takefocus=True)
         self.note.grid(row=1, column=1, sticky="ew")
-        ttk.Label(frame, text="&Category", underline=0).grid(row=2, column=0, sticky="w")
+        ttk.Label(frame, text="Category").grid(row=2, column=0, sticky="w")
         self.category = ttk.Entry(frame, width=20, takefocus=True)
         self.category.grid(row=2, column=1, sticky="ew")
         self.add_button = ttk.Button(frame, text="Add expense", command=self._add, takefocus=True)
@@ -913,7 +1086,7 @@ class ExpenseWindow:
         self.expenses = tk.Listbox(frame, height=10, takefocus=True, exportselection=False)
         self.expenses.grid(row=5, column=0, columnspan=2, sticky="nsew")
         self.status = tk.StringVar(value="Ready")
-        ttk.Label(frame, textvariable=self.status, takefocus=False).grid(row=6, column=0, columnspan=2, sticky="w"){accelerator_lines}
+        ttk.Label(frame, textvariable=self.status).grid(row=6, column=0, columnspan=2, sticky="w"){accelerators}
         self.refresh()
 
     def _add(self) -> None:
@@ -957,6 +1130,7 @@ def _package_files() -> dict[str, str]:
     main = '''from __future__ import annotations
 
 import os
+import sys
 import tkinter as tk
 from pathlib import Path
 from c1_expense_manager.config.settings import SettingsRepository
@@ -964,12 +1138,20 @@ from c1_expense_manager.data.storage import ExpenseRepository
 from c1_expense_manager.domain.service import ExpenseService
 from c1_expense_manager.desktop.ui import ExpenseWindow
 
+def _service(database: Path) -> ExpenseService:
+    return ExpenseService(ExpenseRepository(database))
+
 def main() -> int:
+    if len(sys.argv) == 3 and sys.argv[1] == "--self-test":
+        service = _service(Path(sys.argv[2]))
+        if not service.list_expenses():
+            service.add_expense("1.23", "Packaged restart proof", "Proof")
+        print(len(service.list_expenses()))
+        return 0
     settings_path = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "NikaC1ExpenseManager" / "settings.json"
     settings = SettingsRepository(settings_path).load()
-    service = ExpenseService(ExpenseRepository(settings.database_path))
     root = tk.Tk()
-    ExpenseWindow(root, service)
+    ExpenseWindow(root, _service(Path(settings.database_path)))
     root.mainloop()
     return 0
 
@@ -981,11 +1163,17 @@ if __name__ == "__main__":
     [Parameter(Mandatory=$true)][string]$Destination
 )
 $ErrorActionPreference = 'Stop'
-if (-not (Test-Path -LiteralPath $BundlePath -PathType Container)) { throw 'BundlePath does not exist' }
-if ([System.IO.Path]::GetFullPath($Destination).StartsWith([System.IO.Path]::GetFullPath($env:WINDIR), [System.StringComparison]::OrdinalIgnoreCase)) { throw 'System directory install is forbidden' }
-New-Item -ItemType Directory -Path $Destination -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $BundlePath '*') -Destination $Destination -Recurse -Force
-$exe = Join-Path $Destination 'NikaC1ExpenseManager.exe'
+$bundle = [System.IO.Path]::GetFullPath($BundlePath)
+$destinationPath = [System.IO.Path]::GetFullPath($Destination)
+$windowsPath = [System.IO.Path]::GetFullPath($env:WINDIR)
+if (-not (Test-Path -LiteralPath $bundle -PathType Container)) { throw 'BundlePath does not exist' }
+if ($destinationPath.StartsWith($windowsPath, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'System directory install is forbidden' }
+if ([System.StringComparer]::OrdinalIgnoreCase.Equals($bundle.TrimEnd('\\'), $destinationPath.TrimEnd('\\'))) { throw 'Bundle and destination must differ' }
+New-Item -ItemType Directory -LiteralPath $destinationPath -Force | Out-Null
+Get-ChildItem -LiteralPath $bundle -Force | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination $destinationPath -Recurse -Force
+}
+$exe = Join-Path $destinationPath 'NikaC1ExpenseManager.exe'
 if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'Installed executable is missing' }
 Write-Output $exe
 '''
@@ -995,12 +1183,13 @@ import unittest
 from pathlib import Path
 
 class PackageContractTest(unittest.TestCase):
-    def test_entrypoint_and_non_admin_installer_are_present(self):
+    def test_entrypoint_and_non_admin_literal_source_installer_are_present(self):
         root = Path(__file__).resolve().parents[1]
         self.assertTrue((root / "src" / "c1_expense_manager" / "main.py").is_file())
         installer = (root / "installer" / "install.ps1").read_text(encoding="utf-8")
-        self.assertIn("Destination", installer)
-        self.assertIn("Copy-Item", installer)
+        self.assertIn("Get-ChildItem -LiteralPath $bundle", installer)
+        self.assertIn("Copy-Item -LiteralPath $_.FullName", installer)
+        self.assertNotIn("Copy-Item -LiteralPath (Join-Path $BundlePath '*')", installer)
         self.assertNotIn("Start-Process -Verb RunAs", installer)
 
 if __name__ == "__main__":
@@ -1013,13 +1202,44 @@ if __name__ == "__main__":
     }
 
 
+def _sterile_test_environment() -> dict[str, str]:
+    allowed = (
+        "HOME",
+        "LOCALAPPDATA",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+        "WINDIR",
+    )
+    env = {key: os.environ[key] for key in allowed if key in os.environ}
+    env.update(
+        {
+            "PYTHONIOENCODING": "utf-8",
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONUTF8": "1",
+        }
+    )
+    return env
+
+
 def _run_generated_suite(workspace: Path) -> str:
     completed = subprocess.run(
-        [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"],
+        [
+            sys.executable,
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tests",
+            "-p",
+            "test_*.py",
+        ],
         cwd=workspace,
+        env=_sterile_test_environment(),
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=_WORKER_COMMAND_TIMEOUT_SECONDS,
         check=False,
     )
     output = (completed.stdout or "") + (completed.stderr or "")
@@ -1030,16 +1250,28 @@ def _run_generated_suite(workspace: Path) -> str:
 
 def _run_named_generated_test(workspace: Path, filename: str) -> bool:
     completed = subprocess.run(
-        [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", filename],
+        [
+            sys.executable,
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tests",
+            "-p",
+            filename,
+        ],
         cwd=workspace,
+        env=_sterile_test_environment(),
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=_WORKER_COMMAND_TIMEOUT_SECONDS,
         check=False,
     )
     if completed.returncode != 0:
         output = (completed.stdout or "") + (completed.stderr or "")
-        raise C1MediumAppAcceptanceError(f"generated proof {filename} failed:\n{output}")
+        raise C1MediumAppAcceptanceError(
+            f"generated proof {filename} failed:\n{output}"
+        )
     return True
 
 
@@ -1049,7 +1281,7 @@ def _build_and_install_package(
     source_sha: str,
     project,
     team_plan_id: str,
-) -> tuple[Path, bool]:
+) -> tuple[Path, bool, bool]:
     import PyInstaller.__main__
 
     dist_root = workspace / "dist"
@@ -1079,57 +1311,86 @@ def _build_and_install_package(
     if not executable.is_file():
         raise C1MediumAppAcceptanceError("PyInstaller did not produce C1 Windows executable")
 
-    inner = {
-        "schema": "nika-c1-product-package-v1",
-        "nika_source_sha": source_sha,
+    package_evidence = {
+        "schema": "nika-c1-generated-package-v1",
+        "source_sha": source_sha,
         "product_project_id": project.project_id,
-        "product_project_spec_version": project.spec_version,
+        "spec_version": project.spec_version,
         "team_plan_id": team_plan_id,
         "human_tested": False,
         "nvda_verified": False,
+        "production_release_ready": False,
     }
-    (bundle / "C1_PRODUCT_EVIDENCE.json").write_text(
-        json.dumps(inner, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    (bundle / "c1-package-evidence.json").write_text(
+        json.dumps(package_evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
 
-    with tempfile.TemporaryDirectory(prefix="nika-c1-install-") as tmp:
-        destination = Path(tmp) / "Installed C1 Expense Manager"
-        shell = shutil.which("pwsh") or shutil.which("powershell")
-        if shell is None:
-            raise C1MediumAppAcceptanceError("PowerShell is required for C1 installer proof")
-        completed = subprocess.run(
-            [
-                shell,
-                "-NoProfile",
-                "-File",
-                str(workspace / "installer" / "install.ps1"),
-                "-BundlePath",
-                str(bundle),
-                "-Destination",
-                str(destination),
-            ],
+    installer = workspace / "installer" / "install.ps1"
+    shell = shutil.which("pwsh") or shutil.which("powershell")
+    if shell is None:
+        raise C1MediumAppAcceptanceError("PowerShell executable is unavailable for installer proof")
+    install_root = workspace / "installed" / "C1 Expense Manager"
+    completed = subprocess.run(
+        [
+            shell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-File",
+            str(installer),
+            "-BundlePath",
+            str(bundle),
+            "-Destination",
+            str(install_root),
+        ],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise C1MediumAppAcceptanceError(
+            "generated non-admin installer failed: "
+            + (completed.stderr or completed.stdout or "no output")
+        )
+    installed_exe = install_root / "NikaC1ExpenseManager.exe"
+    if not installed_exe.is_file():
+        raise C1MediumAppAcceptanceError("installer did not materialize packaged executable")
+
+    restart_db = workspace / "installed-data" / "expenses.db"
+    outputs: list[str] = []
+    for _attempt in (1, 2):
+        proof = subprocess.run(
+            [str(installed_exe), "--self-test", str(restart_db)],
+            cwd=install_root,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=30,
             check=False,
         )
-        if completed.returncode != 0:
+        if proof.returncode != 0:
             raise C1MediumAppAcceptanceError(
-                "C1 installer proof failed: " + (completed.stderr or completed.stdout)
+                "installed executable self-test failed: "
+                + (proof.stderr or proof.stdout or "no output")
             )
-        installed = destination / "NikaC1ExpenseManager.exe"
-        installed_ok = installed.is_file() and _sha256_file(installed) == _sha256_file(executable)
-        if not installed_ok:
-            raise C1MediumAppAcceptanceError("installed C1 executable differs from packaged executable")
+        outputs.append(proof.stdout.strip())
+    if outputs != ["1", "1"]:
+        raise C1MediumAppAcceptanceError(
+            f"packaged restart proof changed durable row count: {outputs}"
+        )
 
-    package = dist_root / "NikaC1ExpenseManager-windows-x64.zip"
-    with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+    archive = workspace / "NikaC1ExpenseManager-windows-x64.zip"
+    if archive.exists():
+        archive.unlink()
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as handle:
         for path in sorted(bundle.rglob("*")):
             if path.is_file():
-                archive.write(path, Path("NikaC1ExpenseManager") / path.relative_to(bundle))
-        archive.write(workspace / "installer" / "install.ps1", "install.ps1")
-    return package, installed_ok
+                handle.write(path, path.relative_to(bundle.parent))
+        handle.write(installer, Path("NikaC1ExpenseManager") / "install.ps1")
+    if not archive.is_file() or archive.stat().st_size == 0:
+        raise C1MediumAppAcceptanceError("C1 package archive was not created")
+    return archive, True, True
 
 
 def _sha256_file(path: Path) -> str:
@@ -1141,9 +1402,14 @@ def _sha256_file(path: Path) -> str:
 
 
 def write_c1_evidence(path: Path, evidence: C1MediumAppEvidence) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
+    if evidence.human_tested or evidence.nvda_verified or evidence.production_release_ready:
+        raise C1MediumAppAcceptanceError(
+            "automated C1 evidence may not claim human/NVDA/release verification"
+        )
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
         json.dumps(evidence.to_dict(), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    return path
+    return target
