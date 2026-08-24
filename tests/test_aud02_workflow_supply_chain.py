@@ -12,8 +12,8 @@ _REMOTE_SCRIPT_PIPE = re.compile(
 )
 _MUTABLE_OLLAMA_PULL = re.compile(r"\bollama\s+pull\s+([^\s#]+)", re.IGNORECASE)
 _STEP_ITEM = re.compile(r"^(?P<indent>\s*)-\s+")
-_PERSIST_FALSE = re.compile(
-    r"^\s*persist-credentials:\s*false\s*(?:#.*)?$",
+_PERSIST_SETTING = re.compile(
+    r"^\s*persist-credentials:\s*([^\s#]+)\s*(?:#.*)?$",
     re.IGNORECASE,
 )
 
@@ -74,14 +74,17 @@ def _checkout_disables_persisted_credentials(lines: list[str], uses_index: int) 
             continue
 
         with_indent = _indentation(line)
+        values: list[str] = []
         for following in lines[candidate + 1 : step_end]:
             if not following.strip():
                 continue
             if _indentation(following) <= with_indent:
                 break
-            if _PERSIST_FALSE.fullmatch(following):
-                return True
-        return False
+            match = _PERSIST_SETTING.fullmatch(following)
+            if match:
+                values.append(match.group(1).casefold())
+
+        return values == ["false"]
 
     return False
 
@@ -149,6 +152,20 @@ def test_checkout_step_parser_handles_named_steps_and_negative_controls() -> Non
         "        env:",
         "          persist-credentials: false",
     ]
+    duplicate_conflict = [
+        "      - name: Ambiguous checkout",
+        f"        uses: {action}",
+        "        with:",
+        "          persist-credentials: false",
+        "          persist-credentials: true",
+    ]
+    duplicate_false = [
+        "      - name: Duplicate checkout input",
+        f"        uses: {action}",
+        "        with:",
+        "          persist-credentials: false",
+        "          persist-credentials: false",
+    ]
     inline_step = [
         f"      - uses: {action}",
         "        with:",
@@ -159,6 +176,8 @@ def test_checkout_step_parser_handles_named_steps_and_negative_controls() -> Non
     assert not _checkout_disables_persisted_credentials(missing, 1)
     assert not _checkout_disables_persisted_credentials(explicit_true, 1)
     assert not _checkout_disables_persisted_credentials(misplaced_env, 1)
+    assert not _checkout_disables_persisted_credentials(duplicate_conflict, 1)
+    assert not _checkout_disables_persisted_credentials(duplicate_false, 1)
     assert _checkout_disables_persisted_credentials(inline_step, 0)
 
 
