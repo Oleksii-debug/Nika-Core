@@ -427,8 +427,17 @@ class ProductFactoryCheckpointHost:
         return count
 
     def _row_to_record(self, row: Any) -> PersistedProductFactoryCheckpoint:
-        payload_json = str(row["payload_json"])
-        checksum = str(row["checksum_sha256"])
+        payload_json = row["payload_json"]
+        checksum = row["checksum_sha256"]
+        checkpoint_id = row["checkpoint_id"]
+        host_task_id = row["task_id"]
+        if not all(
+            isinstance(value, str)
+            for value in (payload_json, checksum, checkpoint_id, host_task_id)
+        ):
+            raise ProductFactoryCheckpointIntegrityError(
+                "checkpoint durable identity and payload fields must be text"
+            )
         if _sha256(payload_json) != checksum:
             raise ProductFactoryCheckpointIntegrityError("checkpoint checksum mismatch")
         try:
@@ -438,9 +447,19 @@ class ProductFactoryCheckpointHost:
             raise ProductFactoryCheckpointIntegrityError(
                 "checkpoint payload is not valid Product Factory checkpoint v1"
             ) from exc
+        canonical = _canonical(_encode_checkpoint(checkpoint))
+        if payload_json != canonical:
+            raise ProductFactoryCheckpointIntegrityError(
+                "checkpoint payload is not canonical Product Factory checkpoint v1"
+            )
+        expected_checkpoint_id = _checkpoint_id(host_task_id, checkpoint, checksum)
+        if checkpoint_id != expected_checkpoint_id:
+            raise ProductFactoryCheckpointIntegrityError(
+                "checkpoint identity does not match durable payload"
+            )
         return PersistedProductFactoryCheckpoint(
-            checkpoint_id=str(row["checkpoint_id"]),
-            host_task_id=str(row["task_id"]),
+            checkpoint_id=checkpoint_id,
+            host_task_id=host_task_id,
             checkpoint=checkpoint,
             checksum_sha256=checksum,
             created_at=str(row["created_at"]),
