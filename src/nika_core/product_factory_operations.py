@@ -277,6 +277,8 @@ class ProductOperationsCoordinator:
                     raise ProductOperationsError(
                         "maintenance request id conflicts with prior payload"
                     )
+                self._validate_maintenance_authority(record, request)
+                self._validate_existing_maintenance_effect(record, existing)
                 return existing
             if self.port is None or request.approval_ref is None:
                 raise ProductOperationsError(
@@ -298,6 +300,10 @@ class ProductOperationsCoordinator:
                 raise ProductOperationsError("unknown maintenance request")
             current = self._maintenance[request_id]
             if not current.result.uncertain:
+                self._validate_existing_maintenance_effect(
+                    self._require(current.request.service_id),
+                    current,
+                )
                 return current
             if self.port is None:
                 raise ProductOperationsError("maintenance side-effect port is not configured")
@@ -385,6 +391,7 @@ class ProductOperationsCoordinator:
                     "operations snapshot maintenance lacks durable approval evidence"
                 )
             self._validate_maintenance_authority(service, maintenance.request)
+            self._validate_restored_maintenance_effect(service, maintenance)
             maintenance_by_service.setdefault(maintenance.request.service_id, []).append(
                 maintenance
             )
@@ -419,6 +426,68 @@ class ProductOperationsCoordinator:
         except KeyError as exc:
             raise ProductOperationsError("unknown deployable service") from exc
 
+    def _lookup_maintenance_effect(
+        self,
+        record: ServiceRecord,
+        request: MaintenanceRequest,
+    ) -> MaintenanceEffectReservation | None:
+        if self.effect_journal is None:
+            raise ProductOperationsError(
+                "maintenance effect requires a durable host-bound effect journal"
+            )
+        reservation = self.effect_journal.lookup(
+            project_id=self.project_id,
+            service=record.service,
+            request=request,
+        )
+        if reservation is not None and not isinstance(
+            reservation,
+            MaintenanceEffectReservation,
+        ):
+            raise ProductOperationsError(
+                "maintenance effect journal returned invalid lookup evidence"
+            )
+        return reservation
+
+    def _validate_existing_maintenance_effect(
+        self,
+        record: ServiceRecord,
+        maintenance: MaintenanceRecord,
+    ) -> None:
+        reservation = self._lookup_maintenance_effect(record, maintenance.request)
+        if reservation is None:
+            raise ProductOperationsError(
+                "maintenance effect is missing from durable runtime authority"
+            )
+        if maintenance.result.uncertain:
+            if reservation.state is not MaintenanceEffectState.UNCERTAIN:
+                raise ProductOperationsError(
+                    "maintenance effect state conflicts with local uncertain result"
+                )
+            return
+        if (
+            reservation.state is not MaintenanceEffectState.COMPLETED
+            or reservation.result != maintenance.result
+        ):
+            raise ProductOperationsError(
+                "maintenance effect result conflicts with durable runtime authority"
+            )
+
+    def _validate_restored_maintenance_effect(
+        self,
+        record: ServiceRecord,
+        maintenance: MaintenanceRecord,
+    ) -> None:
+        reservation = self._lookup_maintenance_effect(record, maintenance.request)
+        if (
+            reservation is None
+            or reservation.state is not MaintenanceEffectState.COMPLETED
+            or reservation.result != maintenance.result
+        ):
+            raise ProductOperationsError(
+                "maintenance effect in snapshot is not backed by completed durable authority"
+            )
+
     def _run_maintenance_effect(
         self,
         record: ServiceRecord,
@@ -432,20 +501,36 @@ class ProductOperationsCoordinator:
             raise ProductOperationsError(
                 "maintenance side effect requires a durable host-bound effect journal"
             )
-        reservation = self.effect_journal.reserve(
-            project_id=self.project_id,
-            service=record.service,
-            request=request,
-        )
-        if not isinstance(reservation, MaintenanceEffectReservation):
-            raise ProductOperationsError(
-                "maintenance effect journal returned invalid reservation evidence"
+        if recover_only:
+            reservation = self._lookup_maintenance_effect(record, request)
+            if reservation is None:
+                raise ProductOperationsError(
+                    "maintenance effect recovery lacks durable runtime authority"
+                )
+        else:
+            reservation = self.effect_journal.reserve(
+                project_id=self.project_id,
+                service=record.service,
+                request=request,
             )
+            if not isinstance(reservation, MaintenanceEffectReservation):
+                raise ProductOperationsError(
+                    "maintenance effect journal returned invalid reservation evidence"
+                )
         if reservation.state is MaintenanceEffectState.COMPLETED:
             assert reservation.result is not None
             return reservation.result, True
 
-        if reservation.created and not recover_only:
+        if reservation.state is MaintenanceEffectState.PENDING and not reservation.created:
+            raise ProductOperationsError(
+                "maintenance effect is pending; host recovery must prove prior owner loss"
+            )
+
+        if reservation.created:
+            if recover_only:
+                raise ProductOperationsError(
+                    "maintenance recovery cannot create new durable effect authority"
+                )
             try:
                 result = self.port.apply(request)
             except BaseException:
@@ -462,6 +547,10 @@ class ProductOperationsCoordinator:
                 self.effect_journal.complete(reservation.operation_key, result)
             return result, False
 
+        if reservation.state is not MaintenanceEffectState.UNCERTAIN:
+            raise ProductOperationsError(
+                "maintenance effect state is not eligible for provider inspection"
+            )
         try:
             result = self.port.inspect(request)
         except BaseException:
