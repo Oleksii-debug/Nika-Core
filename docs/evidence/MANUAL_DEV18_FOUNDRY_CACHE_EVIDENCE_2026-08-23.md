@@ -1,120 +1,89 @@
 # MANUAL-DEV18 — Foundry cache evidence framing hardening
 
-Date: 2026-08-23  
+Date: 2026-08-24  
 Original branch start main: `e40691a6e2ff9c31fd413f63d004612e048d95ed`  
-Current synchronized main: `e8743566ffc673d6f8d272e88de0e027c23ab277`  
+Current synchronized main: `23c7c1ce97b263b4aafa61bdcbace207b4476a3d`  
 Branch: `work/manual-dev18/foundry-cache-evidence-v2`
 
 ## Scope
 
-This is an independent DEV18 physical-proof integrity batch. It is not stacked on DEV18 PR #182 and does not modify Foundry provider runtime ownership/concurrency source, ModelGateway contracts, dependencies, release workflows, credentials, or model artifacts.
+This is an independent DEV18 physical-proof integrity batch. It does not modify Foundry provider runtime ownership/concurrency source, shared ModelGateway contracts, dependencies, release workflows, credentials, permissions, or model artifacts.
 
 No model was selected, downloaded, loaded, or executed while producing this change.
 
-The branch is synchronized non-force with current main. The intervening TECH02 immutable-action and DEV16 deterministic-planning integrations are file-disjoint from this Foundry cache-proof slice.
+## Deterministic framing and filesystem defects
 
-## Deterministic defects
+The prior optional cache digest used `relative_path || NUL || file_bytes || NUL`. That stream is not prefix-free because arbitrary model bytes may contain the delimiter plus bytes that look like a following path. A concrete one-file/two-file fixture produces the same legacy preimage without finding a SHA-256 collision.
 
-The prior optional cache digest in `scripts/prove_foundry_local.py` used this framing for each file:
+The current implementation additionally protects against:
 
-`relative_path || NUL || file_bytes || NUL`
+1. symbolic links and Windows reparse points;
+2. silent `os.walk()` enumeration failure;
+3. lexical/resolved path escape;
+4. pathname replacement between inventory and open;
+5. descriptor mutation while bytes are read;
+6. pathname mutation after descriptor hashing;
+7. final-inventory additions, removals, replacements, or metadata changes.
 
-That stream is not prefix-free because arbitrary model bytes may themselves contain the delimiter and bytes that look like another relative path. Two different cache trees can therefore produce the same bytes presented to SHA-256 without finding a SHA-256 collision.
+## `sha256-tree-v2`
 
-The regression fixture proves one concrete pair:
+`foundry_cache_tree_sha256()` binds:
 
-- tree A: one file `a` containing `X NUL b NUL Y`;
-- tree B: file `a` containing `X` and file `b` containing `Y`.
+- versioned domain separation;
+- exact file count;
+- length-prefixed UTF-8 relative path bytes;
+- exact file size;
+- exact file bytes;
+- deterministic path order.
 
-Both serialize identically under the old v1 framing. They must not be accepted as the same model-cache integrity evidence.
+It accepts regular files/directories only, rejects an empty tree, rejects filesystem indirection, uses `os.walk(..., onerror=...)`, and opens files with `O_NOFOLLOW` where available.
 
-Additional evidence-boundary defects covered by the current implementation/tests:
+## Windows path-stat versus descriptor-stat compatibility repair
 
-1. symbolic links or Windows reparse points can redirect traversal outside the selected cache tree;
-2. `os.walk()` enumeration errors can otherwise omit an unreadable/disappearing subtree;
-3. a malicious/incorrect enumerator can yield a path lexically outside the selected root;
-4. a pathname can be replaced between inventory `lstat` and file open;
-5. file identity/size/mtime/ctime can change while the opened descriptor is being hashed;
-6. files can be added or removed after initial enumeration.
+Exact candidate `ccf9595f60e71a6ad91084da8afdd5a8fd804670` exposed a deterministic Windows-only failure after dependency consistency, Ruff, and compile had passed. Ubuntu Core passed, but Windows full pytest reported `2 failed, 1301 passed, 2 skipped, 10 warnings`. Both failures were ordinary unchanged-file positive cases and stopped at the pre-read comparison between `os.lstat(path)` and `os.fstat(descriptor)`.
 
-## Repair
+The defect was architectural: one five-field tuple `(st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns)` was treated simultaneously as file-object identity and mutable metadata across two different OS query domains. Python 3.12 changed Windows pathname stat/lstat behavior and separately deprecates Windows `st_ctime`/`st_ctime_ns`; timestamp meaning and resolution are platform/filesystem dependent. A byte-identical file must not be rejected merely because pathname and open-descriptor metadata are exposed differently.
 
-`foundry_cache_tree_sha256()` emits `sha256-tree-v2` evidence and binds:
+The repair does **not** remove race detection. It separates comparison domains:
 
-1. a versioned domain-separation header;
-2. exact file count;
-3. length-prefixed UTF-8 relative path bytes;
-4. exact file size;
-5. exact file bytes.
+- inventory pathname snapshot → immediate post-open pathname snapshot uses `lstat → lstat` with the complete identity/metadata tuple;
+- opened descriptor before read → opened descriptor after read uses `fstat → fstat` with the complete tuple;
+- cross-domain pathname/descriptor boundary requires a regular descriptor and exact expected size, but does not require every path-stat timestamp field to equal the descriptor-stat representation;
+- final pathname state is again compared to the original pathname snapshot;
+- final full inventory is re-enumerated and compared to the initial inventory.
 
-The framing is unambiguous even when model bytes contain NULs or path-like byte sequences.
+Therefore a replacement between inventory and open is still rejected before bytes are read, an opened file changing during hashing is rejected, and a later pathname/inventory change is rejected. This is evidence integrity, not an OS sandbox against hostile arbitrary code already running with the same user authority.
 
-The helper also:
+A dedicated regression simulates a stable descriptor whose `st_ctime_ns` representation differs from the pathname stat domain and requires successful hashing of the unchanged bytes. A companion regression repeats the replacement-before-open attack and requires fail-closed rejection after the domain split.
 
-- canonicalizes the selected root only for containment checks while preserving relative-path identity for the digest;
-- fails closed on symbolic links and Windows reparse-point attributes;
-- requires every enumerated base/child to remain inside the selected root;
-- accepts regular files/directories only;
-- supplies an `os.walk(..., onerror=...)` failure path so enumeration errors cannot be silently omitted;
-- rejects an empty cache tree as model checksum evidence;
-- records file count and total bytes;
-- opens each model file with `O_NOFOLLOW` where the platform exposes it;
-- compares the opened descriptor identity against the pre-open `lstat` before hashing bytes;
-- rechecks descriptor identity/size/mtime/ctime after hashing;
-- rechecks pathname identity and root containment after descriptor hashing;
-- performs a final full inventory rescan and rejects added, removed, replaced, or metadata-changed files detected while hashing.
+## REUSE → ADAPT → CUSTOM(thin)
 
-The physical proof script delegates only its optional `--hash-model-cache` action to this helper. Its model selection, explicit-download gate, ModelGateway inference, resource evidence, ownership-safe unload/reload, and no-raw-prompt/response evidence behavior are otherwise unchanged.
+- **REUSE:** Python stdlib `hashlib`, `os.lstat`, `os.open`/`os.fstat`/`os.read`, `os.walk`, `stat`, `pathlib`.
+- **ADAPT:** existing optional Foundry physical-proof cache checksum surface.
+- **CUSTOM(thin):** versioned Nika cache-tree framing plus fail-closed filesystem/inventory policy.
 
-## REUSE -> ADAPT -> CUSTOM(thin)
-
-- REUSE: Python stdlib `hashlib`, `os.lstat`, `os.open`/`os.fstat`/`os.read`, `os.walk`, `stat`, `pathlib`.
-- ADAPT: existing optional Foundry physical-proof cache checksum surface.
-- CUSTOM(thin): only Nika-specific versioned model-cache evidence framing and fail-closed filesystem/inventory policy.
-
-No additional hashing library, model manager, inference backend, generic artifact framework, dependency, or model file is introduced.
+No new dependency, hashing framework, model manager, inference backend, or native Windows identity framework is introduced.
 
 ## Regression coverage
 
-The focused test module now covers 13 deterministic cases:
+The prior strengthened suite contains 13 deterministic framing/path/race cases. The Windows compatibility repair adds 2 cases:
 
-- concrete old-v1 structural ambiguity and v2 separation;
-- deterministic digest independent of file creation order;
-- relative-path and file-content binding;
-- empty-cache rejection;
-- file symlink rejection;
-- directory-symlink/path-escape rejection;
-- Windows reparse-attribute rejection;
-- directory-enumeration error rejection;
-- explicit enumerator path outside the selected root;
-- pathname replacement between inventory and descriptor open;
-- descriptor metadata mutation during hashing;
-- final inventory rejection when a file is added;
-- final inventory rejection when a file is removed.
+- pathname/descriptor `st_ctime_ns` domains may differ without false-rejecting an unchanged file;
+- pathname replacement between inventory and open remains rejected after the domain split.
 
-Exact-content isolated preflight for the strengthened helper/tests: Python import/compile PASS, focused pytest `13 passed`, maximum source/test line length `96`.
+Repository exact-head Core CI and complete applicable M12 are authoritative. Previous RED or GREEN results do not transfer to a newer candidate SHA.
 
-Repository exact-head Core CI and complete applicable M12 remain authoritative for GREEN classification after this current-main synchronization.
+## Physical proof and authorization boundary
 
-## Physical proof path and authorization boundary
+The existing `scripts/prove_foundry_local.py` remains the bounded collector. A valid real run requires physical Windows, exact installed `foundry-local-sdk-winml`, explicit model alias, exact public selected variant ID, human-reviewed model-license evidence, resource evidence, real ModelGateway inference, provider-owned unload/reload/final unload, and applicable real cache digest evidence.
 
-The existing `scripts/prove_foundry_local.py` remains the bounded collector. A valid real run requires:
-
-- physical Windows;
-- installed `foundry-local-sdk-winml` (the collector records the exact installed version);
-- explicit `--model` alias;
-- exact public `--model-id` selected variant identity;
-- operator-supplied, human-reviewed `--model-license` evidence reference;
-- optional resource ceilings and mandatory resource snapshots;
-- real inference through Nika `ModelGateway`;
-- provider-owned unload, reload inference, and final unload;
-- optional `--hash-model-cache` using the v2 tree evidence above.
-
-Inference itself never silently downloads a model. `--allow-download` is a separate explicit model-management authorization for the exact alias/variant/license and must not be supplied unless an authorized run has approved that acquisition.
-
-No such model-download authorization exists in this coding cycle, so no model was acquired or executed here.
+Inference never silently downloads a model. `--allow-download` is a separate explicit model-management authorization. No such authorization exists in this coding cycle.
 
 `MODEL_SELECTED=false`  
+`MODEL_ALIAS=NONE`  
+`MODEL_VARIANT_ID=NONE`  
+`MODEL_LICENSE=NONE`  
+`REAL_MODEL_CACHE_DIGEST=NONE`  
 `MODEL_DOWNLOADED=false`  
 `MODEL_LOADED=false`  
 `MODEL_INFERENCE_EXECUTED=false`  
