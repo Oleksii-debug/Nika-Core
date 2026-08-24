@@ -15,6 +15,8 @@ def test_c1_medium_app_uses_real_product_factory_lifecycle(tmp_path: Path) -> No
     assert evidence.project_id == "product-c1-medium-expense-manager"
     assert evidence.spec_version == 2
     assert evidence.spec_history_versions == (1, 2)
+    assert evidence.research_package_id == "c1-research-local-windows-v1"
+    assert evidence.selected_option_id == "local-tk-sqlite"
     assert len(evidence.ownership_lease_ids) == 5
     assert evidence.independent_qa_role_ids
     assert attempts["01-storage"] == 2
@@ -30,6 +32,7 @@ def test_c1_medium_app_uses_real_product_factory_lifecycle(tmp_path: Path) -> No
     assert evidence.package_path is None
     assert evidence.package_sha256 is None
     assert evidence.installed_executable_proven is False
+    assert evidence.packaged_restart_proven is False
     assert evidence.human_tested is False
     assert evidence.nvda_verified is False
     assert evidence.production_release_ready is False
@@ -60,3 +63,9 @@ def test_c1_generated_product_is_component_scoped_not_monolithic(tmp_path: Path)
     assert "<Alt-a>" in ui
     assert "<Alt-r>" in ui
     assert "pyautogui" not in ui
+
+    installer = (product / "installer" / "install.ps1").read_text(encoding="utf-8")
+    assert "Get-ChildItem -LiteralPath $bundle" in installer
+    assert "Copy-Item -LiteralPath $_.FullName" in installer
+    assert "Copy-Item -LiteralPath (Join-Path $BundlePath '*')" not in installer
+    assert "Start-Process -Verb RunAs" not in installer
