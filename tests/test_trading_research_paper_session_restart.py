@@ -47,12 +47,18 @@ DATA_VERSION = DatasetVersion(
 )
 
 
-def _quote(at: datetime, *, size: str = "10") -> Quote:
+def _quote(
+    at: datetime,
+    *,
+    bid: str = "99",
+    ask: str = "101",
+    size: str = "10",
+) -> Quote:
     return Quote(
         INSTRUMENT,
         EventTime(at, at, at),
-        Decimal(99),
-        Decimal(101),
+        Decimal(bid),
+        Decimal(ask),
         Decimal(size),
         Decimal(size),
     )
@@ -74,13 +80,19 @@ def _data(*, cutoff: datetime | None = None, semantic_hash: str | None = None):
     )
 
 
-def _limits(*, max_position: str = "20", allow_short: bool = True) -> RiskLimits:
+def _limits(
+    *,
+    max_position: str = "20",
+    max_gross: str = "100000",
+    max_drawdown: str = "100000",
+    allow_short: bool = True,
+) -> RiskLimits:
     return RiskLimits(
         max_abs_position=Decimal(max_position),
-        max_gross_exposure=Decimal(100_000),
+        max_gross_exposure=Decimal(max_gross),
         max_net_exposure=Decimal(100_000),
         max_session_loss=Decimal(100_000),
-        max_drawdown=Decimal(100_000),
+        max_drawdown=Decimal(max_drawdown),
         allow_short=allow_short,
         max_leverage=Decimal(100),
     )
@@ -149,8 +161,7 @@ def test_crash_before_activation_restores_same_pending_risk_approved_order(tmp_p
     session = PaperTradingSession.start(store, _config("before-activation", policy=policy))
     session.process_slice(TimeSlice(0, NOW, (_quote(NOW),)))
     approved = session.queue_intent(
-        _intent("latency-order", at=NOW, slice_index=0, quantity="2"),
-        mark_price=Decimal(100),
+        _intent("latency-order", at=NOW, slice_index=0, quantity="2")
     )
 
     restarted = PaperTradingSession.resume(SQLiteStore(tmp_path / "nika.db"), "before-activation")
@@ -175,10 +186,7 @@ def test_crash_after_partial_fill_retry_does_not_fill_twice(tmp_path) -> None:
     policy = ExecutionPolicy("half-liquidity", max_fill_fraction=Decimal("0.5"))
     session = PaperTradingSession.start(store, _config("partial-restart", policy=policy))
     session.process_slice(TimeSlice(0, NOW, (_quote(NOW, size="8"),)))
-    session.queue_intent(
-        _intent("partial", at=NOW, slice_index=0, quantity="10"),
-        mark_price=Decimal(100),
-    )
+    session.queue_intent(_intent("partial", at=NOW, slice_index=0, quantity="10"))
     at_one = NOW + timedelta(minutes=1)
     first = session.process_slice(TimeSlice(1, at_one, (_quote(at_one, size="8"),)))
     assert first.updates[0].state is OrderState.PARTIALLY_FILLED
@@ -204,10 +212,7 @@ def test_cancelled_and_expired_orders_remain_terminal_after_restart(tmp_path) ->
     store = SQLiteStore(tmp_path / "nika.db")
     cancelled = PaperTradingSession.start(store, _config("cancelled"))
     cancelled.process_slice(TimeSlice(0, NOW, (_quote(NOW),)))
-    order = cancelled.queue_intent(
-        _intent("cancel-me", at=NOW, slice_index=0),
-        mark_price=Decimal(100),
-    )
+    order = cancelled.queue_intent(_intent("cancel-me", at=NOW, slice_index=0))
     cancelled.cancel(order.approval_id, "test cancellation")
     cancelled = PaperTradingSession.resume(store, "cancelled")
     at_one = NOW + timedelta(minutes=1)
@@ -224,8 +229,7 @@ def test_cancelled_and_expired_orders_remain_terminal_after_restart(tmp_path) ->
             at=NOW,
             slice_index=0,
             expires_at=NOW + timedelta(seconds=30),
-        ),
-        mark_price=Decimal(100),
+        )
     )
     expired = PaperTradingSession.resume(store, "expired")
     expired.process_slice(TimeSlice(1, at_one, (_quote(at_one),)))
@@ -248,12 +252,25 @@ def test_restart_uses_durable_risk_limits_and_strategy_cannot_queue_approval(tmp
     restarted = PaperTradingSession.resume(store, "risk-authority")
 
     with pytest.raises(RiskRejected, match="position"):
-        restarted.queue_intent(
-            _intent("too-large", at=NOW, slice_index=0, quantity="2"),
-            mark_price=Decimal(100),
-        )
+        restarted.queue_intent(_intent("too-large", at=NOW, slice_index=0, quantity="2"))
     assert restarted.snapshot.orders == ()
     assert not hasattr(restarted, "queue_approved_order")
+
+
+def test_pretrade_risk_uses_durable_mark_and_has_no_strategy_price_override(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    session = PaperTradingSession.start(
+        store,
+        _config("durable-risk-mark", limits=_limits(max_gross="150")),
+    )
+    session.process_slice(
+        TimeSlice(0, NOW, (_quote(NOW, bid="999", ask="1001"),))
+    )
+
+    assert "mark_price" not in inspect.signature(session.queue_intent).parameters
+    with pytest.raises(RiskRejected, match="gross"):
+        session.queue_intent(_intent("cannot-spoof-price", at=NOW, slice_index=0))
+    assert session.snapshot.orders == ()
 
 
 def test_data_source_fingerprint_and_cutoff_are_immutable_resume_authority(tmp_path) -> None:
@@ -277,10 +294,7 @@ def test_slice_commit_is_atomic_when_session_state_update_crashes(tmp_path) -> N
     store = SQLiteStore(tmp_path / "nika.db")
     session = PaperTradingSession.start(store, _config("atomic-slice"))
     session.process_slice(TimeSlice(0, NOW, (_quote(NOW),)))
-    session.queue_intent(
-        _intent("atomic-fill", at=NOW, slice_index=0, quantity="2"),
-        mark_price=Decimal(100),
-    )
+    session.queue_intent(_intent("atomic-fill", at=NOW, slice_index=0, quantity="2"))
     with store.connection() as conn:
         conn.execute(
             "CREATE TRIGGER fail_paper_session_update "
@@ -307,10 +321,7 @@ def test_long_short_reversal_preserves_exact_decimal_accounting_invariants(tmp_p
     policy = ExecutionPolicy("fees", fixed_fee=Decimal(1))
     session = PaperTradingSession.start(store, _config("reversal", policy=policy))
     session.process_slice(TimeSlice(0, NOW, (_quote(NOW),)))
-    session.queue_intent(
-        _intent("buy-five", at=NOW, slice_index=0, quantity="5"),
-        mark_price=Decimal(100),
-    )
+    session.queue_intent(_intent("buy-five", at=NOW, slice_index=0, quantity="5"))
 
     at_one = NOW + timedelta(minutes=1)
     session.process_slice(TimeSlice(1, at_one, (_quote(at_one),)))
@@ -330,8 +341,7 @@ def test_long_short_reversal_preserves_exact_decimal_accounting_invariants(tmp_p
             slice_index=1,
             quantity="7",
             side=Side.SELL,
-        ),
-        mark_price=Decimal(100),
+        )
     )
     at_two = NOW + timedelta(minutes=2)
     session.process_slice(TimeSlice(2, at_two, (_quote(at_two),)))
@@ -346,6 +356,45 @@ def test_long_short_reversal_preserves_exact_decimal_accounting_invariants(tmp_p
     assert final.positions[0].quantity == Decimal(-2)
     assert final.positions[0].average_price == Decimal(99)
     assert session.snapshot.risk_state.peak_equity == Decimal(1000)
+
+
+def test_intraslice_mark_to_market_peak_is_authoritative_for_post_fill_drawdown(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    session = PaperTradingSession.start(
+        store,
+        _config(
+            "intraslice-drawdown",
+            limits=_limits(max_drawdown="30", allow_short=False),
+        ),
+    )
+    session.process_slice(TimeSlice(0, NOW, (_quote(NOW),)))
+    session.queue_intent(_intent("buy-one", at=NOW, slice_index=0))
+
+    at_one = NOW + timedelta(minutes=1)
+    session.process_slice(TimeSlice(1, at_one, (_quote(at_one),)))
+    assert session.snapshot.account.equity == Decimal(999)
+    session.queue_intent(
+        _intent("sell-one", at=at_one, slice_index=1, side=Side.SELL)
+    )
+
+    at_two = NOW + timedelta(minutes=2)
+    bar = Bar(
+        INSTRUMENT,
+        EventTime(at_two, at_two, at_two),
+        Decimal(80),
+        Decimal(120),
+        Decimal(80),
+        Decimal(120),
+        Decimal(10),
+    )
+    with pytest.raises(RiskRejected, match="drawdown"):
+        session.process_slice(TimeSlice(2, at_two, (bar,)))
+
+    restarted = PaperTradingSession.resume(store, "intraslice-drawdown")
+    assert restarted.snapshot.cursor_slice == 1
+    assert restarted.fill_count == 1
+    assert restarted.snapshot.risk_state.peak_equity == Decimal(1000)
+    assert restarted.snapshot.open_orders[0].order.intent.intent_id == "sell-one"
 
 
 def test_same_slice_fill_reconstruction_preserves_durable_queue_order(tmp_path) -> None:
@@ -368,8 +417,7 @@ def test_same_slice_fill_reconstruction_preserves_durable_queue_order(tmp_path) 
                 submitted_at=NOW,
                 submitted_slice=0,
                 limit_price=Decimal(limit_price),
-            ),
-            mark_price=Decimal(110),
+            )
         )
 
     at_one = NOW + timedelta(minutes=1)
@@ -400,10 +448,7 @@ def test_same_raw_fill_identity_is_session_scoped_across_two_sessions(tmp_path) 
     for session_id in ("isolation-a", "isolation-b"):
         session = PaperTradingSession.start(store, _config(session_id))
         session.process_slice(TimeSlice(0, NOW, (_quote(NOW),)))
-        session.queue_intent(
-            _intent("same-intent", at=NOW, slice_index=0),
-            mark_price=Decimal(100),
-        )
+        session.queue_intent(_intent("same-intent", at=NOW, slice_index=0))
         at_one = NOW + timedelta(minutes=1)
         session.process_slice(TimeSlice(1, at_one, (_quote(at_one),)))
         assert session.fill_count == 1
@@ -421,10 +466,7 @@ def test_durable_config_and_terminal_state_tamper_fail_closed(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "nika.db")
     session = PaperTradingSession.start(store, _config("tamper"))
     session.process_slice(TimeSlice(0, NOW, (_quote(NOW),)))
-    session.queue_intent(
-        _intent("tamper-order", at=NOW, slice_index=0),
-        mark_price=Decimal(100),
-    )
+    session.queue_intent(_intent("tamper-order", at=NOW, slice_index=0))
     with store.connection() as conn:
         conn.execute(
             "UPDATE trading_research_paper_orders SET state = 'cancelled' "

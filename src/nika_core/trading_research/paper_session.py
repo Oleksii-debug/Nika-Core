@@ -722,12 +722,7 @@ class PaperTradingSession:
     def fill_count(self) -> int:
         return len(self._record.fills)
 
-    def queue_intent(
-        self,
-        intent: OrderIntent,
-        *,
-        mark_price: Decimal,
-    ) -> RiskApprovedOrder:
+    def queue_intent(self, intent: OrderIntent) -> RiskApprovedOrder:
         cursor_slice = self._record.snapshot.cursor_slice
         cursor_at = self._record.snapshot.cursor_at
         if cursor_slice is None or cursor_at is None:
@@ -751,6 +746,11 @@ class PaperTradingSession:
                 raise PaperSessionConflict("intent_id is already bound to different intent data")
             return existing.order
 
+        mark_price = self._record.marks.get(intent.instrument.instrument_id)
+        if mark_price is None:
+            raise PaperSessionConflict(
+                "current committed market cursor has no durable mark for intent instrument"
+            )
         pending_signed = sum(
             (
                 item.remaining_quantity * Decimal(item.order.intent.side.sign)
@@ -763,7 +763,7 @@ class PaperTradingSession:
         order = engine.approve(
             intent,
             snapshot=self._record.snapshot.account,
-            mark_price=_finite_decimal(mark_price, "mark_price"),
+            mark_price=mark_price,
             pending_signed_quantity=pending_signed,
             approved_at=cursor_at,
             approved_slice=cursor_slice,
@@ -806,7 +806,12 @@ class PaperTradingSession:
             ledger.apply_fill(fill)
         engine = RiskEngine(self._record.snapshot.config.risk_limits)
         updates: list[OrderUpdate] = []
-        risk_state = self._record.snapshot.risk_state
+        prior_risk_state = self._record.snapshot.risk_state
+        marked_account = ledger.snapshot(marks)
+        risk_state = RiskState(
+            peak_equity=max(prior_risk_state.peak_equity, marked_account.equity),
+            session_start_equity=prior_risk_state.session_start_equity,
+        )
         for order_snapshot in self._record.snapshot.open_orders:
             update = self._execution.execute(
                 order_snapshot.order,
@@ -818,6 +823,10 @@ class PaperTradingSession:
                 ledger.apply_fill(scoped_fill)
                 account_after_fill = ledger.snapshot(marks)
                 engine.assert_post_fill(account_after_fill, risk_state)
+                risk_state = RiskState(
+                    peak_equity=max(risk_state.peak_equity, account_after_fill.equity),
+                    session_start_equity=risk_state.session_start_equity,
+                )
                 update = OrderUpdate(
                     approval_id=update.approval_id,
                     state=update.state,
