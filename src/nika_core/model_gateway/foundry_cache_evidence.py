@@ -136,8 +136,24 @@ def _hash_file(
     observed_size = 0
     try:
         opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode) or _file_identity(opened) != _file_identity(before):
+        if not stat.S_ISREG(opened.st_mode):
             raise ValueError(f"model cache file changed before hashing: {path}")
+
+        # Compare pathname snapshots with pathname snapshots and descriptor snapshots
+        # with descriptor snapshots. Python's Windows path-stat implementation may
+        # expose metadata through a different OS query than fstat(), so treating all
+        # five stat fields as one cross-API identity can false-reject an unchanged file.
+        # A replacement between inventory and open is still caught by the immediate
+        # second lstat() of the pathname; descriptor mutation is caught independently.
+        after_open = _lstat_plain(path)
+        _resolved_within_root(root, path)
+        if (
+            _file_identity(after_open) != _file_identity(before)
+            or int(opened.st_size) != int(before.st_size)
+        ):
+            raise ValueError(f"model cache file changed before hashing: {path}")
+
+        opened_identity = _file_identity(opened)
         while True:
             chunk = os.read(descriptor, _READ_CHUNK_BYTES)
             if not chunk:
@@ -145,7 +161,7 @@ def _hash_file(
             digest.update(chunk)
             observed_size += len(chunk)
         opened_after = os.fstat(descriptor)
-        if _file_identity(opened_after) != _file_identity(before):
+        if _file_identity(opened_after) != opened_identity:
             raise ValueError(f"model cache file changed while hashing: {path}")
     except OSError as exc:
         raise ValueError(f"model cache file cannot be read: {path}") from exc
