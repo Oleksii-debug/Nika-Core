@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
+from threading import Event
 
 import pytest
 
@@ -116,6 +118,24 @@ class CrashAfterEffectPort(InspectablePort):
         raise SystemExit("simulated process loss after provider effect")
 
 
+class BlockingPort(InspectablePort):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = Event()
+        self.release = Event()
+
+    def apply(self, request: MaintenanceRequest) -> MaintenanceResult:
+        self.apply_calls += 1
+        self.external_applied = True
+        self.started.set()
+        assert self.release.wait(3), "test provider was not released"
+        return MaintenanceResult(
+            True,
+            False,
+            (f"provider:{request.request_id}:applied",),
+        )
+
+
 def _runtime_journal(tmp_path):
     store = SQLiteStore(tmp_path / "nika-pf8.db")
     store.initialize()
@@ -152,6 +172,7 @@ def test_runtime_ledger_reservation_and_result_survive_adapter_recreation(tmp_pa
     service = _service()
     request = _request(service)
 
+    assert journal.lookup(project_id="project-a", service=service, request=request) is None
     first = journal.reserve(
         project_id="project-a",
         service=service,
@@ -165,6 +186,15 @@ def test_runtime_ledger_reservation_and_result_survive_adapter_recreation(tmp_pa
         IdempotencyLedger(store),
         task_id=task_id,
     )
+    looked_up = restarted.lookup(
+        project_id="project-a",
+        service=service,
+        request=request,
+    )
+    assert looked_up is not None
+    assert looked_up.created is False
+    assert looked_up.state is MaintenanceEffectState.PENDING
+
     replay = restarted.reserve(
         project_id="project-a",
         service=service,
@@ -182,11 +212,12 @@ def test_runtime_ledger_reservation_and_result_survive_adapter_recreation(tmp_pa
         IdempotencyLedger(store),
         task_id=task_id,
     )
-    completed = second_restart.reserve(
+    completed = second_restart.lookup(
         project_id="project-a",
         service=service,
         request=request,
     )
+    assert completed is not None
     assert completed.created is False
     assert completed.state is MaintenanceEffectState.COMPLETED
     assert completed.result == result
@@ -203,6 +234,12 @@ def test_runtime_ledger_rejects_rebound_request_and_fake_task_identity(tmp_path)
         request,
         evidence_refs=(f"health:{SHA_B}",),
     )
+    with pytest.raises(ProductOperationsError, match="durable runtime authority"):
+        journal.lookup(
+            project_id="project-a",
+            service=rebound_service,
+            request=rebound_request,
+        )
     with pytest.raises(ProductOperationsError, match="conflicts with durable runtime authority"):
         journal.reserve(
             project_id="project-a",
@@ -261,7 +298,7 @@ def test_process_loss_after_effect_restarts_with_inspection_not_redispatch(tmp_p
     assert ledger.list_for_task(task_id)[0].status is IdempotencyStatus.COMPLETED
 
 
-def test_pending_after_hard_process_loss_is_inspected_without_provider_replay(tmp_path) -> None:
+def test_pending_after_hard_process_loss_fails_closed_without_provider_access(tmp_path) -> None:
     store, task_id, ledger, journal = _runtime_journal(tmp_path)
     service = _service()
     request = _request(service)
@@ -283,6 +320,36 @@ def test_pending_after_hard_process_loss_is_inspected_without_provider_replay(tm
         service=service,
         request=request,
     )
+    with pytest.raises(ProductOperationsError, match="pending.*owner loss"):
+        restarted.request_maintenance(request)
+
+    assert port.apply_calls == 0
+    assert port.inspect_calls == 0
+    assert ledger.require(reservation.operation_key).status is IdempotencyStatus.PENDING
+
+
+def test_host_marked_uncertain_effect_can_reconcile_without_redispatch(tmp_path) -> None:
+    store, task_id, ledger, journal = _runtime_journal(tmp_path)
+    service = _service()
+    request = _request(service)
+    reservation = journal.reserve(
+        project_id="project-a",
+        service=service,
+        request=request,
+    )
+    journal.mark_uncertain(reservation.operation_key)
+
+    port = InspectablePort()
+    port.external_applied = True
+    restarted = _coordinator(
+        port=port,
+        journal=RuntimeIdempotencyMaintenanceJournal(
+            IdempotencyLedger(store),
+            task_id=task_id,
+        ),
+        service=service,
+        request=request,
+    )
     saved = restarted.request_maintenance(request)
 
     assert saved.reconciled is True
@@ -290,6 +357,47 @@ def test_pending_after_hard_process_loss_is_inspected_without_provider_replay(tm
     assert port.apply_calls == 0
     assert port.inspect_calls == 1
     assert ledger.require(reservation.operation_key).status is IdempotencyStatus.COMPLETED
+
+
+def test_parallel_coordinator_cannot_inspect_live_pending_owner(tmp_path) -> None:
+    store, task_id, ledger, journal = _runtime_journal(tmp_path)
+    service = _service()
+    request = _request(service)
+    port = BlockingPort()
+    first = _coordinator(
+        port=port,
+        journal=journal,
+        service=service,
+        request=request,
+    )
+    second = _coordinator(
+        port=port,
+        journal=RuntimeIdempotencyMaintenanceJournal(
+            IdempotencyLedger(store),
+            task_id=task_id,
+        ),
+        service=service,
+        request=request,
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        running = pool.submit(first.request_maintenance, request)
+        assert port.started.wait(2), "first coordinator did not enter provider apply"
+        operation = ledger.list_for_task(task_id)[0]
+        assert operation.status is IdempotencyStatus.PENDING
+
+        with pytest.raises(ProductOperationsError, match="pending.*owner loss"):
+            second.request_maintenance(request)
+        assert port.apply_calls == 1
+        assert port.inspect_calls == 0
+
+        port.release.set()
+        saved = running.result(timeout=2)
+
+    assert saved.result.applied is True
+    assert ledger.require(operation.operation_key).status is IdempotencyStatus.COMPLETED
+    assert port.apply_calls == 1
+    assert port.inspect_calls == 0
 
 
 def test_completed_effect_before_local_save_restores_without_provider_call(tmp_path) -> None:
