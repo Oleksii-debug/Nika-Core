@@ -79,14 +79,18 @@ def test_audit_redacts_camel_acronym_and_punctuation_secret_keys(tmp_path: Path)
         ),
         (
             "url",
-            "https://audit-user:VALUE_CANARY_URL_PASSWORD_84D1@audit.invalid/path"
-            "?access_token=VALUE_CANARY_QUERY_TOKEN_63B9&page=1",
+            (
+                "https://audit-user:VALUE_CANARY_URL_PASSWORD_84D1@audit.invalid/path"
+                "?access_token=VALUE_CANARY_QUERY_TOKEN_63B9&page=1"
+            ),
             ("VALUE_CANARY_URL_PASSWORD_84D1", "VALUE_CANARY_QUERY_TOKEN_63B9"),
         ),
         (
             "stderr",
-            "fatal: repository 'https://oauth2:VALUE_CANARY_GIT_TOKEN_5F20@"
-            "github.invalid/org/repo.git/' not found",
+            (
+                "fatal: repository 'https://oauth2:VALUE_CANARY_GIT_TOKEN_5F20@"
+                "github.invalid/org/repo.git/' not found"
+            ),
             ("VALUE_CANARY_GIT_TOKEN_5F20",),
         ),
         (
