@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from pf8_effect_journal_fake import MemoryEffectJournal
 
 from nika_core.product_factory_operations import (
     MaintenanceState,
@@ -19,7 +20,6 @@ from nika_core.product_factory_operations_contracts import (
     ServiceObservation,
     ServiceReplica,
 )
-from pf8_effect_journal_fake import MemoryEffectJournal
 
 
 def _sha(value: int) -> str:
