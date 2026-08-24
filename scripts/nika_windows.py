@@ -126,6 +126,28 @@ def _require_product_state(
     return product_state
 
 
+def _require_current_product_result(
+    response: Mapping[str, Any],
+    *,
+    project_id: str,
+    spec_version: int,
+    state: str,
+    goal: str,
+) -> None:
+    expected_message = (
+        f"Поточний ProductProject: {project_id}; "
+        f"spec version {spec_version}; state {state}; goal: {goal}."
+    )
+    if (
+        response.get("status") != "completed"
+        or response.get("message") != expected_message
+        or response.get("focus_id") != "tasks-heading"
+    ):
+        raise RuntimeError(
+            "PF11 packaged Current ProductProject command returned inconsistent identity/focus"
+        )
+
+
 def _run_pf11_proof(
     config: AppConfig,
     *,
@@ -154,12 +176,28 @@ def _run_pf11_proof(
     if detail.summary.project_id != project_id or detail.summary.version != 1:
         raise RuntimeError("PF11 packaged ProductProject identity/version proof failed")
     product_state = _require_product_state(bridge.get_state(), project_id=project_id)
+    current_result = bridge.dispatch(
+        {
+            "request_id": "pf11-packaged-current-proof",
+            "action_id": "task.create",
+            "payload": {"command": "Show current ProductProject"},
+        }
+    )
+    _require_current_product_result(
+        current_result,
+        project_id=project_id,
+        spec_version=detail.summary.version,
+        state=detail.summary.state,
+        goal=detail.summary.goal,
+    )
     payload = {
         "route": decision.route.value,
         "project_id": project_id,
         "spec_version": detail.summary.version,
         "state": detail.summary.state,
         "command_center_state_proven": True,
+        "current_command_proven": True,
+        "current_command_focus_proven": True,
         "bridge_state_project_id": product_state["project_id"],
         "bridge_state_spec_version": product_state["spec_version"],
         "bridge_state_status_count": product_state["status_count"],
