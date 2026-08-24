@@ -315,6 +315,15 @@ class MultiAgentSupervisor:
                 "team has an unfinished durable cancellation operation"
             )
 
+    async def _cancel_after_execution_task_cancelled(self, team_id: str) -> None:
+        """Reuse durable team cancellation before any runtime cleanup side effect."""
+        try:
+            await self.cancel_team(team_id)
+        except CancellationReconciliationRequired:
+            operation = self._cancellations.get(team_id)
+            if operation is None or self._store.team_state(team_id) is not TeamState.CANCELLED:
+                raise
+
     async def _run_new_child(
         self,
         member: TeamMember,
@@ -336,15 +345,7 @@ class MultiAgentSupervisor:
                 )
             )
         except asyncio.CancelledError:
-            await self._runtime.cancel(
-                task_id=self._task_id(member.team_id, member.member_id),
-                thread_id=member.thread_id,
-            )
-            self._store.set_member_state(
-                team_id=member.team_id,
-                member_id=member.member_id,
-                state=MemberState.CANCELLED,
-            )
+            await self._cancel_after_execution_task_cancelled(member.team_id)
             raise
         except Exception as exc:  # noqa: BLE001 - isolate one worker from the team.
             return self._finish_exception(prepared, exc)
@@ -374,15 +375,7 @@ class MultiAgentSupervisor:
                 )
             )
         except asyncio.CancelledError:
-            await self._runtime.cancel(
-                task_id=self._task_id(member.team_id, member.member_id),
-                thread_id=member.thread_id,
-            )
-            self._store.set_member_state(
-                team_id=member.team_id,
-                member_id=member.member_id,
-                state=MemberState.CANCELLED,
-            )
+            await self._cancel_after_execution_task_cancelled(member.team_id)
             raise
         except Exception as exc:  # noqa: BLE001 - recovery failure belongs to this child.
             current = self._store.member(member.team_id, member.member_id)
