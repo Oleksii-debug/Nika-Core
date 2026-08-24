@@ -192,6 +192,33 @@ class DesktopBackend:
         if record is None:
             raise ValueError("Немає активного завдання агента для зупинки.")
 
+        session = self._coordinator.sessions.get(record.task_id)
+        if session is not None:
+            if session.runtime_id != self._runtime.runtime_id:
+                raise ValueError(
+                    "Активна runtime-сесія належить іншому runtime; "
+                    "безпечне скасування відхилено."
+                )
+            accepted = bool(
+                self._host()
+                .submit(
+                    self._coordinator.cancel(
+                        self._runtime,
+                        task_id=record.task_id,
+                        thread_id=session.thread_id,
+                    )
+                )
+                .result()
+            )
+            if not accepted:
+                raise ValueError("Runtime не підтвердив зупинку; стан завдання не змінено.")
+            return UIResult(
+                request_id="desktop-handler",
+                status="completed",
+                message="Поточне завдання агента скасовано.",
+                focus_id="tasks-heading",
+            )
+
         if record.state in _LOCAL_CANCEL_STATES:
             self._queue.transition(record.task_id, TaskState.CANCELLED)
             return UIResult(
@@ -201,16 +228,7 @@ class DesktopBackend:
                 focus_id="tasks-heading",
             )
 
-        session = self._coordinator.sessions.get(record.task_id)
-        if session is not None and session.runtime_id != self._runtime.runtime_id:
-            raise ValueError(
-                "Активна runtime-сесія належить іншому runtime; безпечне скасування відхилено."
-            )
-        thread_id = (
-            session.thread_id
-            if session is not None
-            else self._active_thread(record.task_id)
-        )
+        thread_id = self._active_thread(record.task_id)
         if record.state != TaskState.RUNNING or thread_id is None:
             raise ValueError(
                 "Неможливо безпечно скасувати активне runtime-завдання без "
