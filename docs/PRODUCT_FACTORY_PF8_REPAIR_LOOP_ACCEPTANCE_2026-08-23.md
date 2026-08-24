@@ -4,13 +4,13 @@ Status: implementation candidate; exact-head Core CI and M12 evidence is require
 
 ## Scope and live baseline
 
-ONE-SHOT-17 starts from live `main` `8e2e0eb3f0f65b75e1d23b0f36ab2bf09a8477ba` and was dependency-aware resynced after live `main` advanced to `e8743566ffc673d6f8d272e88de0e027c23ab277`. The main advance was unrelated Deterministic Brain work; no Product Factory / Toolsmith / incident / deployment source changed in that resync.
+ONE-SHOT-17 starts from live `main` `8e2e0eb3f0f65b75e1d23b0f36ab2bf09a8477ba`. It first resynced after main advanced to `e8743566ffc673d6f8d272e88de0e027c23ab277`, then resynced non-force again after #158 advanced main to `af43e41dca1066f95debafef360d61b2bf38b2ec`. The second drift was exactly `scripts/nika_windows.py`, `src/nika_core/product_factory_packaged_journey.py`, and `tests/test_packaged_current_product_project.py`; it had no Product Factory repair-loop / Toolsmith / incident / deployment overlap with this lane.
 
 This lane is intentionally additive. It does not replace Product Operations, ProductFactoryCoordinator, IncidentRepairReleaseCoordinator, CapabilityEscalationService, ProductFactoryProgramHost or DeploymentFabric.
 
 Active ownership remains respected:
 - PF8 lifecycle convergence: PR #286, successor to #178/#200 semantics;
-- PF5 build execution: PR #177;
+- PF5 durable build execution: PR #295, successor to closed/unmerged #177;
 - PF6 deployment hardening: PR #172;
 - PF12 checkpoint authority: PR #164.
 
@@ -72,7 +72,7 @@ The same contract audit found a second integration defect before claiming accept
 
 ### PF5 build-executor uncertainty
 
-The integrated baseline exposes `NormalizedBuildEvidence` but does not yet integrate the PF5 build execution fabric owned by PR #177. ONE-SHOT-17 therefore verifies exact accepted-repair -> build-evidence -> release lineage and rejects uncertain/failed/mismatched evidence, but does **not** claim executor-level crash-before/after-build-side-effect proof. That credit belongs after the canonical PF5 executor is integrated and can be consumed without stacking its branch.
+The integrated baseline exposes `NormalizedBuildEvidence` but does not yet integrate the durable PF5 build execution fabric now owned by successor PR #295. ONE-SHOT-17 therefore verifies exact accepted-repair -> build-evidence -> release lineage and rejects uncertain/failed/mismatched evidence, but does **not** claim executor-level crash-before/after-build-side-effect proof. That credit belongs after the canonical PF5 executor is integrated and can be consumed without stacking its branch.
 
 ### PF8 second ProductFactory attempt lineage
 
