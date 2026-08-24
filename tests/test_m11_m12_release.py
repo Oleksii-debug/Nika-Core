@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import json
+import tomllib
 from pathlib import Path
 
 import pytest
 
-from nika_core.packaging.notices import verify_third_party_notices
+from nika_core.packaging.notices import (
+    SUPPLY_CHAIN_FILE,
+    supply_chain_findings,
+    verify_third_party_notices,
+)
 from nika_core.packaging.release import (
     build_release_manifest,
     verify_release_manifest,
@@ -117,6 +122,56 @@ def test_third_party_notice_verification_fails_closed(tmp_path: Path) -> None:
     findings = verify_third_party_notices(tmp_path)
     assert "notices:pywebview" in findings
     assert "notices:pythonnet" in findings
+    assert f"missing:{SUPPLY_CHAIN_FILE}" in findings
+
+
+def test_supply_chain_policy_fails_closed_on_unpinned_optional_and_license_risk() -> None:
+    payload = {
+        "release_critical_declarations": [
+            {"name": "pyinstaller", "exact_pin": False},
+        ],
+        "declared_dependency_surface": [
+            {
+                "group": "browser",
+                "role": "optional-not-bundled",
+                "name": "playwright",
+                "listed_in_bundle_runtime": True,
+            }
+        ],
+        "bundle_runtime_distributions": [
+            {
+                "name": "example",
+                "license_risk": "review-required",
+                "project_urls": [],
+                "record_sha256": None,
+            }
+        ],
+    }
+    findings = supply_chain_findings(payload)
+    assert "supply-chain:unpinned-release-tool:pyinstaller" in findings
+    assert "supply-chain:optional-bundled:browser:playwright" in findings
+    assert "supply-chain:license-review:example" in findings
+    assert "supply-chain:source-provenance:example" in findings
+    assert "supply-chain:installed-record:example" in findings
+
+
+def test_release_critical_build_dependencies_are_exact_pinned() -> None:
+    root = Path(__file__).resolve().parents[1]
+    with (root / "pyproject.toml").open("rb") as handle:
+        data = tomllib.load(handle)
+    assert data["build-system"]["requires"] == ["setuptools==84.0.0", "wheel==0.48.0"]
+    assert data["project"]["optional-dependencies"]["qa"] == [
+        "pip-audit==2.10.1",
+        "pyinstaller==6.22.2",
+    ]
+
+
+def test_m11_publishes_machine_readable_supply_chain_evidence() -> None:
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github" / "workflows" / "m11-windows-release.yml").read_text(
+        encoding="utf-8"
+    )
+    assert f"dist/NikaCore/{SUPPLY_CHAIN_FILE}" in workflow
 
 
 def test_windows_plan_is_onedir_windowed_and_bundles_web_assets(tmp_path: Path) -> None:
