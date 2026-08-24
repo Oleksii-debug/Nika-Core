@@ -5,7 +5,9 @@ on:
     paths:
       - ".github/workflows/c3-browser-agent.yml"
       - "scripts/c3_browser_agent_factory_proof.py"
+      - "scripts/c3_browser_agent_factory_acceptance.py"
       - "tests/test_c3_browser_agent_factory_proof.py"
+      - "tests/test_c3_browser_agent_factory_acceptance.py"
       - "src/nika_core/interaction/**"
       - "src/nika_core/product_factory_*.py"
       - "src/nika_core/product_project.py"
@@ -16,7 +18,9 @@ on:
     paths:
       - ".github/workflows/c3-browser-agent.yml"
       - "scripts/c3_browser_agent_factory_proof.py"
+      - "scripts/c3_browser_agent_factory_acceptance.py"
       - "tests/test_c3_browser_agent_factory_proof.py"
+      - "tests/test_c3_browser_agent_factory_acceptance.py"
       - "src/nika_core/interaction/**"
       - "src/nika_core/product_factory_*.py"
       - "src/nika_core/product_project.py"
@@ -25,6 +29,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: c3-browser-agent-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   c3-browser-agent:
@@ -69,22 +77,29 @@ jobs:
         run: |
           python -m ruff check \
             scripts/c3_browser_agent_factory_proof.py \
-            tests/test_c3_browser_agent_factory_proof.py
+            scripts/c3_browser_agent_factory_acceptance.py \
+            tests/test_c3_browser_agent_factory_proof.py \
+            tests/test_c3_browser_agent_factory_acceptance.py
 
       - name: Compile C3 acceptance slice
         run: |
           python -m compileall -q \
             scripts/c3_browser_agent_factory_proof.py \
-            tests/test_c3_browser_agent_factory_proof.py
+            scripts/c3_browser_agent_factory_acceptance.py \
+            tests/test_c3_browser_agent_factory_proof.py \
+            tests/test_c3_browser_agent_factory_acceptance.py
 
       - name: Run deterministic C3 unit and restart tests
-        run: python -m pytest tests/test_c3_browser_agent_factory_proof.py
+        run: >-
+          python -m pytest
+          tests/test_c3_browser_agent_factory_proof.py
+          tests/test_c3_browser_agent_factory_acceptance.py
 
-      - name: Run real local Playwright C3 factory proof
+      - name: Run real factory-generated local Playwright C3 proof
         env:
           NIKA_CANDIDATE_SHA: ${{ steps.candidate.outputs.sha }}
         run: |
-          python scripts/c3_browser_agent_factory_proof.py \
+          python scripts/c3_browser_agent_factory_acceptance.py \
             --output artifacts/c3-browser-agent
 
       - name: Upload exact C3 product package and evidence
