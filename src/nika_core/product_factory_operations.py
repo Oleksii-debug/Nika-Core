@@ -7,6 +7,9 @@ from .product_factory_operations_contracts import (
     DeployableService,
     MaintenanceAction,
     MaintenanceApprovalAuthorityPort,
+    MaintenanceEffectJournalPort,
+    MaintenanceEffectReservation,
+    MaintenanceEffectState,
     MaintenanceRequest,
     MaintenanceResult,
     MaintenanceState,
@@ -75,6 +78,7 @@ class ProductOperationsCoordinator:
     project_id: str
     port: ProductOperationsPort | None = None
     approval_authority: MaintenanceApprovalAuthorityPort | None = None
+    effect_journal: MaintenanceEffectJournalPort | None = None
     _services: dict[str, ServiceRecord] = field(default_factory=dict, init=False, repr=False)
     _maintenance: dict[str, MaintenanceRecord] = field(default_factory=dict, init=False, repr=False)
     _revoked: set[str] = field(default_factory=set, init=False, repr=False)
@@ -279,22 +283,13 @@ class ProductOperationsCoordinator:
                     "maintenance side effect requires configured port and explicit approval"
                 )
             self._validate_maintenance_authority(record, request)
-            result = self.port.apply(request)
-            if not isinstance(result, MaintenanceResult):
-                raise ProductOperationsError(
-                    "maintenance port returned invalid result evidence"
-                )
-            saved = MaintenanceRecord(request, result)
-            self._maintenance[request.request_id] = saved
-            self._services[request.service_id] = ServiceRecord(
-                record.service,
-                record.health,
-                _maintenance_state(request.action, result),
-                record.observation,
-                record.rollback,
-                record.blocked_credentials,
-                record.node_loss,
+            result, reconciled = self._run_maintenance_effect(
+                record,
+                request,
+                recover_only=False,
             )
+            saved = MaintenanceRecord(request, result, reconciled=reconciled)
+            self._save_maintenance(record, saved)
             return saved
 
     def reconcile_maintenance(self, request_id: str) -> MaintenanceRecord:
@@ -308,22 +303,13 @@ class ProductOperationsCoordinator:
                 raise ProductOperationsError("maintenance side-effect port is not configured")
             record = self._require(current.request.service_id)
             self._validate_maintenance_authority(record, current.request)
-            result = self.port.inspect(current.request)
-            if not isinstance(result, MaintenanceResult):
-                raise ProductOperationsError(
-                    "maintenance port returned invalid inspection evidence"
-                )
-            saved = MaintenanceRecord(current.request, result, reconciled=True)
-            self._maintenance[request_id] = saved
-            self._services[record.service.service_id] = ServiceRecord(
-                record.service,
-                record.health,
-                _maintenance_state(current.request.action, result),
-                record.observation,
-                record.rollback,
-                record.blocked_credentials,
-                record.node_loss,
+            result, _ = self._run_maintenance_effect(
+                record,
+                current.request,
+                recover_only=True,
             )
+            saved = MaintenanceRecord(current.request, result, reconciled=True)
+            self._save_maintenance(record, saved)
             return saved
 
     def health_summary(self) -> ProjectHealthSummary:
@@ -433,6 +419,82 @@ class ProductOperationsCoordinator:
         except KeyError as exc:
             raise ProductOperationsError("unknown deployable service") from exc
 
+    def _run_maintenance_effect(
+        self,
+        record: ServiceRecord,
+        request: MaintenanceRequest,
+        *,
+        recover_only: bool,
+    ) -> tuple[MaintenanceResult, bool]:
+        if self.port is None:
+            raise ProductOperationsError("maintenance side-effect port is not configured")
+        if self.effect_journal is None:
+            raise ProductOperationsError(
+                "maintenance side effect requires a durable host-bound effect journal"
+            )
+        reservation = self.effect_journal.reserve(
+            project_id=self.project_id,
+            service=record.service,
+            request=request,
+        )
+        if not isinstance(reservation, MaintenanceEffectReservation):
+            raise ProductOperationsError(
+                "maintenance effect journal returned invalid reservation evidence"
+            )
+        if reservation.state is MaintenanceEffectState.COMPLETED:
+            assert reservation.result is not None
+            return reservation.result, True
+
+        if reservation.created and not recover_only:
+            try:
+                result = self.port.apply(request)
+            except BaseException:
+                self.effect_journal.mark_uncertain(reservation.operation_key)
+                raise
+            if not isinstance(result, MaintenanceResult):
+                self.effect_journal.mark_uncertain(reservation.operation_key)
+                raise ProductOperationsError(
+                    "maintenance port returned invalid result evidence"
+                )
+            if result.uncertain:
+                self.effect_journal.mark_uncertain(reservation.operation_key)
+            else:
+                self.effect_journal.complete(reservation.operation_key, result)
+            return result, False
+
+        try:
+            result = self.port.inspect(request)
+        except BaseException:
+            self.effect_journal.mark_uncertain(reservation.operation_key)
+            raise
+        if not isinstance(result, MaintenanceResult):
+            self.effect_journal.mark_uncertain(reservation.operation_key)
+            raise ProductOperationsError(
+                "maintenance port returned invalid inspection evidence"
+            )
+        if result.uncertain:
+            self.effect_journal.mark_uncertain(reservation.operation_key)
+        else:
+            self.effect_journal.reconcile(reservation.operation_key, result)
+        return result, True
+
+    def _save_maintenance(
+        self,
+        record: ServiceRecord,
+        maintenance: MaintenanceRecord,
+    ) -> None:
+        request = maintenance.request
+        self._maintenance[request.request_id] = maintenance
+        self._services[request.service_id] = ServiceRecord(
+            record.service,
+            record.health,
+            _maintenance_state(request.action, maintenance.result),
+            record.observation,
+            record.rollback,
+            record.blocked_credentials,
+            record.node_loss,
+        )
+
     def _loss(self, service: DeployableService) -> tuple[str, ...]:
         return self._loss_for(service, self._down_nodes)
 
@@ -507,7 +569,7 @@ class ProductOperationsCoordinator:
                 service=record.service,
                 request=request,
             )
-        except Exception as exc:  # noqa: BLE001 - trusted boundary must fail closed
+        except Exception as exc:
             raise ProductOperationsError(
                 "maintenance trusted approval authority verification failed"
             ) from exc
