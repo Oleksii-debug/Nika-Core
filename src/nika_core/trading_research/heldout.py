@@ -11,7 +11,7 @@ from .contracts import CausalityViolation, Partition, TradingResearchError, requ
 from .dataset import ValidationReport
 
 _HELDOUT_SCHEMA = "nika-trader-heldout-v2"
-_STRATEGY_ARTIFACT_SCHEMA = "nika-trader-strategy-artifact-v1"
+_STRATEGY_ARTIFACT_SCHEMA = "nika-trader-strategy-artifact-v2"
 _QUALITY_SCHEMA = "nika-trader-data-quality-v1"
 _CANDIDATE_SCHEMA = "nika-trader-candidate-score-v1"
 _SELECTION_SCHEMA = "nika-trader-selection-v1"
@@ -111,7 +111,7 @@ class StrategyArtifactFingerprint:
 
     @property
     def fingerprint(self) -> str:
-        payload = "|".join(
+        payload = json.dumps(
             (
                 _STRATEGY_ARTIFACT_SCHEMA,
                 self.strategy_id,
@@ -120,10 +120,12 @@ class StrategyArtifactFingerprint:
                 self.config_sha256,
                 self.feature_pipeline_sha256,
                 self.fitted_state_sha256,
-                str(self.seed),
+                self.seed,
                 self.fit_cutoff_at.isoformat(),
                 self.created_at.isoformat(),
-            )
+            ),
+            ensure_ascii=False,
+            separators=(",", ":"),
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
