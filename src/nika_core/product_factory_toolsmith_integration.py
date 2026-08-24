@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from nika_core.product_factory_coding_worker_adapter import (
     CodingWorkerAdapterError,
@@ -74,6 +74,20 @@ class CapabilityEscalationPort(Protocol):
     def reconcile_resume(self, *, task_id: str, capability_id: str) -> dict[str, str] | None: ...
 
 
+@runtime_checkable
+class HostTaskBindingPort(Protocol):
+    """Optional trusted-host task binding required by durable Toolsmith repositories."""
+
+    def ensure_host_task(
+        self,
+        *,
+        task_id: str,
+        workspace_id: str,
+        agent_id: str,
+        payload: dict[str, object],
+    ) -> None: ...
+
+
 @dataclass(slots=True)
 class ProductFactoryToolsmithBridge:
     """Component-scoped bridge from Product Factory into durable Toolsmith escalation.
@@ -99,6 +113,7 @@ class ProductFactoryToolsmithBridge:
         if not capability_id.strip() or not reason.strip():
             raise ProductFactoryToolsmithError("capability id and gap reason must not be empty")
         task_id = component_task_id(request)
+        self._ensure_durable_component_task(request, task_id)
         gap = CapabilityGap(
             task_id=task_id,
             requested_capability=capability_id,
@@ -165,6 +180,25 @@ class ProductFactoryToolsmithBridge:
             capability_id=checkpoint.capability_id,
             capability_version=registered["version"],
             capability_digest=registered["digest"],
+        )
+
+    def _ensure_durable_component_task(
+        self,
+        request: ComponentWorkRequest,
+        task_id: str,
+    ) -> None:
+        if not isinstance(self.escalation, HostTaskBindingPort):
+            return
+        self.escalation.ensure_host_task(
+            task_id=task_id,
+            workspace_id="product.factory",
+            agent_id="product-factory-toolsmith",
+            payload={
+                "schema": "nika-product-factory-component-task-v1",
+                "project_id": request.project_id,
+                "component_id": request.component_id,
+                "repository_id": request.repository_id,
+            },
         )
 
 
