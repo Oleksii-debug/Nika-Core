@@ -10,11 +10,11 @@ from typing import Iterator
 
 
 class RecoveryLeaseError(RuntimeError):
-    """Recovery ownership or SQLite quiescence could not be established safely."""
+    """Recovery ownership or SQLite writer exclusion could not be established safely."""
 
 
 class RecoveryLeaseBusyError(RecoveryLeaseError):
-    """Another process or SQLite client currently owns incompatible access."""
+    """Another process or SQLite writer currently owns incompatible access."""
 
 
 class RecoveryFileLease:
@@ -117,12 +117,15 @@ class RecoveryFileLease:
 
 @contextmanager
 def exclusive_sqlite_lease(path: Path) -> Iterator[sqlite3.Connection]:
-    """Hold SQLite's native EXCLUSIVE locking mode until the connection closes.
+    """Hold SQLite write ownership until the connection closes.
 
     This is intentionally separate from the recovery file lease. The file lease
-    serializes recovery owners even for missing/corrupt targets; SQLite's own lock is
-    the quiescence authority for a healthy live database and is automatically obeyed by
-    ordinary SQLite clients in other processes.
+    serializes recovery owners even for missing/corrupt targets. For a healthy database,
+    SQLite locking provides the writer-exclusion boundary without changing SQLiteStore:
+    an already-active writer prevents this lease, and writers/new access cannot pass the
+    held exclusive locking-mode connection. A WAL reader that already owns a snapshot may
+    finish that snapshot; transactional Online Backup prevents it from observing a
+    partially published database.
     """
 
     try:
@@ -145,9 +148,9 @@ def exclusive_sqlite_lease(path: Path) -> Iterator[sqlite3.Connection]:
                 connection.execute("ROLLBACK")
             if "locked" in str(exc).casefold() or "busy" in str(exc).casefold():
                 raise RecoveryLeaseBusyError(
-                    "live SQLite clients prevent exclusive recovery ownership"
+                    "live SQLite writer prevents exclusive recovery ownership"
                 ) from exc
-            raise RecoveryLeaseError("SQLite recovery quiescence probe failed") from exc
+            raise RecoveryLeaseError("SQLite recovery writer-ownership probe failed") from exc
         except sqlite3.DatabaseError as exc:
             if connection.in_transaction:
                 connection.execute("ROLLBACK")
