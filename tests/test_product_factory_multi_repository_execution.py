@@ -12,15 +12,15 @@ import pytest
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
+from nika_core.product_factory_checkpoint_host import (
+    ProductFactoryCheckpointError,
+    ProductFactoryCheckpointHost,
+)
 from nika_core.product_factory_coding_worker_adapter import (
     CodingWorkerComponentAdapter,
     CodingWorkerDispatchContext,
     CodingWorkerExecutionEvidence,
     RepositoryPathIdentity,
-)
-from nika_core.product_factory_checkpoint_host import (
-    ProductFactoryCheckpointError,
-    ProductFactoryCheckpointHost,
 )
 from nika_core.product_factory_coordinator import ReviewDecision, WorkState
 from nika_core.product_factory_multi_repository import (
@@ -81,7 +81,7 @@ class Fixture:
     task_id: str
     graph: ProductRepositoryGraph
     repositories: dict[str, LocalRepository]
-    worker: "DeterministicMultiRepoWorker"
+    worker: DeterministicMultiRepoWorker
 
 
 class DeterministicMultiRepoWorker(CodingWorkerPort):

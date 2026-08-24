@@ -3,9 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_factory_checkpoint_host import ProductFactoryCheckpointHost
