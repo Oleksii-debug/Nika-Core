@@ -19,7 +19,7 @@ from nika_core.media.contracts import (
 )
 from nika_core.media.errors import MediaError, MediaErrorCode
 from nika_core.media.files import promote_partial_file
-from nika_core.media.hashing import sha256_json
+from nika_core.media.hashing import sha256_file, sha256_json
 from nika_core.media.process import ProcessResult, SafeProcessRunner
 from nika_core.media.subtitles import SubtitlePolicy, normalize_subtitle_file
 from nika_core.media.yt_dlp import YtDlpAdapter, YtDlpDiscovery, YtDlpPolicy
@@ -429,19 +429,33 @@ class YtDlpSubtitleAcquirer:
                     "downloaded subtitle format did not match rediscovered track identity",
                 )
 
+            os.replace(candidate, partial_path)
+            shutil.rmtree(staging)
+            source_sha256 = sha256_file(partial_path, max_bytes=active.max_bytes)
             transcript = normalize_subtitle_file(
-                candidate,
+                partial_path,
                 track=refreshed,
                 version_id=expected_version.version_id,
                 media_duration_seconds=expected_version.duration_seconds,
                 policy=subtitle_policy,
             )
-            os.replace(candidate, partial_path)
-            shutil.rmtree(staging)
+            normalized_sha256 = sha256_file(partial_path, max_bytes=active.max_bytes)
+            if normalized_sha256 != source_sha256:
+                raise MediaError(
+                    MediaErrorCode.CHECKSUM_MISMATCH,
+                    "subtitle bytes changed while normalization evidence was being created",
+                )
+            expected_transcript_id = f"subtitle:{source_sha256[:32]}"
+            if transcript.transcript_id != expected_transcript_id:
+                raise MediaError(
+                    MediaErrorCode.CHECKSUM_MISMATCH,
+                    "normalized transcript is not bound to the acquired subtitle bytes",
+                )
             promoted = promote_partial_file(
                 partial_path,
                 final_path,
                 allowed_root=root,
+                expected_sha256=source_sha256,
                 max_bytes=active.max_bytes,
             )
             asset = MediaAsset(
