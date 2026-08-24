@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 
 import pytest
@@ -32,6 +33,11 @@ from nika_core.product_project import (
     ProductProjectSpec,
     ResearchEvidencePackage,
 )
+
+_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
+_CLOSURE_REF = "review:dependency-closure:business"
+_SCOPE_REF = "review:compliance-scope:business"
+_HTTPX_SHA = "a" * 64
 
 
 def _research_package() -> ResearchEvidencePackage:
@@ -100,17 +106,18 @@ class _ReviewAuthority:
     ) -> bool:
         if project_id != self._project_id:
             return False
-        expected = {
+        prefixes = {
+            _CLOSURE_REF: "dependency-closure:",
+            _SCOPE_REF: "compliance-scope:",
+            "review:license:httpx-0.28.1": "license-disposition:component-httpx:",
             (
-                "review:license:httpx-0.28.1",
-                "license-disposition:component-httpx",
-            ),
-            (
-                "terms-review:public-source:competitor-1",
-                "public-source-permission:competitor-public-1",
-            ),
+                "terms-review:public-source:competitor-1"
+            ): "public-source-permission:competitor-public-1:",
         }
-        return (evidence_ref, purpose) in expected
+        prefix = prefixes.get(evidence_ref)
+        if prefix is None or not purpose.startswith(prefix):
+            return False
+        return _FINGERPRINT_RE.fullmatch(purpose.removeprefix(prefix)) is not None
 
 
 def _allowed_compliance(project_id: str) -> ProductComplianceDecision:
@@ -123,7 +130,7 @@ def _allowed_compliance(project_id: str) -> ProductComplianceDecision:
                 package_name="httpx",
                 version="0.28.1",
                 source_ref="registry:pypi:httpx:0.28.1",
-                provenance_ref="hash:sha256:httpx-fixture",
+                provenance_ref=f"sha256:{_HTTPX_SHA}",
                 license_expression="BSD-3-Clause",
                 license_disposition=LicenseDisposition.APPROVED,
                 distribution_obligations=("retain-license-notice",),
@@ -150,6 +157,8 @@ def _allowed_compliance(project_id: str) -> ProductComplianceDecision:
                 permission_basis_ref="terms-review:public-source:competitor-1",
             ),
         ),
+        dependency_closure_ref=_CLOSURE_REF,
+        scope_review_ref=_SCOPE_REF,
     )
 
 
