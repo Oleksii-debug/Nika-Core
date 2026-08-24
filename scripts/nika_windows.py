@@ -23,6 +23,11 @@ from nika_core.product_factory_packaged_journey import (
     PackagedProductStateProvider,
     product_project_identity,
 )
+from nika_core.product_factory_packaged_planning import (
+    TEAM_PLAN_REF_PREFIX,
+    PackagedProductFactoryTeamPlanner,
+    PackagedTeamPlanResult,
+)
 from nika_core.product_project import ProductProjectRepository
 from nika_core.ui.bridge import UIActionBridge
 from nika_core.ui.bridge_models import UIResult
@@ -52,11 +57,13 @@ def build_windows_bridge(
         workspaces=WorkspaceRegistry(store),
         audit=AuditLog(store),
     )
-    products = ProductProjectCommandService(ProductProjectRepository(store))
+    repository = ProductProjectRepository(store)
+    products = ProductProjectCommandService(repository)
     product_router = PackagedProductCommandRouter(
         products=products,
         ordinary_handler=backend.create_task,
         selection_store=PackagedProductSelectionStore(store),
+        team_planner=PackagedProductFactoryTeamPlanner(repository),
     )
     command_center = ProductCommandCenter(products)
     product_state = PackagedProductStateProvider(
@@ -95,6 +102,7 @@ def _require_product_state(
     response: Mapping[str, Any],
     *,
     project_id: str,
+    spec_version: int,
 ) -> Mapping[str, Any]:
     if response.get("ok") is not True:
         raise RuntimeError(f"PF11 packaged bridge state failed: {response}")
@@ -106,13 +114,16 @@ def _require_product_state(
         raise TypeError("PF11 packaged bridge did not expose ProductCommandCenter state")
     if (
         product_state.get("project_id") != project_id
-        or product_state.get("spec_version") != 1
+        or product_state.get("spec_version") != spec_version
         or not isinstance(product_state.get("status_count"), int)
         or isinstance(product_state.get("status_count"), bool)
         or not isinstance(product_state.get("decision_count"), int)
         or isinstance(product_state.get("decision_count"), bool)
     ):
         raise RuntimeError("PF11 packaged ProductCommandCenter state identity is invalid")
+    status_counts = product_state.get("status_counts")
+    if not isinstance(status_counts, Mapping) or status_counts.get("team_role") != 1:
+        raise RuntimeError("PF11 packaged state did not expose the durable team-plan reference")
     forbidden_fields = {
         "evidence",
         "evidence_refs",
@@ -148,6 +159,29 @@ def _require_current_product_result(
         )
 
 
+def _require_team_plan_result(
+    response: Mapping[str, Any],
+    *,
+    plan_result: PackagedTeamPlanResult,
+) -> None:
+    permission_ceiling = ", ".join(sorted(plan_result.plan.permission_ceiling)) or "none"
+    expected_message = (
+        f"План Product Factory: {plan_result.plan.plan_id}; "
+        f"ProductProject: {plan_result.project_id}; spec version {plan_result.spec_version}; "
+        f"state {plan_result.state}; scale medium; roles {len(plan_result.plan.roles)}; "
+        f"independent review roles {plan_result.independent_review_count}; "
+        f"permission ceiling: {permission_ceiling}; worker dispatch: not started."
+    )
+    if (
+        response.get("status") != "completed"
+        or response.get("message") != expected_message
+        or response.get("focus_id") != "tasks-heading"
+    ):
+        raise RuntimeError(
+            "PF11 packaged Product Factory plan returned inconsistent identity/focus"
+        )
+
+
 def _run_pf11_proof(
     config: AppConfig,
     *,
@@ -172,10 +206,56 @@ def _run_pf11_proof(
     )
     if result.get("status") != "completed":
         raise RuntimeError(f"PF11 packaged ProductProject route failed: {result}")
+
+    plan_response = bridge.dispatch(
+        {
+            "request_id": "pf11-packaged-plan-proof",
+            "action_id": "task.create",
+            "payload": {"command": "Plan current ProductProject"},
+        }
+    )
+    if plan_response.get("status") != "completed":
+        raise RuntimeError(f"PF11 packaged Product Factory planning failed: {plan_response}")
+
     detail = products.inspect_project(project_id)
-    if detail.summary.project_id != project_id or detail.summary.version != 1:
+    if detail.summary.project_id != project_id or detail.summary.version != 2:
         raise RuntimeError("PF11 packaged ProductProject identity/version proof failed")
-    product_state = _require_product_state(bridge.get_state(), project_id=project_id)
+
+    proof_store = SQLiteStore(config.database_path)
+    proof_store.initialize()
+    proof_repository = ProductProjectRepository(proof_store)
+    team_plan = PackagedProductFactoryTeamPlanner(proof_repository).inspect(project_id)
+    persisted_project = proof_repository.get(project_id)
+    owned_refs = tuple(
+        ref
+        for ref in persisted_project.spec.team_refs
+        if ref.startswith(TEAM_PLAN_REF_PREFIX)
+    )
+    if owned_refs != (team_plan.binding_ref,):
+        raise RuntimeError("PF11 packaged team plan binding is not canonical ProductProject state")
+    if team_plan.plan.permission_ceiling != frozenset({"read_project"}):
+        raise RuntimeError("PF11 packaged team plan exceeded planning-only permission ceiling")
+    if any(
+        role.permissions - frozenset({"read_project"})
+        for role in team_plan.plan.roles
+    ):
+        raise RuntimeError("PF11 packaged team role exceeded planning-only permissions")
+
+    _require_team_plan_result(plan_response, plan_result=team_plan)
+    show_plan_response = bridge.dispatch(
+        {
+            "request_id": "pf11-packaged-show-plan-proof",
+            "action_id": "task.create",
+            "payload": {"command": "Show current Product Factory plan"},
+        }
+    )
+    _require_team_plan_result(show_plan_response, plan_result=team_plan)
+
+    product_state = _require_product_state(
+        bridge.get_state(),
+        project_id=project_id,
+        spec_version=detail.summary.version,
+    )
     current_result = bridge.dispatch(
         {
             "request_id": "pf11-packaged-current-proof",
@@ -202,6 +282,14 @@ def _run_pf11_proof(
         "bridge_state_spec_version": product_state["spec_version"],
         "bridge_state_status_count": product_state["status_count"],
         "bridge_state_decision_count": product_state["decision_count"],
+        "team_plan_id": team_plan.plan.plan_id,
+        "team_plan_binding_ref": team_plan.binding_ref,
+        "team_plan_role_count": len(team_plan.plan.roles),
+        "team_plan_independent_review_count": team_plan.independent_review_count,
+        "team_plan_permission_ceiling": sorted(team_plan.plan.permission_ceiling),
+        "team_plan_persisted_proven": True,
+        "team_plan_restart_recovery_proven": True,
+        "team_plan_worker_dispatch_started": False,
         "restart_selection_integrity_proven": True,
         "bounded_projection_proven": True,
         "human_tested": False,
