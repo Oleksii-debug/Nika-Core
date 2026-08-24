@@ -403,7 +403,7 @@ class TeamCancellationJournal:
             raise RuntimeError("cancellation operation identity is corrupt")
         expected_effect_count = row["expected_effect_count"]
         if isinstance(expected_effect_count, bool) or not isinstance(expected_effect_count, int):
-            raise RuntimeError("cancellation expected effect count is corrupt")
+            raise TypeError("cancellation expected effect count is corrupt")
         if expected_effect_count < 0:
             raise RuntimeError("cancellation expected effect count is corrupt")
         effect_rows = conn.execute(
