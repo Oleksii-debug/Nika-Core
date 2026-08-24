@@ -18,6 +18,7 @@
     <button type="button" data-action-id="nav.agents" data-focus-target="agents-heading">Агенти</button>
     <button type="button" data-action-id="nav.logs" data-focus-target="logs-heading">Журнал</button>
     <button type="button" data-action-id="nav.workspaces" data-focus-target="workspaces-heading">Робочі простори</button>
+    <a href="#product-project-heading">ProductProject</a>
     <a href="#keyboard-heading">Клавіатура</a>
   </nav>
 
@@ -39,6 +40,29 @@
       <h2 id="tasks-heading" tabindex="-1">Завдання</h2>
       <p id="tasks-empty">Завдань ще немає.</p>
       <ol id="tasks-list" aria-label="Список завдань"></ol>
+    </section>
+
+    <section aria-labelledby="product-project-heading">
+      <h2 id="product-project-heading" tabindex="-1">ProductProject</h2>
+      <p id="product-project-empty">Поточний ProductProject не вибрано.</p>
+      <dl id="product-project-summary" aria-label="Поточний ProductProject" hidden>
+        <dt>Назва</dt>
+        <dd id="product-project-title">—</dd>
+        <dt>Ідентифікатор</dt>
+        <dd id="product-project-id">—</dd>
+        <dt>Мета</dt>
+        <dd id="product-project-goal">—</dd>
+        <dt>Стан</dt>
+        <dd id="product-project-state">—</dd>
+        <dt>Версія специфікації</dt>
+        <dd id="product-project-spec-version">—</dd>
+        <dt>Блокери</dt>
+        <dd id="product-project-blocker-count">—</dd>
+        <dt>Записи стану</dt>
+        <dd id="product-project-status-count">—</dd>
+        <dt>Рішення</dt>
+        <dd id="product-project-decision-count">—</dd>
+      </dl>
     </section>
 
     <section aria-labelledby="agents-heading">
