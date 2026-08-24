@@ -35,7 +35,6 @@ from nika_core.product_factory_deployment import (
 )
 from nika_core.toolsmith.contracts import AllowedPathPolicy, ChangedFile
 
-
 NOW = datetime(2026, 8, 24, 6, 0, tzinfo=UTC)
 SHA = "a" * 40
 
