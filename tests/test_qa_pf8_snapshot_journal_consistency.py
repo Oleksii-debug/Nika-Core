@@ -108,11 +108,12 @@ def _journal(tmp_path):
         payload={"project_id": "project-a"},
     )
     ledger = IdempotencyLedger(store)
-    return ledger, RuntimeIdempotencyMaintenanceJournal(ledger, task_id=task.task_id)
+    journal = RuntimeIdempotencyMaintenanceJournal(ledger, task_id=task.task_id)
+    return task.task_id, ledger, journal
 
 
 def test_restore_rejects_applied_snapshot_when_canonical_journal_has_no_effect(tmp_path) -> None:
-    ledger, journal = _journal(tmp_path)
+    task_id, ledger, journal = _journal(tmp_path)
     forged = MaintenanceResult(True, False, ("snapshot:forged-applied",))
     coordinator = ProductOperationsCoordinator(
         "project-a",
@@ -123,11 +124,11 @@ def test_restore_rejects_applied_snapshot_when_canonical_journal_has_no_effect(t
     with pytest.raises(ProductOperationsError, match="maintenance effect"):
         coordinator.restore(_snapshot(forged))
 
-    assert ledger.list_for_task(journal._task_id) == ()  # noqa: SLF001 - QA oracle
+    assert ledger.list_for_task(task_id) == ()
 
 
 def test_restore_rejects_snapshot_result_that_conflicts_with_completed_journal(tmp_path) -> None:
-    ledger, journal = _journal(tmp_path)
+    _, ledger, journal = _journal(tmp_path)
     service = _service()
     request = _request()
     reservation = journal.reserve(
@@ -156,7 +157,7 @@ def test_restore_rejects_resolved_snapshot_while_journal_is_unresolved(
     tmp_path,
     durable_state: str,
 ) -> None:
-    ledger, journal = _journal(tmp_path)
+    _, ledger, journal = _journal(tmp_path)
     service = _service()
     request = _request()
     reservation = journal.reserve(
