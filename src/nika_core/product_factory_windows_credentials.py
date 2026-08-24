@@ -1,24 +1,23 @@
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import hmac
-import os
 import secrets
 import sys
-import tempfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
 from threading import RLock
-from typing import BinaryIO, Protocol
+from typing import Protocol
 
 _CREDENTIAL_BLOB_MAX_BYTES = 5 * 512
 _GENERIC_TARGET_MAX_CHARS = 32767
 _SERVICE_PREFIX = "NikaCore.ProductFactory.v1"
 _USERNAME = "nika-core"
 _AUTHORITY_SEGMENT = "authority"
+_ERROR_ALREADY_EXISTS = 183
 _PROCESS_AUTHORITY_LOCK_GUARD = RLock()
-_PROCESS_AUTHORITY_LOCKS: dict[str, BinaryIO] = {}
+_PROCESS_AUTHORITY_HANDLES: dict[str, int] = {}
 
 
 class ProtectedCredentialStoreError(RuntimeError):
@@ -433,35 +432,43 @@ def _ensure_process_authority_owner(service_prefix: str) -> None:
         ) from None
     lock_key = hashlib.sha256(encoded_prefix).hexdigest()
     with _PROCESS_AUTHORITY_LOCK_GUARD:
-        if lock_key in _PROCESS_AUTHORITY_LOCKS:
+        if lock_key in _PROCESS_AUTHORITY_HANDLES:
             return
+        object_name = f"Local\\NikaCore.ProductFactory.CredentialAuthority.{lock_key}"
         try:
-            import msvcrt
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            create_event = kernel32.CreateEventW
+            create_event.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_wchar_p,
+            ]
+            create_event.restype = ctypes.c_void_p
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = [ctypes.c_void_p]
+            close_handle.restype = ctypes.c_int
 
-            root = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
-            lock_dir = Path(root) / "NikaCore" / "ProductFactory"
-            lock_dir.mkdir(parents=True, exist_ok=True)
-            lock_path = lock_dir / f"credential-authority-{lock_key}.lock"
-            lock_file = lock_path.open("a+b")
-            lock_file.seek(0, os.SEEK_END)
-            if lock_file.tell() == 0:
-                lock_file.write(b"\x00")
-                lock_file.flush()
-            lock_file.seek(0)
-            try:
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
-            except OSError:
-                lock_file.close()
+            ctypes.set_last_error(0)
+            raw_handle = create_event(None, 0, 0, object_name)
+            last_error = ctypes.get_last_error()
+            if not raw_handle:
                 raise ProtectedCredentialStoreError(
-                    "another credential authority host is active or the authority lock is unavailable"
-                ) from None
+                    f"credential authority host initialization failed (winerror={last_error})"
+                )
+            handle = int(raw_handle)
+            if last_error == _ERROR_ALREADY_EXISTS:
+                close_handle(ctypes.c_void_p(handle))
+                raise ProtectedCredentialStoreError(
+                    "another credential authority host is active"
+                )
         except ProtectedCredentialStoreError:
             raise
         except Exception as exc:
             raise ProtectedCredentialStoreError(
-                f"credential authority host lock initialization failed ({type(exc).__name__})"
+                f"credential authority host initialization failed ({type(exc).__name__})"
             ) from None
-        _PROCESS_AUTHORITY_LOCKS[lock_key] = lock_file
+        _PROCESS_AUTHORITY_HANDLES[lock_key] = handle
 
 
 def _validated_material(raw_secret: str) -> str:
