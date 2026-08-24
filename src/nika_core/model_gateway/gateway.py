@@ -6,6 +6,7 @@ from typing import Protocol
 
 from .contracts import (
     ModelErrorCode,
+    ModelFailureEffect,
     ModelGatewayError,
     ModelProvider,
     ModelRequest,
@@ -148,12 +149,12 @@ class ModelGateway:
                 self._audit_failure(request, capabilities.provider_id, error)
                 raise error from exc
             except TimeoutError as exc:
-                retryable = capabilities.supports_hard_cancellation
                 error = ModelGatewayError(
                     ModelErrorCode.TIMEOUT,
                     "model request exceeded its total deadline",
                     provider_id=capabilities.provider_id,
-                    retryable=retryable,
+                    retryable=capabilities.supports_hard_cancellation,
+                    failure_effect=ModelFailureEffect.UNKNOWN,
                 )
                 self._audit_failure(request, capabilities.provider_id, error)
                 if self._can_fallback(error=error, index=index, providers=providers):
@@ -307,6 +308,13 @@ class ModelGateway:
                 provider_id=provider_id,
                 retryable=False,
             )
+        if not isinstance(error.failure_effect, ModelFailureEffect):
+            return ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                "model provider returned an invalid failure effect state",
+                provider_id=provider_id,
+                retryable=False,
+            )
         if error.provider_id is not None and error.provider_id != provider_id:
             return ModelGatewayError(
                 ModelErrorCode.PROVIDER_ERROR,
@@ -320,6 +328,7 @@ class ModelGateway:
                 str(error),
                 provider_id=provider_id,
                 retryable=error.retryable,
+                failure_effect=error.failure_effect,
             )
         return error
 
@@ -355,6 +364,8 @@ class ModelGateway:
         if error.code not in _SAFE_FALLBACK_CODES:
             return False
         if not error.retryable:
+            return False
+        if error.failure_effect is not ModelFailureEffect.NO_EFFECT:
             return False
         return not (
             error.code is ModelErrorCode.TIMEOUT
@@ -395,7 +406,11 @@ class ModelGateway:
         self._audit(
             event_type="model.failed",
             request=request,
-            payload={"provider_id": provider_id, "code": error.code.value},
+            payload={
+                "provider_id": provider_id,
+                "code": error.code.value,
+                "failure_effect": error.failure_effect.value,
+            },
         )
 
     def _audit_fallback(
@@ -412,6 +427,7 @@ class ModelGateway:
                 "from_provider_id": current.capabilities.provider_id,
                 "to_provider_id": fallback.capabilities.provider_id,
                 "reason": error.code.value,
+                "failure_effect": error.failure_effect.value,
             },
         )
 
