@@ -247,10 +247,15 @@ class ProductReleaseComplianceGate:
             and decision.snapshot_digest == snapshot.digest
         )
         packaging_findings = _notice_bundle_findings(snapshot, bundle_dir)
+        refreshed: ReleaseComplianceDecision | None = None
         if context_matches and not packaging_findings and decision.allowed:
-            return _issue_grant(decision, snapshot)
+            refreshed = self.evaluate(snapshot, bundle_dir=bundle_dir)
+            if refreshed.allowed:
+                return _issue_grant(refreshed, snapshot)
 
         findings = list(decision.findings)
+        if refreshed is not None:
+            findings.extend(refreshed.findings)
         if not context_matches:
             findings.append("decision:stale-or-wrong-release-snapshot")
         findings.extend(packaging_findings)
