@@ -151,6 +151,30 @@ The final `reliability.restore_completed` event is appended to the fully staged 
 before publication and records the exact source backup plus the generated safety-backup
 filename. The surviving restored database therefore retains final restore evidence.
 
+## Physical process-loss evidence
+
+Exception-based fault injection remains useful for ordinary rollback paths, but it is not
+accepted as the only crash proof because Python still executes `finally` blocks and closes
+SQLite connections while unwinding an exception.
+
+`tests/test_backup_restore_recovery_process_loss.py` therefore uses spawned processes and
+`os._exit()` at exact recovery boundaries. The parent process proves durable filesystem
+and SQLite state after the child exits without Python cleanup:
+
+- a separate process holding an active WAL read transaction prevents native exclusive
+  restore ownership;
+- process loss after the safety backup but before staged audit/live copy preserves the
+  live logical database and leaves a verifiable safety artifact;
+- process loss immediately after SQLite Online Backup commits the staged database into the
+  live connection leaves the restored logical state and final `restore_completed` audit
+  recoverable on a fresh connection;
+- process loss after a corrupt target has been quarantined but before staged publication
+  leaves the marker, stage and quarantine sufficient for `recover_interrupted_restore()`
+  to complete exactly once.
+
+These are process-loss tests, not a claim of simulated power-loss or arbitrary hostile
+filesystem containment.
+
 ## Explicit residual boundary
 
 This work does **not** claim an authenticated filesystem transaction or a sandbox against
@@ -172,10 +196,13 @@ Focused deterministic tests cover:
 
 - WAL-only stale confirmation and zero-WAL normalization;
 - committed WAL mutation of a manifest-bound backup after preview;
-- live WAL client exclusion;
+- same-process and cross-process live WAL client exclusion;
 - cross-process recovery-owner conflict;
-- crash after safety backup but before live copy;
-- crash after committed healthy live copy with durable final audit;
+- real `os._exit` process loss after safety backup but before live copy;
+- real `os._exit` process loss immediately after committed healthy live copy with durable
+  final audit;
+- real `os._exit` process loss after quarantine and before staged publication, followed by
+  interrupted-restore completion;
 - crash after corrupt-stage publication followed by interrupted recovery;
 - no-clobber publication race;
 - unknown competing target preservation during quarantine rollback;
