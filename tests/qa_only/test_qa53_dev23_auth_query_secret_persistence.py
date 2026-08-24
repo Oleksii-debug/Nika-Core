@@ -5,9 +5,14 @@ from pathlib import Path
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.research import NetworkResearchRepository, ResearchRepository, ResearchWorkspace
-from nika_core.research.models import SourceKind, SourceSpec
-from nika_core.research.source_identity import ResearchSourceIdentityError
+from nika_core.research import (
+    NetworkResearchRepository,
+    ResearchRepository,
+    ResearchSourceIdentityError,
+    ResearchWorkspace,
+    SourceKind,
+    SourceSpec,
+)
 
 
 _CANARY = "QA53_SYNTHETIC_AUTH_QUERY_SECRET_b3e2a619"
