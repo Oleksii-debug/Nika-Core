@@ -74,6 +74,11 @@ def main() -> None:
         assert before.target.application.executable.lower().endswith("powershell.exe")
         assert before.target.window.native_handle not in {None, 0}
         assert before.target.window.generation == 1
+        unaddressable_count = backend.last_unaddressable_count
+        assert unaddressable_count > 0, (
+            "WinForms fixture did not reproduce the no-RuntimeId provider artifact "
+            "that previously blocked the entire semantic snapshot"
+        )
         collision_runtime_ids = backend.last_duplicate_runtime_ids
         assert collision_runtime_ids, (
             "WinForms fixture did not reproduce the duplicate RuntimeId family "
@@ -172,6 +177,7 @@ def main() -> None:
                     "control_count": len(final.controls),
                     "patterns": patterns,
                     "median_observe_ms": baseline.median_observe_ms,
+                    "unaddressable_runtime_id_elements_omitted": unaddressable_count,
                     "duplicate_runtime_ids_disambiguated_by_generation": [
                         list(item) for item in collision_runtime_ids
                     ],

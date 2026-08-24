@@ -141,3 +141,4 @@ def test_pywinauto_backend_omits_unaddressable_elements_without_guessing(
     assert len(controls) == 1
     assert controls[0].runtime_id == (4, 2)
     assert controls[0].element_generation == 1
+    assert backend.last_unaddressable_count == 2

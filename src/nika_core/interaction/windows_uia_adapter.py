@@ -137,12 +137,19 @@ class PywinautoUIABackend:
             dict[tuple[int, ...], list[_TrackedElement]],
         ] = {}
         self._last_duplicate_runtime_ids: tuple[tuple[int, ...], ...] = ()
+        self._last_unaddressable_count = 0
 
     @property
     def last_duplicate_runtime_ids(self) -> tuple[tuple[int, ...], ...]:
         """RuntimeIds that represented multiple distinct elements last observation."""
 
         return self._last_duplicate_runtime_ids
+
+    @property
+    def last_unaddressable_count(self) -> int:
+        """UIA provider elements omitted because they exposed no usable RuntimeId."""
+
+        return self._last_unaddressable_count
 
     def _desktop(self):
         try:
@@ -446,17 +453,20 @@ class PywinautoUIABackend:
             else "is_content_element"
         )
         pairs: list[tuple[object, UIAControlRecord]] = []
+        unaddressable_count = 0
         for wrapper in wrappers:
             if getattr(wrapper.element_info, flag_name, None) is False:
                 continue
             record = self._record(wrapper)
             if record.runtime_id is None:
+                unaddressable_count += 1
                 logger.debug(
                     "Ignoring UIA element without usable RuntimeId; "
                     "it cannot receive semantic action authority"
                 )
                 continue
             pairs.append((wrapper, record))
+        self._last_unaddressable_count = unaddressable_count
         return self._assign_generations(hwnd, tuple(pairs))
 
     def enumerate_controls(
