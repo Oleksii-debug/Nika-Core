@@ -30,8 +30,8 @@ def _factory(*, objective_id: str) -> BusinessFactory:
                 evidence=(
                     EvidenceRef(
                         evidence_id=f"evidence-{objective_id}",
-                        source_ref="research:source:controlled:concurrency",
-                        summary="Controlled concurrency evidence",
+                        provenance_ref="research:source:controlled:concurrency",
+                        claim="Controlled concurrency evidence",
                     ),
                 ),
                 research_artifact_ref=f"research:artifact:{objective_id}",
