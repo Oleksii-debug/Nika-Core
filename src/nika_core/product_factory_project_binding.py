@@ -1,14 +1,26 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import hashlib
+import hmac
+import json
+import secrets
+from dataclasses import dataclass, field, fields, is_dataclass
+from enum import Enum
+from typing import Any
 
 from nika_core.product_factory_coordinator import (
     CoordinatorError,
     CoordinatorSnapshot,
     ProductFactoryCoordinator,
 )
+from nika_core.product_factory_coordinator import (
+    trusted_plan_fingerprint as compute_trusted_plan_fingerprint,
+)
 from nika_core.product_factory_orchestration import ProductRepositoryGraph
 from nika_core.product_project import ProductProject
+
+_LIVE_AUTHORITY_SCHEMA = "nika-product-factory-live-plan-authority-v2"
+_LIVE_AUTHORITY_KEY = secrets.token_bytes(32)
 
 
 class ProductProjectBindingError(ValueError):
@@ -25,7 +37,58 @@ class ProductProjectCoordinatorCheckpoint:
     spec_version: int
     row_version: int
     coordinator: CoordinatorSnapshot
-    trusted_plan_fingerprint: str | None = field(default=None, repr=False, compare=False)
+    # Candidate-controlled bytes are never authority. These live-only fields are
+    # deliberately excluded from __init__/serialization. The fingerprint is useful
+    # diagnostic metadata; the keyed proof binds the exact host-issued live checkpoint.
+    trusted_plan_fingerprint: str | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    trusted_plan_authority_proof: str | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+
+def verify_live_checkpoint_authority(
+    checkpoint: ProductProjectCoordinatorCheckpoint,
+) -> str:
+    """Verify the process-ephemeral host binding proof for a first checkpoint.
+
+    The proof binds both immutable plan authority and the exact live checkpoint snapshot.
+    It is intentionally not durable. After the first atomic checkpoint save, the
+    host-task anchor is authoritative across process restart. Merely knowing or
+    recomputing the public plan fingerprint cannot mint this keyed proof.
+    """
+
+    plan = checkpoint.coordinator.trusted_plan
+    if plan is None:
+        raise ProductProjectBindingError("checkpoint is missing immutable trusted plan")
+    try:
+        fingerprint = compute_trusted_plan_fingerprint(plan)
+    except CoordinatorError as exc:
+        raise ProductProjectBindingError("checkpoint trusted plan is invalid") from exc
+    if checkpoint.trusted_plan_fingerprint != fingerprint:
+        raise ProductProjectBindingError(
+            "live checkpoint trusted-plan fingerprint does not match checkpoint plan"
+        )
+    proof = checkpoint.trusted_plan_authority_proof
+    if proof is None:
+        raise ProductProjectBindingError("checkpoint has no live host authority proof")
+    expected = _sign_live_authority(
+        project_id=checkpoint.project_id,
+        spec_version=checkpoint.spec_version,
+        row_version=checkpoint.row_version,
+        fingerprint=fingerprint,
+        coordinator=checkpoint.coordinator,
+    )
+    if not hmac.compare_digest(proof, expected):
+        raise ProductProjectBindingError("checkpoint live host authority proof is invalid")
+    return fingerprint
 
 
 @dataclass(slots=True)
@@ -36,6 +99,11 @@ class ProductProjectCoordinatorBinding:
     coordinator snapshots nor creates a second project store; the host persists the
     checkpoint wherever orchestration state is durably owned and must re-bind it against
     the current ProductProject before resume.
+
+    A live checkpoint receives a process-ephemeral keyed proof for the initial trusted
+    plan and exact snapshot. The proof cannot be reconstructed from checkpoint bytes or
+    from the public plan fingerprint alone. It only authorizes first-anchor establishment;
+    restart authority subsequently comes from the independently persisted host-task anchor.
     """
 
     project: ProductProject
@@ -80,13 +148,26 @@ class ProductProjectCoordinatorBinding:
             raise ProductProjectBindingError(
                 "coordinator snapshot does not belong to bound ProductProject"
             )
-        return ProductProjectCoordinatorCheckpoint(
+        fingerprint = coordinator.trusted_plan_fingerprint
+        checkpoint = ProductProjectCoordinatorCheckpoint(
             project_id=self.project.project_id,
             spec_version=self.project.spec_version,
             row_version=self.project.row_version,
             coordinator=snapshot,
-            trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
         )
+        object.__setattr__(checkpoint, "trusted_plan_fingerprint", fingerprint)
+        object.__setattr__(
+            checkpoint,
+            "trusted_plan_authority_proof",
+            _sign_live_authority(
+                project_id=checkpoint.project_id,
+                spec_version=checkpoint.spec_version,
+                row_version=checkpoint.row_version,
+                fingerprint=fingerprint,
+                coordinator=snapshot,
+            ),
+        )
+        return checkpoint
 
     def restore(
         self,
@@ -126,3 +207,66 @@ class ProductProjectCoordinatorBinding:
             raise StaleProductProjectBindingError(
                 "ProductProject changed after orchestration checkpoint; explicit reconciliation required"
             )
+
+
+def _sign_live_authority(
+    *,
+    project_id: str,
+    spec_version: int,
+    row_version: int,
+    fingerprint: str,
+    coordinator: CoordinatorSnapshot,
+) -> str:
+    payload = json.dumps(
+        (
+            _LIVE_AUTHORITY_SCHEMA,
+            project_id,
+            spec_version,
+            row_version,
+            fingerprint,
+            _authority_value(coordinator),
+        ),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hmac.new(_LIVE_AUTHORITY_KEY, payload, hashlib.sha256).hexdigest()
+
+
+def _authority_value(value: Any) -> Any:
+    """Project an in-memory checkpoint value into deterministic proof framing.
+
+    This framing is used only to authenticate a live host-issued capability in the same
+    process. Durable checkpoint serialization remains owned by the checkpoint host.
+    """
+
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            item.name: _authority_value(getattr(value, item.name))
+            for item in fields(value)
+        }
+    if isinstance(value, Enum):
+        return _authority_value(value.value)
+    if isinstance(value, dict):
+        return {
+            str(key): _authority_value(value[key])
+            for key in sorted(value, key=lambda item: str(item))
+        }
+    if isinstance(value, (tuple, list)):
+        return [_authority_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        items = [_authority_value(item) for item in value]
+        return sorted(
+            items,
+            key=lambda item: json.dumps(
+                item,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    raise ProductProjectBindingError(
+        f"unsupported live checkpoint authority value type: {type(value).__name__}"
+    )
