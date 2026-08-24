@@ -10,6 +10,7 @@ from pathlib import Path
 
 from nika_core.packaging.notices import (
     build_third_party_notices,
+    verified_third_party_notice_reference,
     verify_third_party_notices,
 )
 from nika_core.product_compliance import (
@@ -371,6 +372,18 @@ def _notice_bundle_findings(
             findings.append("packaging:notices-digest-mismatch")
     elif "packaging:missing:THIRD_PARTY_NOTICES.txt" not in findings:
         findings.append("packaging:missing:THIRD_PARTY_NOTICES.txt")
+    if not findings:
+        for notice in snapshot.notice_evidence:
+            expected_ref = verified_third_party_notice_reference(
+                directory,
+                package_name=notice.package_name,
+                version=notice.version,
+            )
+            if expected_ref is None or not hmac.compare_digest(
+                expected_ref,
+                notice.notice_ref,
+            ):
+                findings.append(f"packaging:notice-ref-unverified:{notice.component_id}")
     return tuple(dict.fromkeys(findings))
 
 
