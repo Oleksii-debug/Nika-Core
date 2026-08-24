@@ -22,6 +22,7 @@ from nika_core.runtime.contracts import (
     RuntimeResumeRequest,
     RuntimeUnsupportedError,
 )
+from nika_core.runtime.session_store import RuntimeSessionStore
 from nika_core.ui.bridge import UIActionBridge
 from nika_core.ui.desktop_backend import DesktopBackend
 
@@ -149,6 +150,23 @@ def test_create_task_dispatches_no_llm_runtime_without_blocking_bridge(tmp_path:
         backend.close()
 
 
+def test_stop_immediately_after_acceptance_routes_through_runtime_cancel(tmp_path: Path) -> None:
+    runtime = BlockingRuntime()
+    backend, queue, _store = build_backend(tmp_path, runtime=runtime)
+    try:
+        result = backend.create_task({"command": "скасуй одразу"})
+        assert result.status == "accepted"
+        task = queue.list_recent()[0]
+
+        stop = backend.stop_agent({})
+        assert stop.status == "accepted"
+        assert runtime.started.wait(timeout=1.0)
+        assert runtime.cancel_requested.wait(timeout=1.0)
+        _wait_for_state(queue, task.task_id, TaskState.CANCELLED)
+    finally:
+        backend.close()
+
+
 def test_running_runtime_keeps_stop_available_and_pause_fail_closed(tmp_path: Path) -> None:
     runtime = BlockingRuntime()
     backend, queue, _store = build_backend(tmp_path, runtime=runtime)
@@ -173,13 +191,13 @@ def test_running_runtime_keeps_stop_available_and_pause_fail_closed(tmp_path: Pa
 
 def test_runtime_paused_task_resumes_through_durable_session(tmp_path: Path) -> None:
     runtime = PausingRuntime()
-    backend, queue, _store = build_backend(tmp_path, runtime=runtime)
+    backend, queue, store = build_backend(tmp_path, runtime=runtime)
     try:
         result = backend.create_task({"command": "зупинись і продовж"})
         assert result.status == "accepted"
         task = queue.list_recent()[0]
         _wait_for_state(queue, task.task_id, TaskState.PAUSED)
-        session = backend._coordinator.sessions.get(task.task_id)
+        session = RuntimeSessionStore(store).get(task.task_id)
         assert session is not None
         assert session.runtime_id == runtime.runtime_id
 
