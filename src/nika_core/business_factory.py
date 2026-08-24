@@ -12,7 +12,7 @@ from nika_core.business_authority import (
     BusinessAuthorizationIntent,
     trusted_business_authorization,
 )
-from nika_core.product_compliance import ProductComplianceDecision
+from nika_core.product_release_compliance import ReleaseComplianceGrant
 from nika_core.product_project import (
     EvidenceRef,
     ProductProjectError,
@@ -500,17 +500,25 @@ class BusinessFactory:
         delivery_id: str,
         artifact_ref: str,
         authorization_ref: str,
-        compliance: ProductComplianceDecision,
+        compliance: ReleaseComplianceGrant,
     ) -> DeliveryRecord:
         order = self._require_linked_work_order()
         qa = self._snapshot.qa
         if qa is None or qa.state is not QAState.PASSED:
             raise BusinessFactoryError("delivery requires passing QA evidence")
         project_id = order.product_project_id or ""
-        if compliance.project_id != project_id or not compliance.allowed:
-            raise BusinessFactoryError("delivery requires an allowed PF10 compliance decision")
-        _text(delivery_id, "delivery_id")
         _text(artifact_ref, "delivery artifact_ref")
+        if not isinstance(compliance, ReleaseComplianceGrant):
+            raise BusinessFactoryError("delivery requires an exact PF10 release compliance grant")
+        if (
+            compliance.project_id != project_id
+            or compliance.artifact_ref != artifact_ref
+            or not compliance.allowed
+        ):
+            raise BusinessFactoryError(
+                "delivery requires an allowed exact-artifact PF10 release compliance grant"
+            )
+        _text(delivery_id, "delivery_id")
         _text(authorization_ref, "delivery authorization_ref")
         intent = _delivery_authorization_intent(
             self._snapshot.objective.objective_id,
