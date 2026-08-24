@@ -131,12 +131,7 @@ class DurableBuildExecutionHost:
     def execute(self, work_id: str, *, now: datetime | None = None) -> BuildExecutionRecord:
         self._ensure_usable()
         port = _DurableNodePort(self)
-        try:
-            record = self.coordinator.run_dispatch(work_id, port, now=now)
-        except Exception:
-            # The decorator already persisted EFFECT_IN_FLIGHT before any real run call.
-            # Unexpected provider/programming failure therefore remains inspection-only.
-            raise
+        record = self.coordinator.run_dispatch(work_id, port, now=now)
         self._persist_if_changed()
         return record
 
@@ -158,18 +153,34 @@ class DurableBuildExecutionHost:
             raise BuildExecutionDurabilityError(
                 "poisoned PF5 host must be discarded before durable recovery"
             )
-        saved = self.checkpoints.latest()
-        self._sequence = saved.snapshot.sequence
-        self._last_fingerprint = durable_state_fingerprint(saved.snapshot)
-        self._file_evidence = {
-            item.work_id: item for item in saved.snapshot.file_evidence
-        }
-        candidate = self._restore_registry_leases(saved.snapshot, now=now)
-        self._validate_file_evidence(candidate.coordinator)
-        self.coordinator.restore(candidate.coordinator, now=now)
-        self._needs_restore = False
-        self._persist_if_changed()
-        return self._durable_snapshot(self._sequence)
+        registry_before = self.coordinator.nodes.snapshot()
+        sequence_before = self._sequence
+        fingerprint_before = self._last_fingerprint
+        file_evidence_before = dict(self._file_evidence)
+        needs_restore_before = self._needs_restore
+        restored = False
+        try:
+            saved = self.checkpoints.latest()
+            self._sequence = saved.snapshot.sequence
+            self._last_fingerprint = durable_state_fingerprint(saved.snapshot)
+            self._file_evidence = {
+                item.work_id: item for item in saved.snapshot.file_evidence
+            }
+            candidate = self._restore_registry_leases(saved.snapshot, now=now)
+            self._validate_file_evidence(candidate.coordinator)
+            self.coordinator.restore(candidate.coordinator, now=now)
+            self._needs_restore = False
+            self._persist_if_changed()
+            result = self._durable_snapshot(self._sequence)
+            restored = True
+            return result
+        finally:
+            if not restored:
+                self.coordinator.nodes.restore(registry_before)
+                self._sequence = sequence_before
+                self._last_fingerprint = fingerprint_before
+                self._file_evidence = file_evidence_before
+                self._needs_restore = needs_restore_before
 
     def snapshot(self) -> DurableBuildExecutionSnapshot:
         self._ensure_usable()
@@ -315,6 +326,7 @@ class DurableBuildExecutionHost:
         current_by_node = {lease.node_id: lease for lease in current.leases}
         current_by_work = {(lease.project_id, lease.work_id): lease for lease in current.leases}
         durable_leases: list[WorkLease] = []
+        drop_current_lease_ids: set[str] = set()
         for lease in snapshot.leases:
             record = records.get(lease.work_id)
             if record is None or lease.project_id != record.spec.request.project_id:
@@ -325,17 +337,20 @@ class DurableBuildExecutionHost:
                 raise BuildExecutionCheckpointIntegrityError(
                     "durable PF5 lease identity does not match execution record"
                 )
-            if record.state is BuildExecutionState.PREPARED and (
+            exact = current_by_lease.get(lease.lease_id)
+            if exact is not None and exact != lease:
+                raise BuildExecutionDurabilityError(
+                    "current execution registry reused a durable PF5 lease id"
+                )
+            unavailable = record.state is BuildExecutionState.PREPARED and (
                 lease.expires_at <= instant
                 or not self.coordinator.node_availability.is_available(lease.node_id)
-            ):
+            )
+            if unavailable:
+                if exact is not None:
+                    drop_current_lease_ids.add(lease.lease_id)
                 continue
-            exact = current_by_lease.get(lease.lease_id)
             if exact is not None:
-                if exact != lease:
-                    raise BuildExecutionDurabilityError(
-                        "current execution registry reused a durable PF5 lease id"
-                    )
                 continue
             if lease.node_id in current_by_node:
                 raise BuildExecutionDurabilityError(
@@ -347,9 +362,12 @@ class DurableBuildExecutionHost:
                     "current execution registry already has a different work lease"
                 )
             durable_leases.append(lease)
+        retained_current = tuple(
+            lease for lease in current.leases if lease.lease_id not in drop_current_lease_ids
+        )
         merged = ExecutionRegistrySnapshot(
             current.nodes,
-            tuple(sorted((*current.leases, *durable_leases), key=lambda item: item.lease_id)),
+            tuple(sorted((*retained_current, *durable_leases), key=lambda item: item.lease_id)),
             max(current.next_lease, snapshot.registry_next_lease),
         )
         self.coordinator.nodes.restore(merged)
@@ -365,11 +383,6 @@ class DurableBuildExecutionHost:
                 if lease is not None and not unavailable:
                     unavailable = not self.coordinator.node_availability.is_available(lease.node_id)
                 if unavailable:
-                    if lease is not None:
-                        try:
-                            self.coordinator.nodes.release(lease.lease_id)
-                        except Exception:
-                            pass
                     record = replace(
                         record,
                         state=BuildExecutionState.WAITING_FOR_NODE,
@@ -510,3 +523,9 @@ def _validate_changed_files(
             )
         normalized.append(ChangedFile(canonical, item.sha256, item.size_bytes))
     return tuple(normalized)
+
+
+def _aware(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise BuildExecutionDurabilityError("PF5 restore datetime must be timezone-aware")
+    return value.astimezone(UTC)
