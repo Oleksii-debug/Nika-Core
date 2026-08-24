@@ -52,7 +52,10 @@ class _DesktopRuntimeLoop:
     def _run(self) -> None:
         asyncio.set_event_loop(self._loop)
         self._ready.set()
-        self._loop.run_forever()
+        try:
+            self._loop.run_forever()
+        finally:
+            self._loop.close()
 
     def submit(self, coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
         return asyncio.run_coroutine_threadsafe(coroutine, self._loop)
@@ -60,6 +63,8 @@ class _DesktopRuntimeLoop:
     def close(self) -> None:
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=2)
+        if self._thread.is_alive():
+            raise RuntimeError("desktop runtime event loop did not stop")
 
 
 class DesktopBackend:
@@ -201,7 +206,11 @@ class DesktopBackend:
             raise ValueError(
                 "Активна runtime-сесія належить іншому runtime; безпечне скасування відхилено."
             )
-        thread_id = session.thread_id if session is not None else self._active_thread(record.task_id)
+        thread_id = (
+            session.thread_id
+            if session is not None
+            else self._active_thread(record.task_id)
+        )
         if record.state != TaskState.RUNNING or thread_id is None:
             raise ValueError(
                 "Неможливо безпечно скасувати активне runtime-завдання без "
@@ -254,10 +263,19 @@ class DesktopBackend:
         }
 
     def close(self) -> None:
-        """Stop the private bridge event loop after all live tasks have finished."""
+        """Stop the private bridge event loop after all submitted runtime work has settled."""
         with self._active_lock:
-            if self._active_threads:
-                raise RuntimeError("cannot close desktop runtime loop while tasks are active")
+            futures = tuple(self._active_futures.values())
+        for future in futures:
+            try:
+                future.result(timeout=2)
+            except TimeoutError as exc:
+                raise RuntimeError("cannot close desktop runtime loop while tasks are active") from exc
+            except Exception:  # noqa: BLE001 - cleanup after a recorded background failure
+                pass
+        with self._active_lock:
+            self._active_threads.clear()
+            self._active_futures.clear()
         if self._runtime_loop is not None:
             self._runtime_loop.close()
             self._runtime_loop = None
@@ -268,13 +286,14 @@ class DesktopBackend:
         return self._runtime_loop
 
     def _schedule_start(self, task_id: str, command: str) -> None:
+        thread_id = f"desktop-{task_id}"
         self._submit_runtime(
             task_id,
-            f"desktop-{task_id}",
+            thread_id,
             self._start_if_ready(
                 RuntimeRequest(
                     task_id=task_id,
-                    thread_id=f"desktop-{task_id}",
+                    thread_id=thread_id,
                     payload={"command": command},
                 )
             ),
