@@ -4,9 +4,10 @@ import errno
 import os
 import sqlite3
 import stat
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Self
 
 
 class RecoveryLeaseError(RuntimeError):
@@ -29,7 +30,7 @@ class RecoveryFileLease:
         self._path = path
         self._fd: int | None = None
 
-    def __enter__(self) -> RecoveryFileLease:
+    def __enter__(self) -> Self:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._reject_indirect_lock_path()
         flags = os.O_RDWR | os.O_CREAT
