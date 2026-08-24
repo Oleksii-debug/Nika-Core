@@ -11,6 +11,7 @@ from nika_core.product_factory_credentials import (
     CredentialState,
     IdentityRef,
     SecretRef,
+    credential_authority_fingerprint,
 )
 
 NOW = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
@@ -141,11 +142,25 @@ def secret(
     )
 
 
+def _pre_enroll(
+    store: FakeProtectedStore,
+    reference: SecretRef,
+    raw_secret: str,
+) -> None:
+    store.seed(reference.secret_ref, reference.generation, raw_secret)
+    store.bind_authority(
+        secret_ref=reference.secret_ref,
+        generation=reference.generation,
+        authority_fingerprint=credential_authority_fingerprint(reference),
+    )
+
+
 def broker_with_secret() -> tuple[CredentialBroker, FakeProtectedStore]:
     store = FakeProtectedStore()
-    store.seed("secret-a", 1, RAW_SECRET)
+    reference = secret()
+    _pre_enroll(store, reference, RAW_SECRET)
     broker = CredentialBroker(store)
-    broker.register_secret(secret(), now=NOW)
+    broker.register_secret(reference, now=NOW)
     return broker, store
 
 
@@ -311,11 +326,13 @@ def test_rotation_requires_preseeded_generation_and_revokes_old_lease() -> None:
 
 def test_identity_binding_cannot_cross_project_boundary() -> None:
     store = FakeProtectedStore()
-    store.seed("secret-a", 1, RAW_SECRET)
-    store.seed("secret-b", 1, "another-secret")
+    reference_a = secret()
+    reference_b = secret("secret-b", project_id=PROJECT_B)
+    _pre_enroll(store, reference_a, RAW_SECRET)
+    _pre_enroll(store, reference_b, "another-secret")
     broker = CredentialBroker(store)
-    broker.register_secret(secret(), now=NOW)
-    broker.register_secret(secret("secret-b", project_id=PROJECT_B), now=NOW)
+    broker.register_secret(reference_a, now=NOW)
+    broker.register_secret(reference_b, now=NOW)
 
     with pytest.raises(CredentialBrokerError, match="another project"):
         broker.register_identity(
@@ -425,10 +442,20 @@ def test_registration_requires_material_already_in_protected_store() -> None:
         broker.register_secret(secret(), now=NOW)
 
 
+def test_registration_requires_pre_enrolled_protected_authority() -> None:
+    store = FakeProtectedStore()
+    reference = secret()
+    store.seed(reference.secret_ref, reference.generation, RAW_SECRET)
+
+    with pytest.raises(CredentialBrokerError, match="not pre-enrolled"):
+        CredentialBroker(store).register_secret(reference, now=NOW)
+
+
 def test_audit_is_project_scoped_and_contains_only_reference_metadata() -> None:
     broker, store = broker_with_secret()
-    store.seed("secret-b", 1, "other-project-secret")
-    broker.register_secret(secret("secret-b", project_id=PROJECT_B), now=NOW)
+    reference_b = secret("secret-b", project_id=PROJECT_B)
+    _pre_enroll(store, reference_b, "other-project-secret")
+    broker.register_secret(reference_b, now=NOW)
 
     events_a = broker.audit_events(PROJECT_A)
     events_b = broker.audit_events(PROJECT_B)
