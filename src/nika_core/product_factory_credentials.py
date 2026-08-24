@@ -276,11 +276,14 @@ class CredentialBroker:
                 raise CredentialBrokerError(
                     "protected store does not contain referenced secret generation"
                 )
-            self.store.bind_authority(
+            if not self.store.authority_matches(
                 secret_ref=secret.secret_ref,
                 generation=secret.generation,
                 authority_fingerprint=_secret_authority_fingerprint(secret),
-            )
+            ):
+                raise CredentialBrokerError(
+                    "protected store credential authority was not pre-enrolled"
+                )
             self._secrets[secret.secret_ref] = secret
             self._record(
                 "register", secret.project_id, secret.secret_ref, instant, "reference registered"
@@ -717,6 +720,14 @@ class CredentialBroker:
         event_id = f"credential-event-{self._next_event:08d}"
         self._next_event += 1
         return event_id
+
+
+def credential_authority_fingerprint(secret: SecretRef) -> str:
+    """Derive canonical metadata identity for trusted protected-store enrollment."""
+
+    if not isinstance(secret, SecretRef):
+        raise TypeError("credential authority enrollment requires a SecretRef")
+    return _secret_authority_fingerprint(secret)
 
 
 def _secret_authority_fingerprint(secret: SecretRef) -> str:
