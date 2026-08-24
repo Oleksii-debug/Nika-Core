@@ -103,7 +103,9 @@ def test_zero_length_wal_is_same_logical_durable_state(tmp_path: Path) -> None:
     assert manager._restore_state_sha256(database) == without_wal
 
 
-def test_live_wal_client_blocks_restore_until_sqlite_quiesces(tmp_path: Path) -> None:
+def test_live_wal_writer_blocks_restore_until_writer_ownership_is_free(
+    tmp_path: Path,
+) -> None:
     database = tmp_path / "nika.db"
     store = _initialize(database)
     _insert_task(database, value="snapshot")
@@ -117,8 +119,9 @@ def test_live_wal_client_blocks_restore_until_sqlite_quiesces(tmp_path: Path) ->
         keeper.execute("PRAGMA wal_autocheckpoint = 0")
         _set_task_value(database, "newer-live-state")
         plan = manager.prepare_restore(backup)
+        keeper.execute("BEGIN IMMEDIATE")
 
-        with pytest.raises(RestoreSafetyError, match="prevent exclusive recovery ownership"):
+        with pytest.raises(RestoreSafetyError, match="writer prevents exclusive recovery ownership"):
             manager.restore(
                 plan,
                 confirmation_fingerprint=plan.confirmation_fingerprint,
@@ -127,6 +130,8 @@ def test_live_wal_client_blocks_restore_until_sqlite_quiesces(tmp_path: Path) ->
         assert _task_value(database) == "newer-live-state"
         assert not tuple(tmp_path.glob("nika.db.pre-restore-*.sqlite3"))
     finally:
+        if keeper.in_transaction:
+            keeper.execute("ROLLBACK")
         keeper.close()
 
     refreshed = manager.prepare_restore(backup)
