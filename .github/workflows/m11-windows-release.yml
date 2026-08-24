@@ -85,6 +85,4 @@ jobs:
             dist/NikaCore-${{ steps.release.outputs.version }}-windows-x64.zip
             dist/NikaCore/release-manifest.json
             dist/NikaCore/THIRD_PARTY_NOTICES.txt
-            dist/NikaCore/THIRD_PARTY_SUPPLY_CHAIN.json
-            dist/NikaCore/THIRD_PARTY_SBOM.cdx.json
           if-no-files-found: error
