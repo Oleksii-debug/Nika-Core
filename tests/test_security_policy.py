@@ -106,7 +106,7 @@ def test_network_and_process_require_explicit_allowlist(tmp_path: Path) -> None:
             tool_id="process.test",
             risk=ToolRisk.LOCAL_WRITE,
             target="tests",
-            executable="/usr/bin/pytest",
+            executable="pytest",
         ),
         policy,
         ledger,
@@ -116,6 +116,100 @@ def test_network_and_process_require_explicit_allowlist(tmp_path: Path) -> None:
         policy.sandbox.authorize_network("evil.example")
     with pytest.raises(PermissionError, match="process executable"):
         policy.sandbox.authorize_executable("powershell.exe")
+
+
+def test_executable_allowlist_requires_the_same_scope_and_identity(tmp_path: Path) -> None:
+    sandbox = SandboxPolicy(
+        workspace_root=tmp_path / "workspace",
+        allowed_executables=(
+            "pytest",
+            "/opt/nika/bin/python3",
+            r"C:\Nika\Tools\python.exe",
+        ),
+    )
+
+    sandbox.authorize_executable("pytest")
+    sandbox.authorize_executable("/opt/nika/bin/python3")
+    sandbox.authorize_executable(r"c:\nika\tools\PYTHON.EXE")
+
+    with pytest.raises(PermissionError, match="process executable"):
+        sandbox.authorize_executable("/usr/bin/pytest")
+    with pytest.raises(PermissionError, match="process executable"):
+        sandbox.authorize_executable("/other/nika/bin/python3")
+    with pytest.raises(PermissionError, match="process executable"):
+        sandbox.authorize_executable(r"C:\Other\python.exe")
+
+
+def test_executable_allowlist_rejects_traversal_and_empty_entries(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="must not contain traversal"):
+        SandboxPolicy(
+            workspace_root=tmp_path / "workspace",
+            allowed_executables=("/usr/bin/../pytest",),
+        )
+    with pytest.raises(ValueError, match="must not be empty"):
+        SandboxPolicy(
+            workspace_root=tmp_path / "workspace",
+            allowed_executables=(" ",),
+        )
+
+    sandbox = SandboxPolicy(
+        workspace_root=tmp_path / "workspace",
+        allowed_executables=("/usr/bin/pytest",),
+    )
+    with pytest.raises(PermissionError, match="process executable"):
+        sandbox.authorize_executable("/usr/bin/../pytest")
+
+
+def test_executable_denial_precedes_approval_and_budget_consumption(tmp_path: Path) -> None:
+    intent = ActionIntent(
+        action_id="danger-process-1",
+        tool_id="danger.execute",
+        risk=ToolRisk.HIGH_IMPACT,
+        target="approved process",
+        executable="/untrusted/bin/pytest",
+    )
+    approval = _approval(intent, approval_id="approval-process-1")
+    approvals = ApprovalLedger()
+    budget = ExecutionBudget(max_process_launches=1)
+    budgets = ExecutionBudgetLedger(budget)
+    basename_only_policy = SecurityPolicy(
+        granted_tools=frozenset({"danger.execute"}),
+        sandbox=SandboxPolicy(
+            workspace_root=tmp_path / "workspace",
+            allowed_executables=("pytest",),
+        ),
+        budget=budget,
+    )
+    now = datetime(2026, 8, 18, 19, 0, tzinfo=UTC)
+
+    with pytest.raises(PermissionError, match="process executable"):
+        authorize_action(
+            intent,
+            basename_only_policy,
+            budgets,
+            approvals,
+            approval=approval,
+            now=now,
+        )
+    assert budgets.process_launches == 0
+
+    exact_path_policy = SecurityPolicy(
+        granted_tools=frozenset({"danger.execute"}),
+        sandbox=SandboxPolicy(
+            workspace_root=tmp_path / "workspace",
+            allowed_executables=("/untrusted/bin/pytest",),
+        ),
+        budget=budget,
+    )
+    authorize_action(
+        intent,
+        exact_path_policy,
+        budgets,
+        approvals,
+        approval=approval,
+        now=now,
+    )
+    assert budgets.process_launches == 1
 
 
 def test_high_impact_approval_is_exact_expiring_and_single_use(tmp_path: Path) -> None:
