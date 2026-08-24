@@ -324,7 +324,10 @@ def _write_release_metadata(path: Path, snapshot: ReleaseDatabaseSnapshot) -> No
 
 def _read_release_metadata(path: Path, root: Path) -> ReleaseDatabaseSnapshot:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_strict_json_object,
+        )
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ReleaseDatabaseRecoveryError(
             "release database metadata is not valid UTF-8 JSON"
@@ -364,6 +367,17 @@ def _read_release_metadata(path: Path, root: Path) -> ReleaseDatabaseSnapshot:
         database_created_at=created_at,
         manifest_version=manifest_version,
     )
+
+
+def _strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ReleaseDatabaseRecoveryError(
+                "release database metadata contains duplicate fields"
+            )
+        result[key] = value
+    return result
 
 
 def _exact_int(payload: dict[str, Any], field: str) -> int:

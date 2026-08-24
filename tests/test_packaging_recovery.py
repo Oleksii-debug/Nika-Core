@@ -74,6 +74,10 @@ def _release_recovery(database: Path) -> ReleaseDatabaseRecovery:
     return ReleaseDatabaseRecovery(SQLiteRecoveryManager(_initialize(database)))
 
 
+def _restarted_release_recovery(database: Path) -> ReleaseDatabaseRecovery:
+    return ReleaseDatabaseRecovery(SQLiteRecoveryManager(SQLiteStore(database)))
+
+
 def test_snapshot_reuses_canonical_backup_and_binds_exact_release(tmp_path: Path) -> None:
     database = tmp_path / "дані з пробілом" / "ніка.db"
     recovery = _release_recovery(database)
@@ -91,7 +95,7 @@ def test_snapshot_reuses_canonical_backup_and_binds_exact_release(tmp_path: Path
 
     assert verified == snapshot
     assert snapshot.source_release_sha == SHA_OLD
-    assert set(path.name for path in snapshot_dir.iterdir()) == {
+    assert {path.name for path in snapshot_dir.iterdir()} == {
         "database.sqlite3",
         "database.sqlite3.manifest.json",
         "release-database-snapshot.json",
@@ -146,6 +150,27 @@ def test_release_metadata_strict_numeric_and_unknown_fields_fail(tmp_path: Path)
     payload["unexpected"] = "field"
     metadata.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ReleaseDatabaseRecoveryError, match="fields do not match"):
+        recovery.verify_snapshot(snapshot_dir)
+
+
+def test_release_metadata_duplicate_fields_fail_closed(tmp_path: Path) -> None:
+    database = tmp_path / "nika.db"
+    recovery = _release_recovery(database)
+    snapshot_dir = tmp_path / "snapshot"
+    recovery.create_snapshot(snapshot_dir, source_release_sha=SHA_OLD)
+    metadata = snapshot_dir / "release-database-snapshot.json"
+
+    original = metadata.read_text(encoding="utf-8").rstrip()
+    payload = json.loads(original)
+    duplicate = (
+        original[:-1]
+        + ',"source_release_sha":'
+        + json.dumps(payload["source_release_sha"])
+        + "}\n"
+    )
+    metadata.write_text(duplicate, encoding="utf-8")
+
+    with pytest.raises(ReleaseDatabaseRecoveryError, match="duplicate fields"):
         recovery.verify_snapshot(snapshot_dir)
 
 
@@ -258,6 +283,38 @@ def test_missing_live_database_requires_absent_current_release_sha(tmp_path: Pat
             expected_source_release_sha=SHA_OLD,
             current_release_sha=SHA_NEW,
         )
+
+
+def test_snapshot_restore_and_replay_survive_process_reconstruction(tmp_path: Path) -> None:
+    database = tmp_path / "дані з пробілом" / "ніка.db"
+    recovery = _release_recovery(database)
+    _insert_task(database, task_id="restart", value="snapshot")
+    snapshot_dir = tmp_path / "release snapshots" / "версія 1"
+
+    first = recovery.create_snapshot(snapshot_dir, source_release_sha=SHA_OLD)
+    _set_task_value(database, task_id="restart", value="current")
+
+    restarted = _restarted_release_recovery(database)
+    replay = restarted.create_snapshot(snapshot_dir, source_release_sha=SHA_OLD)
+    assert replay == first
+    plan = restarted.prepare_restore(
+        snapshot_dir,
+        expected_source_release_sha=SHA_OLD,
+        current_release_sha=SHA_NEW,
+    )
+    result = restarted.restore(
+        plan,
+        confirmation_fingerprint=plan.confirmation_fingerprint,
+    )
+    assert result.snapshot == first
+    assert _task_value(database, task_id="restart") == "snapshot"
+
+    restarted_again = _restarted_release_recovery(database)
+    assert restarted_again.verify_snapshot(
+        snapshot_dir,
+        expected_source_release_sha=SHA_OLD,
+    ) == first
+    assert restarted_again.recover_interrupted_restore() is None
 
 
 def test_packaging_adapter_does_not_implement_a_second_sqlite_engine() -> None:
