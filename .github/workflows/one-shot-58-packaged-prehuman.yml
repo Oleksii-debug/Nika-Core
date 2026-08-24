@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 env:
-  NIKA_TARGET_SHA: af478f84be8b69fa881844dcd5b1a13e927d4078
+  NIKA_TARGET_SHA: 0b9b86f728343bea8f630847c1d1ec2168d8ea04
   NIKA_HARNESS_SHA: ${{ github.event.pull_request.head.sha }}
 
 concurrency:
@@ -80,6 +80,7 @@ jobs:
           tests/test_packaged_current_product_project.py
           tests/test_m11_m12_release.py
           tests/test_m5_ui_foundation.py
+          tests/test_m5_keymap_semantic_focus.py
           -q
 
       - name: Run Ruff on exact-target journey surfaces
@@ -90,6 +91,7 @@ jobs:
           src/nika_core/product_factory_packaged_journey.py
           src/nika_core/ui
           tests/test_packaged_current_product_project.py
+          tests/test_m5_keymap_semantic_focus.py
 
       - name: Resolve canonical package version
         id: release
