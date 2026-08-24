@@ -288,7 +288,6 @@ def _run_pf11_proof(
         "team_plan_independent_review_count": team_plan.independent_review_count,
         "team_plan_permission_ceiling": sorted(team_plan.plan.permission_ceiling),
         "team_plan_persisted_proven": True,
-        "team_plan_restart_recovery_proven": True,
         "team_plan_worker_dispatch_started": False,
         "restart_selection_integrity_proven": True,
         "bounded_projection_proven": True,
