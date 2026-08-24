@@ -50,14 +50,19 @@ class _Provider(DeploymentProviderPort):
         if self.deploy_error:
             raise RuntimeError("deploy transport failed after possible mutation")
         if self.deploy_without_evidence:
-            return ProviderDeploymentResult(True, False, ())
+            return ProviderDeploymentResult(True, False, (), release=intent.release)
         if self.deploy_uncertain:
             return ProviderDeploymentResult(
                 False,
                 True,
                 ("deploy://uncertain",),
             )
-        return ProviderDeploymentResult(True, False, ("deploy://ok",))
+        return ProviderDeploymentResult(
+            True,
+            False,
+            ("deploy://ok",),
+            release=intent.release,
+        )
 
     def health(self, intent: DeploymentIntent) -> HealthEvidence:
         self.health_calls += 1
@@ -69,22 +74,26 @@ class _Provider(DeploymentProviderPort):
             self.healthy,
             ("health://ok",),
             NOW,
+            release=intent.release,
         )
 
     def rollback(
         self,
         intent: DeploymentIntent,
-        previous_release_sha: str | None,
+        previous_release: ReleaseRef | None,
     ) -> RollbackEvidence:
         self.rollback_calls += 1
         if self.rollback_error:
             raise RuntimeError("rollback transport unavailable")
+        restored = previous_release if self.rollback_succeeds else None
         return RollbackEvidence(
             intent.environment.environment_id,
             intent.release.source_sha,
-            previous_release_sha if self.rollback_succeeds else None,
+            restored.source_sha if restored is not None else None,
             self.rollback_succeeds,
             ("rollback://result",),
+            failed_release=intent.release,
+            restored_release=restored,
         )
 
     def inspect(self, intent: DeploymentIntent) -> ProviderInspection:
@@ -94,6 +103,7 @@ class _Provider(DeploymentProviderPort):
             intent.release.source_sha,
             True,
             ("inspect://ok",),
+            release=intent.release,
         )
 
 
@@ -358,7 +368,7 @@ def test_restore_rejects_stale_authority_over_unresolved_staging_effect() -> Non
         restarted.restore(corrupted)
 
 
-def test_legacy_sha_rollback_is_not_dispatched_for_existing_previous_release() -> None:
+def test_failed_exact_rollback_stays_uncertain_and_blocks_redeployment() -> None:
     provider = _Provider()
     fabric = DeploymentFabric(provider)
     fabric.deploy(_intent(EnvironmentTier.STAGING, "stage-a"))
@@ -374,7 +384,8 @@ def test_legacy_sha_rollback_is_not_dispatched_for_existing_previous_release() -
         )
     )
     assert failed.state is DeploymentState.UNCERTAIN
-    assert provider.rollback_calls == 0
+    assert failed.health is not None and not failed.health.healthy
+    assert provider.rollback_calls == 1
     assert fabric.snapshot().healthy_staging == ()
 
     with pytest.raises(DeploymentFabricError, match="unresolved deployment effect"):
