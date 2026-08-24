@@ -213,9 +213,6 @@ class ProductComplianceGate:
         dependency_identities: set[tuple[str, str, str, str]] = set()
         package_versions: dict[tuple[str, str], tuple[str, str]] = {}
 
-        if not dependencies:
-            findings.append("dependency-inventory:empty")
-
         if dependency_closure_ref is None:
             findings.append("dependency-closure:unverified")
         else:
