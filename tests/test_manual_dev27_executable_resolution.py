@@ -89,12 +89,13 @@ def test_safe_allowlisted_symlink_launches_canonical_target(
     target = pathlib.Path(sys.executable).resolve(strict=True)
     alias = tmp_path / "safe-python"
     _make_symlink(alias, target)
+    canonical_target = alias.resolve(strict=True)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
     result = run_typed_process(
         (str(alias), "-c", "print('canonical-ok')"),
-        process_policy=ProcessPolicy((str(alias), str(target))),
+        process_policy=ProcessPolicy((str(alias), str(canonical_target))),
         resource_budget=_budget(),
         cwd=workspace,
         workspace_root=workspace,
@@ -103,7 +104,7 @@ def test_safe_allowlisted_symlink_launches_canonical_target(
 
     assert result.returncode == 0
     assert result.stdout.strip() == "canonical-ok"
-    assert result.argv[0] == str(target)
+    assert result.argv[0] == str(canonical_target)
     assert result.argv[0] != str(alias)
 
 
