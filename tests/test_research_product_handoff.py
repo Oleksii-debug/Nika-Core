@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pytest
@@ -112,6 +113,77 @@ def _approved_decision() -> ProductDecision:
         rationale="Best supported option",
         decided_by_ref="user://owner",
     )
+
+
+def _convert_result_to_current_http_source(
+    store: SQLiteStore,
+    *,
+    raw_sha256: str = "a" * 64,
+) -> None:
+    source_id = "http-1"
+    locator = "https://example.com/research"
+    snapshot_id = hashlib.sha256(f"{source_id}\0{raw_sha256}".encode()).hexdigest()
+    created_at = "2026-08-23T00:00:00+00:00"
+    with store.connection() as conn:
+        item = conn.execute(
+            "SELECT document_id,evidence_json FROM research_result_items "
+            "WHERE result_set_id='rs-1' AND ordinal=0"
+        ).fetchone()
+        evidence = json.loads(item["evidence_json"])
+        observed_at = evidence[0]["observed_at"]
+        evidence[0].update(
+            {
+                "source_id": source_id,
+                "source_kind": "http",
+                "locator": locator,
+                "freshness": "current",
+            }
+        )
+        conn.execute(
+            "UPDATE research_result_items SET evidence_json=? "
+            "WHERE result_set_id='rs-1' AND ordinal=0",
+            (json.dumps(evidence),),
+        )
+        conn.execute(
+            "INSERT INTO research_http_sources("
+            "source_id,workspace_id,url,current_raw_sha256,freshness,created_at,updated_at"
+            ") VALUES (?,?,?,?,?,?,?)",
+            (source_id, "ws", locator, raw_sha256, "current", created_at, created_at),
+        )
+        conn.execute(
+            "INSERT INTO corpus_artifacts("
+            "artifact_id,workspace_id,raw_sha256,byte_size,media_type,original_name,"
+            "storage_relpath,created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (
+                "artifact-http-1",
+                "ws",
+                raw_sha256,
+                1,
+                "text/plain",
+                "research.txt",
+                "sha256/http-1",
+                created_at,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO research_http_snapshots("
+            "snapshot_id,source_id,artifact_id,raw_sha256,media_type,document_id,observed_at"
+            ") VALUES (?,?,?,?,?,?,?)",
+            (
+                snapshot_id,
+                source_id,
+                "artifact-http-1",
+                raw_sha256,
+                "text/plain",
+                item["document_id"],
+                observed_at,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO corpus_http_origins("
+            "document_id,source_id,snapshot_id,locator,observed_at) VALUES (?,?,?,?,?)",
+            (item["document_id"], source_id, snapshot_id, locator, observed_at),
+        )
 
 
 def test_canonical_research_handoff_is_sealed_restart_safe_and_structured(tmp_path) -> None:
@@ -290,38 +362,7 @@ def test_requirement_inherits_approved_decision_evidence_and_survives_restart(tm
 
 def test_decision_rejects_formal_handoff_when_remote_source_becomes_stale(tmp_path) -> None:
     store, projects, _, service = _environment(tmp_path)
-    with store.connection() as conn:
-        row = conn.execute(
-            "SELECT evidence_json FROM research_result_items "
-            "WHERE result_set_id='rs-1' AND ordinal=0"
-        ).fetchone()
-        evidence = json.loads(row["evidence_json"])
-        evidence[0].update(
-            {
-                "source_id": "http-1",
-                "source_kind": "http",
-                "locator": "https://example.com/research",
-                "freshness": "current",
-            }
-        )
-        conn.execute(
-            "UPDATE research_result_items SET evidence_json=? "
-            "WHERE result_set_id='rs-1' AND ordinal=0",
-            (json.dumps(evidence),),
-        )
-        conn.execute(
-            "INSERT INTO research_http_sources("
-            "source_id,workspace_id,url,freshness,created_at,updated_at"
-            ") VALUES (?,?,?,?,?,?)",
-            (
-                "http-1",
-                "ws",
-                "https://example.com/research",
-                "current",
-                "2026-08-23T00:00:00+00:00",
-                "2026-08-23T00:00:00+00:00",
-            ),
-        )
+    _convert_result_to_current_http_source(store)
 
     service.handoff(
         project_id="p1",
@@ -342,6 +383,81 @@ def test_decision_rejects_formal_handoff_when_remote_source_becomes_stale(tmp_pa
             expected_row_version=0,
             idempotency_key="decision:approve:stale-source",
         )
+    assert projects.get("p1").row_version == 0
+
+
+def test_source_content_update_invalidates_handoff_and_decision_replay(tmp_path) -> None:
+    store, projects, _, service = _environment(tmp_path)
+    _convert_result_to_current_http_source(store)
+    service.handoff(
+        project_id="p1",
+        result_set_id="rs-1",
+        package_id="research-1",
+        options=_options(),
+    )
+    decisions = ProductDecisionRepository(store)
+    decision = _approved_decision()
+    decisions.record(
+        "p1",
+        decision,
+        expected_row_version=0,
+        idempotency_key="decision:approve",
+    )
+    assert projects.get("p1").row_version == 1
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE research_http_sources SET current_raw_sha256=?,freshness='current' "
+            "WHERE source_id='http-1'",
+            ("b" * 64,),
+        )
+
+    with pytest.raises(ProductProjectError, match="source content changed"):
+        service.get("p1", "research-1")
+    with pytest.raises(ProductProjectError, match="source content changed"):
+        decisions.record(
+            "p1",
+            decision,
+            expected_row_version=0,
+            idempotency_key="decision:approve",
+        )
+    assert projects.get("p1").row_version == 1
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM product_decisions").fetchone()[0] == 1
+
+
+def test_source_content_seal_rewrite_cannot_bypass_formal_authority(tmp_path) -> None:
+    store, projects, _, service = _environment(tmp_path)
+    _convert_result_to_current_http_source(store)
+    service.handoff(
+        project_id="p1",
+        result_set_id="rs-1",
+        package_id="research-1",
+        options=_options(),
+    )
+
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT event_id,payload_json FROM audit_events "
+            "WHERE event_type='product_project.research_product_handoff_sealed' "
+            "AND entity_id='p1'"
+        ).fetchone()
+        seal = json.loads(row["payload_json"])
+        seal["source_content_bindings"][0]["raw_sha256"] = "b" * 64
+        canonical = json.dumps(
+            seal["source_content_bindings"],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        seal["source_content_sha256"] = hashlib.sha256(canonical.encode()).hexdigest()
+        conn.execute(
+            "UPDATE audit_events SET payload_json=? WHERE event_id=?",
+            (json.dumps(seal), row["event_id"]),
+        )
+
+    with pytest.raises(ProductProjectError, match="formal research handoff authority mismatch"):
+        service.get("p1", "research-1")
     assert projects.get("p1").row_version == 0
 
 
