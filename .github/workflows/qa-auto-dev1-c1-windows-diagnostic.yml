@@ -4,6 +4,12 @@ on:
   push:
     branches:
       - qa/auto-dev1/c1-windows-diagnostic-d977caa
+  pull_request:
+    branches:
+      - work/one-shot-21/c1-medium-app-acceptance
+    paths:
+      - tests/test_auto_dev1_c1_windows_diagnostic.py
+      - .github/workflows/qa-auto-dev1-c1-windows-diagnostic.yml
   workflow_dispatch:
 
 permissions:
