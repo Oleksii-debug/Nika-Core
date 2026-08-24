@@ -30,3 +30,12 @@ def test_planning_engine_does_not_bloat_base_install() -> None:
     assert all("unified-planning" not in requirement for requirement in lowered)
     assert all("up-aries" not in requirement for requirement in lowered)
     assert all("pyperplan" not in requirement for requirement in lowered)
+
+
+def test_planning_runtime_cannot_force_vulnerable_pytest_range() -> None:
+    project = _project_metadata()
+    optional = project["optional-dependencies"]
+    assert isinstance(optional, dict)
+
+    dev = optional["dev"]
+    assert "pytest>=9.0.3,<10" in dev
