@@ -17,7 +17,7 @@ from .contracts import (
     WorkerFailure,
     WorkerFailureKind,
 )
-from .repository import ToolsmithRepository
+from .repository import InvalidTransitionError, StaleTransitionError, ToolsmithRepository
 
 
 class CapabilityEscalationService:
@@ -240,10 +240,16 @@ class CapabilityEscalationService:
         )
         if row is None:
             raise KeyError((gap.task_id, gap.requested_capability))
-        if int(row["row_version"]) != expected_version:
-            raise ValueError("registration row version does not match durable escalation")
-        if CandidateState(str(row["state"])) is not CandidateState.VERIFIED:
-            raise ValueError("registration requires durable VERIFIED state")
+        actual_version = int(row["row_version"])
+        if actual_version != expected_version:
+            raise StaleTransitionError(
+                f"expected row version {expected_version}, found {actual_version}"
+            )
+        state = CandidateState(str(row["state"]))
+        if state is not CandidateState.VERIFIED:
+            raise InvalidTransitionError(
+                f"invalid candidate transition {state.value} -> {CandidateState.REGISTERING.value}"
+            )
         verified_digest = row.get("pinned_digest")
         if verified_digest is not None and str(verified_digest) != manifest.digest:
             raise ValueError("manifest digest does not match independently verified candidate")
