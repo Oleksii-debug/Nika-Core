@@ -103,7 +103,7 @@
     announce(result.message || (result.status === "completed" ? "Виконано." : result.status), failed);
     appendLog(result.message);
     await refreshState();
-    const focusId = result.focus_id || trigger?.dataset?.focusTarget;
+    const focusId = result.focus_id || (failed ? trigger?.dataset?.errorFocusTarget : trigger?.dataset?.focusTarget);
     if (focusId) focusElementById(focusId);
     else trigger?.focus?.();
   }
