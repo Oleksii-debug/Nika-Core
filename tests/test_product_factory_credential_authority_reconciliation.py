@@ -11,6 +11,7 @@ from nika_core.product_factory_credentials import (
     CredentialBrokerError,
     CredentialState,
     SecretRef,
+    credential_authority_fingerprint,
 )
 
 NOW = datetime(2026, 8, 23, 14, 0, tzinfo=UTC)
@@ -154,8 +155,14 @@ def _secret(project_id: str = PROJECT_A) -> SecretRef:
 
 def _broker(store: _AuthorityStore | None = None) -> tuple[CredentialBroker, _AuthorityStore]:
     protected_store = store or _AuthorityStore()
+    reference = _secret()
+    protected_store.bind_authority(
+        secret_ref=reference.secret_ref,
+        generation=reference.generation,
+        authority_fingerprint=credential_authority_fingerprint(reference),
+    )
     broker = CredentialBroker(protected_store)
-    broker.register_secret(_secret(), now=NOW)
+    broker.register_secret(reference, now=NOW)
     return broker, protected_store
 
 

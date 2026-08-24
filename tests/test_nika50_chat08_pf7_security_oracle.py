@@ -1,8 +1,8 @@
 """QA_ONLY adversarial oracle for NIKA50 CHAT-08 PF7 security findings.
 
-This file is intentionally based on production PR #162 head
-``dc934da20031f2caf85cfb1519abadf9940c04e0`` and must never be merged into
-production.  All credential material below is synthetic test data.
+This file is synchronized over production PR #162 head
+``b856f64ebb0d490911f523d4a0cd6e104ce5531e`` and must never be merged into
+production. All credential material below is synthetic test data.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from nika_core.product_factory_credentials import (
     CredentialBroker,
     CredentialBrokerError,
     SecretRef,
+    credential_authority_fingerprint,
 )
 from nika_core.product_factory_windows_credentials import (
     ProtectedCredentialStoreError,
@@ -80,6 +81,16 @@ def _store(
     return WindowsCredentialStore(backend, service_prefix=service_prefix)
 
 
+def _pre_enroll(store: WindowsCredentialStore, reference: SecretRef) -> None:
+    """Model trusted host enrollment without deriving authority inside the broker."""
+
+    store.bind_authority(
+        secret_ref=reference.secret_ref,
+        generation=reference.generation,
+        authority_fingerprint=credential_authority_fingerprint(reference),
+    )
+
+
 def test_material_presence_cannot_bootstrap_caller_created_credential_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -117,6 +128,7 @@ def test_peer_store_handle_is_invalid_after_revocation_or_rotation(
     owner_store.provision_secret(SECRET_REF, 1, "synthetic-not-a-real-credential-v1")
 
     secret = _secret()
+    _pre_enroll(owner_store, secret)
     owner = CredentialBroker(owner_store)
     owner.register_secret(secret, now=NOW)
     peer = CredentialBroker(peer_store)
@@ -148,7 +160,7 @@ def test_peer_store_handle_is_invalid_after_revocation_or_rotation(
     else:
         owner.revoke(project_id=PROJECT_ID, secret_ref=SECRET_REF, now=NOW)
 
-    # Broker-side use already sees the independently retired authority.
+    # Broker-side use must reject the independently retired authority.
     with pytest.raises(CredentialBrokerError):
         peer.authorize_use(
             lease_id=lease.lease_id,
@@ -157,9 +169,8 @@ def test_peer_store_handle_is_invalid_after_revocation_or_rotation(
             now=NOW,
         )
 
-    # The protected-store redemption boundary must make the same decision.  On
-    # dc934da... validate_handle() checks only raw material existence, so a peer
-    # adapter can currently continue accepting the stale handle.
+    # The protected-store redemption boundary must make the same decision even
+    # though this peer adapter has a separate in-memory handle table.
     with pytest.raises(ProtectedCredentialStoreError):
         peer_store.validate_handle(
             handle_ref=lease.handle_ref,
@@ -198,13 +209,18 @@ class _Kernel32Probe:
         return 101
 
 
-def test_process_authority_primitive_is_not_limited_to_current_logon_session(
+def test_process_authority_primitive_is_cross_session_and_user_scoped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A one-per-user authority owner cannot use the per-session Local namespace."""
+    """One credential authority owner must be global across sessions but user-scoped."""
 
     kernel32 = _Kernel32Probe()
     monkeypatch.setattr(windows_credentials.sys, "platform", "win32")
+    monkeypatch.setattr(
+        windows_credentials,
+        "_current_user_scope_key",
+        lambda: "qa-user-scope",
+    )
     monkeypatch.setattr(
         windows_credentials.ctypes,
         "WinDLL",
@@ -228,6 +244,10 @@ def test_process_authority_primitive_is_not_limited_to_current_logon_session(
     windows_credentials._ensure_process_authority_owner("NikaQA.Chat08.SessionScope")
 
     assert kernel32.object_names
-    assert not kernel32.object_names[0].startswith("Local\\"), (
-        "credential authority owner is session-local rather than cross-session/user-scoped"
+    object_name = kernel32.object_names[0]
+    assert object_name.startswith("Global\\"), (
+        "credential authority owner is not in the cross-session Global namespace"
+    )
+    assert "qa-user-scope" in object_name, (
+        "credential authority owner is global but not scoped to the Windows user"
     )
