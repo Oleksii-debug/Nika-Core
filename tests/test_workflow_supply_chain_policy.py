@@ -11,6 +11,11 @@ _REMOTE_SCRIPT_PIPE = re.compile(
     re.IGNORECASE,
 )
 _CHECKOUT_USE = "uses: actions/checkout@"
+_STEP_ITEM = re.compile(r"^(?P<indent>\s*)-\s+")
+_PERSIST_SETTING = re.compile(
+    r"^\s*persist-credentials:\s*([^\s#]+)\s*(?:#.*)?$",
+    re.IGNORECASE,
+)
 
 
 def _workflows() -> tuple[Path, ...]:
@@ -19,25 +24,80 @@ def _workflows() -> tuple[Path, ...]:
     )
 
 
+def _indentation(line: str) -> int:
+    return len(line) - len(line.lstrip())
+
+
+def _step_bounds(lines: list[str], uses_index: int) -> tuple[int, int]:
+    uses_line = lines[uses_index]
+    uses_indent = _indentation(uses_line)
+    step_start: int | None = None
+    step_indent: int | None = None
+
+    for candidate in range(uses_index, -1, -1):
+        match = _STEP_ITEM.match(lines[candidate])
+        if not match:
+            continue
+        candidate_indent = len(match.group("indent"))
+        if candidate == uses_index or candidate_indent < uses_indent:
+            step_start = candidate
+            step_indent = candidate_indent
+            break
+
+    if step_start is None or step_indent is None:
+        raise AssertionError(
+            f"checkout at line {uses_index + 1} is not inside a YAML list step"
+        )
+
+    step_end = len(lines)
+    for candidate in range(step_start + 1, len(lines)):
+        match = _STEP_ITEM.match(lines[candidate])
+        if match and len(match.group("indent")) == step_indent:
+            step_end = candidate
+            break
+
+    return step_start, step_end
+
+
+def _uses_key_indent(line: str) -> int:
+    indentation = _indentation(line)
+    if line.lstrip().startswith("- uses:"):
+        return indentation + 2
+    return indentation
+
+
+def _checkout_disables_persisted_credentials(lines: list[str], uses_index: int) -> bool:
+    step_start, step_end = _step_bounds(lines, uses_index)
+    sibling_indent = _uses_key_indent(lines[uses_index])
+
+    for candidate in range(step_start, step_end):
+        line = lines[candidate]
+        if line.strip().casefold() != "with:" or _indentation(line) != sibling_indent:
+            continue
+
+        with_indent = _indentation(line)
+        values: list[str] = []
+        for following in lines[candidate + 1 : step_end]:
+            if not following.strip():
+                continue
+            if _indentation(following) <= with_indent:
+                break
+            match = _PERSIST_SETTING.fullmatch(following)
+            if match:
+                values.append(match.group(1).casefold())
+
+        return values == ["false"]
+
+    return False
+
+
 def _checkout_credential_findings(workflow: Path) -> list[str]:
     findings: list[str] = []
     lines = workflow.read_text(encoding="utf-8").splitlines()
     for index, line in enumerate(lines):
         if _CHECKOUT_USE not in line:
             continue
-        indentation = len(line) - len(line.lstrip())
-        block: list[str] = []
-        for following in lines[index + 1 :]:
-            stripped = following.strip()
-            next_indent = len(following) - len(following.lstrip())
-            if stripped and (
-                next_indent < indentation
-                or (next_indent == indentation and stripped.startswith("- "))
-            ):
-                break
-            block.append(following)
-        normalized = "\n".join(block).casefold().replace(" ", "")
-        if "persist-credentials:false" not in normalized:
+        if not _checkout_disables_persisted_credentials(lines, index):
             findings.append(f"{workflow}:{index + 1}")
     return findings
 
@@ -71,8 +131,12 @@ def test_checkout_policy_handles_named_steps_and_rejects_unsafe_settings(
 ) -> None:
     action = "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
     safe = tmp_path / "safe.yml"
+    inline_safe = tmp_path / "inline-safe.yml"
     missing = tmp_path / "missing.yml"
     explicitly_true = tmp_path / "true.yml"
+    misplaced_env = tmp_path / "misplaced-env.yml"
+    duplicate_conflict = tmp_path / "duplicate-conflict.yml"
+    duplicate_false = tmp_path / "duplicate-false.yml"
 
     safe.write_text(
         "jobs:\n"
@@ -85,6 +149,15 @@ def test_checkout_policy_handles_named_steps_and_rejects_unsafe_settings(
         "          persist-credentials: false\n"
         "      - name: Later step\n"
         "        run: echo safe\n",
+        encoding="utf-8",
+    )
+    inline_safe.write_text(
+        "jobs:\n"
+        "  verify:\n"
+        "    steps:\n"
+        f"      - uses: {action}\n"
+        "        with:\n"
+        "          persist-credentials: false\n",
         encoding="utf-8",
     )
     missing.write_text(
@@ -103,18 +176,52 @@ def test_checkout_policy_handles_named_steps_and_rejects_unsafe_settings(
         "jobs:\n"
         "  verify:\n"
         "    steps:\n"
-        "      - name: Checkout\n"
+        "      - name: Unsafe checkout\n"
         f"        uses: {action}\n"
         "        with:\n"
-        "          persist-credentials: true\n"
-        "      - name: Later step\n"
-        "        run: echo unsafe\n",
+        "          persist-credentials: true\n",
+        encoding="utf-8",
+    )
+    misplaced_env.write_text(
+        "jobs:\n"
+        "  verify:\n"
+        "    steps:\n"
+        "      - name: Misplaced credential setting\n"
+        f"        uses: {action}\n"
+        "        env:\n"
+        "          persist-credentials: false\n",
+        encoding="utf-8",
+    )
+    duplicate_conflict.write_text(
+        "jobs:\n"
+        "  verify:\n"
+        "    steps:\n"
+        "      - name: Ambiguous checkout\n"
+        f"        uses: {action}\n"
+        "        with:\n"
+        "          persist-credentials: false\n"
+        "          persist-credentials: true\n",
+        encoding="utf-8",
+    )
+    duplicate_false.write_text(
+        "jobs:\n"
+        "  verify:\n"
+        "    steps:\n"
+        "      - name: Duplicate checkout input\n"
+        f"        uses: {action}\n"
+        "        with:\n"
+        "          persist-credentials: false\n"
+        "          persist-credentials: false\n",
         encoding="utf-8",
     )
 
     assert _checkout_credential_findings(safe) == []
+    assert _checkout_credential_findings(inline_safe) == []
     assert len(_checkout_credential_findings(missing)) == 1
     assert len(_checkout_credential_findings(explicitly_true)) == 1
+    assert len(_checkout_credential_findings(misplaced_env)) == 1
+    assert len(_checkout_credential_findings(duplicate_conflict)) == 1
+    assert len(_checkout_credential_findings(duplicate_false)) == 1
 
 
 def test_workflows_do_not_pipe_remote_installers_to_shells() -> None:
