@@ -5,6 +5,14 @@ import sqlite3
 from datetime import UTC, datetime
 
 KNOWLEDGE_SCHEMA_VERSION = 3
+_KNOWLEDGE_FOREIGN_KEY_TABLES = frozenset(
+    {
+        "knowledge_artifacts",
+        "knowledge_versions",
+        "knowledge_acl",
+        "knowledge_chunks",
+    }
+)
 
 KNOWLEDGE_MIGRATION_1 = (
     """CREATE TABLE IF NOT EXISTS knowledge_artifacts (
@@ -88,6 +96,12 @@ KNOWLEDGE_MIGRATION_1 = (
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _assert_knowledge_foreign_key_integrity(conn: sqlite3.Connection) -> None:
+    violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if any(row[0] in _KNOWLEDGE_FOREIGN_KEY_TABLES for row in violations):
+        raise RuntimeError("knowledge schema foreign-key integrity check failed")
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
@@ -268,3 +282,4 @@ def initialize_knowledge_schema(conn: sqlite3.Connection) -> None:
             "INSERT INTO knowledge_schema_migrations(version, applied_at) VALUES (?, ?)",
             (version, _now()),
         )
+    _assert_knowledge_foreign_key_integrity(conn)
