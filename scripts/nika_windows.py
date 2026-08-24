@@ -122,7 +122,9 @@ def _require_product_state(
     ):
         raise RuntimeError("PF11 packaged ProductCommandCenter state identity is invalid")
     status_counts = product_state.get("status_counts")
-    if not isinstance(status_counts, Mapping) or status_counts.get("team_role") != 1:
+    if spec_version >= 2 and (
+        not isinstance(status_counts, Mapping) or status_counts.get("team_role") != 1
+    ):
         raise RuntimeError("PF11 packaged state did not expose the durable team-plan reference")
     forbidden_fields = {
         "evidence",
@@ -207,6 +209,22 @@ def _run_pf11_proof(
     if result.get("status") != "completed":
         raise RuntimeError(f"PF11 packaged ProductProject route failed: {result}")
 
+    before_plan = products.inspect_project(project_id)
+    before_plan_current = bridge.dispatch(
+        {
+            "request_id": "pf11-packaged-pre-plan-current-proof",
+            "action_id": "task.create",
+            "payload": {"command": "Show current ProductProject"},
+        }
+    )
+    _require_current_product_result(
+        before_plan_current,
+        project_id=project_id,
+        spec_version=before_plan.summary.version,
+        state=before_plan.summary.state,
+        goal=before_plan.summary.goal,
+    )
+
     plan_response = bridge.dispatch(
         {
             "request_id": "pf11-packaged-plan-proof",
@@ -275,6 +293,7 @@ def _run_pf11_proof(
         "project_id": project_id,
         "spec_version": detail.summary.version,
         "state": detail.summary.state,
+        "pre_plan_current_command_proven": True,
         "command_center_state_proven": True,
         "current_command_proven": True,
         "current_command_focus_proven": True,
