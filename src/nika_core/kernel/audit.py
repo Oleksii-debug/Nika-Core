@@ -33,7 +33,7 @@ _SECRET_ASSIGNMENT = re.compile(
     r"session(?:[_-]?(?:id|token))?|credential|credentials)\b\s*[:=]\s*)"
     r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^&;\s,<>]+)"
 )
-_BEARER_VALUE = re.compile(r"(?i)(\bbearer\s+)[A-Za-z0-9._~+/=-]{8,}")
+_BEARER_VALUE = re.compile(r"(?i)(\bbearer\s+)[A-Za-z0-9._~+/=-]{1,}")
 _SENSITIVE_KEYS = frozenset(
     {
         "access_token",
