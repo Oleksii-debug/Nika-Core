@@ -154,8 +154,12 @@ def validate_artifact_for_handoff(artifact: StructuredMediaArtifact) -> None:
                 f"media model {model.model_id} references an engine missing from artifact evidence"
             )
 
+    revision_ids: set[str] = set()
     previous_revision_id: str | None = None
     for ordinal, revision in enumerate(artifact.revisions):
+        if revision.revision_id in revision_ids:
+            raise ValueError("text revision identities must be unique for Corpus handoff")
+        revision_ids.add(revision.revision_id)
         if revision.artifact_id != artifact.artifact_id:
             raise ValueError("text revision belongs to a different artifact")
         if revision.ordinal != ordinal:
