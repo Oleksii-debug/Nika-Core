@@ -59,9 +59,15 @@ Additional invariants:
   observation time before the fabric may treat that `ReleaseRef` as healthy staging authority;
 - inspect/reconcile must prove the same complete exact release identity whenever a release is reported;
   same-SHA/different-artifact or different-version evidence is rejected and uncertainty is preserved;
-- successful rollback must report the exact requested previous release SHA;
-- rollback transport failure, invalid rollback evidence, or `succeeded=False` after an applied deployment
-  remains `UNCERTAIN`; it is not converted into a terminal safe rejection and requires inspection.
+- current/previous release state is retained as full `ReleaseRef` identity in new snapshots;
+- legacy SHA-only current/previous release snapshots migrate only when durable records identify one exact
+  release; ambiguous same-SHA histories fail closed;
+- providers may retain the legacy SHA-only `rollback()` contract for compatibility, but when a previous
+  exact release exists `DeploymentFabric` will not issue an ambiguous SHA-only rollback effect;
+- providers implementing optional `rollback_exact()` receive the complete previous `ReleaseRef` and must
+  prove the exact restored release; the Ansible adapter implements this capability;
+- rollback transport failure, invalid/mismatched exact rollback evidence, or `succeeded=False` after an
+  applied deployment remains `UNCERTAIN` and requires inspection.
 
 ### Process-crash durability boundary
 
@@ -88,23 +94,29 @@ Required normalized fields:
 - deploy: `applied: bool`
 - health: `release_version: str`, `release_sha: str`, `artifact_digest: str`, `healthy: bool`,
   `observed_at: ISO-8601 aware datetime`
-- rollback: `succeeded: bool`, `restored_release_sha: str | null`
+- legacy rollback: `succeeded: bool`, `restored_release_sha: str | null`
+- exact rollback when a release is restored: `succeeded: bool`, `restored_release_version: str`,
+  `restored_release_sha: str`, `restored_artifact_digest: str`
+- exact rollback when no prior release exists: `succeeded: bool` with no partial restored-release identity
 - inspect when a release exists: `release_version: str`, `release_sha: str`, `artifact_digest: str`,
   `healthy: bool | null`
 - inspect when no release exists: `release_sha: null`, no partial version/digest identity, and
   `healthy: bool | null`
 
 `release_sha` is lowercase 40-character hex. `artifact_digest` is lowercase 64-character hex. Health and
-inspect identities must equal the exact `ReleaseRef` supplied by the deployment intent.
+inspect identities must equal the exact `ReleaseRef` supplied by the deployment intent. Exact rollback
+must equal the complete previous `ReleaseRef`; partial restored-release identity fails closed.
 
 This tightens the original SHA-only adapter contract. Operator-controlled health/inspect playbooks that
 still emit only `release_sha` must be upgraded before they can be used with this adapter; missing version
 or artifact-digest evidence fails closed rather than being inferred from the requested intent.
 
-The existing rollback provider contract still identifies the previous/restored release by SHA only. This
-batch therefore does **not** claim exact-artifact rollback identity when two release artifacts share the
-same source SHA. Extending rollback to a full `ReleaseRef` is a shared-contract compatibility decision and
-must be handled as a separate PF6 batch rather than silently changing provider interfaces here.
+The shared `DeploymentProviderPort.rollback()` remains available for legacy SHA-only providers. Exact
+artifact rollback is exposed as the optional `ExactReleaseRollbackProviderPort.rollback_exact()`
+capability instead of silently breaking the existing provider interface. When an exact previous release is
+known but a provider lacks that capability, the fabric preserves `UNCERTAIN` and does not dispatch an
+ambiguous SHA-only rollback. `AuthorizedAnsibleStagingAdapter` implements the exact capability and binds
+previous/restored version + source SHA + artifact digest through its normalized contract.
 
 Playbooks that handle credentials must use the backend's own protected credential mechanism and Ansible
 `no_log` discipline. Raw credentials must never be returned in `nika_pf3`, passed in ProductProject, or
@@ -139,9 +151,13 @@ The test suite covers:
 - unresolved staging invalidating staging authority and corrupt restart state with stale authority failing
   closed;
 - failed rollback -> `UNCERTAIN` rather than false terminal success/rejection;
+- exact `ReleaseRef` current/previous release persistence and legacy snapshot migration;
+- same-SHA legacy snapshot ambiguity failing closed;
+- legacy SHA-only provider not being asked to restore an ambiguous exact prior artifact;
+- exact-capable rollback binding previous and restored version/SHA/digest;
+- partial or substituted restored exact release identity failing closed;
 - no-release inspection resolving uncertainty and permitting later fresh work;
 - exact version/SHA/digest health binding, incomplete identity rejection and health transport failure;
-- exact previous-SHA rollback and false rollback rejection;
 - exact version/SHA/digest inspect normalization and uncertainty preservation;
 - same-SHA/different-artifact uncertain reconciliation rejection;
 - duplicate normalized Runner result contracts failing closed;
