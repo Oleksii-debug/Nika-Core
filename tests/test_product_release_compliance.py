@@ -16,6 +16,7 @@ from nika_core.product_compliance import (
 from nika_core.product_release_compliance import (
     ProductReleaseComplianceGate,
     ReleaseComplianceDecision,
+    ReleaseComplianceGrant,
     ReleaseComplianceSnapshot,
     ReleaseDependency,
     ReleaseNoticeEvidence,
@@ -25,6 +26,15 @@ from nika_core.product_release_compliance import (
 _PROJECT = "project-1"
 _PROJECT_SOURCE_SHA = "c" * 64
 _ARTIFACT_SHA = "b" * 64
+_CLOSURE_REF = "review:dependency-closure:project-1"
+_SCOPE_REF = "review:compliance-scope:project-1"
+
+
+def _purpose_has_sha256(purpose: str, prefix: str) -> bool:
+    if not purpose.startswith(prefix):
+        return False
+    digest = purpose.removeprefix(prefix)
+    return len(digest) == 64 and all(char in "0123456789abcdef" for char in digest.casefold())
 
 
 class _ReviewAuthority:
@@ -35,7 +45,20 @@ class _ReviewAuthority:
         evidence_ref: str,
         purpose: str,
     ) -> bool:
-        return project_id == _PROJECT and evidence_ref == f"review:{purpose}"
+        if project_id != _PROJECT:
+            return False
+        if evidence_ref == _CLOSURE_REF:
+            return _purpose_has_sha256(purpose, "dependency-closure:")
+        if evidence_ref == _SCOPE_REF:
+            return _purpose_has_sha256(purpose, "compliance-scope:")
+        prefix = "review:license-disposition:"
+        if evidence_ref.startswith(prefix):
+            component_id = evidence_ref.removeprefix(prefix)
+            return _purpose_has_sha256(
+                purpose,
+                f"license-disposition:{component_id}:",
+            )
+        return False
 
 
 def _adoption(
@@ -48,13 +71,14 @@ def _adoption(
 ) -> DependencyAdoption:
     package = package_name or component_id
     notice_ref = f"artifact:THIRD_PARTY_NOTICES.txt#{component_id}"
+    provenance_digest = hashlib.sha256(f"{component_id}:{version}".encode()).hexdigest()
     return DependencyAdoption(
         project_id=_PROJECT,
         component_id=component_id,
         package_name=package,
         version=version,
         source_ref=f"registry:pypi:{package}:{version}",
-        provenance_ref=f"provenance:{component_id}:{version}",
+        provenance_ref=f"hash:sha256:{provenance_digest}",
         license_expression=license_expression,
         license_disposition=LicenseDisposition.APPROVED,
         distribution_obligations=obligations,
@@ -100,6 +124,8 @@ def _snapshot(
     obligations: tuple[DistributionObligationEvidence, ...] | None = None,
     notices: tuple[ReleaseNoticeEvidence, ...] | None = None,
     notice_hash: str | None = None,
+    dependency_closure_ref: str | None = _CLOSURE_REF,
+    scope_review_ref: str | None = _SCOPE_REF,
 ) -> ReleaseComplianceSnapshot:
     deps = dependencies or (
         _dependency("root", requires=("leaf",)),
@@ -140,6 +166,8 @@ def _snapshot(
         dependencies=deps,
         obligation_evidence=obligation_rows,
         notice_evidence=notice_rows,
+        dependency_closure_ref=dependency_closure_ref,
+        scope_review_ref=scope_review_ref,
     )
 
 
@@ -159,6 +187,8 @@ def test_exact_release_gate_issues_current_snapshot_delivery_grant(
     assert decision.allowed is True
     assert decision.findings == ()
     assert decision.snapshot_digest == snapshot.digest
+    assert _CLOSURE_REF in decision.evidence_refs
+    assert _SCOPE_REF in decision.evidence_refs
 
     grant = gate.require_release_allowed(decision, snapshot, bundle_dir=tmp_path)
     assert grant.allowed is True
@@ -167,6 +197,28 @@ def test_exact_release_gate_issues_current_snapshot_delivery_grant(
     assert grant.artifact_ref == snapshot.artifact_ref
     assert f"pf10:snapshot:{snapshot.digest}" in grant.evidence_refs
     assert f"artifact:sha256:{snapshot.artifact_sha256}" in grant.evidence_refs
+
+
+def test_missing_dependency_closure_or_scope_review_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _verified_packaging(monkeypatch)
+    gate = ProductReleaseComplianceGate(review_authority=_ReviewAuthority())
+
+    missing_closure = gate.evaluate(
+        _snapshot(tmp_path, dependency_closure_ref=None),
+        bundle_dir=tmp_path,
+    )
+    assert missing_closure.allowed is False
+    assert "dependency-closure:unverified" in missing_closure.findings
+
+    missing_scope = gate.evaluate(
+        _snapshot(tmp_path, scope_review_ref=None),
+        bundle_dir=tmp_path,
+    )
+    assert missing_scope.allowed is False
+    assert "compliance-scope:unreviewed" in missing_scope.findings
 
 
 def test_default_release_gate_cannot_turn_caller_review_strings_into_authority(
@@ -278,7 +330,7 @@ def test_missing_or_orphan_notice_evidence_fails_closed(
     assert any(item.startswith("notice:evidence-missing:root") for item in decision.findings)
 
 
-def test_stale_decision_after_dependency_change_is_rejected(
+def test_stale_decision_after_dependency_or_closure_change_is_rejected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -293,6 +345,14 @@ def test_stale_decision_after_dependency_change_is_rejected(
     assert changed.digest != snapshot.digest
     with pytest.raises(ProductComplianceError, match="stale-or-wrong-release-snapshot"):
         gate.require_release_allowed(decision, changed, bundle_dir=tmp_path)
+
+    changed_closure = replace(
+        snapshot,
+        dependency_closure_ref="review:dependency-closure:project-1:new",
+    )
+    assert changed_closure.digest != snapshot.digest
+    with pytest.raises(ProductComplianceError, match="stale-or-wrong-release-snapshot"):
+        gate.require_release_allowed(decision, changed_closure, bundle_dir=tmp_path)
 
 
 def test_decision_tamper_cross_context_replay_and_fabrication_fail_closed(
@@ -322,6 +382,16 @@ def test_decision_tamper_cross_context_replay_and_fabrication_fail_closed(
     assert fabricated.allowed is False
     with pytest.raises(ProductComplianceError, match="untrusted-origin"):
         gate.require_release_allowed(fabricated, snapshot, bundle_dir=tmp_path)
+
+    forged_grant = ReleaseComplianceGrant(
+        project_id=_PROJECT,
+        release_id=snapshot.release_id,
+        artifact_ref=snapshot.artifact_ref,
+        artifact_sha256=snapshot.artifact_sha256,
+        snapshot_digest=snapshot.digest,
+        evidence_refs=decision.evidence_refs,
+    )
+    assert forged_grant.allowed is False
 
 
 def test_packaging_notice_drift_invalidates_previously_allowed_decision(

@@ -326,7 +326,7 @@ class ProductComplianceGate:
             if not dependency.notice_required and dependency.notice_refs:
                 findings.append(f"orphan:notice-ref:{dependency.component_id}")
 
-        for component_id, obligation in obligations:
+        for component_id, obligation in obligations.keys():
             dependency = dependencies_by_component.get(component_id)
             if dependency is None or obligation not in dependency.distribution_obligations:
                 findings.append(
