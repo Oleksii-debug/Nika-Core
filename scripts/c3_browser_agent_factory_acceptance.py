@@ -503,8 +503,7 @@ def _run_factory_program(
                     accepted=True,
                     reason="generated component passed declared tests and path-scope review",
                     evidence_refs=(
-                        f"c3:qa:{review_record.request.component_id}:"
-                        f"attempt-{review_record.request.attempt}",
+                        f"c3:qa:{review_record.request.component_id}:attempt-{review_record.request.attempt}",
                     ),
                 ),
             )
