@@ -3,7 +3,6 @@ from __future__ import annotations
 import pathlib
 import re
 
-
 _WORKFLOW_ROOT = pathlib.Path(".github/workflows")
 _ACTION_USE = re.compile(r"^\s*-?\s*uses:\s*([^\s#]+)", re.MULTILINE)
 _FULL_COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
