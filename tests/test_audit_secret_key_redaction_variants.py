@@ -142,11 +142,47 @@ def test_audit_redacts_secret_material_embedded_in_benign_string_values(
     audit.verify_integrity()
 
 
+@pytest.mark.parametrize("query_key", ["token", "auth", "key", "sig"])
+def test_audit_redacts_credential_query_alias_values(
+    tmp_path: Path,
+    query_key: str,
+) -> None:
+    store = SQLiteStore(tmp_path / f"query-{query_key}.db")
+    store.initialize()
+    audit = AuditLog(store)
+    canary = f"VALUE_CANARY_QUERY_ALIAS_{query_key.upper()}_4F91"
+
+    audit.append(
+        event_type="security.query_alias_redaction",
+        entity_type="security-test",
+        entity_id=query_key,
+        payload={
+            "url": f"https://audit.invalid/redirect?{query_key}={canary}&page=1"
+        },
+    )
+
+    event = audit.list_for(entity_type="security-test", entity_id=query_key)[0]
+    sanitized = str(event.payload["url"])
+    assert f"?{query_key}={_REDACTED}&page=1" in sanitized
+    assert canary not in sanitized
+
+    with store.connection() as conn:
+        raw_payload = str(
+            conn.execute(
+                "SELECT payload_json FROM audit_events WHERE event_id = 1"
+            ).fetchone()["payload_json"]
+        )
+    assert canary not in raw_payload
+    audit.verify_integrity()
+
+
 def test_audit_string_redaction_preserves_count_like_non_secret_metadata(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "count-values.db")
     store.initialize()
     audit = AuditLog(store)
-    diagnostic = "tokenCount=7 sessionCount=4 cookieCount=2"
+    diagnostic = (
+        "tokenCount=7 sessionCount=4 cookieCount=2 authCount=3 keyCount=5 sigCount=6"
+    )
 
     audit.append(
         event_type="security.safe_counts",
