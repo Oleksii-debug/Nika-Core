@@ -952,6 +952,18 @@ class MultiRepositoryProductFactoryHost:
             raise MultiRepositoryExecutionError(
                 "execution state is stale for current ProductProject"
             )
+        current_graph_digest = _sha256(_canonical(_encode_graph(state.authority.graph)))
+        current_dependency_edges = _dependency_edges(
+            state.authority.graph,
+            state.authority.graph_version,
+        )
+        if (
+            current_graph_digest != state.authority.graph_digest
+            or current_dependency_edges != state.authority.dependency_edges
+        ):
+            raise MultiRepositoryExecutionError(
+                "repository graph authority changed after durable binding"
+            )
         if state.binding.graph is not state.authority.graph:
             raise MultiRepositoryExecutionError(
                 "execution binding does not use durable repository graph authority"
@@ -960,11 +972,20 @@ class MultiRepositoryProductFactoryHost:
             raise MultiRepositoryExecutionError(
                 "coordinator does not use durable repository graph authority"
             )
+        expected_host_authority = _graph_authority_fingerprint(
+            project=project,
+            graph_version=state.authority.graph_version,
+            graph_digest=state.authority.graph_digest,
+        )
         with self.store.connection() as conn:
-            self._require_host_task(
+            host_payload = self._require_host_task(
                 conn,
                 host_task_id=host_task_id,
                 project_id=project.project_id,
+            )
+        if host_payload.get(_GRAPH_AUTHORITY_KEY) != expected_host_authority:
+            raise MultiRepositoryExecutionError(
+                "host task repository graph authority is missing or mismatched"
             )
 
     @staticmethod
