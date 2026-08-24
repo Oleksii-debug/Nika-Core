@@ -4,8 +4,7 @@ import subprocess
 
 import pytest
 
-from nika_core.toolsmith import execution
-from nika_core.toolsmith.workspace_security import WorkspaceSecurityError
+from nika_core.toolsmith import execution, workspace_security
 
 
 _CANARY = "QA53_SYNTHETIC_GIT_URL_SECRET_4d93f1b7"
@@ -38,8 +37,8 @@ def test_git_failure_diagnostic_cannot_expose_credential_url(
 
     monkeypatch.setattr(execution.subprocess, "run", fake_run)
 
-    with pytest.raises(WorkspaceSecurityError) as exc_info:
-        execution._git(  # noqa: SLF001 - intentional QA oracle of exact boundary
+    with pytest.raises(workspace_security.WorkspaceSecurityError) as exc_info:
+        execution._git(
             ("git", "fetch"),
             cwd=tmp_path,
             environment={},
