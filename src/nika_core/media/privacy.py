@@ -6,17 +6,23 @@ from typing import Any
 
 _SECRET_KEYS = frozenset(
     {
+        "access_token",
+        "api_key",
+        "auth_token",
         "authorization",
+        "client_secret",
         "cookie",
         "cookies",
         "password",
-        "token",
-        "access_token",
         "refresh_token",
-        "api_key",
         "secret",
+        "session_cookie",
+        "session_id",
+        "token",
     }
 )
+_SENSITIVE_KEY_TOKENS = frozenset({"cookie", "password", "secret", "token"})
+_NON_SECRET_KEY_SUFFIXES = frozenset({"count"})
 _SENSITIVE_QUERY = re.compile(
     r"(?i)([?&](?:token|access_token|refresh_token|api_key|auth|key|password|secret|signature|sig|expires)=[^&#\s]+)"
 )
@@ -54,6 +60,25 @@ _SENSITIVE_ARGV_OPTIONS = frozenset(
         "--token",
     }
 )
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_KEY_SEPARATOR = re.compile(r"[^A-Za-z0-9]+")
+
+
+def _normalized_key_tokens(key: str) -> tuple[str, ...]:
+    expanded = _CAMEL_BOUNDARY.sub("_", key)
+    return tuple(token.casefold() for token in _KEY_SEPARATOR.split(expanded) if token)
+
+
+def _is_secret_key(key: str) -> bool:
+    tokens = _normalized_key_tokens(key)
+    if not tokens:
+        return False
+    normalized = "_".join(tokens)
+    if normalized in _SECRET_KEYS:
+        return True
+    if tokens[-1] in _NON_SECRET_KEY_SUFFIXES:
+        return False
+    return any(token in _SENSITIVE_KEY_TOKENS for token in tokens)
 
 
 def redact_text(value: str) -> str:
@@ -98,8 +123,7 @@ def redact_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
 def redact_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, item in value.items():
-        lowered = key.lower()
-        if lowered in _SECRET_KEYS or any(token in lowered for token in ("cookie", "password", "token")):
+        if _is_secret_key(key):
             result[key] = "[REDACTED]"
         elif isinstance(item, str):
             result[key] = redact_text(item)
