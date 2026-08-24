@@ -13,6 +13,7 @@ from nika_core.model_gateway.foundry_local import FoundryLocalProvider
 
 FOUNDRY_OWNER_BLOCKED = pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason=(
         "current main coordinates Foundry native work per provider instance; DEV18 #182 owns "
         "the process-wide coordinator. Strict XPASS forces conversion after integration."
