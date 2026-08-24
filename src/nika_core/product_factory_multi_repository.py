@@ -59,7 +59,11 @@ class VersionedDependencyEdge:
     depends_on_component_id: str
 
     def __post_init__(self) -> None:
-        if self.graph_version < 1:
+        if (
+            not isinstance(self.graph_version, int)
+            or isinstance(self.graph_version, bool)
+            or self.graph_version < 1
+        ):
             raise MultiRepositoryExecutionError("graph_version must be positive")
         if not self.component_id.strip() or not self.depends_on_component_id.strip():
             raise MultiRepositoryExecutionError("dependency edge identity must not be empty")
@@ -109,9 +113,23 @@ class RepairLineageIntent:
             )
         ):
             raise RepairLineageError("repair lineage identity and reason must not be empty")
-        if self.spec_version < 1 or self.row_version < 0:
+        if (
+            not isinstance(self.spec_version, int)
+            or isinstance(self.spec_version, bool)
+            or self.spec_version < 1
+            or not isinstance(self.row_version, int)
+            or isinstance(self.row_version, bool)
+            or self.row_version < 0
+        ):
             raise RepairLineageError("repair lineage ProductProject version is invalid")
-        if self.from_attempt < 1 or self.to_attempt != self.from_attempt + 1:
+        if (
+            not isinstance(self.from_attempt, int)
+            or isinstance(self.from_attempt, bool)
+            or not isinstance(self.to_attempt, int)
+            or isinstance(self.to_attempt, bool)
+            or self.from_attempt < 1
+            or self.to_attempt != self.from_attempt + 1
+        ):
             raise RepairLineageError("repair lineage attempts must advance exactly one generation")
         _validate_sha(self.from_result_sha, "from_result_sha")
         _validate_sha(self.to_base_sha, "to_base_sha")
@@ -354,7 +372,11 @@ class MultiRepositoryProductFactoryHost:
         graph: ProductRepositoryGraph,
         graph_version: int,
     ) -> RepositoryGraphAuthority:
-        if graph_version < 1:
+        if (
+            not isinstance(graph_version, int)
+            or isinstance(graph_version, bool)
+            or graph_version < 1
+        ):
             raise MultiRepositoryExecutionError("graph_version must be positive")
         if graph.project_id != project.project_id:
             raise MultiRepositoryExecutionError(
@@ -547,38 +569,36 @@ class MultiRepositoryProductFactoryHost:
         if _sha256(canonical) != row["checksum_sha256"]:
             raise RepositoryGraphIntegrityError("repository graph checkpoint checksum mismatch")
         try:
-            payload = json.loads(canonical)
-        except json.JSONDecodeError as exc:
+            payload = _object(json.loads(canonical), "repository graph checkpoint")
+        except (TypeError, ValueError) as exc:
             raise RepositoryGraphIntegrityError(
-                "repository graph checkpoint is not valid JSON"
+                "repository graph checkpoint is not valid JSON object"
             ) from exc
         if payload.get("schema") != _GRAPH_SCHEMA:
             raise RepositoryGraphIntegrityError("repository graph checkpoint schema mismatch")
+        try:
+            project_id = _text(payload, "project_id")
+            spec_version = _positive_int(payload, "spec_version")
+            row_version = _nonnegative_int(payload, "row_version")
+            graph_version = _positive_int(payload, "graph_version")
+            graph_digest_evidence = _text(payload, "graph_digest")
+            graph = _decode_graph(payload["graph"])
+            edge_payloads = _list(payload, "dependency_edges")
+            edges = tuple(_decode_dependency_edge(item) for item in edge_payloads)
+        except (KeyError, TypeError, ValueError, RepositoryGraphError) as exc:
+            raise RepositoryGraphIntegrityError(
+                "repository graph checkpoint payload is invalid"
+            ) from exc
         if (
-            payload.get("project_id") != project.project_id
-            or payload.get("spec_version") != project.spec_version
-            or payload.get("row_version") != project.row_version
+            project_id != project.project_id
+            or spec_version != project.spec_version
+            or row_version != project.row_version
         ):
             raise RepositoryGraphIntegrityError(
                 "repository graph authority is stale for current ProductProject"
             )
-        try:
-            graph = _decode_graph(payload["graph"])
-            graph_version = int(payload["graph_version"])
-            edges = tuple(
-                VersionedDependencyEdge(
-                    graph_version=int(item["graph_version"]),
-                    component_id=str(item["component_id"]),
-                    depends_on_component_id=str(item["depends_on_component_id"]),
-                )
-                for item in payload["dependency_edges"]
-            )
-        except (AttributeError, KeyError, TypeError, ValueError, RepositoryGraphError) as exc:
-            raise RepositoryGraphIntegrityError(
-                "repository graph checkpoint payload is invalid"
-            ) from exc
         graph_digest = _sha256(_canonical(_encode_graph(graph)))
-        if payload.get("graph_digest") != graph_digest:
+        if graph_digest_evidence != graph_digest:
             raise RepositoryGraphIntegrityError("repository graph digest mismatch")
         expected_edges = _dependency_edges(graph, graph_version)
         if edges != expected_edges:
@@ -731,26 +751,26 @@ class MultiRepositoryProductFactoryHost:
         if _sha256(canonical) != row["checksum_sha256"]:
             raise RepairLineageError("repair lineage checkpoint checksum mismatch")
         try:
-            payload = json.loads(canonical)
-        except json.JSONDecodeError as exc:
-            raise RepairLineageError("repair lineage checkpoint is not valid JSON") from exc
+            payload = _object(json.loads(canonical), "repair lineage checkpoint")
+        except (TypeError, ValueError) as exc:
+            raise RepairLineageError("repair lineage checkpoint is not valid JSON object") from exc
         if payload.get("schema") != _LINEAGE_SCHEMA:
             raise RepairLineageError("repair lineage checkpoint schema mismatch")
         try:
             intent = RepairLineageIntent(
-                lineage_id=str(payload["lineage_id"]),
-                project_id=str(payload["project_id"]),
-                spec_version=int(payload["spec_version"]),
-                row_version=int(payload["row_version"]),
-                graph_digest=str(payload["graph_digest"]),
-                component_id=str(payload["component_id"]),
-                from_attempt=int(payload["from_attempt"]),
-                from_work_id=str(payload["from_work_id"]),
-                from_result_sha=str(payload["from_result_sha"]),
-                to_attempt=int(payload["to_attempt"]),
-                to_work_id=str(payload["to_work_id"]),
-                to_base_sha=str(payload["to_base_sha"]),
-                reason=str(payload["reason"]),
+                lineage_id=_text(payload, "lineage_id"),
+                project_id=_text(payload, "project_id"),
+                spec_version=_positive_int(payload, "spec_version"),
+                row_version=_nonnegative_int(payload, "row_version"),
+                graph_digest=_text(payload, "graph_digest"),
+                component_id=_text(payload, "component_id"),
+                from_attempt=_positive_int(payload, "from_attempt"),
+                from_work_id=_text(payload, "from_work_id"),
+                from_result_sha=_text(payload, "from_result_sha"),
+                to_attempt=_positive_int(payload, "to_attempt"),
+                to_work_id=_text(payload, "to_work_id"),
+                to_base_sha=_text(payload, "to_base_sha"),
+                reason=_text(payload, "reason"),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise RepairLineageError("repair lineage checkpoint payload is invalid") from exc
@@ -962,10 +982,14 @@ class MultiRepositoryProductFactoryHost:
             raise MultiRepositoryExecutionError("Product Factory host task does not exist")
         try:
             payload = json.loads(row["payload_json"])
-        except json.JSONDecodeError as exc:
+        except (TypeError, ValueError) as exc:
             raise MultiRepositoryExecutionError(
                 "Product Factory host task payload is corrupt"
             ) from exc
+        if not isinstance(payload, dict):
+            raise MultiRepositoryExecutionError(
+                "Product Factory host task payload must be an object"
+            )
         if (
             payload.get("kind") != _HOST_KIND
             or payload.get("product_project_id") != project_id
@@ -1022,7 +1046,11 @@ def _dependency_edges(
     graph: ProductRepositoryGraph,
     graph_version: int,
 ) -> tuple[VersionedDependencyEdge, ...]:
-    if graph_version < 1:
+    if (
+        not isinstance(graph_version, int)
+        or isinstance(graph_version, bool)
+        or graph_version < 1
+    ):
         raise MultiRepositoryExecutionError("graph_version must be positive")
     return tuple(
         sorted(
@@ -1046,30 +1074,44 @@ def _encode_graph(graph: ProductRepositoryGraph) -> dict[str, Any]:
 
 
 def _decode_graph(payload: Mapping[str, Any]) -> ProductRepositoryGraph:
+    data = _object(payload, "repository graph")
+    repositories_payload = _list(data, "repositories")
+    components_payload = _list(data, "components")
     repositories = tuple(
-        RepositoryRef(**dict(item))
-        for item in payload.get("repositories", ())
+        RepositoryRef(**_object(item, "repository reference"))
+        for item in repositories_payload
     )
     components = tuple(
         ProductComponent(
             **{
-                **dict(item),
-                "paths": tuple(item.get("paths", ())),
-                "dependencies": tuple(item.get("dependencies", ())),
+                **item_data,
+                "paths": tuple(item_data.get("paths", ())),
+                "dependencies": tuple(item_data.get("dependencies", ())),
                 "build_commands": tuple(
-                    tuple(command) for command in item.get("build_commands", ())
+                    tuple(command) for command in item_data.get("build_commands", ())
                 ),
                 "test_commands": tuple(
-                    tuple(command) for command in item.get("test_commands", ())
+                    tuple(command) for command in item_data.get("test_commands", ())
                 ),
             }
         )
-        for item in payload.get("components", ())
+        for item_data in (
+            _object(item, "product component") for item in components_payload
+        )
     )
     return ProductRepositoryGraph(
-        project_id=str(payload["project_id"]),
+        project_id=_text(data, "project_id"),
         repositories=repositories,
         components=components,
+    )
+
+
+def _decode_dependency_edge(payload: Any) -> VersionedDependencyEdge:
+    data = _object(payload, "dependency edge")
+    return VersionedDependencyEdge(
+        graph_version=_positive_int(data, "graph_version"),
+        component_id=_text(data, "component_id"),
+        depends_on_component_id=_text(data, "depends_on_component_id"),
     )
 
 
@@ -1097,6 +1139,40 @@ def _graph_authority_fingerprint(
             }
         )
     )
+
+
+def _object(value: Any, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise TypeError(f"{label} must be an object")
+    return value
+
+
+def _list(data: dict[str, Any], key: str) -> list[Any]:
+    value = data.get(key)
+    if not isinstance(value, list):
+        raise TypeError(f"{key} must be a list")
+    return value
+
+
+def _text(data: dict[str, Any], key: str) -> str:
+    value = data.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{key} must be non-empty text")
+    return value
+
+
+def _positive_int(data: dict[str, Any], key: str) -> int:
+    value = data.get(key)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValueError(f"{key} must be a positive integer")
+    return value
+
+
+def _nonnegative_int(data: dict[str, Any], key: str) -> int:
+    value = data.get(key)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"{key} must be a non-negative integer")
+    return value
 
 
 def _canonical(value: Any) -> str:
