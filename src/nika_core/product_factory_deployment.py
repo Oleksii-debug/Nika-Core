@@ -336,11 +336,12 @@ class ProviderInspection:
     def __post_init__(self) -> None:
         if self.release_sha is not None:
             _validate_sha(self.release_sha)
-        if self.release is not None:
-            if self.release_sha is None or self.release.source_sha != self.release_sha:
-                raise DeploymentFabricError(
-                    "inspection exact release disagrees with release SHA"
-                )
+        if self.release is not None and (
+            self.release_sha is None or self.release.source_sha != self.release_sha
+        ):
+            raise DeploymentFabricError(
+                "inspection exact release disagrees with release SHA"
+            )
 
 
 class DeploymentProviderPort(Protocol):
@@ -776,11 +777,14 @@ def _normalize_record(
             and rollback.restored_release_sha == previous.source_sha
         ):
             restored_release = previous
-        if rollback.succeeded and rollback.restored_release_sha is not None:
-            if restored_release is None:
-                raise DeploymentFabricError(
-                    "legacy rollback snapshot is ambiguous or lacks exact restored release"
-                )
+        if (
+            rollback.succeeded
+            and rollback.restored_release_sha is not None
+            and restored_release is None
+        ):
+            raise DeploymentFabricError(
+                "legacy rollback snapshot is ambiguous or lacks exact restored release"
+            )
         rollback = replace(
             rollback,
             failed_release=failed_release,
