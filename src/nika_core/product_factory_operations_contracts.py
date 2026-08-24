@@ -193,6 +193,14 @@ class MaintenanceEffectReservation:
 class MaintenanceEffectJournalPort(Protocol):
     """Durable pre-effect reservation boundary for one maintenance task host."""
 
+    def lookup(
+        self,
+        *,
+        project_id: str,
+        service: DeployableService,
+        request: MaintenanceRequest,
+    ) -> MaintenanceEffectReservation | None: ...
+
     def reserve(
         self,
         *,
