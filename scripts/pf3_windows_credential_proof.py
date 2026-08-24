@@ -3,9 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+import subprocess
 import sys
+import tempfile
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from nika_core.product_factory_windows_credentials import (
     ProtectedCredentialStoreError,
@@ -16,6 +20,8 @@ from nika_core.product_factory_windows_credentials import (
 PROJECT_ID = "pf3-proof-project"
 AUDIENCE = "pf3-proof-audience"
 SCOPE = "credential:proof"
+_AUTHORITY_OWNER_READY = "pf3-authority-owner-ready"
+_AUTHORITY_LOCKED_EXIT = 23
 
 
 def _expect_unknown_handle(store: WindowsCredentialStore, handle_ref: str, now: datetime) -> None:
@@ -59,9 +65,112 @@ def _cleanup(store: WindowsCredentialStore | None, secret_ref: str) -> list[str]
     return errors
 
 
+def _self_command(*args: str) -> list[str]:
+    if getattr(sys, "frozen", False):
+        return [sys.executable, *args]
+    return [sys.executable, str(Path(__file__).resolve()), *args]
+
+
+def _authority_owner_child(marker_path: Path) -> int:
+    _ = create_windows_credential_store()
+    marker_path.write_text(_AUTHORITY_OWNER_READY, encoding="utf-8")
+    sys.stdin.readline()
+    return 0
+
+
+def _authority_probe_child() -> int:
+    try:
+        _ = create_windows_credential_store()
+    except ProtectedCredentialStoreError as exc:
+        if "another credential authority host is active" in str(exc):
+            return _AUTHORITY_LOCKED_EXIT
+        raise
+    return 0
+
+
+def _prove_cross_process_authority_owner() -> None:
+    with tempfile.TemporaryDirectory(prefix="nika-pf3-authority-") as temp_dir:
+        marker_path = Path(temp_dir) / "owner-ready.txt"
+        owner = subprocess.Popen(
+            _self_command("--authority-owner-child", str(marker_path)),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 60
+            while not marker_path.exists():
+                if owner.poll() is not None:
+                    stdout, stderr = owner.communicate()
+                    raise RuntimeError(
+                        "credential authority owner child exited before readiness "
+                        f"({owner.returncode}); stdout={stdout[:200]!r}; stderr={stderr[:200]!r}"
+                    )
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("credential authority owner child readiness timed out")
+                time.sleep(0.05)
+            if marker_path.read_text(encoding="utf-8") != _AUTHORITY_OWNER_READY:
+                raise RuntimeError("credential authority owner child wrote invalid readiness evidence")
+
+            blocked = subprocess.run(
+                _self_command("--authority-probe-child"),
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if blocked.returncode != _AUTHORITY_LOCKED_EXIT:
+                raise RuntimeError(
+                    "concurrent credential authority process was not blocked "
+                    f"({blocked.returncode}); stdout={blocked.stdout[:200]!r}; "
+                    f"stderr={blocked.stderr[:200]!r}"
+                )
+
+            stdout, stderr = owner.communicate("release\n", timeout=60)
+            if owner.returncode != 0:
+                raise RuntimeError(
+                    "credential authority owner child failed during release "
+                    f"({owner.returncode}); stdout={stdout[:200]!r}; stderr={stderr[:200]!r}"
+                )
+
+            recovered = subprocess.run(
+                _self_command("--authority-probe-child"),
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if recovered.returncode != 0:
+                raise RuntimeError(
+                    "credential authority lock was not recoverable after owner exit "
+                    f"({recovered.returncode}); stdout={recovered.stdout[:200]!r}; "
+                    f"stderr={recovered.stderr[:200]!r}"
+                )
+        finally:
+            if owner.poll() is None:
+                owner.terminate()
+                try:
+                    owner.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    owner.kill()
+                    owner.communicate()
+
+
 def main() -> int:
+    args = sys.argv[1:]
+    if args[:1] == ["--authority-owner-child"]:
+        if len(args) != 2:
+            raise SystemExit("authority owner child requires one marker path")
+        return _authority_owner_child(Path(args[1]))
+    if args == ["--authority-probe-child"]:
+        return _authority_probe_child()
+    if args:
+        raise SystemExit("unknown PF3 credential proof arguments")
     if sys.platform != "win32":
         raise SystemExit("PF3 Windows credential proof requires Windows")
+
+    _prove_cross_process_authority_owner()
 
     secret_ref = "pf3-proof-" + uuid.uuid4().hex
     raw_secret = secrets.token_urlsafe(48)
@@ -228,6 +337,7 @@ def main() -> int:
                 "backend": "python-keyring WinVaultKeyring",
                 "cleanup": "verified",
                 "credential_blob_2560_bytes": "verified",
+                "cross_process_authority_owner": "verified",
                 "handle_operation_idempotency": "verified",
                 "handle_restart_invalidation": "verified",
                 "persistence": "local_machine",
