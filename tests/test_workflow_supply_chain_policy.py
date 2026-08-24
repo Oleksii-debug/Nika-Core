@@ -10,7 +10,10 @@ _REMOTE_SCRIPT_PIPE = re.compile(
     r"(?:curl|wget)\b[^\n|]*https?://[^\n|]+\|\s*(?:sh|bash)\b",
     re.IGNORECASE,
 )
-_CHECKOUT_USE = "uses: actions/checkout@"
+_CHECKOUT_USE = re.compile(
+    r"^\s*-?\s*uses:\s*actions/checkout@",
+    re.IGNORECASE,
+)
 _STEP_ITEM = re.compile(r"^(?P<indent>\s*)-\s+")
 _PERSIST_SETTING = re.compile(
     r"^\s*persist-credentials:\s*([^\s#]+)\s*(?:#.*)?$",
@@ -95,7 +98,7 @@ def _checkout_credential_findings(workflow: Path) -> list[str]:
     findings: list[str] = []
     lines = workflow.read_text(encoding="utf-8").splitlines()
     for index, line in enumerate(lines):
-        if _CHECKOUT_USE not in line:
+        if _CHECKOUT_USE.search(line) is None:
             continue
         if not _checkout_disables_persisted_credentials(lines, index):
             findings.append(f"{workflow}:{index + 1}")
@@ -129,9 +132,13 @@ def test_checkout_never_persists_ci_credentials() -> None:
 def test_checkout_policy_handles_named_steps_and_rejects_unsafe_settings(
     tmp_path: Path,
 ) -> None:
-    action = "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
+    checkout_sha = "11d5960a326750d5838078e36cf38b85af677262"
+    action = f"actions/checkout@{checkout_sha}"
+    mixed_case_action = f"Actions/Checkout@{checkout_sha}"
     safe = tmp_path / "safe.yml"
     inline_safe = tmp_path / "inline-safe.yml"
+    mixed_case_safe = tmp_path / "mixed-case-safe.yml"
+    mixed_case_missing = tmp_path / "mixed-case-missing.yml"
     missing = tmp_path / "missing.yml"
     explicitly_true = tmp_path / "true.yml"
     misplaced_env = tmp_path / "misplaced-env.yml"
@@ -158,6 +165,24 @@ def test_checkout_policy_handles_named_steps_and_rejects_unsafe_settings(
         f"      - uses: {action}\n"
         "        with:\n"
         "          persist-credentials: false\n",
+        encoding="utf-8",
+    )
+    mixed_case_safe.write_text(
+        "jobs:\n"
+        "  verify:\n"
+        "    steps:\n"
+        "      - name: Mixed-case checkout\n"
+        f"        uses: {mixed_case_action}\n"
+        "        with:\n"
+        "          persist-credentials: false\n",
+        encoding="utf-8",
+    )
+    mixed_case_missing.write_text(
+        "jobs:\n"
+        "  verify:\n"
+        "    steps:\n"
+        "      - name: Mixed-case checkout without hardening\n"
+        f"        uses: {mixed_case_action}\n",
         encoding="utf-8",
     )
     missing.write_text(
@@ -217,6 +242,8 @@ def test_checkout_policy_handles_named_steps_and_rejects_unsafe_settings(
 
     assert _checkout_credential_findings(safe) == []
     assert _checkout_credential_findings(inline_safe) == []
+    assert _checkout_credential_findings(mixed_case_safe) == []
+    assert len(_checkout_credential_findings(mixed_case_missing)) == 1
     assert len(_checkout_credential_findings(missing)) == 1
     assert len(_checkout_credential_findings(explicitly_true)) == 1
     assert len(_checkout_credential_findings(misplaced_env)) == 1
