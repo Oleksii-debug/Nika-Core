@@ -186,7 +186,11 @@ class ProductFactoryCheckpointHost:
                             "same coordinator revision has different durable state"
                         )
                     return previous_record
-                _validate_checkpoint_transition(previous_record.checkpoint, checkpoint)
+                _validate_checkpoint_transition(
+                    previous_record.checkpoint,
+                    checkpoint,
+                    live_authority=live_authority,
+                )
             try:
                 conn.execute(
                     """
@@ -564,6 +568,8 @@ def _validate_checkpoint_authority(
 def _validate_checkpoint_transition(
     previous: ProductProjectCoordinatorCheckpoint,
     current: ProductProjectCoordinatorCheckpoint,
+    *,
+    live_authority: str | None,
 ) -> None:
     if (
         previous.project_id != current.project_id
@@ -588,7 +594,8 @@ def _validate_checkpoint_transition(
     # A durable checkpoint is not required after every in-memory coordinator method.
     # The host therefore validates transitive forward reachability through the legal
     # same-attempt state machine. Security-significant repair generation changes remain
-    # stricter below and require a durable REPAIR_REQUIRED predecessor.
+    # stricter below and require a durable REPAIR_REQUIRED predecessor plus an exact
+    # live host proof for the first durable state of the new generation.
     allowed_same_attempt = {
         WorkState.PLANNED: frozenset(
             {
@@ -663,6 +670,10 @@ def _validate_checkpoint_transition(
         if current_record.state is not WorkState.READY:
             raise ProductFactoryCheckpointIntegrityError(
                 "new repair attempt must be durably checkpointed as ready before execution"
+            )
+        if live_authority is None:
+            raise ProductFactoryTrustedPlanAuthorityError(
+                "new repair generation requires live host authority proof"
             )
         _validate_repair_request_transition(previous_request, current_request)
 
