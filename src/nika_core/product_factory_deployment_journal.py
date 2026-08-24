@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_factory_deployment import (
@@ -33,20 +33,24 @@ class SQLiteDeploymentEffectJournal:
 
     store: SQLiteStore
     host_task_id: str
+    _ledger: IdempotencyLedger = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not self.host_task_id.strip():
-            raise DeploymentFabricError("deployment effect journal host task id must not be empty")
+            raise DeploymentFabricError(
+                "deployment effect journal host task id must not be empty"
+            )
         self._ledger = IdempotencyLedger(self.store)
 
     def before_effect(self, intent: DeploymentIntent) -> bool:
-        """Reserve the exact deployment effect and return whether this caller may dispatch."""
+        """Reserve the exact deployment effect and report whether dispatch is new."""
         operation_key = _operation_key(intent)
         environment_prefix = _environment_prefix(intent)
         input_fingerprint = _intent_fingerprint(intent)
         with self.store.connection() as conn:
-            # Serialize the cross-intent environment check with reservation. Different
-            # intent ids must not race into two external mutations for one environment.
+            # Serialize environment conflict detection with reservation. A second
+            # process cannot reserve a different deployment for the same environment
+            # between these two checks.
             conn.execute("BEGIN IMMEDIATE")
             _require_host_task(
                 conn,
@@ -91,7 +95,7 @@ class SQLiteDeploymentEffectJournal:
     def mark_uncertain(self, intent: DeploymentIntent) -> None:
         operation_key = _operation_key(intent)
         record = self._ledger.require(operation_key)
-        self._validate_record_owner(record.task_id, record.operation_type, intent)
+        self._validate_record_owner(record, intent)
         if record.status is IdempotencyStatus.PENDING:
             self._ledger.mark_uncertain(operation_key)
         elif record.status is IdempotencyStatus.UNCERTAIN:
@@ -112,7 +116,7 @@ class SQLiteDeploymentEffectJournal:
             )
         operation_key = _operation_key(intent)
         record = self._ledger.require(operation_key)
-        self._validate_record_owner(record.task_id, record.operation_type, intent)
+        self._validate_record_owner(record, intent)
         summary = {
             "state": state.value,
             "project_id": intent.project_id,
@@ -132,15 +136,17 @@ class SQLiteDeploymentEffectJournal:
                 "completed deployment effect journal result conflicts with terminal state"
             )
 
-    def _validate_record_owner(
-        self,
-        task_id: str,
-        operation_type: str,
-        intent: DeploymentIntent,
-    ) -> None:
+    def _validate_record_owner(self, record: object, intent: DeploymentIntent) -> None:
+        task_id = getattr(record, "task_id", None)
+        operation_type = getattr(record, "operation_type", None)
+        input_fingerprint = getattr(record, "input_fingerprint", None)
         if task_id != self.host_task_id or operation_type != _OPERATION_TYPE:
             raise DeploymentFabricError(
                 "deployment effect journal record belongs to another host authority"
+            )
+        if input_fingerprint != _intent_fingerprint(intent):
+            raise DeploymentFabricError(
+                "deployment effect journal record does not match exact deployment intent"
             )
         with self.store.connection() as conn:
             _require_host_task(
