@@ -2,18 +2,23 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import secrets
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from threading import RLock
-from typing import Protocol
+from typing import BinaryIO, Protocol
 
 _CREDENTIAL_BLOB_MAX_BYTES = 5 * 512
 _GENERIC_TARGET_MAX_CHARS = 32767
 _SERVICE_PREFIX = "NikaCore.ProductFactory.v1"
 _USERNAME = "nika-core"
 _AUTHORITY_SEGMENT = "authority"
+_PROCESS_AUTHORITY_LOCK_GUARD = RLock()
+_PROCESS_AUTHORITY_LOCKS: dict[str, BinaryIO] = {}
 
 
 class ProtectedCredentialStoreError(RuntimeError):
@@ -63,7 +68,7 @@ class _HandleBinding:
 
 @dataclass(slots=True)
 class WindowsCredentialStore:
-    """Windows Credential Manager adapter with in-process opaque lease handles."""
+    """Windows Credential Manager adapter with process-owned opaque lease handles."""
 
     _backend: WindowsVaultBackendPort = field(repr=False)
     service_prefix: str = _SERVICE_PREFIX
@@ -73,6 +78,7 @@ class WindowsCredentialStore:
 
     def __post_init__(self) -> None:
         _nonempty("credential service prefix", self.service_prefix)
+        _ensure_process_authority_owner(self.service_prefix)
 
     def provision_secret(self, secret_ref: str, generation: int, raw_secret: str) -> None:
         target = self._target(secret_ref, generation)
@@ -414,6 +420,48 @@ def create_windows_credential_store() -> WindowsCredentialStore:
     except Exception as exc:
         raise _backend_error("initialize", exc) from None
     return WindowsCredentialStore(backend)
+
+
+def _ensure_process_authority_owner(service_prefix: str) -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        encoded_prefix = service_prefix.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ProtectedCredentialStoreError(
+            "credential service prefix must be valid UTF-8 text"
+        ) from None
+    lock_key = hashlib.sha256(encoded_prefix).hexdigest()
+    with _PROCESS_AUTHORITY_LOCK_GUARD:
+        if lock_key in _PROCESS_AUTHORITY_LOCKS:
+            return
+        try:
+            import msvcrt
+
+            root = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+            lock_dir = Path(root) / "NikaCore" / "ProductFactory"
+            lock_dir.mkdir(parents=True, exist_ok=True)
+            lock_path = lock_dir / f"credential-authority-{lock_key}.lock"
+            lock_file = lock_path.open("a+b")
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write(b"\x00")
+                lock_file.flush()
+            lock_file.seek(0)
+            try:
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                lock_file.close()
+                raise ProtectedCredentialStoreError(
+                    "another credential authority host is active or the authority lock is unavailable"
+                ) from None
+        except ProtectedCredentialStoreError:
+            raise
+        except Exception as exc:
+            raise ProtectedCredentialStoreError(
+                f"credential authority host lock initialization failed ({type(exc).__name__})"
+            ) from None
+        _PROCESS_AUTHORITY_LOCKS[lock_key] = lock_file
 
 
 def _validated_material(raw_secret: str) -> str:
