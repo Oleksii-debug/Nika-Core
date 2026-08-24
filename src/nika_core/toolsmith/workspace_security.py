@@ -207,7 +207,15 @@ def _paths_overlap(first: pathlib.Path, second: pathlib.Path) -> bool:
 
 def _executable_identity_key(value: str) -> str:
     if os.name == "nt":
-        return pathlib.PureWindowsPath(value).as_posix().casefold()
+        normalized = pathlib.PureWindowsPath(value).as_posix()
+        if (
+            len(normalized) >= 7
+            and normalized.startswith("//?/")
+            and normalized[4] in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+            and normalized[5:7] == ":/"
+        ):
+            normalized = normalized[4:]
+        return normalized.casefold()
     return value
 
 

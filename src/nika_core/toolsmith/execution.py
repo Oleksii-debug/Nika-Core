@@ -430,22 +430,26 @@ def _git(
     environment: collections.abc.Mapping[str, str],
     timeout_seconds: int = 60,
 ) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(
-        tuple(argv),
-        cwd=cwd,
-        env=dict(environment),
-        shell=False,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout_seconds,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            tuple(argv),
+            cwd=cwd,
+            env=dict(environment),
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise WorkspaceSecurityError("git command timed out") from None
+    except (OSError, subprocess.SubprocessError):
+        raise WorkspaceSecurityError("git command could not be executed") from None
     if result.returncode != 0:
-        message = result.stderr.strip() or result.stdout.strip() or "git command failed"
-        raise WorkspaceSecurityError(message[:2000])
+        raise WorkspaceSecurityError(f"git command failed (exit {result.returncode})")
     return result
 
 
