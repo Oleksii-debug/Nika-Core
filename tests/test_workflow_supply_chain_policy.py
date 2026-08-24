@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import pathlib
 import re
+from pathlib import Path
 
-_WORKFLOW_ROOT = pathlib.Path(".github/workflows")
+_WORKFLOW_ROOT = Path(".github/workflows")
 _ACTION_USE = re.compile(r"^\s*-?\s*uses:\s*([^\s#]+)", re.MULTILINE)
 _FULL_COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _REMOTE_SCRIPT_PIPE = re.compile(
@@ -13,7 +13,7 @@ _REMOTE_SCRIPT_PIPE = re.compile(
 _CHECKOUT_USE = "uses: actions/checkout@"
 
 
-def _workflows() -> tuple[pathlib.Path, ...]:
+def _workflows() -> tuple[Path, ...]:
     return tuple(sorted(_WORKFLOW_ROOT.glob("*.yml"))) + tuple(
         sorted(_WORKFLOW_ROOT.glob("*.yaml"))
     )
