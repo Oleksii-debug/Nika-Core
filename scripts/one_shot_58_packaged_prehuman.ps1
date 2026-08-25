@@ -452,7 +452,31 @@ try {
             $edit = Focus-CommandInput
             [System.Windows.Forms.SendKeys]::SendWait('^a')
             [System.Windows.Forms.SendKeys]::SendWait('{BACKSPACE}')
-            Require ((Get-EditValue $edit) -eq '') 'Command input was not cleared before rejected create.'
+            $cleared = $false
+            for ($attempt = 0; $attempt -lt 20; $attempt++) {
+                Start-Sleep -Milliseconds 100
+                Assert-ProcessGeneration
+                try {
+                    $matches = @(Get-UniqueCandidates 'Що має зробити Nika?' ([System.Windows.Automation.ControlType]::Edit))
+                } catch [System.Windows.Automation.ElementNotAvailableException] {
+                    continue
+                }
+                if ($matches.Count -gt 1) {
+                    throw "Ambiguous UIA semantic locator while waiting for cleared command input. Count=$($matches.Count)."
+                }
+                if ($matches.Count -eq 1) {
+                    try {
+                        if ((Get-EditValue $matches[0]) -eq '') {
+                            $edit = $matches[0]
+                            $cleared = $true
+                            break
+                        }
+                    } catch [System.Windows.Automation.ElementNotAvailableException] {
+                        continue
+                    }
+                }
+            }
+            Require $cleared 'Command input was not cleared before rejected create.'
             [System.Windows.Forms.SendKeys]::SendWait('{TAB}')
             $create = Wait-UniqueElement 'Створити завдання' ([System.Windows.Automation.ControlType]::Button)
             Assert-ExactFocus $create 'create task button before rejected empty command'
