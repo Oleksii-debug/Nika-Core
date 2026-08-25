@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,16 @@ def _request(source_locator: str, *, artifact_key: str) -> KnowledgeIngestReques
     )
 
 
+def _drop_knowledge_schema(store: SQLiteStore) -> None:
+    with store.connection() as conn:
+        conn.execute("DROP TABLE knowledge_fts")
+        conn.execute("DROP TABLE knowledge_acl")
+        conn.execute("DROP TABLE knowledge_chunks")
+        conn.execute("DROP TABLE knowledge_versions")
+        conn.execute("DROP TABLE knowledge_artifacts")
+        conn.execute("DROP TABLE knowledge_schema_migrations")
+
+
 @pytest.mark.parametrize(
     ("source_locator", "artifact_key"),
     (
@@ -68,6 +79,59 @@ def test_unregistered_credential_locator_never_becomes_durable_provenance(
         )
 
     assert all(_CANARY not in locator for locator in durable_locators)
+
+
+def test_legacy_migration_never_copies_credential_locator_into_knowledge(
+    tmp_path: Path,
+) -> None:
+    store, _corpus = _make_corpus(tmp_path)
+    legacy_text = "legacy credential provenance marker"
+    secret_locator = f"https://example.com/legacy?access_token={_CANARY}"
+
+    with store.connection() as conn:
+        conn.execute(
+            """INSERT INTO research_sources(
+                source_id, workspace_id, kind, locator, created_at, updated_at
+            ) VALUES (?, ?, 'local_file', ?, ?, ?)""",
+            ("legacy-source", "ws-a", secret_locator, _TIMESTAMP, _TIMESTAMP),
+        )
+        conn.execute(
+            """INSERT INTO corpus_documents(
+                document_id, workspace_id, normalized_sha256, title, media_type,
+                normalized_text, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                "legacy-secret-doc",
+                "ws-a",
+                hashlib.sha256(legacy_text.encode()).hexdigest(),
+                "Legacy secret fixture",
+                "text/plain",
+                legacy_text,
+                _TIMESTAMP,
+            ),
+        )
+        conn.execute(
+            """INSERT INTO corpus_origins(document_id, source_id, locator, observed_at)
+            VALUES (?, ?, ?, ?)""",
+            ("legacy-secret-doc", "legacy-source", secret_locator, _TIMESTAMP),
+        )
+
+    _drop_knowledge_schema(store)
+    try:
+        store.initialize()
+    except Exception as exc:  # noqa: BLE001 - safe migration may fail closed
+        assert _CANARY not in str(exc)
+        assert _CANARY not in repr(exc)
+        return
+
+    with store.connection() as conn:
+        migrated = conn.execute(
+            """SELECT source_locator FROM knowledge_versions
+            WHERE workspace_id=? AND artifact_key=? AND version=1""",
+            ("ws-a", "legacy:legacy-secret-doc"),
+        ).fetchone()
+    assert migrated is not None
+    assert _CANARY not in migrated["source_locator"]
 
 
 def test_unregistered_opaque_locator_remains_supported(tmp_path: Path) -> None:
