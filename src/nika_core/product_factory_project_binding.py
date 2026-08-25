@@ -290,8 +290,13 @@ def _minimize_durable_work_record(record: WorkRecord) -> WorkRecord:
 
 
 def _durable_review_evidence_ref(value: str) -> str:
+    prefix = f"{_DURABLE_REVIEW_EVIDENCE_SCHEME}:"
+    if value.startswith(prefix):
+        digest = value[len(prefix) :]
+        if len(digest) == 64 and all(character in "0123456789abcdef" for character in digest):
+            return value
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
-    return f"{_DURABLE_REVIEW_EVIDENCE_SCHEME}:{digest}"
+    return f"{prefix}{digest}"
 
 
 def _sign_live_authority(
