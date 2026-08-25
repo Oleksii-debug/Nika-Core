@@ -16,6 +16,7 @@ _SENSITIVE_QUERY_KEYS = frozenset(
         "access_token",
         "api_key",
         "apikey",
+        "auth",
         "auth_token",
         "authorization",
         "awsaccesskeyid",
