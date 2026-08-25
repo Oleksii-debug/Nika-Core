@@ -320,6 +320,8 @@ class DesktopBackend:
             raise
 
     def _schedule_cancel_locked(self, task_id: str, thread_id: str) -> Future[bool]:
+        if RuntimeCapability.CANCELLATION not in self._runtime.capabilities:
+            raise ValueError("Поточний runtime не заявляє безпечне скасування.")
         existing = self._cancel_futures.get(task_id)
         if existing is not None and not existing.done():
             raise ValueError("Запит на зупинку цього завдання вже виконується.")
