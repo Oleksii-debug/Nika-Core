@@ -14,7 +14,6 @@ from nika_core.research import (
     SourceSpec,
 )
 
-
 _CANARY = "QA53_SYNTHETIC_AUTH_QUERY_SECRET_b3e2a619"
 
 
