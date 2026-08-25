@@ -1,7 +1,7 @@
 """QA_ONLY adversarial oracle for NIKA50 CHAT-08 PF7 security findings.
 
 This file is synchronized over production PR #162 head
-``b856f64ebb0d490911f523d4a0cd6e104ce5531e`` and must never be merged into
+``705221414de4d99a8e0547cd0704ef7279e5348a`` and must never be merged into
 production. All credential material below is synthetic test data.
 """
 
@@ -296,6 +296,87 @@ def test_restore_rejects_fabricated_credential_use_audit_event(
         snapshot.audit_events + (forged_use,),
         snapshot.next_lease,
         3,
+    )
+
+    with pytest.raises(CredentialBrokerError):
+        CredentialBroker(store).restore(forged)
+
+
+def test_restore_rejects_rewritten_credential_audit_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Existing durable audit history must not be rewriteable by snapshot bytes."""
+
+    backend = _MemoryWinVaultBackend()
+    store = _store(
+        backend,
+        monkeypatch,
+        service_prefix="NikaQA.Chat08.AuditRewrite",
+    )
+    store.provision_secret(SECRET_REF, 1, "synthetic-not-a-real-credential")
+
+    secret = _secret()
+    _pre_enroll(store, secret)
+    broker = CredentialBroker(store)
+    broker.register_secret(secret, now=NOW)
+    snapshot = broker.snapshot()
+    assert len(snapshot.audit_events) == 1
+
+    canonical = CredentialBroker(store)
+    canonical.restore(snapshot)
+    assert canonical.audit_events(PROJECT_ID) == snapshot.audit_events
+
+    original = snapshot.audit_events[0]
+    rewritten = CredentialAuditEvent(
+        original.event_id,
+        "use",
+        original.project_id,
+        original.secret_ref,
+        original.at,
+        "audience=qa-provider-api;scope=repo:admin",
+    )
+    forged = CredentialBrokerSnapshot(
+        snapshot.secrets,
+        snapshot.identities,
+        (rewritten,),
+        snapshot.next_lease,
+        snapshot.next_event,
+    )
+
+    with pytest.raises(CredentialBrokerError):
+        CredentialBroker(store).restore(forged)
+
+
+def test_restore_rejects_omitted_credential_audit_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A snapshot must not erase prior durable credential audit evidence."""
+
+    backend = _MemoryWinVaultBackend()
+    store = _store(
+        backend,
+        monkeypatch,
+        service_prefix="NikaQA.Chat08.AuditOmission",
+    )
+    store.provision_secret(SECRET_REF, 1, "synthetic-not-a-real-credential")
+
+    secret = _secret()
+    _pre_enroll(store, secret)
+    broker = CredentialBroker(store)
+    broker.register_secret(secret, now=NOW)
+    snapshot = broker.snapshot()
+    assert snapshot.audit_events
+
+    canonical = CredentialBroker(store)
+    canonical.restore(snapshot)
+    assert canonical.audit_events(PROJECT_ID) == snapshot.audit_events
+
+    forged = CredentialBrokerSnapshot(
+        snapshot.secrets,
+        snapshot.identities,
+        (),
+        snapshot.next_lease,
+        snapshot.next_event,
     )
 
     with pytest.raises(CredentialBrokerError):
