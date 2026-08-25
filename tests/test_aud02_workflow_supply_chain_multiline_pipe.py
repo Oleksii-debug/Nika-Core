@@ -12,11 +12,12 @@ _POLICY_PATH = Path("tests/test_workflow_supply_chain_policy.py")
 
 def _owner_remote_pipe_policy(tmp_path: Path) -> Callable[[], None]:
     namespace = runpy.run_path(str(_POLICY_PATH))
-    namespace["_WORKFLOW_ROOT"] = tmp_path
-    return cast(
+    policy = cast(
         Callable[[], None],
         namespace["test_workflows_do_not_pipe_remote_installers_to_shells"],
     )
+    policy.__globals__["_WORKFLOW_ROOT"] = tmp_path
+    return policy
 
 
 def _assert_policy_rejects(policy: Callable[[], None], path: Path, text: str) -> None:
