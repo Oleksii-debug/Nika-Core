@@ -6,7 +6,11 @@ from pathlib import Path
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.research.knowledge import KnowledgeCorpus, KnowledgeIngestRequest
+from nika_core.research.knowledge import (
+    KnowledgeCorpus,
+    KnowledgeIngestRequest,
+    RetrievalScope,
+)
 
 _TIMESTAMP = "2026-08-25T00:00:00+00:00"
 _CANARY = "nika_qa_locator_secret_canary"
@@ -49,6 +53,11 @@ def _drop_knowledge_schema(store: SQLiteStore) -> None:
         conn.execute("DROP TABLE knowledge_schema_migrations")
 
 
+def _assert_secret_not_echoed(exc: Exception) -> None:
+    assert _CANARY not in str(exc)
+    assert _CANARY not in repr(exc)
+
+
 @pytest.mark.parametrize(
     ("source_locator", "artifact_key"),
     (
@@ -66,8 +75,7 @@ def test_unregistered_credential_locator_never_becomes_durable_provenance(
     try:
         corpus.ingest(_request(source_locator, artifact_key=artifact_key))
     except Exception as exc:  # noqa: BLE001 - oracle accepts any safe fail-closed rejection
-        assert _CANARY not in str(exc)
-        assert _CANARY not in repr(exc)
+        _assert_secret_not_echoed(exc)
 
     with store.connection() as conn:
         durable_locators = tuple(
@@ -120,8 +128,7 @@ def test_legacy_migration_never_copies_credential_locator_into_knowledge(
     try:
         store.initialize()
     except Exception as exc:  # noqa: BLE001 - safe migration may fail closed
-        assert _CANARY not in str(exc)
-        assert _CANARY not in repr(exc)
+        _assert_secret_not_echoed(exc)
         return
 
     with store.connection() as conn:
@@ -132,6 +139,36 @@ def test_legacy_migration_never_copies_credential_locator_into_knowledge(
         ).fetchone()
     assert migrated is not None
     assert _CANARY not in migrated["source_locator"]
+
+
+def test_restart_never_reexposes_preexisting_credential_locator(tmp_path: Path) -> None:
+    store, corpus = _make_corpus(tmp_path)
+    corpus.ingest(
+        _request("approved:historical-safe", artifact_key="preexisting-provenance")
+    )
+    secret_locator = f"https://example.com/history?access_token={_CANARY}"
+    with store.connection() as conn:
+        conn.execute(
+            """UPDATE knowledge_versions SET source_locator=?
+            WHERE workspace_id=? AND artifact_key=? AND version=1""",
+            (secret_locator, "ws-a", "preexisting-provenance"),
+        )
+
+    restarted_store = SQLiteStore(store.path)
+    try:
+        restarted_store.initialize()
+        restarted = KnowledgeCorpus(restarted_store)
+        restarted.verify_integrity()
+        hits = restarted.search(
+            RetrievalScope(principal_id="user:reader", workspace_ids=("ws-a",)),
+            "credential provenance",
+        )
+    except Exception as exc:  # noqa: BLE001 - safe restart/integrity may fail closed
+        _assert_secret_not_echoed(exc)
+        return
+
+    assert hits
+    assert all(_CANARY not in hit.provenance.source_locator for hit in hits)
 
 
 def test_unregistered_opaque_locator_remains_supported(tmp_path: Path) -> None:
