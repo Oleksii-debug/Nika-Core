@@ -151,4 +151,4 @@ def test_stop_returns_before_runtime_cancel_finishes(tmp_path: Path) -> None:
     )
     assert "error" not in result_holder
     result = result_holder["result"]
-    assert getattr(result, "status") == "accepted"
+    assert result.status == "accepted"
