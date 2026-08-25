@@ -23,6 +23,8 @@ from nika_core.product_project import ProductProject
 _LIVE_AUTHORITY_SCHEMA = "nika-product-factory-live-plan-authority-v2"
 _LIVE_AUTHORITY_KEY = secrets.token_bytes(32)
 _DURABLE_WORKER_DIAGNOSTIC_OMITTED = "worker diagnostic omitted from durable checkpoint"
+_DURABLE_REVIEW_REASON_OMITTED = "review rationale omitted from durable checkpoint"
+_DURABLE_REVIEW_EVIDENCE_SCHEME = "sha256"
 
 
 class ProductProjectBindingError(ValueError):
@@ -56,8 +58,8 @@ class ProductProjectCoordinatorCheckpoint:
     )
 
     def __post_init__(self) -> None:
-        # Free-form worker diagnostics are runtime evidence, not durable authority.
-        # Normalize them before any checkpoint can be signed or handed to persistence.
+        # Free-form worker diagnostics and reviewer-controlled review text are runtime
+        # evidence, not durable authority. Normalize them before signing or persistence.
         object.__setattr__(
             self,
             "coordinator",
@@ -240,6 +242,7 @@ def _minimize_durable_work_record(record: WorkRecord) -> WorkRecord:
     coding_result = result.coding_result
     recovery = coding_result.recovery_state
     failure = coding_result.failure
+    review = record.review
     safe_recovery = (
         None if recovery is None else replace(recovery, opaque_token=None)
     )
@@ -248,14 +251,27 @@ def _minimize_durable_work_record(record: WorkRecord) -> WorkRecord:
         if failure is None
         else replace(failure, message=_DURABLE_WORKER_DIAGNOSTIC_OMITTED)
     )
-    safe_blocker = (
-        _DURABLE_WORKER_DIAGNOSTIC_OMITTED
-        if failure is not None and record.blocker is not None
-        else record.blocker
+    safe_review = (
+        None
+        if review is None
+        else replace(
+            review,
+            reason=_DURABLE_REVIEW_REASON_OMITTED,
+            evidence_refs=tuple(
+                _durable_review_evidence_ref(value) for value in review.evidence_refs
+            ),
+        )
     )
+    if review is not None and not review.accepted and record.blocker is not None:
+        safe_blocker = _DURABLE_REVIEW_REASON_OMITTED
+    elif failure is not None and record.blocker is not None:
+        safe_blocker = _DURABLE_WORKER_DIAGNOSTIC_OMITTED
+    else:
+        safe_blocker = record.blocker
     if (
         safe_recovery == recovery
         and safe_failure == failure
+        and safe_review == review
         and safe_blocker == record.blocker
     ):
         return record
@@ -268,8 +284,14 @@ def _minimize_durable_work_record(record: WorkRecord) -> WorkRecord:
     return replace(
         record,
         result=replace(result, coding_result=safe_coding_result),
+        review=safe_review,
         blocker=safe_blocker,
     )
+
+
+def _durable_review_evidence_ref(value: str) -> str:
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return f"{_DURABLE_REVIEW_EVIDENCE_SCHEME}:{digest}"
 
 
 def _sign_live_authority(
