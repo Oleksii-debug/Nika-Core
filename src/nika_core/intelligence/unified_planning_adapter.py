@@ -107,7 +107,7 @@ class UnifiedPlanningAdapter:
                 code=DeterministicErrorCode.UNSUPPORTED_PROBLEM,
             )
 
-        plan_steps: list[PlanStep] = []
+        planned_actions: list[DeterministicAction] = []
         for action_instance in actions_in_plan:
             definition = action_by_up_name.get(action_instance.action.name)
             if definition is None:
@@ -115,8 +115,49 @@ class UnifiedPlanningAdapter:
                     "planner returned an unknown action",
                     code=DeterministicErrorCode.PLANNER_FAILURE,
                 )
+            planned_actions.append(definition)
+        return self._validated_plan(
+            state=state,
+            goal=goal,
+            planned_actions=tuple(planned_actions),
+        )
+
+    @classmethod
+    def _validated_plan(
+        cls,
+        *,
+        state: WorldState,
+        goal: DeterministicGoal,
+        planned_actions: tuple[DeterministicAction, ...],
+    ) -> DeterministicPlan:
+        """Validate solver output against Nika semantics and drop state no-ops."""
+        simulated_facts = set(state.facts)
+        plan_steps: list[PlanStep] = []
+
+        for definition in planned_actions:
+            if not definition.requires <= simulated_facts or definition.forbids & simulated_facts:
+                raise DeterministicPlanningError(
+                    f"planner returned an inapplicable action: {definition.action_id}",
+                    code=DeterministicErrorCode.INVALID_PLAN,
+                )
+
+            changes_state = bool(
+                (definition.adds - simulated_facts) or (definition.removes & simulated_facts)
+            )
+            if not changes_state:
+                continue
+
+            simulated_facts.difference_update(definition.removes)
+            simulated_facts.update(definition.adds)
             plan_steps.append(
                 PlanStep(action_id=definition.action_id, tool_id=definition.tool_id)
+            )
+
+        simulated_state = WorldState(frozenset(simulated_facts))
+        if not cls._goal_satisfied(simulated_state, goal):
+            raise DeterministicPlanningError(
+                "planner returned a plan that does not satisfy the goal",
+                code=DeterministicErrorCode.INVALID_PLAN,
             )
         return DeterministicPlan(steps=tuple(plan_steps))
 
