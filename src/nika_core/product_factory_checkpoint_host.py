@@ -42,8 +42,10 @@ from nika_core.toolsmith.contracts import (
 
 _CHECKPOINT_SCHEMA = "nika-product-factory-checkpoint-v1"
 _CHECKPOINT_STAGE = "product_factory.coordinator.v1"
+_CHECKPOINT_HEAD_SCHEMA = "nika-product-factory-checkpoint-head-v1"
 _HOST_KIND = "product_factory"
 _TRUSTED_PLAN_KEY = "trusted_plan_fingerprint"
+_CHECKPOINT_HEAD_KEY = "product_factory_checkpoint_head"
 
 
 class ProductFactoryCheckpointError(ValueError):
@@ -105,32 +107,45 @@ class ProductFactoryCheckpointHost:
         live_authority = _live_checkpoint_authority(checkpoint)
         now = datetime.now(UTC).isoformat()
         with self._store.connection() as conn:
-            # Serialize all writers before reading the predecessor/host anchor. This makes
-            # same-revision idempotency and conflicting-writer rejection one SQLite
-            # transaction rather than a read-then-write race between connections.
+            # The host task already owns independent trusted-plan authority. Commit the
+            # exact admitted checkpoint head there as well so restart authority never
+            # depends on candidate-created wall-clock ordering or public row hashes alone.
             conn.execute("BEGIN IMMEDIATE")
             host_payload = self._require_host_task(
                 conn,
                 host_task_id=host_task_id,
                 project_id=checkpoint.project_id,
             )
-            previous = conn.execute(
-                """
-                SELECT checkpoint_id, task_id, payload_json, checksum_sha256, created_at
-                FROM checkpoints
-                WHERE task_id = ? AND stage = ?
-                ORDER BY created_at DESC, checkpoint_id DESC
-                LIMIT 1
-                """,
-                (host_task_id, _CHECKPOINT_STAGE),
-            ).fetchone()
             host_authority = _host_task_trusted_plan(host_payload, required=False)
-            if host_authority is None:
-                if previous is not None:
+            host_head = _host_task_checkpoint_head(host_payload, required=False)
+            checkpoint_count = self._checkpoint_count(conn, host_task_id=host_task_id)
+
+            previous_record = None
+            if host_head is not None:
+                if host_authority is None:
                     raise ProductFactoryTrustedPlanAuthorityError(
-                        "legacy Product Factory checkpoint has no trusted plan authority; "
-                        "explicit reconciliation is required"
+                        "Product Factory checkpoint head has no trusted plan authority"
                     )
+                previous_record = self._validated_committed_head(
+                    conn,
+                    host_task_id=host_task_id,
+                    project_id=checkpoint.project_id,
+                    host_payload=host_payload,
+                )
+            elif checkpoint_count:
+                raise ProductFactoryCheckpointIntegrityError(
+                    "durable Product Factory checkpoints have no canonical host-task head; "
+                    "explicit reconciliation is required"
+                )
+            elif host_authority is not None and live_authority is None:
+                # Covers legacy clear/reset states that retained only the old plan anchor.
+                # No candidate may silently turn that stale anchor into a new lineage.
+                raise ProductFactoryTrustedPlanAuthorityError(
+                    "Product Factory checkpoint lineage has no durable host head; "
+                    "fresh live trusted plan authority proof is required"
+                )
+
+            if host_authority is None:
                 if live_authority is None:
                     raise ProductFactoryTrustedPlanAuthorityError(
                         "first Product Factory checkpoint requires live trusted plan authority proof"
@@ -141,10 +156,6 @@ class ProductFactoryCheckpointHost:
                     )
                 host_payload = dict(host_payload)
                 host_payload[_TRUSTED_PLAN_KEY] = live_authority
-                conn.execute(
-                    "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
-                    (_canonical(host_payload), host_task_id),
-                )
                 host_authority = live_authority
                 self._audit(
                     conn,
@@ -166,10 +177,7 @@ class ProductFactoryCheckpointHost:
                     )
 
             _validate_checkpoint_authority(checkpoint, host_authority)
-            previous_record = None
-            if previous is not None:
-                previous_record = self._row_to_record(previous)
-                _validate_checkpoint_authority(previous_record.checkpoint, host_authority)
+            if previous_record is not None:
                 if (
                     previous_record.checkpoint.coordinator.revision
                     > checkpoint.coordinator.revision
@@ -191,6 +199,7 @@ class ProductFactoryCheckpointHost:
                     checkpoint,
                     live_authority=live_authority,
                 )
+
             try:
                 conn.execute(
                     """
@@ -211,6 +220,17 @@ class ProductFactoryCheckpointHost:
                 raise ProductFactoryCheckpointError(
                     "checkpoint identity already exists with incompatible host state"
                 ) from exc
+
+            host_payload = dict(host_payload)
+            host_payload[_CHECKPOINT_HEAD_KEY] = _checkpoint_head_payload(
+                checkpoint_id=checkpoint_id,
+                checksum=checksum,
+                revision=checkpoint.coordinator.revision,
+            )
+            conn.execute(
+                "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+                (_canonical(host_payload), host_task_id),
+            )
             self._audit(
                 conn,
                 event_type="product_factory.checkpoint_saved",
@@ -262,6 +282,16 @@ class ProductFactoryCheckpointHost:
             )
             authority = _host_task_trusted_plan(host_payload, required=True)
             _validate_checkpoint_authority(record.checkpoint, authority)
+            if _host_task_checkpoint_head(host_payload, required=False) is None:
+                raise ProductFactoryCheckpointIntegrityError(
+                    "durable Product Factory checkpoint lineage has no canonical host-task head"
+                )
+            self._validated_committed_head(
+                conn,
+                host_task_id=record.host_task_id,
+                project_id=record.checkpoint.project_id,
+                host_payload=host_payload,
+            )
         return record
 
     def latest(
@@ -276,26 +306,21 @@ class ProductFactoryCheckpointHost:
                 host_task_id=host_task_id,
                 project_id=project_id,
             )
-            row = conn.execute(
-                """
-                SELECT checkpoint_id, task_id, stage, payload_json, checksum_sha256, created_at
-                FROM checkpoints
-                WHERE task_id = ? AND stage = ?
-                ORDER BY created_at DESC, checkpoint_id DESC
-                LIMIT 1
-                """,
-                (host_task_id, _CHECKPOINT_STAGE),
-            ).fetchone()
-            if row is None:
+            head = _host_task_checkpoint_head(host_payload, required=False)
+            checkpoint_count = self._checkpoint_count(conn, host_task_id=host_task_id)
+            if head is None:
+                if checkpoint_count:
+                    raise ProductFactoryCheckpointIntegrityError(
+                        "durable Product Factory checkpoints have no canonical host-task head; "
+                        "explicit reconciliation is required"
+                    )
                 return None
-            authority = _host_task_trusted_plan(host_payload, required=True)
-            record = self._row_to_record(row)
-            if record.checkpoint.project_id != project_id:
-                raise ProductFactoryCheckpointIntegrityError(
-                    "durable checkpoint project does not match host task project"
-                )
-            _validate_checkpoint_authority(record.checkpoint, authority)
-        return record
+            return self._validated_committed_head(
+                conn,
+                host_task_id=host_task_id,
+                project_id=project_id,
+                host_payload=host_payload,
+            )
 
     def inspect_latest(
         self,
@@ -412,19 +437,108 @@ class ProductFactoryCheckpointHost:
 
     def clear(self, *, host_task_id: str, project_id: str) -> int:
         with self._store.connection() as conn:
-            self._require_host_task(conn, host_task_id=host_task_id, project_id=project_id)
+            conn.execute("BEGIN IMMEDIATE")
+            host_payload = self._require_host_task(
+                conn,
+                host_task_id=host_task_id,
+                project_id=project_id,
+            )
             cursor = conn.execute(
                 "DELETE FROM checkpoints WHERE task_id = ? AND stage = ?",
                 (host_task_id, _CHECKPOINT_STAGE),
             )
             count = int(cursor.rowcount)
+            reset_payload = dict(host_payload)
+            trusted_plan_revoked = reset_payload.pop(_TRUSTED_PLAN_KEY, None) is not None
+            checkpoint_head_revoked = reset_payload.pop(_CHECKPOINT_HEAD_KEY, None) is not None
+            if reset_payload != host_payload:
+                conn.execute(
+                    "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+                    (_canonical(reset_payload), host_task_id),
+                )
             self._audit(
                 conn,
                 event_type="product_factory.checkpoints_cleared",
                 entity_id=project_id,
-                payload={"host_task_id": host_task_id, "deleted_count": count},
+                payload={
+                    "host_task_id": host_task_id,
+                    "deleted_count": count,
+                    "trusted_plan_revoked": trusted_plan_revoked,
+                    "checkpoint_head_revoked": checkpoint_head_revoked,
+                },
             )
         return count
+
+    def _validated_committed_head(
+        self,
+        conn: Any,
+        *,
+        host_task_id: str,
+        project_id: str,
+        host_payload: dict[str, Any],
+    ) -> PersistedProductFactoryCheckpoint:
+        authority = _host_task_trusted_plan(host_payload, required=True)
+        head = _host_task_checkpoint_head(host_payload, required=True)
+        assert head is not None
+        head_checkpoint_id, head_checksum, head_revision = head
+        rows = conn.execute(
+            """
+            SELECT checkpoint_id, task_id, payload_json, checksum_sha256, created_at
+            FROM checkpoints
+            WHERE task_id = ? AND stage = ?
+            """,
+            (host_task_id, _CHECKPOINT_STAGE),
+        ).fetchall()
+        if not rows:
+            raise ProductFactoryCheckpointIntegrityError(
+                "canonical host-task checkpoint head points to a missing durable lineage"
+            )
+
+        committed = None
+        revisions: dict[int, tuple[str, str]] = {}
+        for row in rows:
+            record = self._row_to_record(row)
+            if record.checkpoint.project_id != project_id:
+                raise ProductFactoryCheckpointIntegrityError(
+                    "durable checkpoint project does not match host task project"
+                )
+            _validate_checkpoint_authority(record.checkpoint, authority)
+            revision = record.checkpoint.coordinator.revision
+            identity = (record.checkpoint_id, record.checksum_sha256)
+            prior = revisions.get(revision)
+            if prior is not None and prior != identity:
+                raise ProductFactoryCheckpointIntegrityError(
+                    "durable checkpoint lineage contains conflicting coordinator revision"
+                )
+            revisions[revision] = identity
+            if revision > head_revision:
+                raise ProductFactoryCheckpointIntegrityError(
+                    "durable checkpoint lineage contains an uncommitted successor beyond host authority"
+                )
+            if record.checkpoint_id == head_checkpoint_id:
+                committed = record
+
+        if committed is None:
+            raise ProductFactoryCheckpointIntegrityError(
+                "canonical host-task checkpoint head row is missing"
+            )
+        if committed.checksum_sha256 != head_checksum:
+            raise ProductFactoryCheckpointIntegrityError(
+                "canonical host-task checkpoint head checksum does not match durable row"
+            )
+        if committed.checkpoint.coordinator.revision != head_revision:
+            raise ProductFactoryCheckpointIntegrityError(
+                "canonical host-task checkpoint head revision does not match durable row"
+            )
+        return committed
+
+    @staticmethod
+    def _checkpoint_count(conn: Any, *, host_task_id: str) -> int:
+        row = conn.execute(
+            "SELECT COUNT(*) AS count FROM checkpoints WHERE task_id = ? AND stage = ?",
+            (host_task_id, _CHECKPOINT_STAGE),
+        ).fetchone()
+        return int(row["count"])
 
     def _row_to_record(self, row: Any) -> PersistedProductFactoryCheckpoint:
         payload_json = row["payload_json"]
@@ -539,6 +653,63 @@ def _host_task_trusted_plan(payload: dict[str, Any], *, required: bool) -> str |
         )
     _validate_fingerprint(value)
     return value
+
+
+def _host_task_checkpoint_head(
+    payload: dict[str, Any],
+    *,
+    required: bool,
+) -> tuple[str, str, int] | None:
+    value = payload.get(_CHECKPOINT_HEAD_KEY)
+    if value is None:
+        if required:
+            raise ProductFactoryCheckpointIntegrityError(
+                "Product Factory host task has no canonical checkpoint head"
+            )
+        return None
+    if not isinstance(value, dict) or value.get("schema") != _CHECKPOINT_HEAD_SCHEMA:
+        raise ProductFactoryCheckpointIntegrityError(
+            "Product Factory host task checkpoint head is malformed"
+        )
+    checkpoint_id = value.get("checkpoint_id")
+    checksum = value.get("checksum_sha256")
+    revision = value.get("coordinator_revision")
+    if (
+        not isinstance(checkpoint_id, str)
+        or not checkpoint_id.startswith("pf2-")
+        or len(checkpoint_id) != 36
+        or any(char not in "0123456789abcdef" for char in checkpoint_id[4:].casefold())
+    ):
+        raise ProductFactoryCheckpointIntegrityError(
+            "Product Factory host task checkpoint head identity is malformed"
+        )
+    if (
+        not isinstance(checksum, str)
+        or len(checksum) != 64
+        or any(char not in "0123456789abcdef" for char in checksum.casefold())
+    ):
+        raise ProductFactoryCheckpointIntegrityError(
+            "Product Factory host task checkpoint head checksum is malformed"
+        )
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
+        raise ProductFactoryCheckpointIntegrityError(
+            "Product Factory host task checkpoint head revision is malformed"
+        )
+    return checkpoint_id, checksum, revision
+
+
+def _checkpoint_head_payload(
+    *,
+    checkpoint_id: str,
+    checksum: str,
+    revision: int,
+) -> dict[str, object]:
+    return {
+        "schema": _CHECKPOINT_HEAD_SCHEMA,
+        "checkpoint_id": checkpoint_id,
+        "checksum_sha256": checksum,
+        "coordinator_revision": revision,
+    }
 
 
 def _checkpoint_trusted_plan_fingerprint(
