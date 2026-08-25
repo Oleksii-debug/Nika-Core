@@ -7,7 +7,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import zipfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -164,7 +163,7 @@ class SandboxMediumAppWorker:
                 retryable=True,
             )
             digest = hashlib.sha256(
-                f"{request.work_id}:controlled-failure".encode("utf-8")
+                f"{request.work_id}:controlled-failure".encode()
             ).hexdigest()
             return WorkerResultEnvelope(
                 work_id=request.work_id,
@@ -858,6 +857,7 @@ def _component_files(component_id: str, attempt: int) -> dict[str, str]:
 def _storage_files() -> dict[str, str]:
     storage = '''from __future__ import annotations
 
+from contextlib import closing
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -877,7 +877,7 @@ class ExpenseRepository:
 
     def migrate(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.path) as conn:
+        with closing(sqlite3.connect(self.path)) as conn, conn:
             version = int(conn.execute("PRAGMA user_version").fetchone()[0])
             if version == 0:
                 conn.execute("CREATE TABLE expenses (expense_id INTEGER PRIMARY KEY AUTOINCREMENT, amount_cents INTEGER NOT NULL CHECK(amount_cents >= 0), note TEXT NOT NULL)")
@@ -894,18 +894,19 @@ class ExpenseRepository:
         if amount_cents < 0:
             raise ValueError("amount_cents must be non-negative")
         self.migrate()
-        with sqlite3.connect(self.path) as conn:
+        with closing(sqlite3.connect(self.path)) as conn, conn:
             cursor = conn.execute("INSERT INTO expenses(amount_cents,note,category) VALUES (?,?,?)", (amount_cents, note.strip(), category.strip() or "General"))
             return int(cursor.lastrowid)
 
     def list_all(self) -> tuple[Expense, ...]:
         self.migrate()
-        with sqlite3.connect(self.path) as conn:
+        with closing(sqlite3.connect(self.path)) as conn, conn:
             rows = conn.execute("SELECT expense_id,amount_cents,note,category FROM expenses ORDER BY expense_id").fetchall()
         return tuple(Expense(int(row[0]), int(row[1]), str(row[2]), str(row[3])) for row in rows)
 '''
     test = '''from __future__ import annotations
 
+from contextlib import closing
 import sqlite3
 import sys
 import tempfile
@@ -918,14 +919,14 @@ class StorageUpgradeTest(unittest.TestCase):
     def test_v1_data_survives_v2_upgrade_and_reopen(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "expenses.db"
-            with sqlite3.connect(path) as conn:
+            with closing(sqlite3.connect(path)) as conn, conn:
                 conn.execute("CREATE TABLE expenses (expense_id INTEGER PRIMARY KEY AUTOINCREMENT, amount_cents INTEGER NOT NULL, note TEXT NOT NULL)")
                 conn.execute("INSERT INTO expenses(amount_cents,note) VALUES (?,?)", (1250, "Legacy row"))
                 conn.execute("PRAGMA user_version = 1")
             ExpenseRepository(path).migrate()
             rows = ExpenseRepository(path).list_all()
             self.assertEqual([(r.amount_cents, r.note, r.category) for r in rows], [(1250, "Legacy row", "General")])
-            with sqlite3.connect(path) as conn:
+            with closing(sqlite3.connect(path)) as conn, conn:
                 self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 2)
 
 if __name__ == "__main__":

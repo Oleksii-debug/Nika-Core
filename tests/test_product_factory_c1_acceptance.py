@@ -2,7 +2,23 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from nika_core.product_factory_c1_acceptance import C1MediumAppAcceptanceRunner
+from nika_core.product_factory_c1_acceptance import (
+    C1MediumAppAcceptanceRunner,
+    _storage_files,
+)
+
+
+def test_c1_generated_storage_closes_sqlite_connections_deterministically() -> None:
+    generated = _storage_files()
+    storage = generated["src/c1_expense_manager/data/storage.py"]
+    upgrade_test = generated["tests/test_storage_upgrade.py"]
+
+    assert storage.count("with closing(sqlite3.connect(") == 3
+    assert upgrade_test.count("with closing(sqlite3.connect(") == 2
+    assert "from contextlib import closing" in storage
+    assert "from contextlib import closing" in upgrade_test
+    assert "with sqlite3.connect(" not in storage
+    assert "with sqlite3.connect(" not in upgrade_test
 
 
 def test_c1_medium_app_uses_real_product_factory_lifecycle(tmp_path: Path) -> None:
