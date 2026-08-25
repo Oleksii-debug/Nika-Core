@@ -73,6 +73,26 @@ def test_validated_plan_rejects_inapplicable_solver_action() -> None:
     assert str(exc_info.value) == "planner returned an inapplicable action: finish"
 
 
+def test_validated_plan_rejects_repeated_effectful_action() -> None:
+    with pytest.raises(DeterministicPlanningError) as exc_info:
+        UnifiedPlanningAdapter._validated_plan(
+            state=WorldState(),
+            goal=DeterministicGoal(required=frozenset({"ready"})),
+            planned_actions=(
+                DeterministicAction(action_id="set-ready", adds=frozenset({"ready"})),
+                DeterministicAction(
+                    action_id="clear-ready",
+                    requires=frozenset({"ready"}),
+                    removes=frozenset({"ready"}),
+                ),
+                DeterministicAction(action_id="set-ready", adds=frozenset({"ready"})),
+            ),
+        )
+
+    assert exc_info.value.code == DeterministicErrorCode.INVALID_PLAN
+    assert str(exc_info.value) == "planner returned a repeated deterministic action: set-ready"
+
+
 def test_validated_plan_rejects_solver_output_that_misses_goal() -> None:
     with pytest.raises(DeterministicPlanningError) as exc_info:
         UnifiedPlanningAdapter._validated_plan(

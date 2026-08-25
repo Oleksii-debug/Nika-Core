@@ -133,6 +133,7 @@ class UnifiedPlanningAdapter:
         """Validate solver output against Nika semantics and drop state no-ops."""
         simulated_facts = set(state.facts)
         plan_steps: list[PlanStep] = []
+        seen_effectful_actions: set[str] = set()
 
         for definition in planned_actions:
             if not definition.requires <= simulated_facts or definition.forbids & simulated_facts:
@@ -146,12 +147,18 @@ class UnifiedPlanningAdapter:
             )
             if not changes_state:
                 continue
+            if definition.action_id in seen_effectful_actions:
+                raise DeterministicPlanningError(
+                    f"planner returned a repeated deterministic action: {definition.action_id}",
+                    code=DeterministicErrorCode.INVALID_PLAN,
+                )
 
             simulated_facts.difference_update(definition.removes)
             simulated_facts.update(definition.adds)
             plan_steps.append(
                 PlanStep(action_id=definition.action_id, tool_id=definition.tool_id)
             )
+            seen_effectful_actions.add(definition.action_id)
 
         simulated_state = WorldState(frozenset(simulated_facts))
         if not cls._goal_satisfied(simulated_state, goal):
