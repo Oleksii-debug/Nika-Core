@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from nika_core.intelligence.contracts import DeterministicAction, DeterministicGoal, WorldState
+from nika_core.intelligence.contracts import (
+    DeterministicAction,
+    DeterministicGoal,
+    WorldState,
+)
 from nika_core.intelligence.unified_planning_adapter import UnifiedPlanningAdapter
 
 
