@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from collections.abc import Coroutine, Mapping
 from concurrent.futures import Future
@@ -20,6 +21,7 @@ from nika_core.runtime.coordinator import TaskRuntimeCoordinator
 from nika_core.runtime.reference import ReferenceRuntime
 from nika_core.ui.bridge_models import UIResult
 
+_LOGGER = logging.getLogger(__name__)
 _DEFAULT_AGENT_ID = "nika.default"
 _DEFAULT_WORKSPACE_ID = "default"
 _TERMINAL_STATES = frozenset(
@@ -120,7 +122,7 @@ class DesktopBackend:
         )
 
     def pause_task(self, _payload: Mapping[str, Any]) -> UIResult:
-        record = self._latest_controllable()
+        record = self._only_controllable(action="призупинення")
         if record is None:
             raise ValueError("Немає активного завдання, яке можна призупинити.")
         if record.state == TaskState.RUNNING:
@@ -147,7 +149,7 @@ class DesktopBackend:
         )
 
     def resume_task(self, _payload: Mapping[str, Any]) -> UIResult:
-        record = self._latest_with_state(TaskState.PAUSED)
+        record = self._only_with_state(TaskState.PAUSED, action="продовження")
         if record is None:
             raise ValueError("Немає призупиненого завдання для продовження.")
 
@@ -189,7 +191,7 @@ class DesktopBackend:
         )
 
     def stop_agent(self, _payload: Mapping[str, Any]) -> UIResult:
-        record = self._latest_controllable()
+        record = self._only_controllable(action="зупинки")
         if record is None:
             raise ValueError("Немає активного завдання агента для зупинки.")
 
@@ -266,9 +268,14 @@ class DesktopBackend:
             try:
                 future.result(timeout=2)
             except TimeoutError as exc:
-                raise RuntimeError("cannot close desktop runtime loop while tasks are active") from exc
-            except Exception:  # noqa: BLE001 - cleanup after a recorded background failure
-                pass
+                raise RuntimeError(
+                    "cannot close desktop runtime loop while tasks are active"
+                ) from exc
+            except Exception as exc:  # noqa: BLE001 - callback already records bounded failure
+                _LOGGER.warning(
+                    "Desktop runtime future failed before close; exception_type=%s",
+                    type(exc).__name__,
+                )
         with self._active_lock:
             self._active_threads.clear()
             self._active_futures.clear()
@@ -405,17 +412,31 @@ class DesktopBackend:
                 )
             )
 
-    def _latest_controllable(self) -> TaskRecord | None:
-        for record in self._queue.list_recent(limit=50):
-            if record.state not in _TERMINAL_STATES:
-                return record
-        return None
+    def _only_controllable(self, *, action: str) -> TaskRecord | None:
+        records = [
+            record
+            for record in self._queue.list_recent(limit=50)
+            if record.state not in _TERMINAL_STATES
+        ]
+        return self._require_unambiguous(records, action=action)
 
-    def _latest_with_state(self, state: TaskState) -> TaskRecord | None:
-        for record in self._queue.list_recent(limit=50):
-            if record.state == state:
-                return record
-        return None
+    def _only_with_state(self, state: TaskState, *, action: str) -> TaskRecord | None:
+        records = [
+            record for record in self._queue.list_recent(limit=50) if record.state == state
+        ]
+        return self._require_unambiguous(records, action=action)
+
+    @staticmethod
+    def _require_unambiguous(
+        records: list[TaskRecord],
+        *,
+        action: str,
+    ) -> TaskRecord | None:
+        if len(records) > 1:
+            raise ValueError(
+                f"Є кілька завдань, доступних для {action}; потрібен явний вибір завдання."
+            )
+        return records[0] if records else None
 
     @staticmethod
     def _task_view(record: TaskRecord) -> dict[str, Any]:
