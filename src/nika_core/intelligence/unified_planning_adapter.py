@@ -63,12 +63,27 @@ class UnifiedPlanningAdapter:
 
         action_by_up_name: dict[str, DeterministicAction] = {}
         for index, definition in enumerate(actions):
+            # A deterministic action whose declared effects are all already satisfied is a
+            # semantic no-op in that state. Satisficing engines are otherwise free to include
+            # such redundant steps, and Aries has returned different-but-valid plans across
+            # platforms. Keep the guard inside the planning problem rather than filtering from
+            # the initial state: an action that is a no-op now may become useful after an earlier
+            # action changes one of its effect facts.
+            change_conditions = [up.Not(fluents[fact]) for fact in definition.adds]
+            change_conditions.extend(fluents[fact] for fact in definition.removes)
+            if not change_conditions:
+                continue
+
             up_name = f"action_{index}"
             planned_action = up.InstantaneousAction(up_name)
             for fact in definition.requires:
                 planned_action.add_precondition(fluents[fact])
             for fact in definition.forbids:
                 planned_action.add_precondition(up.Not(fluents[fact]))
+            if len(change_conditions) == 1:
+                planned_action.add_precondition(change_conditions[0])
+            else:
+                planned_action.add_precondition(up.Or(*change_conditions))
             for fact in definition.adds:
                 planned_action.add_effect(fluents[fact], True)
             for fact in definition.removes:
