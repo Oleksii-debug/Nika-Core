@@ -31,6 +31,16 @@ def _snapshot_id(source_id: str, raw_sha256: str) -> str:
     return hashlib.sha256(f"{source_id}\0{raw_sha256}".encode()).hexdigest()
 
 
+def _canonical_stored_locator(locator: str) -> str:
+    try:
+        return canonical_http_locator(locator)
+    except ResearchSourceIdentityError as exc:
+        raise ResearchSourceIdentityError(
+            "source_identity_corrupt",
+            "stored HTTP source identity is invalid and cannot be used",
+        ) from exc
+
+
 class NetworkResearchRepository:
     def __init__(self, store: SQLiteStore) -> None:
         self._store = store
@@ -44,6 +54,7 @@ class NetworkResearchRepository:
         locator = canonical_http_locator(source.locator)
         now = _now()
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             collision = conn.execute(
                 "SELECT 1 FROM research_sources WHERE source_id=?",
                 (source.source_id,),
@@ -64,10 +75,7 @@ class NetworkResearchRepository:
                 (source.workspace_id, source.source_id),
             ).fetchall()
             for candidate in candidates:
-                try:
-                    candidate_locator = canonical_http_locator(candidate["url"])
-                except ResearchSourceIdentityError:
-                    continue
+                candidate_locator = _canonical_stored_locator(candidate["url"])
                 if candidate_locator == locator:
                     raise ResearchSourceIdentityError(
                         "source_duplicate",
@@ -94,13 +102,7 @@ class NetworkResearchRepository:
                         "source_workspace_conflict",
                         "HTTP source_id is permanently bound to its original workspace",
                     )
-                try:
-                    existing_locator = canonical_http_locator(existing["url"])
-                except ResearchSourceIdentityError as exc:
-                    raise ResearchSourceIdentityError(
-                        "source_identity_corrupt",
-                        "stored HTTP source identity is invalid and cannot be rebound",
-                    ) from exc
+                existing_locator = _canonical_stored_locator(existing["url"])
                 if existing_locator != locator:
                     raise ResearchSourceIdentityError(
                         "source_locator_conflict",
@@ -121,6 +123,7 @@ class NetworkResearchRepository:
             ).fetchone()
         if row is None:
             raise KeyError(f"unknown HTTP source: {source_id}")
+        _canonical_stored_locator(row["url"])
         return HttpSourceState(
             source_id=row["source_id"],
             workspace_id=row["workspace_id"],
