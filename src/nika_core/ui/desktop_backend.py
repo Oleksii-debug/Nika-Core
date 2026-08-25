@@ -195,14 +195,35 @@ class DesktopBackend:
         if record is None:
             raise ValueError("Немає активного завдання агента для зупинки.")
 
-        session = self._coordinator.sessions.get(record.task_id)
-        if session is not None:
-            if session.runtime_id != self._runtime.runtime_id:
-                raise ValueError(
-                    "Активна runtime-сесія належить іншому runtime; "
-                    "безпечне скасування відхилено."
-                )
-            self._schedule_cancel(record.task_id, session.thread_id)
+        cancel_future: Future[bool] | None = None
+        with self._active_lock:
+            thread_id = self._active_threads.get(record.task_id)
+            if thread_id is not None:
+                cancel_future = self._schedule_cancel_locked(record.task_id, thread_id)
+            else:
+                session = self._coordinator.sessions.get(record.task_id)
+                if session is not None:
+                    if session.runtime_id != self._runtime.runtime_id:
+                        raise ValueError(
+                            "Активна runtime-сесія належить іншому runtime; "
+                            "безпечне скасування відхилено."
+                        )
+                    cancel_future = self._schedule_cancel_locked(
+                        record.task_id, session.thread_id
+                    )
+                else:
+                    current = self._queue.get(record.task_id)
+                    if current.state not in _LOCAL_CANCEL_STATES:
+                        raise ValueError(
+                            "Неможливо безпечно скасувати активне runtime-завдання без "
+                            "збереженої або локально активної runtime-сесії."
+                        )
+                    self._queue.transition(record.task_id, TaskState.CANCELLED)
+
+        if cancel_future is not None:
+            cancel_future.add_done_callback(
+                lambda done: self._cancel_done(record.task_id, done)
+            )
             return UIResult(
                 request_id="desktop-handler",
                 status="accepted",
@@ -210,26 +231,10 @@ class DesktopBackend:
                 focus_id="tasks-heading",
             )
 
-        if record.state in _LOCAL_CANCEL_STATES:
-            self._queue.transition(record.task_id, TaskState.CANCELLED)
-            return UIResult(
-                request_id="desktop-handler",
-                status="completed",
-                message="Поточне завдання агента скасовано до активного runtime-виконання.",
-                focus_id="tasks-heading",
-            )
-
-        thread_id = self._active_thread(record.task_id)
-        if record.state != TaskState.RUNNING or thread_id is None:
-            raise ValueError(
-                "Неможливо безпечно скасувати активне runtime-завдання без "
-                "збереженої або локально активної runtime-сесії."
-            )
-        self._schedule_cancel(record.task_id, thread_id)
         return UIResult(
             request_id="desktop-handler",
-            status="accepted",
-            message="Запит на зупинку runtime прийнято.",
+            status="completed",
+            message="Поточне завдання агента скасовано до активного runtime-виконання.",
             focus_id="tasks-heading",
         )
 
@@ -314,20 +319,19 @@ class DesktopBackend:
                 return None
             raise
 
-    def _schedule_cancel(self, task_id: str, thread_id: str) -> None:
-        with self._active_lock:
-            existing = self._cancel_futures.get(task_id)
-            if existing is not None and not existing.done():
-                raise ValueError("Запит на зупинку цього завдання вже виконується.")
-            future = self._host().submit(
-                self._coordinator.cancel(
-                    self._runtime,
-                    task_id=task_id,
-                    thread_id=thread_id,
-                )
+    def _schedule_cancel_locked(self, task_id: str, thread_id: str) -> Future[bool]:
+        existing = self._cancel_futures.get(task_id)
+        if existing is not None and not existing.done():
+            raise ValueError("Запит на зупинку цього завдання вже виконується.")
+        future = self._host().submit(
+            self._coordinator.cancel(
+                self._runtime,
+                task_id=task_id,
+                thread_id=thread_id,
             )
-            self._cancel_futures[task_id] = future
-        future.add_done_callback(lambda done: self._cancel_done(task_id, done))
+        )
+        self._cancel_futures[task_id] = future
+        return future
 
     def _submit_runtime(
         self,
