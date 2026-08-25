@@ -3,11 +3,12 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import secrets
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from enum import Enum
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from nika_core.product_command.reference_safety import safe_evidence_reference
 from nika_core.product_factory_coordinator import (
@@ -26,6 +27,17 @@ _LIVE_AUTHORITY_SCHEMA = "nika-product-factory-live-plan-authority-v2"
 _LIVE_AUTHORITY_KEY = secrets.token_bytes(32)
 _DURABLE_WORKER_DIAGNOSTIC_OMITTED = "worker diagnostic omitted from durable checkpoint"
 _DURABLE_REVIEW_REASON_OMITTED = "review rationale omitted from durable checkpoint"
+_DURABLE_REVIEW_CREDENTIAL_ASSIGNMENT = re.compile(
+    r"(?:^|[\s?&#;,{\[(])['\"]?"
+    r"(?:"
+    r"x[-_]?api[-_]?key|api[-_]?key|subscription[-_]?key|"
+    r"client[-_]?secret|password|passwd|secret|auth|authorization|"
+    r"access[-_]?token|refresh[-_]?token|oauth(?:[-_]?token)?|"
+    r"cookie|set[-_]?cookie|session(?:[-_]?(?:id|token))?|"
+    r"awsaccesskeyid|x[-_]?amz[-_]?signature"
+    r")[\'\"]?\s*(?:=|:)",
+    re.IGNORECASE,
+)
 
 
 class ProductProjectBindingError(ValueError):
@@ -291,7 +303,11 @@ def _minimize_durable_work_record(record: WorkRecord) -> WorkRecord:
 
 
 def _durable_review_reason(value: str) -> str:
-    if safe_evidence_reference(value) != value or _reference_has_url_userinfo(value):
+    if (
+        safe_evidence_reference(value) != value
+        or _reference_has_credential_assignment(value)
+        or _reference_has_url_userinfo(value)
+    ):
         return _DURABLE_REVIEW_REASON_OMITTED
     return value
 
@@ -300,10 +316,14 @@ def _durable_review_evidence_ref(value: str) -> str:
     safe_reference = safe_evidence_reference(value)
     if safe_reference != value:
         return safe_reference
-    if not _reference_has_url_userinfo(value):
+    if not (_reference_has_credential_assignment(value) or _reference_has_url_userinfo(value)):
         return value
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
+
+
+def _reference_has_credential_assignment(value: str) -> bool:
+    return _DURABLE_REVIEW_CREDENTIAL_ASSIGNMENT.search(unquote(value)) is not None
 
 
 def _reference_has_url_userinfo(value: str) -> bool:
