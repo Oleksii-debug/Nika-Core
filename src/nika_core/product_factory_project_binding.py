@@ -7,7 +7,9 @@ import secrets
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from enum import Enum
 from typing import Any
+from urllib.parse import urlsplit
 
+from nika_core.product_command.reference_safety import safe_evidence_reference
 from nika_core.product_factory_coordinator import (
     CoordinatorError,
     CoordinatorSnapshot,
@@ -24,7 +26,6 @@ _LIVE_AUTHORITY_SCHEMA = "nika-product-factory-live-plan-authority-v2"
 _LIVE_AUTHORITY_KEY = secrets.token_bytes(32)
 _DURABLE_WORKER_DIAGNOSTIC_OMITTED = "worker diagnostic omitted from durable checkpoint"
 _DURABLE_REVIEW_REASON_OMITTED = "review rationale omitted from durable checkpoint"
-_DURABLE_REVIEW_EVIDENCE_SCHEME = "sha256"
 
 
 class ProductProjectBindingError(ValueError):
@@ -256,14 +257,14 @@ def _minimize_durable_work_record(record: WorkRecord) -> WorkRecord:
         if review is None
         else replace(
             review,
-            reason=_DURABLE_REVIEW_REASON_OMITTED,
+            reason=_durable_review_reason(review.reason),
             evidence_refs=tuple(
                 _durable_review_evidence_ref(value) for value in review.evidence_refs
             ),
         )
     )
     if review is not None and not review.accepted and record.blocker is not None:
-        safe_blocker = _DURABLE_REVIEW_REASON_OMITTED
+        safe_blocker = _durable_review_reason(record.blocker)
     elif failure is not None and record.blocker is not None:
         safe_blocker = _DURABLE_WORKER_DIAGNOSTIC_OMITTED
     else:
@@ -289,14 +290,30 @@ def _minimize_durable_work_record(record: WorkRecord) -> WorkRecord:
     )
 
 
+def _durable_review_reason(value: str) -> str:
+    if safe_evidence_reference(value) != value or _reference_has_url_userinfo(value):
+        return _DURABLE_REVIEW_REASON_OMITTED
+    return value
+
+
 def _durable_review_evidence_ref(value: str) -> str:
-    prefix = f"{_DURABLE_REVIEW_EVIDENCE_SCHEME}:"
-    if value.startswith(prefix):
-        digest = value[len(prefix) :]
-        if len(digest) == 64 and all(character in "0123456789abcdef" for character in digest):
-            return value
+    safe_reference = safe_evidence_reference(value)
+    if safe_reference != value:
+        return safe_reference
+    if not _reference_has_url_userinfo(value):
+        return value
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
-    return f"{prefix}{digest}"
+    return f"sha256:{digest}"
+
+
+def _reference_has_url_userinfo(value: str) -> bool:
+    if "://" not in value:
+        return False
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return True
+    return parsed.username is not None or parsed.password is not None
 
 
 def _sign_live_authority(
