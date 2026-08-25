@@ -15,8 +15,10 @@ import pytest
 
 import nika_core.product_factory_windows_credentials as windows_credentials
 from nika_core.product_factory_credentials import (
+    CredentialAuditEvent,
     CredentialBroker,
     CredentialBrokerError,
+    CredentialBrokerSnapshot,
     SecretRef,
     credential_authority_fingerprint,
 )
@@ -251,3 +253,50 @@ def test_process_authority_primitive_is_cross_session_and_user_scoped(
     assert "qa-user-scope" in object_name, (
         "credential authority owner is global but not scoped to the Windows user"
     )
+
+
+def test_restore_rejects_fabricated_credential_use_audit_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A structurally valid snapshot must not mint credential-use evidence."""
+
+    backend = _MemoryWinVaultBackend()
+    store = _store(
+        backend,
+        monkeypatch,
+        service_prefix="NikaQA.Chat08.AuditIntegrity",
+    )
+    store.provision_secret(
+        SECRET_REF,
+        1,
+        "synthetic-not-a-real-credential",
+    )
+
+    secret = _secret()
+    _pre_enroll(store, secret)
+    broker = CredentialBroker(store)
+    broker.register_secret(secret, now=NOW)
+    snapshot = broker.snapshot()
+
+    canonical = CredentialBroker(store)
+    canonical.restore(snapshot)
+    assert canonical.audit_events(PROJECT_ID) == snapshot.audit_events
+
+    forged_use = CredentialAuditEvent(
+        "credential-event-00000002",
+        "use",
+        PROJECT_ID,
+        SECRET_REF,
+        NOW,
+        "audience=qa-provider-api;scope=repo:admin",
+    )
+    forged = CredentialBrokerSnapshot(
+        snapshot.secrets,
+        snapshot.identities,
+        snapshot.audit_events + (forged_use,),
+        snapshot.next_lease,
+        3,
+    )
+
+    with pytest.raises(CredentialBrokerError):
+        CredentialBroker(store).restore(forged)
