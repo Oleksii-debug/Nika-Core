@@ -60,16 +60,34 @@ task to PAUSED while its runtime continues executing in the background.
 - User-triggered pause of an already RUNNING runtime remains an explicit runtime-contract gap; it
   must be added by the runtime owner rather than simulated in the UI facade.
 
+### Unqualified control authority
+
+The packaged Pause, Resume, and Stop actions do not currently carry an explicit durable task target.
+DesktopBackend therefore refuses to select an arbitrary/latest task when more than one matching
+non-terminal target exists. Ambiguous unqualified control fails closed with a clear message and
+causes no task-state or runtime-cancellation side effect. A future explicit task-selection UI may
+extend the bridge contract without weakening this boundary.
+
+### Teardown diagnostics
+
+A background runtime/cancellation future can already have recorded its bounded failure through the
+canonical callback before `DesktopBackend.close()` observes the failed future. Teardown no longer
+silently swallows that exception. It logs only the exception **type**, never raw exception text or
+payload data, then continues deterministic cleanup after all submitted work has settled.
+
 ## Acceptance evidence
 
-Focused regressions use a cooperative long-running fake runtime to prove:
+Focused regressions use cooperative long-running fake runtimes to prove:
 
-- Create Task returns while runtime work is still active;
+- Create Task returns while runtime work is still active and reports dispatch as `accepted`;
 - real task state reaches RUNNING and later COMPLETED;
 - active pause fails closed without falsifying PAUSED state;
-- Stop cancels a live non-durable runtime through `TaskRuntimeCoordinator`;
-- pre-start pause/resume is safe;
+- Stop cancels a live non-durable runtime through `TaskRuntimeCoordinator` without blocking for
+  completion;
+- pre-start pause/resume is safe and asynchronous resume reports `accepted`;
 - resume after prior RUNNING without a durable runtime session is rejected;
-- a foreign/unidentified RUNNING task cannot be locally cancelled by guesswork.
+- a foreign/unidentified RUNNING task cannot be locally cancelled by guesswork;
+- two live tasks make unqualified Stop fail closed with zero cancellation side effects;
+- multiple candidate tasks make unqualified Pause/Resume fail closed instead of choosing by recency.
 
 Automated evidence does not set `HUMAN_TESTED` or `NVDA_VERIFIED`.
