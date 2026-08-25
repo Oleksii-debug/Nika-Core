@@ -41,6 +41,11 @@ cancellation ledger and the cancellation-wins finalization rule. A non-durable r
 cancelled while the packaged process owns the exact live task/thread identity; after process loss,
 that in-memory identity is not invented on restart.
 
+Live runtime cancellation is dispatched only when the current runtime declares
+`RuntimeCapability.CANCELLATION`. A runtime that does not declare that capability fails closed
+before any coordinator/runtime cancellation side effect. Pre-runtime READY/PAUSED/BLOCKED work may
+still be cancelled locally only when there is no submitted runtime identity or persisted session.
+
 A submitted desktop runtime identity is registered under the same local lock that Stop uses to
 resolve cancellation authority. Stop therefore does not trust the earlier task snapshot returned by
 unqualified target selection. While holding that lock it first checks for an in-process submitted
@@ -91,6 +96,8 @@ Focused regressions use cooperative long-running fake runtimes to prove:
 - active pause fails closed without falsifying PAUSED state;
 - Stop cancels a live non-durable runtime through `TaskRuntimeCoordinator` without blocking for
   completion;
+- active Stop fails closed without issuing `runtime.cancel()` when the runtime does not declare
+  `CANCELLATION`;
 - immediate Stop after an accepted Create follows the already-submitted runtime identity instead of
   taking a local READY cancellation shortcut;
 - a deterministic stale READY snapshot cannot bypass runtime cancellation after that task has become

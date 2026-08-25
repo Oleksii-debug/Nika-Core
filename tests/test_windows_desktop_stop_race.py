@@ -53,6 +53,20 @@ class StopRaceRuntime:
         return True
 
 
+class NonCancellableStopRaceRuntime(StopRaceRuntime):
+    runtime_id = "desktop-stop-no-cancel-test"
+    capabilities = frozenset()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancel_attempted = threading.Event()
+
+    async def cancel(self, *, task_id: str, thread_id: str) -> bool:
+        del task_id, thread_id
+        self.cancel_attempted.set()
+        return False
+
+
 def _build_backend(
     tmp_path: Path,
     runtime: StopRaceRuntime,
@@ -140,4 +154,26 @@ def test_stop_immediately_after_create_uses_submitted_runtime_identity(
         _wait_for_state(queue, task.task_id, TaskState.CANCELLED)
     finally:
         runtime.release.set()
+        backend.close()
+
+
+def test_stop_fails_closed_when_runtime_does_not_declare_cancellation(
+    tmp_path: Path,
+) -> None:
+    runtime = NonCancellableStopRaceRuntime()
+    backend, queue = _build_backend(tmp_path, runtime)
+    backend.create_task({"command": "non-cancellable live task"})
+    assert runtime.started.wait(timeout=1.0)
+    task = queue.list_recent(limit=1)[0]
+    _wait_for_state(queue, task.task_id, TaskState.RUNNING)
+
+    try:
+        with pytest.raises(ValueError, match="не заявляє безпечне скасування"):
+            backend.stop_agent({})
+
+        assert runtime.cancel_attempted.is_set() is False
+        assert queue.get(task.task_id).state == TaskState.RUNNING
+    finally:
+        runtime.release.set()
+        _wait_for_state(queue, task.task_id, TaskState.COMPLETED)
         backend.close()
