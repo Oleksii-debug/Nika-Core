@@ -7,7 +7,6 @@ import pytest
 from nika_core.model_gateway import contracts
 from nika_core.model_gateway.gateway import ModelGateway
 
-
 _CANARY = "QA53_SYNTHETIC_DEV17_PROVIDER_SECRET_7f2c9b1e"
 
 
