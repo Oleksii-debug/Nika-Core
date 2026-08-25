@@ -478,15 +478,7 @@ class ProductOperationsCoordinator:
         record: ServiceRecord,
         maintenance: MaintenanceRecord,
     ) -> None:
-        reservation = self._lookup_maintenance_effect(record, maintenance.request)
-        if (
-            reservation is None
-            or reservation.state is not MaintenanceEffectState.COMPLETED
-            or reservation.result != maintenance.result
-        ):
-            raise ProductOperationsError(
-                "maintenance effect in snapshot is not backed by completed durable authority"
-            )
+        self._validate_existing_maintenance_effect(record, maintenance)
 
     def _run_maintenance_effect(
         self,
