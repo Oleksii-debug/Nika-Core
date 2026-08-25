@@ -41,8 +41,15 @@ cancellation ledger and the cancellation-wins finalization rule. A non-durable r
 cancelled while the packaged process owns the exact live task/thread identity; after process loss,
 that in-memory identity is not invented on restart.
 
-READY/PAUSED/BLOCKED tasks that have not entered active runtime execution may still be cancelled
-locally through normal task-state transitions.
+A submitted desktop runtime identity is registered under the same local lock that Stop uses to
+resolve cancellation authority. Stop therefore does not trust the earlier task snapshot returned by
+unqualified target selection. While holding that lock it first checks for an in-process submitted
+runtime, then for a persisted runtime session, and only then re-reads current durable task state.
+This closes the READY-to-RUNNING race where stale UI state could otherwise write `CANCELLED` after
+runtime execution had already started without sending the runtime a cancellation request.
+
+READY/PAUSED/BLOCKED tasks may still be cancelled locally only when the packaged process owns no
+submitted runtime identity and no persisted runtime session at the linearized Stop decision.
 
 ### Pause and resume
 
@@ -84,6 +91,10 @@ Focused regressions use cooperative long-running fake runtimes to prove:
 - active pause fails closed without falsifying PAUSED state;
 - Stop cancels a live non-durable runtime through `TaskRuntimeCoordinator` without blocking for
   completion;
+- immediate Stop after an accepted Create follows the already-submitted runtime identity instead of
+  taking a local READY cancellation shortcut;
+- a deterministic stale READY snapshot cannot bypass runtime cancellation after that task has become
+  RUNNING;
 - pre-start pause/resume is safe and asynchronous resume reports `accepted`;
 - resume after prior RUNNING without a durable runtime session is rejected;
 - a foreign/unidentified RUNNING task cannot be locally cancelled by guesswork;
