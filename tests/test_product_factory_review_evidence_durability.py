@@ -196,6 +196,109 @@ def test_rejected_review_minimizes_reason_ref_and_mirrored_blocker(tmp_path) -> 
     assert restored_record.blocker == restored_record.review.reason
 
 
+def test_accepted_review_minimizes_credential_assignments_and_encoded_keys(
+    tmp_path,
+) -> None:
+    reason_canary = "OWNER_API_KEY_CANARY"
+    password_canary = "OWNER_PASSWORD_CANARY"
+    encoded_canary = "OWNER_ENCODED_API_KEY_CANARY"
+    json_canary = "OWNER_JSON_API_KEY_CANARY"
+    reason = f"verified; api_key={reason_canary}"
+    evidence_refs = (
+        f"https://example.invalid/evidence?password={password_canary}",
+        f"https://example.invalid/evidence?api%5Fkey={encoded_canary}",
+        (
+            "https://example.invalid/evidence?payload="
+            f"%7B%22api_key%22%3A%22{json_canary}%22%7D"
+        ),
+    )
+    store, binding, coordinator, task_id = _setup(tmp_path)
+    coordinator.review(
+        "core",
+        ReviewDecision(
+            reviewer_id="independent-qa",
+            accepted=True,
+            reason=reason,
+            evidence_refs=evidence_refs,
+        ),
+    )
+
+    runtime = coordinator.snapshot().records[0]
+    assert runtime.review is not None
+    assert runtime.review.reason == reason
+    assert runtime.review.evidence_refs == evidence_refs
+
+    checkpoint = binding.checkpoint(coordinator)
+    durable = checkpoint.coordinator.records[0]
+    assert durable.review is not None
+    assert durable.review.reason == DURABLE_REVIEW_REASON
+    assert durable.review.evidence_refs == tuple(_digest_ref(value) for value in evidence_refs)
+
+    host = ProductFactoryCheckpointHost(store)
+    host.save(host_task_id=task_id, checkpoint=checkpoint)
+    with store.connection() as conn:
+        raw = str(
+            conn.execute(
+                "SELECT payload_json FROM checkpoints WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()[0]
+        )
+    assert reason_canary not in raw
+    assert password_canary not in raw
+    assert encoded_canary not in raw
+    assert json_canary not in raw
+
+    restored = host.restore_latest(host_task_id=task_id, binding=binding)
+    assert restored.snapshot().records[0].review == durable.review
+
+
+def test_rejected_review_minimizes_secret_assignment_and_mirrored_blocker(
+    tmp_path,
+) -> None:
+    canary = "OWNER_CLIENT_SECRET_CANARY"
+    reason = f"rejected; client_secret={canary}"
+    evidence_refs = ("review://core/rejected",)
+    store, binding, coordinator, task_id = _setup(tmp_path)
+    coordinator.review(
+        "core",
+        ReviewDecision(
+            reviewer_id="independent-qa",
+            accepted=False,
+            reason=reason,
+            evidence_refs=evidence_refs,
+        ),
+    )
+
+    checkpoint = binding.checkpoint(coordinator)
+    durable = checkpoint.coordinator.records[0]
+    assert durable.review is not None
+    assert durable.review.reason == DURABLE_REVIEW_REASON
+    assert durable.review.evidence_refs == evidence_refs
+    assert durable.blocker == DURABLE_REVIEW_REASON
+
+    host = ProductFactoryCheckpointHost(store)
+    host.save(host_task_id=task_id, checkpoint=checkpoint)
+    with store.connection() as conn:
+        raw = str(
+            conn.execute(
+                "SELECT payload_json FROM checkpoints WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()[0]
+        )
+    assert canary not in raw
+
+    restored_record = (
+        host.restore_latest(
+            host_task_id=task_id,
+            binding=binding,
+        )
+        .snapshot()
+        .records[0]
+    )
+    assert restored_record.review == durable.review
+    assert restored_record.blocker == DURABLE_REVIEW_REASON
+
+
 def test_safe_review_evidence_identity_survives_checkpoint_restart(tmp_path) -> None:
     reason = "verified by exact deterministic acceptance evidence"
     evidence_refs = (
