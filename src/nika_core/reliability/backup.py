@@ -171,7 +171,10 @@ class SQLiteRecoveryManager:
         return artifact
 
     def verify_backup(self, backup_path: Path | str) -> BackupArtifact:
-        database = Path(backup_path).resolve()
+        configured_database = Path(backup_path)
+        if self._is_indirect_path(configured_database):
+            raise BackupVerificationError("backup database and manifest must be direct files")
+        database = configured_database.resolve()
         manifest_path = self._manifest_path(database)
         if not database.is_file():
             raise BackupVerificationError(f"backup database does not exist: {database}")
@@ -240,7 +243,7 @@ class SQLiteRecoveryManager:
     def _prepare_restore_unlocked(self, backup_path: Path | str) -> RestorePlan:
         self._ensure_no_interrupted_restore()
         backup = self.verify_backup(backup_path)
-        target = self._store.path.resolve()
+        target = self._resolve_direct_restore_target(self._store.path)
         self._ensure_restore_family_coherent(target)
         if target == backup.database_path:
             raise ValueError("restore source must differ from the live database")
@@ -316,7 +319,7 @@ class SQLiteRecoveryManager:
             raise PermissionError("restore confirmation does not match the prepared preview")
 
         backup = self.verify_backup(plan.backup.database_path)
-        target = self._store.path.resolve()
+        target = self._resolve_direct_restore_target(self._store.path)
         if target != plan.target_path:
             raise RestorePlanStaleError("restore target changed after preview")
         current_exists = self._assert_restore_plan_current(plan, backup, target)
@@ -437,7 +440,7 @@ class SQLiteRecoveryManager:
             return self._recover_interrupted_restore_unlocked()
 
     def _recover_interrupted_restore_unlocked(self) -> InterruptedRestoreResult | None:
-        target = self._store.path.resolve()
+        target = self._resolve_direct_restore_target(self._store.path)
         marker_path = self._restore_marker_path(target)
         if not marker_path.exists():
             return None
@@ -838,6 +841,12 @@ class SQLiteRecoveryManager:
         if not self._equal(fingerprint, plan.confirmation_fingerprint):
             raise RestorePlanStaleError("live database changed after restore preview")
         return current_exists
+
+    @classmethod
+    def _resolve_direct_restore_target(cls, configured_target: Path) -> Path:
+        if cls._is_indirect_path(configured_target):
+            raise RestoreSafetyError("restore target must not be an indirect filesystem path")
+        return configured_target.resolve()
 
     @classmethod
     def _ensure_restore_family_coherent(cls, target: Path) -> None:
