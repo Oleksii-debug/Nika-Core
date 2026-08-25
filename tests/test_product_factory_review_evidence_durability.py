@@ -194,3 +194,68 @@ def test_rejected_review_minimizes_reason_ref_and_mirrored_blocker(tmp_path) -> 
     assert restored_record.review is not None
     assert restored_record.review.reason == DURABLE_REVIEW_REASON
     assert restored_record.blocker == restored_record.review.reason
+
+
+def test_safe_review_evidence_identity_survives_checkpoint_restart(tmp_path) -> None:
+    reason = "verified by exact deterministic acceptance evidence"
+    evidence_refs = (
+        "tests://core/pass",
+        "artifact-sha256:" + "f" * 64,
+    )
+    store, binding, coordinator, task_id = _setup(tmp_path)
+    coordinator.review(
+        "core",
+        ReviewDecision(
+            reviewer_id="independent-qa",
+            accepted=True,
+            reason=reason,
+            evidence_refs=evidence_refs,
+        ),
+    )
+
+    checkpoint = binding.checkpoint(coordinator)
+    durable = checkpoint.coordinator.records[0]
+    assert durable.review is not None
+    assert durable.review.reason == reason
+    assert durable.review.evidence_refs == evidence_refs
+
+    host = ProductFactoryCheckpointHost(store)
+    host.save(host_task_id=task_id, checkpoint=checkpoint)
+    restored = host.restore_latest(host_task_id=task_id, binding=binding)
+    restored_review = restored.snapshot().records[0].review
+    assert restored_review is not None
+    assert restored_review.reason == reason
+    assert restored_review.evidence_refs == evidence_refs
+
+
+def test_safe_rejected_review_preserves_reason_and_blocker_across_restart(tmp_path) -> None:
+    reason = "missing exact acceptance evidence"
+    evidence_refs = ("tests://core/fail",)
+    store, binding, coordinator, task_id = _setup(tmp_path)
+    coordinator.review(
+        "core",
+        ReviewDecision(
+            reviewer_id="independent-qa",
+            accepted=False,
+            reason=reason,
+            evidence_refs=evidence_refs,
+        ),
+    )
+
+    checkpoint = binding.checkpoint(coordinator)
+    durable = checkpoint.coordinator.records[0]
+    assert durable.review is not None
+    assert durable.review.reason == reason
+    assert durable.review.evidence_refs == evidence_refs
+    assert durable.blocker == reason
+
+    host = ProductFactoryCheckpointHost(store)
+    host.save(host_task_id=task_id, checkpoint=checkpoint)
+    restored_record = host.restore_latest(
+        host_task_id=task_id,
+        binding=binding,
+    ).snapshot().records[0]
+    assert restored_record.review is not None
+    assert restored_record.review.reason == reason
+    assert restored_record.review.evidence_refs == evidence_refs
+    assert restored_record.blocker == reason
