@@ -16,8 +16,6 @@
   let actionsReady = false;
   let bridgeInitializationStarted = false;
 
-  const reservedEditingKeys = new Set(["a", "c", "x", "v", "z", "y"]);
-
   function announce(message, assertive = false) {
     statusNode.setAttribute("aria-live", assertive ? "assertive" : "polite");
     statusNode.textContent = message || "Готово.";
@@ -37,7 +35,8 @@
 
   function isEditable(target) {
     if (!(target instanceof Element)) return false;
-    return target.matches("input, textarea, select, [contenteditable='true']");
+    if (target.matches("input, textarea, select")) return true;
+    return target instanceof HTMLElement && target.isContentEditable;
   }
 
   function eventBinding(event) {
@@ -62,6 +61,14 @@
     if (!(element instanceof HTMLElement)) return false;
     element.focus({ preventScroll: false });
     return document.activeElement === element;
+  }
+
+  function keymapControlId(actionId, control) {
+    return `keymap-${control}-${encodeURIComponent(String(actionId))}`;
+  }
+
+  function keymapAccessibleActionLabel(action) {
+    return `${action.label} (${action.action_id})`;
   }
 
   function renderItems(list, emptyNode, items, formatter) {
@@ -100,7 +107,7 @@
     announce(result.message || (result.status === "completed" ? "Виконано." : result.status), failed);
     appendLog(result.message);
     await refreshState();
-    const focusId = result.focus_id || trigger?.dataset?.focusTarget;
+    const focusId = result.focus_id || (failed ? trigger?.dataset?.errorFocusTarget : trigger?.dataset?.focusTarget);
     if (focusId) focusElementById(focusId);
     else trigger?.focus?.();
   }
@@ -113,6 +120,7 @@
     actions = await globalThis.pywebview.api.list_actions();
     keymapBody.replaceChildren();
     for (const action of actions) {
+      const accessibleActionLabel = keymapAccessibleActionLabel(action);
       const row = document.createElement("tr");
       const labelCell = document.createElement("th");
       labelCell.scope = "row";
@@ -120,27 +128,47 @@
       const bindingCell = document.createElement("td");
       const input = document.createElement("input");
       input.type = "text";
+      input.id = keymapControlId(action.action_id, "binding");
       input.value = action.binding || "";
       input.dataset.actionId = action.action_id;
-      input.setAttribute("aria-label", `Комбінація для ${action.label}`);
+      input.setAttribute("aria-label", `Комбінація для ${accessibleActionLabel}`);
       bindingCell.appendChild(input);
       const controlCell = document.createElement("td");
       const save = document.createElement("button");
+      const saveFocusId = keymapControlId(action.action_id, "save");
       save.type = "button";
+      save.id = saveFocusId;
       save.textContent = action.may_be_unbound ? "Зберегти / очистити" : "Зберегти";
+      save.setAttribute(
+        "aria-label",
+        action.may_be_unbound
+          ? `Зберегти або очистити комбінацію для ${accessibleActionLabel}`
+          : `Зберегти комбінацію для ${accessibleActionLabel}`,
+      );
       save.addEventListener("click", async () => {
         const response = await globalThis.pywebview.api.set_binding(action.action_id, input.value.trim() || null);
         announce(response.message, !response.ok);
-        if (response.ok) await refreshKeymap();
-        else input.focus();
+        if (response.ok) {
+          await refreshKeymap();
+          focusElementById(saveFocusId);
+        } else input.focus();
       });
       const restore = document.createElement("button");
+      const restoreFocusId = keymapControlId(action.action_id, "restore");
       restore.type = "button";
+      restore.id = restoreFocusId;
       restore.textContent = "За замовчуванням";
+      restore.setAttribute(
+        "aria-label",
+        `Відновити комбінацію за замовчуванням для ${accessibleActionLabel}`,
+      );
       restore.addEventListener("click", async () => {
         const response = await globalThis.pywebview.api.restore_default(action.action_id);
         announce(response.message, !response.ok);
-        if (response.ok) await refreshKeymap();
+        if (response.ok) {
+          await refreshKeymap();
+          focusElementById(restoreFocusId);
+        }
       });
       controlCell.append(save, document.createTextNode(" "), restore);
       row.append(labelCell, bindingCell, controlCell);
@@ -192,7 +220,7 @@
   });
 
   document.addEventListener("keydown", (event) => {
-    if (isEditable(event.target) && event.ctrlKey && !event.altKey && !event.metaKey && reservedEditingKeys.has(event.key.toLowerCase())) return;
+    if (isEditable(event.target)) return;
     if (!actionsReady) return;
     const pressed = eventBinding(event);
     if (!pressed) return;
