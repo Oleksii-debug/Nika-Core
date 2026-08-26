@@ -277,7 +277,10 @@ def _decode_entity(entity_type: str, payload: Mapping[str, object]) -> object:
     raise SportsbookResearchError(f"unknown persisted entity type: {entity_type}")
 
 
-def _decode_observation(observation_type: str, payload: Mapping[str, object]) -> SportsbookObservation:
+def _decode_observation(
+    observation_type: str,
+    payload: Mapping[str, object],
+) -> SportsbookObservation:
     time = _decode_time(cast(Mapping[str, object], payload["time"]))
     source_id = str(payload["source_id"])
     sequence = int(payload["source_sequence"])
@@ -338,6 +341,7 @@ class SQLiteSportsbookRepository:
 
     def initialize(self) -> None:
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS sportsbook_schema_migrations ("
                 "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
@@ -347,7 +351,9 @@ class SQLiteSportsbookRepository:
             ).fetchall()
             versions = [int(row["version"]) for row in rows]
             if versions and versions != list(range(1, max(versions) + 1)):
-                raise SportsbookResearchError("sportsbook schema migration history is not contiguous")
+                raise SportsbookResearchError(
+                    "sportsbook schema migration history is not contiguous"
+                )
             current = versions[-1] if versions else 0
             if current > SPORTSBOOK_SCHEMA_VERSION:
                 raise SportsbookResearchError(
@@ -395,6 +401,7 @@ class SQLiteSportsbookRepository:
         )
         inserted = 0
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             self._validate_shape(conn)
             for entity in entities:
                 entity_type, entity_id, payload = _entity_record(entity)
@@ -471,6 +478,7 @@ class SQLiteSportsbookRepository:
         batch = tuple(observations)
         inserted = 0
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             self._validate_shape(conn)
             for observation in batch:
                 event_id, market_id = self._validate_observation_refs(conn, observation)
@@ -549,18 +557,30 @@ class SQLiteSportsbookRepository:
         if isinstance(observation, (OddsSnapshot, Settlement)):
             market = cls._entity_payload(conn, "market", observation.market_id)
             event_id = str(market["event_id"])
-            selections = observation.prices if isinstance(observation, OddsSnapshot) else observation.outcomes
+            selections = (
+                observation.prices
+                if isinstance(observation, OddsSnapshot)
+                else observation.outcomes
+            )
             for selection_id in selections:
                 selection = cls._entity_payload(conn, "selection", selection_id)
                 if str(selection["market_id"]) != observation.market_id:
                     raise SportsbookResearchError(
-                        f"selection {selection_id} does not belong to market {observation.market_id}"
+                        f"selection {selection_id} does not belong to market "
+                        f"{observation.market_id}"
                     )
             return event_id, observation.market_id
         event = cls._entity_payload(conn, "event", observation.event_id)
         if isinstance(observation, ScoreState):
-            participant_ids = {str(item) for item in cast(list[object], event["participant_ids"])}
-            unknown = [participant_id for participant_id in observation.scores if participant_id not in participant_ids]
+            participant_ids = {
+                str(item)
+                for item in cast(list[object], event["participant_ids"])
+            }
+            unknown = [
+                participant_id
+                for participant_id in observation.scores
+                if participant_id not in participant_ids
+            ]
             if unknown:
                 raise SportsbookResearchError(
                     f"score references participant outside event: {unknown[0]}"
@@ -578,11 +598,17 @@ class SQLiteSportsbookRepository:
         clauses = ["available_at <= ?"]
         params: list[object] = [at.isoformat()]
         if source_id is not None:
+            source_id = source_id.strip()
+            if not source_id:
+                raise SportsbookResearchError("source_id must not be empty")
             clauses.append("source_id = ?")
-            params.append(source_id.strip())
+            params.append(source_id)
         if event_id is not None:
+            event_id = event_id.strip()
+            if not event_id:
+                raise SportsbookResearchError("event_id must not be empty")
             clauses.append("event_id = ?")
-            params.append(event_id.strip())
+            params.append(event_id)
         sql = (
             "SELECT observation_type, payload_json, payload_sha256 "
             "FROM sportsbook_observations WHERE "
