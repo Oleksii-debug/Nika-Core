@@ -49,7 +49,7 @@ from .orders import (
 )
 from .persistence import TradingStateRepository
 from .replay import OrderUpdate, ReplayBook, ReplayPhase, SimulationExecutionEngine, TimeSlice
-from .risk import RiskEngine, RiskLimits, RiskRejected, RiskState
+from .risk import PendingRiskOrder, RiskEngine, RiskLimits, RiskRejected, RiskState
 from .strategy import DecisionContext, OrderStrategy, Strategy, StrategyDecision
 
 __all__ = [
@@ -77,6 +77,7 @@ __all__ = [
     "OrderUpdate",
     "OutcomeSettlement",
     "Partition",
+    "PendingRiskOrder",
     "PortfolioLedger",
     "Position",
     "Provenance",

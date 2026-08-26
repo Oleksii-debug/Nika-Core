@@ -58,14 +58,23 @@ class RiskState:
 
 @dataclass(frozen=True, slots=True)
 class PendingRiskOrder:
-    """Accepted pending order plus the mark used for this admission decision."""
+    """Accepted pending order plus exact remaining quantity and current admission mark."""
 
     order: RiskApprovedOrder
     mark_price: Decimal
+    remaining_quantity: Decimal | None = None
 
     def __post_init__(self) -> None:
         if self.mark_price <= 0:
             raise TradingResearchError("pending mark_price must be positive")
+        remaining = (
+            self.order.intent.quantity
+            if self.remaining_quantity is None
+            else Decimal(self.remaining_quantity)
+        )
+        if remaining <= 0 or remaining > self.order.intent.quantity:
+            raise TradingResearchError("pending remaining_quantity must be in (0, order quantity]")
+        object.__setattr__(self, "remaining_quantity", remaining)
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,15 +126,19 @@ class RiskEngine:
             pending_intent = pending.order.intent
             key = pending_intent.instrument.instrument_id
             _record_mark(marks, key, pending.mark_price)
+            remaining = pending.remaining_quantity
+            assert remaining is not None
             _add_delta(
                 deltas,
                 key,
-                pending_intent.quantity * Decimal(pending_intent.side.sign),
+                remaining * Decimal(pending_intent.side.sign),
             )
             reservation = _execution_reservation(
                 pending_intent,
                 pending.mark_price,
                 pending.order.policy,
+                quantity=remaining,
+                include_fixed_fee=remaining == pending_intent.quantity,
             )
             total_equity_cost += reservation.equity_cost
             total_cash_required += reservation.cash_required
@@ -135,9 +148,7 @@ class RiskEngine:
 
         if pending_signed_quantity != 0:
             if _policy_has_execution_cost(policy):
-                raise RiskRejected(
-                    "exact pending execution-cost reservation required"
-                )
+                raise RiskRejected("exact pending execution-cost reservation required")
             _add_delta(deltas, candidate_key, pending_signed_quantity)
             legacy_reservation = _legacy_pending_reservation(
                 pending_signed_quantity,
@@ -148,7 +159,13 @@ class RiskEngine:
 
         signed = intent.quantity * Decimal(intent.side.sign)
         _add_delta(deltas, candidate_key, signed)
-        candidate_reservation = _execution_reservation(intent, mark_price, policy)
+        candidate_reservation = _execution_reservation(
+            intent,
+            mark_price,
+            policy,
+            quantity=intent.quantity,
+            include_fixed_fee=True,
+        )
         total_equity_cost += candidate_reservation.equity_cost
         total_cash_required += candidate_reservation.cash_required
 
@@ -231,9 +248,7 @@ class RiskEngine:
 def _record_mark(marks: dict[str, Decimal], instrument_id: str, mark_price: Decimal) -> None:
     existing = marks.get(instrument_id)
     if existing is not None and existing != mark_price:
-        raise TradingResearchError(
-            f"inconsistent risk marks for instrument {instrument_id}"
-        )
+        raise TradingResearchError(f"inconsistent risk marks for instrument {instrument_id}")
     marks[instrument_id] = mark_price
 
 
@@ -242,27 +257,26 @@ def _add_delta(deltas: dict[str, Decimal], instrument_id: str, quantity: Decimal
 
 
 def _policy_has_execution_cost(policy: ExecutionPolicy) -> bool:
-    return (
-        policy.slippage_bps != 0
-        or policy.fee_bps != 0
-        or policy.fixed_fee != 0
-    )
+    return policy.slippage_bps != 0 or policy.fee_bps != 0 or policy.fixed_fee != 0
 
 
 def _execution_reservation(
     intent: OrderIntent,
     mark_price: Decimal,
     policy: ExecutionPolicy,
+    *,
+    quantity: Decimal,
+    include_fixed_fee: bool,
 ) -> _ExecutionReservation:
     fill_price = _worst_case_fill_price(intent, mark_price, policy)
-    notional = intent.quantity * fill_price
-    fee = fee_for(notional, policy)
+    notional = quantity * fill_price
+    fee = fee_for(notional, policy, include_fixed_fee=include_fixed_fee)
 
     if intent.side is Side.BUY:
-        adverse_price_loss = max(Decimal(0), fill_price - mark_price) * intent.quantity
+        adverse_price_loss = max(Decimal(0), fill_price - mark_price) * quantity
         cash_required = notional + fee
     else:
-        adverse_price_loss = max(Decimal(0), mark_price - fill_price) * intent.quantity
+        adverse_price_loss = max(Decimal(0), mark_price - fill_price) * quantity
         cash_required = max(Decimal(0), fee - notional)
 
     return _ExecutionReservation(
@@ -281,7 +295,7 @@ def _legacy_pending_reservation(
         return _ExecutionReservation(Decimal(0), Decimal(0))
     side = Side.BUY if signed_quantity > 0 else Side.SELL
     notional = quantity * apply_slippage(mark_price, side, policy.slippage_bps)
-    fee = fee_for(notional, policy)
+    fee = fee_for(notional, policy, include_fixed_fee=False)
     if side is Side.BUY:
         return _ExecutionReservation(
             equity_cost=Decimal(0),

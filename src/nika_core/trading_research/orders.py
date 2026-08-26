@@ -132,10 +132,18 @@ class SimulatedFill:
         object.__setattr__(self, "filled_at", require_aware_utc(self.filled_at, "filled_at"))
 
 
-def fee_for(notional: Decimal, policy: ExecutionPolicy) -> Decimal:
+def fee_for(
+    notional: Decimal,
+    policy: ExecutionPolicy,
+    *,
+    include_fixed_fee: bool = True,
+) -> Decimal:
+    """Return deterministic fee; fixed_fee is charged once per approved order."""
+
     if notional < 0:
         raise TradingResearchError("notional cannot be negative")
-    return policy.fixed_fee + (notional * policy.fee_bps / Decimal(10_000))
+    fixed = policy.fixed_fee if include_fixed_fee else Decimal(0)
+    return fixed + (notional * policy.fee_bps / Decimal(10_000))
 
 
 def apply_slippage(price: Decimal, side: Side, bps: Decimal) -> Decimal:

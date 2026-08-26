@@ -2,6 +2,7 @@
 
 Starting integrated main: `782105eba05da9714c30d45483049dbb1fe06370`.
 Current-main compatibility refresh base: `9140389d552dc56c3ca39b11ab95a534abc44eef`.
+Latest reservation repair starting live main: `109829579ab4693e038e218769c23c2547defd64`.
 
 ## Scope
 
@@ -30,13 +31,21 @@ The phase order is fixed:
 
 Market/limit v1 execution supports PENDING, ACTIVE, PARTIALLY_FILLED, FILLED, CANCELLED and EXPIRED lifecycle states. Quote execution uses ask for buys and bid for sells. Bar execution uses explicit v1 open/limit rules. Liquidity is explicit through quote sizes or bar volume and a versioned maximum fill fraction. Latency, slippage, percentage fee and fixed fee are versioned in `ExecutionPolicy`.
 
+`fixed_fee` is an approved-order charge, not a per-partial-fill charge. The first economic fill of an approved order carries the fixed fee; later partial fills carry percentage fees only. This gives deterministic pending reservation a bounded fixed component while preserving percentage fees proportional to executed notional.
+
 ## Decimal accounting
 
-Authoritative simulated money and position calculations use `decimal.Decimal`: cash, fees, signed quantity, average basis, realized P&L, unrealized P&L, equity, gross exposure and net exposure. Long and short adds, reductions, closes and reversals use deterministic average-cost accounting.
+Authoritative simulated money and position calculations use `decimal.Decimal`: cash, fees, signed position, average basis, realized/unrealized P&L, equity, gross exposure and net exposure. Long and short adds, reductions, closes and reversals use deterministic average-cost accounting.
 
-## Risk
+## Risk and reservation authority
 
-`RiskEngine` evaluates the current position plus pending signed quantity plus the candidate intent before creating `RiskApprovedOrder`. Limits cover absolute position, gross exposure, net exposure, session loss, drawdown, short policy and leverage. Post-fill assertions recheck position, exposure, leverage and loss/drawdown boundaries.
+`RiskEngine` evaluates current state plus accepted-pending state plus the candidate before creating `RiskApprovedOrder`. Limits cover absolute position, gross exposure, net exposure, cash/buying power, session loss, drawdown, short policy and leverage. Post-fill assertions recheck position, exposure, leverage and loss/drawdown boundaries.
+
+The preferred pending boundary is `PendingRiskOrder`, which binds the exact accepted `RiskApprovedOrder`, its current mark and its exact remaining quantity. Risk recomputes deterministic pending economics from the canonical order policy instead of trusting a caller-supplied fee total. Already-filled quantity is not counted again; when a pending order is partially filled, its once-per-order fixed fee is treated as already paid.
+
+The old `pending_signed_quantity` input remains only for zero-cost compatibility. If deterministic slippage, percentage fees or a fixed fee are configured, a non-zero aggregate pending quantity is insufficient to reconstruct the number and policies of accepted orders and therefore fails closed with an exact-pending-reservation requirement.
+
+Candidate and exact-pending execution costs reduce projected equity before leverage, session-loss and drawdown admission. BUY notional plus deterministic fees is reserved from current cash; future SELL proceeds are not treated as available buying power for another pending BUY. This closes the executable QA #479 family where pre-trade approval previously authorized an order that the same risk engine rejected immediately after deterministic fill costs were applied.
 
 ## Persistence and recovery
 
@@ -57,14 +66,16 @@ Current limit: Batch 2 stores the resulting account snapshot as deterministic De
 
 The accounting cases cover long/short open, add, partial close, full close, reversal, fees, weighted basis, realized P&L and equity. The risk cases cover allowed orders, short rejection/allowance, absolute position, gross/net exposure, pending-order exposure, session-loss and drawdown gates.
 
+Focused reservation regressions additionally cover deterministic fee-induced leverage rejection, exact leverage boundary acceptance, cash reservation, fail-closed aggregate pending costs, exact pending-order costs, partial-order remaining quantity and once-per-order fixed fees across multiple fills.
+
 ## REUSE / ADAPT / CUSTOM
 
-- REUSE canonical `SQLiteStore` and Python `Decimal`/datetime primitives.
-- ADAPT the integrated Batch 1 `Instrument`, market-event, `TemporalView`, deterministic event ordering and strategy context contracts.
-- CUSTOM thin deterministic replay/accounting/risk policy because the binding causal phase order, no-same-slice fill invariant, typed risk approval boundary and exactly-once simulated ledger semantics are Nika product contracts rather than a third-party engine contract.
+- REUSE canonical `SQLiteStore`, `ExecutionPolicy`, `fee_for`, `apply_slippage`, `RiskApprovedOrder`, `AccountSnapshot` and Python `Decimal`/datetime primitives.
+- ADAPT the integrated Batch 1 market/causality contracts and the existing canonical RiskEngine so deterministic accepted-pending and candidate economics are projected before approval.
+- CUSTOM thin: `PendingRiskOrder` and small deterministic reservation helpers. No second risk/accounting engine and no new dependency.
 
 No pandas, NumPy, scikit-learn, Gymnasium, pyarrow, LEAN, Nautilus, Zipline, vectorbt, backtesting.py, QuantStats or broker SDK is added by this batch.
 
 ## Evidence truth
 
-Implementation on the branch is not GREEN until Ruff, compile/import, focused 42-oracle/replay/risk/recovery tests, broad repository tests and exact-candidate CI complete successfully. HUMAN_TESTED=false. NVDA_VERIFIED=false.
+Implementation on the branch is not GREEN until Ruff, compile/import, focused 42-oracle/replay/risk/recovery/reservation tests, broad repository tests and exact-candidate CI complete successfully. Independent QA #479 must then be replayed against the repaired exact parent; its source remains QA_ONLY / DO_NOT_MERGE. HUMAN_TESTED=false. NVDA_VERIFIED=false.
