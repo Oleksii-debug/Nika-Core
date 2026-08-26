@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from math import isfinite
@@ -10,6 +11,8 @@ from urllib.parse import urlsplit
 
 from nika_core.experiments.contracts import ExperimentStatus
 from nika_core.model_gateway.contracts import ModelMessage, ModelResponse, PrivacyClass
+
+_SCORER_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 def _validate_persisted_identity(value: str, name: str) -> None:
@@ -20,6 +23,14 @@ def _validate_persisted_identity(value: str, name: str) -> None:
         raise ValueError(f"{name} must not contain URL userinfo")
     if parsed.query or parsed.fragment:
         raise ValueError(f"{name} must not contain a URL query or fragment")
+
+
+def validate_scorer_identity(scorer_id: str, scorer_version: str) -> None:
+    for value, name in ((scorer_id, "scorer_id"), (scorer_version, "scorer_version")):
+        if not isinstance(value, str) or _SCORER_TOKEN.fullmatch(value) is None:
+            raise ValueError(
+                f"{name} must be 1-128 characters using only letters, digits, '.', '_' or '-'"
+            )
 
 
 class EvaluationSplit(StrEnum):
@@ -112,7 +123,7 @@ class EvaluationSuite:
     @property
     def evidence_version(self) -> str:
         return (
-            f"{self.dataset_version};split={self.split.value};"
+            f"{self.dataset_version};split={self.split.value};privacy={self.privacy.value};"
             f"sha256={self.content_sha256}"
         )
 
@@ -151,10 +162,16 @@ class ModelBenchmarkPolicy:
 
 
 class QualityScorer(Protocol):
+    scorer_id: str
+    scorer_version: str
+
     def score(self, case: EvaluationCase, response: ModelResponse) -> float: ...
 
 
 class ExactMatchScorer:
+    scorer_id = "exact_match"
+    scorer_version = "1"
+
     def score(self, case: EvaluationCase, response: ModelResponse) -> float:
         return 1.0 if response.text == case.expected_text else 0.0
 
