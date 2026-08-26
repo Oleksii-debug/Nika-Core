@@ -22,9 +22,11 @@ from .windows_uia_adapter_impl import (
     UIAControlRecord,
     UIAWindowRecord,
     WindowsUIABackend,
-    WindowsUIAInteractionAdapter as _BaseWindowsUIAInteractionAdapter,
     choose_measured_backend,
     measure_observation,
+)
+from .windows_uia_adapter_impl import (
+    WindowsUIAInteractionAdapter as _BaseWindowsUIAInteractionAdapter,
 )
 
 _REQUIRED_PATTERN = {
