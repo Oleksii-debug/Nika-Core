@@ -4,8 +4,8 @@ from dataclasses import dataclass
 
 from .contracts import (
     DenseDecoderConfig,
-    ScalingTarget,
     estimate_dense_decoder_parameters,
+    ScalingTarget,
 )
 
 
