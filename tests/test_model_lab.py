@@ -4,15 +4,15 @@ import pytest
 
 from nika_core.model_lab import (
     CORE_100M,
+    DatasetSourceManifest,
+    default_dense_scaling_ladder,
+    DenseDecoderConfig,
+    estimate_dense_decoder_parameters,
+    ModelTrainingPlan,
     PILOT_20M,
     SCALE_1B,
-    DatasetSourceManifest,
-    DenseDecoderConfig,
-    ModelTrainingPlan,
     TokenizerManifest,
     TrainingCorpusManifest,
-    default_dense_scaling_ladder,
-    estimate_dense_decoder_parameters,
 )
 
 
