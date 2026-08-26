@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from nika_core.business_factory import (
     BusinessFactory,
+    BusinessFactorySnapshot,
     BusinessObjective,
     BusinessPolicy,
     CommunicationAuthority,
@@ -13,7 +16,7 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_project import EvidenceRef, ResearchEvidencePackage
 
 
-def _snapshot(objective_id: str):
+def _snapshot(objective_id: str) -> BusinessFactorySnapshot:
     return BusinessFactory.start(
         objective=BusinessObjective(
             objective_id=objective_id,
@@ -38,7 +41,7 @@ def _snapshot(objective_id: str):
     ).snapshot()
 
 
-def _repository(path):
+def _repository(path: Path) -> tuple[SQLiteStore, BusinessFactoryRepository]:
     store = SQLiteStore(path)
     store.initialize()
     repository = BusinessFactoryRepository(store)
@@ -110,5 +113,30 @@ def test_initialize_rejects_current_marker_with_missing_owned_table(tmp_path) ->
         assert marker["version"] == 1
         conn.execute("DROP TABLE business_factory_snapshots")
 
+    with pytest.raises(RuntimeError):
+        BusinessFactoryRepository(store).initialize()
+
+
+def test_initialize_rejects_current_marker_with_malformed_owned_table(tmp_path) -> None:
+    store, _repository_before_corruption = _repository(
+        tmp_path / "pf9 malformed owned table.sqlite"
+    )
+
+    with store.connection() as conn:
+        conn.execute("DROP TABLE business_factory_snapshots")
+        conn.execute(
+            "CREATE TABLE business_factory_snapshots ("
+            "objective_id TEXT PRIMARY KEY, "
+            "row_version TEXT NOT NULL, "
+            "payload_json TEXT NOT NULL, "
+            "updated_at TEXT NOT NULL)"
+        )
+        declared_type = conn.execute(
+            "SELECT type FROM pragma_table_info('business_factory_snapshots') "
+            "WHERE name = 'row_version'"
+        ).fetchone()
+
+    assert declared_type is not None
+    assert declared_type["type"] == "TEXT"
     with pytest.raises(RuntimeError):
         BusinessFactoryRepository(store).initialize()
