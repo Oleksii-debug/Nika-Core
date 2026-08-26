@@ -87,10 +87,13 @@ def _canonical_relative_path(value: object) -> bool:
 def _release_path_is_secret(value: object) -> bool:
     if not isinstance(value, str):
         return False
-    basename = PurePosixPath(value).name.casefold()
-    if basename in _SECRET_RELEASE_BASENAMES:
-        return True
-    return basename.startswith(".env.") and basename != ".env.example"
+    for part in PurePosixPath(value).parts:
+        identity = part.casefold()
+        if identity in _SECRET_RELEASE_BASENAMES:
+            return True
+        if identity.startswith(".env.") and identity != ".env.example":
+            return True
+    return False
 
 
 def _canonical_release_path(value: object) -> bool:
