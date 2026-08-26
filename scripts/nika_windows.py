@@ -64,6 +64,7 @@ def build_windows_bridge(
         router=product_router,
         command_center=command_center,
     )
+    backend.bind_product_project_state_provider(product_state.product_project_state)
     bridge = UIActionBridge(
         actions,
         keymap,
