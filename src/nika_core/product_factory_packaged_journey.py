@@ -295,8 +295,7 @@ class PackagedProductStateProvider:
 
     def __call__(self) -> dict[str, Any]:
         state = dict(self._base_state())
-        if "product_project" not in state:
-            state["product_project"] = self.product_project_state()
+        state["product_project"] = self.product_project_state()
         return state
 
 
