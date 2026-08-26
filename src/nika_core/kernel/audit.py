@@ -1,15 +1,102 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Final
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from nika_core.data.sqlite import SQLiteStore
+
+_MAX_INSPECTION_LIMIT: Final = 500
+_REDACTED: Final = "[REDACTED]"
+_SENSITIVE_KEYS: Final = frozenset(
+    {
+        "access_token",
+        "api_hash",
+        "api_key",
+        "authorization",
+        "client_secret",
+        "cookie",
+        "id_token",
+        "password",
+        "passphrase",
+        "private_key",
+        "proxy_authorization",
+        "refresh_token",
+        "session_cookie",
+        "session_token",
+        "set_cookie",
+        "secret",
+        "token",
+    }
+)
+_AUTH_HEADER_RE: Final = re.compile(
+    r"(?i)\b(authorization|proxy-authorization)(\s*:\s*)[^\r\n]+"
+)
+_INLINE_SECRET_RE: Final = re.compile(
+    r"(?i)\b(api[_-]?key|api[_-]?hash|access[_-]?token|refresh[_-]?token|"
+    r"id[_-]?token|session[_-]?token|password|passphrase|client[_-]?secret)"
+    r"\b(\s*[:=]\s*)([^\s,;&]+)"
+)
+_BEARER_RE: Final = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
+_SECRET_QUERY_NAMES: Final = frozenset(
+    {
+        "access_token",
+        "api_hash",
+        "api_key",
+        "authorization",
+        "client_secret",
+        "id_token",
+        "password",
+        "refresh_token",
+        "session_token",
+        "token",
+    }
+)
+
+
+class AuditIntegrityError(RuntimeError):
+    """Raised when persisted audit evidence cannot be decoded safely."""
 
 
 @dataclass(frozen=True, slots=True)
 class AuditEvent:
+    event_id: int
+    event_type: str
+    entity_type: str
+    entity_id: str
+    payload: dict[str, object]
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class AuditInspectionQuery:
+    """Bounded forward-only query for user-facing audit inspection."""
+
+    event_type: str | None = None
+    entity_type: str | None = None
+    entity_id: str | None = None
+    after_event_id: int = 0
+    limit: int = 100
+
+    def __post_init__(self) -> None:
+        for field_name in ("event_type", "entity_type", "entity_id"):
+            value = getattr(self, field_name)
+            if value is not None and not value.strip():
+                raise ValueError(f"{field_name} must not be blank")
+        if self.after_event_id < 0:
+            raise ValueError("after_event_id must be non-negative")
+        if not 1 <= self.limit <= _MAX_INSPECTION_LIMIT:
+            raise ValueError(f"limit must be between 1 and {_MAX_INSPECTION_LIMIT}")
+
+
+@dataclass(frozen=True, slots=True)
+class AuditInspectionEvent:
+    """Secret-minimized audit event suitable for text/UI presentation."""
+
     event_id: int
     event_type: str
     entity_type: str
@@ -66,14 +153,144 @@ class AuditLog:
                 "FROM audit_events WHERE entity_type = ? AND entity_id = ? ORDER BY event_id",
                 (entity_type, entity_id),
             ).fetchall()
-        return tuple(
-            AuditEvent(
-                event_id=int(row["event_id"]),
-                event_type=row["event_type"],
-                entity_type=row["entity_type"],
-                entity_id=row["entity_id"],
-                payload=json.loads(row["payload_json"]),
-                created_at=row["created_at"],
-            )
-            for row in rows
+        return tuple(self._event_from_row(row) for row in rows)
+
+    def inspect(
+        self,
+        query: AuditInspectionQuery | None = None,
+    ) -> tuple[AuditInspectionEvent, ...]:
+        """Return a bounded, stable, secret-minimized forward page of audit evidence."""
+        request = query or AuditInspectionQuery()
+        clauses = ["event_id > ?"]
+        parameters: list[object] = [request.after_event_id]
+
+        for column, value in (
+            ("event_type", request.event_type),
+            ("entity_type", request.entity_type),
+            ("entity_id", request.entity_id),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                parameters.append(value)
+
+        parameters.append(request.limit)
+        sql = (
+            "SELECT event_id, event_type, entity_type, entity_id, payload_json, created_at "
+            f"FROM audit_events WHERE {' AND '.join(clauses)} "
+            "ORDER BY event_id LIMIT ?"
         )
+        with self._store.connection() as conn:
+            rows = conn.execute(sql, parameters).fetchall()
+
+        events = tuple(self._event_from_row(row) for row in rows)
+        return tuple(
+            AuditInspectionEvent(
+                event_id=event.event_id,
+                event_type=event.event_type,
+                entity_type=event.entity_type,
+                entity_id=event.entity_id,
+                payload=_redact_payload(event.payload),
+                created_at=event.created_at,
+            )
+            for event in events
+        )
+
+    @staticmethod
+    def _event_from_row(row: sqlite3.Row) -> AuditEvent:
+        try:
+            payload = json.loads(row["payload_json"])
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise AuditIntegrityError(
+                f"audit event {int(row['event_id'])} contains invalid payload JSON"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise AuditIntegrityError(
+                f"audit event {int(row['event_id'])} payload must be a JSON object"
+            )
+        return AuditEvent(
+            event_id=int(row["event_id"]),
+            event_type=str(row["event_type"]),
+            entity_type=str(row["entity_type"]),
+            entity_id=str(row["entity_id"]),
+            payload=payload,
+            created_at=str(row["created_at"]),
+        )
+
+
+def _redact_payload(payload: dict[str, object]) -> dict[str, object]:
+    return {str(key): _redact_value(str(key), value) for key, value in payload.items()}
+
+
+def _redact_value(key: str, value: object) -> object:
+    normalized_key = key.casefold().replace("-", "_")
+    if _is_sensitive_key(normalized_key):
+        return _REDACTED
+    if isinstance(value, dict):
+        return {
+            str(child_key): _redact_value(str(child_key), child)
+            for child_key, child in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_value("", child) for child in value]
+    if isinstance(value, str):
+        return _redact_text(value)
+    return value
+
+
+def _is_sensitive_key(normalized_key: str) -> bool:
+    if normalized_key in _SENSITIVE_KEYS:
+        return True
+    return normalized_key.endswith(
+        (
+            "_password",
+            "_passphrase",
+            "_private_key",
+            "_api_key",
+            "_api_hash",
+            "_access_token",
+            "_refresh_token",
+            "_id_token",
+            "_session_token",
+            "_client_secret",
+        )
+    )
+
+
+def _redact_text(value: str) -> str:
+    sanitized = _AUTH_HEADER_RE.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}{_REDACTED}",
+        value,
+    )
+    sanitized = _BEARER_RE.sub("Bearer " + _REDACTED, sanitized)
+    sanitized = _INLINE_SECRET_RE.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}{_REDACTED}",
+        sanitized,
+    )
+    return _redact_url(sanitized)
+
+
+def _redact_url(value: str) -> str:
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return value
+    if parts.scheme not in {"http", "https"} or not parts.netloc:
+        return value
+
+    hostname = parts.hostname or ""
+    try:
+        parsed_port = parts.port
+    except ValueError:
+        return value
+    port = f":{parsed_port}" if parsed_port is not None else ""
+    if parts.username is not None or parts.password is not None:
+        netloc = f"{_REDACTED}@{hostname}{port}"
+    else:
+        netloc = parts.netloc
+
+    query_pairs = parse_qsl(parts.query, keep_blank_values=True)
+    safe_pairs = [
+        (name, _REDACTED if name.casefold().replace("-", "_") in _SECRET_QUERY_NAMES else item)
+        for name, item in query_pairs
+    ]
+    return urlunsplit((parts.scheme, netloc, parts.path, urlencode(safe_pairs), parts.fragment))
