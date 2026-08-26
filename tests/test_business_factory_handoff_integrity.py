@@ -19,6 +19,14 @@ from nika_core.product_project import (
 )
 
 
+def _spec(work_order_ref: str) -> ProductProjectSpec:
+    return ProductProjectSpec(
+        goal="Build the authorized sandbox product",
+        desired_outcome="A QA-reviewed sandbox release candidate",
+        compliance={"business_work_order_ref": work_order_ref},
+    )
+
+
 def _factory_at_work_order(business_authority) -> BusinessFactory:
     factory = BusinessFactory.start(
         objective=BusinessObjective(
@@ -65,16 +73,9 @@ def _factory_at_work_order(business_authority) -> BusinessFactory:
         work_order_id="work-order-handoff-1",
         scope="Build the authorized sandbox product.",
         authorization_ref="approval:work-order:handoff-1",
+        product_spec=_spec("work-order-handoff-1"),
     )
     return factory
-
-
-def _spec(work_order_ref: str) -> ProductProjectSpec:
-    return ProductProjectSpec(
-        goal="Build the authorized sandbox product",
-        desired_outcome="A QA-reviewed sandbox release candidate",
-        compliance={"business_work_order_ref": work_order_ref},
-    )
 
 
 def test_handoff_rejects_spec_bound_to_another_work_order_before_product_effect(
@@ -97,6 +98,33 @@ def test_handoff_rejects_spec_bound_to_another_work_order_before_product_effect(
 
     with pytest.raises(KeyError):
         products.get("product-wrong-work-order")
+
+
+def test_handoff_rejects_same_work_order_different_spec_before_product_effect(
+    tmp_path,
+    business_authority,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.sqlite")
+    store.initialize()
+    products = ProductProjectRepository(store)
+    factory = _factory_at_work_order(business_authority)
+    substituted = ProductProjectSpec(
+        goal="Build an unauthorized substituted product",
+        desired_outcome="A different effect under the approved WorkOrder id",
+        compliance={"business_work_order_ref": "work-order-handoff-1"},
+    )
+
+    with pytest.raises(BusinessFactoryError, match="authorized WorkOrder specification"):
+        factory.handoff_to_product_factory(
+            repository=products,
+            project_id="product-same-work-order-substituted-spec",
+            project_name="Substituted ProductProject",
+            spec=substituted,
+            idempotency_key="caller-request-substituted-spec",
+        )
+
+    with pytest.raises(KeyError):
+        products.get("product-same-work-order-substituted-spec")
 
 
 def test_uncertain_handoff_exact_retry_reconciles_existing_product(
@@ -122,6 +150,7 @@ def test_uncertain_handoff_exact_retry_reconciles_existing_product(
         idempotency_key="caller-request-handoff-1",
     )
     assert first.product_project_id == "product-handoff-1"
+    assert first.product_spec_fingerprint is not None
     stored = products.get("product-handoff-1")
     assert stored.spec.compliance["business_work_order_ref"] == "work-order-handoff-1"
     assert stored.spec.compliance["business_work_order_authorization_ref"] == (
@@ -129,6 +158,9 @@ def test_uncertain_handoff_exact_retry_reconciles_existing_product(
     )
     assert stored.spec.compliance["business_work_order_authorization_fingerprint"] == (
         first.authorization_fingerprint
+    )
+    assert stored.spec.compliance["business_product_spec_fingerprint"] == (
+        first.product_spec_fingerprint
     )
     assert stored.spec.compliance["business_objective_ref"] == "objective-handoff-1"
 
