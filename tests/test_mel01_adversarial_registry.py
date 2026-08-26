@@ -107,6 +107,26 @@ def test_observation_index_identity_drift_fails_closed(tmp_path: Path) -> None:
         repository.list_observations("run-qa", _suite().key)
 
 
+def test_observation_run_selector_rebinding_fails_closed(tmp_path: Path) -> None:
+    service, store = _lab(tmp_path)
+    first = _observation(observation_id="obs-run-selector", case_id="case-a")
+    service.record_observation(first)
+
+    # Rebind only the query/index column. The canonical payload remains bound to
+    # run-qa. A forged selector must not make that original evidence appear as
+    # evidence for a different benchmark run.
+    with sqlite3.connect(store.path) as conn:
+        conn.execute(
+            "UPDATE model_engineering_observations SET run_id = ? "
+            "WHERE observation_id = ?",
+            ("forged-run", first.observation_id),
+        )
+
+    repository = SQLiteModelEngineeringRepository(store)
+    with pytest.raises(EvidenceIntegrityError):
+        repository.list_observations("forged-run", _suite().key)
+
+
 def test_schema_version_marker_without_required_tables_fails_closed(tmp_path: Path) -> None:
     path = tmp_path / "Unicode каталог" / "MEL state.sqlite3"
     path.parent.mkdir(parents=True, exist_ok=True)
