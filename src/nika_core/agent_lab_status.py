@@ -53,6 +53,7 @@ class AgentLabStatusReader:
         try:
             with self._store.connection() as conn:
                 conn.execute("PRAGMA query_only = ON")
+                conn.execute("BEGIN")
                 schema_version = self._schema_version(conn)
                 self._verify_integrity(conn)
                 team_count = self._scalar(conn, "SELECT COUNT(*) FROM multi_agent_teams")
