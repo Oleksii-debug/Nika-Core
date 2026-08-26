@@ -29,9 +29,12 @@ The service deliberately does not introduce signing/HMAC authority, a second che
 The focused regression family is `tests/test_kernel_checkpoint_durability.py` and covers:
 
 - wall-clock rollback between sequential successful saves;
-- rejection of `NaN` and infinities without durable residue;
+- rejection of `NaN` and infinities before durable write;
+- matching-checksum non-finite and malformed durable JSON rejection;
 - non-object durable payload rejection even with a matching checksum;
 - non-canonical durable payload rejection even with a matching checksum;
+- checksum tamper rejection;
+- corrupt-newest fail-closed behavior with no stale fallback;
 - Unicode/nested finite payload round-trip after reopening the service.
 
 Repository Core CI and applicable integrated workflows remain authoritative for merge credit. `HUMAN_TESTED` and `NVDA_VERIFIED` are not established by these automated tests.
