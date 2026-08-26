@@ -57,6 +57,32 @@ def test_current_live_nonterminal_c10_statuses_remain_active_claims(status: str)
     )
 
 
+def test_current_live_markdown_heading_c10_marker_remains_active_claim() -> None:
+    """Live ENG08 uses '# [NIKA-C10:...]'; Markdown decoration must not unlock that lane."""
+    comment = {
+        "id": 150,
+        "created_at": "2026-08-26T20:10:00Z",
+        "user": {"login": "Oleksii-debug"},
+        "body": "\n".join(
+            (
+                "# [NIKA-C10:ENG08]",
+                "WORKER_ID: ENG08",
+                "RUN_ID: C10-ENG08-S100-CONSOLIDATE-20260826T1815+0300",
+                "STATUS: IN_PROGRESS",
+                "OWNERSHIP_PATHS: src/nika_core/product_factory_release.py",
+            )
+        ),
+    }
+
+    parsed = claims.parse_comment(comment, legacy_ttl_minutes=720)
+
+    assert isinstance(parsed, claims.LaneClaim), (
+        "A current live Markdown-heading NIKA-C10 marker was ignored even though its status is "
+        "IN_PROGRESS. The legacy compatibility parser must not unlock an occupied lane because "
+        "the marker is rendered as a Markdown heading."
+    )
+
+
 def test_ignored_live_nonterminal_status_cannot_lose_to_new_overlapping_claim() -> None:
     """An older live legacy owner must win over a later overlapping v1 claimant."""
     legacy = _comment(
