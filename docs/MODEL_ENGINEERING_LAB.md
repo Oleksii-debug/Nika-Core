@@ -13,8 +13,9 @@ It is **not** a language-model training project. In particular, the closed wrong
 - **REUSE:** `nika_core.model_gateway` for provider routing, privacy classification, timeout/cancellation behavior, usage and provider latency.
 - **REUSE:** `nika_core.resources.ResourceObserverPort` for the CPU/RAM snapshots that the current resource contract can prove.
 - **REUSE:** `nika_core.experiments` as the only promotion/rollback authority. Model Lab does not directly change a champion/default model.
+- **REUSE:** `nika_core.data.SQLiteStore` for durable local persistence rather than creating another database abstraction.
 - **ADAPT:** benchmark candidates and replay cases into `StrategyRef`, `ReplayCase`, and `MetricObservation` records for the Experiment Engine.
-- **CUSTOM(thin):** F6-owned benchmark identity, text-redacted evidence, model provenance/checksum binding, deterministic scoring hooks, and fail-closed provider/model substitution checks.
+- **CUSTOM(thin):** F6-owned benchmark identity, text-redacted evidence, model provenance/checksum binding, deterministic scoring hooks, fail-closed provider/model substitution checks, and a namespaced immutable evidence registry.
 
 No new third-party dependency is introduced by this slice.
 
@@ -42,6 +43,19 @@ A `BenchmarkSuite` is versioned and receives a deterministic SHA-256 over its ex
 Raw benchmark messages still exist in memory while inference is running. A caller must therefore classify each case with the existing `PrivacyClass`; the ModelGateway remains responsible for enforcing privacy routing.
 
 Gateway exception messages are not persisted. Evidence records only the typed `ModelErrorCode`, preventing credentials or provider diagnostics from being copied into Model Lab evidence.
+
+## Durable evidence registry
+
+`SQLiteModelLabRepository` reuses `SQLiteStore.connection()` but owns only namespaced Model Lab tables and its own `model_lab_schema_migrations` marker. It does not edit the shared core or ProductProject migration catalogs.
+
+The repository provides two immutable/idempotent records:
+
+1. candidate registration, keyed by `candidate_id` and bound to `candidate_identity_sha256()`;
+2. benchmark run evidence, keyed by `run_id`, bound to the registered candidate identity, suite identity, canonical JSON, and SHA-256.
+
+Replaying the exact same candidate or run is a no-op. Reusing an ID with different evidence fails closed. Reads verify the persisted evidence SHA-256 over the exact stored UTF-8 bytes before decoding, require the document to be in the canonical serialization, and re-check the embedded candidate against the registered identity. The Windows-relevant path test uses Unicode directory names plus spaces.
+
+This is integrity evidence, not a cryptographic trust root against an attacker who can rewrite both database contents and all digests. Higher-level backup/release trust remains owned by the existing recovery/provenance lanes.
 
 ## Execution safety
 
@@ -91,7 +105,12 @@ Targeted automated tests cover:
 - provider substitution fail-closed behavior;
 - typed gateway-error redaction;
 - protection of the reserved infrastructure metric namespace;
-- aggregation into Experiment Engine contracts without automatic promotion.
+- aggregation into Experiment Engine contracts without automatic promotion;
+- candidate registry idempotency and immutable identity;
+- durable benchmark round-trip and idempotent replay;
+- rejection of conflicting `run_id` reuse and unregistered/changed candidate identity;
+- byte-level persisted-evidence tamper detection;
+- Unicode and space-containing SQLite paths.
 
 Repository acceptance credit requires the exact branch/PR head to pass the repository CI. This document and automated tests cannot set HUMAN_TESTED or NVDA_VERIFIED.
 
