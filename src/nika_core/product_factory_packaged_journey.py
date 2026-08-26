@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections import Counter
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_command.command_center import ProductCommandCenter
 from nika_core.product_command.contracts import CommandRouteKind, ProductProjectDetail
 from nika_core.product_command.product_project_adapter import (
@@ -17,6 +19,22 @@ from nika_core.ui.bridge_models import UIResult
 
 OrdinaryCommandHandler = Callable[[Mapping[str, Any]], UIResult]
 DesktopStateProvider = Callable[[], Mapping[str, Any]]
+_PRODUCT_PROJECT_ID = re.compile(r"product-[0-9a-f]{64}", re.IGNORECASE)
+_REOPEN_PREFIXES = (
+    "open productproject",
+    "reopen productproject",
+    "відкрий productproject",
+    "відкрити productproject",
+    "перейди до productproject",
+)
+_CURRENT_PROJECT_COMMANDS = frozenset(
+    {
+        "current productproject",
+        "show current productproject",
+        "поточний productproject",
+        "покажи поточний productproject",
+    }
+)
 
 
 class PackagedProductJourneyError(ValueError):
@@ -29,6 +47,74 @@ def product_project_identity(normalized_goal: str) -> str:
         raise PackagedProductJourneyError("product goal must not be empty")
     digest = hashlib.sha256(goal.encode("utf-8")).hexdigest()
     return f"product-{digest}"
+
+
+def packaged_product_reopen_target(command: str) -> str | None:
+    """Return a strict ProductProject id for an explicit keyboard reopen command.
+
+    Ordinary text containing a project id is deliberately not intercepted. This keeps the
+    existing command classifier authoritative unless the user explicitly asks to open/reopen a
+    ProductProject. The accepted id is canonicalized to lowercase before durable lookup.
+    """
+    normalized = " ".join(command.split())
+    lowered = normalized.casefold()
+    prefix = next((item for item in _REOPEN_PREFIXES if lowered.startswith(item)), None)
+    if prefix is None:
+        return None
+    remainder = normalized[len(prefix) :].strip(" :#")
+    if not remainder or _PRODUCT_PROJECT_ID.fullmatch(remainder) is None:
+        raise PackagedProductJourneyError(
+            "Вкажіть повний ProductProject ID у форматі product- і 64 hex-символи."
+        )
+    return remainder.lower()
+
+
+def packaged_current_product_command(command: str) -> bool:
+    """Recognize an exact keyboard command that reports the durable presentation selection."""
+    normalized = " ".join(command.split()).casefold().strip(" :")
+    return normalized in _CURRENT_PROJECT_COMMANDS
+
+
+class PackagedProductSelectionStore:
+    """Durable presentation-only selection for the packaged ProductCommandCenter.
+
+    This record is not ProductProject authority. It stores only the opaque project identity needed
+    to restore the last visible ProductProject after an application/process restart.
+    """
+
+    def __init__(self, store: SQLiteStore) -> None:
+        self._store = store
+        with self._store.connection() as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS packaged_product_selection ("
+                "slot INTEGER PRIMARY KEY CHECK(slot = 1), "
+                "project_id TEXT NOT NULL CHECK(length(trim(project_id)) > 0))"
+            )
+
+    def load(self) -> str | None:
+        with self._store.connection() as conn:
+            row = conn.execute(
+                "SELECT project_id FROM packaged_product_selection WHERE slot = 1"
+            ).fetchone()
+        if row is None:
+            return None
+        project_id = str(row["project_id"]).strip()
+        return project_id or None
+
+    def select(self, project_id: str) -> None:
+        normalized = project_id.strip()
+        if not normalized:
+            raise PackagedProductJourneyError("selected ProductProject id must not be empty")
+        with self._store.connection() as conn:
+            conn.execute(
+                "INSERT INTO packaged_product_selection(slot, project_id) VALUES (1, ?) "
+                "ON CONFLICT(slot) DO UPDATE SET project_id = excluded.project_id",
+                (normalized,),
+            )
+
+    def clear(self) -> None:
+        with self._store.connection() as conn:
+            conn.execute("DELETE FROM packaged_product_selection WHERE slot = 1")
 
 
 class PackagedProductCommandRouter:
@@ -44,15 +130,74 @@ class PackagedProductCommandRouter:
         *,
         products: ProductProjectCommandService,
         ordinary_handler: OrdinaryCommandHandler,
+        selection_store: PackagedProductSelectionStore | None = None,
     ) -> None:
         self._products = products
         self._ordinary_handler = ordinary_handler
-        self._active_project_id: str | None = None
+        self._selection_store = selection_store
+        self._active_project_id = selection_store.load() if selection_store is not None else None
 
     @property
     def active_project_id(self) -> str | None:
-        """Return process-local presentation selection, never a durable authority record."""
+        """Return presentation selection; durable authority remains in ProductProject state."""
         return self._active_project_id
+
+    def clear_stale_selection(self) -> None:
+        self._active_project_id = None
+        if self._selection_store is not None:
+            self._selection_store.clear()
+
+    def _select_existing_project(self, project_id: str) -> UIResult:
+        try:
+            detail = self._products.inspect_project(project_id)
+        except KeyError as exc:
+            raise PackagedProductJourneyError(
+                f"ProductProject не знайдено: {project_id}. Поточний вибір не змінено."
+            ) from exc
+        except ProductProjectPresentationConsistencyError as exc:
+            raise PackagedProductJourneyError(
+                "ProductProject changed while packaged state was read; retry the reopen command."
+            ) from exc
+        if self._selection_store is not None:
+            self._selection_store.select(project_id)
+        self._active_project_id = project_id
+        return UIResult(
+            request_id="desktop-handler",
+            status="completed",
+            message=(
+                f"ProductProject відкрито: {project_id}; "
+                f"spec version {detail.summary.version}; state {detail.summary.state}."
+            ),
+            focus_id="tasks-heading",
+        )
+
+    def _describe_current_project(self) -> UIResult:
+        project_id = self._active_project_id
+        if project_id is None:
+            raise PackagedProductJourneyError(
+                "Поточний ProductProject не вибрано. Створіть продукт або відкрийте його за ID."
+            )
+        try:
+            detail = self._products.inspect_project(project_id)
+        except KeyError as exc:
+            self.clear_stale_selection()
+            raise PackagedProductJourneyError(
+                "Збережений ProductProject більше не існує. Застарілий вибір очищено."
+            ) from exc
+        except ProductProjectPresentationConsistencyError as exc:
+            raise PackagedProductJourneyError(
+                "ProductProject changed while packaged state was read; retry the current command."
+            ) from exc
+        return UIResult(
+            request_id="desktop-handler",
+            status="completed",
+            message=(
+                f"Поточний ProductProject: {project_id}; "
+                f"spec version {detail.summary.version}; state {detail.summary.state}; "
+                f"goal: {detail.summary.goal}."
+            ),
+            focus_id="tasks-heading",
+        )
 
     def create(self, payload: Mapping[str, Any]) -> UIResult:
         command = str(payload.get("command", "")).strip()
@@ -60,6 +205,13 @@ class PackagedProductCommandRouter:
             raise PackagedProductJourneyError(
                 "Введіть команду перед створенням завдання."
             )
+
+        if packaged_current_product_command(command):
+            return self._describe_current_project()
+
+        reopen_target = packaged_product_reopen_target(command)
+        if reopen_target is not None:
+            return self._select_existing_project(reopen_target)
 
         decision = route_command(command)
         if decision.route is CommandRouteKind.AGENT_TASK:
@@ -88,6 +240,8 @@ class PackagedProductCommandRouter:
             spec=ProductProjectSpec(goal=goal, desired_outcome=goal),
             idempotency_key=f"packaged-product-route:{project_id}",
         )
+        if self._selection_store is not None:
+            self._selection_store.select(project_id)
         self._active_project_id = project_id
         return UIResult(
             request_id="desktop-handler",
@@ -103,10 +257,9 @@ class PackagedProductCommandRouter:
 class PackagedProductStateProvider:
     """Compose Desktop state with a bounded PF5 ProductCommandCenter projection.
 
-    The active project pointer is intentionally process-local. Durable ProductProject identity,
-    lifecycle and decisions remain owned by PF1/PF5 repositories. Replaying the same product
-    command after restart re-selects the same durable project rather than introducing a second
-    persisted selection mechanism.
+    Durable ProductProject identity, lifecycle and decisions remain owned by PF1/PF5 repositories.
+    The separate packaged selection record contains only the opaque project id needed to restore
+    the last visible project after restart; it is never accepted as project authority.
 
     Only bounded presentation fields are returned. Evidence references, credential references,
     authorization material, provider sessions and protected-store handles are not serialized by
@@ -132,6 +285,9 @@ class PackagedProductStateProvider:
             return state
         try:
             detail = self._command_center.inspect_project(project_id)
+        except KeyError:
+            self._router.clear_stale_selection()
+            return state
         except ProductProjectPresentationConsistencyError as exc:
             raise PackagedProductJourneyError(
                 "ProductProject changed while packaged state was composed; refresh required."

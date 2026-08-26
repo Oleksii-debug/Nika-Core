@@ -159,7 +159,10 @@ def test_snapshot_restore_preserves_state_and_ready_set() -> None:
     coordinator.start("docs")
     snapshot = coordinator.snapshot()
     restored = ProductFactoryCoordinator(_graph())
-    restored.restore(snapshot)
+    restored.restore(
+        snapshot,
+        trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
+    )
     assert restored.snapshot() == snapshot
     assert [item.component_id for item in restored.ready_requests()] == ["core"]
 
@@ -173,7 +176,10 @@ def test_restore_rejects_foreign_project() -> None:
         components=_graph().components,
     )
     with pytest.raises(CoordinatorError, match="snapshot project"):
-        ProductFactoryCoordinator(foreign_graph).restore(snapshot)
+        ProductFactoryCoordinator(foreign_graph).restore(
+            snapshot,
+            trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
+        )
 
 
 def test_plan_rejects_missing_component_goal() -> None:

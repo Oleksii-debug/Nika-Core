@@ -4,6 +4,7 @@ from typing import Any
 
 from nika_core.intelligence.contracts import (
     DeterministicAction,
+    DeterministicErrorCode,
     DeterministicGoal,
     DeterministicPlan,
     DeterministicPlanningError,
@@ -15,7 +16,7 @@ from nika_core.intelligence.contracts import (
 class UnifiedPlanningAdapter:
     """Adapter from Nika boolean-fact planning contracts to Unified Planning."""
 
-    def __init__(self, *, engine_name: str = "pyperplan") -> None:
+    def __init__(self, *, engine_name: str = "aries") -> None:
         if not engine_name.strip():
             raise ValueError("engine_name must not be empty")
         self._engine_name = engine_name
@@ -27,11 +28,22 @@ class UnifiedPlanningAdapter:
         goal: DeterministicGoal,
         actions: tuple[DeterministicAction, ...],
     ) -> DeterministicPlan:
+        if self._goal_satisfied(state, goal):
+            return DeterministicPlan(steps=())
+
+        unreachable_fact = self._obviously_unreachable_fact(state, goal, actions)
+        if unreachable_fact is not None:
+            raise DeterministicPlanningError(
+                f"goal fact is unreachable from registered deterministic actions: {unreachable_fact}",
+                code=DeterministicErrorCode.GOAL_UNREACHABLE,
+            )
+
         try:
             up = self._shortcuts()
         except (ImportError, ModuleNotFoundError) as exc:
             raise DeterministicPlanningError(
-                "Unified Planning is not installed; install the 'planning' optional component"
+                "Unified Planning is not installed; install the 'planning' optional component",
+                code=DeterministicErrorCode.DEPENDENCY_UNAVAILABLE,
             ) from exc
 
         all_facts = set(state.facts) | set(goal.required) | set(goal.forbidden)
@@ -51,12 +63,24 @@ class UnifiedPlanningAdapter:
 
         action_by_up_name: dict[str, DeterministicAction] = {}
         for index, definition in enumerate(actions):
+            # Keep semantic no-ops out of the planning problem itself. The guard is dynamic:
+            # an action that is a no-op now can still become applicable after an earlier action
+            # changes one of its declared effect facts.
+            change_conditions = [up.Not(fluents[fact]) for fact in definition.adds]
+            change_conditions.extend(fluents[fact] for fact in definition.removes)
+            if not change_conditions:
+                continue
+
             up_name = f"action_{index}"
             planned_action = up.InstantaneousAction(up_name)
             for fact in definition.requires:
                 planned_action.add_precondition(fluents[fact])
             for fact in definition.forbids:
                 planned_action.add_precondition(up.Not(fluents[fact]))
+            if len(change_conditions) == 1:
+                planned_action.add_precondition(change_conditions[0])
+            else:
+                planned_action.add_precondition(up.Or(*change_conditions))
             for fact in definition.adds:
                 planned_action.add_effect(fluents[fact], True)
             for fact in definition.removes:
@@ -69,27 +93,151 @@ class UnifiedPlanningAdapter:
         for fact in goal.forbidden:
             problem.add_goal(up.Not(fluents[fact]))
 
-        if not goal.required and not goal.forbidden:
-            return DeterministicPlan(steps=())
-
         try:
             with up.OneshotPlanner(name=self._engine_name) as planner:
                 result = planner.solve(problem)
         except Exception as exc:
-            raise DeterministicPlanningError("deterministic planner failed") from exc
+            raise DeterministicPlanningError(
+                "deterministic planner failed",
+                code=DeterministicErrorCode.PLANNER_FAILURE,
+            ) from exc
 
+        status_name = getattr(result.status, "name", str(result.status))
         if result.plan is None:
-            raise DeterministicPlanningError("goal is not reachable from the current state")
+            raise self._result_error(status_name)
 
-        plan_steps: list[PlanStep] = []
-        for action_instance in result.plan.actions:
+        if status_name not in {"SOLVED_SATISFICING", "SOLVED_OPTIMALLY"}:
+            raise DeterministicPlanningError(
+                f"deterministic planner returned inconsistent status: {status_name}",
+                code=DeterministicErrorCode.PLANNER_FAILURE,
+            )
+
+        actions_in_plan = getattr(result.plan, "actions", None)
+        if actions_in_plan is None:
+            raise DeterministicPlanningError(
+                "deterministic planner returned a non-sequential plan",
+                code=DeterministicErrorCode.UNSUPPORTED_PROBLEM,
+            )
+
+        planned_actions: list[DeterministicAction] = []
+        for action_instance in actions_in_plan:
             definition = action_by_up_name.get(action_instance.action.name)
             if definition is None:
-                raise DeterministicPlanningError("planner returned an unknown action")
+                raise DeterministicPlanningError(
+                    "planner returned an unknown action",
+                    code=DeterministicErrorCode.PLANNER_FAILURE,
+                )
+            planned_actions.append(definition)
+        return self._validated_plan(
+            state=state,
+            goal=goal,
+            planned_actions=tuple(planned_actions),
+        )
+
+    @classmethod
+    def _validated_plan(
+        cls,
+        *,
+        state: WorldState,
+        goal: DeterministicGoal,
+        planned_actions: tuple[DeterministicAction, ...],
+    ) -> DeterministicPlan:
+        """Validate solver output against Nika semantics and drop state no-ops."""
+        simulated_facts = set(state.facts)
+        plan_steps: list[PlanStep] = []
+        seen_effectful_actions: set[str] = set()
+
+        for definition in planned_actions:
+            if not definition.requires <= simulated_facts or definition.forbids & simulated_facts:
+                raise DeterministicPlanningError(
+                    f"planner returned an inapplicable action: {definition.action_id}",
+                    code=DeterministicErrorCode.INVALID_PLAN,
+                )
+
+            changes_state = bool(
+                (definition.adds - simulated_facts) or (definition.removes & simulated_facts)
+            )
+            if not changes_state:
+                continue
+            if definition.action_id in seen_effectful_actions:
+                raise DeterministicPlanningError(
+                    f"planner returned a repeated deterministic action: {definition.action_id}",
+                    code=DeterministicErrorCode.INVALID_PLAN,
+                )
+
+            simulated_facts.difference_update(definition.removes)
+            simulated_facts.update(definition.adds)
             plan_steps.append(
                 PlanStep(action_id=definition.action_id, tool_id=definition.tool_id)
             )
+            seen_effectful_actions.add(definition.action_id)
+
+        simulated_state = WorldState(frozenset(simulated_facts))
+        if not cls._goal_satisfied(simulated_state, goal):
+            raise DeterministicPlanningError(
+                "planner returned a plan that does not satisfy the goal",
+                code=DeterministicErrorCode.INVALID_PLAN,
+            )
         return DeterministicPlan(steps=tuple(plan_steps))
+
+    @staticmethod
+    def _result_error(status_name: str) -> DeterministicPlanningError:
+        if status_name == "UNSOLVABLE_PROVEN":
+            return DeterministicPlanningError(
+                "goal is not reachable from the current state",
+                code=DeterministicErrorCode.GOAL_UNREACHABLE,
+            )
+        if status_name == "UNSOLVABLE_INCOMPLETELY":
+            return DeterministicPlanningError(
+                "planner could not find a plan for the current state and goal",
+                code=DeterministicErrorCode.NO_PLAN_FOUND,
+            )
+        if status_name == "TIMEOUT":
+            return DeterministicPlanningError(
+                "deterministic planner timed out",
+                code=DeterministicErrorCode.PLANNING_TIMEOUT,
+            )
+        if status_name == "MEMOUT":
+            return DeterministicPlanningError(
+                "deterministic planner exhausted its memory budget",
+                code=DeterministicErrorCode.PLANNER_RESOURCE_LIMIT,
+            )
+        if status_name == "UNSUPPORTED_PROBLEM":
+            return DeterministicPlanningError(
+                "deterministic planner does not support this planning problem",
+                code=DeterministicErrorCode.UNSUPPORTED_PROBLEM,
+            )
+        return DeterministicPlanningError(
+            f"deterministic planner failed with status: {status_name}",
+            code=DeterministicErrorCode.PLANNER_FAILURE,
+        )
+
+    @staticmethod
+    def _obviously_unreachable_fact(
+        state: WorldState,
+        goal: DeterministicGoal,
+        actions: tuple[DeterministicAction, ...],
+    ) -> str | None:
+        addable: set[str] = set()
+        removable: set[str] = set()
+        for action in actions:
+            addable.update(action.adds)
+            removable.update(action.removes)
+
+        missing_required = goal.required - state.facts
+        unreachable_required = sorted(missing_required - addable)
+        if unreachable_required:
+            return unreachable_required[0]
+
+        present_forbidden = goal.forbidden & state.facts
+        unreachable_forbidden = sorted(present_forbidden - removable)
+        if unreachable_forbidden:
+            return unreachable_forbidden[0]
+        return None
+
+    @staticmethod
+    def _goal_satisfied(state: WorldState, goal: DeterministicGoal) -> bool:
+        return goal.required <= state.facts and not goal.forbidden & state.facts
 
     @staticmethod
     def _shortcuts() -> Any:
