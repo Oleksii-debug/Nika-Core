@@ -19,9 +19,12 @@ _SENSITIVE_KEYS: Final = frozenset(
         "api_hash",
         "api_key",
         "authorization",
+        "authorization_code",
         "client_secret",
         "cookie",
+        "credential_handle",
         "id_token",
+        "oauth_code",
         "password",
         "passphrase",
         "private_key",
@@ -39,10 +42,10 @@ _AUTH_HEADER_RE: Final = re.compile(
 )
 _COOKIE_HEADER_RE: Final = re.compile(r"(?i)\b(cookie|set-cookie)(\s*:\s*)[^\r\n]+")
 _INLINE_SECRET_RE: Final = re.compile(
-    r"(?i)\b(authorization|proxy[_-]?authorization|api[_-]?key|api[_-]?hash|"
-    r"access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|token|"
-    r"password|passphrase|client[_-]?secret|private[_-]?key|cookie|set[_-]?cookie|secret)"
-    r"\b(\s*[:=]\s*)([^\s,;&]+)"
+    r"(?i)\b(authorization|proxy[_-]?authorization|authorization[_-]?code|oauth[_-]?code|"
+    r"api[_-]?key|api[_-]?hash|access[_-]?token|refresh[_-]?token|id[_-]?token|"
+    r"session[_-]?token|token|password|passphrase|client[_-]?secret|private[_-]?key|"
+    r"cookie|set[_-]?cookie|secret)\b(\s*[:=]\s*)([^\s,;&]+)"
 )
 _BEARER_RE: Final = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
 _PRIVATE_KEY_RE: Final = re.compile(
@@ -56,8 +59,11 @@ _SECRET_QUERY_NAMES: Final = frozenset(
         "api_hash",
         "api_key",
         "authorization",
+        "authorization_code",
         "client_secret",
+        "code",
         "id_token",
+        "oauth_code",
         "password",
         "refresh_token",
         "session_token",
@@ -261,11 +267,12 @@ def _is_sensitive_key(normalized_key: str) -> bool:
             "_private_key",
             "_api_key",
             "_api_hash",
-            "_access_token",
-            "_refresh_token",
-            "_id_token",
-            "_session_token",
+            "_token",
             "_client_secret",
+            "_authorization",
+            "_cookie",
+            "_secret",
+            "_credential_handle",
         )
     )
 
