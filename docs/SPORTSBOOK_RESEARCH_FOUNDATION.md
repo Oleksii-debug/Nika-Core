@@ -44,10 +44,16 @@ All timestamps are normalized to aware UTC by the reused trading-research contra
 - Score values and source sequence values are non-negative exact integers; booleans are rejected.
 - Catalog identities are immutable. Re-registering the same identity with the same semantic bytes
   is idempotent; different bytes fail closed.
+- Catalog entity collections are canonicalized by stable identity before use/persistence so caller
+  input ordering cannot change restart equality or deterministic serialization behavior.
+- Normalized observation-map keys must remain unique; whitespace-normalized collisions fail closed
+  instead of silently overwriting a value.
 - Observation identity binds observation type, source, subject, `event_at`, `source_at`, and source
   sequence. Exact replay is idempotent; a different payload at the same identity fails closed.
 - Batch ingestion is one SQLite transaction, so a later conflict rolls back earlier new rows in the
   same batch.
+- Schema/catalog/observation write paths reserve the SQLite writer with `BEGIN IMMEDIATE`, so two
+  concurrent exact replays serialize into one durable insert rather than a read-before-insert race.
 
 ## Persistence and restart
 
@@ -68,6 +74,11 @@ Restart reconstruction therefore does not trust caller memory or candidate-suppl
 - `source()` identifies the provider/provenance boundary;
 - `read_catalog()` returns domain identity metadata;
 - `read_observations()` returns source observations.
+
+`SportsbookSource.source_uri` is provenance metadata, not a credential container. User-info
+credentials and known sensitive query-parameter names such as access tokens, API keys, passwords,
+sessions, cookies, or authorization values are rejected fail closed before the source identity can
+enter the catalog.
 
 There is intentionally no method for placing a wager, creating/funding an account, deposits,
 withdrawals, redeeming credentials, or invoking bookmaker actions. A future adapter that reads
