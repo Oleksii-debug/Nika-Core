@@ -33,11 +33,14 @@ _FORBIDDEN_SECRET_KEYS = {
     "token",
 }
 _FORBIDDEN_LOCATOR_MARKERS = (
+    "api_key=",
+    "apikey=",
     "authorization=",
     "authorization:",
     "bearer ",
     "cookie=",
     "password=",
+    "secret=",
     "token=",
 )
 
@@ -97,6 +100,9 @@ class ArtifactRecord(FrozenModel):
                 raise ValueError("artifact metadata keys must be at most 120 characters")
             if len(item) > 4096:
                 raise ValueError("artifact metadata values must be at most 4096 characters")
+            lowered_item = item.lower()
+            if any(marker in lowered_item for marker in _FORBIDDEN_LOCATOR_MARKERS):
+                raise ValueError("artifact metadata values must not contain credential material")
         return value
 
     @field_validator("created_at")

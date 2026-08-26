@@ -10,8 +10,9 @@ evidence** for artifacts. It does not become a second storage engine.
 - Raw or large bytes remain owned by the subsystem/storage adapter that produced them.
 - Existing `ContentAddressedBlobStore` remains the reusable storage implementation for research
   blobs; callers can register its digest, size, and an opaque storage reference.
-- Local files can be registered directly. The registry resolves the file, computes SHA-256 and byte
-  size, and persists immutable metadata.
+- Local files can be registered only inside explicit `local_file_roots`. The registry resolves the
+  target first, enforces root containment, computes SHA-256 and byte size, and persists immutable
+  metadata. With no allowed roots, local file registration is disabled.
 - The registry never executes an artifact and never elevates permissions.
 
 This keeps the implementation aligned with `REUSE -> ADAPT -> CUSTOM (thin)`.
@@ -47,8 +48,14 @@ Two location kinds are supported:
 2. `opaque_reference`: storage-owned reference plus caller-supplied immutable digest and size.
    Verification returns `unavailable` rather than claiming evidence it cannot obtain.
 
-The registry rejects obvious credential material in locators and reserved secret metadata keys.
-Callers must pass references to credentials, never credential values.
+The registry rejects obvious credential material in locators, reserved secret metadata keys, and
+metadata values containing credential markers. Callers must pass references to credentials, never
+credential values.
+
+Local file reads are least-privilege. `ArtifactRegistry.from_store(..., local_file_roots=(...))`
+must receive one or more existing directories before `register_file()` is allowed. The source is
+resolved before the containment check, so a symlink/junction that resolves outside the allowed root
+does not broaden the registry's read authority.
 
 ## Verification states
 
@@ -73,6 +80,7 @@ Automated tests cover:
 - opaque-reference truthfulness;
 - workspace/kind/producer filtering and digest lookup;
 - rejection of obvious credential material;
+- explicit local-file root authority and out-of-root denial;
 - fail-closed handling of a timezone-naive injected clock.
 
 `HUMAN_TESTED` and `NVDA_VERIFIED` are not claimed by this service slice.

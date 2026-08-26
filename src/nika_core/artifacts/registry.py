@@ -90,9 +90,11 @@ class ArtifactRegistry:
         repository: SQLiteArtifactRepository,
         *,
         clock: Clock = _utc_now,
+        local_file_roots: tuple[Path | str, ...] = (),
     ) -> None:
         self._repository = repository
         self._clock = clock
+        self._local_file_roots = self._resolve_local_file_roots(local_file_roots)
 
     @classmethod
     def from_store(
@@ -100,9 +102,14 @@ class ArtifactRegistry:
         store: SQLiteStore,
         *,
         clock: Clock = _utc_now,
+        local_file_roots: tuple[Path | str, ...] = (),
     ) -> ArtifactRegistry:
         initialize_artifact_registry_schema(store)
-        return cls(SQLiteArtifactRepository(store), clock=clock)
+        return cls(
+            SQLiteArtifactRepository(store),
+            clock=clock,
+            local_file_roots=local_file_roots,
+        )
 
     def register_file(
         self,
@@ -124,6 +131,12 @@ class ArtifactRegistry:
             raise ArtifactRegistryError("artifact source does not exist") from exc
         if not resolved.is_file():
             raise ArtifactRegistryError("artifact source is not a regular file")
+        if not self._local_file_roots:
+            raise ArtifactRegistryError(
+                "local file registration is disabled until an allowed root is configured"
+            )
+        if not any(resolved.is_relative_to(root) for root in self._local_file_roots):
+            raise ArtifactRegistryError("artifact source escapes configured local file roots")
 
         sha256, size_bytes = _hash_open_file(resolved)
         inferred_media_type = mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
@@ -211,7 +224,10 @@ class ArtifactRegistry:
                 record=record,
                 checked_at=checked_at,
                 state=ArtifactVerificationState.UNAVAILABLE,
-                detail="opaque artifact references require their owning storage adapter to verify bytes",
+                detail=(
+                    "opaque artifact references require their owning storage adapter "
+                    "to verify bytes"
+                ),
             )
             return self._repository.put_verification(verification)
 
@@ -259,6 +275,22 @@ class ArtifactRegistry:
     def verification_history(self, artifact_id: str) -> tuple[ArtifactVerification, ...]:
         self._repository.get(artifact_id)
         return self._repository.list_verifications(artifact_id)
+
+    @staticmethod
+    def _resolve_local_file_roots(
+        roots: tuple[Path | str, ...],
+    ) -> tuple[Path, ...]:
+        resolved_roots: list[Path] = []
+        for root in roots:
+            try:
+                resolved = Path(root).resolve(strict=True)
+            except OSError as exc:
+                raise ArtifactRegistryError("configured local file root does not exist") from exc
+            if not resolved.is_dir():
+                raise ArtifactRegistryError("configured local file root is not a directory")
+            if resolved not in resolved_roots:
+                resolved_roots.append(resolved)
+        return tuple(resolved_roots)
 
     def _build_record(
         self,

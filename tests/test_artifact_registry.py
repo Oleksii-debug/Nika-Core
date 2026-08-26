@@ -14,6 +14,7 @@ from nika_core.artifacts import (
     ArtifactLocationKind,
     ArtifactRecord,
     ArtifactRegistry,
+    ArtifactRegistryError,
     ArtifactVerificationState,
     initialize_artifact_registry_schema,
 )
@@ -26,7 +27,11 @@ def _registry(
     now: datetime = datetime(2026, 8, 26, 20, 0, tzinfo=UTC),
 ) -> ArtifactRegistry:
     store = SQLiteStore(db_path)
-    return ArtifactRegistry.from_store(store, clock=lambda: now)
+    return ArtifactRegistry.from_store(
+        store,
+        clock=lambda: now,
+        local_file_roots=(db_path.parent,),
+    )
 
 
 def test_schema_migration_is_idempotent_and_reports_owned_version(tmp_path: Path) -> None:
@@ -215,6 +220,8 @@ def test_secret_like_metadata_and_locators_are_rejected() -> None:
         ArtifactRecord(**common, locator="https://example.test/file?token=secret")
     with pytest.raises(ValidationError, match="secret material"):
         ArtifactRecord(**common, locator="blob:safe", metadata={"password": "secret"})
+    with pytest.raises(ValidationError, match="credential material"):
+        ArtifactRecord(**common, locator="blob:safe", metadata={"note": "Bearer top-secret"})
 
 
 def test_find_by_digest_and_producer_filter_apply_before_limit(tmp_path: Path) -> None:
@@ -260,5 +267,40 @@ def test_naive_clock_is_rejected_instead_of_assuming_host_timezone(tmp_path: Pat
             reference="blob:clock",
             sha256="d" * 64,
             size_bytes=1,
+            kind="evidence",
+        )
+
+
+def test_local_file_registration_is_disabled_without_explicit_root(tmp_path: Path) -> None:
+    registry = ArtifactRegistry.from_store(SQLiteStore(tmp_path / "state.sqlite3"))
+    source = tmp_path / "private.txt"
+    source.write_text("private", encoding="utf-8")
+
+    with pytest.raises(ArtifactRegistryError, match="allowed root"):
+        registry.register_file(
+            workspace_id="workspace-a",
+            idempotency_key="private",
+            path=source,
+            kind="evidence",
+        )
+
+
+def test_local_file_registration_rejects_paths_outside_allowed_roots(tmp_path: Path) -> None:
+    allowed = tmp_path / "allowed"
+    denied = tmp_path / "denied"
+    allowed.mkdir()
+    denied.mkdir()
+    source = denied / "outside.txt"
+    source.write_text("outside", encoding="utf-8")
+    registry = ArtifactRegistry.from_store(
+        SQLiteStore(tmp_path / "state.sqlite3"),
+        local_file_roots=(allowed,),
+    )
+
+    with pytest.raises(ArtifactRegistryError, match="escapes configured"):
+        registry.register_file(
+            workspace_id="workspace-a",
+            idempotency_key="outside",
+            path=source,
             kind="evidence",
         )
