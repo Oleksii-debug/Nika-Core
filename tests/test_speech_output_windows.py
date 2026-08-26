@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 
 import pytest
@@ -45,6 +46,29 @@ class FakeBackend:
         assert cancel_event is None or not cancel_event.is_set()
         self.spoken_payloads.append(json.loads(payload.decode("utf-8")))
         return self.speak_payload
+
+
+class BlockingBackend(FakeBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def speak(
+        self,
+        payload: bytes,
+        *,
+        timeout_seconds: float,
+        cancel_event: threading.Event | None,
+    ) -> bytes:
+        self.started.set()
+        if not self.release.wait(timeout=2):
+            raise AssertionError("test did not release blocking speech backend")
+        return super().speak(
+            payload,
+            timeout_seconds=timeout_seconds,
+            cancel_event=cancel_event,
+        )
 
 
 @pytest.mark.parametrize(
@@ -169,6 +193,36 @@ def test_adapter_rejects_cancelled_request_before_backend_effect() -> None:
     assert backend.spoken_payloads == []
 
 
+def test_adapter_rejects_overlapping_speech_without_second_effect() -> None:
+    backend = BlockingBackend()
+    first_adapter = WindowsSystemSpeechAdapter(backend)
+    second_backend = FakeBackend()
+    second_adapter = WindowsSystemSpeechAdapter(second_backend)
+    failures: list[BaseException] = []
+
+    def first_speech() -> None:
+        try:
+            first_adapter.speak(SpeechRequest("first"))
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    worker = threading.Thread(target=first_speech)
+    worker.start()
+    assert backend.started.wait(timeout=1)
+    try:
+        with pytest.raises(SpeechError) as error:
+            second_adapter.speak(SpeechRequest("second"))
+        assert error.value.code is SpeechErrorCode.ENGINE_BUSY
+        assert second_backend.spoken_payloads == []
+    finally:
+        backend.release.set()
+        worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert failures == []
+    assert len(backend.spoken_payloads) == 1
+
+
 @pytest.mark.parametrize("timeout", [0, -1, 3600.1, True, "1"])
 def test_adapter_rejects_invalid_timeout(timeout: object) -> None:
     backend = FakeBackend()
@@ -178,3 +232,11 @@ def test_adapter_rejects_invalid_timeout(timeout: object) -> None:
         adapter.list_voices(timeout_seconds=timeout)  # type: ignore[arg-type]
 
     assert error.value.code is SpeechErrorCode.INVALID_REQUEST
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires physical Windows System.Speech host")
+def test_windows_system_speech_host_returns_parseable_voice_metadata() -> None:
+    voices = WindowsSystemSpeechAdapter().list_voices(timeout_seconds=20)
+
+    assert isinstance(voices, tuple)
+    assert all(voice.voice_id.strip() for voice in voices)
