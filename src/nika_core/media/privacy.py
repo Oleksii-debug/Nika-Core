@@ -42,7 +42,7 @@ _AUTHORIZATION_HEADER = re.compile(r"(?im)\b((?:proxy-)?authorization)\s*:\s*[^\
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)(?<![A-Za-z0-9_])"
     r"((?:api[-_]?key|access[-_]?token|refresh[-_]?token|client[-_]?secret|"
-    r"aws[-_]?access[-_]?key[-_]?id|google[-_]?access[-_]?id|"
+    r"client[-_]?credential|aws[-_]?access[-_]?key[-_]?id|google[-_]?access[-_]?id|"
     r"subscription[-_]?key|x[-_]?api[-_]?key|"
     r"x[-_]?amz[-_]?credential|x[-_]?goog[-_]?credential|"
     r"authorization|password|token|secret|credential|cookie|cookies|session[-_]?id)"
