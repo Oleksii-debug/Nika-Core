@@ -31,7 +31,8 @@ from nika_core.product_project import (
     ProductProjectSpec,
     ProductRequirement,
 )
-from nika_core.toolsmith.contracts import CodingResult, TestEvidence as WorkerTestEvidence
+from nika_core.toolsmith.contracts import CodingResult
+from nika_core.toolsmith.contracts import TestEvidence as WorkerTestEvidence
 
 _SOURCE_SHA = "a" * 40
 _RESULT_SHA = "b" * 40
