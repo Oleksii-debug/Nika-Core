@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import isfinite
 
 from nika_core.model_gateway.contracts import PrivacyClass, ProviderKind
@@ -45,6 +45,10 @@ class ModelCandidate:
             (self.permission_fingerprint, "permission_fingerprint"),
         ):
             _require_text(value, name)
+        if not isinstance(self.provider_kind, ProviderKind):
+            raise TypeError("provider_kind must be ProviderKind")
+        if not isinstance(self.supports_private_data, bool):
+            raise TypeError("supports_private_data must be bool")
         if self.artifact_sha256 is not None:
             _require_sha256(self.artifact_sha256, "artifact_sha256")
 
@@ -67,6 +71,8 @@ class EvaluationCase:
         ):
             _require_text(value, name)
         _require_sha256(self.dataset_sha256, "dataset_sha256")
+        if not isinstance(self.privacy, PrivacyClass):
+            raise TypeError("privacy must be PrivacyClass")
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +83,8 @@ class MetricDefinition:
 
     def __post_init__(self) -> None:
         _require_text(self.name, "metric name")
+        if not isinstance(self.higher_is_better, bool):
+            raise TypeError("higher_is_better must be bool")
         value = float(self.max_regression)
         if not isfinite(value) or value < 0:
             raise ValueError("max_regression must be finite and non-negative")
@@ -156,5 +164,5 @@ class ModelRecommendation:
     candidate_manifest_sha256: str
     evidence_sha256: str
     previous_champion_id: str
-    requires_activation_approval: bool = True
-    production_mutation_performed: bool = False
+    requires_activation_approval: bool = field(default=True, init=False)
+    production_mutation_performed: bool = field(default=False, init=False)
