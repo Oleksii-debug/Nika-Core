@@ -169,3 +169,41 @@ def test_actual_http_refresh_invalidates_old_formal_handoff_and_decision_replay(
     assert project.row_version == 1
     with store.connection() as conn:
         assert conn.execute("SELECT COUNT(*) FROM product_decisions").fetchone()[0] == 1
+
+
+def test_formal_handoff_rejects_real_ordinal_alias_after_seal(
+    tmp_path: Path,
+) -> None:
+    store, _network, _service, _state, handoff, decisions, decision = _environment(tmp_path)
+
+    with store.connection() as conn:
+        result_set_id = conn.execute(
+            "SELECT result_set_id FROM research_result_sets"
+        ).fetchone()["result_set_id"]
+        conn.execute(
+            "UPDATE research_result_items SET ordinal=? "
+            "WHERE result_set_id=? AND ordinal=0",
+            (0.5, result_set_id),
+        )
+        corrupted = conn.execute(
+            "SELECT ordinal,typeof(ordinal) AS storage_type "
+            "FROM research_result_items WHERE result_set_id=?",
+            (result_set_id,),
+        ).fetchone()
+        assert corrupted["ordinal"] == 0.5
+        assert corrupted["storage_type"] == "real"
+
+    with pytest.raises(ProductProjectError, match="durable ordinal"):
+        handoff.get("p1", "research-evidence-1")
+    with pytest.raises(ProductProjectError, match="durable ordinal"):
+        decisions.record(
+            "p1",
+            decision,
+            expected_row_version=0,
+            idempotency_key="decision:approve",
+        )
+
+    project = ProductProjectRepository(store).get("p1")
+    assert project.row_version == 1
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM product_decisions").fetchone()[0] == 1

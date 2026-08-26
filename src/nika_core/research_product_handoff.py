@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from typing import Any
 
 from nika_core import _research_product_handoff_base as _base
@@ -14,6 +15,60 @@ ResearchProductHandoffRecord = _base.ResearchProductHandoffRecord
 
 def _snapshot_id(source_id: str, raw_sha256: str) -> str:
     return hashlib.sha256(f"{source_id}\0{raw_sha256}".encode()).hexdigest()
+
+
+def _require_durable_text(value: Any, *, label: str) -> str:
+    if type(value) is not str:
+        raise ProductProjectError(f"{label} must be stored as text")
+    return value
+
+
+def _validate_durable_result_set_rows_conn(conn: Any, result_set_id: str) -> None:
+    header = conn.execute(
+        "SELECT result_set_id,workspace_id,query,created_at "
+        "FROM research_result_sets WHERE result_set_id=?",
+        (result_set_id,),
+    ).fetchone()
+    if header is None:
+        raise ProductProjectError(f"sealed research result set is missing: {result_set_id}")
+    for field in ("result_set_id", "workspace_id", "query", "created_at"):
+        _require_durable_text(
+            header[field],
+            label=f"sealed research result {field}",
+        )
+
+    rows = conn.execute(
+        "SELECT ordinal,document_id,title,snippet,rank,why_matched,evidence_json "
+        "FROM research_result_items WHERE result_set_id=? ORDER BY ordinal",
+        (result_set_id,),
+    ).fetchall()
+    for row in rows:
+        ordinal = row["ordinal"]
+        if type(ordinal) is not int or ordinal < 0:
+            raise ProductProjectError(
+                f"sealed research result has invalid durable ordinal: {result_set_id}"
+            )
+        rank = row["rank"]
+        if type(rank) not in (int, float) or not math.isfinite(rank):
+            raise ProductProjectError(
+                f"sealed research result has invalid durable rank: {result_set_id}"
+            )
+        for field in (
+            "document_id",
+            "title",
+            "snippet",
+            "why_matched",
+            "evidence_json",
+        ):
+            _require_durable_text(
+                row[field],
+                label=f"sealed research result {field}",
+            )
+
+
+def _durable_result_payload_conn(conn: Any, result_set_id: str) -> dict[str, Any]:
+    _validate_durable_result_set_rows_conn(conn, result_set_id)
+    return _base._research_result_payload_conn(conn, result_set_id)
 
 
 def _source_content_bindings_conn(
@@ -305,7 +360,7 @@ def verify_sealed_handoffs_conn(
                 f"formal research handoff authority is missing: {package_id}"
             )
 
-        research_payload = _base._research_result_payload_conn(conn, result_set_id)
+        research_payload = _durable_result_payload_conn(conn, result_set_id)
         if research_payload["workspace_id"] != workspace_id:
             raise ProductProjectError(
                 f"research result workspace identity mismatch: {result_set_id}"
@@ -332,7 +387,7 @@ class ResearchProductHandoffService(_base.ResearchProductHandoffService):
         result_set_id: str,
     ) -> tuple[list[dict[str, Any]], str]:
         with self.store.connection() as conn:
-            research_payload = _base._research_result_payload_conn(conn, result_set_id)
+            research_payload = _durable_result_payload_conn(conn, result_set_id)
             bindings = _source_content_bindings_conn(conn, research_payload)
         return bindings, _base._sha256_json(bindings)
 
