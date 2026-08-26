@@ -14,6 +14,9 @@ Do not prefill any of these fields with `PASS` or `true`. Automation, CI, an LLM
 
 - Git commit SHA (40 chars): `<required>`
 - Source branch expected for release: `<required>`
+- Selected/current release `main` SHA immediately before the human run: `<required when release policy binds to main>`
+- Governing release policy requires artifact `source_sha == selected/current main`: `NO / YES`
+- Artifact/source SHA satisfies that required-main rule: `NO / YES / NOT_APPLICABLE`
 - Product version: `<required>`
 - M12 GitHub Actions workflow run ID: `<required>`
 - M12 workflow head SHA: `<required>`
@@ -23,13 +26,13 @@ Do not prefill any of these fields with `PASS` or `true`. Automation, CI, an LLM
 - `release-manifest.json` schema version: `<required>`
 - `release-manifest.json` `source_sha`: `<required>`
 - Extracted `NikaCore.exe` SHA-256: `<required>`
-- Candidate checked for superseding product/package-input changes immediately before run: `NO / YES`
+- Candidate checked against the current release-identity policy immediately before run: `NO / YES`
 - Identity reconciliation result: `NOT_RUN / PASS / FAIL / BLOCKED`
 - Identity notes: `<required if not PASS>`
 
 ### Identity invariant
 
-The Git commit SHA, M12 workflow head SHA, artifact identity and manifest `source_sha` must refer to the same exact release candidate. If they do not, stop: overall result is `BLOCKED`, and both human-only states remain `NOT_RUN` for the intended release candidate.
+The Git commit SHA, M12 workflow head SHA, artifact identity and manifest `source_sha` must refer to the same exact release candidate. If the governing release policy requires the artifact source SHA to equal selected/current `main`, that equality is also mandatory at the moment the human run begins. If any required identity does not reconcile, stop: overall result is `BLOCKED`, and both human-only states remain `NOT_RUN` for the intended release candidate.
 
 ## B. Required automated evidence for this exact candidate
 
@@ -161,7 +164,7 @@ Complete only after all mandatory scenarios have been executed.
 
 - Mandatory functional scenarios contain no `FAIL`, `BLOCKED`, or unjustified `NOT_APPLICABLE`: `NO / YES`
 - Mandatory NVDA/accessibility scenarios contain no `FAIL`, `BLOCKED`, or unjustified `NOT_APPLICABLE`: `NO / YES`
-- Tested candidate identity remained exact and unsuperseded for the release decision: `NO / YES`
+- Tested candidate identity remained exact and current under the governing release policy: `NO / YES`
 - Test was performed by a real person using NVDA on real Windows: `NO / YES`
 
 Final states:
@@ -171,4 +174,4 @@ Final states:
 - Overall human result: `NOT_RUN / PASS / FAIL / BLOCKED`
 - Human tester declaration/notes: `<required for PASS or FAIL>`
 
-A `PASS` in this record is valid only for the exact candidate identified in section A. Any later product/package-input change requires a new package identity and a new human record.
+A `PASS` in this record is valid only for the exact candidate identified in section A. Any later change that makes that candidate stale under the governing release policy — including any `main` SHA movement when exact current-main identity is required — or any later product/package-input change requires a new eligible package identity and a new human record.
