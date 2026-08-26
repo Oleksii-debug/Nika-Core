@@ -302,47 +302,41 @@ def inspect_repository_governance(
             }
         )
 
+    observed_ruleset_bypass_actor_count = sum(
+        item["bypass_actor_count"] for item in active_rulesets
+    )
+    proof_rulesets = [item for item in active_rulesets if item["bypass_actor_count"] == 0]
     ruleset_combined = {
-        "pull_request": any(item["pull_request"] for item in active_rulesets),
-        "no_force_push": any(item["no_force_push"] for item in active_rulesets),
-        "no_delete": any(item["no_delete"] for item in active_rulesets),
-        "required_checks": set().union(
-            *(item["required_checks"] for item in active_rulesets)
-        )
-        if active_rulesets
-        else set(),
-        "bypass_actor_count": sum(item["bypass_actor_count"] for item in active_rulesets),
+        "pull_request": any(item["pull_request"] for item in proof_rulesets),
+        "no_force_push": any(item["no_force_push"] for item in proof_rulesets),
+        "no_delete": any(item["no_delete"] for item in proof_rulesets),
+        "required_checks": (
+            set().union(*(item["required_checks"] for item in proof_rulesets))
+            if proof_rulesets
+            else set()
+        ),
     }
 
-    combined_checks = set(classic["required_checks"]) | set(
-        ruleset_combined["required_checks"]
-    )
-    ruleset_has_unrestricted_proof = bool(
-        active_rulesets and ruleset_combined["bypass_actor_count"] == 0
-    )
-    classic_complete = bool(
-        protection is not None
-        and classic["pull_request"]
-        and classic["admin_enforcement"]
-        and classic["no_force_push"]
-        and classic["no_delete"]
-        and not (set(policy.required_checks) - set(classic["required_checks"]))
-    )
+    classic_unrestricted = bool(protection is not None and classic["admin_enforcement"])
+    classic_checks = set(classic["required_checks"]) if classic_unrestricted else set()
+    combined_checks = classic_checks | set(ruleset_combined["required_checks"])
     controls = {
         "branch_protected": protected,
         "pull_request_required": bool(
-            classic["pull_request"] or ruleset_combined["pull_request"]
+            (classic_unrestricted and classic["pull_request"])
+            or ruleset_combined["pull_request"]
         ),
-        "admin_enforcement": bool(
-            classic["admin_enforcement"] or ruleset_has_unrestricted_proof
-        ),
+        "admin_enforcement": bool(classic_unrestricted or proof_rulesets),
         "force_push_blocked": bool(
-            classic["no_force_push"] or ruleset_combined["no_force_push"]
+            (classic_unrestricted and classic["no_force_push"])
+            or ruleset_combined["no_force_push"]
         ),
         "deletion_blocked": bool(
-            classic["no_delete"] or ruleset_combined["no_delete"]
+            (classic_unrestricted and classic["no_delete"])
+            or ruleset_combined["no_delete"]
         ),
-        "ruleset_bypass_actor_count": ruleset_combined["bypass_actor_count"],
+        "ruleset_bypass_actor_count": observed_ruleset_bypass_actor_count,
+        "proof_eligible_ruleset_count": len(proof_rulesets),
     }
 
     blockers: list[str] = []
@@ -358,25 +352,18 @@ def inspect_repository_governance(
         blockers.append("FORCE_PUSH_NOT_PROVEN_BLOCKED")
     if policy.forbid_deletions and not controls["deletion_blocked"]:
         blockers.append("DELETION_NOT_PROVEN_BLOCKED")
-    if (
-        policy.forbid_ruleset_bypass
-        and ruleset_combined["bypass_actor_count"]
-        and not classic_complete
-    ):
-        blockers.append("RULESET_BYPASS_ACTORS_PRESENT")
-
     missing_checks = sorted(set(policy.required_checks) - combined_checks)
     if missing_checks:
         blockers.append("REQUIRED_STATUS_CHECKS_MISSING")
 
-    if protected and protection is None and not active_rulesets:
+    if protected and protection is None and not proof_rulesets:
         blockers.append("PROTECTION_DETAILS_NOT_PROVEN")
 
     status = "PASS" if not blockers else "BLOCKED"
     proof_sources: list[str] = []
     if protection is not None:
         proof_sources.append("classic_branch_protection")
-    if active_rulesets:
+    if proof_rulesets:
         proof_sources.append("active_ruleset")
 
     return {
