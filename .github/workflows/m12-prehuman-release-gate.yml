@@ -228,7 +228,6 @@ jobs:
       contents: read
       id-token: write
       attestations: write
-      artifact-metadata: write
     steps:
       - name: Checkout exact integrated source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
