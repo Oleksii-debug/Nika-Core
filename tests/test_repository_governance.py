@@ -14,6 +14,7 @@ SPEC.loader.exec_module(MODULE)
 
 ApiFailure = MODULE.ApiFailure
 GovernancePolicy = MODULE.GovernancePolicy
+GitHubRestClient = MODULE.GitHubRestClient
 inspect_repository_governance = MODULE.inspect_repository_governance
 
 HEAD = "a" * 40
@@ -270,6 +271,12 @@ def test_expected_head_mismatch_blocks_stale_governance_evidence() -> None:
 
     assert report["status"] == "BLOCKED"
     assert report["blockers"] == ["HEAD_MISMATCH"]
+
+
+def test_rest_client_pins_github_api_host() -> None:
+    client = GitHubRestClient(token="synthetic-token", timeout=1.0)
+
+    assert client._api_base == "https://api.github.com"
 
 
 def test_report_never_contains_token_value() -> None:
