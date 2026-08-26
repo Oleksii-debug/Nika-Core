@@ -87,6 +87,32 @@ def test_save_rejects_non_finite_json_without_durable_row(
     assert count == 0
 
 
+def test_latest_rejects_non_finite_durable_json_with_matching_checksum(tmp_path: Path) -> None:
+    store, task_id, checkpoints = _build_service(tmp_path)
+    _insert_raw_checkpoint(
+        store,
+        task_id=task_id,
+        checkpoint_id="non-finite",
+        payload_json='{"value":NaN}',
+    )
+
+    with pytest.raises(ValueError, match="invalid JSON"):
+        checkpoints.latest(task_id)
+
+
+def test_latest_rejects_malformed_durable_json_with_matching_checksum(tmp_path: Path) -> None:
+    store, task_id, checkpoints = _build_service(tmp_path)
+    _insert_raw_checkpoint(
+        store,
+        task_id=task_id,
+        checkpoint_id="malformed",
+        payload_json='{"value":',
+    )
+
+    with pytest.raises(ValueError, match="invalid JSON"):
+        checkpoints.latest(task_id)
+
+
 def test_latest_rejects_non_object_payload_even_with_matching_checksum(tmp_path: Path) -> None:
     store, task_id, checkpoints = _build_service(tmp_path)
     _insert_raw_checkpoint(
@@ -110,6 +136,34 @@ def test_latest_rejects_non_canonical_payload_even_with_matching_checksum(tmp_pa
     )
 
     with pytest.raises(ValueError, match="canonical JSON"):
+        checkpoints.latest(task_id)
+
+
+def test_latest_rejects_checksum_tamper(tmp_path: Path) -> None:
+    store, task_id, checkpoints = _build_service(tmp_path)
+    saved = checkpoints.save(task_id=task_id, stage="valid", payload={"revision": 1})
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE checkpoints SET payload_json = ? WHERE checkpoint_id = ?",
+            ('{"revision":2}', saved.checkpoint_id),
+        )
+
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        checkpoints.latest(task_id)
+
+
+def test_corrupt_newest_checkpoint_does_not_fall_back_to_stale_state(tmp_path: Path) -> None:
+    store, task_id, checkpoints = _build_service(tmp_path)
+    checkpoints.save(task_id=task_id, stage="valid", payload={"revision": 1})
+    _insert_raw_checkpoint(
+        store,
+        task_id=task_id,
+        checkpoint_id="newest-corrupt",
+        payload_json='{"revision":',
+    )
+
+    with pytest.raises(ValueError, match="invalid JSON"):
         checkpoints.latest(task_id)
 
 
