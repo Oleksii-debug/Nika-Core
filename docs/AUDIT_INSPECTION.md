@@ -33,8 +33,9 @@ Pagination is forward-only and deterministic by monotonically increasing `event_
 3. rows are always returned in ascending `event_id` order.
 
 The default page size is 100 and the hard maximum is 500. Zero, negative or oversized limits and
-negative cursors fail closed. Blank supplied filters also fail closed. SQL column names are selected
-only from the fixed implementation allowlist; all values use SQLite parameters.
+negative cursors fail closed. Non-integer cursors/limits, booleans used as integers, non-string
+filters and blank supplied filters also fail closed. SQL column names are selected only from the
+fixed implementation allowlist; all values use SQLite parameters.
 
 This is intentionally cursor-style pagination rather than offset pagination. Concurrent appends can
 appear only on later pages and cannot shift already-consumed rows backward or cause offset-based
@@ -44,18 +45,22 @@ re-reading.
 
 `AuditLog.inspect()` returns `AuditInspectionEvent`, not raw `AuditEvent`. The projection recursively
 redacts common secret-bearing keys, including API keys/hashes, passwords/passphrases, bearer or
-authorization values, session/access/refresh/id tokens, cookies, client secrets and private keys.
-It also minimizes common credential leakage embedded in strings:
+authorization values, all `*_token` authority values, cookies, client secrets, private keys and
+credential handles. It also minimizes common credential leakage embedded in strings:
 
-- `Authorization:` and `Proxy-Authorization:` header values;
+- `Authorization:`, `Proxy-Authorization:`, `Cookie:` and `Set-Cookie:` header values;
 - Bearer tokens;
-- inline `password=`, `api_key=`, token and client-secret forms;
-- HTTP/HTTPS URL userinfo;
-- common secret query-string parameters.
+- inline password/API-key/token/client-secret/private-key forms;
+- private-key PEM blocks;
+- embedded HTTP/HTTPS URL userinfo;
+- common secret or OAuth-code query/fragment parameters.
 
-Credential references such as `credential_id` are intentionally retained because they are
-non-secret audit/provenance identifiers and are required to explain which bounded credential
-reference was used.
+Malformed HTTP/HTTPS URLs that cannot be parsed safely are replaced with `[REDACTED_URL]` rather
+than returned unchanged.
+
+Stable non-secret references such as `credential_id` are intentionally retained because they are
+audit/provenance identifiers and are required to explain which bounded credential reference was
+used. Authority-bearing handles such as `credential_handle` are redacted.
 
 Redaction is defense in depth, not permission to log secrets. Producers remain responsible for
 never putting raw persistent credentials, cookies, tokens or private material into audit payloads.
