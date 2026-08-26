@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -77,6 +79,17 @@ def _lab(tmp_path: Path) -> tuple[ModelEngineeringLab, SQLiteStore]:
     return service, store
 
 
+def _seal_single_candidate(service: ModelEngineeringLab):
+    service.record_observation(
+        _observation(
+            observation_id="obs-sealed",
+            candidate=ModelCandidate("local", "candidate", "revision-1"),
+            input_sha256=_INPUT_A_SHA256,
+        )
+    )
+    return service.recommend("run-qa", _suite().key, created_at=_NOW)
+
+
 def test_same_benchmark_case_rejects_cross_candidate_input_drift(tmp_path: Path) -> None:
     """One suite/run/case must not compare candidates against different inputs."""
     service, _ = _lab(tmp_path)
@@ -101,14 +114,7 @@ def test_same_benchmark_case_rejects_cross_candidate_input_drift(tmp_path: Path)
 def test_recommendation_row_run_rebinding_fails_closed(tmp_path: Path) -> None:
     """Indexed SQLite identity must stay bound to the canonical recommendation payload."""
     service, store = _lab(tmp_path)
-    service.record_observation(
-        _observation(
-            observation_id="obs-sealed",
-            candidate=ModelCandidate("local", "candidate", "revision-1"),
-            input_sha256=_INPUT_A_SHA256,
-        )
-    )
-    recommendation = service.recommend("run-qa", _suite().key, created_at=_NOW)
+    recommendation = _seal_single_candidate(service)
 
     with sqlite3.connect(store.path) as conn:
         conn.execute(
@@ -120,3 +126,36 @@ def test_recommendation_row_run_rebinding_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(EvidenceIntegrityError):
         service.get_recommendation("run-rebound", _suite().key)
+
+
+def test_recomputed_outer_digest_cannot_forge_persisted_ranking(tmp_path: Path) -> None:
+    """A valid storage digest must not substitute for semantic recommendation authority."""
+    service, store = _lab(tmp_path)
+    recommendation = _seal_single_candidate(service)
+
+    with sqlite3.connect(store.path) as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM model_engineering_recommendations "
+            "WHERE recommendation_id = ?",
+            (recommendation.recommendation_id,),
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row[0])
+        payload["ranked_candidates"][0]["score_micros"] = 1_000_000
+        payload["ranked_candidates"][0]["metric_score_micros"][0]["score_micros"] = 1_000_000
+        forged_json = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        forged_sha256 = hashlib.sha256(forged_json.encode("utf-8")).hexdigest()
+        conn.execute(
+            "UPDATE model_engineering_recommendations "
+            "SET payload_json = ?, payload_sha256 = ? WHERE recommendation_id = ?",
+            (forged_json, forged_sha256, recommendation.recommendation_id),
+        )
+        conn.commit()
+
+    with pytest.raises(EvidenceIntegrityError):
+        service.get_recommendation("run-qa", _suite().key)
