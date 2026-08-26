@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import pytest
 
@@ -299,3 +299,61 @@ def test_contracts_reject_duplicate_cases_and_invalid_candidate_timeout():
             model="model",
             timeout_seconds=True,
         )
+
+
+def test_contracts_reject_mutable_or_wrongly_typed_dataset_members():
+    message = ModelMessage("user", "hello")
+    with pytest.raises(ValueError, match="messages must be a tuple"):
+        BenchmarkCase("case", [message])  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="only ModelMessage"):
+        BenchmarkCase("case", ("hello",))  # type: ignore[arg-type]
+
+    case = BenchmarkCase("case", (message,))
+    with pytest.raises(ValueError, match="cases must be a tuple"):
+        BenchmarkDataset("dataset", "v1", [case])  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="only BenchmarkCase"):
+        BenchmarkDataset("dataset", "v1", ("case",))  # type: ignore[arg-type]
+
+
+def test_candidate_rejects_untyped_enum_values():
+    with pytest.raises(ValueError, match="provider_kind"):
+        ModelBenchmarkCandidate(
+            candidate_id="candidate",
+            provider_id="provider",
+            provider_kind="local",  # type: ignore[arg-type]
+            model="model",
+        )
+    with pytest.raises(ValueError, match="privacy"):
+        ModelBenchmarkCandidate(
+            candidate_id="candidate",
+            provider_id="provider",
+            provider_kind=ProviderKind.LOCAL,
+            model="model",
+            privacy="private",  # type: ignore[arg-type]
+        )
+
+
+def test_evidence_contract_rejects_forged_hashes_and_aggregate_identity_drift():
+    runner = ModelBenchmarkRunner(
+        completion=FakeCompletion(),
+        resources=SequenceResources(
+            [
+                ResourceSnapshot(1.0, 2.0, 3),
+                ResourceSnapshot(1.0, 2.0, 3),
+                ResourceSnapshot(1.0, 2.0, 3),
+                ResourceSnapshot(1.0, 2.0, 3),
+            ]
+        ),
+        scorer=ExactScorer(),
+        clock=SequenceClock([1.0, 1.1, 2.0, 2.1]),
+    )
+    result = asyncio.run(runner.run(run_id="bound-run", dataset=dataset(), candidate=candidate()))
+
+    with pytest.raises(ValueError, match="SHA-256"):
+        replace(result.cases[0], response_digest="not-a-digest")
+    with pytest.raises(ValueError, match="run_id mismatch"):
+        replace(result, cases=(replace(result.cases[0], run_id="other"), result.cases[1]))
+    with pytest.raises(ValueError, match="range"):
+        replace(result, mean_quality_score=1.1)
+    with pytest.raises(ValueError, match="non-negative"):
+        replace(result, mean_latency_ms=-1.0)
