@@ -52,18 +52,22 @@ def test_inspect_filters_orders_and_pages(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("kwargs", "message"),
+    ("kwargs", "error_type", "message"),
     [
-        ({"limit": 0}, "limit"),
-        ({"limit": 501}, "limit"),
-        ({"after_event_id": -1}, "after_event_id"),
-        ({"event_type": " "}, "event_type"),
-        ({"entity_type": ""}, "entity_type"),
-        ({"entity_id": "\t"}, "entity_id"),
+        ({"limit": 0}, ValueError, "limit"),
+        ({"limit": 501}, ValueError, "limit"),
+        ({"after_event_id": -1}, ValueError, "after_event_id"),
+        ({"event_type": " "}, ValueError, "event_type"),
+        ({"entity_type": ""}, ValueError, "entity_type"),
+        ({"entity_id": "\t"}, ValueError, "entity_id"),
+        ({"limit": True}, TypeError, "limit"),
+        ({"limit": 1.5}, TypeError, "limit"),
+        ({"after_event_id": False}, TypeError, "after_event_id"),
+        ({"event_type": 42}, TypeError, "event_type"),
     ],
 )
-def test_inspection_query_rejects_unbounded_or_blank_inputs(kwargs, message):
-    with pytest.raises(ValueError, match=message):
+def test_inspection_query_rejects_invalid_inputs(kwargs, error_type, message):
+    with pytest.raises(error_type, match=message):
         AuditInspectionQuery(**kwargs)
 
 
@@ -80,11 +84,12 @@ def test_inspect_redacts_nested_credentials_and_url_secrets(tmp_path):
                 "refresh_token": "refresh-secret",
                 "endpoint": (
                     "https://user:pass@example.test/path?"
-                    "token=query-secret&mode=safe"
+                    "token=query-secret&mode=safe#access_token=fragment-secret"
                 ),
             },
             "messages": [
                 "Authorization: Bearer super-secret",
+                "Cookie: sessionid=cookie-secret",
                 "password=hunter2 failed",
                 "plain text",
             ],
@@ -101,13 +106,51 @@ def test_inspect_redacts_nested_credentials_and_url_secrets(tmp_path):
     assert isinstance(endpoint, str)
     assert "user:pass" not in endpoint
     assert "query-secret" not in endpoint
+    assert "fragment-secret" not in endpoint
     assert "mode=safe" in endpoint
 
     messages = event.payload["messages"]
     assert isinstance(messages, list)
     assert messages[0] == "Authorization: [REDACTED]"
-    assert messages[1] == "password=[REDACTED] failed"
-    assert messages[2] == "plain text"
+    assert messages[1] == "Cookie: [REDACTED]"
+    assert messages[2] == "password=[REDACTED] failed"
+    assert messages[3] == "plain text"
+
+
+def test_malformed_web_url_fails_closed_instead_of_returning_userinfo(tmp_path):
+    _, log = _make_log(tmp_path)
+    log.append(
+        event_type="provider.failed",
+        entity_type="task",
+        entity_id="task-malformed-url",
+        payload={
+            "endpoint": "https://user:pass@example.test:not-a-port/path?token=secret",
+        },
+    )
+
+    event = log.inspect()[0]
+    assert event.payload["endpoint"] == "[REDACTED_URL]"
+
+
+def test_private_key_block_is_not_repeated_into_inspection(tmp_path):
+    _, log = _make_log(tmp_path)
+    log.append(
+        event_type="provider.failed",
+        entity_type="task",
+        entity_id="task-private-key",
+        payload={
+            "message": (
+                "load failed -----BEGIN PRIVATE KEY-----\nsecret-material\n"
+                "-----END PRIVATE KEY----- during startup"
+            )
+        },
+    )
+
+    message = log.inspect()[0].payload["message"]
+    assert isinstance(message, str)
+    assert "secret-material" not in message
+    assert "PRIVATE KEY" not in message
+    assert "[REDACTED]" in message
 
 
 def test_existing_list_for_keeps_raw_payload_contract(tmp_path):
