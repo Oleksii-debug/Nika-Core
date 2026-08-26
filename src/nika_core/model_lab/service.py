@@ -27,6 +27,7 @@ from nika_core.model_lab.contracts import (
     CandidateBenchmarkSummary,
     EvaluationCase,
     EvaluationSuite,
+    ExactMatchScorer,
     ModelBenchmarkPolicy,
     ModelCandidate,
     QualityScorer,
@@ -38,6 +39,7 @@ _QUALITY = "quality"
 _LATENCY_MS = "latency_ms"
 _HOST_CPU_PERCENT = "host_cpu_percent"
 _HOST_MEMORY_PERCENT = "host_memory_percent"
+_DEFAULT_SCORER_ID = "exact_match"
 
 
 class ModelEngineeringLab:
@@ -49,12 +51,14 @@ class ModelEngineeringLab:
         gateway: ModelGateway,
         repository: ExperimentRepository,
         resource_observer: ResourceObserverPort | None = None,
+        scorers: tuple[QualityScorer, ...] = (),
         clock_ns: Callable[[], int] = monotonic_ns,
     ) -> None:
         self._gateway = gateway
         self._repository = repository
         self._engine = ExperimentEngine(repository)
         self._resource_observer = resource_observer
+        self._scorers = self._build_scorer_registry(scorers)
         self._clock_ns = clock_ns
 
     async def compare(
@@ -65,8 +69,9 @@ class ModelEngineeringLab:
         challengers: tuple[ModelCandidate, ...],
         suite: EvaluationSuite,
         policy: ModelBenchmarkPolicy,
-        scorer: QualityScorer,
+        scorer_id: str = _DEFAULT_SCORER_ID,
     ) -> BenchmarkReport:
+        scorer = self._resolve_scorer(scorer_id)
         definition = self._definition(
             experiment_id=experiment_id,
             champion=champion,
@@ -106,6 +111,26 @@ class ModelEngineeringLab:
 
         completed = self._engine.complete(experiment_id)
         return self._report(snapshot=completed, suite=suite)
+
+    @classmethod
+    def _build_scorer_registry(
+        cls, scorers: tuple[QualityScorer, ...]
+    ) -> dict[str, QualityScorer]:
+        registered: dict[str, QualityScorer] = {}
+        for scorer in (ExactMatchScorer(), *scorers):
+            scorer_id, _scorer_version = cls._scorer_identity(scorer)
+            if scorer_id in registered:
+                raise ValueError(f"duplicate quality scorer ID: {scorer_id}")
+            registered[scorer_id] = scorer
+        return registered
+
+    def _resolve_scorer(self, scorer_id: str) -> QualityScorer:
+        if not isinstance(scorer_id, str):
+            raise TypeError("scorer_id must be text")
+        try:
+            return self._scorers[scorer_id]
+        except KeyError as exc:
+            raise ValueError(f"unknown quality scorer: {scorer_id}") from exc
 
     def _load_or_create(self, definition: ExperimentDefinition) -> ExperimentSnapshot:
         try:
