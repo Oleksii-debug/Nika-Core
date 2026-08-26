@@ -6,9 +6,20 @@ from dataclasses import dataclass
 from enum import StrEnum
 from math import isfinite
 from typing import Protocol
+from urllib.parse import urlsplit
 
 from nika_core.experiments.contracts import ExperimentStatus
 from nika_core.model_gateway.contracts import ModelMessage, ModelResponse, PrivacyClass
+
+
+def _validate_persisted_identity(value: str, name: str) -> None:
+    if "\r" in value or "\n" in value:
+        raise ValueError(f"{name} must not contain control-line characters")
+    parsed = urlsplit(value)
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError(f"{name} must not contain URL userinfo")
+    if parsed.query or parsed.fragment:
+        raise ValueError(f"{name} must not contain a URL query or fragment")
 
 
 class EvaluationSplit(StrEnum):
@@ -36,6 +47,7 @@ class ModelCandidate:
                 raise ValueError(f"{name} must not be empty")
             if value != value.strip():
                 raise ValueError(f"{name} must not contain surrounding whitespace")
+            _validate_persisted_identity(value, name)
 
     @property
     def artifact_ref(self) -> str:
@@ -74,6 +86,7 @@ class EvaluationSuite:
                 raise ValueError(f"{name} must not be empty")
             if value != value.strip():
                 raise ValueError(f"{name} must not contain surrounding whitespace")
+            _validate_persisted_identity(value, name)
         if not self.cases:
             raise ValueError("evaluation suite must contain at least one case")
         case_ids = [case.case_id for case in self.cases]
