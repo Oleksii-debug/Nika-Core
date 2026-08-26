@@ -153,6 +153,72 @@ class ToolsmithRepository:
             )
         return expected_version + 1
 
+    def accept_verification(
+        self,
+        *,
+        task_id: str,
+        capability_id: str,
+        expected_version: int,
+        candidate_digest: str,
+        verifier_evidence: dict[str, object],
+    ) -> int:
+        """Atomically persist independent verification and its exact artifact digest."""
+
+        if not candidate_digest.strip():
+            raise ValueError("verification requires exact candidate digest")
+        if not verifier_evidence:
+            raise ValueError("verification requires independent evidence")
+        with self._store.connection() as conn:
+            row = conn.execute(
+                "SELECT state, row_version, pinned_digest FROM capability_escalations "
+                "WHERE task_id = ? AND requested_capability = ?",
+                (task_id, capability_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError((task_id, capability_id))
+            current = CandidateState(str(row["state"]))
+            version = int(row["row_version"])
+            if version != expected_version:
+                raise StaleTransitionError(
+                    f"expected row version {expected_version}, found {version}"
+                )
+            if current is not CandidateState.VERIFYING:
+                raise InvalidTransitionError("verification acceptance requires VERIFYING state")
+            prior_digest = row["pinned_digest"]
+            if prior_digest is not None and str(prior_digest) != candidate_digest:
+                raise RuntimeError("verification digest conflicts with prior durable identity")
+            cursor = conn.execute(
+                "UPDATE capability_escalations SET state = ?, pinned_digest = ?, "
+                "row_version = row_version + 1, updated_at = ? "
+                "WHERE task_id = ? AND requested_capability = ? AND row_version = ?",
+                (
+                    CandidateState.VERIFIED.value,
+                    candidate_digest,
+                    _now(),
+                    task_id,
+                    capability_id,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleTransitionError("candidate row changed during verification acceptance")
+            self._audit.append_with_connection(
+                conn,
+                event_type="capability_escalation.transition",
+                entity_type="task",
+                entity_id=task_id,
+                payload={
+                    "capability_id": capability_id,
+                    "from": CandidateState.VERIFYING.value,
+                    "to": CandidateState.VERIFIED.value,
+                    "evidence": {
+                        "digest": candidate_digest,
+                        "verifier": verifier_evidence,
+                    },
+                },
+            )
+        return expected_version + 1
+
     def record_search_candidate(self, *, task_id: str, candidate: ReuseCandidate) -> None:
         row = self.get_escalation(task_id=task_id, capability_id=candidate.capability_id)
         if row is None:
