@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_command.contracts import CommandRouteKind
 from nika_core.product_command.product_project_adapter import ProductProjectCommandService
@@ -132,6 +133,35 @@ def test_packaged_router_fails_closed_when_agent_builder_is_not_composed(
     assert router.active_project_id is None
     with pytest.raises(KeyError):
         repository.get(product_project_identity(command))
+
+
+def test_real_windows_composition_rejects_agent_creation_without_task_leak(
+    tmp_path: Path,
+) -> None:
+    from scripts.nika_windows import build_windows_bridge
+
+    bridge, _products = build_windows_bridge(
+        AppConfig(database_path=tmp_path / "F10 packaged українська path.db")
+    )
+    before = bridge.get_state()
+    assert before["ok"] is True
+    assert before["state"]["tasks"] == []
+    assert before["state"]["product_project"] is None
+
+    result = bridge.dispatch(
+        {
+            "request_id": "f10-packaged-agent-builder",
+            "action_id": "task.create",
+            "payload": {"command": "Створи агента для аналізу доступних документів"},
+        }
+    )
+
+    assert result["status"] == "rejected"
+    assert "Agent Builder" in result["message"]
+    after = bridge.get_state()
+    assert after["ok"] is True
+    assert after["state"]["tasks"] == []
+    assert after["state"]["product_project"] is None
 
 
 def test_ambiguous_agent_command_invokes_no_specialized_or_ordinary_handler(
