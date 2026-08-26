@@ -48,3 +48,25 @@ def test_float_period_clock_is_rejected_instead_of_binary_coerced() -> None:
             1,
             1.5,  # type: ignore[arg-type]
         )
+
+
+def test_boolean_settlement_values_are_rejected_as_wrong_numeric_type() -> None:
+    with pytest.raises(SportsbookResearchError, match="decimal"):
+        Settlement(
+            "source",
+            "market",
+            _time(),
+            {"selection": True},  # type: ignore[dict-item]
+        )
+
+
+def test_boolean_period_clock_is_rejected_as_wrong_numeric_type() -> None:
+    with pytest.raises(SportsbookResearchError, match="decimal"):
+        PeriodState(
+            "source",
+            "event",
+            _time(),
+            "first_half",
+            1,
+            False,  # type: ignore[arg-type]
+        )
