@@ -42,8 +42,8 @@ The repository uses `SQLiteStore.connection()` but owns separate `table_tennis_*
 For every logical `(source_id, source_record_id)`:
 
 1. the first accepted revision must be `1`;
-2. exact replay of the current revision and identical canonical payload is idempotent (`REPLAYED`);
-3. the same revision with different content is rejected as mutation;
+2. exact replay of any already stored revision and identical canonical payload is idempotent (`REPLAYED`);
+3. an already stored current or historical revision with different content is rejected as mutation;
 4. rollback or skipped revisions are rejected;
 5. the next contiguous revision is append-only and atomically becomes the new head (`REVISED`);
 6. historical revisions remain stored but never double-count current statistics.
@@ -85,6 +85,7 @@ TT01 begins at `MatchObservation`. This is deliberate: network policy, robots/so
 ## Failure and restart behavior
 
 - Exact duplicate after crash: replay returns `REPLAYED`; no second row is added.
+- Full history replay after later revisions: every unchanged stored revision returns `REPLAYED`.
 - Crash after an accepted transaction: restart reads the durable head and current stats.
 - Correction after restart: next contiguous revision appends and supersedes the prior result.
 - Conflicting same revision: reject; upstream must issue a new revision.
@@ -94,6 +95,6 @@ TT01 begins at `MatchObservation`. This is deliberate: network policy, robots/so
 
 ## Verification boundary
 
-TT01 unit coverage includes contract rejection, exact replay, conflicting revisions, gap rejection, revision supersession, restart recovery, deterministic aggregation, latest display-name selection, Unicode/space database paths, concurrent replay convergence, row/hash tamper detection, explicit text output, UTF-8 CSV, and spreadsheet formula-injection protection.
+TT01 unit coverage includes contract rejection, exact current/historical replay, conflicting revisions, gap rejection, revision supersession, full-history restart replay, deterministic aggregation, latest display-name selection, Unicode/space database paths, concurrent replay convergence, row/hash tamper detection, explicit text output, UTF-8 CSV, and spreadsheet formula-injection protection.
 
 Repo-wide Linux/Windows CI at the exact branch SHA remains the acceptance authority after a PR is opened. `HUMAN_TESTED=false` and `NVDA_VERIFIED=false` until real human/NVDA evidence exists.
