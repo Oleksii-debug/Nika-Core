@@ -5,11 +5,16 @@ from .accessibility_repair import (
     AccessibilityInteractionPort,
     AccessibilityRepairService,
 )
+from .activation import (
+    StoredWorkspaceActivation,
+    WorkspaceActivationRepository,
+)
 from .catalog import (
     PluginRequirement,
     WorkspaceCatalog,
     WorkspaceCompatibilityError,
     WorkspaceManifest,
+    WorkspacePolicyCatalog,
     WorkspaceResolver,
 )
 from .software_factory import (
@@ -42,10 +47,13 @@ __all__ = [
     "DownstreamBudgetLimits",
     "PluginRequirement",
     "SoftwareFactoryService",
+    "StoredWorkspaceActivation",
     "ToolsmithSecurityEnvelope",
+    "WorkspaceActivationRepository",
     "WorkspaceCatalog",
     "WorkspaceCompatibilityError",
     "WorkspaceManifest",
+    "WorkspacePolicyCatalog",
     "WorkspaceResolver",
     "build_toolsmith_security_envelope",
 ]
