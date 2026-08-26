@@ -8,6 +8,7 @@ on:
       - "scripts/fixtures/dev04_uia_winforms_fixture.ps1"
       - "tests/test_interaction_windows_uia_adapter.py"
       - "tests/test_interaction_pywinauto_identity.py"
+      - "tests/test_interaction_windows_uia_action_authority.py"
       - ".github/workflows/dev04-windows-uia-proof.yml"
   workflow_dispatch:
 
@@ -39,10 +40,11 @@ jobs:
         run: python scripts/qa_assert_checkout_identity.py
       - name: Install exact Windows interaction candidate
         run: python -m pip install -e ".[dev,windows-interaction]"
-      - name: Run strict deterministic UIA identity regressions
+      - name: Run strict deterministic UIA authority regressions
         run: >-
           python -m pytest -q
           tests/test_interaction_windows_uia_adapter.py
           tests/test_interaction_pywinauto_identity.py
-      - name: Reproduce and close live WinForms duplicate RuntimeId family
+          tests/test_interaction_windows_uia_action_authority.py
+      - name: Run live WinForms semantic UIA proof
         run: python scripts/dev04_windows_uia_proof.py
