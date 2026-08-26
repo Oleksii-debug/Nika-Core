@@ -154,7 +154,7 @@ def test_active_ruleset_without_bypass_can_prove_pf4_controls() -> None:
     assert report["blockers"] == []
 
 
-def test_ruleset_bypass_actor_is_ignored_when_classic_protection_is_complete() -> None:
+def test_bypass_ruleset_is_not_used_when_classic_protection_is_complete() -> None:
     responses = base_responses()
     responses[f"/repos/Oleksii-debug/Nika-Core/branches/{BRANCH}/protection"] = (
         classic_protection()
@@ -179,6 +179,7 @@ def test_ruleset_bypass_actor_is_ignored_when_classic_protection_is_complete() -
     assert report["status"] == "PASS"
     assert report["blockers"] == []
     assert report["controls"]["ruleset_bypass_actor_count"] == 1
+    assert report["controls"]["proof_eligible_ruleset_count"] == 0
 
 
 def test_ruleset_bypass_actor_blocks_when_ruleset_is_needed_for_proof() -> None:
@@ -214,8 +215,34 @@ def test_ruleset_bypass_actor_blocks_when_ruleset_is_needed_for_proof() -> None:
     report = inspect(client)
 
     assert report["status"] == "BLOCKED"
-    assert "RULESET_BYPASS_ACTORS_PRESENT" in report["blockers"]
     assert "ADMIN_BYPASS_NOT_CLOSED" in report["blockers"]
+    assert "PULL_REQUEST_NOT_REQUIRED" in report["blockers"]
+    assert report["controls"]["proof_eligible_ruleset_count"] == 0
+
+
+def test_unrelated_ruleset_cannot_close_classic_admin_bypass() -> None:
+    responses = base_responses()
+    protection = classic_protection()
+    protection["enforce_admins"] = {"enabled": False}
+    responses[f"/repos/Oleksii-debug/Nika-Core/branches/{BRANCH}/protection"] = protection
+    responses["/repos/Oleksii-debug/Nika-Core/rulesets?includes_parents=true"] = [
+        {"id": 20, "name": "metadata-only"}
+    ]
+    responses["/repos/Oleksii-debug/Nika-Core/rulesets/20"] = {
+        "id": 20,
+        "name": "metadata-only",
+        "enforcement": "active",
+        "bypass_actors": [],
+        "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+        "rules": [{"type": "required_commit_message"}],
+    }
+    client = FakeClient(responses)
+
+    report = inspect(client)
+
+    assert report["status"] == "BLOCKED"
+    assert "PULL_REQUEST_NOT_REQUIRED" in report["blockers"]
+    assert "REQUIRED_STATUS_CHECKS_MISSING" in report["blockers"]
 
 
 def test_missing_required_check_is_not_accepted() -> None:
