@@ -112,6 +112,29 @@ def test_revision_supersedes_previous_result_and_survives_restart(tmp_path) -> N
     assert by_id["player-b"].sets_for == 3
 
 
+def test_complete_revision_history_can_be_replayed_after_restart(tmp_path) -> None:
+    db_path = tmp_path / "stats.sqlite3"
+    revision_1 = _match()
+    revision_2 = _match(revision=2, sets_a=1, sets_b=3)
+
+    first_repository = TableTennisRepository(SQLiteStore(db_path))
+    first_service = TableTennisStatsService(first_repository)
+    first_service.ingest_many([revision_1, revision_2])
+
+    restarted_repository = TableTennisRepository(SQLiteStore(db_path))
+    restarted_service = TableTennisStatsService(restarted_repository)
+    replay = restarted_service.ingest_many([revision_1, revision_2])
+
+    assert [result.disposition for result in replay] == [
+        IngestDisposition.REPLAYED,
+        IngestDisposition.REPLAYED,
+    ]
+    assert restarted_repository.revision_count() == 2
+
+    with pytest.raises(TableTennisRevisionError, match="historical"):
+        restarted_service.ingest(_match(revision=1, sets_a=1, sets_b=3))
+
+
 def test_statistics_are_deterministic_across_ingest_order(tmp_path) -> None:
     matches = [
         _match(record_id="m-2", a_id="p2", a_name="Two", b_id="p3", b_name="Three"),
