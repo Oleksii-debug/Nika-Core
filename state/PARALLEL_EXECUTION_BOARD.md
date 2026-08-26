@@ -1,127 +1,155 @@
 # PARALLEL EXECUTION BOARD — Nika Core
 
-Updated: 2026-08-20.
-Mode: **ACTIVE AUTONOMOUS PRODUCT FACTORY DEVELOPMENT**.
-Canonical technical evidence: live GitHub `main`, exact PR heads and current Actions. Drive owns automation routing/ownership/handoff truth.
+Reconciled: 2026-08-26.
+Mode: **ACTIVE PARALLEL DEVELOPMENT WITH LIVE COLLISION CONTROL**.
+Purpose: durable coordination protocol, not a static roster of current workers.
+
+`LIVE_GITHUB_PRECEDENCE=true`
+`NON_AUTHORITATIVE_SNAPSHOT=true`
+
+## Live board resolution order
+
+Resolve the board anew immediately before every write, review handoff, rebase/sync, or integration
+decision:
+
+1. live `main` SHA;
+2. latest Issue #1 ownership/handoff markers;
+3. open PR heads, bases and changed files;
+4. live branches, including recent branches that do not yet have a PR;
+5. current GitHub Actions/checks for the exact candidate SHA;
+6. mandatory repository specifications and acceptance gates at the exact live `main`;
+7. Drive/manual snapshots only as historical/contextual input.
+
+A static line in this file never reserves a production slice.
+
+Treat a branch-without-PR as a possible active reservation when its name/scope and recent commit
+activity overlap the proposed lane. Treat an old marker as historical until its latest status,
+branch and activity are checked. If ownership is ambiguous, yield from the overlapping slice or
+choose an independent lane rather than creating a second writer.
+
+## Ownership marker contract
+
+A worker taking a coherent lane should publish a live marker before shared/production edits. The
+marker should identify, as applicable:
+
+- `STATUS`;
+- exact `START_MAIN` or exact dependency parent;
+- branch;
+- role/claim;
+- `OWNERSHIP_PATHS`;
+- semantic/shared authorities that must not be duplicated;
+- compatibility decision for shared-contract edits;
+- `REUSE_ADAPT_CUSTOM`;
+- safety/release limits;
+- `HUMAN_TESTED=false` and `NVDA_VERIFIED=false` unless real human evidence exists.
+
+Issue #1 is the default coordination thread for these markers. A PR is the canonical review vehicle
+once code/evidence exists. Branch names alone are not sufficient when a marker can be posted.
+
+## One-writer collision rules
+
+1. One production writer per owned slice.
+2. Separate branch per independent coherent lane.
+3. Check both exact paths and semantic authority before editing.
+4. Do not stack unrelated branches.
+5. Do not edit another lane merely because its branch is stale; first establish an explicit
+   ownership transfer/supersession decision.
+6. Shared-contract edits require an explicit compatibility decision and focused regression proof.
+7. A blocked lane does not idle independent lanes.
+8. No direct worker write to `main`.
+9. No self-merge merely because owner CI is green.
+10. Re-read live ownership immediately before the first write and immediately before integration.
+
+If two lanes collide after both started, the later/less-authoritative lane yields unless the owners
+publish a compatibility decision that makes the split explicit.
+
+## Dynamic/stale marker handling
+
+`STATUS=IN_PROGRESS` is not an eternal lock. Determine whether it is still active from the newest
+Issue #1/PR comments, branch head activity, replacement/supersession markers and dependency state.
+
+Conversely, the absence of an open PR does not mean a slice is free. Recent reservation branches
+and fresh Issue #1 markers must be checked before work starts.
+
+Never infer ownership from an old Drive lane table when live GitHub shows a newer branch, PR or
+marker.
 
 ## Evidence states
+
 - PREPARED — scope/contracts/reuse decision ready.
 - IMPLEMENTED — production-intended source/tests exist on a branch.
-- GREEN — exact branch/PR head passed required automated checks.
-- INTEGRATED — exact green candidate merged into `main`.
-- PACKAGED — exact installable artifact built and checked.
+- GREEN — exact candidate head passed required automated checks.
+- INTEGRATED — exact accepted candidate merged into `main`.
+- PACKAGED — exact installable artifact built and verified.
 - HUMAN_TESTED — a person completed the required manual protocol.
-- NVDA_VERIFIED — the human NVDA protocol passed; automation may never award this state.
+- NVDA_VERIFIED — a person completed the required NVDA protocol.
 
-Current global truth:
-- `HUMAN_TESTED=false`;
-- `NVDA_VERIFIED=false`;
-- `PRODUCTION_RELEASE_READY=false`;
-- `PF11=false`;
-- historical Core percentages and stale Windows ZIPs are archival only.
+Owner tests do not automatically satisfy an independent audit requirement. QA-only branches do not
+become production code. A head move invalidates exact-head evidence until gates are rerun.
 
-## Canonical main
+## Shared authority and compatibility
 
-`df84a72d6705aa78cb0c69df9e47a367098b74bb`
+`REUSE -> ADAPT -> CUSTOM (thin)` is mandatory for generic capability work.
 
-Integrated Product Factory foundation:
-- PF5 #90 — command/presentation routing;
-- PF1 #91 — durable ProductProject + Research→Product handoff;
-- PF2 #92 — Dynamic Team Composer + ProductRepositoryGraph;
-- PF2 #93 — deterministic coordinator/reconciliation;
-- PF2 #94 — public CodingWorkerPort adapter;
-- PF2 #97 — restart recovery for in-flight component work;
-- PF3 #95 — ExecutionNode + deployment/staging/health/rollback foundation, exact head `4a3e0b342ec06c936693c8f583ed4f7a4fdc2007`, Core #671 + M12 #439 green, integrated as current main.
+Do not create a second authority for an existing responsibility such as durable project state,
+approval, credential storage, recovery, task lifecycle, model routing, resource accounting,
+release provenance, Product Factory checkpoint authority, or accessibility action semantics.
 
-## Scheduled Product Factory dependency order
+When a proposed change touches a shared contract:
 
-`PF1 → PF2 → PF3 → PF4 → PF5`
+1. identify current consumers and active owners;
+2. state the compatibility decision in the live marker/PR;
+3. keep the edit as narrow as possible;
+4. run focused consumer regressions plus the normal repository gates;
+5. do not obtain green by weakening the existing contract or oracle.
 
-PF5 runs downstream last and consumes only integrated upstream contracts.
+## Pre-human and accessibility truth
 
-### AUTO-PF1 — ProductProject
-PF1 #91 is **INTEGRATED**.
+Parallel throughput does not relax release gates.
 
-Available to downstream: durable create/get/update-spec, optimistic concurrency and Research→Product handoff. A durable public product-decision write API is not yet integrated; PF5 must fail closed instead of writing PF1 tables directly.
+- `HUMAN_TESTED=false` until a person performs the protocol.
+- `NVDA_VERIFIED=false` until a real NVDA test is performed.
+- automated UIA/DOM/semantic tests are machine evidence only.
+- Windows/NVDA interaction priority remains native/app API, semantic DOM/UIA, named deterministic
+  controls, vision/OCR fallback, coordinates last.
+- high-impact actions remain inside their approval boundaries.
 
-### AUTO-PF2 — orchestration
-PF2 #92/#93/#94/#97 are **INTEGRATED**. Open follow-up #98 remains **NOT INTEGRATED** and PF5 does not consume it.
+## Reconciliation snapshot — non-authoritative after any live change
 
-### AUTO-PF3 — execution/deployment
-PF3 #95 is **INTEGRATED**. Public downstream-safe surface includes execution nodes/capabilities/resources/leases, normalized exact release evidence, deployment snapshots, staging-first policy state, health and rollback evidence.
+The anti-staleness reconciliation started from:
 
-PF5 may present these contracts. PF5 does not execute deployment provider actions, expose `provider_ref`, handle raw credentials or claim a Product Operations service that has not been integrated.
+- `main` `109829579ab4693e038e218769c23c2547defd64`;
+- exact-base Core CI `32980430285`: SUCCESS;
+- M11 `32980430222`: SUCCESS;
+- M12 `32980430229`: SUCCESS;
+- `main` protection observed disabled and repository rulesets empty.
 
-### AUTO-PF4 — acceptance QA
-PF4 remains the independent PF0–PF12 gatekeeper and evidence lane. It rejects stale/false exact-SHA evidence without becoming a competing feature writer.
+During the same live read, many current production/QA lanes were already newer than the old
+2026-08-20 board, and several reservations existed as branches before PR creation. That is the
+reason this file no longer enumerates a supposedly current owner roster.
 
-### AUTO-PF5 — command journey + release
-PF5 #90 is **INTEGRATED**.
+Do not use this snapshot to decide current ownership, mergeability, current CI state, or current
+`main`.
 
-Current real PF5 code/evidence PR: #96, `auto-pf5/command-journey-pf2-presentation`.
+## Integration protocol
 
-Current coherent scope:
-- deterministic Ukrainian + English ProductProject/Toolsmith routing;
-- explicit ambiguity for mixed product/capability intent;
-- real integrated PF1 ProductProject create/inspect/update through `ProductProjectRepository`;
-- SQLite restart, stale-version and credential-reference redaction tests;
-- integrated PF2 CoordinatorSnapshot → textual component/review/QA/blocker projection;
-- integrated PF3 ExecutionRegistrySnapshot/DeploymentFabricSnapshot → textual execution-node/build/release/staging/health/rollback/blocker projection;
-- no PF3 provider credential reference in PF5 presentation;
-- product-decision persistence fails closed until PF1 exposes a durable public decision API;
-- canonical status reconciliation in this same real code/evidence PR.
+Immediately before integration:
 
-The prior #96 exact head `ee303c76da16adef5a4519ce9068839c73cd2c0e` is superseded: Core #679 passed, M12 #447 failed. Rollback history is preserved at `backup/auto-pf5-96-ee303c76`. The branch is being rebuilt linearly from current main `df84a72d6705aa78cb0c69df9e47a367098b74bb`; only fresh exact-head gates on the final rebuilt SHA count.
+1. freeze and re-read the exact candidate head;
+2. re-read live `main`;
+3. verify current ancestry/mergeability and dependency ordering;
+4. verify required exact-head Core and milestone-specific gates;
+5. verify required independent QA/audit on the same exact source identity;
+6. confirm no newer conflicting owner/contract landed;
+7. preserve rollback/history and do not force-push accepted evidence away;
+8. merge only through the repository's guarded integration process.
 
-State: **IMPLEMENTED / CURRENT-MAIN REBUILD + PREFLIGHT + FRESH GATES REQUIRED / NOT INTEGRATED**.
+A successful historical workflow run is lineage evidence only after the source head or relevant
+base/contract changes.
 
-## Manual/shared ownership — no scheduled duplication
+## Maintenance rule for this board
 
-- DEV01 #86 — Research/Corpus report exports.
-- DEV02 #72 — Windows worker containment proof.
-- DEV03 #67 — deterministic trader replay/accounting/risk.
-- DEV04 #78 — strict Windows UIA semantic vertical and shared Interaction/UIA ownership; dedicated live proof remains blocked by duplicate semantic-node identity.
-- DEV05 #89 — stable platform subtitle acquisition.
-- M10 #61/#62 — authorization/approval security ownership.
-
-PF5 does not edit these production slices without an explicit compatibility decision.
-
-## PF5 interaction/UI rule
-
-Shared semantic Windows UI remains outside PF5 ownership while DEV04 #78 is active. PF5 advances native/API and textual presentation contracts first.
-
-Interaction priority:
-1. native/application API;
-2. DOM/UIA/accessibility semantics;
-3. named deterministic controls;
-4. screenshot/OCR/vision fallback;
-5. coordinates last.
-
-Automated semantic/UIA evidence never sets `NVDA_VERIFIED=true`.
-
-## Collision policy
-1. One writer per production slice.
-2. Separate branch per independent coherent lane.
-3. Branch from latest compatible green main unless a real dependency requires otherwise.
-4. Never import an unmerged sibling branch as canonical dependency.
-5. Shared-contract edits require explicit compatibility decision and focused tests.
-6. A blocked upstream lane does not idle independent downstream work.
-7. Exact-head acceptance + current-main compatibility are required before merge credit.
-8. No direct scheduled-worker writes to `main`.
-
-## Product Factory release policy
-
-Backend-only tests do not close Product Factory. PF11 requires a representative product created by the real factory from a clean packaged Windows Nika installation: research, durable ProductProject, product decision, acceptance criteria, team, repository, isolated implementation, independent QA/accessibility, package/release provenance and restart/resume.
-
-The expense application is an acceptance scenario, not a hard-coded Core product. Do not promote a new human candidate from isolated PF5 backend/presentation work.
-
-## Next dependency-ordered integration wave
-
-1. PF5 completes #96 current-main rebuild, preflight and fresh exact-head Core/M12.
-2. PF1 adds a durable public decision-write boundary before PF5 can claim create/inspect/update/decision completeness.
-3. PF2 repairs/integrates #98 independently; PF5 consumes it only after integration.
-4. PF3 follow-up owns credential/real-provider/operations capabilities; PF5 consumes only integrated public contracts.
-5. Shared semantic UI waits for DEV04 ownership release plus compatibility decision.
-6. PF11 package/release follows only after the representative integrated journey exists.
-
-Progress is evidence-based; no invented Full Product Vision percentage is assigned.
+Do not manually copy the current PR list into this file. That design caused the 2026-08-20 board to
+remain frozen while live development advanced by hundreds of issue/PR numbers and multiple main
+merges. Keep durable collision/integration rules here; keep volatile owners and exact evidence in
+live GitHub.
