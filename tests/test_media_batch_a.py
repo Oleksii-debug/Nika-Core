@@ -363,3 +363,68 @@ def test_heavy_media_resource_claims_share_one_machine_slot(tmp_path: Path) -> N
         )
     assert blocked.value.code == MediaErrorCode.RESOURCE_BLOCKED
     assert coordinator.release(first) is True
+
+
+_MEDIA_CREDENTIAL_QUERY_ALIASES = (
+    "api-key",
+    "client_secret",
+    "client-secret",
+    "subscription-key",
+    "subscription_key",
+    "x-api-key",
+)
+
+
+@pytest.mark.parametrize("query_key", _MEDIA_CREDENTIAL_QUERY_ALIASES)
+def test_yt_dlp_blocks_credential_query_aliases_before_process(
+    tmp_path: Path,
+    query_key: str,
+) -> None:
+    runner = FakeRunner([])
+    source_url = f"https://media.example/watch?{query_key}=owner-secret-canary"
+
+    with pytest.raises(MediaError) as caught:
+        YtDlpAdapter(runner).discover(source_url, cwd=tmp_path)
+
+    assert caught.value.code == MediaErrorCode.AUTH_REQUIRED
+    assert "owner-secret-canary" not in str(caught.value)
+    assert runner.argv == []
+
+
+@pytest.mark.parametrize("query_key", _MEDIA_CREDENTIAL_QUERY_ALIASES)
+def test_yt_dlp_minimizes_credential_query_aliases_from_upstream_metadata(
+    tmp_path: Path,
+    query_key: str,
+) -> None:
+    secret_url = f"https://media.example/watch?{query_key}=owner-secret-canary"
+    payload = {
+        "id": "credential-alias-fixture",
+        "title": "Credential alias fixture",
+        "duration": 1,
+        "webpage_url": secret_url,
+    }
+    runner = FakeRunner([json.dumps(payload).encode()])
+
+    result = YtDlpAdapter(runner).discover(
+        "https://media.example/watch?id=public-fixture",
+        cwd=tmp_path,
+    )
+
+    assert "owner-secret-canary" not in result.source.locator
+    assert "owner-secret-canary" not in json.dumps(result.sanitized_metadata)
+
+
+def test_yt_dlp_keeps_benign_subscription_query(tmp_path: Path) -> None:
+    source_url = "https://media.example/watch?subscription=public-catalog"
+    payload = {
+        "id": "benign-query-fixture",
+        "title": "Benign query fixture",
+        "duration": 1,
+        "webpage_url": source_url,
+    }
+    runner = FakeRunner([json.dumps(payload).encode()])
+
+    result = YtDlpAdapter(runner).discover(source_url, cwd=tmp_path)
+
+    assert result.source.locator == source_url
+    assert len(runner.argv) == 1
