@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 
@@ -11,6 +12,7 @@ from nika_core.sportsbook_research import (
     EventStatus,
     EventStatusCode,
     Market,
+    OddsSnapshot,
     Participant,
     Selection,
     Sport,
@@ -78,3 +80,29 @@ def test_tampered_available_at_query_column_fails_closed(tmp_path) -> None:
     decision_time = event_at + timedelta(seconds=10)
     with pytest.raises(SportsbookResearchError, match="integrity"):
         repository.observations_at(decision_time)
+
+
+def test_tampered_entity_lookup_key_cannot_create_selection_alias(tmp_path) -> None:
+    repository, store = _repository(tmp_path)
+    repository.register_catalog(_catalog())
+
+    # Keep the hashed payload unchanged but move its denormalized lookup key. Without
+    # key-to-payload binding, _entity_payload() can resolve a non-canonical alias.
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE sportsbook_entities SET entity_id = ? "
+            "WHERE entity_type = 'selection' AND entity_id = 'a-win'",
+            ("ghost-selection",),
+        )
+
+    at = datetime(2026, 8, 27, 12, 2, tzinfo=UTC)
+    observation = OddsSnapshot(
+        "source",
+        "market",
+        EventTime(event_at=at, source_at=at, available_at=at),
+        {"ghost-selection": Decimal("2.00")},
+        2,
+    )
+
+    with pytest.raises(SportsbookResearchError):
+        repository.ingest(observation)
