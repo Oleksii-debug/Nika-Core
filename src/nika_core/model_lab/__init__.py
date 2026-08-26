@@ -23,6 +23,7 @@ from nika_core.model_lab.experiment_adapter import (
     metric_observations,
     suite_replays,
 )
+from nika_core.model_lab.repository import ModelLabRepository, SQLiteModelLabRepository
 
 __all__ = [
     "AttemptStatus",
@@ -35,6 +36,8 @@ __all__ = [
     "MetricValue",
     "ModelBenchmarkRunner",
     "ModelCandidate",
+    "ModelLabRepository",
+    "SQLiteModelLabRepository",
     "build_experiment_definition",
     "candidate_identity_sha256",
     "candidate_strategy_ref",
