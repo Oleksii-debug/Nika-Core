@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from nika_core.packaging.notices import build_cyclonedx_sbom
+from nika_core.packaging.notices import build_cyclonedx_sbom, supply_chain_findings
 
 
 def _supply_chain() -> dict[str, object]:
     return {
         "artifact": "NikaCore Windows base runtime",
         "policy": {"model_licenses_separate_from_engine": True},
+        "release_critical_declarations": [],
         "declared_dependency_surface": [
             {
                 "group": "base",
@@ -34,7 +35,43 @@ def _supply_chain() -> dict[str, object]:
                 "project_urls": ["https://example.invalid/runtime"],
             }
         ],
+        "bundle_native_artifacts": [],
     }
+
+
+def test_runtime_distribution_requires_declared_root_lineage() -> None:
+    """A clean-looking runtime package cannot be accepted without dependency lineage.
+
+    A transitive runtime dependency does not have to be a direct pyproject declaration,
+    but release evidence still has to bind it to an allowed declared root.  Otherwise an
+    undeclared package can be inserted while carrying plausible license/URL/RECORD data.
+    """
+    payload = _supply_chain()
+    payload["declared_dependency_surface"] = []
+
+    findings = supply_chain_findings(payload)
+    assert findings, (
+        "runtime inventory accepted a package with no declared/root dependency lineage"
+    )
+
+
+def test_packaged_native_binary_requires_provenance_lineage() -> None:
+    """Hashing a native binary is integrity evidence, not source provenance."""
+    payload = _supply_chain()
+    payload["bundle_native_artifacts"] = [
+        {
+            "path": "rogue-native.dll",
+            "sha256": "b" * 64,
+            "size": 4096,
+            "origin_class": "packaged-native-runtime",
+        }
+    ]
+
+    findings = supply_chain_findings(payload)
+    assert findings, (
+        "packaged native binary was accepted with only bytes/coarse origin and no "
+        "distribution/tool/source lineage"
+    )
 
 
 def test_cyclonedx_sbom_binds_dependency_scope_move() -> None:
