@@ -57,7 +57,7 @@ class MCPClientAdapter:
                 for tool in result.tools:
                     tool_id = f"mcp:{self._config.server_id}:{tool.name}"
                     if tool_id in seen_tool_ids:
-                        raise ValueError(f"duplicate MCP tool id: {tool_id}")
+                        raise ValueError("duplicate MCP tool id")
                     if len(specs) >= self._config.max_tools:
                         raise ValueError("MCP tool catalog exceeds max_tools")
                     seen_tool_ids.add(tool_id)
