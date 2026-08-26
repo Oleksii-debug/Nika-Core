@@ -51,10 +51,16 @@ def _candidate(
     )
 
 
-def _suite(*, dataset_ref: str, dataset_version: str = "1") -> BenchmarkSuite:
+def _suite(
+    *,
+    dataset_ref: str,
+    dataset_version: str = "1",
+    repetitions: int = 1,
+) -> BenchmarkSuite:
     return BenchmarkSuite(
         suite_id="shared-suite-id",
         version="1.0.0",
+        repetitions=repetitions,
         cases=(
             BenchmarkCase(
                 case_id="shared-case-id",
@@ -74,6 +80,7 @@ def _complete_evidence(
     candidate: ModelCandidate,
     suite: BenchmarkSuite,
     value: float,
+    expected_attempts: int = 1,
 ) -> BenchmarkRunEvidence:
     case = suite.cases[0]
     return BenchmarkRunEvidence(
@@ -82,7 +89,7 @@ def _complete_evidence(
         suite_id=suite.suite_id,
         suite_version=suite.version,
         suite_sha256=suite_sha256(suite),
-        expected_attempts=1,
+        expected_attempts=expected_attempts,
         attempts=(
             BenchmarkAttempt(
                 attempt_id=f"{case.case_id}:1",
@@ -195,5 +202,34 @@ def test_m8_must_not_promote_evidence_from_different_suite_provenance() -> None:
 
     # Provenance invariant: replay_id equality is insufficient authority when the
     # benchmark suite/dataset binding differs from the ExperimentDefinition.
+    assert result.status is ExperimentStatus.COMPLETED
+    assert result.selected_candidate_id == "champion"
+
+
+def test_m8_must_not_promote_under_sampled_declared_repetitions() -> None:
+    trusted_suite = _suite(dataset_ref="dataset://trusted", repetitions=2)
+    challenger = _candidate(
+        candidate_id="challenger",
+        model="reviewed-model",
+        model_version="reviewed-v1",
+        artifact_sha256="a" * 64,
+    )
+    under_sampled = _complete_evidence(
+        candidate=challenger,
+        suite=trusted_suite,
+        value=1.0,
+        expected_attempts=1,
+    )
+    assert trusted_suite.repetitions == 2
+    assert under_sampled.complete is True
+
+    result = _complete_m8(
+        declared_challenger=challenger,
+        definition_suite=trusted_suite,
+        challenger_evidence=under_sampled,
+    )
+
+    # Coverage invariant: declaring two repetitions must not be satisfiable by one
+    # repetition merely because BenchmarkRunEvidence.expected_attempts was lowered.
     assert result.status is ExperimentStatus.COMPLETED
     assert result.selected_candidate_id == "champion"
