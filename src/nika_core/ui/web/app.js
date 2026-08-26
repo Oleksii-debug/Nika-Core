@@ -108,6 +108,13 @@
     for (const node of Object.values(productProjectFields)) node.textContent = "";
   }
 
+  function renderProductProjectUnavailable(message) {
+    productProjectEmpty.textContent = message || "Стан поточного ProductProject недоступний.";
+    productProjectEmpty.hidden = false;
+    productProjectSummary.hidden = true;
+    clearProductProjectFields();
+  }
+
   function renderProductProject(project) {
     if (project == null) {
       productProjectEmpty.textContent = "Поточний ProductProject не вибрано.";
@@ -117,10 +124,9 @@
       return true;
     }
     if (!validProductProject(project)) {
-      productProjectEmpty.textContent = "Стан поточного ProductProject недоступний або пошкоджений.";
-      productProjectEmpty.hidden = false;
-      productProjectSummary.hidden = true;
-      clearProductProjectFields();
+      renderProductProjectUnavailable(
+        "Стан поточного ProductProject недоступний або пошкоджений.",
+      );
       appendLog("Некоректний bounded ProductProject state відхилено інтерфейсом.");
       return false;
     }
@@ -133,9 +139,20 @@
   }
 
   async function refreshState() {
-    if (!globalThis.pywebview?.api?.get_state) return false;
-    const response = await globalThis.pywebview.api.get_state();
+    if (!globalThis.pywebview?.api?.get_state) {
+      renderProductProjectUnavailable("Стан поточного ProductProject недоступний.");
+      return false;
+    }
+    let response;
+    try {
+      response = await globalThis.pywebview.api.get_state();
+    } catch (error) {
+      renderProductProjectUnavailable("Стан поточного ProductProject недоступний.");
+      appendLog(error instanceof Error ? error.message : String(error));
+      return false;
+    }
     if (!response.ok) {
+      renderProductProjectUnavailable("Стан поточного ProductProject недоступний.");
       appendLog(response.message || "Не вдалося отримати стан програми.");
       return false;
     }
@@ -190,7 +207,7 @@
       const saveFocusId = keymapControlId(action.action_id, "save");
       save.type = "button";
       save.id = saveFocusId;
-      save.textContent = action.may_be_unbound ? "Зберегти / очистити" : "Зберегти";
+      save.textContent = action.may_beUnbound ? "Зберегти / очистити" : "Зберегти";
       save.setAttribute(
         "aria-label",
         action.may_be_unbound
@@ -237,7 +254,8 @@
     try {
       const ready = await refreshKeymap();
       if (!ready) throw new Error("Action Registry bridge unavailable");
-      await refreshState();
+      const stateReady = await refreshState();
+      if (!stateReady) throw new Error("Desktop state bridge unavailable");
       document.documentElement.dataset.nikaReady = "true";
       announce("Nika Core готова до роботи.");
     } catch (error) {
