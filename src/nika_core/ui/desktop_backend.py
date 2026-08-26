@@ -419,17 +419,30 @@ class DesktopBackend:
             )
 
     def _only_controllable(self, *, action: str) -> TaskRecord | None:
-        records = [
-            record
-            for record in self._queue.list_recent(limit=50)
-            if record.state not in _TERMINAL_STATES
-        ]
+        with self._queue.store.connection() as conn:
+            rows = conn.execute(
+                "SELECT task_id FROM tasks "
+                "WHERE state NOT IN (?, ?, ?, ?) "
+                "ORDER BY updated_at DESC, created_at DESC LIMIT 2",
+                (
+                    TaskState.COMPLETED.value,
+                    TaskState.FAILED.value,
+                    TaskState.CANCELLED.value,
+                    TaskState.ARCHIVED.value,
+                ),
+            ).fetchall()
+        records = [self._queue.get(str(row["task_id"])) for row in rows]
         return self._require_unambiguous(records, action=action)
 
     def _only_with_state(self, state: TaskState, *, action: str) -> TaskRecord | None:
-        records = [
-            record for record in self._queue.list_recent(limit=50) if record.state == state
-        ]
+        with self._queue.store.connection() as conn:
+            rows = conn.execute(
+                "SELECT task_id FROM tasks "
+                "WHERE state = ? "
+                "ORDER BY updated_at DESC, created_at DESC LIMIT 2",
+                (state.value,),
+            ).fetchall()
+        records = [self._queue.get(str(row["task_id"])) for row in rows]
         return self._require_unambiguous(records, action=action)
 
     @staticmethod
