@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import Protocol
+from typing import Any, Protocol
 
 from nika_core.product_factory_deployment import ExecutionNodeRegistry
 from nika_core.product_factory_deployment_fleet import (
@@ -11,6 +14,12 @@ from nika_core.product_factory_deployment_fleet import (
 )
 from nika_core.product_factory_operations import ProductOperationsCoordinator
 from nika_core.product_factory_operations_contracts import ServiceHealth
+from nika_core.runtime.idempotency import (
+    IdempotencyConflictError,
+    IdempotencyLedger,
+    IdempotencyRecord,
+    IdempotencyStatus,
+)
 
 
 class FleetMaintenanceError(ValueError):
@@ -199,6 +208,7 @@ class RollingFleetMaintenanceCoordinator:
     operations: ProductOperationsCoordinator
     nodes: ExecutionNodeRegistry
     port: NodeMaintenancePort
+    idempotency: IdempotencyLedger | None = None
     _plans: dict[str, RollingMaintenancePlan] = field(default_factory=dict, init=False, repr=False)
     _records: dict[str, dict[str, NodeMaintenanceRecord]] = field(
         default_factory=dict,
@@ -273,8 +283,7 @@ class RollingFleetMaintenanceCoordinator:
                     )
                     return self.get(plan_id)
             request = self._request(plan, record, action)
-            result = self.port.apply(request)
-            records[node_id] = self._consume_result(record, request, result)
+            records[node_id] = self._apply_once(record, request)
             return self.get(plan_id)
         return self.get(plan_id)
 
@@ -320,6 +329,7 @@ class RollingFleetMaintenanceCoordinator:
                     raise FleetMaintenanceError(
                         "rolling-maintenance snapshot disagrees with live topology"
                     )
+                self._validate_pending_request(plan, record)
                 mapped[record.node_id] = record
             records[plan_id] = mapped
         self._plans = plans
@@ -433,6 +443,41 @@ class RollingFleetMaintenanceCoordinator:
             evidence_refs=plan.evidence_refs + record.evidence_refs,
         )
 
+    def _apply_once(
+        self,
+        record: NodeMaintenanceRecord,
+        request: NodeMaintenanceRequest,
+    ) -> NodeMaintenanceRecord:
+        ledger_record, created = self._reserve_request(request)
+        if not created:
+            if ledger_record.status is IdempotencyStatus.COMPLETED:
+                result = _result_from_payload(ledger_record.result)
+                return self._consume_result(record, request, result)
+            if request.action is NodeMaintenanceAction.DRAIN:
+                self.operations.record_node_availability(record.node_id, available=False)
+            return replace(
+                record,
+                state=NodeMaintenanceState.RECONCILE_REQUIRED,
+                evidence_refs=record.evidence_refs
+                + (f"idempotency:reconcile-required:{ledger_record.operation_key}",),
+                pending_request=request,
+            )
+        try:
+            result = self.port.apply(request)
+        except Exception:
+            self._ledger().mark_uncertain(ledger_record.operation_key)
+            raise
+        if result.uncertain:
+            self._ledger().mark_uncertain(ledger_record.operation_key)
+        elif result.applied:
+            self._ledger().complete(
+                ledger_record.operation_key,
+                _result_payload(result),
+            )
+        else:
+            self._ledger().release_pending(ledger_record.operation_key)
+        return self._consume_result(record, request, result)
+
     def _consume_result(
         self,
         record: NodeMaintenanceRecord,
@@ -457,20 +502,88 @@ class RollingFleetMaintenanceCoordinator:
         request = record.pending_request
         if request is None:
             raise FleetMaintenanceError("reconcile state is missing durable request identity")
+        ledger_record, created = self._reserve_request(request)
+        if created:
+            # Legacy snapshots can contain an unresolved provider request without the
+            # newer ledger row. Treat it as uncertain; never infer that replay is safe.
+            ledger_record = self._ledger().mark_uncertain(ledger_record.operation_key)
+        if ledger_record.status is IdempotencyStatus.COMPLETED:
+            result = _result_from_payload(ledger_record.result)
+            evidence = record.evidence_refs + result.evidence_refs
+            return self._complete_action(record, request.action, result, evidence)
+
         result = self.port.inspect(request)
         evidence = record.evidence_refs + result.evidence_refs
         if result.uncertain:
+            if ledger_record.status is IdempotencyStatus.PENDING:
+                self._ledger().mark_uncertain(ledger_record.operation_key)
             return replace(record, evidence_refs=evidence)
         if not result.applied:
             if request.action is NodeMaintenanceAction.DRAIN:
                 self.operations.record_node_availability(record.node_id, available=True)
+            if ledger_record.status is IdempotencyStatus.PENDING:
+                self._ledger().release_pending(ledger_record.operation_key)
+                return self._rewind_after_proven_not_applied(record, evidence)
+            self._ledger().reconcile_completed(
+                ledger_record.operation_key,
+                _result_payload(result),
+            )
             return replace(
                 record,
                 state=NodeMaintenanceState.FAILED,
                 evidence_refs=evidence,
                 pending_request=None,
             )
+        if ledger_record.status is IdempotencyStatus.PENDING:
+            self._ledger().complete(ledger_record.operation_key, _result_payload(result))
+        else:
+            self._ledger().reconcile_completed(
+                ledger_record.operation_key,
+                _result_payload(result),
+            )
         return self._complete_action(record, request.action, result, evidence)
+
+    def _reserve_request(
+        self,
+        request: NodeMaintenanceRequest,
+    ) -> tuple[IdempotencyRecord, bool]:
+        operation_key = f"fleet-maintenance:{request.request_id}"
+        try:
+            return self._ledger().reserve_once(
+                operation_key=operation_key,
+                task_id=request.plan_id,
+                operation_type=f"fleet-maintenance:{request.action.value}",
+                input_fingerprint=_request_fingerprint(request),
+            )
+        except IdempotencyConflictError as exc:
+            raise FleetMaintenanceError(
+                "durable maintenance identity conflicts with prior request input"
+            ) from exc
+
+    def _ledger(self) -> IdempotencyLedger:
+        if self.idempotency is None:
+            raise FleetMaintenanceError(
+                "durable idempotency ledger is required before maintenance side effects"
+            )
+        return self.idempotency
+
+    def _rewind_after_proven_not_applied(
+        self,
+        record: NodeMaintenanceRecord,
+        evidence: tuple[str, ...],
+    ) -> NodeMaintenanceRecord:
+        state = {
+            0: NodeMaintenanceState.CORDONED,
+            1: NodeMaintenanceState.DRAINED,
+            2: NodeMaintenanceState.RESTARTED,
+            3: NodeMaintenanceState.VERIFIED,
+        }[len(record.completed_actions)]
+        return replace(
+            record,
+            state=state,
+            evidence_refs=evidence,
+            pending_request=None,
+        )
 
     def _complete_action(
         self,
@@ -539,6 +652,35 @@ class RollingFleetMaintenanceCoordinator:
                         "execution node already belongs to active rolling maintenance"
                     )
 
+    def _validate_pending_request(
+        self,
+        plan: RollingMaintenancePlan,
+        record: NodeMaintenanceRecord,
+    ) -> None:
+        request = record.pending_request
+        if request is None:
+            return
+        action = _next_action(record)
+        if action is None:
+            raise FleetMaintenanceError(
+                "restored pending request has no remaining maintenance action"
+            )
+        if (
+            request.request_id != f"{plan.plan_id}:{record.node_id}:{action.value}"
+            or request.plan_id != plan.plan_id
+            or request.project_id != plan.project_id
+            or request.fleet_plan_id != plan.fleet_plan_id
+            or request.node_id != record.node_id
+            or request.action is not action
+            or request.bindings != record.bindings
+            or request.reason != plan.reason
+            or request.approval_ref != plan.approval_ref
+            or request.evidence_refs[: len(plan.evidence_refs)] != plan.evidence_refs
+        ):
+            raise FleetMaintenanceError(
+                "restored pending maintenance request identity is invalid"
+            )
+
     def _validate_cordon_state(self) -> None:
         node_enabled = {
             node.identity.node_id: node.enabled for node in self.nodes.snapshot().nodes
@@ -564,6 +706,75 @@ class RollingFleetMaintenanceCoordinator:
         if plan is None:
             raise FleetMaintenanceError("unknown rolling-maintenance plan")
         return plan
+
+
+def _request_fingerprint(request: NodeMaintenanceRequest) -> str:
+    payload = {
+        "request_id": request.request_id,
+        "plan_id": request.plan_id,
+        "project_id": request.project_id,
+        "fleet_plan_id": request.fleet_plan_id,
+        "node_id": request.node_id,
+        "action": request.action.value,
+        "bindings": [
+            {
+                "service_id": binding.service_id,
+                "environment_id": binding.environment_id,
+                "release_sha": binding.release_sha,
+                "artifact_digest": binding.artifact_digest,
+                "replica_ids": list(binding.replica_ids),
+            }
+            for binding in request.bindings
+        ],
+        "reason": request.reason,
+        "approval_ref": request.approval_ref,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _result_payload(result: NodeMaintenanceResult) -> dict[str, Any]:
+    return {
+        "applied": result.applied,
+        "uncertain": result.uncertain,
+        "evidence_refs": list(result.evidence_refs),
+        "verified_replica_ids": list(result.verified_replica_ids),
+    }
+
+
+def _result_from_payload(payload: Mapping[str, Any] | None) -> NodeMaintenanceResult:
+    if payload is None:
+        raise FleetMaintenanceError("completed maintenance ledger record is missing result")
+    try:
+        applied = payload["applied"]
+        uncertain = payload["uncertain"]
+        evidence_refs = payload["evidence_refs"]
+        verified_replica_ids = payload["verified_replica_ids"]
+        if not isinstance(applied, bool) or not isinstance(uncertain, bool):
+            raise TypeError
+        if not isinstance(evidence_refs, list) or not all(
+            isinstance(item, str) for item in evidence_refs
+        ):
+            raise TypeError
+        if not isinstance(verified_replica_ids, list) or not all(
+            isinstance(item, str) for item in verified_replica_ids
+        ):
+            raise TypeError
+        return NodeMaintenanceResult(
+            applied,
+            uncertain,
+            tuple(evidence_refs),
+            tuple(verified_replica_ids),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise FleetMaintenanceError(
+            "completed maintenance ledger result is invalid"
+        ) from exc
 
 
 def _next_action(record: NodeMaintenanceRecord) -> NodeMaintenanceAction | None:
