@@ -24,20 +24,36 @@ _SENSITIVE_QUERY_KEYS = frozenset(
     {
         "access_token",
         "api_key",
+        "apikey",
         "auth",
+        "auth_token",
         "authorization",
+        "awsaccesskeyid",
+        "client_secret",
         "cookie",
         "cookies",
+        "credential",
+        "googleaccessid",
         "key",
         "password",
         "refresh_token",
         "secret",
         "sig",
         "signature",
+        "subscription_key",
         "token",
+        "x_amz_credential",
+        "x_api_key",
+        "x_goog_credential",
     }
 )
+_SENSITIVE_QUERY_SUFFIXES = ("_token", "_secret", "_password", "_signature")
 _LOCAL_HOSTNAMES = frozenset({"localhost", "localhost.localdomain"})
+
+
+def _is_sensitive_query_key(key: str) -> bool:
+    normalized = key.casefold().replace("-", "_")
+    return normalized in _SENSITIVE_QUERY_KEYS or normalized.endswith(_SENSITIVE_QUERY_SUFFIXES)
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,8 +338,10 @@ class YtDlpAdapter:
                 MediaErrorCode.AUTH_REQUIRED,
                 "URL-embedded credentials are forbidden; use an opaque authentication reference",
             )
-        query_keys = {key.lower() for key, _value in parse_qsl(parsed.query, keep_blank_values=True)}
-        if query_keys & _SENSITIVE_QUERY_KEYS:
+        if any(
+            _is_sensitive_query_key(key)
+            for key, _value in parse_qsl(parsed.query, keep_blank_values=True)
+        ):
             raise MediaError(
                 MediaErrorCode.AUTH_REQUIRED,
                 "credential-like URL query parameters are forbidden; use an opaque authentication reference",
@@ -361,7 +379,7 @@ class YtDlpAdapter:
             host = f"{host}:{parsed.port}"
         safe_query = []
         for key, value in parse_qsl(parsed.query, keep_blank_values=True):
-            safe_query.append((key, "[REDACTED]" if key.lower() in _SENSITIVE_QUERY_KEYS else value))
+            safe_query.append((key, "[REDACTED]" if _is_sensitive_query_key(key) else value))
         sanitized = urlunsplit(
             (
                 parsed.scheme.lower(),
