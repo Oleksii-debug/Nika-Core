@@ -17,7 +17,6 @@ from nika_core.product_factory_deployment import (
     EnvironmentIdentity,
     EnvironmentTier,
     HealthEvidence,
-    ProviderInspection,
     ReleaseRef,
     RollbackEvidence,
 )
@@ -205,7 +204,10 @@ class DurableDeploymentFabric(DeploymentFabric):
         return fabric
 
 
-def _validate_snapshot_project(snapshot: DeploymentFabricSnapshot, project_id: str) -> None:
+def _validate_snapshot_project(
+    snapshot: DeploymentFabricSnapshot,
+    project_id: str,
+) -> None:
     for record in snapshot.records:
         if record.intent.project_id != project_id:
             raise ProductFactoryDeploymentCheckpointError(
@@ -236,7 +238,11 @@ def _decode_snapshot(value: Any) -> DeploymentFabricSnapshot:
     records = data.get("records")
     staging = data.get("healthy_staging")
     current = data.get("current_releases")
-    if not isinstance(records, list) or not isinstance(staging, list) or not isinstance(current, list):
+    if (
+        not isinstance(records, list)
+        or not isinstance(staging, list)
+        or not isinstance(current, list)
+    ):
         raise TypeError("deployment snapshot collections must be lists")
     return DeploymentFabricSnapshot(
         tuple(_decode_record(item) for item in records),
@@ -262,9 +268,14 @@ def _decode_record(value: Any) -> DeploymentRecord:
     return DeploymentRecord(
         intent=_decode_intent(data["intent"]),
         state=DeploymentState(_text(data, "state")),
-        provider_evidence_refs=_text_tuple(data.get("provider_evidence_refs", []), "evidence refs"),
+        provider_evidence_refs=_text_tuple(
+            data.get("provider_evidence_refs", []),
+            "evidence refs",
+        ),
         health=None if data.get("health") is None else _decode_health(data["health"]),
-        rollback=None if data.get("rollback") is None else _decode_rollback(data["rollback"]),
+        rollback=(
+            None if data.get("rollback") is None else _decode_rollback(data["rollback"])
+        ),
         previous_release_sha=_optional_text(data.get("previous_release_sha")),
         previous_release=_decode_optional_release(data.get("previous_release")),
     )
@@ -299,7 +310,10 @@ def _decode_intent(value: Any) -> DeploymentIntent:
             _text(environment, "provider_ref"),
         ),
         release=release,
-        migration_refs=_text_tuple(data.get("migration_refs", []), "migration refs"),
+        migration_refs=_text_tuple(
+            data.get("migration_refs", []),
+            "migration refs",
+        ),
     )
 
 
@@ -404,6 +418,8 @@ def _optional_text(value: Any) -> str | None:
 
 
 def _text_tuple(value: Any, label: str) -> tuple[str, ...]:
-    if not isinstance(value, (list, tuple)) or any(not isinstance(item, str) for item in value):
+    if not isinstance(value, (list, tuple)) or any(
+        not isinstance(item, str) for item in value
+    ):
         raise TypeError(f"{label} must contain text values")
     return tuple(value)
