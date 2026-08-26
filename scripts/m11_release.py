@@ -16,6 +16,7 @@ from nika_core.packaging.release import (
     write_release_manifest,
 )
 from nika_core.packaging.windows import default_windows_plan
+from nika_core.product_factory_packaged_planning import TEAM_PLAN_REF_PREFIX
 
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _PF11_EVIDENCE_NAME = "pf11-packaged-product-journey.json"
@@ -58,6 +59,13 @@ def resolve_source_sha(requested: str | None) -> str:
 def _require_exact_nonnegative_int(payload: dict[str, object], field: str) -> int:
     value = payload.get(field)
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RuntimeError(f"packaged PF11 proof returned invalid {field}")
+    return value
+
+
+def _require_nonempty_string(payload: dict[str, object], field: str) -> str:
+    value = payload.get(field)
+    if not isinstance(value, str) or not value.strip():
         raise RuntimeError(f"packaged PF11 proof returned invalid {field}")
     return value
 
@@ -108,17 +116,35 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
     project_id = first.get("project_id")
     if (
         first.get("route") != "product_project"
-        or first.get("spec_version") != 1
+        or first.get("spec_version") != 2
         or not isinstance(project_id, str)
         or not project_id.strip()
+        or first.get("pre_plan_current_command_proven") is not True
         or first.get("command_center_state_proven") is not True
+        or first.get("current_command_proven") is not True
+        or first.get("current_command_focus_proven") is not True
         or first.get("bounded_projection_proven") is not True
         or first.get("bridge_state_project_id") != project_id
-        or first.get("bridge_state_spec_version") != 1
+        or first.get("bridge_state_spec_version") != 2
+        or first.get("team_plan_persisted_proven") is not True
+        or first.get("team_plan_worker_dispatch_started") is not False
     ):
         raise RuntimeError("packaged PF11 ProductProject proof returned invalid route evidence")
     status_count = _require_exact_nonnegative_int(first, "bridge_state_status_count")
     decision_count = _require_exact_nonnegative_int(first, "bridge_state_decision_count")
+    role_count = _require_exact_nonnegative_int(first, "team_plan_role_count")
+    review_count = _require_exact_nonnegative_int(
+        first,
+        "team_plan_independent_review_count",
+    )
+    team_plan_id = _require_nonempty_string(first, "team_plan_id")
+    team_plan_binding_ref = _require_nonempty_string(first, "team_plan_binding_ref")
+    if not team_plan_binding_ref.startswith(TEAM_PLAN_REF_PREFIX):
+        raise RuntimeError("packaged PF11 proof returned an unrecognized team-plan binding")
+    if role_count < 1 or review_count < 1 or review_count > role_count:
+        raise RuntimeError("packaged PF11 proof returned invalid team-plan role counts")
+    if first.get("team_plan_permission_ceiling") != ["read_project"]:
+        raise RuntimeError("packaged PF11 proof exceeded the planning-only permission ceiling")
     for forbidden_true in (
         "human_tested",
         "nvda_verified",
@@ -129,17 +155,26 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
 
     target = bundle_dir / _PF11_EVIDENCE_NAME
     evidence = {
-        "schema_version": 2,
+        "schema_version": 3,
         "source_sha": source_sha,
         "route": first["route"],
         "product_project_id": project_id,
         "product_project_spec_version": first["spec_version"],
         "product_project_state": first.get("state"),
+        "pre_plan_current_command_proven": True,
         "product_command_center_proven": True,
         "packaged_bridge_state_proven": True,
         "bounded_projection_proven": True,
         "bridge_state_status_count": status_count,
         "bridge_state_decision_count": decision_count,
+        "team_plan_id": team_plan_id,
+        "team_plan_binding_ref": team_plan_binding_ref,
+        "team_plan_role_count": role_count,
+        "team_plan_independent_review_count": review_count,
+        "team_plan_permission_ceiling": ["read_project"],
+        "team_plan_persisted_proven": True,
+        "team_plan_restart_recovery_proven": True,
+        "team_plan_worker_dispatch_started": False,
         "packaged_executable_proven": True,
         "restart_replay_proven": True,
         "human_tested": False,
