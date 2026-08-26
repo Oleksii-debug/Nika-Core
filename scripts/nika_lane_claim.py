@@ -4,6 +4,7 @@ import argparse
 import json
 import re
 import sys
+import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -43,6 +44,10 @@ class Scope:
         if self.is_prefix:
             return self.value[:-3]
         return self.value
+
+    @property
+    def identity_root(self) -> str:
+        return self.root.casefold()
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,12 +133,47 @@ def _validate_scope(value: object) -> Scope:
         raise LaneClaimError("scope must use repository POSIX separators")
     if raw.startswith("/") or raw.endswith("/") or "//" in raw:
         raise LaneClaimError("scope must be a canonical repository-relative path")
+    if unicodedata.normalize("NFC", raw) != raw:
+        raise LaneClaimError("scope must use NFC-normalized Unicode")
     parts = raw.split("/")
     if not parts or any(part in {"", ".", ".."} for part in parts):
         raise LaneClaimError("scope must not contain empty, '.' or '..' components")
-    if parts[0] == ".git":
+    if any(part.casefold() == ".git" for part in parts):
         raise LaneClaimError("scope may not claim Git metadata")
+
+    forbidden = '<>:"|?*'
+    reserved = {"con", "prn", "aux", "nul"}
+    for part in parts:
+        if part.endswith((" ", ".")):
+            raise LaneClaimError("scope contains a Windows-ambiguous trailing dot or space")
+        if any(char in part for char in forbidden):
+            raise LaneClaimError("scope contains a Windows-forbidden path character")
+        device_stem = part.split(".", 1)[0].casefold()
+        if (
+            device_stem in reserved
+            or re.fullmatch(r"com[0-9]", device_stem)
+            or re.fullmatch(r"lpt[0-9]", device_stem)
+        ):
+            raise LaneClaimError("scope contains a Windows reserved device name")
     return Scope(value=text, is_prefix=is_prefix)
+
+
+def _scope_overlaps(left: Scope, right: Scope) -> bool:
+    left_root = left.identity_root
+    right_root = right.identity_root
+    if not left.is_prefix and not right.is_prefix:
+        return left_root == right_root
+    if left.is_prefix and right.is_prefix:
+        return (
+            left_root == right_root
+            or left_root.startswith(right_root + "/")
+            or right_root.startswith(left_root + "/")
+        )
+    prefix, exact = (left, right) if left.is_prefix else (right, left)
+    return (
+        exact.identity_root == prefix.identity_root
+        or exact.identity_root.startswith(prefix.identity_root + "/")
+    )
 
 
 def claim_from_mapping(payload: Mapping[str, object]) -> LaneClaim:
@@ -172,9 +212,13 @@ def claim_from_mapping(payload: Mapping[str, object]) -> LaneClaim:
     if not raw_scope:
         raise LaneClaimError("scope must not be empty")
     scopes = tuple(_validate_scope(item) for item in raw_scope)
-    scope_names = [item.value for item in scopes]
+    scope_names = [item.value.casefold() for item in scopes]
     if len(scope_names) != len(set(scope_names)):
-        raise LaneClaimError("scope entries must be unique")
+        raise LaneClaimError("scope entries must be unique under Windows path identity")
+    for index, left in enumerate(scopes):
+        for right in scopes[index + 1 :]:
+            if _scope_overlaps(left, right):
+                raise LaneClaimError("scope entries must not overlap within one claim")
 
     created_at = _parse_timestamp(payload["created_at"], "created_at")
     expires_at = _parse_timestamp(payload["expires_at"], "expires_at")
@@ -213,6 +257,8 @@ def _payloads_from_text(text: str) -> list[Mapping[str, object]]:
     if isinstance(parsed, dict):
         return [parsed]
     if isinstance(parsed, list):
+        if not parsed:
+            raise LaneClaimError("JSON claim lists must not be empty")
         if not all(isinstance(item, dict) for item in parsed):
             raise LaneClaimError("JSON claim lists may contain objects only")
         return parsed
@@ -247,37 +293,61 @@ def load_claims(path: Path) -> tuple[LaneClaim, ...]:
     return claims_from_text(text)
 
 
-def _scope_overlaps(left: Scope, right: Scope) -> bool:
-    if not left.is_prefix and not right.is_prefix:
-        return left.root == right.root
-    if left.is_prefix and right.is_prefix:
-        return (
-            left.root == right.root
-            or left.root.startswith(right.root + "/")
-            or right.root.startswith(left.root + "/")
-        )
-    prefix, exact = (left, right) if left.is_prefix else (right, left)
-    return exact.root == prefix.root or exact.root.startswith(prefix.root + "/")
+def _scope_identity(scope: tuple[Scope, ...]) -> tuple[str, ...]:
+    return tuple(item.value.casefold() for item in scope)
 
 
 def effective_claims(claims: Iterable[LaneClaim], now: datetime) -> tuple[LaneClaim, ...]:
     if now.tzinfo is None or now.utcoffset() is None:
         raise LaneClaimError("now must be timezone-aware")
-    latest: dict[str, LaneClaim] = {}
+
+    histories: dict[str, list[LaneClaim]] = {}
     for claim in claims:
-        current = latest.get(claim.lane_id)
-        if current is None or claim.created_at > current.created_at:
-            latest[claim.lane_id] = claim
-            continue
-        if claim.created_at == current.created_at and claim != current:
-            raise LaneClaimError(
-                f"conflicting same-time claim records for lane {claim.lane_id}"
+        histories.setdefault(claim.lane_id, []).append(claim)
+
+    effective: list[LaneClaim] = []
+    for lane_id, history in histories.items():
+        ordered = sorted(history, key=lambda item: item.created_at)
+        first = ordered[0]
+        fixed_identity = (
+            first.owner,
+            first.start_main,
+            first.branch,
+            _scope_identity(first.scope),
+        )
+        seen_pr = first.pr
+        released = first.status == "released"
+        previous = first
+
+        for claim in ordered[1:]:
+            if claim.created_at == previous.created_at:
+                if claim != previous:
+                    raise LaneClaimError(
+                        f"conflicting same-time claim records for lane {lane_id}"
+                    )
+                continue
+            identity = (
+                claim.owner,
+                claim.start_main,
+                claim.branch,
+                _scope_identity(claim.scope),
             )
-    return tuple(
-        claim
-        for claim in sorted(latest.values(), key=lambda item: item.lane_id)
-        if claim.is_active_at(now)
-    )
+            if identity != fixed_identity:
+                raise LaneClaimError(f"lane identity changed across records for {lane_id}")
+            if seen_pr is not None and claim.pr != seen_pr:
+                raise LaneClaimError(f"PR identity changed across records for {lane_id}")
+            if seen_pr is None and claim.pr is not None:
+                seen_pr = claim.pr
+            if released and claim.status == "active":
+                raise LaneClaimError(f"released lane {lane_id} cannot be reactivated")
+            released = released or claim.status == "released"
+            previous = claim
+
+        latest = ordered[-1]
+        if latest.is_active_at(now):
+            effective.append(latest)
+
+    return tuple(sorted(effective, key=lambda item: item.lane_id))
 
 
 def find_collisions(

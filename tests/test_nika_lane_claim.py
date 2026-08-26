@@ -55,6 +55,11 @@ def test_valid_claim_is_active() -> None:
         r"src\file.py",
         "src/*/file.py",
         ".git/config",
+        "nested/.GIT/config",
+        "docs/NUL.txt",
+        "docs/name.",
+        "docs/name ",
+        "docs/name:stream",
     ],
 )
 def test_unsafe_scope_fails_closed(bad_scope: str) -> None:
@@ -211,6 +216,98 @@ def test_json_list_can_represent_ledger_export() -> None:
 def test_non_object_prefixed_payload_fails_closed() -> None:
     with pytest.raises(LaneClaimError, match="must be a JSON object"):
         claims_from_text('NIKA_LANE_CLAIM_V1=["not", "an", "object"]')
+
+
+def test_scope_collision_uses_windows_case_insensitive_identity() -> None:
+    candidate = claim_from_mapping(_payload(scope=["docs/Policy.md"]))
+    peer = claim_from_mapping(
+        _payload(
+            lane_id="W100",
+            scope=["DOCS/policy.MD"],
+            created_at="2026-08-26T20:01:00Z",
+            expires_at="2026-08-27T20:01:00Z",
+        )
+    )
+
+    assert find_collisions(candidate, [peer], NOW)
+
+
+def test_non_nfc_scope_fails_closed() -> None:
+    decomposed = "docs/cafe\u0301.md"
+
+    with pytest.raises(LaneClaimError, match="NFC"):
+        claim_from_mapping(_payload(scope=[decomposed]))
+
+
+def test_redundant_overlapping_scope_inside_claim_fails_closed() -> None:
+    with pytest.raises(LaneClaimError, match="overlap"):
+        claim_from_mapping(
+            _payload(
+                scope=[
+                    "src/nika_core/research/**",
+                    "src/nika_core/research/http.py",
+                ]
+            )
+        )
+
+
+def test_lane_identity_cannot_change_during_renewal() -> None:
+    first = claim_from_mapping(_payload())
+    changed = claim_from_mapping(
+        _payload(
+            scope=["docs/ROADMAP.md"],
+            created_at="2026-08-26T20:30:00Z",
+            expires_at="2026-08-27T20:30:00Z",
+        )
+    )
+
+    with pytest.raises(LaneClaimError, match="identity changed"):
+        effective_claims([first, changed], NOW)
+
+
+def test_pr_identity_can_bind_once_but_not_change() -> None:
+    first = claim_from_mapping(_payload())
+    with_pr_payload = _payload(
+        created_at="2026-08-26T20:20:00Z",
+        expires_at="2026-08-27T20:20:00Z",
+    )
+    with_pr_payload["pr"] = 501
+    with_pr = claim_from_mapping(with_pr_payload)
+    changed_pr_payload = _payload(
+        created_at="2026-08-26T20:40:00Z",
+        expires_at="2026-08-27T20:40:00Z",
+    )
+    changed_pr_payload["pr"] = 502
+    changed_pr = claim_from_mapping(changed_pr_payload)
+
+    assert effective_claims([first, with_pr], NOW) == (with_pr,)
+    with pytest.raises(LaneClaimError, match="PR identity changed"):
+        effective_claims([first, with_pr, changed_pr], NOW)
+
+
+def test_released_lane_cannot_be_reactivated() -> None:
+    first = claim_from_mapping(_payload())
+    released = claim_from_mapping(
+        _payload(
+            status="released",
+            created_at="2026-08-26T20:20:00Z",
+            expires_at="2026-08-27T20:20:00Z",
+        )
+    )
+    renewed = claim_from_mapping(
+        _payload(
+            created_at="2026-08-26T20:40:00Z",
+            expires_at="2026-08-27T20:40:00Z",
+        )
+    )
+
+    with pytest.raises(LaneClaimError, match="cannot be reactivated"):
+        effective_claims([first, released, renewed], NOW)
+
+
+def test_empty_json_claim_list_fails_closed() -> None:
+    with pytest.raises(LaneClaimError, match="must not be empty"):
+        claims_from_text("[]")
 
 
 def test_naive_now_is_rejected() -> None:

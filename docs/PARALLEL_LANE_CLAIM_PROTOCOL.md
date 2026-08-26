@@ -63,8 +63,10 @@ Fields:
 - `expires_at`: canonical UTC timestamp ending in `Z`, at most 24 hours later;
 - `pr`: positive PR number when known, otherwise `null`.
 
-A newer record for the same `lane_id` supersedes an older one. A `released` record closes the lane.
-Equal-time conflicting records fail closed.
+A newer record for the same `lane_id` supersedes an older one only when owner, start SHA, branch and
+scope identity remain unchanged. PR identity may bind once from `null` to a positive PR number and
+cannot later change. A `released` record closes the lane permanently; reuse requires a new lane ID.
+Equal-time conflicting records and mid-lane identity changes fail closed.
 
 ## Scope collision semantics
 
@@ -72,12 +74,15 @@ Scopes are lexical repository paths, not filesystem containment proofs.
 
 - `path/file.py` claims exactly that path.
 - `path/subtree/**` claims the subtree root and every descendant.
-- exact paths collide only when equal.
-- a prefix collides with an exact path inside that prefix.
+- exact paths collide when equal under Windows case-insensitive identity.
+- a prefix collides with an exact path inside that prefix under the same identity.
 - two prefixes collide when either contains the other.
 - sibling prefixes do not collide.
-- absolute paths, backslashes, traversal, `.git`, embedded wildcards and non-canonical path forms are
+- scope text must be NFC-normalized so decomposed/composed Unicode aliases cannot split ownership.
+- absolute paths, backslashes, traversal, `.git`, embedded wildcards, Windows-reserved device names,
+  forbidden Windows filename characters, trailing dot/space aliases and non-canonical path forms are
   rejected.
+- overlapping entries inside one claim are rejected instead of silently widening or duplicating scope.
 
 A path claim is only a collision detector. Shared-contract changes can require a compatibility
 decision even when filenames differ.
@@ -85,7 +90,8 @@ decision even when filenames differ.
 ## Lease lifetime and stale claims
 
 Version 1 limits a claim to 24 hours so an abandoned chat cannot block development indefinitely.
-Workers doing longer work publish a fresh claim after another full live-state race check.
+Workers doing longer work publish a fresh claim with the same immutable lane identity after another
+full live-state race check.
 
 Expiry does not erase GitHub truth. An open PR, newer Issue #1 owner record, explicit integration
 dependency, or current Drive handoff can still prove that a slice is occupied.
