@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .contracts import DenseDecoderConfig, ScalingTarget, estimate_dense_decoder_parameters
+from .contracts import (
+    DenseDecoderConfig,
+    ScalingTarget,
+    estimate_dense_decoder_parameters,
+)
 
 
 PILOT_20M = ScalingTarget(target_id="pilot-20m", target_parameters=20_000_000)
