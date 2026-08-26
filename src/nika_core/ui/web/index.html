@@ -28,7 +28,7 @@
       <textarea id="command-input" rows="5"></textarea>
       <p id="execution-mode">Поточний пакет запускає команди через безпечний детермінований режим без LLM.</p>
       <div class="actions">
-        <button type="button" data-action-id="task.create">Створити завдання</button>
+        <button type="button" data-action-id="task.create" data-error-focus-target="command-input">Створити завдання</button>
         <button type="button" data-action-id="task.pause">Призупинити</button>
         <button type="button" data-action-id="task.resume">Продовжити</button>
         <button type="button" data-action-id="agent.stop">Зупинити агента</button>
