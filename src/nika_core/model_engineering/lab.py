@@ -163,9 +163,7 @@ class ModelEngineeringLab:
             selected = next(item for item in candidates if item.candidate_id == selected_id)
         except StopIteration as exc:
             raise RuntimeError("selected candidate is absent from immutable definition") from exc
-        candidate = self.decode_candidate(selected)
-        if candidate.candidate_id != selected_id:
-            raise RuntimeError("candidate manifest identity does not match selected candidate")
+        self.decode_candidate(selected)
         return ModelRecommendation(
             experiment_id=experiment_id,
             candidate_id=selected_id,
@@ -192,6 +190,7 @@ class ModelEngineeringLab:
                 "model_version",
                 "source_ref",
                 "license_ref",
+                "privacy_capability_ref",
                 "permission_fingerprint",
                 "supports_private_data",
                 "artifact_sha256",
@@ -211,10 +210,13 @@ class ModelEngineeringLab:
             model_version=cls._manifest_text(payload, "model_version"),
             source_ref=cls._manifest_text(payload, "source_ref"),
             license_ref=cls._manifest_text(payload, "license_ref"),
+            privacy_capability_ref=cls._manifest_text(payload, "privacy_capability_ref"),
             permission_fingerprint=cls._manifest_text(payload, "permission_fingerprint"),
             supports_private_data=supports_private_data,
             artifact_sha256=raw_artifact_sha256,
         )
+        if candidate.candidate_id != strategy.candidate_id:
+            raise ValueError("candidate manifest identity mismatch")
         if candidate.permission_fingerprint != strategy.permission_fingerprint:
             raise ValueError("candidate permission evidence mismatch")
         return candidate
@@ -282,6 +284,7 @@ class ModelEngineeringLab:
             "model_version": candidate.model_version,
             "source_ref": candidate.source_ref,
             "license_ref": candidate.license_ref,
+            "privacy_capability_ref": candidate.privacy_capability_ref,
             "permission_fingerprint": candidate.permission_fingerprint,
             "supports_private_data": candidate.supports_private_data,
             "artifact_sha256": candidate.artifact_sha256,
