@@ -11,6 +11,11 @@ from nika_core.product_factory_orchestration import (
     ProductRepositoryGraph,
     RepositoryRef,
 )
+from nika_core.product_factory_review_authority import (
+    ProductFactoryReviewAuthorityError,
+    ProductFactoryReviewAuthorityPort,
+    ProductFactoryReviewSubject,
+)
 from nika_core.toolsmith.contracts import CodingResult, TestEvidence
 
 
@@ -65,6 +70,7 @@ class WorkerResultEnvelope:
     result_sha: str
     diff_digest: str
     coding_result: CodingResult
+    producer_actor_id: str | None = None
 
     def __post_init__(self) -> None:
         if not all(value.strip() for value in (self.work_id, self.component_id, self.repository_id)):
@@ -72,6 +78,8 @@ class WorkerResultEnvelope:
         _validate_sha(self.base_sha, "base_sha")
         _validate_sha(self.result_sha, "result_sha")
         _validate_digest(self.diff_digest, "diff_digest")
+        if self.producer_actor_id is not None and not self.producer_actor_id.strip():
+            raise CoordinatorError("producer actor identity must not be blank")
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,7 +90,12 @@ class ReviewDecision:
     evidence_refs: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if not self.reviewer_id.strip() or not self.reason.strip() or not self.evidence_refs:
+        if (
+            not self.reviewer_id.strip()
+            or not self.reason.strip()
+            or not self.evidence_refs
+            or any(not ref.strip() for ref in self.evidence_refs)
+        ):
             raise CoordinatorError("independent review requires reviewer, reason and evidence")
 
 
@@ -112,6 +125,10 @@ class ProductFactoryCoordinator:
     """PF4 coordinator above bounded component work, not a second agent runtime."""
 
     graph: ProductRepositoryGraph
+    review_authority: ProductFactoryReviewAuthorityPort | None = field(
+        default=None,
+        repr=False,
+    )
     _records: dict[str, WorkRecord] = field(default_factory=dict, init=False, repr=False)
     _revision: int = field(default=0, init=False, repr=False)
     _trusted_plan: tuple[ComponentWorkRequest, ...] | None = field(
@@ -211,6 +228,43 @@ class ProductFactoryCoordinator:
         record = self._record(component_id)
         if record.state is not WorkState.REVIEW_REQUIRED or record.result is None:
             raise CoordinatorError("component is not awaiting independent review")
+
+        producer_actor_id = record.result.producer_actor_id
+        if producer_actor_id is None:
+            raise CoordinatorError(
+                "trusted producer identity is required before independent review"
+            )
+        if producer_actor_id == decision.reviewer_id:
+            raise CoordinatorError(
+                "independent reviewer must differ from candidate producer"
+            )
+        if self.review_authority is None:
+            raise CoordinatorError("trusted independent reviewer authority is unavailable")
+
+        try:
+            subject = ProductFactoryReviewSubject(
+                project_id=record.request.project_id,
+                component_id=record.request.component_id,
+                work_id=record.request.work_id,
+                repository_id=record.request.repository_id,
+                base_sha=record.result.base_sha,
+                result_sha=record.result.result_sha,
+                diff_digest=record.result.diff_digest,
+                attempt=record.request.attempt,
+                producer_actor_id=producer_actor_id,
+                reviewer_id=decision.reviewer_id,
+                accepted=decision.accepted,
+            )
+            verified = self.review_authority.verify(subject, decision.evidence_refs)
+        except ProductFactoryReviewAuthorityError as exc:
+            raise CoordinatorError(f"invalid independent review subject: {exc}") from exc
+        except Exception as exc:  # noqa: BLE001 - authority failures are fail-closed
+            raise CoordinatorError(
+                "trusted independent reviewer authority verification failed"
+            ) from exc
+        if verified is not True:
+            raise CoordinatorError("trusted independent reviewer authority rejected evidence")
+
         state = WorkState.ACCEPTED if decision.accepted else WorkState.REPAIR_REQUIRED
         updated = WorkRecord(
             record.request,
