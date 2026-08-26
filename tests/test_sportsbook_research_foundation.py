@@ -273,9 +273,9 @@ def test_future_schema_and_corrupt_payload_fail_closed(tmp_path) -> None:
     with pytest.raises(SportsbookResearchError, match="integrity"):
         repository.load_catalog()
 
-    future_store = SQLiteStore(tmp_path / "future.sqlite3")
-    future_store.initialize()
-    with future_store.connection() as conn:
+    broken_store = SQLiteStore(tmp_path / "broken-history.sqlite3")
+    broken_store.initialize()
+    with broken_store.connection() as conn:
         conn.execute(
             "CREATE TABLE sportsbook_schema_migrations ("
             "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
@@ -283,6 +283,21 @@ def test_future_schema_and_corrupt_payload_fail_closed(tmp_path) -> None:
         conn.execute(
             "INSERT INTO sportsbook_schema_migrations(version, applied_at) VALUES (2, ?)",
             (datetime.now(UTC).isoformat(),),
+        )
+    with pytest.raises(SportsbookResearchError, match="not contiguous"):
+        SQLiteSportsbookRepository(broken_store).initialize()
+
+    future_store = SQLiteStore(tmp_path / "future.sqlite3")
+    future_store.initialize()
+    with future_store.connection() as conn:
+        conn.execute(
+            "CREATE TABLE sportsbook_schema_migrations ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        timestamp = datetime.now(UTC).isoformat()
+        conn.executemany(
+            "INSERT INTO sportsbook_schema_migrations(version, applied_at) VALUES (?, ?)",
+            ((1, timestamp), (2, timestamp)),
         )
     with pytest.raises(SportsbookResearchError, match="newer"):
         SQLiteSportsbookRepository(future_store).initialize()
