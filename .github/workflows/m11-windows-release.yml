@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "src/nika_core/packaging/**"
+      - "src/nika_core/product_release_compliance.py"
       - "src/nika_core/qa/**"
       - "src/nika_core/ui/**"
       - "scripts/nika_windows.py"
@@ -11,6 +12,7 @@ on:
       - "scripts/m5_uia_proof.ps1"
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
+      - "tests/test_product_release_compliance.py"
       - "tests/test_qa_workflow_lineage.py"
       - "pyproject.toml"
       - ".github/workflows/m11-windows-release.yml"
@@ -19,6 +21,7 @@ on:
       - "main"
     paths:
       - "src/nika_core/packaging/**"
+      - "src/nika_core/product_release_compliance.py"
       - "src/nika_core/qa/**"
       - "src/nika_core/ui/**"
       - "scripts/nika_windows.py"
@@ -26,6 +29,7 @@ on:
       - "scripts/m5_uia_proof.ps1"
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
+      - "tests/test_product_release_compliance.py"
       - "tests/test_qa_workflow_lineage.py"
       - "pyproject.toml"
       - ".github/workflows/m11-windows-release.yml"
