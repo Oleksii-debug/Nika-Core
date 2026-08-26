@@ -118,9 +118,17 @@ or contention profiling is required.
 The Model Engineering Lab does not promote a model itself.
 
 `build_experiment_definition()` creates only an existing Experiment Engine definition and refuses
-promotion-oriented definitions unless the evaluation set is explicitly `held_out`.
+promotion-oriented definitions unless the evaluation set is explicitly `held_out`. The promotion
+policy is also rejected if it names a metric outside the four bounded Model Engineering metrics.
 
-`benchmark_observations()` can project case evidence into these bounded metrics:
+`benchmark_observations()` emits exactly the primary and guardrail metrics declared by that exact
+`ExperimentDefinition`. Before emitting anything it binds the benchmark report to the supplied
+`EvaluationSet`, verifies the exact replay evidence encoded in the definition, checks complete case
+identity/order, and verifies that the candidate's evidence SHA matches the experiment's
+`StrategyRef`. A report from another evaluation version or another model using the same candidate
+ID therefore cannot be rebound into the experiment merely by reusing replay or candidate names.
+
+The bounded metrics are:
 - `model_quality_score`;
 - `model_task_pass`;
 - `model_completion_success`;
@@ -157,7 +165,10 @@ Fail closed on:
 - invalid or Boolean CPU/memory telemetry;
 - invalid accelerator telemetry;
 - backwards/non-finite benchmark clock;
-- development-set use for a promotion Experiment definition.
+- development-set use for a promotion Experiment definition;
+- unsupported promotion-policy metrics;
+- replay/evaluation-set evidence substitution;
+- same-candidate-ID model evidence substitution.
 
 Provider errors remain benchmark evidence as typed failures. Unexpected programming errors are not
 laundered into a normal provider failure.
