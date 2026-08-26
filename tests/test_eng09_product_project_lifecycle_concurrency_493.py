@@ -109,10 +109,9 @@ def test_same_key_concurrent_transition_is_one_effect_and_restart_replay(tmp_pat
     assert replay == first
     assert restarted.projects.get("p1").row_version == 1
     assert restarted.current_state("p1") is ProductProjectState.PAUSED
-    assert restarted.history("p1") == (
-        restarted.history("p1")[0],
-        first,
-    )
+    history = restarted.history("p1")
+    assert len(history) == 2
+    assert history[1] == first
 
     with restarted_store.connection() as conn:
         receipt_count = conn.execute(
