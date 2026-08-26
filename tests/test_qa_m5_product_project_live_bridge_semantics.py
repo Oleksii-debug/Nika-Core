@@ -23,11 +23,11 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _render_live_snapshot(product_project: Mapping[str, Any]) -> dict[str, object]:
-    project_json = json.dumps(product_project, ensure_ascii=True)
+def _render_live_response(response: Mapping[str, Any]) -> dict[str, object]:
+    response_json = json.dumps(response, ensure_ascii=True)
     harness = f"""
 const fs = require("fs");
-const PROJECT = {project_json};
+const RESPONSE = {response_json};
 
 class Element {{}}
 class HTMLElement extends Element {{
@@ -77,10 +77,7 @@ global.crypto = {{ randomUUID: () => "qa-live-bridge-request" }};
 global.pywebview = {{
   api: {{
     list_actions: async () => [],
-    get_state: async () => ({{
-      ok: true,
-      state: {{ tasks: [], agents: [], workspaces: [], product_project: PROJECT }},
-    }}),
+    get_state: async () => RESPONSE,
     export_keymap: async () => ({{ ok: true, message: "ok", data: "{{}}" }}),
     import_keymap: async () => ({{ ok: true, message: "ok" }}),
     set_binding: async () => ({{ ok: true, message: "ok" }}),
@@ -133,7 +130,7 @@ def _require_product_project(response: Mapping[str, Any]) -> Mapping[str, Any]:
     return project
 
 
-def test_real_packaged_bridge_projection_renders_after_restart(tmp_path: Path) -> None:
+def test_real_packaged_bridge_response_renders_after_restart(tmp_path: Path) -> None:
     database = tmp_path / "live ProductProject bridge.db"
     config = AppConfig(database_path=database)
     goal = "Створи застосунок для доступного обліку витрат"
@@ -154,7 +151,8 @@ def test_real_packaged_bridge_projection_renders_after_restart(tmp_path: Path) -
     assert created["status"] == "completed"
     assert first_products.inspect_project(project_id).summary.goal == goal
 
-    first_project = _require_product_project(first_bridge.get_state())
+    first_response = first_bridge.get_state()
+    first_project = _require_product_project(first_response)
     assert first_project["project_id"] == project_id
     assert first_project["title"] == goal
     assert first_project["goal"] == goal
@@ -174,11 +172,12 @@ def test_real_packaged_bridge_projection_renders_after_restart(tmp_path: Path) -
     )
 
     restarted_bridge, restarted_products = build_windows_bridge(config)
-    restarted_project = _require_product_project(restarted_bridge.get_state())
+    restarted_response = restarted_bridge.get_state()
+    restarted_project = _require_product_project(restarted_response)
     assert restarted_project == first_project
     assert restarted_products.inspect_project(project_id).summary.goal == goal
 
-    rendered = _render_live_snapshot(restarted_project)
+    rendered = _render_live_response(restarted_response)
     assert rendered == {
         "empty_hidden": True,
         "summary_hidden": False,
