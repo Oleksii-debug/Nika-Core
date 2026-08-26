@@ -54,8 +54,8 @@ class GovernancePolicy:
 class GitHubRestClient:
     """Minimal read-only GitHub REST client with secret-safe failures."""
 
-    def __init__(self, *, api_base: str, token: str | None, timeout: float) -> None:
-        self._api_base = api_base.rstrip("/")
+    def __init__(self, *, token: str | None, timeout: float) -> None:
+        self._api_base = "https://api.github.com"
         self._token = token
         self._timeout = timeout
 
@@ -419,7 +419,6 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="required_checks",
         help="Required status-check context; repeat to override defaults.",
     )
-    parser.add_argument("--api-base", default="https://api.github.com")
     parser.add_argument("--timeout", type=float, default=15.0)
     parser.add_argument(
         "--token-env",
@@ -433,7 +432,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     required_checks = tuple(args.required_checks or DEFAULT_REQUIRED_CHECKS)
     token = os.environ.get(args.token_env) if args.token_env else None
-    client = GitHubRestClient(api_base=args.api_base, token=token, timeout=args.timeout)
+    client = GitHubRestClient(token=token, timeout=args.timeout)
     try:
         report = inspect_repository_governance(
             client,
