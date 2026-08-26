@@ -106,6 +106,17 @@ def _bool_enabled(value: Any, *, default: bool = False) -> bool:
     return default
 
 
+def _actor_allowance_count(value: Any) -> int:
+    if not isinstance(value, dict):
+        return 0
+    count = 0
+    for key in ("users", "teams", "apps"):
+        actors = value.get(key, [])
+        if isinstance(actors, list):
+            count += len(actors)
+    return count
+
+
 def _classic_required_checks(protection: dict[str, Any]) -> set[str]:
     status_checks = protection.get("required_status_checks")
     if not isinstance(status_checks, dict):
@@ -272,12 +283,16 @@ def inspect_repository_governance(
         "admin_enforcement": False,
         "no_force_push": False,
         "no_delete": False,
+        "pull_request_bypass_actor_count": 0,
         "required_checks": set(),
     }
     if protection is not None:
-        classic["pull_request"] = isinstance(
-            protection.get("required_pull_request_reviews"), dict
-        )
+        pull_request_reviews = protection.get("required_pull_request_reviews")
+        classic["pull_request"] = isinstance(pull_request_reviews, dict)
+        if isinstance(pull_request_reviews, dict):
+            classic["pull_request_bypass_actor_count"] = _actor_allowance_count(
+                pull_request_reviews.get("bypass_pull_request_allowances")
+            )
         classic["admin_enforcement"] = _bool_enabled(protection.get("enforce_admins"))
         classic["no_force_push"] = not _bool_enabled(
             protection.get("allow_force_pushes"), default=True
@@ -317,7 +332,11 @@ def inspect_repository_governance(
         ),
     }
 
-    classic_unrestricted = bool(protection is not None and classic["admin_enforcement"])
+    classic_unrestricted = bool(
+        protection is not None
+        and classic["admin_enforcement"]
+        and classic["pull_request_bypass_actor_count"] == 0
+    )
     classic_checks = set(classic["required_checks"]) if classic_unrestricted else set()
     combined_checks = classic_checks | set(ruleset_combined["required_checks"])
     controls = {
@@ -335,6 +354,9 @@ def inspect_repository_governance(
             (classic_unrestricted and classic["no_delete"])
             or ruleset_combined["no_delete"]
         ),
+        "classic_pull_request_bypass_actor_count": classic[
+            "pull_request_bypass_actor_count"
+        ],
         "ruleset_bypass_actor_count": observed_ruleset_bypass_actor_count,
         "proof_eligible_ruleset_count": len(proof_rulesets),
     }
