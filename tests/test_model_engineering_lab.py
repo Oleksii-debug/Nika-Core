@@ -32,6 +32,9 @@ def _candidate(candidate_id: str, *, model_version: str) -> ModelCandidate:
         model_version=model_version,
         source_ref=f"local-model-registry://{candidate_id}/{model_version}",
         license_ref="license-evidence://approved-model-license",
+        privacy_capability_ref=(
+            f"provider-capability://{candidate_id}/private-data-review-v1"
+        ),
         permission_fingerprint="perm:v1:private-local-only",
         supports_private_data=True,
         artifact_sha256="a" * 64 if candidate_id == "champion" else "b" * 64,
@@ -109,6 +112,7 @@ def test_model_manifests_are_bound_into_existing_experiment_definition() -> None
     case = lab.decode_case(snapshot.definition.replays[0])
     assert champion.model_id == "model-champion"
     assert champion.artifact_sha256 == "a" * 64
+    assert champion.privacy_capability_ref.endswith("private-data-review-v1")
     assert case.dataset_version == "2026-08-26.1"
     assert case.privacy is PrivacyClass.PRIVATE
     assert snapshot.definition.champion.version != champion.model_version
@@ -126,6 +130,39 @@ def test_candidate_manifest_tamper_fails_closed() -> None:
 
     with pytest.raises(ValueError, match="manifest digest mismatch"):
         lab.decode_candidate(tampered)
+
+
+def test_candidate_strategy_identity_mismatch_fails_closed() -> None:
+    repository = InMemoryExperimentRepository()
+    lab = ModelEngineeringLab(repository)
+    snapshot = lab.create(_spec())
+
+    mismatched = replace(snapshot.definition.champion, candidate_id="different-id")
+
+    with pytest.raises(ValueError, match="manifest identity mismatch"):
+        lab.decode_candidate(mismatched)
+
+
+def test_secret_bearing_candidate_reference_is_rejected_before_persistence() -> None:
+    with pytest.raises(ValueError, match="credential-like query parameters"):
+        replace(
+            _candidate("champion", model_version="1.0.0"),
+            source_ref="https://models.example/model?X-Amz-Signature=synthetic-canary",
+        )
+
+    with pytest.raises(ValueError, match="URL credentials"):
+        replace(
+            _candidate("champion", model_version="1.0.0"),
+            license_ref="https://synthetic:canary@licenses.example/model",
+        )
+
+
+def test_secret_bearing_dataset_reference_is_rejected_before_persistence() -> None:
+    with pytest.raises(ValueError, match="credential-like query parameters"):
+        replace(
+            _case("case-1", dataset_version="1"),
+            dataset_ref="https://datasets.example/eval?token=synthetic-canary",
+        )
 
 
 def test_permission_widening_is_rejected_before_experiment_creation() -> None:
@@ -279,3 +316,19 @@ def test_create_start_and_complete_are_idempotent_for_uncertain_replay() -> None
     replayed_recommendation = lab.complete("model-exp-001")
 
     assert replayed_recommendation == first_recommendation
+
+
+def test_rollback_is_idempotent_and_restores_previous_champion_recommendation() -> None:
+    repository = InMemoryExperimentRepository()
+    lab = ModelEngineeringLab(repository)
+    lab.create(_spec())
+    lab.start("model-exp-001")
+    _record_complete_matrix(lab, challenger_latency_ms=115.0)
+    promoted = lab.complete("model-exp-001")
+    assert promoted.candidate_id == "challenger"
+
+    first_rollback = lab.rollback("model-exp-001")
+    replayed_rollback = lab.rollback("model-exp-001")
+
+    assert first_rollback.candidate_id == "champion"
+    assert replayed_rollback == first_rollback
