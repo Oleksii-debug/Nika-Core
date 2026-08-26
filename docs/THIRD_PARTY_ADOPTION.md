@@ -31,10 +31,13 @@ Nika owns stable task/agent/workspace identity, lifecycle, permissions, approval
 ## Intelligence and Model Gateway
 Nika now treats model-free planning, embedded models, external local model servers and cloud APIs as separate replaceable capabilities.
 
-### Deterministic Brain — ADAPT Unified Planning
-- ADAPT — `unified-planning` 1.3.x with a small compatible engine such as Pyperplan for explicit Boolean/state/action planning.
-- Nika owns `WorldState`, goal/action and planner contracts; Unified Planning types stay inside the adapter.
-- Planned actions execute through the existing guarded ToolExecutor and therefore do not bypass approval/security policy.
+### Deterministic Brain — ADAPT Unified Planning + Aries
+- ADAPT / INTEGRATED — `unified-planning==1.3.0` behind Nika's framework-neutral deterministic-planning contracts.
+- REUSE OPTIONAL / PINNED — `up-aries==0.5.0` is the adopted optional engine. Unified Planning 1.3.0 is Apache-2.0; the published `up-aries` 0.5.0 package declares MIT, while the current maintained Aries upstream exposes Apache-2.0 OR MIT licensing. Exact source hashes and publication provenance are recorded in `docs/DETERMINISTIC_BRAIN_DEPENDENCY_EVIDENCE.md`.
+- REJECT FOR ADOPTED DEFAULT — Pyperplan 2.1 is GPLv3+. Although the Unified Planning wrapper can expose a Pyperplan integration, wrapper metadata does not change the engine license; Pyperplan is not part of Nika's adopted planning extra.
+- Nika owns `WorldState`, goal/action/plan/error contracts, complete-plan simulation/validation, cumulative step/replan/timeout budgets, completed-action restart identity and approval boundaries; Unified Planning/Aries types stay inside the adapter.
+- The `planning` extra remains optional and must not bloat the base Windows package. A future planner/version/source/license change requires a fresh adoption and release-evidence decision.
+- Planned actions execute through the existing guarded `ToolExecutor`; planner output never manufactures approval or bypasses R0–R4 policy.
 - REUSE — SQLite FTS5 and ordinary deterministic libraries/search before adding semantic models.
 - REUSE — scikit-learn only for measured classical ML tasks with explicit datasets/metrics.
 
