@@ -106,3 +106,15 @@ def test_tampered_entity_lookup_key_cannot_create_selection_alias(tmp_path) -> N
 
     with pytest.raises(SportsbookResearchError):
         repository.ingest(observation)
+
+
+@pytest.mark.parametrize("query_key", ["client_secret", "apikey"])
+def test_source_uri_rejects_additional_unambiguous_secret_query_aliases(
+    query_key: str,
+) -> None:
+    with pytest.raises(SportsbookResearchError, match="credential query parameter"):
+        SportsbookSource(
+            "source",
+            "Source",
+            f"https://example.invalid/feed?{query_key}=super-secret-value",
+        )
