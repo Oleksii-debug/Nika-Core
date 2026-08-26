@@ -12,6 +12,7 @@ from nika_core.data.sqlite import SQLiteStore
 
 _MAX_INSPECTION_LIMIT: Final = 500
 _REDACTED: Final = "[REDACTED]"
+_REDACTED_URL: Final = "[REDACTED_URL]"
 _SENSITIVE_KEYS: Final = frozenset(
     {
         "access_token",
@@ -36,12 +37,17 @@ _SENSITIVE_KEYS: Final = frozenset(
 _AUTH_HEADER_RE: Final = re.compile(
     r"(?i)\b(authorization|proxy-authorization)(\s*:\s*)[^\r\n]+"
 )
+_COOKIE_HEADER_RE: Final = re.compile(r"(?i)\b(cookie|set-cookie)(\s*:\s*)[^\r\n]+")
 _INLINE_SECRET_RE: Final = re.compile(
     r"(?i)\b(api[_-]?key|api[_-]?hash|access[_-]?token|refresh[_-]?token|"
     r"id[_-]?token|session[_-]?token|password|passphrase|client[_-]?secret)"
     r"\b(\s*[:=]\s*)([^\s,;&]+)"
 )
 _BEARER_RE: Final = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
+_PRIVATE_KEY_RE: Final = re.compile(
+    r"-----BEGIN [^-\r\n]*PRIVATE KEY-----.*?-----END [^-\r\n]*PRIVATE KEY-----",
+    re.IGNORECASE | re.DOTALL,
+)
 _SECRET_QUERY_NAMES: Final = frozenset(
     {
         "access_token",
@@ -85,10 +91,16 @@ class AuditInspectionQuery:
     def __post_init__(self) -> None:
         for field_name in ("event_type", "entity_type", "entity_id"):
             value = getattr(self, field_name)
+            if value is not None and not isinstance(value, str):
+                raise TypeError(f"{field_name} must be a string when supplied")
             if value is not None and not value.strip():
                 raise ValueError(f"{field_name} must not be blank")
+        if type(self.after_event_id) is not int:
+            raise TypeError("after_event_id must be an integer")
         if self.after_event_id < 0:
             raise ValueError("after_event_id must be non-negative")
+        if type(self.limit) is not int:
+            raise TypeError("limit must be an integer")
         if not 1 <= self.limit <= _MAX_INSPECTION_LIMIT:
             raise ValueError(f"limit must be between 1 and {_MAX_INSPECTION_LIMIT}")
 
@@ -257,9 +269,14 @@ def _is_sensitive_key(normalized_key: str) -> bool:
 
 
 def _redact_text(value: str) -> str:
+    sanitized = _PRIVATE_KEY_RE.sub(_REDACTED, value)
     sanitized = _AUTH_HEADER_RE.sub(
         lambda match: f"{match.group(1)}{match.group(2)}{_REDACTED}",
-        value,
+        sanitized,
+    )
+    sanitized = _COOKIE_HEADER_RE.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}{_REDACTED}",
+        sanitized,
     )
     sanitized = _BEARER_RE.sub("Bearer " + _REDACTED, sanitized)
     sanitized = _INLINE_SECRET_RE.sub(
@@ -270,27 +287,45 @@ def _redact_text(value: str) -> str:
 
 
 def _redact_url(value: str) -> str:
+    looks_like_web_url = value.casefold().startswith(("http://", "https://"))
     try:
         parts = urlsplit(value)
     except ValueError:
+        return _REDACTED_URL if looks_like_web_url else value
+    if parts.scheme not in {"http", "https"}:
         return value
-    if parts.scheme not in {"http", "https"} or not parts.netloc:
-        return value
+    if not parts.netloc:
+        return _REDACTED_URL
 
     hostname = parts.hostname or ""
     try:
         parsed_port = parts.port
     except ValueError:
-        return value
+        return _REDACTED_URL
     port = f":{parsed_port}" if parsed_port is not None else ""
     if parts.username is not None or parts.password is not None:
-        netloc = f"{_REDACTED}@{hostname}{port}"
+        host_for_netloc = f"[{hostname}]" if ":" in hostname else hostname
+        netloc = f"{_REDACTED}@{host_for_netloc}{port}"
     else:
         netloc = parts.netloc
 
-    query_pairs = parse_qsl(parts.query, keep_blank_values=True)
-    safe_pairs = [
-        (name, _REDACTED if name.casefold().replace("-", "_") in _SECRET_QUERY_NAMES else item)
-        for name, item in query_pairs
-    ]
-    return urlunsplit((parts.scheme, netloc, parts.path, urlencode(safe_pairs), parts.fragment))
+    safe_query = _redact_url_parameters(parts.query)
+    safe_fragment = _redact_url_parameters(parts.fragment)
+    return urlunsplit((parts.scheme, netloc, parts.path, safe_query, safe_fragment))
+
+
+def _redact_url_parameters(value: str) -> str:
+    pairs = parse_qsl(value, keep_blank_values=True)
+    if not pairs:
+        return value
+    return urlencode(
+        [
+            (
+                name,
+                _REDACTED
+                if name.casefold().replace("-", "_") in _SECRET_QUERY_NAMES
+                else item,
+            )
+            for name, item in pairs
+        ]
+    )
