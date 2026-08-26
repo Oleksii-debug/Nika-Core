@@ -66,7 +66,7 @@ def _time(*, minute: int, available_delay: int = 0) -> EventTime:
     event_at = datetime(2026, 8, 27, 16, minute, tzinfo=UTC)
     return EventTime(
         event_at=event_at,
-        source_at=event_at + timedelta(seconds=1),
+        source_at=event_at,
         available_at=event_at + timedelta(seconds=available_delay),
     )
 
