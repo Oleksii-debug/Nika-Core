@@ -19,6 +19,43 @@ _MANIFEST_KEYS = frozenset({"manifest_version", "product", "version", "source_sh
 _RELEASE_FILE_KEYS = frozenset({"path", "size", "sha256"})
 _WINDOWS_FORBIDDEN_CHARS = frozenset('<>"|?*')
 _SECRET_RELEASE_BASENAMES = frozenset({".env", "token.json", "cookies.txt"})
+_SECRET_CONTENT_SUFFIXES = frozenset(
+    {".json", ".toml", ".yaml", ".yml", ".ini", ".cfg", ".conf", ".properties"}
+)
+_SECRET_SCAN_CHUNK_BYTES = 64 * 1024
+_SECRET_SCAN_OVERLAP_BYTES = 8 * 1024
+_SECRET_ASSIGNMENT_RE = re.compile(
+    rb"""
+    [\"']?
+    (?:
+        api[_-]?key|apikey|access[_-]?token|auth[_-]?token|client[_-]?secret|
+        secret[_-]?key|password|passwd|private[_-]?key
+    )
+    [\"']?
+    \s*[:=]\s*
+    (?P<value>
+        \"(?:\\.|[^\"\\\r\n]){1,4096}\"|
+        '(?:\\.|[^'\\\r\n]){1,4096}'|
+        [^\s,\#;}{\]\r\n]{1,4096}
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_SECRET_PLACEHOLDER_VALUES = frozenset(
+    {
+        b"none",
+        b"null",
+        b"unset",
+        b"redacted",
+        b"masked",
+        b"changeme",
+        b"change-me",
+        b"change_me",
+        b"replace-me",
+        b"replace_me",
+        b"placeholder",
+    }
+)
 
 
 class _DuplicateJsonKey(ValueError):
@@ -98,6 +135,54 @@ def _release_path_is_secret(value: object) -> bool:
 
 def _canonical_release_path(value: object) -> bool:
     return _canonical_relative_path(value) and value != _RELEASE_MANIFEST_NAME
+
+
+def _secret_assignment_value_is_placeholder(value: bytes) -> bool:
+    normalized = value.strip().strip(b"\"'").strip().lower()
+    if not normalized or normalized in _SECRET_PLACEHOLDER_VALUES:
+        return True
+    if normalized.startswith(b"${") and normalized.endswith(b"}"):
+        return True
+    if normalized.startswith(b"{{") and normalized.endswith(b"}}"):
+        return True
+    if normalized.startswith(b"%") and normalized.endswith(b"%") and len(normalized) > 2:
+        return True
+    if normalized.startswith((b"env:", b"keyring:", b"credential-ref:")):
+        return True
+    return False
+
+
+def _stream_contains_secret_assignment(handle: Any) -> bool:
+    overlap = b""
+    while True:
+        chunk = handle.read(_SECRET_SCAN_CHUNK_BYTES)
+        if not chunk:
+            return False
+        window = overlap + chunk
+        for match in _SECRET_ASSIGNMENT_RE.finditer(window):
+            if not _secret_assignment_value_is_placeholder(match.group("value")):
+                return True
+        overlap = window[-_SECRET_SCAN_OVERLAP_BYTES:]
+
+
+def _release_file_contains_secret_assignment(relative_path: str, path: Path) -> bool:
+    if PurePosixPath(relative_path).suffix.casefold() not in _SECRET_CONTENT_SUFFIXES:
+        return False
+    try:
+        with path.open("rb") as handle:
+            return _stream_contains_secret_assignment(handle)
+    except OSError:
+        return True
+
+
+def _archive_member_contains_secret_assignment(
+    archive: zipfile.ZipFile,
+    member: zipfile.ZipInfo,
+) -> bool:
+    if PurePosixPath(_zip_member_path(member)).suffix.casefold() not in _SECRET_CONTENT_SUFFIXES:
+        return False
+    with archive.open(member, "r") as handle:
+        return _stream_contains_secret_assignment(handle)
 
 
 def _manifest_structure_findings(manifest: ReleaseManifest) -> tuple[str, ...]:
@@ -247,6 +332,9 @@ def verify_release_manifest(bundle_dir: Path, manifest: ReleaseManifest) -> tupl
             continue
         if _sha256(path) != entry.sha256:
             findings.append(f"sha256:{relative_path}")
+            continue
+        if _release_file_contains_secret_assignment(relative_path, path):
+            findings.append(f"secret-content:{relative_path}")
     return tuple(findings)
 
 
@@ -416,6 +504,14 @@ def verify_release_archive(artifact_path: Path, *, source_sha: str) -> tuple[str
                     continue
                 if actual_sha256 != entry.sha256:
                     findings.append(f"archive:sha256:{relative_path}")
+                    continue
+                try:
+                    has_secret_content = _archive_member_contains_secret_assignment(archive, member)
+                except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile):
+                    findings.append(f"archive:unreadable:{relative_path}")
+                    continue
+                if has_secret_content:
+                    findings.append(f"archive:secret-content:{relative_path}")
             return tuple(findings)
     except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile):
         return ("archive:invalid-zip",)
