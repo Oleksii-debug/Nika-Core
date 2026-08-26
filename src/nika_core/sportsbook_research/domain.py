@@ -6,6 +6,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from types import MappingProxyType
+from urllib.parse import parse_qsl, urlsplit
 
 from nika_core.trading_research.contracts import EventTime, require_aware_utc
 
@@ -46,6 +47,35 @@ def _source_sequence(value: int) -> int:
     if type(value) is not int or value < 0:
         raise SportsbookResearchError("source_sequence must be a non-negative integer")
     return value
+
+
+def _safe_source_uri(value: str) -> str:
+    normalized = _required(value, "source_uri")
+    parsed = urlsplit(normalized)
+    if parsed.username is not None or parsed.password is not None:
+        raise SportsbookResearchError("source_uri must not contain credentials")
+    sensitive_query_keys = {
+        "access_token",
+        "api_key",
+        "api_token",
+        "authorization",
+        "cookie",
+        "credential",
+        "credentials",
+        "password",
+        "refresh_token",
+        "secret",
+        "session",
+        "session_id",
+        "token",
+    }
+    for key, _value in parse_qsl(parsed.query, keep_blank_values=True):
+        normalized_key = key.strip().lower().replace("-", "_")
+        if normalized_key in sensitive_query_keys:
+            raise SportsbookResearchError(
+                f"source_uri must not contain credential query parameter: {key}"
+            )
+    return normalized
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,7 +184,7 @@ class SportsbookSource:
         object.__setattr__(self, "source_id", _required(self.source_id, "source_id"))
         object.__setattr__(self, "name", _required(self.name, "name"))
         if self.source_uri is not None:
-            object.__setattr__(self, "source_uri", _required(self.source_uri, "source_uri"))
+            object.__setattr__(self, "source_uri", _safe_source_uri(self.source_uri))
         if self.license_id is not None:
             object.__setattr__(self, "license_id", _required(self.license_id, "license_id"))
 
@@ -224,6 +254,33 @@ class SportsbookCatalog:
             raise SportsbookResearchError(
                 f"market must contain at least one selection: {empty_market}"
             )
+        object.__setattr__(self, "sports", tuple(sorted(self.sports, key=lambda item: item.sport_id)))
+        object.__setattr__(
+            self,
+            "competitions",
+            tuple(sorted(self.competitions, key=lambda item: item.competition_id)),
+        )
+        object.__setattr__(
+            self,
+            "participants",
+            tuple(sorted(self.participants, key=lambda item: item.participant_id)),
+        )
+        object.__setattr__(self, "events", tuple(sorted(self.events, key=lambda item: item.event_id)))
+        object.__setattr__(
+            self,
+            "markets",
+            tuple(sorted(self.markets, key=lambda item: item.market_id)),
+        )
+        object.__setattr__(
+            self,
+            "selections",
+            tuple(sorted(self.selections, key=lambda item: item.selection_id)),
+        )
+        object.__setattr__(
+            self,
+            "sources",
+            tuple(sorted(self.sources, key=lambda item: item.source_id)),
+        )
 
 
 class EventStatusCode(str, Enum):
@@ -239,6 +296,8 @@ def _copy_int_mapping(values: Mapping[str, int], field_name: str) -> Mapping[str
     copied: dict[str, int] = {}
     for key, value in values.items():
         normalized = _required(str(key), field_name)
+        if normalized in copied:
+            raise SportsbookResearchError(f"duplicate normalized {field_name} key: {normalized}")
         if type(value) is not int or value < 0:
             raise SportsbookResearchError(
                 f"{field_name} values must be non-negative integers"
@@ -260,6 +319,8 @@ def _copy_decimal_mapping(
     copied: dict[str, Decimal] = {}
     for key, value in values.items():
         normalized = _required(str(key), field_name)
+        if normalized in copied:
+            raise SportsbookResearchError(f"duplicate normalized {field_name} key: {normalized}")
         parsed = _finite_decimal(value, field_name)
         if minimum_exclusive is not None and parsed <= minimum_exclusive:
             raise SportsbookResearchError(
