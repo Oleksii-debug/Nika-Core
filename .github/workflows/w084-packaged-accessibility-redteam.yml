@@ -1,0 +1,200 @@
+name: W084 Windows Packaged Accessibility Pre-Human Red-Team
+
+on:
+  pull_request:
+    paths:
+      - "scripts/w084_packaged_accessibility_redteam.ps1"
+      - ".github/workflows/w084-packaged-accessibility-redteam.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  NIKA_TARGET_SHA: 3f89ec92fec86e008d01b94a7588ddfb1d5025ff
+  NIKA_REUSE_HARNESS_SHA: c42075f82bcbca72c670364a8d3db3c46aeb7b1a
+  NIKA_M12_RUN_ID: "32937118253"
+  NIKA_M12_ARTIFACT_ID: "9605108321"
+  NIKA_M12_ARTIFACT_NAME: NikaCore-0.0.2-m12-prehuman-3f89ec92fec86e008d01b94a7588ddfb1d5025ff
+  NIKA_M12_ARTIFACT_DIGEST: sha256:84b6b4bd36b9c3683008f0a50134944a1d4de6fb3112e1f37ab841dce0d1ac8c
+
+concurrency:
+  group: w084-packaged-accessibility-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  packaged-accessibility-redteam:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout W084 QA head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: qa
+          persist-credentials: false
+
+      - name: Checkout pinned reusable ONE-SHOT-58 harness
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.NIKA_REUSE_HARNESS_SHA }}
+          path: reuse
+          persist-credentials: false
+
+      - name: Verify QA and reusable harness identities
+        shell: pwsh
+        run: |
+          $qaHead = (git -C qa rev-parse HEAD).Trim().ToLowerInvariant()
+          if ($qaHead -ne '${{ github.event.pull_request.head.sha }}') {
+            throw "W084 QA checkout mismatch: $qaHead"
+          }
+          $reuseHead = (git -C reuse rev-parse HEAD).Trim().ToLowerInvariant()
+          if ($reuseHead -ne '${{ env.NIKA_REUSE_HARNESS_SHA }}') {
+            throw "Reusable ONE-SHOT-58 checkout mismatch: $reuseHead"
+          }
+          if (-not (Test-Path -LiteralPath ./reuse/scripts/one_shot_58_packaged_prehuman.ps1 -PathType Leaf)) {
+            throw 'Pinned ONE-SHOT-58 harness script is missing.'
+          }
+
+      - name: Verify reusable harness has no coordinate or vision targeting fallback
+        shell: pwsh
+        run: |
+          $harness = Get-Content -LiteralPath ./reuse/scripts/one_shot_58_packaged_prehuman.ps1 -Raw -Encoding UTF8
+          $forbidden = '(?i)SetCursorPos|mouse_event|GetClickablePoint|BoundingRectangle|AutomationElement\.FromPoint|pyautogui|ImageGrab|screenshot|\bOCR\b'
+          if ($harness -match $forbidden) {
+            throw "Reusable harness contains forbidden fallback surface: $($Matches[0])"
+          }
+          $w084 = Get-Content -LiteralPath ./qa/scripts/w084_packaged_accessibility_redteam.ps1 -Raw -Encoding UTF8
+          if ($w084 -match $forbidden) {
+            throw "W084 harness contains forbidden fallback surface: $($Matches[0])"
+          }
+
+      - name: Verify exact M12 artifact metadata
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $artifact = gh api "repos/${{ github.repository }}/actions/artifacts/${{ env.NIKA_M12_ARTIFACT_ID }}" | ConvertFrom-Json
+          if ([string]$artifact.name -ne '${{ env.NIKA_M12_ARTIFACT_NAME }}') {
+            throw "M12 artifact name mismatch: $($artifact.name)"
+          }
+          if ([string]$artifact.digest -ne '${{ env.NIKA_M12_ARTIFACT_DIGEST }}') {
+            throw "M12 artifact digest mismatch: $($artifact.digest)"
+          }
+          if ($artifact.expired -ne $false) {
+            throw 'Exact M12 artifact is expired.'
+          }
+          if ([string]$artifact.workflow_run.id -ne '${{ env.NIKA_M12_RUN_ID }}') {
+            throw "M12 workflow run mismatch: $($artifact.workflow_run.id)"
+          }
+          if ([string]$artifact.workflow_run.head_sha -ne '${{ env.NIKA_TARGET_SHA }}') {
+            throw "M12 artifact source SHA mismatch: $($artifact.workflow_run.head_sha)"
+          }
+          Write-Host "Exact M12 artifact verified: id=$($artifact.id), digest=$($artifact.digest)"
+
+      - name: Download exact M12 packaged candidate artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ env.NIKA_M12_ARTIFACT_NAME }}
+          path: candidate
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.NIKA_M12_RUN_ID }}
+
+      - name: Verify inner distributable and extract to Unicode spaced path
+        shell: pwsh
+        run: |
+          $evidencePath = './candidate/m12-prehuman-evidence.json'
+          if (-not (Test-Path -LiteralPath $evidencePath -PathType Leaf)) {
+            throw 'M12 pre-human evidence is missing from downloaded artifact.'
+          }
+          $evidence = Get-Content -LiteralPath $evidencePath -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ([string]$evidence.commit_sha -ne '${{ env.NIKA_TARGET_SHA }}') {
+            throw "M12 evidence commit mismatch: $($evidence.commit_sha)"
+          }
+          if ($evidence.human_tested -ne $false -or $evidence.nvda_verified -ne $false -or $evidence.production_release_ready -ne $false) {
+            throw 'M12 automated evidence incorrectly grants human/NVDA/release-ready truth.'
+          }
+          $zips = @(Get-ChildItem -LiteralPath ./candidate -Filter 'NikaCore-*-windows-x64.zip' -File)
+          if ($zips.Count -ne 1) {
+            throw "Expected exactly one distributable ZIP, found $($zips.Count)."
+          }
+          $zip = $zips[0]
+          $zipSha = (Get-FileHash -LiteralPath $zip.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($zipSha -ne ([string]$evidence.distributable_zip_sha256).ToLowerInvariant()) {
+            throw "Inner distributable SHA-256 mismatch: $zipSha"
+          }
+          if ($zip.Length -ne [int64]$evidence.distributable_zip_size) {
+            throw "Inner distributable size mismatch: $($zip.Length)"
+          }
+          $bundle = Join-Path $env:RUNNER_TEMP 'W084 Пакет Nika\Точний кандидат'
+          Remove-Item -LiteralPath $bundle -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $bundle -Force | Out-Null
+          Expand-Archive -LiteralPath $zip.FullName -DestinationPath $bundle -Force
+          foreach ($required in @('NikaCore.exe', 'release-manifest.json', 'THIRD_PARTY_NOTICES.txt', 'pf11-packaged-product-journey.json')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $bundle $required) -PathType Leaf)) {
+              throw "Extracted exact package is missing $required"
+            }
+          }
+          $database = Join-Path $env:RUNNER_TEMP 'W084 Пакет Nika\дані стану\product factory.db'
+          $reuseEvidence = Join-Path $env:RUNNER_TEMP 'W084 Пакет Nika\evidence\one-shot-58-reuse.json'
+          $w084Evidence = Join-Path $env:RUNNER_TEMP 'W084 Пакет Nika\evidence\w084-redteam.json'
+          "NIKA_BUNDLE=$bundle" >> $env:GITHUB_ENV
+          "NIKA_DATABASE=$database" >> $env:GITHUB_ENV
+          "NIKA_REUSE_EVIDENCE=$reuseEvidence" >> $env:GITHUB_ENV
+          "NIKA_W084_EVIDENCE=$w084Evidence" >> $env:GITHUB_ENV
+          "NIKA_WINDOW_TITLE=Nika Core $($evidence.product_version)" >> $env:GITHUB_ENV
+          Write-Host "Exact inner distributable SHA-256: $zipSha"
+
+      - name: Run pinned strongest packaged semantic journey
+        id: reuse
+        continue-on-error: true
+        shell: pwsh
+        run: >-
+          ./reuse/scripts/one_shot_58_packaged_prehuman.ps1
+          -ExePath "$env:NIKA_BUNDLE\NikaCore.exe"
+          -BundleDir "$env:NIKA_BUNDLE"
+          -DatabasePath "$env:NIKA_DATABASE"
+          -TargetSourceSha '${{ env.NIKA_TARGET_SHA }}'
+          -HarnessSha '${{ env.NIKA_REUSE_HARNESS_SHA }}'
+          -EvidencePath "$env:NIKA_REUSE_EVIDENCE"
+          -WindowTitle "$env:NIKA_WINDOW_TITLE"
+
+      - name: Run W084 novel semantic red-team probes
+        id: w084
+        continue-on-error: true
+        shell: pwsh
+        env:
+          NIKA_DB_PATH: ${{ env.NIKA_DATABASE }}
+        run: >-
+          ./qa/scripts/w084_packaged_accessibility_redteam.ps1
+          -ExePath "$env:NIKA_BUNDLE\NikaCore.exe"
+          -EvidencePath "$env:NIKA_W084_EVIDENCE"
+          -TargetSourceSha '${{ env.NIKA_TARGET_SHA }}'
+          -ReuseHarnessSha '${{ env.NIKA_REUSE_HARNESS_SHA }}'
+          -M12ArtifactDigest '${{ env.NIKA_M12_ARTIFACT_DIGEST }}'
+          -WindowTitle "$env:NIKA_WINDOW_TITLE"
+
+      - name: Upload W084 exact red-team evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: W084-packaged-accessibility-${{ env.NIKA_TARGET_SHA }}-${{ github.event.pull_request.head.sha }}
+          path: |
+            ${{ runner.temp }}/W084 Пакет Nika/evidence/*.json
+            candidate/m12-prehuman-evidence.json
+            candidate/release-manifest.json
+            candidate/THIRD_PARTY_NOTICES.txt
+          if-no-files-found: warn
+
+      - name: Enforce W084 red-team verdict
+        if: always()
+        shell: pwsh
+        run: |
+          $reuseOutcome = '${{ steps.reuse.outcome }}'
+          $w084Outcome = '${{ steps.w084.outcome }}'
+          Write-Host "Pinned ONE-SHOT-58 outcome: $reuseOutcome"
+          Write-Host "W084 novel probes outcome: $w084Outcome"
+          if ($reuseOutcome -ne 'success' -or $w084Outcome -ne 'success') {
+            throw "W084 detected a packaged accessibility failure: reuse=$reuseOutcome; novel=$w084Outcome"
+          }
