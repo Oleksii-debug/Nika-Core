@@ -21,8 +21,18 @@ _SECRET_KEYS = frozenset(
         "token",
     }
 )
-_SENSITIVE_KEY_TOKENS = frozenset({"cookie", "password", "secret", "token"})
+_SENSITIVE_KEY_TOKENS = frozenset({"cookie", "credential", "password", "secret", "token"})
 _NON_SECRET_KEY_SUFFIXES = frozenset({"count"})
+_SENSITIVE_COMPACT_KEYS = frozenset(
+    {
+        "awsaccesskeyid",
+        "googleaccessid",
+        "subscriptionkey",
+        "xapikey",
+        "xamzcredential",
+        "xgoogcredential",
+    }
+)
 _SENSITIVE_QUERY = re.compile(
     r"(?i)([?&](?:token|access_token|refresh_token|api_key|auth|key|password|secret|signature|sig|expires)=[^&#\s]+)"
 )
@@ -32,7 +42,10 @@ _AUTHORIZATION_HEADER = re.compile(r"(?im)\b((?:proxy-)?authorization)\s*:\s*[^\
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)(?<![A-Za-z0-9_])"
     r"((?:api[-_]?key|access[-_]?token|refresh[-_]?token|client[-_]?secret|"
-    r"authorization|password|token|secret|cookie|cookies|session[-_]?id)"
+    r"aws[-_]?access[-_]?key[-_]?id|google[-_]?access[-_]?id|"
+    r"subscription[-_]?key|x[-_]?api[-_]?key|"
+    r"x[-_]?amz[-_]?credential|x[-_]?goog[-_]?credential|"
+    r"authorization|password|token|secret|credential|cookie|cookies|session[-_]?id)"
     r"\s*[:=]\s*)"
     r"([^\s,;&#]+)"
 )
@@ -80,7 +93,15 @@ def _is_secret_key(key: str) -> bool:
         return True
     if tokens[-1] in _NON_SECRET_KEY_SUFFIXES:
         return False
-    return any(token in _SENSITIVE_KEY_TOKENS for token in tokens)
+    if any(token in _SENSITIVE_KEY_TOKENS for token in tokens):
+        return True
+    compact = "".join(tokens)
+    if compact in _SENSITIVE_COMPACT_KEYS:
+        return True
+    token_set = frozenset(tokens)
+    return {"api", "key"}.issubset(token_set) or {"subscription", "key"}.issubset(
+        token_set
+    )
 
 
 def redact_text(value: str) -> str:
