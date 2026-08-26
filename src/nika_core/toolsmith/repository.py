@@ -244,15 +244,35 @@ class ToolsmithRepository:
             )
 
     def register_exact(self, *, task_id: str, manifest: CapabilityManifestV1) -> None:
+        # Keep the preflight read for fast diagnostics, but never use it as commit authority.
+        # A rollback may win after this read, so publication must revalidate the escalation
+        # under the same SQLite write transaction that creates the active registry row.
         row = self.get_escalation(task_id=task_id, capability_id=manifest.capability_id)
         if row is None:
             raise KeyError((task_id, manifest.capability_id))
         if CandidateState(str(row["state"])) is not CandidateState.REGISTERING:
             raise InvalidTransitionError("capability must be REGISTERING before exact registration")
-        ceiling = frozenset(json.loads(str(row["permission_ceiling_json"])))
-        if not manifest.permissions.issubset(ceiling):
-            raise PermissionError("registered capability permissions exceed original task ceiling")
+
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            authoritative = conn.execute(
+                "SELECT state, permission_ceiling_json, pinned_digest "
+                "FROM capability_escalations "
+                "WHERE task_id = ? AND requested_capability = ?",
+                (task_id, manifest.capability_id),
+            ).fetchone()
+            if authoritative is None:
+                raise KeyError((task_id, manifest.capability_id))
+            if CandidateState(str(authoritative["state"])) is not CandidateState.REGISTERING:
+                raise StaleTransitionError("candidate changed before exact registry publication")
+            ceiling = frozenset(json.loads(str(authoritative["permission_ceiling_json"])))
+            if not manifest.permissions.issubset(ceiling):
+                raise PermissionError("registered capability permissions exceed original task ceiling")
+            verified_digest = authoritative["pinned_digest"]
+            if verified_digest is None or str(verified_digest) != manifest.digest:
+                raise StaleTransitionError(
+                    "verified candidate identity changed before exact registry publication"
+                )
             conflicting = conn.execute(
                 "SELECT digest FROM capability_registry WHERE capability_id = ? AND version = ?",
                 (manifest.capability_id, manifest.version),
