@@ -104,7 +104,7 @@ def test_safe_allowlisted_symlink_launches_canonical_target(
 
     assert result.returncode == 0
     assert result.stdout.strip() == "canonical-ok"
-    assert result.argv[0] == str(canonical_target)
+    assert pathlib.Path(result.argv[0]).samefile(canonical_target)
     assert result.argv[0] != str(alias)
 
 
