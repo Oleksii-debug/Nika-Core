@@ -16,6 +16,8 @@ class MCPServerConfig:
     target: Any = field(repr=False)
     default_risk: ToolRisk = ToolRisk.EXTERNAL_SIDE_EFFECT
     timeout_seconds: float = 30.0
+    max_tool_pages: int = 32
+    max_tools: int = 512
 
     def __post_init__(self) -> None:
         if not self.server_id.strip():
@@ -29,6 +31,10 @@ class MCPServerConfig:
             raise ValueError("MCP risk downgrades require a trusted connector policy")
         if self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be greater than zero")
+        if self.max_tool_pages <= 0:
+            raise ValueError("max_tool_pages must be greater than zero")
+        if self.max_tools <= 0:
+            raise ValueError("max_tools must be greater than zero")
 
 
 class MCPClientAdapter:
@@ -38,23 +44,40 @@ class MCPClientAdapter:
         self._config = config
 
     async def list_tools(self) -> tuple[ToolSpec, ...]:
+        specs: list[ToolSpec] = []
+        seen_tool_ids: set[str] = set()
+        seen_cursors: set[str] = set()
+        cursor: str | None = None
         async with Client(
             self._config.target,
             read_timeout_seconds=self._config.timeout_seconds,
         ) as client:
-            result = await client.list_tools()
-        specs: list[ToolSpec] = []
-        for tool in result.tools:
-            specs.append(
-                ToolSpec(
-                    tool_id=f"mcp:{self._config.server_id}:{tool.name}",
-                    description=tool.description or tool.title or tool.name,
-                    risk=self._config.default_risk,
-                    timeout_seconds=self._config.timeout_seconds,
-                    input_schema=dict(tool.input_schema or {}),
-                )
-            )
-        return tuple(specs)
+            for _page_number in range(self._config.max_tool_pages):
+                result = await client.list_tools(cursor=cursor)
+                for tool in result.tools:
+                    tool_id = f"mcp:{self._config.server_id}:{tool.name}"
+                    if tool_id in seen_tool_ids:
+                        raise ValueError(f"duplicate MCP tool id: {tool_id}")
+                    if len(specs) >= self._config.max_tools:
+                        raise ValueError("MCP tool catalog exceeds max_tools")
+                    seen_tool_ids.add(tool_id)
+                    specs.append(
+                        ToolSpec(
+                            tool_id=tool_id,
+                            description=tool.description or tool.title or tool.name,
+                            risk=self._config.default_risk,
+                            timeout_seconds=self._config.timeout_seconds,
+                            input_schema=dict(tool.input_schema or {}),
+                        )
+                    )
+                next_cursor = result.next_cursor
+                if next_cursor is None:
+                    return tuple(specs)
+                if next_cursor in seen_cursors:
+                    raise ValueError("MCP tool catalog repeated pagination cursor")
+                seen_cursors.add(next_cursor)
+                cursor = next_cursor
+        raise ValueError("MCP tool catalog exceeds max_tool_pages")
 
     async def call(self, call: ToolCall) -> ToolResult:
         prefix = f"mcp:{self._config.server_id}:"
