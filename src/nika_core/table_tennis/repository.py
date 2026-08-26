@@ -219,8 +219,8 @@ class TableTennisRepository:
             if payload_sha256 != latest_payload_sha256:
                 raise TableTennisRevisionError("an existing source revision cannot be mutated")
             return self._result(observation, payload_sha256, IngestDisposition.REPLAYED)
-        if observation.source_revision <= latest_revision:
-            raise TableTennisRevisionError("source revisions cannot roll back")
+        if observation.source_revision < latest_revision:
+            return self._replay_historical(conn, observation, payload_sha256)
         if observation.source_revision != latest_revision + 1:
             raise TableTennisRevisionError("source revisions must be contiguous")
         self._insert_record(conn, observation, payload_sha256)
@@ -241,6 +241,39 @@ class TableTennisRepository:
         if updated.rowcount != 1:
             raise TableTennisIntegrityError("table-tennis head changed during revision update")
         return self._result(observation, payload_sha256, IngestDisposition.REVISED)
+
+    def _replay_historical(
+        self,
+        conn: sqlite3.Connection,
+        observation: MatchObservation,
+        payload_sha256: str,
+    ) -> IngestResult:
+        historical_row = conn.execute(
+            """
+            SELECT * FROM table_tennis_matches
+            WHERE source_id = ? AND source_record_id = ? AND source_revision = ?
+            """,
+            (
+                observation.source_id,
+                observation.source_record_id,
+                observation.source_revision,
+            ),
+        ).fetchone()
+        if historical_row is None:
+            raise TableTennisIntegrityError(
+                "table-tennis head has a missing historical revision"
+            )
+        historical = self._observation_from_row(historical_row)
+        historical_payload = historical.payload_sha256()
+        if historical_payload != historical_row["payload_sha256"]:
+            raise TableTennisIntegrityError(
+                "historical table-tennis record failed payload verification"
+            )
+        if payload_sha256 != historical_payload:
+            raise TableTennisRevisionError(
+                "an existing historical source revision cannot be mutated"
+            )
+        return self._result(observation, payload_sha256, IngestDisposition.REPLAYED)
 
     @staticmethod
     def _insert_record(
