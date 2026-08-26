@@ -51,6 +51,7 @@ def test_windows_component_rejects_unsafe_raw_identity_before_normpath(
         "src/file:stream/../api",
         "src/bad./../api",
         "src/../api",
+        "src/ child",
     ),
 )
 def test_windows_lease_rejects_unsafe_raw_identity_before_normpath(
