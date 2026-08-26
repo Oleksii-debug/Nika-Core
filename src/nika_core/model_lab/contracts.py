@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from math import isfinite
-import re
 
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
