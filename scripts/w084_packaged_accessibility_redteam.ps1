@@ -51,16 +51,16 @@ function Find-Window {
     $script:process.Refresh()
     Require (-not $script:process.HasExited) "Packaged process $($script:process.Id) exited unexpectedly."
     $root = [System.Windows.Automation.AutomationElement]::RootElement
-    $name = New-Object System.Windows.Automation.PropertyCondition(
+    $nameCondition = New-Object System.Windows.Automation.PropertyCondition(
         [System.Windows.Automation.AutomationElement]::NameProperty,
         $WindowTitle
     )
-    $pid = New-Object System.Windows.Automation.PropertyCondition(
+    $processIdCondition = New-Object System.Windows.Automation.PropertyCondition(
         [System.Windows.Automation.AutomationElement]::ProcessIdProperty,
         $script:process.Id
     )
     $condition = [System.Windows.Automation.AndCondition]::new(
-        [System.Windows.Automation.Condition[]]@($name, $pid)
+        [System.Windows.Automation.Condition[]]@($nameCondition, $processIdCondition)
     )
     $matches = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $condition)
     Require ($matches.Count -le 1) "Duplicate top-level role/name/process identity: '$WindowTitle', PID=$($script:process.Id), count=$($matches.Count)."
@@ -215,9 +215,10 @@ try {
         }
 
         Invoke-Check 'w084.hidden_empty_state_not_exposed' {
+            Wait-Unique 'prehuman deterministic local ping — completed' ([System.Windows.Automation.ControlType]::ListItem) | Out-Null
             $hiddenTaskEmpty = @(Get-Matches 'Завдань ще немає.' ([System.Windows.Automation.ControlType]::Text))
             Require ($hiddenTaskEmpty.Count -eq 0) "Hidden task empty-state leaked into UIA after persisted task creation; count=$($hiddenTaskEmpty.Count)."
-            'DOM hidden task empty-state is absent from packaged UIA control semantics'
+            'persisted completed task is exposed while hidden task empty-state is absent from packaged UIA'
         }
 
         Invoke-Check 'w084.disabled_focusable_controls' {
