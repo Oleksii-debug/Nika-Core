@@ -78,6 +78,12 @@ def test_running_an_existing_agent_remains_an_ordinary_agent_task() -> None:
     assert decision.route is CommandRouteKind.AGENT_TASK
 
 
+def test_make_existing_assistant_do_work_is_not_agent_creation() -> None:
+    decision = route_command("Make the existing assistant summarize the latest report")
+
+    assert decision.route is CommandRouteKind.AGENT_TASK
+
+
 def test_agent_builder_and_toolsmith_intent_is_ambiguous() -> None:
     decision = route_command("Create an agent with a missing plugin capability")
 

@@ -39,7 +39,7 @@ _TOOLSMITH_PATTERNS = (
 )
 _AGENT_BUILDER_PATTERNS = (
     re.compile(
-        r"\b(create|build|configure|define|design|make)\b.*\b(agent|assistant)\b",
+        r"\b(create|build|configure|define|design)\b.*\b(agent|assistant)\b",
         re.IGNORECASE,
     ),
     re.compile(
