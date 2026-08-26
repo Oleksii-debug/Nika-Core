@@ -80,6 +80,8 @@ def test_inspect_redacts_nested_credentials_and_url_secrets(tmp_path):
         payload={
             "api_key": "sk-secret",
             "credential_id": "cred-safe-ref",
+            "credential_handle": "opaque-authority-handle",
+            "resume_token": "resume-authority",
             "nested": {
                 "refresh_token": "refresh-secret",
                 "endpoint": (
@@ -100,6 +102,8 @@ def test_inspect_redacts_nested_credentials_and_url_secrets(tmp_path):
     event = log.inspect()[0]
     assert event.payload["api_key"] == "[REDACTED]"
     assert event.payload["credential_id"] == "cred-safe-ref"
+    assert event.payload["credential_handle"] == "[REDACTED]"
+    assert event.payload["resume_token"] == "[REDACTED]"
     nested = event.payload["nested"]
     assert isinstance(nested, dict)
     assert nested["refresh_token"] == "[REDACTED]"
@@ -128,7 +132,7 @@ def test_embedded_url_credentials_are_redacted_without_destroying_safe_fragment(
         payload={
             "message": (
                 "request failed at "
-                "https://user:pass@example.test/api?mode=safe&token=secret#details"
+                "https://user:pass@example.test/api?mode=safe&code=oauth-secret#details"
                 " and will retry"
             )
         },
@@ -137,7 +141,7 @@ def test_embedded_url_credentials_are_redacted_without_destroying_safe_fragment(
     message = log.inspect()[0].payload["message"]
     assert isinstance(message, str)
     assert "user:pass" not in message
-    assert "secret" not in message
+    assert "oauth-secret" not in message
     assert "mode=safe" in message
     assert "#details" in message
     assert "and will retry" in message
