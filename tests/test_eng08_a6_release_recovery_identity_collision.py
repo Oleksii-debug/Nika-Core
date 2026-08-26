@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import sqlite3
 from pathlib import Path
@@ -10,6 +11,7 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.packaging.recovery import (
     ReleaseDatabaseRecovery,
     ReleaseDatabaseRecoveryError,
+    ReleaseDatabaseSnapshot,
 )
 from nika_core.reliability.backup import (
     RestorePlanStaleError,
@@ -185,3 +187,39 @@ def test_restore_plan_cannot_be_replayed_against_another_database_target(
             plan,
             confirmation_fingerprint=plan.confirmation_fingerprint,
         )
+
+
+def test_release_snapshot_contract_binds_distributable_identity_beyond_git_sha() -> None:
+    """A source SHA alone cannot identify two differently packaged releases."""
+    create_parameters = set(
+        inspect.signature(ReleaseDatabaseRecovery.create_snapshot).parameters
+    )
+    snapshot_fields = set(ReleaseDatabaseSnapshot.__dataclass_fields__)
+    identity_surface = create_parameters | snapshot_fields
+    release_identity_tokens = (
+        "release_manifest",
+        "artifact",
+        "distributable",
+        "release_version",
+    )
+
+    assert any(
+        token in name
+        for name in identity_surface
+        for token in release_identity_tokens
+    ), (
+        "release database recovery collapses distributables that share source SHA; "
+        "bind the canonical release manifest/version/artifact identity as well"
+    )
+
+
+def test_restore_revalidates_current_release_identity_at_effect_boundary() -> None:
+    """A preview-bound current SHA must not stay authoritative after release movement."""
+    restore_parameters = set(
+        inspect.signature(ReleaseDatabaseRecovery.restore).parameters
+    )
+
+    assert any("current_release" in name for name in restore_parameters), (
+        "restore has no fresh current-release authority input/resolver; a release "
+        "control-plane change after preview can leave stale confirmation usable"
+    )
