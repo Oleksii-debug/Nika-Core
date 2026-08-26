@@ -18,7 +18,7 @@ def main() -> int:
     args = parser.parse_args()
 
     evidence = C1MediumAppAcceptanceRunner(
-        root=args.root,
+        root=args.root.resolve(),
         source_sha=args.source_sha,
     ).run(build_windows_package=args.windows_package)
     target = write_c1_evidence(args.evidence, evidence)

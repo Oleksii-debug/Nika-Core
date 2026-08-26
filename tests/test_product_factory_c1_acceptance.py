@@ -21,6 +21,15 @@ def test_c1_generated_storage_closes_sqlite_connections_deterministically() -> N
     assert "with sqlite3.connect(" not in upgrade_test
 
 
+def test_c1_cli_canonicalizes_relative_root_before_package_subprocesses() -> None:
+    script = (
+        Path(__file__).resolve().parents[1] / "scripts" / "pf11_c1_medium_app.py"
+    ).read_text(encoding="utf-8")
+
+    assert "root=args.root.resolve()," in script
+    assert "root=args.root," not in script
+
+
 def test_c1_medium_app_uses_real_product_factory_lifecycle(tmp_path: Path) -> None:
     evidence = C1MediumAppAcceptanceRunner(
         root=tmp_path / "C1 medium app",
