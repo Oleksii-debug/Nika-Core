@@ -39,8 +39,9 @@ _AUTH_HEADER_RE: Final = re.compile(
 )
 _COOKIE_HEADER_RE: Final = re.compile(r"(?i)\b(cookie|set-cookie)(\s*:\s*)[^\r\n]+")
 _INLINE_SECRET_RE: Final = re.compile(
-    r"(?i)\b(api[_-]?key|api[_-]?hash|access[_-]?token|refresh[_-]?token|"
-    r"id[_-]?token|session[_-]?token|password|passphrase|client[_-]?secret)"
+    r"(?i)\b(authorization|proxy[_-]?authorization|api[_-]?key|api[_-]?hash|"
+    r"access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|token|"
+    r"password|passphrase|client[_-]?secret|private[_-]?key|cookie|set[_-]?cookie|secret)"
     r"\b(\s*[:=]\s*)([^\s,;&]+)"
 )
 _BEARER_RE: Final = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
@@ -48,6 +49,7 @@ _PRIVATE_KEY_RE: Final = re.compile(
     r"-----BEGIN [^-\r\n]*PRIVATE KEY-----.*?-----END [^-\r\n]*PRIVATE KEY-----",
     re.IGNORECASE | re.DOTALL,
 )
+_HTTP_URL_RE: Final = re.compile(r"(?i)https?://[^\s'\"<>]+")
 _SECRET_QUERY_NAMES: Final = frozenset(
     {
         "access_token",
@@ -283,18 +285,15 @@ def _redact_text(value: str) -> str:
         lambda match: f"{match.group(1)}{match.group(2)}{_REDACTED}",
         sanitized,
     )
-    return _redact_url(sanitized)
+    return _HTTP_URL_RE.sub(lambda match: _redact_url(match.group(0)), sanitized)
 
 
 def _redact_url(value: str) -> str:
-    looks_like_web_url = value.casefold().startswith(("http://", "https://"))
     try:
         parts = urlsplit(value)
     except ValueError:
-        return _REDACTED_URL if looks_like_web_url else value
-    if parts.scheme not in {"http", "https"}:
-        return value
-    if not parts.netloc:
+        return _REDACTED_URL
+    if parts.scheme not in {"http", "https"} or not parts.netloc:
         return _REDACTED_URL
 
     hostname = parts.hostname or ""
@@ -316,16 +315,15 @@ def _redact_url(value: str) -> str:
 
 def _redact_url_parameters(value: str) -> str:
     pairs = parse_qsl(value, keep_blank_values=True)
-    if not pairs:
+    sensitive = [
+        name.casefold().replace("-", "_") in _SECRET_QUERY_NAMES
+        for name, _item in pairs
+    ]
+    if not any(sensitive):
         return value
     return urlencode(
         [
-            (
-                name,
-                _REDACTED
-                if name.casefold().replace("-", "_") in _SECRET_QUERY_NAMES
-                else item,
-            )
-            for name, item in pairs
+            (name, _REDACTED if is_sensitive else item)
+            for (name, item), is_sensitive in zip(pairs, sensitive, strict=True)
         ]
     )
