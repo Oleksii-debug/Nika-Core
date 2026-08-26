@@ -31,7 +31,7 @@ from nika_core.product_project import (
     ProductProjectSpec,
     ProductRequirement,
 )
-from nika_core.toolsmith.contracts import CodingResult, TestEvidence
+from nika_core.toolsmith.contracts import CodingResult, TestEvidence as WorkerTestEvidence
 
 _SOURCE_SHA = "a" * 40
 _RESULT_SHA = "b" * 40
@@ -182,7 +182,12 @@ def test_pf12_checkpoint_does_not_persist_worker_test_command_secret_canary(
         job_id=request.work_id,
         changed_files=(),
         test_evidence=(
-            TestEvidence(
+            WorkerTestEvidence(
+                ("python", "-m", "pytest", "tests/core"),
+                0,
+                _DIGEST,
+            ),
+            WorkerTestEvidence(
                 ("python", "-m", "pytest", "--api-key", _CHECKPOINT_CANARY),
                 0,
                 _DIGEST,
