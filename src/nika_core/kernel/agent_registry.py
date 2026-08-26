@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -36,13 +37,18 @@ class AgentRegistry:
         return int(row["count"])
 
     def register(self, definition: AgentDefinition) -> None:
-        current = self._latest(definition.agent_id)
-        if current is not None and definition.version <= current.version:
-            raise ValueError("agent version must increase")
         if self._store is None:
+            current = self._latest(definition.agent_id)
+            if current is not None and definition.version <= current.version:
+                raise ValueError("agent version must increase")
             self._agents[definition.agent_id] = definition
             return
+
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._latest(definition.agent_id, conn=conn)
+            if current is not None and definition.version <= current.version:
+                raise ValueError("agent version must increase")
             conn.execute(
                 "INSERT INTO agents(agent_id, version, name, goal, created_at) VALUES (?, ?, ?, ?, ?)",
                 (
@@ -75,10 +81,19 @@ class AgentRegistry:
             for row in rows
         )
 
-    def _latest(self, agent_id: str) -> AgentDefinition | None:
+    def _latest(
+        self, agent_id: str, *, conn: sqlite3.Connection | None = None
+    ) -> AgentDefinition | None:
         if self._store is None:
             return self._agents.get(agent_id)
-        with self._store.connection() as conn:
+        if conn is None:
+            with self._store.connection() as owned_conn:
+                row = owned_conn.execute(
+                    "SELECT agent_id, name, version, goal FROM agents "
+                    "WHERE agent_id = ? ORDER BY version DESC LIMIT 1",
+                    (agent_id,),
+                ).fetchone()
+        else:
             row = conn.execute(
                 "SELECT agent_id, name, version, goal FROM agents "
                 "WHERE agent_id = ? ORDER BY version DESC LIMIT 1",

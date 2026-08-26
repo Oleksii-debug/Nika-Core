@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -36,10 +37,11 @@ class WorkspaceRegistry:
         return int(row["count"])
 
     def register(self, definition: WorkspaceDefinition) -> None:
-        current = self._latest(definition.workspace_id)
-        if current is not None and definition.version <= current.version:
-            raise ValueError("workspace version must increase")
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._latest(definition.workspace_id, conn=conn)
+            if current is not None and definition.version <= current.version:
+                raise ValueError("workspace version must increase")
             conn.execute(
                 "INSERT INTO workspaces(workspace_id, version, name, description, enabled, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
@@ -79,8 +81,17 @@ class WorkspaceRegistry:
             for row in rows
         )
 
-    def _latest(self, workspace_id: str) -> WorkspaceDefinition | None:
-        with self._store.connection() as conn:
+    def _latest(
+        self, workspace_id: str, *, conn: sqlite3.Connection | None = None
+    ) -> WorkspaceDefinition | None:
+        if conn is None:
+            with self._store.connection() as owned_conn:
+                row = owned_conn.execute(
+                    "SELECT workspace_id, name, version, description, enabled FROM workspaces "
+                    "WHERE workspace_id = ? ORDER BY version DESC LIMIT 1",
+                    (workspace_id,),
+                ).fetchone()
+        else:
             row = conn.execute(
                 "SELECT workspace_id, name, version, description, enabled FROM workspaces "
                 "WHERE workspace_id = ? ORDER BY version DESC LIMIT 1",
