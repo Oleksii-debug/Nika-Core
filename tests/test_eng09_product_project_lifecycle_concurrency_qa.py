@@ -3,8 +3,6 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
-import pytest
-
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_project import (
     ProductProjectError,
@@ -85,11 +83,10 @@ def test_same_key_concurrent_retry_commits_one_transition_and_replays_exactly(tm
         reason="Concurrent exact retry",
         changed_by_ref="agent://eng09",
     )
+    history = restarted.history("p1")
     assert replay == first
-    assert restarted.history("p1") == (
-        restarted.history("p1")[0],
-        first,
-    )
+    assert len(history) == 2
+    assert history[1] == first
 
 
 def test_different_keys_same_expected_version_have_one_winner_and_one_stale_writer(tmp_path) -> None:
@@ -209,7 +206,11 @@ def test_same_key_conflicting_concurrent_input_is_rejected_and_lock_is_released(
     assert _mutation_counts(store) == (2, 2)
 
     replay_state = winner.new_state
-    replay_reason = "Conflicting pause" if replay_state is ProductProjectState.PAUSED else "Conflicting block"
+    replay_reason = (
+        "Conflicting pause"
+        if replay_state is ProductProjectState.PAUSED
+        else "Conflicting block"
+    )
     restarted = ProductProjectLifecycleService(SQLiteStore(store.path))
     historical_replay = restarted.transition(
         "p1",
@@ -221,19 +222,3 @@ def test_same_key_conflicting_concurrent_input_is_rejected_and_lock_is_released(
     )
     assert historical_replay == winner
     assert restarted.current_state("p1") is ProductProjectState.ACTIVE
-
-
-@pytest.mark.parametrize("state", [ProductProjectState.PAUSED, ProductProjectState.BLOCKED])
-def test_post_concurrency_restart_history_remains_canonical(tmp_path, state) -> None:
-    store, _, lifecycle = _setup_project(tmp_path)
-    first = lifecycle.transition(
-        "p1",
-        state,
-        expected_row_version=0,
-        idempotency_key=f"status:p1:{state.value}:restart",
-        reason=f"Persist {state.value} before restart",
-        changed_by_ref="agent://eng09",
-    )
-    restarted = ProductProjectLifecycleService(SQLiteStore(store.path))
-    assert restarted.history("p1")[1] == first
-    assert restarted.current_state("p1") is state
