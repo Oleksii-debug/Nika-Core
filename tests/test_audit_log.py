@@ -91,6 +91,7 @@ def test_inspect_redacts_nested_credentials_and_url_secrets(tmp_path):
                 "Authorization: Bearer super-secret",
                 "Cookie: sessionid=cookie-secret",
                 "password=hunter2 failed",
+                "token=loose-secret failed",
                 "plain text",
             ],
         },
@@ -114,7 +115,32 @@ def test_inspect_redacts_nested_credentials_and_url_secrets(tmp_path):
     assert messages[0] == "Authorization: [REDACTED]"
     assert messages[1] == "Cookie: [REDACTED]"
     assert messages[2] == "password=[REDACTED] failed"
-    assert messages[3] == "plain text"
+    assert messages[3] == "token=[REDACTED] failed"
+    assert messages[4] == "plain text"
+
+
+def test_embedded_url_credentials_are_redacted_without_destroying_safe_fragment(tmp_path):
+    _, log = _make_log(tmp_path)
+    log.append(
+        event_type="provider.failed",
+        entity_type="task",
+        entity_id="task-embedded-url",
+        payload={
+            "message": (
+                "request failed at "
+                "https://user:pass@example.test/api?mode=safe&token=secret#details"
+                " and will retry"
+            )
+        },
+    )
+
+    message = log.inspect()[0].payload["message"]
+    assert isinstance(message, str)
+    assert "user:pass" not in message
+    assert "secret" not in message
+    assert "mode=safe" in message
+    assert "#details" in message
+    assert "and will retry" in message
 
 
 def test_malformed_web_url_fails_closed_instead_of_returning_userinfo(tmp_path):
