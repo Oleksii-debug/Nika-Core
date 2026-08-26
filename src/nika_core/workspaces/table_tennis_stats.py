@@ -59,7 +59,7 @@ def _timestamp(value: datetime | str, label: str) -> str:
 
 
 def _plain_int(value: object, label: str) -> int:
-    if type(value) is not int:
+    if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"{label} must be an integer")
     if value < 0:
         raise TableTennisStatsError(f"{label} must be non-negative")
@@ -357,7 +357,7 @@ class TableTennisStatsRepository:
             if match_id != _match_id(source_id, source_match_id):
                 raise TableTennisDataIntegrityError("durable match id failed source binding")
             version = data["current_version"]
-            if type(version) is not int or version < 1:
+            if isinstance(version, bool) or not isinstance(version, int) or version < 1:
                 raise TableTennisDataIntegrityError("durable match version is invalid")
             payload = json.loads(data["payload_json"])
             expected = {"competition", "games", "played_at", "player_a", "player_b"}
