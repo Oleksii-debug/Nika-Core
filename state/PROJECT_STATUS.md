@@ -51,9 +51,9 @@ replacement for the live reads above.
 - reconciliation base `main`: `109829579ab4693e038e218769c23c2547defd64`;
 - that base is merge PR #405, shared workflow supply-chain security convergence;
 - exact-base hosted evidence observed during reconciliation:
-  - Core CI `32980430285`: SUCCESS;
-  - M11 `32980430222`: SUCCESS;
-  - M12 Pre-Human Release Gate `32980430229`: SUCCESS;
+  - Core CI `32981968912`: SUCCESS;
+  - M11 `32981968937`: SUCCESS;
+  - M12 Pre-Human Release Gate `32981968851`: SUCCESS;
 - branch protection on `main` was observed as disabled and repository rulesets as empty;
 - live development had advanced far beyond the old #90-#98 status snapshot, with current
   production, QA, audit and integration lanes coordinated through GitHub.

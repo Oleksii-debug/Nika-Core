@@ -119,9 +119,9 @@ Parallel throughput does not relax release gates.
 The anti-staleness reconciliation started from:
 
 - `main` `109829579ab4693e038e218769c23c2547defd64`;
-- exact-base Core CI `32980430285`: SUCCESS;
-- M11 `32980430222`: SUCCESS;
-- M12 `32980430229`: SUCCESS;
+- exact-base Core CI `32981968912`: SUCCESS;
+- M11 `32981968937`: SUCCESS;
+- M12 `32981968851`: SUCCESS;
 - `main` protection observed disabled and repository rulesets empty.
 
 During the same live read, many current production/QA lanes were already newer than the old
