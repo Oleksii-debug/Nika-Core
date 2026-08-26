@@ -100,6 +100,25 @@ def test_classic_branch_protection_proves_minimum_pf4_controls() -> None:
     assert report["safe_activation_preview"]["automatic_mutation"] is False
 
 
+def test_classic_pull_request_bypass_actor_blocks_classic_proof() -> None:
+    responses = base_responses()
+    protection = classic_protection()
+    protection["required_pull_request_reviews"]["bypass_pull_request_allowances"] = {
+        "users": [],
+        "teams": [],
+        "apps": [{"slug": "synthetic-worker"}],
+    }
+    responses[f"/repos/Oleksii-debug/Nika-Core/branches/{BRANCH}/protection"] = protection
+    client = FakeClient(responses)
+
+    report = inspect(client)
+
+    assert report["status"] == "BLOCKED"
+    assert report["controls"]["classic_pull_request_bypass_actor_count"] == 1
+    assert "PULL_REQUEST_NOT_REQUIRED" in report["blockers"]
+    assert "REQUIRED_STATUS_CHECKS_MISSING" in report["blockers"]
+
+
 def test_protected_branch_with_unreadable_details_does_not_guess_green() -> None:
     responses = base_responses()
     responses[f"/repos/Oleksii-debug/Nika-Core/branches/{BRANCH}/protection"] = ApiFailure(
