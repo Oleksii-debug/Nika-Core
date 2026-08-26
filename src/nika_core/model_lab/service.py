@@ -30,6 +30,7 @@ from nika_core.model_lab.contracts import (
     ModelBenchmarkPolicy,
     ModelCandidate,
     QualityScorer,
+    validate_scorer_identity,
 )
 from nika_core.resources.contracts import ResourceObserverPort
 
@@ -72,6 +73,7 @@ class ModelEngineeringLab:
             challengers=challengers,
             suite=suite,
             policy=policy,
+            scorer=scorer,
         )
         snapshot = self._load_or_create(definition)
         if snapshot.status is ExperimentStatus.DRAFT:
@@ -122,6 +124,7 @@ class ModelEngineeringLab:
         challengers: tuple[ModelCandidate, ...],
         suite: EvaluationSuite,
         policy: ModelBenchmarkPolicy,
+        scorer: QualityScorer,
     ) -> ExperimentDefinition:
         if not experiment_id.strip():
             raise ValueError("experiment_id must not be empty")
@@ -133,6 +136,11 @@ class ModelEngineeringLab:
             raise ValueError("evaluation suite is smaller than minimum_cases")
         if self._resource_metrics_requested(policy) and self._resource_observer is None:
             raise ValueError("host resource guardrails require a resource observer")
+        evidence_version = self._benchmark_evidence_version(
+            suite=suite,
+            policy=policy,
+            scorer=scorer,
+        )
 
         return ExperimentDefinition(
             experiment_id=experiment_id,
@@ -142,7 +150,7 @@ class ModelEngineeringLab:
                 ReplayCase(
                     replay_id=case.case_id,
                     dataset_ref=suite.dataset_ref,
-                    dataset_version=suite.evidence_version,
+                    dataset_version=evidence_version,
                 )
                 for case in suite.cases
             ),
@@ -164,6 +172,31 @@ class ModelEngineeringLab:
             artifact_ref=candidate.artifact_ref,
             permission_fingerprint=candidate.permission_fingerprint,
         )
+
+    @classmethod
+    def _benchmark_evidence_version(
+        cls,
+        *,
+        suite: EvaluationSuite,
+        policy: ModelBenchmarkPolicy,
+        scorer: QualityScorer,
+    ) -> str:
+        scorer_id, scorer_version = cls._scorer_identity(scorer)
+        timeout = format(policy.request_timeout_seconds, ".17g")
+        return (
+            f"{suite.evidence_version};timeout_s={timeout};"
+            f"scorer={scorer_id}@{scorer_version}"
+        )
+
+    @staticmethod
+    def _scorer_identity(scorer: QualityScorer) -> tuple[str, str]:
+        try:
+            scorer_id = scorer.scorer_id
+            scorer_version = scorer.scorer_version
+        except AttributeError as exc:
+            raise ValueError("quality scorer must declare scorer_id and scorer_version") from exc
+        validate_scorer_identity(scorer_id, scorer_version)
+        return scorer_id, scorer_version
 
     @staticmethod
     def _guardrails(policy: ModelBenchmarkPolicy) -> tuple[MetricRule, ...]:
