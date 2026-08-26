@@ -6,7 +6,7 @@ Status: implementation candidate on the isolated `MODEL-LAB-01` lane. It is not 
 
 The Full Product Vision requires a real Model Engineering Lab that can compare replaceable intelligence components on versioned task/evaluation sets and promote only from explicit held-out/replay evidence. This foundation implements the deterministic comparison/promotion core without creating another model gateway, experiment framework, resource monitor, or database schema.
 
-The lab compares one champion against one or more challengers through the existing `ModelGateway`. Each evaluation case is executed with an exact provider/model selection and `temperature=0.0`. A caller-supplied deterministic quality scorer produces the primary quality metric. The built-in `ExactMatchScorer` supports model-free acceptance tests without another LLM dependency.
+The lab compares one champion against one or more challengers through the existing `ModelGateway`. Each evaluation case is executed with an exact provider/model selection and `temperature=0.0`. A caller-supplied deterministic quality scorer produces the primary quality metric and must declare a stable `scorer_id` plus `scorer_version`. The built-in `ExactMatchScorer` uses `exact_match@1` and supports model-free acceptance tests without another LLM dependency.
 
 ## REUSE -> ADAPT -> CUSTOM decision
 
@@ -25,11 +25,12 @@ An `EvaluationSuite` binds:
 - dataset reference;
 - dataset version;
 - held-out or replay split;
+- privacy class;
 - ordered case IDs;
 - message roles/content;
 - expected text.
 
-The canonical case payload is SHA-256 hashed. M8 receives the resulting digest inside `dataset_version`, so a restart with the same friendly dataset ref/version but changed evaluation content fails closed as a definition mismatch.
+The canonical case payload is SHA-256 hashed. The durable M8 replay version additionally binds the benchmark request timeout and stable quality-scorer ID/version. A restart with the same friendly dataset ref/version but changed evaluation content, privacy route, timeout, or scorer version therefore fails closed as a definition mismatch instead of mixing incomparable evidence.
 
 For every candidate/case, Model Lab commits one atomic group containing:
 
@@ -38,7 +39,7 @@ For every candidate/case, Model Lab commits one atomic group containing:
 - optional `host_cpu_percent`;
 - optional `host_memory_percent`.
 
-Raw model response text and raw evaluation messages are not added to M8 observations or benchmark reports. The experiment definition persists candidate/provider/model identity and dataset ref/version/digest, so these identity fields must never contain credentials or secret-bearing URLs.
+Raw model response text and raw evaluation messages are not added to M8 observations or benchmark reports. The experiment definition persists candidate/provider/model identity and dataset ref/version/digest/provenance fields. Persisted candidate and dataset identities reject URL userinfo, query strings, fragments and control-line characters so credential-bearing locators are not accepted as durable benchmark identity.
 
 A crash after a committed case group can resume from the existing M8 experiment. Complete groups are skipped. A partial group is treated as integrity failure rather than re-running a model and mixing metrics from two different responses. SQLite M8 persistence makes the group append transactional; a process recreation can continue from the same database.
 
@@ -54,7 +55,7 @@ The response must return the exact benchmark request ID, provider ID and model I
 
 ## Privacy and accessibility
 
-Evaluation privacy is passed unchanged into `ModelRequest`; therefore the existing ModelGateway privacy route remains authoritative. Model Lab itself has no credential API and no model-download API.
+Evaluation privacy is passed unchanged into `ModelRequest` and is also bound into durable benchmark identity; therefore a resumed experiment cannot silently reroute remaining cases under a different privacy classification. Existing ModelGateway privacy routing remains authoritative. Model Lab itself has no credential API and no model-download API.
 
 This slice has no new UI. It does not claim HUMAN_TESTED or NVDA_VERIFIED. A later workspace integration must be coordinated with the active shared UI/workspace owner and must expose semantic keyboard/NVDA controls rather than a parallel custom shell.
 
@@ -65,14 +66,15 @@ Current `ResourceObserverPort` exposes host CPU percent, host memory percent and
 ## Acceptance evidence required before integration
 
 1. dependency consistency remains unchanged because no dependency is added;
-2. Ruff, compile and full pytest pass on the exact branch head;
+2. Ruff, compile and full pytest pass on the exact branch head, including Windows Verify when triggered by Core CI;
 3. deterministic promotion and latency-regression denial pass;
 4. response identity substitution fails closed;
-5. dataset content mutation under the same friendly version fails closed;
-6. permission fingerprint drift fails before inference;
-7. crash/restart resumes without replaying committed case groups;
-8. SQLite path with spaces/Unicode passes restart evidence;
-9. optional host-resource guardrails require an observer and remain explicitly host-level;
-10. no raw model output is persisted as experiment observation/report evidence;
-11. exact SHA and Actions evidence are recorded before merge;
-12. packaged workspace/NVDA credit remains false until later human/product-journey integration.
+5. dataset content, privacy, timeout, or scorer-version mutation on resume fails closed;
+6. unversioned scorer and permission fingerprint drift fail before inference;
+7. credential-bearing persisted identity locators are rejected;
+8. crash/restart resumes without replaying committed case groups;
+9. SQLite path with spaces/Unicode passes restart evidence;
+10. optional host-resource guardrails require an observer and remain explicitly host-level;
+11. no raw model output is persisted as experiment observation/report evidence;
+12. exact SHA and Actions evidence are recorded before integration;
+13. packaged workspace/NVDA credit remains false until later human/product-journey integration.
