@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from mcp import Client
@@ -11,12 +11,17 @@ from nika_core.tools import ToolCall, ToolResult, ToolRisk, ToolSpec
 @dataclass(frozen=True, slots=True)
 class MCPServerConfig:
     server_id: str
-    target: Any
+    target: Any = field(repr=False)
     default_risk: ToolRisk = ToolRisk.EXTERNAL_SIDE_EFFECT
 
     def __post_init__(self) -> None:
         if not self.server_id.strip():
             raise ValueError("server_id must not be empty")
+        if self.default_risk not in {
+            ToolRisk.EXTERNAL_SIDE_EFFECT,
+            ToolRisk.HIGH_IMPACT,
+        }:
+            raise ValueError("MCP risk downgrades require a trusted connector policy")
 
 
 class MCPClientAdapter:
