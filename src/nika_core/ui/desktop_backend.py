@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from collections.abc import Coroutine, Mapping
+from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import Future
 from typing import Any
 
@@ -30,6 +30,18 @@ _TERMINAL_STATES = frozenset(
 _LOCAL_CANCEL_STATES = frozenset(
     {TaskState.CREATED, TaskState.READY, TaskState.PAUSED, TaskState.BLOCKED}
 )
+_PRODUCT_PROJECT_STRING_LIMITS = {
+    "project_id": 160,
+    "title": 240,
+    "goal": 4000,
+    "state": 80,
+}
+_PRODUCT_PROJECT_COUNT_FIELDS = (
+    "blocker_count",
+    "status_count",
+    "decision_count",
+)
+ProductProjectStateProvider = Callable[[], Mapping[str, Any] | None]
 
 
 class _DesktopRuntimeLoop:
@@ -101,7 +113,24 @@ class DesktopBackend:
         self._active_threads: dict[str, str] = {}
         self._active_futures: dict[str, Future[Any]] = {}
         self._cancel_futures: dict[str, Future[bool]] = {}
+        self._product_project_state_provider: ProductProjectStateProvider | None = None
         self._ensure_defaults()
+
+    def bind_product_project_state_provider(
+        self,
+        provider: ProductProjectStateProvider,
+    ) -> None:
+        """Bind the packaged ProductProject presentation projection exactly once.
+
+        Durable ProductProject identity and lifecycle stay outside the desktop facade. This
+        composition hook accepts only a read-only presentation provider and snapshot() applies a
+        second allowlist/type/size boundary before anything crosses the pywebview bridge.
+        """
+        if not callable(provider):
+            raise TypeError("ProductProject desktop state provider must be callable.")
+        if self._product_project_state_provider is not None:
+            raise RuntimeError("ProductProject desktop state provider is already bound.")
+        self._product_project_state_provider = provider
 
     def create_task(self, payload: Mapping[str, Any]) -> UIResult:
         command = str(payload.get("command", "")).strip()
@@ -239,7 +268,7 @@ class DesktopBackend:
         )
 
     def snapshot(self) -> dict[str, Any]:
-        return {
+        state: dict[str, Any] = {
             "tasks": [self._task_view(record) for record in self._queue.list_recent(limit=50)],
             "agents": [
                 {
@@ -261,6 +290,9 @@ class DesktopBackend:
                 for item in self._workspaces.list_latest()
             ],
         }
+        if self._product_project_state_provider is not None:
+            state["product_project"] = self._product_project_snapshot()
+        return state
 
     def close(self) -> None:
         """Stop the private bridge event loop after all submitted runtime work has settled."""
@@ -288,6 +320,39 @@ class DesktopBackend:
         if self._runtime_loop is not None:
             self._runtime_loop.close()
             self._runtime_loop = None
+
+    def _product_project_snapshot(self) -> dict[str, Any] | None:
+        provider = self._product_project_state_provider
+        if provider is None:
+            return None
+        raw = provider()
+        if raw is None:
+            return None
+        if not isinstance(raw, Mapping):
+            raise TypeError("ProductProject desktop state must be a mapping or null.")
+
+        projected: dict[str, Any] = {}
+        for field, limit in _PRODUCT_PROJECT_STRING_LIMITS.items():
+            value = raw.get(field)
+            if not isinstance(value, str) or not value.strip() or len(value) > limit:
+                raise ValueError(
+                    f"ProductProject desktop state has invalid bounded field: {field}."
+                )
+            projected[field] = value
+
+        spec_version = raw.get("spec_version")
+        if type(spec_version) is not int or spec_version < 1:
+            raise ValueError("ProductProject desktop state has invalid spec_version.")
+        projected["spec_version"] = spec_version
+
+        for field in _PRODUCT_PROJECT_COUNT_FIELDS:
+            value = raw.get(field)
+            if type(value) is not int or value < 0:
+                raise ValueError(
+                    f"ProductProject desktop state has invalid count field: {field}."
+                )
+            projected[field] = value
+        return projected
 
     def _host(self) -> _DesktopRuntimeLoop:
         if self._runtime_loop is None:
