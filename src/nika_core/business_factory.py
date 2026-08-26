@@ -159,6 +159,7 @@ class BusinessWorkOrder:
     scope: str
     authorization_ref: str
     authorization_fingerprint: str
+    product_spec_fingerprint: str | None = None
     product_project_id: str | None = None
 
 
@@ -177,6 +178,9 @@ class DeliveryRecord:
     authorization_ref: str
     authorization_fingerprint: str
     compliance_evidence_refs: tuple[str, ...]
+    release_id: str | None = None
+    artifact_sha256: str | None = None
+    compliance_snapshot_digest: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,6 +383,7 @@ class BusinessFactory:
         work_order_id: str,
         scope: str,
         authorization_ref: str,
+        product_spec: ProductProjectSpec | None = None,
     ) -> BusinessWorkOrder:
         proposal = self._require_proposal()
         if proposal.state is not ProposalState.APPROVED:
@@ -388,11 +393,21 @@ class BusinessFactory:
         _text(work_order_id, "work_order_id")
         _text(scope, "work order scope")
         _text(authorization_ref, "work order authorization_ref")
+        product_spec_fingerprint: str | None = None
+        if product_spec is not None:
+            if not isinstance(product_spec, ProductProjectSpec):
+                raise BusinessFactoryError("work order product_spec must be ProductProjectSpec")
+            if product_spec.compliance.get("business_work_order_ref") != work_order_id:
+                raise BusinessFactoryError(
+                    "authorized ProductProject spec must bind the exact business WorkOrder"
+                )
+            product_spec_fingerprint = _product_spec_fingerprint(product_spec)
         intent = _work_order_authorization_intent(
             self._snapshot.objective.objective_id,
             proposal,
             work_order_id=work_order_id,
             scope=scope,
+            product_spec_fingerprint=product_spec_fingerprint,
         )
         self._require_authorization(intent, authorization_ref)
         order = BusinessWorkOrder(
@@ -401,6 +416,7 @@ class BusinessFactory:
             scope,
             authorization_ref,
             intent.fingerprint,
+            product_spec_fingerprint,
         )
         self._snapshot = replace(self._snapshot, work_order=order)
         self._record("work_order.authorized", work_order_id, authorization_ref)
@@ -426,6 +442,15 @@ class BusinessFactory:
             raise BusinessFactoryError(
                 "ProductProject spec must bind the exact authorized business WorkOrder"
             )
+        if order.product_spec_fingerprint is None:
+            raise BusinessFactoryError(
+                "WorkOrder lacks exact ProductProject specification authority"
+            )
+        product_spec_fingerprint = _product_spec_fingerprint(spec)
+        if product_spec_fingerprint != order.product_spec_fingerprint:
+            raise BusinessFactoryError(
+                "ProductProject spec does not match the authorized WorkOrder specification"
+            )
         if order.product_project_id is not None:
             if order.product_project_id != project_id:
                 raise BusinessFactoryError(
@@ -437,9 +462,19 @@ class BusinessFactory:
                 raise BusinessFactoryError(
                     "linked ProductProject is missing from durable repository"
                 ) from exc
-            if linked.spec.compliance.get("business_work_order_ref") != order.work_order_id:
+            linked_compliance = linked.spec.compliance
+            if linked_compliance.get("business_work_order_ref") != order.work_order_id:
                 raise BusinessFactoryError(
                     "linked ProductProject does not match the authorized business WorkOrder"
+                )
+            if (
+                linked_compliance.get("business_product_spec_fingerprint")
+                != order.product_spec_fingerprint
+                or linked_compliance.get("business_work_order_authorization_fingerprint")
+                != order.authorization_fingerprint
+            ):
+                raise BusinessFactoryError(
+                    "linked ProductProject authority lineage does not match the WorkOrder"
                 )
             return order
 
@@ -459,6 +494,7 @@ class BusinessFactory:
                 "business_work_order_ref": order.work_order_id,
                 "business_work_order_authorization_ref": order.authorization_ref,
                 "business_work_order_authorization_fingerprint": order.authorization_fingerprint,
+                "business_product_spec_fingerprint": order.product_spec_fingerprint,
                 "business_objective_ref": objective_id,
                 "business_handoff_request_key": idempotency_key,
             }
@@ -475,9 +511,19 @@ class BusinessFactory:
             raise BusinessFactoryError(
                 "ProductProject handoff conflicts with durable WorkOrder effect"
             ) from exc
-        if project.spec.compliance.get("business_work_order_ref") != order.work_order_id:
+        project_compliance = project.spec.compliance
+        if project_compliance.get("business_work_order_ref") != order.work_order_id:
             raise BusinessFactoryError(
                 "durable ProductProject does not match the authorized business WorkOrder"
+            )
+        if (
+            project_compliance.get("business_product_spec_fingerprint")
+            != order.product_spec_fingerprint
+            or project_compliance.get("business_work_order_authorization_fingerprint")
+            != order.authorization_fingerprint
+        ):
+            raise BusinessFactoryError(
+                "durable ProductProject authority lineage does not match the WorkOrder"
             )
         order = replace(order, product_project_id=project.project_id)
         self._snapshot = replace(self._snapshot, work_order=order)
@@ -507,22 +553,28 @@ class BusinessFactory:
         if qa is None or qa.state is not QAState.PASSED:
             raise BusinessFactoryError("delivery requires passing QA evidence")
         project_id = order.product_project_id or ""
+        _text(delivery_id, "delivery_id")
+        _text(artifact_ref, "delivery artifact_ref")
+        _text(authorization_ref, "delivery authorization_ref")
         if not isinstance(compliance, ReleaseComplianceGrant):
             raise BusinessFactoryError("delivery requires an exact PF10 release compliance grant")
         if (
             compliance.project_id != project_id
+            or compliance.release_id != delivery_id
             or compliance.artifact_ref != artifact_ref
             or not compliance.allowed
         ):
             raise BusinessFactoryError("delivery requires an exact PF10 release compliance grant")
-        _text(delivery_id, "delivery_id")
-        _text(artifact_ref, "delivery artifact_ref")
-        _text(authorization_ref, "delivery authorization_ref")
+        _sha256(compliance.artifact_sha256, "delivery artifact_sha256")
+        _sha256(compliance.snapshot_digest, "delivery compliance snapshot digest")
         intent = _delivery_authorization_intent(
             self._snapshot.objective.objective_id,
             delivery_id=delivery_id,
             project_id=project_id,
+            release_id=compliance.release_id,
             artifact_ref=artifact_ref,
+            artifact_sha256=compliance.artifact_sha256,
+            compliance_snapshot_digest=compliance.snapshot_digest,
             qa_evidence_ref=qa.evidence_ref,
             compliance_evidence_refs=compliance.evidence_refs,
         )
@@ -534,6 +586,9 @@ class BusinessFactory:
             authorization_ref,
             intent.fingerprint,
             compliance.evidence_refs,
+            compliance.release_id,
+            compliance.artifact_sha256,
+            compliance.snapshot_digest,
         )
         self._snapshot = replace(self._snapshot, delivery=delivery)
         self._record("delivery.authorized", delivery_id, authorization_ref)
@@ -842,16 +897,23 @@ def _validate_snapshot(snapshot: BusinessFactorySnapshot) -> None:
     _text(order.scope, "work order scope")
     _text(order.authorization_ref, "work order authorization_ref")
     _text(order.authorization_fingerprint, "work order authorization fingerprint")
+    if order.product_spec_fingerprint is not None:
+        _sha256(order.product_spec_fingerprint, "work order product spec fingerprint")
     expected_order_fingerprint = _work_order_authorization_intent(
         snapshot.objective.objective_id,
         proposal,
         work_order_id=order.work_order_id,
         scope=order.scope,
+        product_spec_fingerprint=order.product_spec_fingerprint,
     ).fingerprint
     if order.authorization_fingerprint != expected_order_fingerprint:
         raise BusinessFactoryError("work order authorization fingerprint does not match scope")
     if order.product_project_id is not None:
         _text(order.product_project_id, "product_project_id")
+        if order.product_spec_fingerprint is None:
+            raise BusinessFactoryError(
+                "linked ProductProject requires exact WorkOrder product specification authority"
+            )
 
     qa = snapshot.qa
     if qa is not None:
@@ -874,11 +936,22 @@ def _validate_snapshot(snapshot: BusinessFactorySnapshot) -> None:
             "delivery compliance evidence_ref",
             allow_empty=True,
         )
+        if delivery.release_id is None:
+            raise BusinessFactoryError("delivery lacks exact PF10 release identity")
+        if delivery.release_id != delivery.delivery_id:
+            raise BusinessFactoryError("delivery release identity does not match delivery_id")
+        if delivery.artifact_sha256 is None or delivery.compliance_snapshot_digest is None:
+            raise BusinessFactoryError("delivery lacks exact PF10 artifact/snapshot authority")
+        _sha256(delivery.artifact_sha256, "delivery artifact_sha256")
+        _sha256(delivery.compliance_snapshot_digest, "delivery compliance snapshot digest")
         expected_delivery_fingerprint = _delivery_authorization_intent(
             snapshot.objective.objective_id,
             delivery_id=delivery.delivery_id,
             project_id=delivery.project_id,
+            release_id=delivery.release_id,
             artifact_ref=delivery.artifact_ref,
+            artifact_sha256=delivery.artifact_sha256,
+            compliance_snapshot_digest=delivery.compliance_snapshot_digest,
             qa_evidence_ref=qa.evidence_ref,
             compliance_evidence_refs=delivery.compliance_evidence_refs,
         ).fingerprint
@@ -927,18 +1000,38 @@ def _work_order_authorization_intent(
     *,
     work_order_id: str,
     scope: str,
+    product_spec_fingerprint: str | None = None,
 ) -> BusinessAuthorizationIntent:
     _text(proposal.approval_fingerprint, "proposal approval fingerprint")
+    bindings = [
+        ("proposal_id", proposal.proposal_id),
+        ("proposal_approval_fingerprint", proposal.approval_fingerprint),
+        ("scope", scope),
+    ]
+    if product_spec_fingerprint is not None:
+        _sha256(product_spec_fingerprint, "product spec fingerprint")
+        bindings.append(("product_spec_fingerprint", product_spec_fingerprint))
     return BusinessAuthorizationIntent(
         objective_id=objective_id,
         purpose="work_order.authorize",
         subject_id=work_order_id,
-        bindings=(
-            ("proposal_id", proposal.proposal_id),
-            ("proposal_approval_fingerprint", proposal.approval_fingerprint),
-            ("scope", scope),
-        ),
+        bindings=tuple(bindings),
     )
+
+
+def _product_spec_fingerprint(spec: ProductProjectSpec) -> str:
+    effective_spec = replace(
+        spec,
+        supersedes_spec_version=None,
+        revision_reason="initial specification",
+    )
+    payload = json.dumps(
+        effective_spec.to_dict(),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _delivery_authorization_intent(
@@ -946,7 +1039,10 @@ def _delivery_authorization_intent(
     *,
     delivery_id: str,
     project_id: str,
+    release_id: str,
     artifact_ref: str,
+    artifact_sha256: str,
+    compliance_snapshot_digest: str,
     qa_evidence_ref: str,
     compliance_evidence_refs: tuple[str, ...],
 ) -> BusinessAuthorizationIntent:
@@ -961,9 +1057,12 @@ def _delivery_authorization_intent(
         subject_id=delivery_id,
         bindings=(
             ("artifact_ref", artifact_ref),
+            ("artifact_sha256", artifact_sha256),
             ("compliance_evidence_refs", compliance_payload),
+            ("compliance_snapshot_digest", compliance_snapshot_digest),
             ("project_id", project_id),
             ("qa_evidence_ref", qa_evidence_ref),
+            ("release_id", release_id),
         ),
     )
 
@@ -1017,6 +1116,7 @@ def _work_order(raw: object) -> BusinessWorkOrder | None:
         _value(item, "scope", "work order"),
         _value(item, "authorization_ref", "work order"),
         _value(item, "authorization_fingerprint", "work order"),
+        _optional_value(item, "product_spec_fingerprint", "work order"),
         _optional_value(item, "product_project_id", "work order"),
     )
 
@@ -1043,6 +1143,9 @@ def _delivery(raw: object) -> DeliveryRecord | None:
         _value(item, "authorization_ref", "delivery"),
         _value(item, "authorization_fingerprint", "delivery"),
         _strings(item, "compliance_evidence_refs", "delivery"),
+        _optional_value(item, "release_id", "delivery"),
+        _optional_value(item, "artifact_sha256", "delivery"),
+        _optional_value(item, "compliance_snapshot_digest", "delivery"),
     )
 
 
@@ -1141,6 +1244,14 @@ def _int(raw: object, label: str) -> int:
 def _text(value: object, label: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise BusinessFactoryError(f"{label} must be non-empty text")
+
+
+def _sha256(value: object, label: str) -> None:
+    _text(value, label)
+    assert isinstance(value, str)
+    normalized = value.casefold()
+    if len(normalized) != 64 or any(char not in "0123456789abcdef" for char in normalized):
+        raise BusinessFactoryError(f"{label} must be a 64-character SHA-256 hex digest")
 
 
 def _unique(values: tuple[str, ...], label: str, *, allow_empty: bool = False) -> None:
