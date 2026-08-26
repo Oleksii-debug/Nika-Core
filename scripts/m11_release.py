@@ -106,15 +106,22 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
     if first != second:
         raise RuntimeError("packaged PF11 ProductProject restart replay changed durable identity")
     project_id = first.get("project_id")
+    goal = first.get("goal")
     if (
         first.get("route") != "product_project"
-        or first.get("spec_version") != 1
+        or first.get("spec_version") != 2
         or not isinstance(project_id, str)
         or not project_id.strip()
+        or not isinstance(goal, str)
+        or not goal.strip()
         or first.get("command_center_state_proven") is not True
+        or first.get("current_command_proven") is not True
+        or first.get("current_command_focus_proven") is not True
+        or first.get("refinement_command_proven") is not True
+        or first.get("refinement_durable_state_proven") is not True
         or first.get("bounded_projection_proven") is not True
         or first.get("bridge_state_project_id") != project_id
-        or first.get("bridge_state_spec_version") != 1
+        or first.get("bridge_state_spec_version") != 2
     ):
         raise RuntimeError("packaged PF11 ProductProject proof returned invalid route evidence")
     status_count = _require_exact_nonnegative_int(first, "bridge_state_status_count")
@@ -135,13 +142,16 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
         "product_project_id": project_id,
         "product_project_spec_version": first["spec_version"],
         "product_project_state": first.get("state"),
+        "product_project_goal": goal,
         "product_command_center_proven": True,
         "packaged_bridge_state_proven": True,
+        "packaged_refinement_proven": True,
         "bounded_projection_proven": True,
         "bridge_state_status_count": status_count,
         "bridge_state_decision_count": decision_count,
         "packaged_executable_proven": True,
         "restart_replay_proven": True,
+        "refinement_restart_replay_proven": True,
         "human_tested": False,
         "nvda_verified": False,
         "production_release_ready": False,

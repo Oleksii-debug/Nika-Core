@@ -23,11 +23,16 @@ from nika_core.product_factory_packaged_journey import (
     PackagedProductStateProvider,
     product_project_identity,
 )
+from nika_core.product_factory_packaged_refinement import PackagedProductRefinementRouter
 from nika_core.product_project import ProductProjectRepository
 from nika_core.ui.bridge import UIActionBridge
 from nika_core.ui.bridge_models import UIResult
 from nika_core.ui.desktop_backend import DesktopBackend
 from nika_core.ui.shell import launch_windows_shell
+
+_PF11_REFINED_GOAL = (
+    "Create an accessible Windows product with keyboard-first packaged restart acceptance"
+)
 
 
 def _focus(focus_id: str, message: str) -> UIResult:
@@ -58,6 +63,10 @@ def build_windows_bridge(
         ordinary_handler=backend.create_task,
         selection_store=PackagedProductSelectionStore(store),
     )
+    product_entry = PackagedProductRefinementRouter(
+        products=products,
+        base_router=product_router,
+    )
     command_center = ProductCommandCenter(products)
     product_state = PackagedProductStateProvider(
         base_state=backend.snapshot,
@@ -68,7 +77,7 @@ def build_windows_bridge(
         actions,
         keymap,
         handlers={
-            "task.create": product_router.create,
+            "task.create": product_entry.create,
             "task.pause": backend.pause_task,
             "task.resume": backend.resume_task,
             "agent.stop": backend.stop_agent,
@@ -95,6 +104,8 @@ def _require_product_state(
     response: Mapping[str, Any],
     *,
     project_id: str,
+    spec_version: int,
+    goal: str,
 ) -> Mapping[str, Any]:
     if response.get("ok") is not True:
         raise RuntimeError(f"PF11 packaged bridge state failed: {response}")
@@ -106,7 +117,8 @@ def _require_product_state(
         raise TypeError("PF11 packaged bridge did not expose ProductCommandCenter state")
     if (
         product_state.get("project_id") != project_id
-        or product_state.get("spec_version") != 1
+        or product_state.get("spec_version") != spec_version
+        or product_state.get("goal") != goal
         or not isinstance(product_state.get("status_count"), int)
         or isinstance(product_state.get("status_count"), bool)
         or not isinstance(product_state.get("decision_count"), int)
@@ -148,6 +160,36 @@ def _require_current_product_result(
         )
 
 
+def _require_refinement_result(
+    response: Mapping[str, Any],
+    *,
+    project_id: str,
+    before_version: int,
+    state: str,
+    goal: str,
+) -> None:
+    if before_version == 1:
+        expected_message = (
+            f"ProductProject оновлено: {project_id}; "
+            f"spec version 1 -> 2; state {state}; goal: {goal}."
+        )
+    elif before_version == 2:
+        expected_message = (
+            f"Ціль ProductProject вже актуальна: {project_id}; "
+            f"spec version 2; state {state}; goal: {goal}."
+        )
+    else:
+        raise RuntimeError("PF11 packaged refinement started from an unsupported spec version")
+    if (
+        response.get("status") != "completed"
+        or response.get("message") != expected_message
+        or response.get("focus_id") != "tasks-heading"
+    ):
+        raise RuntimeError(
+            "PF11 packaged ProductProject refinement returned inconsistent identity/focus"
+        )
+
+
 def _run_pf11_proof(
     config: AppConfig,
     *,
@@ -158,7 +200,8 @@ def _run_pf11_proof(
     decision = route_command(command)
     if decision.normalized_goal is None:
         raise RuntimeError("PF11 proof command did not produce a normalized ProductProject goal")
-    project_id = product_project_identity(decision.normalized_goal)
+    initial_goal = decision.normalized_goal
+    project_id = product_project_identity(initial_goal)
     recovered_before_command = bridge.get_state()
     recovered_project = recovered_before_command.get("state", {}).get("product_project")
     if isinstance(recovered_project, Mapping) and recovered_project.get("project_id") != project_id:
@@ -172,10 +215,46 @@ def _run_pf11_proof(
     )
     if result.get("status") != "completed":
         raise RuntimeError(f"PF11 packaged ProductProject route failed: {result}")
-    detail = products.inspect_project(project_id)
-    if detail.summary.project_id != project_id or detail.summary.version != 1:
+
+    before = products.inspect_project(project_id)
+    if before.summary.project_id != project_id or before.summary.version not in {1, 2}:
         raise RuntimeError("PF11 packaged ProductProject identity/version proof failed")
-    product_state = _require_product_state(bridge.get_state(), project_id=project_id)
+    if before.summary.version == 1 and before.summary.goal != initial_goal:
+        raise RuntimeError("PF11 packaged initial ProductProject goal is inconsistent")
+    if before.summary.version == 2 and before.summary.goal != _PF11_REFINED_GOAL:
+        raise RuntimeError("PF11 packaged restarted ProductProject goal is inconsistent")
+
+    refinement = bridge.dispatch(
+        {
+            "request_id": "pf11-packaged-refinement-proof",
+            "action_id": "task.create",
+            "payload": {
+                "command": f"Set current ProductProject goal: {_PF11_REFINED_GOAL}",
+            },
+        }
+    )
+    _require_refinement_result(
+        refinement,
+        project_id=project_id,
+        before_version=before.summary.version,
+        state=before.summary.state,
+        goal=_PF11_REFINED_GOAL,
+    )
+
+    detail = products.inspect_project(project_id)
+    if (
+        detail.summary.project_id != project_id
+        or detail.summary.version != 2
+        or detail.summary.state != before.summary.state
+        or detail.summary.goal != _PF11_REFINED_GOAL
+    ):
+        raise RuntimeError("PF11 packaged ProductProject refinement durability proof failed")
+    product_state = _require_product_state(
+        bridge.get_state(),
+        project_id=project_id,
+        spec_version=2,
+        goal=_PF11_REFINED_GOAL,
+    )
     current_result = bridge.dispatch(
         {
             "request_id": "pf11-packaged-current-proof",
@@ -186,18 +265,21 @@ def _run_pf11_proof(
     _require_current_product_result(
         current_result,
         project_id=project_id,
-        spec_version=detail.summary.version,
+        spec_version=2,
         state=detail.summary.state,
-        goal=detail.summary.goal,
+        goal=_PF11_REFINED_GOAL,
     )
     payload = {
         "route": decision.route.value,
         "project_id": project_id,
         "spec_version": detail.summary.version,
         "state": detail.summary.state,
+        "goal": detail.summary.goal,
         "command_center_state_proven": True,
         "current_command_proven": True,
         "current_command_focus_proven": True,
+        "refinement_command_proven": True,
+        "refinement_durable_state_proven": True,
         "bridge_state_project_id": product_state["project_id"],
         "bridge_state_spec_version": product_state["spec_version"],
         "bridge_state_status_count": product_state["status_count"],
