@@ -41,28 +41,37 @@ class IntelligenceModePolicy:
     """Fail-closed product policy for selecting one intelligence boundary.
 
     Local provider identifiers match the existing Nika model adapters. External
-    APIs remain disabled until the product layer explicitly enables that mode.
-    This policy never grants a model download, credential, or high-impact tool
-    approval; those remain governed by their existing dedicated boundaries.
+    APIs remain disabled until the product layer explicitly enables one exact
+    provider identity. This policy never grants a model download, credential,
+    or high-impact tool approval; those remain governed by their existing
+    dedicated boundaries.
     """
 
     embedded_provider_id: str = "foundry-local"
     ollama_provider_id: str = "ollama"
+    external_provider_id: str | None = None
     embedded_local_enabled: bool = True
     local_ollama_enabled: bool = True
     external_api_enabled: bool = False
 
     def __post_init__(self) -> None:
-        for name, provider_id in (
-            ("embedded_provider_id", self.embedded_provider_id),
-            ("ollama_provider_id", self.ollama_provider_id),
-        ):
+        provider_ids = {
+            "embedded_provider_id": self.embedded_provider_id,
+            "ollama_provider_id": self.ollama_provider_id,
+        }
+        if self.external_provider_id is not None:
+            provider_ids["external_provider_id"] = self.external_provider_id
+
+        for name, provider_id in provider_ids.items():
             if not provider_id.strip():
                 raise ValueError(f"{name} must not be empty")
             if provider_id != provider_id.strip():
                 raise ValueError(f"{name} must not contain surrounding whitespace")
-        if self.embedded_provider_id == self.ollama_provider_id:
-            raise ValueError("embedded and Ollama provider IDs must be distinct")
+
+        if len(set(provider_ids.values())) != len(provider_ids):
+            raise ValueError("intelligence mode provider IDs must be distinct")
+        if self.external_api_enabled and self.external_provider_id is None:
+            raise ValueError("external_provider_id is required when external API mode is enabled")
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,7 +129,7 @@ class IntelligenceModeRouter:
             IntelligenceModeStatus(
                 mode=IntelligenceMode.EXTERNAL_API,
                 enabled=self._policy.external_api_enabled,
-                provider_id=None,
+                provider_id=self._policy.external_provider_id,
                 provider_kind=ProviderKind.CLOUD,
             ),
         )
@@ -149,7 +158,6 @@ class IntelligenceModeRouter:
                 mode=mode,
                 request=request,
                 provider_id=self._policy.embedded_provider_id,
-                provider_kind=None,
                 expected_kind=ProviderKind.LOCAL,
             )
 
@@ -159,17 +167,22 @@ class IntelligenceModeRouter:
                 mode=mode,
                 request=request,
                 provider_id=self._policy.ollama_provider_id,
-                provider_kind=None,
                 expected_kind=ProviderKind.LOCAL,
             )
 
         if mode is IntelligenceMode.EXTERNAL_API:
             self._require_enabled(mode, self._policy.external_api_enabled)
+            provider_id = self._policy.external_provider_id
+            if provider_id is None:
+                raise IntelligenceModeError(
+                    IntelligenceModeErrorCode.INVALID_CONFIGURATION,
+                    "external API mode has no approved provider identity",
+                    mode=mode,
+                )
             return await self._complete_with_gateway(
                 mode=mode,
                 request=request,
-                provider_id=None,
-                provider_kind=ProviderKind.CLOUD,
+                provider_id=provider_id,
                 expected_kind=ProviderKind.CLOUD,
             )
 
@@ -184,14 +197,13 @@ class IntelligenceModeRouter:
         *,
         mode: IntelligenceMode,
         request: ModelRequest,
-        provider_id: str | None,
-        provider_kind: ProviderKind | None,
+        provider_id: str,
         expected_kind: ProviderKind,
     ) -> ModelResponse:
         routed_request = replace(
             request,
             provider_id=provider_id,
-            provider_kind=provider_kind,
+            provider_kind=None,
             fallback_provider_ids=(),
         )
         response = await self._gateway.complete(routed_request)
