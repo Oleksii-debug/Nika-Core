@@ -207,7 +207,7 @@
       const saveFocusId = keymapControlId(action.action_id, "save");
       save.type = "button";
       save.id = saveFocusId;
-      save.textContent = action.may_beUnbound ? "Зберегти / очистити" : "Зберегти";
+      save.textContent = action.may_be_unbound ? "Зберегти / очистити" : "Зберегти";
       save.setAttribute(
         "aria-label",
         action.may_be_unbound
