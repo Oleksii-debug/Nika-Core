@@ -87,6 +87,8 @@ class ProductSearchResult:
 
 
 def _required(value: str, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise ProductSearchError(f"{field_name} must be a string")
     normalized = value.strip()
     if not normalized:
         raise ProductSearchError(f"{field_name} is required")
@@ -96,7 +98,7 @@ def _required(value: str, field_name: str) -> str:
 def _currency(value: str | None) -> str | None:
     if value is None:
         return None
-    normalized = value.strip().upper()
+    normalized = _required(value, "currency").upper()
     if len(normalized) != 3 or not normalized.isascii() or not normalized.isalpha():
         raise ProductSearchError("currency must be a three-letter ASCII code")
     return normalized
@@ -105,6 +107,8 @@ def _currency(value: str | None) -> str | None:
 def _decimal(value: Decimal | None, field_name: str) -> Decimal | None:
     if value is None:
         return None
+    if not isinstance(value, Decimal):
+        raise ProductSearchError(f"{field_name} must be a Decimal")
     if not value.is_finite() or value < 0:
         raise ProductSearchError(f"{field_name} must be a finite non-negative amount")
     return value
@@ -136,20 +140,20 @@ class ProductSearchService:
             item = items.get(_required(observation.document_id, "document_id"))
             if item is None:
                 raise ProductSearchError(
-                    f"observation document is outside research result: {observation.document_id}"
+                    "observation document is outside research result: "
+                    f"{observation.document_id}"
                 )
             card = self._card_from_observation(item, observation)
             if self._matches(card, normalized):
                 cards.append(card)
 
         cards.sort(key=lambda card: self._sort_key(card, normalized))
-        limited = tuple(cards[: normalized.limit])
         return ProductSearchResult(
             result_set_id=result_set.result_set_id,
             workspace_id=result_set.workspace_id,
             query=result_set.query,
             criteria=normalized,
-            cards=limited,
+            cards=tuple(cards[: normalized.limit]),
         )
 
     @staticmethod
@@ -190,17 +194,21 @@ class ProductSearchService:
         seller = _required(observation.seller, "seller")
         price = _decimal(observation.price_amount, "price_amount")
         currency = _currency(observation.currency)
+        if not isinstance(observation.availability, ProductAvailability):
+            raise ProductSearchError("availability must be a ProductAvailability")
         if (price is None) != (currency is None):
             raise ProductSearchError("price_amount and currency must be recorded together")
+        if not math.isfinite(item.rank):
+            raise ProductSearchError("research rank must be finite")
 
-        matching_evidence = tuple(
-            evidence
-            for evidence in item.evidence
-            if evidence.source_id == source_id
-            and evidence.locator == locator
-            and evidence.observed_at == observed_at
+        evidence = tuple(
+            value
+            for value in item.evidence
+            if value.source_id == source_id
+            and value.locator == locator
+            and value.observed_at == observed_at
         )
-        if not matching_evidence:
+        if not evidence:
             raise ProductSearchError(
                 "product observation is not bound to exact research evidence"
             )
@@ -218,12 +226,18 @@ class ProductSearchService:
             observed_at=observed_at,
             research_rank=item.rank,
             why_matched=item.why_matched,
-            evidence=matching_evidence,
+            evidence=evidence,
         )
 
     @staticmethod
     def _validate_criteria(criteria: ProductSearchCriteria) -> ProductSearchCriteria:
         currency = _currency(criteria.currency)
+        if not isinstance(criteria.require_available, bool):
+            raise ProductSearchError("require_available must be a boolean")
+        if not isinstance(criteria.sort, ProductSort):
+            raise ProductSearchError("sort must be a ProductSort")
+        if not isinstance(criteria.limit, int) or isinstance(criteria.limit, bool):
+            raise ProductSearchError("limit must be an integer")
         min_price = _decimal(criteria.min_price, "min_price")
         max_price = _decimal(criteria.max_price, "max_price")
         if min_price is not None and max_price is not None and min_price > max_price:
@@ -254,8 +268,9 @@ class ProductSearchService:
 
     @staticmethod
     def _matches(card: ProductCard, criteria: ProductSearchCriteria) -> bool:
-        if criteria.require_available and card.availability is not ProductAvailability.IN_STOCK:
-            return False
+        if criteria.require_available:
+            if card.availability is not ProductAvailability.IN_STOCK:
+                return False
         if criteria.seller_allowlist and card.seller not in criteria.seller_allowlist:
             return False
 
@@ -264,10 +279,12 @@ class ProductSearchService:
         if price_filtering or price_sorting:
             if card.price_amount is None or card.currency != criteria.currency:
                 return False
-        if criteria.min_price is not None and card.price_amount < criteria.min_price:
-            return False
-        if criteria.max_price is not None and card.price_amount > criteria.max_price:
-            return False
+        if criteria.min_price is not None:
+            if card.price_amount is None or card.price_amount < criteria.min_price:
+                return False
+        if criteria.max_price is not None:
+            if card.price_amount is None or card.price_amount > criteria.max_price:
+                return False
         return True
 
     @staticmethod
@@ -276,10 +293,12 @@ class ProductSearchService:
         criteria: ProductSearchCriteria,
     ) -> tuple[object, ...]:
         if criteria.sort is ProductSort.PRICE_LOW_TO_HIGH:
-            assert card.price_amount is not None
+            if card.price_amount is None:
+                raise ProductSearchError("price sort requires a recorded price")
             return (card.price_amount, card.research_rank, card.product_id)
         if criteria.sort is ProductSort.PRICE_HIGH_TO_LOW:
-            assert card.price_amount is not None
+            if card.price_amount is None:
+                raise ProductSearchError("price sort requires a recorded price")
             return (-card.price_amount, card.research_rank, card.product_id)
         return (card.research_rank, card.product_id)
 
@@ -291,6 +310,7 @@ class ProductSearchCodec:
 
     @classmethod
     def dumps(cls, result: ProductSearchResult) -> str:
+        cls._validate_result(result)
         payload = {
             "schema_version": cls.SCHEMA_VERSION,
             "result_set_id": result.result_set_id,
@@ -299,7 +319,6 @@ class ProductSearchCodec:
             "criteria": cls._criteria_payload(result.criteria),
             "cards": [cls._card_payload(card) for card in result.cards],
         }
-        cls._validate_result(result)
         return json.dumps(
             payload,
             ensure_ascii=False,
@@ -312,25 +331,34 @@ class ProductSearchCodec:
     def loads(cls, raw: str) -> ProductSearchResult:
         try:
             payload = json.loads(raw)
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, TypeError) as exc:
             raise ProductSearchError("invalid product search JSON") from exc
         if not isinstance(payload, dict):
             raise ProductSearchError("product search payload must be an object")
         cls._expect_keys(
             payload,
-            {"schema_version", "result_set_id", "workspace_id", "query", "criteria", "cards"},
+            {
+                "schema_version",
+                "result_set_id",
+                "workspace_id",
+                "query",
+                "criteria",
+                "cards",
+            },
             "payload",
         )
-        if payload["schema_version"] != cls.SCHEMA_VERSION:
+        schema_version = payload["schema_version"]
+        if (
+            not isinstance(schema_version, int)
+            or isinstance(schema_version, bool)
+            or schema_version != cls.SCHEMA_VERSION
+        ):
             raise ProductSearchError("unsupported product search schema_version")
         cards_raw = payload["cards"]
         if not isinstance(cards_raw, list):
             raise ProductSearchError("cards must be a list")
         criteria = cls._criteria_from_payload(payload["criteria"])
         cards = tuple(cls._card_from_payload(value) for value in cards_raw)
-        product_ids = [card.product_id for card in cards]
-        if len(product_ids) != len(set(product_ids)):
-            raise ProductSearchError("stored cards contain duplicate product IDs")
         result = ProductSearchResult(
             result_set_id=cls._string(payload["result_set_id"], "result_set_id"),
             workspace_id=cls._string(payload["workspace_id"], "workspace_id"),
@@ -343,6 +371,9 @@ class ProductSearchCodec:
 
     @classmethod
     def _validate_result(cls, result: ProductSearchResult) -> None:
+        _required(result.result_set_id, "result_set_id")
+        _required(result.workspace_id, "workspace_id")
+        _required(result.query, "query")
         criteria = ProductSearchService._validate_criteria(result.criteria)
         if criteria != result.criteria:
             raise ProductSearchError("product search criteria are not normalized")
@@ -352,9 +383,9 @@ class ProductSearchCodec:
         if len(result.cards) > criteria.limit:
             raise ProductSearchError("stored card count exceeds criteria limit")
         for card in result.cards:
+            cls._validate_card(card)
             if not ProductSearchService._matches(card, criteria):
                 raise ProductSearchError("stored card does not satisfy search criteria")
-            cls._validate_card(card)
         expected = tuple(
             sorted(
                 result.cards,
@@ -368,8 +399,12 @@ class ProductSearchCodec:
     def _criteria_payload(criteria: ProductSearchCriteria) -> dict[str, object]:
         return {
             "currency": criteria.currency,
-            "min_price": str(criteria.min_price) if criteria.min_price is not None else None,
-            "max_price": str(criteria.max_price) if criteria.max_price is not None else None,
+            "min_price": (
+                str(criteria.min_price) if criteria.min_price is not None else None
+            ),
+            "max_price": (
+                str(criteria.max_price) if criteria.max_price is not None else None
+            ),
             "require_available": criteria.require_available,
             "seller_allowlist": list(criteria.seller_allowlist),
             "sort": criteria.sort.value,
@@ -503,6 +538,8 @@ class ProductSearchCodec:
         _required(card.locator, "locator")
         _required(card.observed_at, "observed_at")
         _required(card.why_matched, "why_matched")
+        if not isinstance(card.availability, ProductAvailability):
+            raise ProductSearchError("availability must be a ProductAvailability")
         _decimal(card.price_amount, "price_amount")
         normalized_currency = _currency(card.currency)
         if normalized_currency != card.currency:
@@ -528,7 +565,9 @@ class ProductSearchCodec:
             "source_kind": evidence.source_kind.value,
             "locator": evidence.locator,
             "observed_at": evidence.observed_at,
-            "freshness": evidence.freshness.value if evidence.freshness is not None else None,
+            "freshness": (
+                evidence.freshness.value if evidence.freshness is not None else None
+            ),
         }
 
     @classmethod
