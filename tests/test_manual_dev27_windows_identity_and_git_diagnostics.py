@@ -8,7 +8,6 @@ import pytest
 
 from nika_core.toolsmith import execution, workspace_security
 
-
 _GIT_SECRET_CANARY = "DEV27_SYNTHETIC_GIT_SECRET_8bca0d7f"
 
 
