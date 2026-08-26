@@ -161,23 +161,35 @@ def test_external_api_mode_is_disabled_by_default() -> None:
     assert cloud.requests == []
 
 
-def test_approved_external_api_mode_routes_only_to_cloud_default() -> None:
+def test_approved_external_api_mode_pins_exact_provider_identity() -> None:
     gateway = RecordingGateway()
-    cloud = RecordingProvider(provider_id="approved-cloud", kind=ProviderKind.CLOUD)
-    gateway.register(cloud, default=True)
+    approved = RecordingProvider(provider_id="approved-cloud", kind=ProviderKind.CLOUD)
+    other_default = RecordingProvider(provider_id="other-cloud", kind=ProviderKind.CLOUD)
+    gateway.register(approved)
+    gateway.register(other_default, default=True)
     router = IntelligenceModeRouter(
         gateway=gateway,
         deterministic=RecordingDeterministicCompletion(),
-        policy=IntelligenceModePolicy(external_api_enabled=True),
+        policy=IntelligenceModePolicy(
+            external_api_enabled=True,
+            external_provider_id="approved-cloud",
+        ),
     )
 
     response = asyncio.run(router.complete(IntelligenceMode.EXTERNAL_API, _request()))
 
     assert response.provider_id == "approved-cloud"
     routed = gateway.requests[0]
-    assert routed.provider_id is None
-    assert routed.provider_kind is ProviderKind.CLOUD
+    assert routed.provider_id == "approved-cloud"
+    assert routed.provider_kind is None
     assert routed.fallback_provider_ids == ()
+    assert len(approved.requests) == 1
+    assert other_default.requests == []
+
+
+def test_external_api_enable_requires_exact_provider_identity() -> None:
+    with pytest.raises(ValueError, match="external_provider_id is required"):
+        IntelligenceModePolicy(external_api_enabled=True)
 
 
 def test_disabled_local_mode_fails_before_gateway_invocation() -> None:
@@ -245,3 +257,6 @@ def test_mode_policy_rejects_ambiguous_or_whitespace_provider_ids() -> None:
 
     with pytest.raises(ValueError, match="surrounding whitespace"):
         IntelligenceModePolicy(ollama_provider_id=" ollama")
+
+    with pytest.raises(ValueError, match="distinct"):
+        IntelligenceModePolicy(external_provider_id="ollama")
