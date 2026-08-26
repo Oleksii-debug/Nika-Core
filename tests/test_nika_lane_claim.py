@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -11,6 +12,7 @@ from scripts.nika_lane_claim import (
     claims_from_text,
     effective_claims,
     find_collisions,
+    main,
 )
 
 
@@ -60,6 +62,7 @@ def test_valid_claim_is_active() -> None:
         "docs/name.",
         "docs/name ",
         "docs/name:stream",
+        "docs/bad\nname.py",
     ],
 )
 def test_unsafe_scope_fails_closed(bad_scope: str) -> None:
@@ -178,9 +181,7 @@ def test_invalid_identity_fields_fail_closed(field: str, value: object) -> None:
 
 def test_lease_cannot_exceed_24_hours() -> None:
     with pytest.raises(LaneClaimError, match="24 hours"):
-        claim_from_mapping(
-            _payload(expires_at="2026-08-27T20:00:01Z")
-        )
+        claim_from_mapping(_payload(expires_at="2026-08-27T20:00:01Z"))
 
 
 def test_unknown_fields_fail_closed() -> None:
@@ -310,6 +311,98 @@ def test_empty_json_claim_list_fails_closed() -> None:
         claims_from_text("[]")
 
 
+def test_lane_history_must_start_active() -> None:
+    released = claim_from_mapping(_payload(status="released"))
+
+    with pytest.raises(LaneClaimError, match="must start active"):
+        effective_claims([released], NOW)
+
+
+def test_active_renewal_cannot_regress_expiry() -> None:
+    first = claim_from_mapping(_payload())
+    shorter = claim_from_mapping(
+        _payload(
+            created_at="2026-08-26T20:30:00Z",
+            expires_at="2026-08-27T19:30:00Z",
+        )
+    )
+
+    with pytest.raises(LaneClaimError, match="expiry regressed"):
+        effective_claims([first, shorter], NOW)
+
+
+def test_cli_clear_and_collision_exit_codes(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate_path = tmp_path / "candidate.json"
+    peer_path = tmp_path / "peer.json"
+    candidate_path.write_text(json.dumps(_payload()), encoding="utf-8")
+    peer_path.write_text(
+        json.dumps(
+            _payload(
+                lane_id="W100",
+                scope=["src/nika_core/unrelated/**"],
+                created_at="2026-08-26T20:01:00Z",
+                expires_at="2026-08-27T20:01:00Z",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                "check",
+                str(candidate_path),
+                "--against",
+                str(peer_path),
+                "--now",
+                "2026-08-26T21:00:00Z",
+            ]
+        )
+        == 0
+    )
+    assert "CLEAR W099" in capsys.readouterr().out
+
+    peer_path.write_text(
+        json.dumps(
+            _payload(
+                lane_id="W100",
+                scope=["src/nika_core/example/file.py"],
+                created_at="2026-08-26T20:01:00Z",
+                expires_at="2026-08-27T20:01:00Z",
+            )
+        ),
+        encoding="utf-8",
+    )
+    assert (
+        main(
+            [
+                "check",
+                str(candidate_path),
+                "--against",
+                str(peer_path),
+                "--now",
+                "2026-08-26T21:00:00Z",
+            ]
+        )
+        == 3
+    )
+    assert "COLLISION W099 W100" in capsys.readouterr().out
+
+
+def test_cli_invalid_input_returns_two(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    bad = tmp_path / "bad.json"
+    bad.write_text("{}", encoding="utf-8")
+
+    assert main(["validate", str(bad), "--now", "2026-08-26T21:00:00Z"]) == 2
+    assert "INVALID" in capsys.readouterr().err
+
+
 def test_naive_now_is_rejected() -> None:
     claim = claim_from_mapping(_payload())
 
@@ -319,6 +412,4 @@ def test_naive_now_is_rejected() -> None:
 
 def test_scope_entries_must_be_unique() -> None:
     with pytest.raises(LaneClaimError, match="unique"):
-        claim_from_mapping(
-            _payload(scope=["docs/ROADMAP.md", "docs/ROADMAP.md"])
-        )
+        claim_from_mapping(_payload(scope=["docs/ROADMAP.md", "docs/ROADMAP.md"]))

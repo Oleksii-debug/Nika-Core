@@ -54,7 +54,7 @@ Fields:
 
 - `schema`: exactly `nika-lane-claim/v1`;
 - `lane_id`: stable uppercase lane identity;
-- `owner`: human-readable worker identity;
+- `owner`: human-readable worker identity without control characters;
 - `status`: `active` or `released`;
 - `start_main`: exact lowercase 40-hex `main` SHA observed at claim time;
 - `branch`: unique Git branch;
@@ -63,10 +63,12 @@ Fields:
 - `expires_at`: canonical UTC timestamp ending in `Z`, at most 24 hours later;
 - `pr`: positive PR number when known, otherwise `null`.
 
-A newer record for the same `lane_id` supersedes an older one only when owner, start SHA, branch and
-scope identity remain unchanged. PR identity may bind once from `null` to a positive PR number and
-cannot later change. A `released` record closes the lane permanently; reuse requires a new lane ID.
-Equal-time conflicting records and mid-lane identity changes fail closed.
+A lane history must start with an `active` record. A newer record for the same `lane_id` supersedes
+an older one only when owner, start SHA, branch and scope identity remain unchanged. PR identity may
+bind once from `null` to a positive PR number and cannot later change. Active renewal may preserve or
+extend expiry but cannot shorten it. A `released` record closes the lane permanently; reuse requires a
+new lane ID. Orphan release records, equal-time conflicting records and mid-lane identity changes fail
+closed.
 
 ## Scope collision semantics
 

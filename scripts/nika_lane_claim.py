@@ -83,6 +83,8 @@ def _require_exact_str(value: object, field: str) -> str:
         raise LaneClaimError(f"{field} must be a string")
     if not value or value != value.strip():
         raise LaneClaimError(f"{field} must be non-empty canonical text")
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise LaneClaimError(f"{field} must not contain control characters")
     return value
 
 
@@ -115,8 +117,6 @@ def _validate_branch(value: object) -> str:
         raise LaneClaimError("branch contains a forbidden ref sequence")
     if any(char in branch for char in "\\ ~^:?*["):
         raise LaneClaimError("branch contains a forbidden ref character")
-    if any(ord(char) < 32 or ord(char) == 127 for char in branch):
-        raise LaneClaimError("branch contains a control character")
     if any(part.endswith(".lock") or part in {"", ".", ".."} for part in branch.split("/")):
         raise LaneClaimError("branch contains an invalid ref component")
     return branch
@@ -315,8 +315,10 @@ def effective_claims(claims: Iterable[LaneClaim], now: datetime) -> tuple[LaneCl
             first.branch,
             _scope_identity(first.scope),
         )
+        if first.status != "active":
+            raise LaneClaimError(f"lane history for {lane_id} must start active")
         seen_pr = first.pr
-        released = first.status == "released"
+        released = False
         previous = first
 
         for claim in ordered[1:]:
@@ -340,6 +342,8 @@ def effective_claims(claims: Iterable[LaneClaim], now: datetime) -> tuple[LaneCl
                 seen_pr = claim.pr
             if released and claim.status == "active":
                 raise LaneClaimError(f"released lane {lane_id} cannot be reactivated")
+            if claim.status == "active" and claim.expires_at < previous.expires_at:
+                raise LaneClaimError(f"active lease expiry regressed for {lane_id}")
             released = released or claim.status == "released"
             previous = claim
 
@@ -390,10 +394,17 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     now = _parse_now(args.now)
     claims = load_claims(Path(args.path))
     active = effective_claims(claims, now)
-    active_ids = {claim.lane_id for claim in active}
     for claim in claims:
-        state = "ACTIVE" if claim.lane_id in active_ids else "INACTIVE"
-        print(f"VALID {claim.lane_id} {state}")
+        print(
+            "VALID_RECORD "
+            f"{claim.lane_id} {claim.status.upper()} "
+            f"{claim.created_at.isoformat().replace('+00:00', 'Z')}"
+        )
+    if not active:
+        print("NO_ACTIVE_CLAIMS")
+        return 0
+    for claim in active:
+        print(f"ACTIVE {claim.lane_id} {claim.branch}")
     return 0
 
 
