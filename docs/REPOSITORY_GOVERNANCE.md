@@ -26,7 +26,7 @@ The verifier requires all of the following before returning `PASS`:
 
 1. the selected branch is protected;
 2. changes require a pull request;
-3. protection applies to administrators, so an ordinary worker cannot become a de facto bypass merely because its integration has elevated repository access;
+3. classic branch protection applies to administrators and has no `bypass_pull_request_allowances` for users, teams, or apps when it is used as evidence;
 4. force pushes are blocked;
 5. branch deletion is blocked;
 6. the stable Core CI contexts `Verify (ubuntu-latest)` and `Verify (windows-latest)` are required;
@@ -39,7 +39,7 @@ Path-conditional or routinely skipped workflows are deliberately not made univer
 
 The public branch summary may show whether a branch is protected, but complete classic branch-protection evidence can require authenticated GitHub API access. GitHub's current REST documentation specifies repository `Administration: read` permission for the Get branch protection endpoint.
 
-Pass a token only through an environment variable, never a command-line value or repository file. The default is `GITHUB_TOKEN`; use `--token-env NAME` to select another environment variable. Do not commit `.env`, tokens, browser credentials, or GitHub sessions.
+Pass a token only through an environment variable, never a command-line value or repository file. The default is `GITHUB_TOKEN`; use `--token-env NAME` to select another environment variable. The verifier pins requests to `https://api.github.com`; there is no command-line API-host override that could redirect a token. Do not commit `.env`, tokens, browser credentials, or GitHub sessions.
 
 If the token cannot read detailed protection state, the verifier reports `BLOCKED` rather than guessing that the branch is safe.
 
@@ -50,9 +50,10 @@ This repository tool intentionally does not mutate branch protection or rulesets
 Before activation, retain these invariants:
 
 - PR-based changes to `main`;
+- no classic PR-bypass allowances for worker users, teams, or apps;
 - no force push or deletion;
 - exact stable Core CI contexts only;
-- no silent worker/app bypass;
+- no silent ruleset worker/app bypass;
 - a documented repository-owner break-glass recovery path;
 - after any break-glass change, rerun the exact-head Core, M11, M12 and this governance verifier before restoring release credit.
 
