@@ -27,6 +27,22 @@ Nika Core has important conditional proof jobs that run only for specific branch
 
 The repository-wide minimum is therefore the stable `Core required gate`. M11, M12, PF3, DEV05, physical Windows, independent audit, and Product Journey evidence remain separate acceptance requirements according to the owning specification and lane. Passing the repository-wide Core gate never upgrades those requirements and never sets `HUMAN_TESTED` or `NVDA_VERIFIED`.
 
+## Trust boundary of a status-check gate
+
+The stable gate fixes required-check availability and fail-closed aggregation. It is **not** an immutable security authority by itself.
+
+For a normal GitHub Actions `pull_request` run, the workflow definition is taken from the pull request merge commit. A pull request that changes `.github/workflows/ci.yml` can therefore change the workflow that produces the `Core required gate` check. Read-only workflow permissions and `persist-credentials: false` reduce credential exposure, but they do not make candidate-supplied workflow logic trusted.
+
+Consequences:
+
+- branch protection using `Core required gate` is a strong minimum against accidental direct-main updates and against skipped/conditional-check deadlocks;
+- it must not be described as proof that a malicious or incorrectly authorized workflow-changing pull request cannot manufacture its own CI behavior;
+- ordinary product lanes must not modify `.github/workflows/**`;
+- workflow changes require an explicit governance/security lane, current-main reread, exact diff review, and independent integration decision;
+- if the live GitHub plan/account topology supports an independently enforced required-workflow or file-path protection mechanism, it should be evaluated as a separate governance hardening step rather than silently assumed here.
+
+Nika Core currently uses one GitHub user repository identity for repository administration, so GitHub account-level review metadata cannot be treated as a substitute for the project's independent TECH02/AUD review process.
+
 ## Branch-protection activation boundary
 
 Enabling or changing branch protection is a separate high-impact repository administration action. Do not perform it merely because this source change exists.
@@ -35,10 +51,10 @@ Before activation:
 
 1. Merge the stable-gate source only after its exact candidate head passes current Core CI and the normal independent integration review.
 2. Confirm `Core required gate` has completed successfully on the integrated repository within GitHub's required-check eligibility window.
-3. Re-read live `main`, repository rulesets/branch protection, open integration work, and current check names immediately before the settings change.
+3. Re-read live `main`, repository rulesets/branch protection, open integration work, current check names, and any open workflow-changing pull requests immediately before the settings change.
 4. Preview the exact proposed protection settings and obtain explicit project-owner approval for that settings mutation.
 
-Initial safe enforcement target:
+Initial bounded enforcement target:
 
 - branch: `main`;
 - require pull requests before merging;
@@ -46,9 +62,10 @@ Initial safe enforcement target:
 - disallow force pushes;
 - disallow branch deletion;
 - do not enable merge queue until `merge_group` triggering is deliberately added and qualified;
-- do not treat repository protection as a substitute for M11/M12/PF/audit/human acceptance gates.
+- do not treat repository protection as a substitute for M11/M12/PF/audit/human acceptance gates;
+- do not claim workflow-file immutability unless a separate independently enforced mechanism actually provides it.
 
-Whether administrators may bypass protection, how many approving reviews are required, and whether strict up-to-date status is enabled are policy decisions that must be previewed against the live parallel-development topology before activation. They are not silently chosen by this implementation lane.
+Whether administrators may bypass protection, how many approving reviews are required, whether strict up-to-date status is enabled, and whether an additional workflow-file protection mechanism is available are policy decisions that must be previewed against the live parallel-development topology before activation. They are not silently chosen by this implementation lane.
 
 ## Rollback and incident handling
 
