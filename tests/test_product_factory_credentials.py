@@ -11,6 +11,7 @@ from nika_core.product_factory_credentials import (
     CredentialState,
     IdentityRef,
     SecretRef,
+    credential_authority_fingerprint,
 )
 
 NOW = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
@@ -22,7 +23,9 @@ RAW_SECRET = "super-secret-test-value-never-serialize"
 @dataclass(slots=True)
 class FakeProtectedStore:
     _material: dict[tuple[str, int], str] = field(default_factory=dict)
+    _authorities: dict[tuple[str, int], str] = field(default_factory=dict)
     _handles: dict[str, tuple[str, int]] = field(default_factory=dict)
+    _operation_handles: dict[str, str] = field(default_factory=dict)
     _next_handle: int = 1
 
     def seed(self, secret_ref: str, generation: int, raw_secret: str) -> None:
@@ -31,9 +34,48 @@ class FakeProtectedStore:
     def contains(self, secret_ref: str, generation: int) -> bool:
         return (secret_ref, generation) in self._material
 
+    def bind_authority(
+        self,
+        *,
+        secret_ref: str,
+        generation: int,
+        authority_fingerprint: str,
+    ) -> None:
+        key = (secret_ref, generation)
+        existing = self._authorities.get(key)
+        if existing is not None and existing != authority_fingerprint:
+            raise AssertionError("fake authority conflict")
+        self._authorities[key] = authority_fingerprint
+
+    def authority_matches(
+        self,
+        *,
+        secret_ref: str,
+        generation: int,
+        authority_fingerprint: str,
+    ) -> bool:
+        return self._authorities.get((secret_ref, generation)) == authority_fingerprint
+
+    def retire_authority(
+        self,
+        *,
+        secret_ref: str,
+        generation: int,
+        current_authority_fingerprint: str,
+        retired_authority_fingerprint: str,
+    ) -> None:
+        key = (secret_ref, generation)
+        existing = self._authorities.get(key)
+        if existing == retired_authority_fingerprint:
+            return
+        if existing != current_authority_fingerprint:
+            raise AssertionError("fake authority retirement conflict")
+        self._authorities[key] = retired_authority_fingerprint
+
     def issue_handle(
         self,
         *,
+        operation_id: str,
         secret_ref: str,
         generation: int,
         project_id: str,
@@ -47,10 +89,28 @@ class FakeProtectedStore:
         assert expires_at.tzinfo is not None
         if not self.contains(secret_ref, generation):
             raise AssertionError("fake store cannot issue a handle for missing material")
+        existing = self._operation_handles.get(operation_id)
+        if existing is not None:
+            return existing
         handle = f"fake-protected-handle-{self._next_handle:08d}"
         self._next_handle += 1
         self._handles[handle] = (secret_ref, generation)
+        self._operation_handles[operation_id] = handle
         return handle
+
+    def reconcile_handle(
+        self,
+        *,
+        operation_id: str,
+        secret_ref: str,
+        generation: int,
+        project_id: str,
+        audience: str,
+        scopes: frozenset[str],
+        expires_at: datetime,
+    ) -> str | None:
+        del secret_ref, generation, project_id, audience, scopes, expires_at
+        return self._operation_handles.get(operation_id)
 
     def revoke_handles(self, secret_ref: str, generation: int) -> None:
         for handle in [
@@ -59,6 +119,9 @@ class FakeProtectedStore:
             if identity == (secret_ref, generation)
         ]:
             del self._handles[handle]
+            for operation_id, operation_handle in list(self._operation_handles.items()):
+                if operation_handle == handle:
+                    del self._operation_handles[operation_id]
 
 
 def secret(
@@ -79,11 +142,25 @@ def secret(
     )
 
 
+def _pre_enroll(
+    store: FakeProtectedStore,
+    reference: SecretRef,
+    raw_secret: str,
+) -> None:
+    store.seed(reference.secret_ref, reference.generation, raw_secret)
+    store.bind_authority(
+        secret_ref=reference.secret_ref,
+        generation=reference.generation,
+        authority_fingerprint=credential_authority_fingerprint(reference),
+    )
+
+
 def broker_with_secret() -> tuple[CredentialBroker, FakeProtectedStore]:
     store = FakeProtectedStore()
-    store.seed("secret-a", 1, RAW_SECRET)
+    reference = secret()
+    _pre_enroll(store, reference, RAW_SECRET)
     broker = CredentialBroker(store)
-    broker.register_secret(secret(), now=NOW)
+    broker.register_secret(reference, now=NOW)
     return broker, store
 
 
@@ -115,10 +192,11 @@ def test_opaque_lease_and_audit_never_serialize_raw_secret() -> None:
     assert evidence.secret_ref == "secret-a"
 
 
-def test_project_cannot_use_or_enumerate_unrelated_secret() -> None:
+def test_project_cannot_use_or_resolve_unrelated_secret() -> None:
     broker, _store = broker_with_secret()
 
-    assert broker.list_project_secret_refs(PROJECT_B) == ()
+    with pytest.raises(CredentialBrokerError, match="unavailable for project"):
+        broker.get_secret_ref(project_id=PROJECT_B, secret_ref="secret-a")
     with pytest.raises(CredentialBrokerError, match="unavailable for project"):
         broker.issue_lease(
             project_id=PROJECT_B,
@@ -178,7 +256,10 @@ def test_revocation_invalidates_existing_lease_and_future_use() -> None:
     broker.revoke(project_id=PROJECT_A, secret_ref="secret-a", now=NOW + timedelta(seconds=1))
 
     assert lease.handle_ref not in store._handles
-    assert broker.list_project_secret_refs(PROJECT_A)[0].state is CredentialState.REVOKED
+    assert (
+        broker.get_secret_ref(project_id=PROJECT_A, secret_ref="secret-a").state
+        is CredentialState.REVOKED
+    )
     with pytest.raises(CredentialBrokerError, match="unknown or invalidated"):
         broker.authorize_use(
             lease_id=lease.lease_id,
@@ -245,11 +326,13 @@ def test_rotation_requires_preseeded_generation_and_revokes_old_lease() -> None:
 
 def test_identity_binding_cannot_cross_project_boundary() -> None:
     store = FakeProtectedStore()
-    store.seed("secret-a", 1, RAW_SECRET)
-    store.seed("secret-b", 1, "another-secret")
+    reference_a = secret()
+    reference_b = secret("secret-b", project_id=PROJECT_B)
+    _pre_enroll(store, reference_a, RAW_SECRET)
+    _pre_enroll(store, reference_b, "another-secret")
     broker = CredentialBroker(store)
-    broker.register_secret(secret(), now=NOW)
-    broker.register_secret(secret("secret-b", project_id=PROJECT_B), now=NOW)
+    broker.register_secret(reference_a, now=NOW)
+    broker.register_secret(reference_b, now=NOW)
 
     with pytest.raises(CredentialBrokerError, match="another project"):
         broker.register_identity(
@@ -293,7 +376,9 @@ def test_restart_snapshot_drops_leases_but_preserves_audit() -> None:
     restored.restore(snapshot)
 
     assert RAW_SECRET not in repr(snapshot)
-    assert restored.list_project_secret_refs(PROJECT_A) == broker.list_project_secret_refs(PROJECT_A)
+    assert restored.get_secret_ref(
+        project_id=PROJECT_A, secret_ref="secret-a"
+    ) == broker.get_secret_ref(project_id=PROJECT_A, secret_ref="secret-a")
     assert restored.audit_events(PROJECT_A) == broker.audit_events(PROJECT_A)
     with pytest.raises(CredentialBrokerError, match="unknown or invalidated"):
         restored.authorize_use(
@@ -357,10 +442,20 @@ def test_registration_requires_material_already_in_protected_store() -> None:
         broker.register_secret(secret(), now=NOW)
 
 
+def test_registration_requires_pre_enrolled_protected_authority() -> None:
+    store = FakeProtectedStore()
+    reference = secret()
+    store.seed(reference.secret_ref, reference.generation, RAW_SECRET)
+
+    with pytest.raises(CredentialBrokerError, match="not pre-enrolled"):
+        CredentialBroker(store).register_secret(reference, now=NOW)
+
+
 def test_audit_is_project_scoped_and_contains_only_reference_metadata() -> None:
     broker, store = broker_with_secret()
-    store.seed("secret-b", 1, "other-project-secret")
-    broker.register_secret(secret("secret-b", project_id=PROJECT_B), now=NOW)
+    reference_b = secret("secret-b", project_id=PROJECT_B)
+    _pre_enroll(store, reference_b, "other-project-secret")
+    broker.register_secret(reference_b, now=NOW)
 
     events_a = broker.audit_events(PROJECT_A)
     events_b = broker.audit_events(PROJECT_B)

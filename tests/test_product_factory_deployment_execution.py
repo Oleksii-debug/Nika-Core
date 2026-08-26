@@ -5,7 +5,11 @@ from datetime import UTC, datetime
 
 import pytest
 
-from nika_core.product_factory_credentials import CredentialBroker, SecretRef
+from nika_core.product_factory_credentials import (
+    CredentialBroker,
+    SecretRef,
+    credential_authority_fingerprint,
+)
 from nika_core.product_factory_deployment import (
     DeploymentFabric,
     DeploymentIntent,
@@ -40,15 +44,91 @@ DIGEST = "a" * 64
 @dataclass
 class FakeProtectedStore:
     generations: set[tuple[str, int]] = field(default_factory=set)
+    authorities: dict[tuple[str, int], str] = field(default_factory=dict)
+    operation_handles: dict[str, tuple[str, str, int]] = field(default_factory=dict)
 
     def contains(self, secret_ref: str, generation: int) -> bool:
         return (secret_ref, generation) in self.generations
 
+    def bind_authority(
+        self,
+        *,
+        secret_ref: str,
+        generation: int,
+        authority_fingerprint: str,
+    ) -> None:
+        key = (secret_ref, generation)
+        if key not in self.generations:
+            raise RuntimeError("protected generation is unavailable")
+        existing = self.authorities.get(key)
+        if existing is not None and existing != authority_fingerprint:
+            raise RuntimeError("credential authority conflicts")
+        self.authorities[key] = authority_fingerprint
+
+    def authority_matches(
+        self,
+        *,
+        secret_ref: str,
+        generation: int,
+        authority_fingerprint: str,
+    ) -> bool:
+        return self.authorities.get((secret_ref, generation)) == authority_fingerprint
+
+    def retire_authority(
+        self,
+        *,
+        secret_ref: str,
+        generation: int,
+        current_authority_fingerprint: str,
+        retired_authority_fingerprint: str,
+    ) -> None:
+        key = (secret_ref, generation)
+        existing = self.authorities.get(key)
+        if existing == retired_authority_fingerprint:
+            return
+        if existing != current_authority_fingerprint:
+            raise RuntimeError("credential authority retirement conflicts")
+        self.authorities[key] = retired_authority_fingerprint
+
     def issue_handle(self, **kwargs: object) -> str:
-        return f"opaque-handle:{kwargs['secret_ref']}:{kwargs['generation']}"
+        operation_id = kwargs["operation_id"]
+        secret_ref = kwargs["secret_ref"]
+        generation = kwargs["generation"]
+        assert isinstance(operation_id, str)
+        assert isinstance(secret_ref, str)
+        assert isinstance(generation, int) and not isinstance(generation, bool)
+        existing = self.operation_handles.get(operation_id)
+        if existing is not None:
+            handle, bound_ref, bound_generation = existing
+            if (bound_ref, bound_generation) != (secret_ref, generation):
+                raise RuntimeError("operation identity conflicts")
+            return handle
+        handle = f"opaque-handle:{operation_id}"
+        self.operation_handles[operation_id] = (handle, secret_ref, generation)
+        return handle
+
+    def reconcile_handle(self, **kwargs: object) -> str | None:
+        operation_id = kwargs["operation_id"]
+        secret_ref = kwargs["secret_ref"]
+        generation = kwargs["generation"]
+        assert isinstance(operation_id, str)
+        assert isinstance(secret_ref, str)
+        assert isinstance(generation, int) and not isinstance(generation, bool)
+        existing = self.operation_handles.get(operation_id)
+        if existing is None:
+            return None
+        handle, bound_ref, bound_generation = existing
+        if (bound_ref, bound_generation) != (secret_ref, generation):
+            raise RuntimeError("operation identity conflicts")
+        return handle
 
     def revoke_handles(self, secret_ref: str, generation: int) -> None:
-        return None
+        for operation_id in [
+            operation_id
+            for operation_id, (_, bound_ref, bound_generation) in self.operation_handles.items()
+            if (bound_ref, bound_generation) == (secret_ref, generation)
+        ]:
+            del self.operation_handles[operation_id]
 
 
 @dataclass
@@ -141,17 +221,20 @@ def _coordinator(
     nodes.register(local_linux_node())
     store = FakeProtectedStore({("secret:project-a", 1)})
     credentials = CredentialBroker(store)
-    credentials.register_secret(
-        SecretRef(
-            "secret:project-a",
-            "project-a",
-            "fake-staging",
-            "staging deployment",
-            frozenset({"deploy:staging"}),
-            frozenset({"staging-provider"}),
-        ),
-        now=NOW,
+    reference = SecretRef(
+        "secret:project-a",
+        "project-a",
+        "fake-staging",
+        "staging deployment",
+        frozenset({"deploy:staging"}),
+        frozenset({"staging-provider"}),
     )
+    store.bind_authority(
+        secret_ref=reference.secret_ref,
+        generation=reference.generation,
+        authority_fingerprint=credential_authority_fingerprint(reference),
+    )
+    credentials.register_secret(reference, now=NOW)
     actual_provider = provider or FakeProvider()
     actual_health = health or FakeNodeHealth()
     coordinator = DeploymentExecutionCoordinator(
@@ -179,7 +262,6 @@ def test_execution_success_releases_ephemeral_leases() -> None:
     assert any(ref.startswith("execution-node:") for ref in completed.evidence_refs)
     assert sum(ref.startswith("credential-use:") for ref in completed.evidence_refs) == 2
 
-    # Node lease is released after the provider boundary completes.
     second = _spec("project-a", "profiles", SHA2)
     coordinator.submit(second, now=NOW)
     assert coordinator.prepare(second.operation_id, now=NOW).state is OperationState.PREPARED
