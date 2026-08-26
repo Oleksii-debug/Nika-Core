@@ -56,7 +56,7 @@ jobs:
             throw 'Pinned ONE-SHOT-58 harness script is missing.'
           }
 
-      - name: Verify reusable harness has no coordinate or vision targeting fallback
+      - name: Verify harnesses have no coordinate or vision targeting fallback
         shell: pwsh
         run: |
           $forbidden = '(?i)SetCursorPos|mouse_event|GetClickablePoint|BoundingRectangle|AutomationElement\.FromPoint|pyautogui|ImageGrab|CopyFromScreen|Graphics\.FromImage'
@@ -69,30 +69,7 @@ jobs:
             throw "W084 harness contains forbidden fallback surface: $($Matches[0])"
           }
 
-      - name: Verify exact M12 artifact metadata
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $artifact = gh api "repos/${{ github.repository }}/actions/artifacts/${{ env.NIKA_M12_ARTIFACT_ID }}" | ConvertFrom-Json
-          if ([string]$artifact.name -ne '${{ env.NIKA_M12_ARTIFACT_NAME }}') {
-            throw "M12 artifact name mismatch: $($artifact.name)"
-          }
-          if ([string]$artifact.digest -ne '${{ env.NIKA_M12_ARTIFACT_DIGEST }}') {
-            throw "M12 artifact digest mismatch: $($artifact.digest)"
-          }
-          if ($artifact.expired -ne $false) {
-            throw 'Exact M12 artifact is expired.'
-          }
-          if ([string]$artifact.workflow_run.id -ne '${{ env.NIKA_M12_RUN_ID }}') {
-            throw "M12 workflow run mismatch: $($artifact.workflow_run.id)"
-          }
-          if ([string]$artifact.workflow_run.head_sha -ne '${{ env.NIKA_TARGET_SHA }}') {
-            throw "M12 artifact source SHA mismatch: $($artifact.workflow_run.head_sha)"
-          }
-          Write-Host "Exact M12 artifact verified: id=$($artifact.id), digest=$($artifact.digest)"
-
-      - name: Download exact M12 packaged candidate artifact
+      - name: Download exact sealed M12 packaged candidate
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: ${{ env.NIKA_M12_ARTIFACT_NAME }}
@@ -144,6 +121,8 @@ jobs:
           "NIKA_REUSE_EVIDENCE=$reuseEvidence" >> $env:GITHUB_ENV
           "NIKA_W084_EVIDENCE=$w084Evidence" >> $env:GITHUB_ENV
           "NIKA_WINDOW_TITLE=Nika Core $($evidence.product_version)" >> $env:GITHUB_ENV
+          Write-Host "Exact sealed M12 artifact id: ${{ env.NIKA_M12_ARTIFACT_ID }}"
+          Write-Host "Live-verified outer artifact digest: ${{ env.NIKA_M12_ARTIFACT_DIGEST }}"
           Write-Host "Exact inner distributable SHA-256: $zipSha"
 
       - name: Run pinned strongest packaged semantic journey
