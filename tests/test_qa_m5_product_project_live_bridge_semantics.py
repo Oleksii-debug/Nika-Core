@@ -137,7 +137,7 @@ def _require_product_project(response: Mapping[str, Any]) -> Mapping[str, Any]:
 
 def _create_and_restart(
     tmp_path: Path,
-) -> tuple[str, str, dict[str, Any], dict[str, Any]]:
+) -> tuple[str, str, dict[str, Any], dict[str, Any], dict[str, Any]]:
     database = tmp_path / "live ProductProject bridge.db"
     config = AppConfig(database_path=database)
     goal = "Створи застосунок для доступного обліку витрат"
@@ -162,15 +162,13 @@ def _create_and_restart(
     restarted_bridge, restarted_products = build_windows_bridge(config)
     restarted_response = restarted_bridge.get_state()
     assert restarted_products.inspect_project(project_id).summary.goal == goal
-    return goal, project_id, initial, first_response | {"restart": restarted_response}
+    return goal, project_id, initial, first_response, restarted_response
 
 
 def test_real_packaged_bridge_exposes_bounded_projection_after_restart(tmp_path: Path) -> None:
-    goal, project_id, _initial, responses = _create_and_restart(tmp_path)
-    first_response = {key: value for key, value in responses.items() if key != "restart"}
-    restarted_response = responses["restart"]
-    assert isinstance(restarted_response, Mapping)
-
+    goal, project_id, _initial, first_response, restarted_response = _create_and_restart(
+        tmp_path
+    )
     first_project = _require_product_project(first_response)
     restarted_project = _require_product_project(restarted_response)
 
@@ -190,10 +188,9 @@ def test_exact_live_bridge_responses_render_empty_then_current_state(tmp_path: P
     if _NODE is None:
         pytest.skip("Node.js is required for the live bridge-to-renderer oracle")
 
-    goal, project_id, initial, responses = _create_and_restart(tmp_path)
-    restarted_response = responses["restart"]
-    assert isinstance(restarted_response, Mapping)
-
+    goal, project_id, initial, _first_response, restarted_response = _create_and_restart(
+        tmp_path
+    )
     rendered_initial = _render_live_response(initial)
     assert rendered_initial["empty_hidden"] is False
     assert rendered_initial["summary_hidden"] is True
