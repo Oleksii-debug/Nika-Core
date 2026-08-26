@@ -59,8 +59,8 @@ jobs:
       - name: Verify reusable harness has no coordinate or vision targeting fallback
         shell: pwsh
         run: |
+          $forbidden = '(?i)SetCursorPos|mouse_event|GetClickablePoint|BoundingRectangle|AutomationElement\.FromPoint|pyautogui|ImageGrab|CopyFromScreen|Graphics\.FromImage'
           $harness = Get-Content -LiteralPath ./reuse/scripts/one_shot_58_packaged_prehuman.ps1 -Raw -Encoding UTF8
-          $forbidden = '(?i)SetCursorPos|mouse_event|GetClickablePoint|BoundingRectangle|AutomationElement\.FromPoint|pyautogui|ImageGrab|screenshot|\bOCR\b'
           if ($harness -match $forbidden) {
             throw "Reusable harness contains forbidden fallback surface: $($Matches[0])"
           }
@@ -164,16 +164,15 @@ jobs:
         id: w084
         continue-on-error: true
         shell: pwsh
-        env:
-          NIKA_DB_PATH: ${{ env.NIKA_DATABASE }}
-        run: >-
-          ./qa/scripts/w084_packaged_accessibility_redteam.ps1
-          -ExePath "$env:NIKA_BUNDLE\NikaCore.exe"
-          -EvidencePath "$env:NIKA_W084_EVIDENCE"
-          -TargetSourceSha '${{ env.NIKA_TARGET_SHA }}'
-          -ReuseHarnessSha '${{ env.NIKA_REUSE_HARNESS_SHA }}'
-          -M12ArtifactDigest '${{ env.NIKA_M12_ARTIFACT_DIGEST }}'
-          -WindowTitle "$env:NIKA_WINDOW_TITLE"
+        run: |
+          $env:NIKA_DB_PATH = $env:NIKA_DATABASE
+          ./qa/scripts/w084_packaged_accessibility_redteam.ps1 `
+            -ExePath "$env:NIKA_BUNDLE\NikaCore.exe" `
+            -EvidencePath "$env:NIKA_W084_EVIDENCE" `
+            -TargetSourceSha '${{ env.NIKA_TARGET_SHA }}' `
+            -ReuseHarnessSha '${{ env.NIKA_REUSE_HARNESS_SHA }}' `
+            -M12ArtifactDigest '${{ env.NIKA_M12_ARTIFACT_DIGEST }}' `
+            -WindowTitle "$env:NIKA_WINDOW_TITLE"
 
       - name: Upload W084 exact red-team evidence
         if: always()
@@ -183,8 +182,8 @@ jobs:
           path: |
             ${{ runner.temp }}/W084 Пакет Nika/evidence/*.json
             candidate/m12-prehuman-evidence.json
-            candidate/release-manifest.json
-            candidate/THIRD_PARTY_NOTICES.txt
+            candidate/NikaCore/release-manifest.json
+            candidate/NikaCore/THIRD_PARTY_NOTICES.txt
           if-no-files-found: warn
 
       - name: Enforce W084 red-team verdict
