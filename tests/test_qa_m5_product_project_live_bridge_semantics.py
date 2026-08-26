@@ -16,14 +16,19 @@ from scripts.nika_windows import build_windows_bridge
 _ROOT = Path(__file__).parents[1]
 _APP_JS = _ROOT / "src" / "nika_core" / "ui" / "web" / "app.js"
 _NODE = shutil.which("node")
-
-pytestmark = pytest.mark.skipif(
-    _NODE is None,
-    reason="Node.js is required for this live bridge-to-renderer oracle",
-)
+_FORBIDDEN_PROJECT_FIELDS = {
+    "evidence_refs",
+    "credential_refs",
+    "authorization_ref",
+    "provider_session",
+    "protected_store_handle",
+}
 
 
 def _render_live_response(response: Mapping[str, Any]) -> dict[str, object]:
+    node = _NODE
+    if node is None:
+        raise RuntimeError("Node.js is required for the live bridge-to-renderer oracle")
     response_json = json.dumps(response, ensure_ascii=True)
     harness = f"""
 const fs = require("fs");
@@ -105,7 +110,7 @@ setTimeout(() => {{
 }}, 50);
 """
     result = subprocess.run(
-        (_NODE, "-e", harness, str(_APP_JS)),
+        (node, "-e", harness, str(_APP_JS)),
         check=False,
         capture_output=True,
         text=True,
@@ -130,7 +135,9 @@ def _require_product_project(response: Mapping[str, Any]) -> Mapping[str, Any]:
     return project
 
 
-def test_real_packaged_bridge_response_renders_after_restart(tmp_path: Path) -> None:
+def _create_and_restart(
+    tmp_path: Path,
+) -> tuple[str, str, dict[str, Any], dict[str, Any]]:
     database = tmp_path / "live ProductProject bridge.db"
     config = AppConfig(database_path=database)
     goal = "Створи застосунок для доступного обліку витрат"
@@ -150,9 +157,24 @@ def test_real_packaged_bridge_response_renders_after_restart(tmp_path: Path) -> 
     )
     assert created["status"] == "completed"
     assert first_products.inspect_project(project_id).summary.goal == goal
-
     first_response = first_bridge.get_state()
+
+    restarted_bridge, restarted_products = build_windows_bridge(config)
+    restarted_response = restarted_bridge.get_state()
+    assert restarted_products.inspect_project(project_id).summary.goal == goal
+    return goal, project_id, initial, first_response | {"restart": restarted_response}
+
+
+def test_real_packaged_bridge_exposes_bounded_projection_after_restart(tmp_path: Path) -> None:
+    goal, project_id, _initial, responses = _create_and_restart(tmp_path)
+    first_response = {key: value for key, value in responses.items() if key != "restart"}
+    restarted_response = responses["restart"]
+    assert isinstance(restarted_response, Mapping)
+
     first_project = _require_product_project(first_response)
+    restarted_project = _require_product_project(restarted_response)
+
+    assert restarted_project == first_project
     assert first_project["project_id"] == project_id
     assert first_project["title"] == goal
     assert first_project["goal"] == goal
@@ -161,21 +183,21 @@ def test_real_packaged_bridge_response_renders_after_restart(tmp_path: Path) -> 
     assert first_project["blocker_count"] == 0
     assert first_project["status_count"] == 0
     assert first_project["decision_count"] == 0
-    assert set(first_project).isdisjoint(
-        {
-            "evidence_refs",
-            "credential_refs",
-            "authorization_ref",
-            "provider_session",
-            "protected_store_handle",
-        }
-    )
+    assert set(first_project).isdisjoint(_FORBIDDEN_PROJECT_FIELDS)
 
-    restarted_bridge, restarted_products = build_windows_bridge(config)
-    restarted_response = restarted_bridge.get_state()
-    restarted_project = _require_product_project(restarted_response)
-    assert restarted_project == first_project
-    assert restarted_products.inspect_project(project_id).summary.goal == goal
+
+def test_exact_live_bridge_responses_render_empty_then_current_state(tmp_path: Path) -> None:
+    if _NODE is None:
+        pytest.skip("Node.js is required for the live bridge-to-renderer oracle")
+
+    goal, project_id, initial, responses = _create_and_restart(tmp_path)
+    restarted_response = responses["restart"]
+    assert isinstance(restarted_response, Mapping)
+
+    rendered_initial = _render_live_response(initial)
+    assert rendered_initial["empty_hidden"] is False
+    assert rendered_initial["summary_hidden"] is True
+    assert rendered_initial["ready"] == "true"
 
     rendered = _render_live_response(restarted_response)
     assert rendered == {
