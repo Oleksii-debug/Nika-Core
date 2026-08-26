@@ -36,6 +36,16 @@ from .playwright_adapter import (
     PlaywrightInteractionAdapter,
 )
 from .resolver import resolve_strict, validate_snapshot
+from .windows_uia_adapter import (
+    PywinautoUIABackend,
+    UIABackendMeasurement,
+    UIAControlRecord,
+    UIAWindowRecord,
+    WindowsUIABackend,
+    WindowsUIAInteractionAdapter,
+    choose_measured_backend,
+    measure_observation,
+)
 
 __all__ = [
     "AmbiguousTargetError",
@@ -61,12 +71,20 @@ __all__ = [
     "PageRegistry",
     "PermissionBlockedError",
     "PlaywrightInteractionAdapter",
+    "PywinautoUIABackend",
     "SemanticInteractionCoordinator",
     "SemanticSnapshot",
     "StaleSnapshotError",
     "TargetNotFoundError",
+    "UIABackendMeasurement",
+    "UIAControlRecord",
+    "UIAWindowRecord",
     "UnsupportedInteractionError",
     "WindowIdentity",
+    "WindowsUIABackend",
+    "WindowsUIAInteractionAdapter",
+    "choose_measured_backend",
+    "measure_observation",
     "resolve_strict",
     "validate_snapshot",
 ]
