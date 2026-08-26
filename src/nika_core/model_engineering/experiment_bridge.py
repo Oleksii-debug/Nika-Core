@@ -21,6 +21,14 @@ QUALITY_METRIC = "model_quality_score"
 TASK_PASS_METRIC = "model_task_pass"
 COMPLETION_METRIC = "model_completion_success"
 LATENCY_METRIC = "model_latency_ms"
+_SUPPORTED_METRICS = frozenset(
+    {
+        QUALITY_METRIC,
+        TASK_PASS_METRIC,
+        COMPLETION_METRIC,
+        LATENCY_METRIC,
+    }
+)
 
 
 def build_experiment_definition(
@@ -44,6 +52,13 @@ def build_experiment_definition(
         raise ValueError("model promotion candidate IDs must be unique")
     if not permission_fingerprint or permission_fingerprint != permission_fingerprint.strip():
         raise ValueError("permission_fingerprint must be non-empty without surrounding whitespace")
+    policy_metrics = {
+        policy.primary_metric,
+        *(rule.metric for rule in policy.guardrails),
+    }
+    unsupported = policy_metrics - _SUPPORTED_METRICS
+    if unsupported:
+        raise ValueError(f"unsupported model promotion metrics: {sorted(unsupported)}")
 
     return ExperimentDefinition(
         experiment_id=experiment_id,
@@ -73,17 +88,11 @@ def benchmark_observations(
 ) -> tuple[MetricObservation, ...]:
     """Project benchmark case evidence into the existing Experiment Engine vocabulary."""
 
-    allowed = {
-        QUALITY_METRIC,
-        TASK_PASS_METRIC,
-        COMPLETION_METRIC,
-        LATENCY_METRIC,
-    }
     if not metrics:
         raise ValueError("at least one benchmark metric is required")
     if len(metrics) != len(set(metrics)):
         raise ValueError("benchmark metrics must be unique")
-    unknown = set(metrics) - allowed
+    unknown = set(metrics) - _SUPPORTED_METRICS
     if unknown:
         raise ValueError(f"unsupported benchmark metrics: {sorted(unknown)}")
 
