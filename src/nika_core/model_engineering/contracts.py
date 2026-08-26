@@ -2,8 +2,28 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from math import isfinite
+from urllib.parse import parse_qsl, urlsplit
 
 from nika_core.model_gateway.contracts import PrivacyClass, ProviderKind
+
+_SECRET_QUERY_KEYS = frozenset(
+    {
+        "access_token",
+        "api_key",
+        "apikey",
+        "code",
+        "credential",
+        "id_token",
+        "key",
+        "password",
+        "secret",
+        "sig",
+        "signature",
+        "token",
+        "x-amz-signature",
+        "x-goog-signature",
+    }
+)
 
 
 def _require_text(value: str, name: str) -> None:
@@ -19,6 +39,22 @@ def _require_sha256(value: str, name: str) -> None:
         raise ValueError(f"{name} must be a lowercase SHA-256 hex digest")
 
 
+def _require_non_secret_ref(value: str, name: str) -> None:
+    """Reject common credential-bearing URL forms before durable evidence persistence."""
+
+    _require_text(value, name)
+    try:
+        parsed = urlsplit(value)
+        query = parse_qsl(parsed.query, keep_blank_values=True)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a valid non-secret reference") from exc
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError(f"{name} must not contain URL credentials")
+    for key, _ in query:
+        if key.casefold() in _SECRET_QUERY_KEYS:
+            raise ValueError(f"{name} must not contain credential-like query parameters")
+
+
 @dataclass(frozen=True, slots=True)
 class ModelCandidate:
     """Immutable, non-secret identity for one model/provider candidate."""
@@ -30,6 +66,7 @@ class ModelCandidate:
     model_version: str
     source_ref: str
     license_ref: str
+    privacy_capability_ref: str
     permission_fingerprint: str
     supports_private_data: bool
     artifact_sha256: str | None = None
@@ -40,11 +77,15 @@ class ModelCandidate:
             (self.provider_id, "provider_id"),
             (self.model_id, "model_id"),
             (self.model_version, "model_version"),
-            (self.source_ref, "source_ref"),
-            (self.license_ref, "license_ref"),
             (self.permission_fingerprint, "permission_fingerprint"),
         ):
             _require_text(value, name)
+        for value, name in (
+            (self.source_ref, "source_ref"),
+            (self.license_ref, "license_ref"),
+            (self.privacy_capability_ref, "privacy_capability_ref"),
+        ):
+            _require_non_secret_ref(value, name)
         if not isinstance(self.provider_kind, ProviderKind):
             raise TypeError("provider_kind must be ProviderKind")
         if not isinstance(self.supports_private_data, bool):
@@ -64,12 +105,9 @@ class EvaluationCase:
     privacy: PrivacyClass = PrivacyClass.PRIVATE
 
     def __post_init__(self) -> None:
-        for value, name in (
-            (self.case_id, "case_id"),
-            (self.dataset_ref, "dataset_ref"),
-            (self.dataset_version, "dataset_version"),
-        ):
-            _require_text(value, name)
+        _require_text(self.case_id, "case_id")
+        _require_non_secret_ref(self.dataset_ref, "dataset_ref")
+        _require_text(self.dataset_version, "dataset_version")
         _require_sha256(self.dataset_sha256, "dataset_sha256")
         if not isinstance(self.privacy, PrivacyClass):
             raise TypeError("privacy must be PrivacyClass")
