@@ -4,11 +4,13 @@
 
 ## Decision state — must start here
 
-- `HUMAN_TESTED`: `NOT_RUN`
-- `NVDA_VERIFIED`: `NOT_RUN`
+- `HUMAN_TESTED`: `false`
+- `NVDA_VERIFIED`: `false`
+- Functional human evidence state: `NOT_RUN`
+- NVDA evidence state: `NOT_RUN`
 - Overall human result: `NOT_RUN`
 
-Do not prefill any of these fields with `PASS` or `true`. Automation, CI, an LLM, a UIA dump or a generated report cannot change them to a passing human-only state.
+Do not prefill either truth flag with `true`. Automation, CI, an LLM, a UIA dump or a generated report cannot change either human-only flag to `true` or change a human observation from `NOT_RUN` to `PASS`.
 
 ## A. Exact candidate identity
 
@@ -32,7 +34,7 @@ Do not prefill any of these fields with `PASS` or `true`. Automation, CI, an LLM
 
 ### Identity invariant
 
-The Git commit SHA, M12 workflow head SHA, artifact identity and manifest `source_sha` must refer to the same exact release candidate. If the governing release policy requires the artifact source SHA to equal selected/current `main`, that equality is also mandatory at the moment the human run begins. If any required identity does not reconcile, stop: overall result is `BLOCKED`, and both human-only states remain `NOT_RUN` for the intended release candidate.
+The Git commit SHA, M12 workflow head SHA, artifact identity and manifest `source_sha` must refer to the same exact release candidate. If the governing release policy requires the artifact source SHA to equal selected/current `main`, that equality is also mandatory at the moment the human run begins. If any required identity does not reconcile, stop: overall result is `BLOCKED`, both human-only truth flags remain `false`, and no current-candidate human evidence may be promoted to `PASS`.
 
 ## B. Required automated evidence for this exact candidate
 
@@ -45,7 +47,7 @@ Record only evidence actually tied to the candidate above.
 - All required automated gates refer to the exact candidate: `NO / YES`
 - Automated evidence reconciliation result: `NOT_RUN / PASS / FAIL / BLOCKED`
 
-Automated green is a prerequisite/supporting signal only. It does not set `HUMAN_TESTED` or `NVDA_VERIFIED`.
+Automated green is a prerequisite/supporting signal only. It does not set `HUMAN_TESTED=true`, `NVDA_VERIFIED=true`, or any human observation to `PASS`.
 
 ## C. Human test environment
 
@@ -167,11 +169,18 @@ Complete only after all mandatory scenarios have been executed.
 - Tested candidate identity remained exact and current under the governing release policy: `NO / YES`
 - Test was performed by a real person using NVDA on real Windows: `NO / YES`
 
-Final states:
+Final evidence states:
 
-- `HUMAN_TESTED`: `NOT_RUN / PASS / FAIL`
-- `NVDA_VERIFIED`: `NOT_RUN / PASS / FAIL`
+- Functional human evidence state: `NOT_RUN / PASS / FAIL`
+- NVDA evidence state: `NOT_RUN / PASS / FAIL`
 - Overall human result: `NOT_RUN / PASS / FAIL / BLOCKED`
+
+Final truth flags:
+
+- `HUMAN_TESTED`: `false / true`
+- `NVDA_VERIFIED`: `false / true`
 - Human tester declaration/notes: `<required for PASS or FAIL>`
+
+Set `HUMAN_TESTED=true` only if the mandatory functional human evidence is `PASS` on this exact eligible candidate. Set `NVDA_VERIFIED=true` only if the mandatory NVDA evidence is `PASS` in that same real-human NVDA run. Otherwise the respective flag remains `false`.
 
 A `PASS` in this record is valid only for the exact candidate identified in section A. Any later change that makes that candidate stale under the governing release policy — including any `main` SHA movement when exact current-main identity is required — or any later product/package-input change requires a new eligible package identity and a new human record.
