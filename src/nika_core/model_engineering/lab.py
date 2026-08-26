@@ -23,7 +23,6 @@ from nika_core.model_gateway.contracts import PrivacyClass, ProviderKind
 from .contracts import (
     CaseMeasurement,
     EvaluationCase,
-    MetricDefinition,
     ModelCandidate,
     ModelExperimentSpec,
     ModelRecommendation,
