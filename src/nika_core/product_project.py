@@ -539,7 +539,16 @@ class ProductProjectRepository:
                     raise ProductProjectError(
                         "idempotency key was already used with different input"
                     )
-                return self._get_conn(conn, existing["project_id"])
+                stored_project_id = existing["project_id"]
+                if type(stored_project_id) is not str or not stored_project_id.strip():
+                    raise ProductProjectError(
+                        "invalid durable create idempotency project identity"
+                    )
+                if stored_project_id != project_id:
+                    raise ProductProjectError(
+                        "create idempotency record project identity mismatch"
+                    )
+                return self._get_conn(conn, project_id)
             if conn.execute(
                 "SELECT 1 FROM product_projects WHERE project_id = ?", (project_id,)
             ).fetchone():
