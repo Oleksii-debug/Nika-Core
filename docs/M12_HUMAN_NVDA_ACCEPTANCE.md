@@ -10,7 +10,7 @@ This protocol closes only the human Windows/NVDA gate for the exact candidate th
 
 - Passing this protocol does **not** manufacture credit for an unproven Full Product Vision, Product Factory, Business Factory or other product journey.
 - If the release candidate claims one of those user-facing capabilities, the corresponding integrated product journey and automated gates must already be green on the same exact source state before the human run can be used as final release evidence.
-- A docs-only clarification of this protocol does not invalidate a packaged candidate because it does not change packaged behavior. Any product, package-input, workflow, dependency or release-manifest change requires a fresh candidate and fresh human evidence.
+- A docs-only clarification does not by itself prove or change packaged behavior, and this protocol never infers that an older artifact remains current merely because executable bytes appear unchanged. Candidate reuse is governed by the canonical release-identity policy and integration decision. If the release requires artifact `source_sha` to equal the selected/current `main`, any merged commit that moves `main` changes that identity and requires a freshly qualified candidate. Product, package-input, workflow, dependency or release-manifest changes always require a fresh candidate and fresh human evidence.
 
 ## 2. Candidate identity — record before launching
 
@@ -37,6 +37,7 @@ Immediately before the human run, verify that the candidate is still the intende
 Do not award human acceptance if any of the following is true:
 
 - a later product/package-input change has superseded the candidate;
+- the governing release policy requires the candidate source SHA to equal the selected/current `main`, and `main` has moved to a different SHA, including by a docs-only commit;
 - the artifact came from a feature/repair branch when the release claim requires integrated `main`;
 - the current release decision refers to a different source SHA or artifact digest;
 - the package/manifest identity cannot be reconciled exactly;
