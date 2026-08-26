@@ -48,14 +48,16 @@ class FakeBackend:
 
 
 @pytest.mark.parametrize(
-    "request",
+    "sample_request",
     [
         SpeechRequest("Привіт"),
         SpeechRequest("Hello", voice_id="Microsoft Test", rate=-3, volume=75),
     ],
 )
-def test_speech_request_accepts_unicode_and_bounded_settings(request: SpeechRequest) -> None:
-    assert request.text
+def test_speech_request_accepts_unicode_and_bounded_settings(
+    sample_request: SpeechRequest,
+) -> None:
+    assert sample_request.text
 
 
 @pytest.mark.parametrize(
