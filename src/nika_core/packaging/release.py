@@ -26,15 +26,18 @@ _SECRET_SCAN_CHUNK_BYTES = 64 * 1024
 _SECRET_SCAN_OVERLAP_BYTES = 8 * 1024
 _SECRET_ASSIGNMENT_RE = re.compile(
     rb"""
-    [\"']?
+    [\r\n{,\[]
+    (?:\xef\xbb\xbf)?
+    [ \t-]*
+    (?P<quote>["'])?
     (?:
         api[_-]?key|apikey|access[_-]?token|auth[_-]?token|client[_-]?secret|
         secret[_-]?key|password|passwd|private[_-]?key
     )
-    [\"']?
+    (?(quote)(?P=quote))
     \s*[:=]\s*
     (?P<value>
-        \"(?:\\.|[^\"\\\r\n]){1,4096}\"|
+        "(?:\\.|[^"\\\r\n]){1,4096}"|
         '(?:\\.|[^'\\\r\n]){1,4096}'|
         [^\s,\#;}{\]\r\n]{1,4096}
     )
@@ -154,15 +157,20 @@ def _secret_assignment_value_is_placeholder(value: bytes) -> bool:
 
 def _stream_contains_secret_assignment(handle: Any) -> bool:
     overlap = b""
+    first_window = True
     while True:
         chunk = handle.read(_SECRET_SCAN_CHUNK_BYTES)
         if not chunk:
             return False
-        window = overlap + chunk
+        raw_window = overlap + chunk
+        # Only the real file start receives a synthetic line boundary. Subsequent
+        # streaming windows must inherit their boundary from actual file bytes.
+        window = b"\n" + raw_window if first_window else raw_window
+        first_window = False
         for match in _SECRET_ASSIGNMENT_RE.finditer(window):
             if not _secret_assignment_value_is_placeholder(match.group("value")):
                 return True
-        overlap = window[-_SECRET_SCAN_OVERLAP_BYTES:]
+        overlap = raw_window[-_SECRET_SCAN_OVERLAP_BYTES:]
 
 
 def _release_file_contains_secret_assignment(relative_path: str, path: Path) -> bool:
