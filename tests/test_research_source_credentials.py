@@ -19,6 +19,10 @@ from nika_core.research.source_identity import ResearchSourceIdentityError
         "https://example.com/data?GoogleAccessId=super-secret",
         "https://example.com/data?key=super-secret",
         "https://example.com/data?auth=super-secret",
+        "https://example.com/data?subscription-key=super-secret",
+        "https://example.com/data?subscription_key=super-secret",
+        "https://example.com/data?x-api-key=super-secret",
+        "https://example.com/data?X-API-KEY=super-secret",
     ],
 )
 def test_query_credentials_are_rejected_before_source_persistence(
@@ -41,3 +45,28 @@ def test_query_credentials_are_rejected_before_source_persistence(
             "SELECT url FROM research_http_sources WHERE source_id='secret'"
         ).fetchone()
     assert row is None
+
+
+@pytest.mark.parametrize(
+    "locator",
+    [
+        "https://example.com/data?subscription=public-catalog&view=road",
+        "https://example.com/data?public_key=dataset-v2",
+    ],
+)
+def test_benign_query_keys_remain_supported(tmp_path: Path, locator: str) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    repository = ResearchRepository(store)
+    repository.upsert_workspace(ResearchWorkspace("ws", "Research"))
+    network = NetworkResearchRepository(store)
+
+    created = network.register_source(SourceSpec("public", "ws", SourceKind.HTTP, locator))
+
+    assert created.url == locator
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT url FROM research_http_sources WHERE source_id='public'"
+        ).fetchone()
+    assert row is not None
+    assert row["url"] == locator
