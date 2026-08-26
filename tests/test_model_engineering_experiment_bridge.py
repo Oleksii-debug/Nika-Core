@@ -238,9 +238,12 @@ def test_benchmark_observations_drive_existing_experiment_engine() -> None:
     engine = ExperimentEngine(repository)
     engine.create(definition)
     engine.start(definition.experiment_id)
-    metrics = (QUALITY_METRIC, LATENCY_METRIC)
     for report in (champion_report, challenger_report):
-        for observation in benchmark_observations(report, metrics=metrics):
+        for observation in benchmark_observations(
+            report,
+            definition=definition,
+            evaluation_set=evaluation,
+        ):
             engine.record(definition.experiment_id, observation)
     completed = engine.complete(definition.experiment_id)
 
@@ -248,22 +251,36 @@ def test_benchmark_observations_drive_existing_experiment_engine() -> None:
     assert completed.previous_champion_id == champion.candidate_id
 
 
-def test_bridge_exposes_only_bounded_supported_metrics() -> None:
+def test_bridge_projects_only_metrics_declared_by_the_exact_policy() -> None:
+    candidate = _candidate("candidate", "m")
+    evaluation = _evaluation()
     report = _report(
-        _candidate("candidate", "m"),
-        _evaluation(),
+        candidate,
+        evaluation,
         quality=(1.0, 0.0),
         latency=(10.0, 20.0),
+    )
+    definition = build_experiment_definition(
+        experiment_id="all-metrics",
+        champion=candidate,
+        challengers=(_candidate("other", "m2"),),
+        evaluation_set=evaluation,
+        policy=PromotionPolicy(
+            primary_metric=QUALITY_METRIC,
+            minimum_replays=2,
+            guardrails=(
+                MetricRule(metric=TASK_PASS_METRIC),
+                MetricRule(metric=COMPLETION_METRIC),
+                MetricRule(metric=LATENCY_METRIC, higher_is_better=False),
+            ),
+        ),
+        permission_fingerprint="permissions-v1",
     )
 
     observations = benchmark_observations(
         report,
-        metrics=(
-            QUALITY_METRIC,
-            TASK_PASS_METRIC,
-            COMPLETION_METRIC,
-            LATENCY_METRIC,
-        ),
+        definition=definition,
+        evaluation_set=evaluation,
     )
     assert len(observations) == 8
     assert {item.metric for item in observations} == {
@@ -273,8 +290,58 @@ def test_bridge_exposes_only_bounded_supported_metrics() -> None:
         LATENCY_METRIC,
     }
 
-    with pytest.raises(ValueError, match="unsupported benchmark metrics"):
-        benchmark_observations(report, metrics=("invented_metric",))
+
+def test_bridge_rejects_cross_evaluation_evidence_rebinding() -> None:
+    candidate = _candidate("candidate", "m")
+    source_evaluation = _evaluation()
+    report = _report(
+        candidate,
+        source_evaluation,
+        quality=(1.0, 1.0),
+        latency=(10.0, 10.0),
+    )
+    target_evaluation = replace(source_evaluation, version="v4")
+    definition = build_experiment_definition(
+        experiment_id="cross-eval",
+        champion=candidate,
+        challengers=(_candidate("other", "m2"),),
+        evaluation_set=target_evaluation,
+        policy=PromotionPolicy(primary_metric=QUALITY_METRIC, minimum_replays=2),
+        permission_fingerprint="permissions-v1",
+    )
+
+    with pytest.raises(ValueError, match="does not match the supplied evaluation set"):
+        benchmark_observations(
+            report,
+            definition=definition,
+            evaluation_set=target_evaluation,
+        )
+
+
+def test_bridge_rejects_same_candidate_id_with_different_model_evidence() -> None:
+    evaluation = _evaluation()
+    trusted_candidate = _candidate("candidate", "m1")
+    definition = build_experiment_definition(
+        experiment_id="candidate-substitution",
+        champion=trusted_candidate,
+        challengers=(_candidate("other", "m3"),),
+        evaluation_set=evaluation,
+        policy=PromotionPolicy(primary_metric=QUALITY_METRIC, minimum_replays=2),
+        permission_fingerprint="permissions-v1",
+    )
+    substituted_report = _report(
+        _candidate("candidate", "m2"),
+        evaluation,
+        quality=(1.0, 1.0),
+        latency=(10.0, 10.0),
+    )
+
+    with pytest.raises(ValueError, match="candidate evidence"):
+        benchmark_observations(
+            substituted_report,
+            definition=definition,
+            evaluation_set=evaluation,
+        )
 
 
 def test_report_identity_guard_rejects_cross_candidate_rebinding() -> None:
