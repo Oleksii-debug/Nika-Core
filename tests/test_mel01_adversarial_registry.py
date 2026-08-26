@@ -148,3 +148,22 @@ def test_schema_version_marker_without_required_tables_fails_closed(tmp_path: Pa
     # be rejected during restart initialization rather than accepted as healthy.
     with pytest.raises((RuntimeError, EvidenceIntegrityError)):
         repository.initialize()
+
+
+def test_malformed_preexisting_table_cannot_be_laundered_into_schema_v1(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "shape laundering" / "MEL.sqlite3"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE model_engineering_observations ("
+            "observation_id TEXT PRIMARY KEY)"
+        )
+
+    repository = SQLiteModelEngineeringRepository(SQLiteStore(path))
+
+    # CREATE TABLE IF NOT EXISTS must not let an attacker/crash residue keep a
+    # malformed owned table while the migration ledger is advanced to v1.
+    with pytest.raises((RuntimeError, EvidenceIntegrityError)):
+        repository.initialize()
