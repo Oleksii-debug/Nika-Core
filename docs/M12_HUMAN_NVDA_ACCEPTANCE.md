@@ -26,9 +26,9 @@ The tester must obtain all of the following from the candidate that will actuall
 - SHA-256 of the downloaded artifact ZIP, when the downloaded archive is locally available for hashing;
 - SHA-256 of `NikaCore.exe` after extraction.
 
-The Git commit SHA, artifact name identity, M12 workflow head SHA and manifest `source_sha` must describe the same candidate. A mismatch is an immediate **BLOCKED/FAIL**; do not continue and do not set either human-only state to true.
+The Git commit SHA, artifact name identity, M12 workflow head SHA and manifest `source_sha` must describe the same candidate. A mismatch is an immediate **BLOCKED/FAIL**; do not continue and do not set either human-only flag to true.
 
-Use `docs/evidence/M12_HUMAN_NVDA_RECORD_TEMPLATE.md` for the record. Its initial states are deliberately `NOT_RUN`.
+Use `docs/evidence/M12_HUMAN_NVDA_RECORD_TEMPLATE.md` for the record. Its observation states are deliberately `NOT_RUN` and its human-only truth flags are deliberately `false` before a real human run.
 
 ## 3. Stale/superseded candidate fail-fast rule
 
@@ -44,7 +44,7 @@ Do not award human acceptance if any of the following is true:
 - the artifact was rebuilt or replaced without a new verifiable identity;
 - required automated Core/M11/M12 gates for this candidate are missing, failed or were run against a different source state.
 
-A stale artifact may be investigated, but its result must remain `HUMAN_TESTED=NOT_RUN` / `NVDA_VERIFIED=NOT_RUN` for the current release candidate.
+A stale artifact may be investigated, but for the current release candidate the truth flags must remain `HUMAN_TESTED=false` and `NVDA_VERIFIED=false`; the corresponding current-candidate evidence remains `NOT_RUN` until a valid human run occurs.
 
 ## 4. Preconditions
 
@@ -148,7 +148,7 @@ Record the exact NVDA announcement/behavior for every `FAIL` or `BLOCKED` item. 
 
 `NVDA_VERIFIED=true` may be recorded only when that same human run used real NVDA and all mandatory NVDA/accessibility scenarios passed on the same exact candidate.
 
-Automation, CI, a test script, an LLM, a generated report, a UIA tree dump or a reviewer reading somebody else's logs may validate supporting evidence but may **not** set either human-only state to true.
+Automation, CI, a test script, an LLM, a generated report, a UIA tree dump or a reviewer reading somebody else's logs may validate supporting evidence but may **not** set either human-only flag to true.
 
 If either human-only decision fails, the rejected artifact must not be reissued as if it were fresh. A product defect requires a repaired candidate and complete applicable automated release gates before a new human run. An evidence/identity mismatch requires a correctly identified candidate before testing resumes.
 
@@ -156,7 +156,7 @@ If either human-only decision fails, the rejected artifact must not be reissued 
 
 Until a completed human evidence record exists for the selected exact candidate:
 
-- `HUMAN_TESTED=false` / evidence state `NOT_RUN`;
-- `NVDA_VERIFIED=false` / evidence state `NOT_RUN`.
+- `HUMAN_TESTED=false` / functional evidence state `NOT_RUN`;
+- `NVDA_VERIFIED=false` / NVDA evidence state `NOT_RUN`.
 
 Do not change those truths merely because M12 automated pre-human CI is green.
