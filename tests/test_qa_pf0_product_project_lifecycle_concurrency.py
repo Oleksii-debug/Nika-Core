@@ -50,6 +50,9 @@ def test_same_key_concurrent_transition_replays_one_durable_effect(tmp_path) -> 
 
     restarted_store = SQLiteStore(store.path)
     restarted = ProductProjectLifecycleService(restarted_store)
+    durable_project = ProductProjectRepository(restarted_store).get("p1")
+    assert durable_project.status == ProductProjectState.PAUSED.value
+    assert durable_project.row_version == 1
     assert restarted.current_state("p1") is ProductProjectState.PAUSED
 
     history = restarted.history("p1")
@@ -67,11 +70,11 @@ def test_same_key_concurrent_transition_replays_one_durable_effect(tmp_path) -> 
     assert replay == results[0]
 
     with restarted_store.connection() as conn:
-        receipt_count = conn.execute(
-            "SELECT COUNT(*) FROM product_project_mutation_idempotency "
+        receipts = conn.execute(
+            "SELECT entity_version FROM product_project_mutation_idempotency "
             "WHERE operation_key=?",
             ("status:p1:pause",),
-        ).fetchone()[0]
+        ).fetchall()
         audit_count = conn.execute(
             "SELECT COUNT(*) FROM audit_events "
             "WHERE event_type='product_project.status_changed' "
@@ -79,5 +82,6 @@ def test_same_key_concurrent_transition_replays_one_durable_effect(tmp_path) -> 
             ("p1",),
         ).fetchone()[0]
 
-    assert receipt_count == 1
+    assert len(receipts) == 1
+    assert receipts[0]["entity_version"] == 1
     assert audit_count == 1
