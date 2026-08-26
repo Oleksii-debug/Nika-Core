@@ -131,3 +131,41 @@ def test_check_must_not_reactivate_lane_closed_by_peer_history(
         "success, bypassing the protocol rule that a released lane cannot be reactivated."
     )
     assert "CLEAR W099" not in output.out
+
+
+def test_check_must_reject_distinct_lanes_sharing_one_branch(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Different lanes cannot safely share a branch even when their file scopes are disjoint."""
+    candidate = _payload(scope=["docs/lane-a.md"])
+    peer = _payload(
+        lane_id="W100",
+        scope=["docs/lane-b.md"],
+        created_at="2026-08-26T20:01:00Z",
+        expires_at="2026-08-27T20:01:00Z",
+    )
+    peer["branch"] = candidate["branch"]
+
+    candidate_path = tmp_path / "candidate.json"
+    peer_path = tmp_path / "peer.json"
+    _write(candidate_path, candidate)
+    _write(peer_path, peer)
+
+    result = claims.main(
+        [
+            "check",
+            str(candidate_path),
+            "--against",
+            str(peer_path),
+            "--now",
+            "2026-08-26T21:00:00Z",
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert result != 0, (
+        "check returned success for two different lane IDs that name the exact same Git branch. "
+        "The protocol requires one unique feature branch per lane so unrelated work cannot stack."
+    )
+    assert "CLEAR W099" not in output.out
