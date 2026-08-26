@@ -26,6 +26,9 @@ _PROCESS_SPEECH_LOCK = threading.Lock()
 
 _LIST_VOICES_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
+$utf8 = [System.Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = $utf8
+[Console]::OutputEncoding = $utf8
 Add-Type -AssemblyName System.Speech
 $synth = [System.Speech.Synthesis.SpeechSynthesizer]::new()
 try {
@@ -50,6 +53,9 @@ finally {
 
 _SPEAK_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
+$utf8 = [System.Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = $utf8
+[Console]::OutputEncoding = $utf8
 Add-Type -AssemblyName System.Speech
 $raw = [Console]::In.ReadToEnd()
 $payload = ConvertFrom-Json -InputObject $raw
@@ -92,19 +98,25 @@ class _ProcessOutcome:
 
 
 class WindowsPowerShellSpeechBackend:
-    def __init__(self, powershell_executable: Path) -> None:
-        self._powershell = _validate_trusted_powershell(powershell_executable)
-
-    @classmethod
-    def discover(cls) -> WindowsPowerShellSpeechBackend:
+    def __init__(self) -> None:
         if os.name != "nt":
             raise SpeechError(
                 SpeechErrorCode.PLATFORM_UNSUPPORTED,
                 "Windows System.Speech is available only on Windows",
             )
         windows_dir = _get_windows_directory()
-        executable = windows_dir / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-        return cls(executable)
+        executable = (
+            windows_dir
+            / "System32"
+            / "WindowsPowerShell"
+            / "v1.0"
+            / "powershell.exe"
+        )
+        self._powershell = _validate_trusted_powershell(executable)
+
+    @classmethod
+    def discover(cls) -> WindowsPowerShellSpeechBackend:
+        return cls()
 
     def list_voices(self, *, timeout_seconds: float) -> bytes:
         outcome = self._run(
@@ -155,11 +167,11 @@ class WindowsPowerShellSpeechBackend:
             ),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             shell=False,
             creationflags=creationflags,
         )
-        result: list[tuple[bytes, bytes] | BaseException] = []
+        result: list[tuple[bytes, None] | BaseException] = []
 
         def communicate() -> None:
             try:
@@ -396,18 +408,17 @@ def _validate_trusted_powershell(executable: Path) -> Path:
             SpeechErrorCode.ENGINE_UNAVAILABLE,
             "Windows PowerShell speech host is not a regular file",
         )
-    if os.name == "nt":
-        attributes = ctypes.windll.kernel32.GetFileAttributesW(str(resolved))
-        if attributes == _INVALID_FILE_ATTRIBUTES:
-            raise SpeechError(
-                SpeechErrorCode.ENGINE_UNAVAILABLE,
-                "unable to inspect Windows PowerShell speech host",
-            )
-        if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
-            raise SpeechError(
-                SpeechErrorCode.ENGINE_UNAVAILABLE,
-                "Windows PowerShell speech host must not be a reparse point",
-            )
+    attributes = ctypes.windll.kernel32.GetFileAttributesW(str(resolved))
+    if attributes == _INVALID_FILE_ATTRIBUTES:
+        raise SpeechError(
+            SpeechErrorCode.ENGINE_UNAVAILABLE,
+            "unable to inspect Windows PowerShell speech host",
+        )
+    if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+        raise SpeechError(
+            SpeechErrorCode.ENGINE_UNAVAILABLE,
+            "Windows PowerShell speech host must not be a reparse point",
+        )
     return resolved
 
 
