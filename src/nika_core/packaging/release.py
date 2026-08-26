@@ -18,6 +18,7 @@ _MAX_RELEASE_MANIFEST_BYTES = 4 * 1024 * 1024
 _MANIFEST_KEYS = frozenset({"manifest_version", "product", "version", "source_sha", "files"})
 _RELEASE_FILE_KEYS = frozenset({"path", "size", "sha256"})
 _WINDOWS_FORBIDDEN_CHARS = frozenset('<>"|?*')
+_SECRET_RELEASE_BASENAMES = frozenset({".env", "token.json", "cookies.txt"})
 
 
 class _DuplicateJsonKey(ValueError):
@@ -83,6 +84,15 @@ def _canonical_relative_path(value: object) -> bool:
     return True
 
 
+def _release_path_is_secret(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    basename = PurePosixPath(value).name.casefold()
+    if basename in _SECRET_RELEASE_BASENAMES:
+        return True
+    return basename.startswith(".env.") and basename != ".env.example"
+
+
 def _canonical_release_path(value: object) -> bool:
     return _canonical_relative_path(value) and value != _RELEASE_MANIFEST_NAME
 
@@ -120,6 +130,8 @@ def _manifest_structure_findings(manifest: ReleaseManifest) -> tuple[str, ...]:
             continue
         if not _canonical_release_path(entry.path):
             findings.append(f"manifest:path:{index}")
+        elif _release_path_is_secret(entry.path):
+            findings.append(f"manifest:secret-path:{entry.path}")
         elif entry.path in seen_paths:
             findings.append(f"manifest:duplicate-path:{entry.path}")
         else:
@@ -217,6 +229,9 @@ def verify_release_manifest(bundle_dir: Path, manifest: ReleaseManifest) -> tupl
         if path.name != _RELEASE_MANIFEST_NAME
     }
     findings: list[str] = []
+    for relative_path in sorted(actual_paths):
+        if _release_path_is_secret(relative_path):
+            findings.append(f"secret-path:{relative_path}")
     for missing in sorted(expected.keys() - actual_paths.keys()):
         findings.append(f"missing:{missing}")
     for unexpected in sorted(actual_paths.keys() - expected.keys()):
@@ -331,6 +346,9 @@ def verify_release_archive(artifact_path: Path, *, source_sha: str) -> tuple[str
                 member_path = _zip_member_path(member)
                 if not _canonical_relative_path(member_path):
                     findings.append(f"archive:path:{index}")
+                    continue
+                if member_path != _RELEASE_MANIFEST_NAME and _release_path_is_secret(member_path):
+                    findings.append(f"archive:secret-path:{member_path}")
                     continue
                 if _zip_member_is_symlink(member):
                     findings.append(f"archive:symlink:{index}")
