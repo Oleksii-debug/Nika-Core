@@ -277,22 +277,26 @@ class PackagedProductStateProvider:
         self._router = router
         self._command_center = command_center
 
-    def __call__(self) -> dict[str, Any]:
-        state = dict(self._base_state())
+    def product_project_state(self) -> dict[str, Any] | None:
+        """Return only the bounded current ProductProject presentation state."""
         project_id = self._router.active_project_id
-        state["product_project"] = None
         if project_id is None:
-            return state
+            return None
         try:
             detail = self._command_center.inspect_project(project_id)
         except KeyError:
             self._router.clear_stale_selection()
-            return state
+            return None
         except ProductProjectPresentationConsistencyError as exc:
             raise PackagedProductJourneyError(
                 "ProductProject changed while packaged state was composed; refresh required."
             ) from exc
-        state["product_project"] = _safe_product_project_state(detail)
+        return _safe_product_project_state(detail)
+
+    def __call__(self) -> dict[str, Any]:
+        state = dict(self._base_state())
+        if "product_project" not in state:
+            state["product_project"] = self.product_project_state()
         return state
 
 
