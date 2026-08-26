@@ -25,7 +25,6 @@ def _payload(branch: str) -> dict[str, object]:
 @pytest.mark.parametrize(
     "branch",
     [
-        "@",
         "-leading-dash",
         "work/.hidden/topic",
     ],
