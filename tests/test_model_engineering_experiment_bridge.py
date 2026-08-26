@@ -146,6 +146,24 @@ def test_bridge_requires_held_out_evidence_for_promotion_definition() -> None:
         )
 
 
+def test_bridge_rejects_policy_metrics_it_cannot_supply() -> None:
+    policy = PromotionPolicy(
+        primary_metric=QUALITY_METRIC,
+        minimum_replays=2,
+        guardrails=(MetricRule(metric="invented_metric"),),
+    )
+
+    with pytest.raises(ValueError, match="unsupported model promotion metrics"):
+        build_experiment_definition(
+            experiment_id="model-promotion",
+            champion=_candidate("champion", "m1"),
+            challengers=(_candidate("challenger", "m2"),),
+            evaluation_set=_evaluation(),
+            policy=policy,
+            permission_fingerprint="permissions-v1",
+        )
+
+
 def test_bridge_uses_exact_evaluation_and_candidate_evidence() -> None:
     champion = _candidate("champion", "m1")
     challenger = _candidate("challenger", "m2")
