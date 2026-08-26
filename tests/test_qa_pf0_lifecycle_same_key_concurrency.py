@@ -26,12 +26,10 @@ def test_same_key_concurrent_transition_is_one_effect_and_durable_replay(tmp_pat
         idempotency_key="create:p1",
     )
 
-    # On the vulnerable read-before-write implementation both connections can reach the
-    # mutation-receipt read together. The gate deliberately makes that interleaving
-    # deterministic. On the repaired implementation BEGIN IMMEDIATE prevents the second
-    # connection from reaching this read until the first writer commits; the short timeout
-    # lets the first writer continue without turning the repaired serialization into a
-    # test deadlock.
+    # Make the old read-before-write race deterministic without slowing the repaired shape.
+    # If the mutation-receipt SELECT runs outside a writer transaction, both callers are
+    # forced to observe the same pre-write authority state before either may continue.
+    # On #493, BEGIN IMMEDIATE has already set conn.in_transaction, so this gate is skipped.
     receipt_gate = threading.Barrier(2)
     original_connection = store.connection
 
@@ -41,10 +39,9 @@ def test_same_key_concurrent_transition_is_one_effect_and_durable_replay(tmp_pat
             def trace(statement: str) -> None:
                 if "FROM product_project_mutation_idempotency" not in statement:
                     return
-                try:
-                    receipt_gate.wait(timeout=0.25)
-                except threading.BrokenBarrierError:
-                    pass
+                if conn.in_transaction:
+                    return
+                receipt_gate.wait(timeout=5.0)
 
             conn.set_trace_callback(trace)
             try:
@@ -56,7 +53,7 @@ def test_same_key_concurrent_transition_is_one_effect_and_durable_replay(tmp_pat
     start_gate = threading.Barrier(2)
 
     def transition():
-        start_gate.wait(timeout=2.0)
+        start_gate.wait(timeout=5.0)
         return ProductProjectLifecycleService(store).transition(
             "p1",
             ProductProjectState.PAUSED,
@@ -68,8 +65,8 @@ def test_same_key_concurrent_transition_is_one_effect_and_durable_replay(tmp_pat
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [executor.submit(transition) for _ in range(2)]
-        first = futures[0].result(timeout=5.0)
-        second = futures[1].result(timeout=5.0)
+        first = futures[0].result(timeout=10.0)
+        second = futures[1].result(timeout=10.0)
 
     assert first == second
     assert first.row_version == 1
@@ -90,10 +87,9 @@ def test_same_key_concurrent_transition_is_one_effect_and_durable_replay(tmp_pat
     assert replay == first
     assert restarted.current_state("p1") is ProductProjectState.PAUSED
     assert restarted.projects.get("p1").row_version == 1
-    assert restarted.history("p1") == (
-        restarted.history("p1")[0],
-        first,
-    )
+    history = restarted.history("p1")
+    assert len(history) == 2
+    assert history[1] == first
 
     with restarted_store.connection() as conn:
         receipt_count = conn.execute(
