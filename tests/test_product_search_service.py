@@ -228,6 +228,49 @@ def test_codec_is_deterministic_round_trip_and_rejects_future_schema() -> None:
         ProductSearchCodec.loads(future)
 
 
+def test_runtime_types_fail_closed_instead_of_leaking_attribute_errors() -> None:
+    bad_observation = replace(
+        _observation(
+            product_id="sku-a",
+            document_id="doc-1",
+            source_id="shop-a",
+            locator="https://shop-a.example/item/1",
+            price="1500.00",
+            seller="Shop A",
+        ),
+        availability="in_stock",  # type: ignore[arg-type]
+    )
+    with pytest.raises(ProductSearchError, match="ProductAvailability"):
+        ProductSearchService().project(
+            result_set=_result_set(),
+            observations=(bad_observation,),
+        )
+
+    with pytest.raises(ProductSearchError, match="limit must be an integer"):
+        ProductSearchService().project(
+            result_set=_result_set(),
+            observations=(),
+            criteria=ProductSearchCriteria(limit=True),  # type: ignore[arg-type]
+        )
+
+    bad_price = replace(
+        _observation(
+            product_id="sku-a",
+            document_id="doc-1",
+            source_id="shop-a",
+            locator="https://shop-a.example/item/1",
+            price="1500.00",
+            seller="Shop A",
+        ),
+        price_amount=1500.0,  # type: ignore[arg-type]
+    )
+    with pytest.raises(ProductSearchError, match="price_amount must be a Decimal"):
+        ProductSearchService().project(
+            result_set=_result_set(),
+            observations=(bad_price,),
+        )
+
+
 def test_accessible_text_contains_structured_fields_without_visual_dependency() -> None:
     result = ProductSearchService().project(
         result_set=_result_set(),
