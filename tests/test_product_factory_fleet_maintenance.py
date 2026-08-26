@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_factory_deployment import (
     DeploymentIntent,
     EnvironmentIdentity,
@@ -45,6 +46,11 @@ from nika_core.product_factory_operations_contracts import (
     ServiceObservation,
     ServiceReplica,
 )
+from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
+
+
+class _SimulatedProcessLoss(BaseException):
+    """Bypass normal Exception handling like abrupt process loss."""
 
 
 class FakeFleet:
@@ -65,6 +71,9 @@ class FakeNodeMaintenance:
     def apply(self, request):
         self.calls.append(("apply", request.request_id))
         mode = self.modes.get(request.request_id, "success")
+        if mode == "crash-after-effect":
+            self.modes[request.request_id] = "applied-after-crash"
+            raise _SimulatedProcessLoss()
         if mode == "uncertain":
             return NodeMaintenanceResult(False, True, ("provider:uncertain",))
         if mode == "rejected":
@@ -153,6 +162,7 @@ def _execution_spec(
 
 
 def _fixture(
+    tmp_path,
     *,
     service_count: int = 2,
     replica_count: int = 3,
@@ -257,7 +267,16 @@ def _fixture(
         )
     )
     port = FakeNodeMaintenance()
-    coordinator = RollingFleetMaintenanceCoordinator(fleet, operations, nodes, port)
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    ledger = IdempotencyLedger(store)
+    coordinator = RollingFleetMaintenanceCoordinator(
+        fleet,
+        operations,
+        nodes,
+        port,
+        ledger,
+    )
     return coordinator, fleet, operations, nodes, port
 
 
@@ -273,8 +292,8 @@ def _plan(*node_ids: str) -> RollingMaintenancePlan:
     )
 
 
-def test_rolling_node_maintenance_cordons_drains_verifies_and_resumes() -> None:
-    coordinator, _, operations, nodes, port = _fixture(service_count=2)
+def test_rolling_node_maintenance_cordons_drains_verifies_and_resumes(tmp_path) -> None:
+    coordinator, _, operations, nodes, port = _fixture(tmp_path, service_count=2)
     coordinator.submit(_plan("node-0"))
 
     drained = coordinator.advance("maintenance-001")
@@ -304,8 +323,8 @@ def test_rolling_node_maintenance_cordons_drains_verifies_and_resumes() -> None:
     assert len(port.calls) == 4
 
 
-def test_active_execution_lease_cordons_node_then_blocks_drain_without_side_effect() -> None:
-    coordinator, _, _, nodes, port = _fixture(service_count=1)
+def test_active_execution_lease_cordons_node_then_blocks_drain_without_side_effect(tmp_path) -> None:
+    coordinator, _, _, nodes, port = _fixture(tmp_path, service_count=1)
     lease = nodes.acquire(
         ExecutionRequest(
             "project-social",
@@ -330,8 +349,8 @@ def test_active_execution_lease_cordons_node_then_blocks_drain_without_side_effe
     assert drained.nodes[0].state is NodeMaintenanceState.DRAINED
 
 
-def test_quorum_guard_blocks_destructive_drain_before_cordon() -> None:
-    coordinator, _, operations, nodes, port = _fixture(service_count=1)
+def test_quorum_guard_blocks_destructive_drain_before_cordon(tmp_path) -> None:
+    coordinator, _, operations, nodes, port = _fixture(tmp_path, service_count=1)
     operations.record_node_availability("node-1", available=False)
     coordinator.submit(_plan("node-0"))
 
@@ -345,8 +364,8 @@ def test_quorum_guard_blocks_destructive_drain_before_cordon() -> None:
     ).enabled
 
 
-def test_credential_revocation_mid_operation_blocks_next_external_action() -> None:
-    coordinator, _, operations, _, port = _fixture(service_count=1)
+def test_credential_revocation_mid_operation_blocks_next_external_action(tmp_path) -> None:
+    coordinator, _, operations, _, port = _fixture(tmp_path, service_count=1)
     coordinator.submit(_plan("node-0"))
     coordinator.advance("maintenance-001")
     calls_after_drain = len(port.calls)
@@ -361,8 +380,8 @@ def test_credential_revocation_mid_operation_blocks_next_external_action() -> No
     assert restarted.nodes[0].state is NodeMaintenanceState.RESTARTED
 
 
-def test_uncertain_drain_requires_inspect_and_never_blind_replays_apply() -> None:
-    coordinator, _, operations, _, port = _fixture(service_count=1)
+def test_uncertain_drain_requires_inspect_and_never_blind_replays_apply(tmp_path) -> None:
+    coordinator, _, operations, _, port = _fixture(tmp_path, service_count=1)
     request_id = "maintenance-001:node-0:drain"
     port.modes[request_id] = "uncertain"
     coordinator.submit(_plan("node-0"))
@@ -376,10 +395,54 @@ def test_uncertain_drain_requires_inspect_and_never_blind_replays_apply() -> Non
     assert reconciled.nodes[0].state is NodeMaintenanceState.DRAINED
     assert port.calls.count(("apply", request_id)) == 1
     assert port.calls.count(("inspect", request_id)) == 1
+    assert coordinator.idempotency is not None
+    assert coordinator.idempotency.require(
+        f"fleet-maintenance:{request_id}"
+    ).status is IdempotencyStatus.COMPLETED
 
 
-def test_verify_fails_closed_when_provider_does_not_prove_exact_drained_replicas() -> None:
-    coordinator, _, _, _, port = _fixture(service_count=1)
+def test_crash_after_provider_effect_restarts_via_inspect_without_duplicate_apply(tmp_path) -> None:
+    coordinator, fleet, operations, nodes, port = _fixture(tmp_path, service_count=1)
+    request_id = "maintenance-001:node-0:drain"
+    coordinator.submit(_plan("node-0"))
+    old_maintenance = coordinator.snapshot()
+    old_nodes = nodes.snapshot()
+    port.modes[request_id] = "crash-after-effect"
+
+    with pytest.raises(_SimulatedProcessLoss):
+        coordinator.advance("maintenance-001")
+
+    assert port.calls.count(("apply", request_id)) == 1
+    assert coordinator.idempotency is not None
+    assert coordinator.idempotency.require(
+        f"fleet-maintenance:{request_id}"
+    ).status is IdempotencyStatus.PENDING
+
+    nodes.restore(old_nodes)
+    restarted = RollingFleetMaintenanceCoordinator(
+        fleet,
+        operations,
+        nodes,
+        port,
+        coordinator.idempotency,
+    )
+    restarted.restore(old_maintenance)
+
+    reconcile_required = restarted.advance("maintenance-001")
+    assert reconcile_required.state is RollingMaintenanceState.RECONCILE_REQUIRED
+    assert port.calls.count(("apply", request_id)) == 1
+
+    drained = restarted.advance("maintenance-001")
+    assert drained.nodes[0].state is NodeMaintenanceState.DRAINED
+    assert port.calls.count(("apply", request_id)) == 1
+    assert port.calls.count(("inspect", request_id)) == 1
+    assert coordinator.idempotency.require(
+        f"fleet-maintenance:{request_id}"
+    ).status is IdempotencyStatus.COMPLETED
+
+
+def test_verify_fails_closed_when_provider_does_not_prove_exact_drained_replicas(tmp_path) -> None:
+    coordinator, _, _, _, port = _fixture(tmp_path, service_count=1)
     coordinator.submit(_plan("node-0"))
     coordinator.advance("maintenance-001")
     coordinator.advance("maintenance-001")
@@ -389,13 +452,15 @@ def test_verify_fails_closed_when_provider_does_not_prove_exact_drained_replicas
         coordinator.advance("maintenance-001")
 
 
-def test_snapshot_restore_requires_execution_node_cordon_parity() -> None:
-    coordinator, fleet, operations, nodes, port = _fixture(service_count=1)
+def test_snapshot_restore_requires_execution_node_cordon_parity(tmp_path) -> None:
+    coordinator, fleet, operations, nodes, port = _fixture(tmp_path, service_count=1)
     coordinator.submit(_plan("node-0"))
     coordinator.advance("maintenance-001")
     snapshot = coordinator.snapshot()
 
-    restored = RollingFleetMaintenanceCoordinator(fleet, operations, nodes, port)
+    restored = RollingFleetMaintenanceCoordinator(
+        fleet, operations, nodes, port, coordinator.idempotency
+    )
     restored.restore(snapshot)
     assert restored.get("maintenance-001").nodes[0].state is NodeMaintenanceState.DRAINED
 
@@ -403,13 +468,15 @@ def test_snapshot_restore_requires_execution_node_cordon_parity() -> None:
         item for item in nodes.snapshot().nodes if item.identity.node_id == "node-0"
     )
     nodes.register(replace(node, enabled=True))
-    corrupt = RollingFleetMaintenanceCoordinator(fleet, operations, nodes, port)
+    corrupt = RollingFleetMaintenanceCoordinator(
+        fleet, operations, nodes, port, coordinator.idempotency
+    )
     with pytest.raises(FleetMaintenanceError, match="lost its cordon"):
         corrupt.restore(snapshot)
 
 
-def test_release_or_topology_drift_is_rejected_before_next_side_effect() -> None:
-    coordinator, fleet, _, _, port = _fixture(service_count=1)
+def test_release_or_topology_drift_is_rejected_before_next_side_effect(tmp_path) -> None:
+    coordinator, fleet, _, _, port = _fixture(tmp_path, service_count=1)
     coordinator.submit(_plan("node-0"))
     coordinator.advance("maintenance-001")
     calls = len(port.calls)
@@ -429,8 +496,8 @@ def test_release_or_topology_drift_is_rejected_before_next_side_effect() -> None
     assert len(port.calls) == calls
 
 
-def test_scale_sixty_services_180_replicas_restart_between_rolling_nodes() -> None:
-    coordinator, fleet, operations, nodes, port = _fixture(service_count=60)
+def test_scale_sixty_services_180_replicas_restart_between_rolling_nodes(tmp_path) -> None:
+    coordinator, fleet, operations, nodes, port = _fixture(tmp_path, service_count=60)
     coordinator.submit(_plan("node-0", "node-1", "node-2"))
 
     for _ in range(4):
@@ -443,7 +510,9 @@ def test_scale_sixty_services_180_replicas_restart_between_rolling_nodes() -> No
     )
 
     snapshot = coordinator.snapshot()
-    restarted = RollingFleetMaintenanceCoordinator(fleet, operations, nodes, port)
+    restarted = RollingFleetMaintenanceCoordinator(
+        fleet, operations, nodes, port, coordinator.idempotency
+    )
     restarted.restore(snapshot)
     for _ in range(8):
         restarted.advance("maintenance-001")
