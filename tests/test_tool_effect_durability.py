@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 
@@ -9,6 +11,7 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
 from nika_core.tools import (
     ToolCall,
+    ToolEffectConflictError,
     ToolEffectGuard,
     ToolExecutor,
     ToolRisk,
@@ -16,9 +19,19 @@ from nika_core.tools import (
 )
 
 
-def _guard(path: Path) -> tuple[ToolEffectGuard, IdempotencyLedger]:
+def _guard(path: Path, *task_ids: str) -> tuple[ToolEffectGuard, IdempotencyLedger]:
     store = SQLiteStore(path)
     store.initialize()
+    with store.connection() as conn:
+        for task_id in task_ids:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO tasks(
+                    task_id, workspace_id, agent_id, state, payload_json, created_at, updated_at
+                ) VALUES (?, 'proof', 'eng02', 'created', '{}', ?, ?)
+                """,
+                (task_id, "2026-08-27T00:00:00+00:00", "2026-08-27T00:00:00+00:00"),
+            )
     ledger = IdempotencyLedger(store)
     return ToolEffectGuard(ledger), ledger
 
@@ -64,7 +77,7 @@ def test_completed_external_tool_replays_after_restart_without_second_effect(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "ніка core" / "state.db"
-    guard, ledger = _guard(database)
+    guard, ledger = _guard(database, "task-stable")
     calls = 0
 
     async def handler(arguments: dict[str, object]) -> object:
@@ -91,7 +104,7 @@ def test_completed_external_tool_replays_after_restart_without_second_effect(
     assert len(records) == 1
     assert records[0].status is IdempotencyStatus.COMPLETED
 
-    restarted_guard, _restarted_ledger = _guard(database)
+    restarted_guard, _restarted_ledger = _guard(database, "task-stable")
     restarted = ToolExecutor(effect_guard=restarted_guard)
     restarted.register(_external_spec(), handler)
 
@@ -103,7 +116,7 @@ def test_completed_external_tool_replays_after_restart_without_second_effect(
 
 
 def test_same_call_identity_with_different_arguments_fails_closed(tmp_path: Path) -> None:
-    guard, _ledger = _guard(tmp_path / "state.db")
+    guard, _ledger = _guard(tmp_path / "state.db", "task-1")
     calls = 0
 
     async def handler(arguments: dict[str, object]) -> object:
@@ -137,7 +150,7 @@ def test_same_call_identity_with_different_arguments_fails_closed(tmp_path: Path
 
 
 def test_timeout_becomes_uncertain_and_is_not_replayed(tmp_path: Path) -> None:
-    guard, ledger = _guard(tmp_path / "state.db")
+    guard, ledger = _guard(tmp_path / "state.db", "task-timeout")
     calls = 0
 
     async def handler(_arguments: dict[str, object]) -> object:
@@ -168,7 +181,7 @@ def test_timeout_becomes_uncertain_and_is_not_replayed(tmp_path: Path) -> None:
 
 
 def test_handler_error_becomes_uncertain_and_is_not_replayed(tmp_path: Path) -> None:
-    guard, ledger = _guard(tmp_path / "state.db")
+    guard, ledger = _guard(tmp_path / "state.db", "task-error")
     calls = 0
 
     async def handler(_arguments: dict[str, object]) -> object:
@@ -196,7 +209,7 @@ def test_handler_error_becomes_uncertain_and_is_not_replayed(tmp_path: Path) -> 
 
 
 def test_cancellation_becomes_uncertain_and_propagates(tmp_path: Path) -> None:
-    guard, ledger = _guard(tmp_path / "state.db")
+    guard, ledger = _guard(tmp_path / "state.db", "task-cancel")
     started = asyncio.Event()
 
     async def handler(_arguments: dict[str, object]) -> object:
@@ -226,6 +239,67 @@ def test_cancellation_becomes_uncertain_and_propagates(tmp_path: Path) -> None:
     assert ledger.list_for_task("task-cancel")[0].status is IdempotencyStatus.UNCERTAIN
     replay = asyncio.run(executor.execute(call))
     assert replay.error == "tool effect not safe to execute"
+
+
+def test_non_json_result_is_uncertain_instead_of_false_completed(tmp_path: Path) -> None:
+    guard, ledger = _guard(tmp_path / "state.db", "task-non-json")
+    calls = 0
+
+    async def handler(_arguments: dict[str, object]) -> object:
+        nonlocal calls
+        calls += 1
+        return object()
+
+    call = ToolCall(
+        call_id="non-json-call",
+        tool_id="publish",
+        task_id="task-non-json",
+        arguments={},
+        approved=True,
+    )
+    executor = ToolExecutor(effect_guard=guard)
+    executor.register(_external_spec(), handler)
+
+    first = asyncio.run(executor.execute(call))
+    replay = asyncio.run(executor.execute(call))
+
+    assert first.error == "tool result durability failed"
+    assert replay.error == "tool effect not safe to execute"
+    assert calls == 1
+    records = ledger.list_for_task("task-non-json")
+    assert len(records) == 1
+    assert records[0].status is IdempotencyStatus.UNCERTAIN
+
+
+def test_simultaneous_first_reservation_has_one_winner_and_no_sqlite_escape(tmp_path: Path) -> None:
+    database = tmp_path / "state.db"
+    left, left_ledger = _guard(database, "task-race")
+    right, _right_ledger = _guard(database, "task-race")
+    barrier = Barrier(2)
+    call = ToolCall(
+        call_id="race-call",
+        tool_id="publish",
+        task_id="task-race",
+        arguments={"value": "same"},
+        approved=True,
+    )
+    spec = _external_spec()
+
+    def reserve(guard: ToolEffectGuard) -> str:
+        barrier.wait(timeout=5)
+        try:
+            guard.reserve(spec=spec, call=call)
+        except ToolEffectConflictError:
+            return "blocked"
+        return "created"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = tuple(pool.map(reserve, (left, right)))
+
+    assert sorted(results) == ["blocked", "created"]
+    records = left_ledger.list_for_task("task-race")
+    assert len(records) == 1
+    assert records[0].status is IdempotencyStatus.PENDING
 
 
 def test_read_only_tool_remains_compatible_without_guard() -> None:
