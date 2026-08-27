@@ -286,13 +286,17 @@ class ProductFactoryCheckpointHost:
                 raise ProductFactoryCheckpointIntegrityError(
                     "durable Product Factory checkpoint lineage has no canonical host-task head"
                 )
-            self._validated_committed_head(
+            committed = self._validated_committed_head(
                 conn,
                 host_task_id=record.host_task_id,
                 project_id=record.checkpoint.project_id,
                 host_payload=host_payload,
             )
-        return record
+            if record.checkpoint_id != committed.checkpoint_id:
+                raise ProductFactoryCheckpointIntegrityError(
+                    "requested checkpoint is not the canonical committed host-task head"
+                )
+        return committed
 
     def latest(
         self,
