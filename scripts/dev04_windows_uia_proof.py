@@ -47,6 +47,41 @@ def observe_until_ready(adapter: WindowsUIAInteractionAdapter):
     raise AssertionError(f"WinForms UIA fixture did not become ready: {last_error!r}")
 
 
+def focus_until_verified(
+    adapter: WindowsUIAInteractionAdapter,
+    node,
+    *,
+    attempts: int = 20,
+    delay_seconds: float = 0.05,
+) -> None:
+    """Boundedly re-observe the exact semantic identity until UIA reports focus.
+
+    WinForms can acknowledge SetFocus before the provider's focused-state property
+    catches up. Every retry re-resolves the same role/name and requires the same
+    RuntimeId/generation-derived node_id, so replacement or ambiguity still fails
+    closed rather than turning the wait into a name-based fallback.
+    """
+
+    last_error: Exception | None = None
+    for _ in range(attempts):
+        try:
+            adapter.focus(node)
+            snapshot = adapter.observe()
+            current = _resolve(snapshot, role=node.role, name=node.name)
+            if current.node_id != node.node_id:
+                raise StaleSnapshotError(
+                    "focus target identity changed during bounded verification"
+                )
+            if current.focused and adapter.capture_focus() == node.node_id:
+                return
+        except StaleSnapshotError as exc:
+            last_error = exc
+        time.sleep(delay_seconds)
+    raise AssertionError(
+        f"exact UIA focus did not become observable within {attempts} attempts: {last_error!r}"
+    )
+
+
 def main() -> None:
     process = subprocess.Popen(
         [
@@ -75,10 +110,6 @@ def main() -> None:
         assert before.target.window.native_handle not in {None, 0}
         assert before.target.window.generation == 1
 
-        # Provider-specific no-RuntimeId and duplicate-RuntimeId artifacts are
-        # nondeterministic across Windows/UIA runner versions. Their fail-closed
-        # handling is mandatory deterministic-test evidence, but a physical run
-        # must not fail merely because this provider instance did not emit them.
         unaddressable_count = backend.last_unaddressable_count
         collision_runtime_ids = backend.last_duplicate_runtime_ids
 
@@ -91,18 +122,17 @@ def main() -> None:
         assert "Toggle" in adapter.pattern_capabilities(checkbox)
 
         original_focus = adapter.capture_focus()
-        adapter.focus(apply_button)
-        assert adapter.capture_focus() == apply_button.node_id
+        focus_until_verified(adapter, apply_button)
         assert adapter.restore_focus(original_focus)
 
-        adapter.focus(edit)
+        focus_until_verified(adapter, edit)
         adapter.act(edit, InteractionAction.SET_VALUE, "Доступність перевірено")
         after_value = adapter.observe()
         edit_after = _resolve(after_value, role="edit", name="Problem description")
         assert edit_after.value == "Доступність перевірено"
 
         checkbox = _resolve(after_value, role="checkbox", name="Verify semantic target")
-        adapter.focus(checkbox)
+        focus_until_verified(adapter, checkbox)
         adapter.act(checkbox, InteractionAction.TOGGLE, None)
         after_toggle = adapter.observe()
         checkbox_after = _resolve(
@@ -112,7 +142,7 @@ def main() -> None:
         assert "Toggle" in adapter.pattern_capabilities(checkbox_after)
 
         apply_button = _resolve(after_toggle, role="button", name="Apply semantic action")
-        adapter.focus(apply_button)
+        focus_until_verified(adapter, apply_button)
         adapter.act(apply_button, InteractionAction.INVOKE, None)
         after_invoke = adapter.observe()
         status = _resolve(after_invoke, role="text", name="Applied: Доступність перевірено")
@@ -184,6 +214,7 @@ def main() -> None:
                     "dpi_position_used_for_targeting": False,
                     "coordinates_used": False,
                     "stale_replacement_rejected": True,
+                    "bounded_exact_focus_verification": True,
                     "human_tested": False,
                     "nvda_verified": False,
                 },
