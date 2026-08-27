@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Mapping, cast
+from typing import cast
 
 import pytest
 
