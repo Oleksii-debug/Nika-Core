@@ -58,6 +58,8 @@ class TaskOwnedTab:
     def __post_init__(self) -> None:
         _validate_identity("task_id", self.task_id)
         _validate_identity("tab_id", self.tab_id)
+        if not isinstance(self.reopen_policy, TaskTabReopenPolicy):
+            raise TypeError("reopen policy must be a TaskTabReopenPolicy")
         if self.reopen_policy is TaskTabReopenPolicy.NEVER:
             if self.reopen_url is not None:
                 raise ValueError("NEVER reopen policy must not persist a reopen URL")
@@ -77,7 +79,7 @@ class TaskOwnedTab:
     @classmethod
     def from_dict(cls, payload: object) -> TaskOwnedTab:
         if not isinstance(payload, dict):
-            raise ValueError("task-tab record must be an object")
+            raise TypeError("task-tab record must be an object")
         expected = {"task_id", "tab_id", "reopen_policy", "reopen_url"}
         if set(payload) != expected:
             raise ValueError("task-tab record fields do not match schema")
@@ -86,11 +88,11 @@ class TaskOwnedTab:
         policy = payload["reopen_policy"]
         reopen_url = payload["reopen_url"]
         if not isinstance(task_id, str) or not isinstance(tab_id, str):
-            raise ValueError("task-tab identities must be strings")
+            raise TypeError("task-tab identities must be strings")
         if not isinstance(policy, str):
-            raise ValueError("task-tab reopen policy must be a string")
+            raise TypeError("task-tab reopen policy must be a string")
         if reopen_url is not None and not isinstance(reopen_url, str):
-            raise ValueError("task-tab reopen URL must be a string or null")
+            raise TypeError("task-tab reopen URL must be a string or null")
         try:
             parsed_policy = TaskTabReopenPolicy(policy)
         except ValueError as exc:
@@ -216,13 +218,18 @@ class TaskBrowserTabs:
     def from_snapshot(cls, *, session: BrowserSession, payload: object) -> TaskBrowserTabs:
         """Restore logical ownership only; all runtime page bindings intentionally start stale."""
 
-        if not isinstance(payload, dict) or set(payload) != {"schema_version", "tabs"}:
+        if not isinstance(payload, dict):
+            raise TypeError("task-browser snapshot must be an object")
+        if set(payload) != {"schema_version", "tabs"}:
             raise ValueError("task-browser snapshot fields do not match schema")
-        if payload["schema_version"] != _SNAPSHOT_SCHEMA:
+        schema_version = payload["schema_version"]
+        if not isinstance(schema_version, int) or isinstance(schema_version, bool):
+            raise TypeError("task-browser snapshot schema version must be an integer")
+        if schema_version != _SNAPSHOT_SCHEMA:
             raise ValueError("unsupported task-browser snapshot schema")
         raw_tabs = payload["tabs"]
         if not isinstance(raw_tabs, list):
-            raise ValueError("task-browser snapshot tabs must be a list")
+            raise TypeError("task-browser snapshot tabs must be a list")
         manager = cls(session=session)
         seen_tab_ids: set[str] = set()
         for raw_tab in raw_tabs:
@@ -246,17 +253,16 @@ class TaskBrowserTabs:
         page_id = self.session.new_page()
         try:
             page = self._page_for_id(page_id)
+        except StaleTaskTabError as exc:
+            raise TaskTabNavigationError("new task-owned browser page was not registered") from exc
+        try:
             page.goto(
                 target_url,
                 wait_until="domcontentloaded",
                 timeout=self.session.timeout_ms,
             )
         except Exception as exc:
-            try:
-                page = self._page_for_id(page_id)
-                page.close()
-            except Exception:
-                pass
+            page.close()
             raise TaskTabNavigationError("task-owned browser tab navigation failed") from exc
         self._bindings[(record.task_id, record.tab_id)] = _RuntimeBinding(
             session_id=self.session.session_id,
@@ -285,12 +291,16 @@ class TaskBrowserTabs:
 
 
 def _validate_identity(name: str, value: str) -> None:
-    if not isinstance(value, str) or not value or value != value.strip() or len(value) > 256:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string")
+    if not value or value != value.strip() or len(value) > 256:
         raise ValueError(f"{name} must be a non-empty bounded string without outer whitespace")
 
 
 def _validate_navigation_url(value: str) -> None:
-    if not isinstance(value, str) or not value or value != value.strip():
+    if not isinstance(value, str):
+        raise TypeError("browser target URL must be a string")
+    if not value or value != value.strip():
         raise ValueError("browser target URL must be a non-empty string without outer whitespace")
     if any(ord(character) < 32 for character in value):
         raise ValueError("browser target URL must not contain control characters")
