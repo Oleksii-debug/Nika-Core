@@ -24,6 +24,7 @@
     status_count: document.getElementById("product-project-status-count"),
     decision_count: document.getElementById("product-project-decision-count"),
   });
+  const productProjectUnavailableMessage = "Стан поточного ProductProject недоступний.";
   let actions = [];
   let actionsReady = false;
   let bridgeInitializationStarted = false;
@@ -109,10 +110,16 @@
   }
 
   function renderProductProjectUnavailable(message) {
-    productProjectEmpty.textContent = message || "Стан поточного ProductProject недоступний.";
+    productProjectEmpty.textContent = message || productProjectUnavailableMessage;
     productProjectEmpty.hidden = false;
     productProjectSummary.hidden = true;
     clearProductProjectFields();
+  }
+
+  function reportStateUnavailable() {
+    renderProductProjectUnavailable(productProjectUnavailableMessage);
+    announce(productProjectUnavailableMessage, true);
+    appendLog(productProjectUnavailableMessage);
   }
 
   function renderProductProject(project) {
@@ -140,20 +147,18 @@
 
   async function refreshState() {
     if (!globalThis.pywebview?.api?.get_state) {
-      renderProductProjectUnavailable("Стан поточного ProductProject недоступний.");
+      reportStateUnavailable();
       return false;
     }
     let response;
     try {
       response = await globalThis.pywebview.api.get_state();
-    } catch (error) {
-      renderProductProjectUnavailable("Стан поточного ProductProject недоступний.");
-      appendLog(error instanceof Error ? error.message : String(error));
+    } catch {
+      reportStateUnavailable();
       return false;
     }
-    if (!response.ok) {
-      renderProductProjectUnavailable("Стан поточного ProductProject недоступний.");
-      appendLog(response.message || "Не вдалося отримати стан програми.");
+    if (!response?.ok) {
+      reportStateUnavailable();
       return false;
     }
     const state = response.state || {};
@@ -258,12 +263,12 @@
       if (!stateReady) throw new Error("Desktop state bridge unavailable");
       document.documentElement.dataset.nikaReady = "true";
       announce("Nika Core готова до роботи.");
-    } catch (error) {
+    } catch {
       actionsReady = false;
       bridgeInitializationStarted = false;
       document.documentElement.dataset.nikaReady = "false";
       announce("Не вдалося завантажити команди Nika Core.", true);
-      appendLog(error instanceof Error ? error.message : String(error));
+      appendLog("Не вдалося ініціалізувати міст Nika Core.");
     }
   }
 
