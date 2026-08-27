@@ -4,7 +4,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import object as _object
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.checkpoint import Checkpoint, CheckpointService
@@ -138,20 +137,19 @@ class V01MonitoringLoop:
             raise ValueError("deadline_at must be in the future")
 
         self._ensure_declared_source(source, allow_register=True)
-        payload: dict[str, object] = {
-            "kind": _MONITOR_KIND,
-            "source_id": source.source_id,
-            "workspace_id": source.workspace_id,
-            "locator": source.locator,
-            "interval_seconds": interval_seconds,
-            "condition": condition.value,
-            "anchor_at": now.isoformat(),
-            "deadline_at": deadline.isoformat() if deadline is not None else None,
-        }
         task = self._tasks.create(
             workspace_id=source.workspace_id,
             agent_id=_MONITOR_AGENT_ID,
-            payload=payload,
+            payload={
+                "kind": _MONITOR_KIND,
+                "source_id": source.source_id,
+                "workspace_id": source.workspace_id,
+                "locator": source.locator,
+                "interval_seconds": interval_seconds,
+                "condition": condition.value,
+                "anchor_at": now.isoformat(),
+                "deadline_at": deadline.isoformat() if deadline is not None else None,
+            },
         )
         self._tasks.transition(task.task_id, TaskState.READY)
         config = self._load_config(task.task_id)
@@ -174,11 +172,11 @@ class V01MonitoringLoop:
     ) -> MonitorRunResult:
         task = self._tasks.get(task_id)
         if task.state is TaskState.PAUSED:
-            return self._inactive_result(MonitorRunDisposition.PAUSED)
+            return _inactive_result(MonitorRunDisposition.PAUSED)
         if task.state is TaskState.CANCELLED:
-            return self._inactive_result(MonitorRunDisposition.CANCELLED)
+            return _inactive_result(MonitorRunDisposition.CANCELLED)
         if task.state not in {TaskState.READY, TaskState.RUNNING}:
-            return self._inactive_result(MonitorRunDisposition.INACTIVE)
+            return _inactive_result(MonitorRunDisposition.INACTIVE)
 
         config = self._load_config(task_id)
         now = _as_utc(occurrence_at or self._clock(), field="occurrence_at")
@@ -203,16 +201,15 @@ class V01MonitoringLoop:
         )
         latest = self._checkpoints.latest(task_id)
         if latest is not None and latest.stage == _CHECKPOINT_STAGE:
-            previous_sequence = _required_int(latest.payload, "occurrence_sequence")
+            previous_sequence = _required_nonnegative_int(latest.payload, "occurrence_sequence")
             if previous_sequence == sequence:
-                return self._result_from_checkpoint(latest, MonitorRunDisposition.DUPLICATE)
+                return _result_from_checkpoint(latest, MonitorRunDisposition.DUPLICATE)
             if previous_sequence > sequence:
                 raise ValueError("occurrence sequence would move backwards")
 
-        previous = self._previous_observation(latest)
+        previous = _checkpoint_observation(latest)
         if previous is None:
             previous = self._current_observation(config)
-
         if task.state is TaskState.READY:
             self._tasks.transition(task_id, TaskState.RUNNING)
 
@@ -229,9 +226,7 @@ class V01MonitoringLoop:
             )
 
         previous_hash = previous.normalized_sha256 if previous is not None else None
-        changed = (
-            None if previous_hash is None else previous_hash != current.normalized_sha256
-        )
+        changed = None if previous_hash is None else previous_hash != current.normalized_sha256
         condition_met = changed is not None and (
             (config.condition is MonitorCondition.CHANGED and changed)
             or (config.condition is MonitorCondition.UNCHANGED and not changed)
@@ -258,7 +253,7 @@ class V01MonitoringLoop:
                 "refresh_disposition": refresh.disposition.value,
             },
         )
-        return self._result_from_checkpoint(checkpoint, MonitorRunDisposition.OBSERVED)
+        return _result_from_checkpoint(checkpoint, MonitorRunDisposition.OBSERVED)
 
     def handle_scheduled(self, payload: dict[str, object]) -> None:
         task_id = payload.get("monitor_task_id")
@@ -269,6 +264,7 @@ class V01MonitoringLoop:
     def pause(self, task_id: str) -> TaskState:
         task = self._tasks.get(task_id)
         if task.state is TaskState.PAUSED:
+            self._scheduler.pause(self.job_id(task_id))
             return task.state
         if task.state not in {TaskState.READY, TaskState.RUNNING}:
             raise ValueError(f"monitor cannot pause from {task.state.value}")
@@ -325,7 +321,6 @@ class V01MonitoringLoop:
             trigger_kind=TriggerKind.INTERVAL,
             trigger=trigger,
             payload={"monitor_task_id": config.task_id},
-            enabled=True,
             coalesce=True,
             max_instances=1,
         )
@@ -343,7 +338,7 @@ class V01MonitoringLoop:
             workspace_id=workspace_id,
             source_id=_required_str(payload, "source_id"),
             locator=_required_str(payload, "locator"),
-            interval_seconds=_required_int(payload, "interval_seconds"),
+            interval_seconds=_required_positive_int(payload, "interval_seconds"),
             condition=MonitorCondition(_required_str(payload, "condition")),
             anchor_at=_parse_utc(_required_str(payload, "anchor_at"), field="anchor_at"),
             deadline_at=_parse_optional_utc(payload.get("deadline_at"), field="deadline_at"),
@@ -391,47 +386,45 @@ class V01MonitoringLoop:
             source_observed_at=row["observed_at"],
         )
 
-    @staticmethod
-    def _previous_observation(checkpoint: Checkpoint | None) -> NormalizedObservation | None:
-        if checkpoint is None or checkpoint.stage != _CHECKPOINT_STAGE:
-            return None
-        return _observation_from_payload(checkpoint.payload)
 
-    @staticmethod
-    def _result_from_checkpoint(
-        checkpoint: Checkpoint,
-        disposition: MonitorRunDisposition,
-    ) -> MonitorRunResult:
-        payload = checkpoint.payload
-        changed = payload.get("changed")
-        if changed is not None and not isinstance(changed, bool):
-            raise ValueError("monitor checkpoint changed flag is invalid")
-        return MonitorRunResult(
-            disposition=disposition,
-            occurrence_id=_required_str(payload, "occurrence_id"),
-            observation=_observation_from_payload(payload),
-            previous_normalized_sha256=_optional_str(
-                payload.get("previous_normalized_sha256"),
-                "previous_normalized_sha256",
-            ),
-            changed=changed,
-            condition_met=_required_bool(payload, "condition_met"),
-            refresh_disposition=RefreshDisposition(
-                _required_str(payload, "refresh_disposition")
-            ),
-        )
+def _checkpoint_observation(checkpoint: Checkpoint | None) -> NormalizedObservation | None:
+    if checkpoint is None or checkpoint.stage != _CHECKPOINT_STAGE:
+        return None
+    return _observation_from_payload(checkpoint.payload)
 
-    @staticmethod
-    def _inactive_result(disposition: MonitorRunDisposition) -> MonitorRunResult:
-        return MonitorRunResult(
-            disposition=disposition,
-            occurrence_id=None,
-            observation=None,
-            previous_normalized_sha256=None,
-            changed=None,
-            condition_met=False,
-            refresh_disposition=None,
-        )
+
+def _result_from_checkpoint(
+    checkpoint: Checkpoint,
+    disposition: MonitorRunDisposition,
+) -> MonitorRunResult:
+    payload = checkpoint.payload
+    changed = payload.get("changed")
+    if changed is not None and not isinstance(changed, bool):
+        raise ValueError("monitor checkpoint changed flag is invalid")
+    return MonitorRunResult(
+        disposition=disposition,
+        occurrence_id=_required_str(payload, "occurrence_id"),
+        observation=_observation_from_payload(payload),
+        previous_normalized_sha256=_optional_str(
+            payload.get("previous_normalized_sha256"),
+            "previous_normalized_sha256",
+        ),
+        changed=changed,
+        condition_met=_required_bool(payload, "condition_met"),
+        refresh_disposition=RefreshDisposition(_required_str(payload, "refresh_disposition")),
+    )
+
+
+def _inactive_result(disposition: MonitorRunDisposition) -> MonitorRunResult:
+    return MonitorRunResult(
+        disposition=disposition,
+        occurrence_id=None,
+        observation=None,
+        previous_normalized_sha256=None,
+        changed=None,
+        condition_met=False,
+        refresh_disposition=None,
+    )
 
 
 def _observation_from_payload(payload: dict[str, object]) -> NormalizedObservation:
@@ -462,10 +455,17 @@ def _optional_str(value: object, key: str) -> str | None:
     return value
 
 
-def _required_int(payload: dict[str, object], key: str) -> int:
+def _required_positive_int(payload: dict[str, object], key: str) -> int:
     value = payload.get(key)
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ValueError(f"monitor payload {key} must be a positive integer")
+    return value
+
+
+def _required_nonnegative_int(payload: dict[str, object], key: str) -> int:
+    value = payload.get(key)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"monitor payload {key} must be a non-negative integer")
     return value
 
 
