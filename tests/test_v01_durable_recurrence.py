@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.scheduler.apscheduler_adapter import APSchedulerAdapter
 from nika_core.scheduler.contracts import ScheduledJob
 from nika_core.scheduler.recurrence import (
     DurableRecurrenceService,
@@ -117,6 +118,56 @@ def test_next_occurrence_is_durable_and_reconstructable_after_restart(tmp_path: 
     restarted, _ = _service(store, clock, calls)
     reloaded = restarted.get("weather Київ")
     assert reloaded == created
+
+
+def test_real_apscheduler_adapter_reinstalls_next_date_intent_without_sleep(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    jobs = ScheduledJobStore(store)
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    calls: list[RecurrenceInvocation] = []
+    service_ref: dict[str, DurableRecurrenceService] = {}
+
+    def scheduler_resolver(action_id: str):
+        assert action_id == DurableRecurrenceService.ACTION_ID
+        return service_ref["service"].action_handler
+
+    def target_resolver(action_id: str):
+        assert action_id == "monitor.check"
+
+        def handler(invocation: RecurrenceInvocation) -> None:
+            calls.append(invocation)
+
+        return handler
+
+    adapter = APSchedulerAdapter(jobs, scheduler_resolver)
+    service = DurableRecurrenceService(
+        jobs=jobs,
+        scheduler=adapter,
+        handler_resolver=target_resolver,
+        clock=clock,
+    )
+    service_ref["service"] = service
+    service.create(
+        recurrence_id="apscheduler-integration",
+        action_id="monitor.check",
+        interval_seconds=60,
+        start_at=clock.value,
+    )
+    job_id = jobs.list_enabled()[0].job_id
+
+    adapter.start()
+    try:
+        assert adapter.has_runtime_job(job_id)
+        service.action_handler({"recurrence_id": "apscheduler-integration"})
+        assert len(calls) == 1
+        state = service.get("apscheduler-integration")
+        assert state is not None
+        assert state.next_due_at == clock.value + timedelta(minutes=1)
+        assert adapter.has_runtime_job(job_id)
+    finally:
+        adapter.shutdown()
 
 
 def test_completed_occurrence_is_not_repeated_and_missed_runs_coalesce_once(
