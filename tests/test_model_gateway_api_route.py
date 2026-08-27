@@ -239,6 +239,28 @@ def test_credential_resolution_failure_is_normalized_without_secret_or_cause() -
     assert request == before
 
 
+def test_http_auth_failure_drops_secret_bearing_transport_cause() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": "unauthorized"})
+
+    api = CredentialRefOpenAICompatibleProvider(
+        config=_config(),
+        credential_resolver=_StaticResolver(_CANARY),
+        client_factory=_client_factory(httpx.MockTransport(handler)),
+    )
+    gateway = ModelGateway()
+    gateway.register(api)
+
+    with pytest.raises(ModelGatewayError) as caught:
+        asyncio.run(gateway.complete(_request()))
+
+    error = caught.value
+    assert error.code is ModelErrorCode.AUTHENTICATION
+    assert error.__cause__ is None
+    assert _CANARY not in str(error)
+    assert _CANARY not in repr(error)
+
+
 def test_api_timeout_is_normalized_and_does_not_cross_route() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("synthetic timeout", request=request)
