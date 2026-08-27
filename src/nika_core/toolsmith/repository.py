@@ -220,15 +220,55 @@ class ToolsmithRepository:
         return expected_version + 1
 
     def record_search_candidate(self, *, task_id: str, candidate: ReuseCandidate) -> None:
-        row = self.get_escalation(task_id=task_id, capability_id=candidate.capability_id)
-        if row is None:
-            raise KeyError((task_id, candidate.capability_id))
-        ceiling = frozenset(json.loads(str(row["permission_ceiling_json"])))
-        if not candidate.permissions.issubset(ceiling):
-            raise PermissionError("candidate permissions exceed original task ceiling")
+        permissions_json = _json(sorted(candidate.permissions))
+        metadata_json = _json(candidate.metadata)
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            escalation = conn.execute(
+                "SELECT permission_ceiling_json FROM capability_escalations "
+                "WHERE task_id = ? AND requested_capability = ?",
+                (task_id, candidate.capability_id),
+            ).fetchone()
+            if escalation is None:
+                raise KeyError((task_id, candidate.capability_id))
+            ceiling = frozenset(json.loads(str(escalation["permission_ceiling_json"])))
+            if not candidate.permissions.issubset(ceiling):
+                raise PermissionError("candidate permissions exceed original task ceiling")
+
+            existing = conn.execute(
+                "SELECT digest, permissions_json, metadata_json "
+                "FROM capability_search_candidates "
+                "WHERE task_id = ? AND capability_id = ? AND version = ? AND source = ? "
+                "ORDER BY candidate_id",
+                (
+                    task_id,
+                    candidate.capability_id,
+                    candidate.version,
+                    candidate.source,
+                ),
+            ).fetchall()
+            if existing:
+                exact_identity = (
+                    candidate.digest,
+                    permissions_json,
+                    metadata_json,
+                )
+                if len(existing) != 1 or any(
+                    (
+                        str(row["digest"]),
+                        str(row["permissions_json"]),
+                        str(row["metadata_json"]),
+                    )
+                    != exact_identity
+                    for row in existing
+                ):
+                    raise RuntimeError(
+                        "candidate source/version conflicts with prior durable search identity"
+                    )
+                return
+
             conn.execute(
-                "INSERT OR IGNORE INTO capability_search_candidates("
+                "INSERT INTO capability_search_candidates("
                 "task_id, capability_id, version, source, digest, permissions_json, metadata_json, "
                 "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
@@ -237,8 +277,8 @@ class ToolsmithRepository:
                     candidate.version,
                     candidate.source,
                     candidate.digest,
-                    _json(sorted(candidate.permissions)),
-                    _json(candidate.metadata),
+                    permissions_json,
+                    metadata_json,
                     _now(),
                 ),
             )
