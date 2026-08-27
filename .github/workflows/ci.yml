@@ -41,6 +41,22 @@ jobs:
       - name: Verify source, dependencies and tests
         run: python scripts/verify.py
 
+  required-core-gate:
+    name: Core required gate
+    if: ${{ always() }}
+    needs: [verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require Ubuntu and Windows Core verification
+        shell: bash
+        env:
+          VERIFY_RESULT: ${{ needs.verify.result }}
+        run: |
+          set -euo pipefail
+          printf 'Core verify aggregate result: %s\n' "$VERIFY_RESULT"
+          test "$VERIFY_RESULT" = "success"
+
   embedded-foundry-sdk-proof:
     name: Embedded Foundry Local SDK dependency proof
     if: >-
