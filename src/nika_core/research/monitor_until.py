@@ -382,7 +382,7 @@ class MonitorUntilConditionService:
     def _metadata(self, job: ScheduledJob) -> dict[str, object]:
         raw = job.payload.get(self.META_KEY)
         if not isinstance(raw, dict):
-            raise ValueError(f"scheduled job {job.job_id!r} is not a monitor-until job")
+            raise TypeError(f"scheduled job {job.job_id!r} is not a monitor-until job")
         metadata = dict(raw)
         if metadata.get("version") != self.META_VERSION:
             raise ValueError("unsupported monitor-until metadata version")
