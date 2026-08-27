@@ -17,7 +17,7 @@ from .contracts import (
     WorkerFailure,
     WorkerFailureKind,
 )
-from .repository import ToolsmithRepository
+from .repository import InvalidTransitionError, StaleTransitionError, ToolsmithRepository
 
 
 class CapabilityEscalationService:
@@ -179,16 +179,12 @@ class CapabilityEscalationService:
         candidate_digest: str,
         verifier_evidence: dict[str, object],
     ) -> int:
-        if not candidate_digest.strip():
-            raise ValueError("verification requires exact candidate digest")
-        if not verifier_evidence:
-            raise ValueError("verification requires independent evidence")
-        return self._repository.transition(
+        return self._repository.accept_verification(
             task_id=gap.task_id,
             capability_id=gap.requested_capability,
             expected_version=expected_version,
-            target=CandidateState.VERIFIED,
-            evidence={"digest": candidate_digest, "verifier": verifier_evidence},
+            candidate_digest=candidate_digest,
+            verifier_evidence=verifier_evidence,
         )
 
     def reject_verification(
@@ -221,6 +217,27 @@ class CapabilityEscalationService:
             raise ValueError("manifest capability id must match escalation")
         if not manifest.permissions.issubset(gap.permission_ceiling):
             raise PermissionError("manifest permissions exceed original task ceiling")
+        row = self._repository.get_escalation(
+            task_id=gap.task_id,
+            capability_id=gap.requested_capability,
+        )
+        if row is None:
+            raise KeyError((gap.task_id, gap.requested_capability))
+        actual_version = int(row["row_version"])
+        if actual_version != expected_version:
+            raise StaleTransitionError(
+                f"expected row version {expected_version}, found {actual_version}"
+            )
+        state = CandidateState(str(row["state"]))
+        if state is not CandidateState.VERIFIED:
+            raise InvalidTransitionError(
+                f"invalid candidate transition {state.value} -> {CandidateState.REGISTERING.value}"
+            )
+        verified_digest = row.get("pinned_digest")
+        if verified_digest is None:
+            raise RuntimeError("verified escalation is missing exact candidate digest")
+        if str(verified_digest) != manifest.digest:
+            raise ValueError("manifest digest does not match independently verified candidate")
         version = self._repository.transition(
             task_id=gap.task_id,
             capability_id=gap.requested_capability,
