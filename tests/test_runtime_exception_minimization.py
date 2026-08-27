@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 import nika_core.runtime.contracts as runtime_contracts
-import nika_core.runtime.langgraph_runtime as langgraph_runtime
+from nika_core.runtime import langgraph_runtime
 
 
 _CANARY = "P10_05_SYNTHETIC_BACKEND_SECRET_7f31c2"
