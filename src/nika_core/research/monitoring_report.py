@@ -32,7 +32,7 @@ def _optional_code(value: str | None, field_name: str) -> str | None:
 
 def _timestamp(value: str, field_name: str) -> str:
     normalized = _required_line(value, field_name, max_length=80)
-    parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+    parsed = datetime.fromisoformat(normalized)
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"{field_name} must include a timezone offset")
     return normalized
@@ -202,7 +202,7 @@ class MonitoringReport:
             raise ValueError("matched condition cannot have a future scheduled check")
         previous: datetime | None = None
         for check in self.checks:
-            current = datetime.fromisoformat(check.checked_at.replace("Z", "+00:00"))
+            current = datetime.fromisoformat(check.checked_at)
             if previous is not None and current < previous:
                 raise ValueError("checks must be ordered chronologically")
             previous = current
