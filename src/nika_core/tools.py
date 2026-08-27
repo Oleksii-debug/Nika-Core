@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import sqlite3
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -92,17 +93,38 @@ class ToolEffectGuard:
             raise ValueError("call_id must not be empty")
 
         operation_key = self._operation_key(task_id=task_id, call_id=call.call_id)
+        input_fingerprint = self._fingerprint(spec=spec, call=call)
         try:
             record, created = self._ledger.reserve_once(
                 operation_key=operation_key,
                 task_id=task_id,
                 operation_type=self._OPERATION_TYPE,
-                input_fingerprint=self._fingerprint(spec=spec, call=call),
+                input_fingerprint=input_fingerprint,
             )
         except IdempotencyConflictError as exc:
             raise ToolEffectConflictError(
                 "tool effect identity conflicts with durable evidence"
             ) from exc
+        except sqlite3.IntegrityError:
+            # A simultaneous first reservation can lose the UNIQUE(operation_key) race
+            # after both callers observed absence. Re-read through the canonical ledger
+            # so the loser deterministically observes the winner instead of leaking a
+            # raw SQLite exception across the tool boundary.
+            try:
+                record, created = self._ledger.reserve_once(
+                    operation_key=operation_key,
+                    task_id=task_id,
+                    operation_type=self._OPERATION_TYPE,
+                    input_fingerprint=input_fingerprint,
+                )
+            except IdempotencyConflictError as exc:
+                raise ToolEffectConflictError(
+                    "tool effect identity conflicts with durable evidence"
+                ) from exc
+            except sqlite3.Error as exc:
+                raise ToolEffectConflictError("tool effect reservation failed closed") from exc
+        except sqlite3.Error as exc:
+            raise ToolEffectConflictError("tool effect reservation failed closed") from exc
 
         if created:
             return ToolEffectReservation(operation_key=operation_key)
@@ -117,14 +139,16 @@ class ToolEffectGuard:
         )
 
     def complete(self, reservation: ToolEffectReservation, output: object) -> None:
-        result: dict[str, object]
         try:
             json.dumps(output, allow_nan=False, ensure_ascii=False, sort_keys=True)
-        except (TypeError, ValueError):
-            result = {"completed": True}
-        else:
-            result = {"completed": True, "output": output}
-        self._ledger.complete(reservation.operation_key, result)
+        except (TypeError, ValueError) as exc:
+            # Never certify a result as COMPLETED if restart cannot reproduce it.
+            # ToolExecutor will convert this finalize failure into UNCERTAIN.
+            raise ValueError("durable tool result must be JSON-compatible") from exc
+        self._ledger.complete(
+            reservation.operation_key,
+            {"completed": True, "output": output},
+        )
 
     def mark_uncertain(self, reservation: ToolEffectReservation) -> None:
         record = self._ledger.require(reservation.operation_key)
