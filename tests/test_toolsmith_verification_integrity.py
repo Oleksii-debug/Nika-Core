@@ -15,6 +15,7 @@ from nika_core.toolsmith import (
     CodingResult,
     DeterministicCodingWorker,
     GapKind,
+    ReuseCandidate,
     ToolsmithRepository,
 )
 
@@ -44,13 +45,8 @@ def _service(
     return task.task_id, store, repository, service
 
 
-def _verified(
-    *,
-    task_id: str,
-    repository: ToolsmithRepository,
-    service: CapabilityEscalationService,
-) -> tuple[CapabilityGap, int]:
-    gap = CapabilityGap(
+def _gap(task_id: str) -> CapabilityGap:
+    return CapabilityGap(
         task_id=task_id,
         requested_capability=CAPABILITY_ID,
         kind=GapKind.MISSING_CAPABILITY,
@@ -58,6 +54,33 @@ def _verified(
         attempted_methods=("registry-search",),
         permission_ceiling=PERMISSIONS,
     )
+
+
+def _candidate(
+    *,
+    digest: str = VERIFIED_DIGEST,
+    permissions: frozenset[str] = frozenset({"repo.read"}),
+    metadata: dict[str, str] | None = None,
+    source: str = "catalog://trusted",
+    version: str = "1.0.0",
+) -> ReuseCandidate:
+    return ReuseCandidate(
+        capability_id=CAPABILITY_ID,
+        version=version,
+        source=source,
+        digest=digest,
+        permissions=permissions,
+        metadata=metadata or {"license": "MIT", "origin": "catalog"},
+    )
+
+
+def _verified(
+    *,
+    task_id: str,
+    repository: ToolsmithRepository,
+    service: CapabilityEscalationService,
+) -> tuple[CapabilityGap, int]:
+    gap = _gap(task_id)
     version, state = service.begin(gap)
     assert state is CandidateState.PROPOSED
     version = repository.transition(
@@ -158,16 +181,96 @@ def test_verified_digest_survives_restart_before_registration(tmp_path: Path) ->
         )
 
 
+def test_search_candidate_identity_survives_restart_and_rejects_digest_substitution(
+    tmp_path: Path,
+) -> None:
+    task_id, store, repository, service = _service(tmp_path)
+    service.begin(_gap(task_id))
+    repository.record_search_candidate(task_id=task_id, candidate=_candidate())
+
+    restarted_store = SQLiteStore(store.path)
+    restarted_store.initialize()
+    restarted_repository = ToolsmithRepository(restarted_store)
+    with pytest.raises(RuntimeError, match="prior durable search identity"):
+        restarted_repository.record_search_candidate(
+            task_id=task_id,
+            candidate=_candidate(digest=SUBSTITUTED_DIGEST),
+        )
+
+    with restarted_store.connection() as conn:
+        rows = conn.execute(
+            "SELECT digest FROM capability_search_candidates "
+            "WHERE task_id = ? AND capability_id = ? AND version = ? AND source = ?",
+            (task_id, CAPABILITY_ID, "1.0.0", "catalog://trusted"),
+        ).fetchall()
+    assert [str(row["digest"]) for row in rows] == [VERIFIED_DIGEST]
+
+
+def test_search_candidate_same_digest_cannot_change_permissions_or_provenance(
+    tmp_path: Path,
+) -> None:
+    task_id, _, repository, service = _service(tmp_path)
+    service.begin(_gap(task_id))
+    repository.record_search_candidate(task_id=task_id, candidate=_candidate())
+
+    with pytest.raises(RuntimeError, match="prior durable search identity"):
+        repository.record_search_candidate(
+            task_id=task_id,
+            candidate=_candidate(permissions=frozenset({"repo.read", "tests.run"})),
+        )
+    with pytest.raises(RuntimeError, match="prior durable search identity"):
+        repository.record_search_candidate(
+            task_id=task_id,
+            candidate=_candidate(metadata={"license": "Apache-2.0", "origin": "catalog"}),
+        )
+
+
+def test_search_candidate_exact_replay_is_idempotent_and_distinct_identity_is_allowed(
+    tmp_path: Path,
+) -> None:
+    task_id, store, repository, service = _service(tmp_path)
+    service.begin(_gap(task_id))
+    candidate = _candidate()
+    repository.record_search_candidate(task_id=task_id, candidate=candidate)
+    repository.record_search_candidate(task_id=task_id, candidate=candidate)
+    repository.record_search_candidate(
+        task_id=task_id,
+        candidate=_candidate(source="catalog://secondary"),
+    )
+    repository.record_search_candidate(
+        task_id=task_id,
+        candidate=_candidate(version="2.0.0"),
+    )
+
+    with store.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) AS count FROM capability_search_candidates WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+    assert count is not None
+    assert int(count["count"]) == 3
+
+
+def test_search_candidate_historical_equivocation_fails_closed(tmp_path: Path) -> None:
+    task_id, store, repository, service = _service(tmp_path)
+    service.begin(_gap(task_id))
+    repository.record_search_candidate(task_id=task_id, candidate=_candidate())
+    with store.connection() as conn:
+        conn.execute(
+            "INSERT INTO capability_search_candidates("
+            "task_id, capability_id, version, source, digest, permissions_json, metadata_json, "
+            "created_at) SELECT task_id, capability_id, version, source, ?, permissions_json, "
+            "metadata_json, created_at FROM capability_search_candidates WHERE task_id = ?",
+            (SUBSTITUTED_DIGEST, task_id),
+        )
+
+    with pytest.raises(RuntimeError, match="prior durable search identity"):
+        repository.record_search_candidate(task_id=task_id, candidate=_candidate())
+
+
 def test_legacy_verified_row_without_digest_fails_closed(tmp_path: Path) -> None:
     task_id, _, repository, service = _service(tmp_path)
-    gap = CapabilityGap(
-        task_id=task_id,
-        requested_capability=CAPABILITY_ID,
-        kind=GapKind.MISSING_CAPABILITY,
-        reason="bounded capability is required",
-        attempted_methods=("registry-search",),
-        permission_ceiling=PERMISSIONS,
-    )
+    gap = _gap(task_id)
     version, _ = service.begin(gap)
     for target in (
         CandidateState.BUILD_REQUIRED,
