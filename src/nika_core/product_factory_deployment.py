@@ -380,6 +380,8 @@ class DeploymentFabricSnapshot:
     records: tuple[DeploymentRecord, ...]
     healthy_staging: tuple[tuple[str, ...], ...]
     current_releases: tuple[tuple[str, ...], ...]
+    exact_healthy_staging: tuple[tuple[str, ...], ...] = ()
+    exact_current_releases: tuple[tuple[str, ...], ...] = ()
 
 
 @dataclass(slots=True)
@@ -504,6 +506,16 @@ class DeploymentFabric:
             (
                 project_id,
                 environment_id,
+                release.source_sha,
+            )
+            for (project_id, environment_id), release in sorted(
+                self._current_releases.items()
+            )
+        )
+        exact_current_releases = tuple(
+            (
+                project_id,
+                environment_id,
                 release.version,
                 release.source_sha,
                 release.artifact_digest,
@@ -513,6 +525,10 @@ class DeploymentFabric:
             )
         )
         healthy_staging = tuple(
+            (project_id, release.source_sha)
+            for project_id, release in sorted(self._healthy_staging.items())
+        )
+        exact_healthy_staging = tuple(
             (
                 project_id,
                 release.version,
@@ -525,6 +541,8 @@ class DeploymentFabric:
             tuple(self._records[key] for key in sorted(self._records)),
             healthy_staging,
             current_releases,
+            exact_healthy_staging,
+            exact_current_releases,
         )
 
     def restore(self, snapshot: DeploymentFabricSnapshot) -> None:
@@ -540,7 +558,14 @@ class DeploymentFabric:
             _validate_record(record)
 
         healthy_staging: dict[str, ReleaseRef] = {}
-        for entry in snapshot.healthy_staging:
+        staging_entries = (
+            snapshot.exact_healthy_staging
+            if snapshot.exact_healthy_staging
+            else snapshot.healthy_staging
+        )
+        for entry in staging_entries:
+            if snapshot.exact_healthy_staging and len(entry) != 4:
+                raise DeploymentFabricError("exact healthy staging snapshot entry has invalid shape")
             project_id, release = _normalize_healthy_staging_entry(entry, records)
             if project_id in healthy_staging:
                 raise DeploymentFabricError("deployment snapshot contains duplicate staging state")
@@ -553,9 +578,25 @@ class DeploymentFabric:
                     "healthy staging snapshot conflicts with unresolved staging effect"
                 )
             healthy_staging[project_id] = release
+        if snapshot.exact_healthy_staging:
+            expected_staging = tuple(
+                (project_id, release.source_sha)
+                for project_id, release in sorted(healthy_staging.items())
+            )
+            if snapshot.healthy_staging != expected_staging:
+                raise DeploymentFabricError(
+                    "healthy staging snapshot exact authority disagrees with public projection"
+                )
 
         current_releases: dict[tuple[str, str], ReleaseRef] = {}
-        for entry in snapshot.current_releases:
+        current_entries = (
+            snapshot.exact_current_releases
+            if snapshot.exact_current_releases
+            else snapshot.current_releases
+        )
+        for entry in current_entries:
+            if snapshot.exact_current_releases and len(entry) != 5:
+                raise DeploymentFabricError("exact current release snapshot entry has invalid shape")
             project_id, environment_id, release = _normalize_current_release_entry(
                 entry, records
             )
@@ -571,6 +612,17 @@ class DeploymentFabric:
                     "current release snapshot is not backed by a healthy deployment record"
                 )
             current_releases[key] = release
+        if snapshot.exact_current_releases:
+            expected_current = tuple(
+                (project_id, environment_id, release.source_sha)
+                for (project_id, environment_id), release in sorted(
+                    current_releases.items()
+                )
+            )
+            if snapshot.current_releases != expected_current:
+                raise DeploymentFabricError(
+                    "current release snapshot exact authority disagrees with public projection"
+                )
 
         self._records = {record.intent.intent_id: record for record in records}
         self._healthy_staging = healthy_staging
@@ -760,11 +812,6 @@ def _normalize_record(
             )
         previous = next(iter(matches))
         record = replace(record, previous_release=previous)
-
-    health = record.health
-    if health is not None and health.release is None:
-        health = replace(health, release=record.intent.release)
-        record = replace(record, health=health)
 
     rollback = record.rollback
     if rollback is not None:

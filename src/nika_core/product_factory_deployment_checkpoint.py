@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime
-from typing import Any
+from typing import Any, NoReturn
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.checkpoint import CheckpointService
@@ -28,6 +28,47 @@ _HOST_KIND = "product_factory"
 
 class ProductFactoryDeploymentCheckpointError(ValueError):
     """Raised when durable PF6 deployment checkpoint invariants are violated."""
+
+
+def _canonical_json(payload: dict[str, object]) -> str:
+    return json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _reject_non_finite(_value: str) -> NoReturn:
+    raise ValueError("deployment checkpoint payload contains a non-finite number")
+
+
+def _decode_checkpoint_payload(payload_json: object, checksum_sha256: object) -> dict[str, object]:
+    if not isinstance(payload_json, str) or not isinstance(checksum_sha256, str):
+        raise ProductFactoryDeploymentCheckpointError(
+            "deployment checkpoint durable fields must be text"
+        )
+    checksum = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+    if checksum != checksum_sha256:
+        raise ProductFactoryDeploymentCheckpointError(
+            "deployment checkpoint checksum mismatch"
+        )
+    try:
+        payload = json.loads(payload_json, parse_constant=_reject_non_finite)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ProductFactoryDeploymentCheckpointError(
+            "deployment checkpoint payload is not valid finite JSON"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ProductFactoryDeploymentCheckpointError(
+            "deployment checkpoint payload must be a JSON object"
+        )
+    if _canonical_json(payload) != payload_json:
+        raise ProductFactoryDeploymentCheckpointError(
+            "deployment checkpoint payload is not canonical JSON"
+        )
+    return payload
 
 
 class ProductFactoryDeploymentCheckpointHost:
@@ -70,26 +111,18 @@ class ProductFactoryDeploymentCheckpointHost:
                 SELECT payload_json, checksum_sha256
                 FROM checkpoints
                 WHERE task_id = ? AND stage = ?
-                ORDER BY created_at DESC, rowid DESC
+                ORDER BY rowid DESC
                 LIMIT 1
                 """,
                 (host_task_id, _STAGE),
             ).fetchone()
         if row is None:
             return None
-        payload_json = str(row["payload_json"])
-        checksum = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
-        if checksum != str(row["checksum_sha256"]):
-            raise ProductFactoryDeploymentCheckpointError(
-                "deployment checkpoint checksum mismatch"
-            )
-        try:
-            payload = json.loads(payload_json)
-        except (TypeError, ValueError) as exc:
-            raise ProductFactoryDeploymentCheckpointError(
-                "deployment checkpoint payload is not valid JSON"
-            ) from exc
-        if not isinstance(payload, dict) or payload.get("schema") != _SCHEMA:
+        payload = _decode_checkpoint_payload(
+            row["payload_json"],
+            row["checksum_sha256"],
+        )
+        if payload.get("schema") != _SCHEMA:
             raise ProductFactoryDeploymentCheckpointError(
                 "unsupported Product Factory deployment checkpoint schema"
             )
@@ -223,6 +256,16 @@ def _validate_snapshot_project(
             raise ProductFactoryDeploymentCheckpointError(
                 "deployment current-release checkpoint contains another project"
             )
+    for entry in snapshot.exact_healthy_staging:
+        if not entry or entry[0] != project_id:
+            raise ProductFactoryDeploymentCheckpointError(
+                "deployment exact staging checkpoint contains another project"
+            )
+    for entry in snapshot.exact_current_releases:
+        if not entry or entry[0] != project_id:
+            raise ProductFactoryDeploymentCheckpointError(
+                "deployment exact current-release checkpoint contains another project"
+            )
 
 
 def _encode_snapshot(snapshot: DeploymentFabricSnapshot) -> dict[str, object]:
@@ -230,6 +273,12 @@ def _encode_snapshot(snapshot: DeploymentFabricSnapshot) -> dict[str, object]:
         "records": [_encode_record(record) for record in snapshot.records],
         "healthy_staging": [list(entry) for entry in snapshot.healthy_staging],
         "current_releases": [list(entry) for entry in snapshot.current_releases],
+        "exact_healthy_staging": [
+            list(entry) for entry in snapshot.exact_healthy_staging
+        ],
+        "exact_current_releases": [
+            list(entry) for entry in snapshot.exact_current_releases
+        ],
     }
 
 
@@ -238,16 +287,28 @@ def _decode_snapshot(value: Any) -> DeploymentFabricSnapshot:
     records = data.get("records")
     staging = data.get("healthy_staging")
     current = data.get("current_releases")
+    exact_staging = data.get("exact_healthy_staging", [])
+    exact_current = data.get("exact_current_releases", [])
     if (
         not isinstance(records, list)
         or not isinstance(staging, list)
         or not isinstance(current, list)
+        or not isinstance(exact_staging, list)
+        or not isinstance(exact_current, list)
     ):
         raise TypeError("deployment snapshot collections must be lists")
     return DeploymentFabricSnapshot(
         tuple(_decode_record(item) for item in records),
         tuple(_text_tuple(item, "healthy staging entry") for item in staging),
         tuple(_text_tuple(item, "current release entry") for item in current),
+        tuple(
+            _text_tuple(item, "exact healthy staging entry")
+            for item in exact_staging
+        ),
+        tuple(
+            _text_tuple(item, "exact current release entry")
+            for item in exact_current
+        ),
     )
 
 

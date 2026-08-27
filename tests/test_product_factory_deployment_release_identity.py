@@ -87,6 +87,28 @@ class _Provider(DeploymentProviderPort):
             ("rollback://result",),
         )
 
+    def rollback_exact(
+        self,
+        intent: DeploymentIntent,
+        previous_release: ReleaseRef | None,
+    ) -> RollbackEvidence:
+        self.rollback_calls += 1
+        if self.rollback_error:
+            raise RuntimeError("rollback transport unavailable")
+        restored_release = previous_release if self.rollback_succeeds else None
+        restored_release_sha = (
+            None if restored_release is None else restored_release.source_sha
+        )
+        return RollbackEvidence(
+            intent.environment.environment_id,
+            intent.release.source_sha,
+            restored_release_sha,
+            self.rollback_succeeds,
+            ("rollback://result",),
+            failed_release=intent.release,
+            restored_release=restored_release,
+        )
+
     def inspect(self, intent: DeploymentIntent) -> ProviderInspection:
         if self.inspection is not None:
             return self.inspection
@@ -155,7 +177,8 @@ def test_snapshot_persists_exact_staging_release_identity() -> None:
     fabric.deploy(staging)
 
     snapshot = fabric.snapshot()
-    assert snapshot.healthy_staging == (
+    assert snapshot.healthy_staging == (("project-1", SHA_A),)
+    assert snapshot.exact_healthy_staging == (
         ("project-1", "1.0.0", SHA_A, DIGEST_A),
     )
 
@@ -178,13 +201,18 @@ def test_legacy_staging_snapshot_migrates_when_release_is_unambiguous() -> None:
     fabric = DeploymentFabric(provider)
     fabric.deploy(_intent(EnvironmentTier.STAGING, "stage"))
     snapshot = fabric.snapshot()
-    legacy = replace(snapshot, healthy_staging=(("project-1", SHA_A),))
+    legacy = replace(
+        snapshot,
+        healthy_staging=(("project-1", SHA_A),),
+        exact_healthy_staging=(),
+    )
 
     restarted = DeploymentFabric(provider)
     restarted.restore(legacy)
     rewritten = restarted.snapshot()
 
-    assert rewritten.healthy_staging == (
+    assert rewritten.healthy_staging == (("project-1", SHA_A),)
+    assert rewritten.exact_healthy_staging == (
         ("project-1", "1.0.0", SHA_A, DIGEST_A),
     )
     restarted.deploy(_intent(EnvironmentTier.PRODUCTION, "prod"))
@@ -203,7 +231,11 @@ def test_legacy_staging_snapshot_fails_closed_when_release_is_ambiguous() -> Non
         )
     )
     snapshot = fabric.snapshot()
-    ambiguous = replace(snapshot, healthy_staging=(("project-1", SHA_A),))
+    ambiguous = replace(
+        snapshot,
+        healthy_staging=(("project-1", SHA_A),),
+        exact_healthy_staging=(),
+    )
 
     restarted = DeploymentFabric(provider)
     with pytest.raises(DeploymentFabricError, match="legacy staging snapshot is ambiguous"):
@@ -215,10 +247,9 @@ def test_exact_staging_snapshot_requires_backing_healthy_record() -> None:
     fabric = DeploymentFabric(provider)
     fabric.deploy(_intent(EnvironmentTier.STAGING, "stage"))
     snapshot = fabric.snapshot()
-    corrupted = DeploymentFabricSnapshot(
-        snapshot.records,
-        (("project-1", "1.0.0", SHA_A, DIGEST_B),),
-        snapshot.current_releases,
+    corrupted = replace(
+        snapshot,
+        exact_healthy_staging=(("project-1", "1.0.0", SHA_A, DIGEST_B),),
     )
 
     restarted = DeploymentFabric(provider)
@@ -347,7 +378,8 @@ def test_restore_rejects_stale_authority_over_unresolved_staging_effect() -> Non
     snapshot = fabric.snapshot()
     corrupted = replace(
         snapshot,
-        healthy_staging=(("project-1", "1.0.0", SHA_A, DIGEST_A),),
+        healthy_staging=(("project-1", SHA_A),),
+        exact_healthy_staging=(("project-1", "1.0.0", SHA_A, DIGEST_A),),
     )
 
     restarted = DeploymentFabric(provider)

@@ -59,8 +59,10 @@ Additional invariants:
   observation time before the fabric may treat that `ReleaseRef` as healthy staging authority;
 - inspect/reconcile must prove the same complete exact release identity whenever a release is reported;
   same-SHA/different-artifact or different-version evidence is rejected and uncertainty is preserved;
-- current/previous release state is retained as full `ReleaseRef` identity in new snapshots;
-- legacy SHA-only current/previous release snapshots migrate only when durable records identify one exact
+- current/staging public snapshot projections retain the integrated SHA-only tuple shapes for existing
+  Product Command consumers, while additive exact-authority fields durably retain complete `ReleaseRef`
+  version + source SHA + artifact digest identity;
+- legacy snapshots without additive exact authority migrate only when durable records identify one exact
   release; ambiguous same-SHA histories fail closed;
 - providers may retain the legacy SHA-only `rollback()` contract for compatibility, but when a previous
   exact release exists `DeploymentFabric` will not issue an ambiguous SHA-only rollback effect;
@@ -71,17 +73,26 @@ Additional invariants:
 
 ### Process-crash durability boundary
 
-The pre-dispatch marker above is written to `DeploymentFabric` state before the provider call and is
-snapshot-visible before any provider result returns. This PR does **not** wire a synchronous SQLite
-host-task checkpoint between that marker and the external provider effect. The integrated generic
-`SQLiteStore` / `checkpoints` table is task-anchored, while current deployment execution contracts do not
-carry the canonical host-task identity needed to reuse that authority safely.
+The generic `DeploymentFabric` still establishes the pre-dispatch `UNCERTAIN` marker in memory before the
+provider call. `DurableDeploymentFabric` closes the process-crash persistence gap by overriding only that
+existing save boundary and synchronously passing the complete snapshot to
+`ProductFactoryDeploymentCheckpointHost` before provider dispatch can continue.
 
-Therefore this batch proves deterministic snapshot/restart idempotency once the fabric snapshot has been
-durably captured, but it does **not** claim that an OS/process crash in the narrow interval between the
-in-memory marker and an external provider effect is already persisted to disk. Closing that boundary
-requires a separate compatibility-approved deployment checkpoint host using canonical task authority; it
-must not be replaced with a second ad-hoc persistence authority in this adapter.
+The checkpoint host does not introduce a second database or deployment journal. It reuses the canonical
+`SQLiteStore`, Product Factory host task identity and `CheckpointService`/`checkpoints` table. The host
+requires the task payload to be explicitly typed as `kind=product_factory` and bound to the exact
+`product_project_id`; a failed or mismatched checkpoint therefore prevents provider dispatch.
+
+On restart the host selects the newest PF6 checkpoint by SQLite insertion order (`rowid DESC`) rather than
+wall-clock metadata, verifies checksum plus canonical finite JSON, and fails closed on an invalid newest
+row instead of silently falling back to older state. New checkpoint snapshots preserve both frozen public
+SHA projections and additive exact release authority. Historical payloads without the additive fields
+remain readable only through the existing fail-closed legacy disambiguation rules.
+
+The crash-injection regression kills execution with `SystemExit` after provider dispatch begins, reopens
+the same SQLite database through a new store instance and proves that replaying the same intent returns
+the durable `UNCERTAIN` record without a second provider dispatch. Explicit provider `inspect()`
+reconciliation remains the only route out of that uncertainty.
 
 ## Runner-side contract
 
@@ -143,6 +154,9 @@ The test suite covers:
 - safe extravars with exact release version/SHA/digest and no password/token/secret fields;
 - timeout/failure -> uncertain deployment;
 - provider-visible pre-dispatch `UNCERTAIN` marker before a provider result returns;
+- synchronous canonical SQLite checkpoint of pre-dispatch `UNCERTAIN` before provider mutation;
+- process-death/restart from the same SQLite database with same-intent no-redispatch;
+- insertion-order checkpoint authority under wall-clock rollback and newest-invalid-row fail-closed read;
 - provider deploy exception and missing deploy evidence -> `UNCERTAIN`, snapshot/restart support, and
   same-intent idempotency without blind provider replay;
 - applied deployment followed by health failure/mismatch -> `UNCERTAIN` with same-intent and restart
@@ -151,7 +165,8 @@ The test suite covers:
 - unresolved staging invalidating staging authority and corrupt restart state with stale authority failing
   closed;
 - failed rollback -> `UNCERTAIN` rather than false terminal success/rejection;
-- exact `ReleaseRef` current/previous release persistence and legacy snapshot migration;
+- exact `ReleaseRef` current/previous release persistence with frozen public projections and legacy
+  snapshot migration;
 - same-SHA legacy snapshot ambiguity failing closed;
 - legacy SHA-only provider not being asked to restore an ambiguous exact prior artifact;
 - exact-capable rollback binding previous and restored version/SHA/digest;
@@ -166,6 +181,7 @@ The test suite covers:
 - raw unrelated Runner output not escaping into evidence;
 - deterministic normalized evidence identity.
 
-No claim is made for a live remote-node, provider or production deployment in CI. No claim is made for
-SQLite-backed process-crash persistence across the pre-dispatch external-effect boundary in this batch.
+No claim is made for a live remote-node, provider or production deployment in CI. The SQLite-backed
+process-crash claim is limited to the task-anchored PF6 checkpoint boundary exercised by the synthetic
+crash/restart tests; it is not evidence of a real remote deployment or cross-system transaction.
 `HUMAN_TESTED=false`; `NVDA_VERIFIED=false`; `PRODUCTION_RELEASE_READY=false`.
