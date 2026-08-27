@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import asyncio
 
-from nika_core.runtime.contracts import RuntimeErrorCode, RuntimeOutcome, RuntimeRequest
-from nika_core.runtime.contracts import RuntimeResumeProbeStatus
+from nika_core.runtime.contracts import (
+    RuntimeErrorCode,
+    RuntimeOutcome,
+    RuntimeRequest,
+    RuntimeResumeProbeStatus,
+)
 from nika_core.runtime.langgraph_runtime import LangGraphRuntime
 
 
