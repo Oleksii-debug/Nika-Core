@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -7,6 +8,8 @@ from pydantic import ValidationError
 
 from nika_core.kernel.action_registry import ActionRegistry, Keymap
 from nika_core.ui.bridge_models import UIActionView, UICommand, UIResult
+
+logger = logging.getLogger(__name__)
 
 ActionHandler = Callable[[Mapping[str, Any]], UIResult | str | None]
 StateProvider = Callable[[], Mapping[str, Any]]
@@ -67,6 +70,19 @@ class UIActionBridge:
                 status="rejected",
                 message=str(exc),
             ).model_dump()
+        except Exception as exc:
+            # This is the final pywebview boundary. Keep unexpected backend failures inside
+            # a serializable result without swallowing process-shutdown BaseException signals.
+            logger.error(
+                "UI action failed: action_id=%s exception_type=%s",
+                command.action_id,
+                type(exc).__name__,
+            )
+            return UIResult(
+                request_id=command.request_id,
+                status="failed",
+                message="Не вдалося виконати дію через внутрішню помилку.",
+            ).model_dump()
 
         if isinstance(outcome, UIResult):
             if outcome.request_id != command.request_id:
@@ -90,6 +106,15 @@ class UIActionBridge:
             state = dict(self._state_provider())
         except (KeyError, TypeError, ValueError) as exc:
             return {"ok": False, "message": str(exc)}
+        except Exception as exc:
+            logger.error(
+                "Desktop state provider failed: exception_type=%s",
+                type(exc).__name__,
+            )
+            return {
+                "ok": False,
+                "message": "Не вдалося отримати стан програми через внутрішню помилку.",
+            }
         return {"ok": True, "state": state}
 
     def list_actions(self) -> list[dict[str, Any]]:
