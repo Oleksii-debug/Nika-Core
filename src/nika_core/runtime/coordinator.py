@@ -9,6 +9,7 @@ from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.task_state import TaskState, can_transition
 from nika_core.runtime.contracts import (
     AgentRuntimePort,
+    RuntimeCapability,
     RuntimeErrorCode,
     RuntimeEvent,
     RuntimeOutcome,
@@ -45,6 +46,9 @@ _RESUMABLE_OUTCOMES = frozenset(
 )
 
 _CANCEL_OPERATION_TYPE = "runtime.cancel"
+_TERMINAL_TASK_STATES = frozenset(
+    {TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELLED, TaskState.ARCHIVED}
+)
 
 
 class TaskRuntimeCoordinator:
@@ -61,6 +65,7 @@ class TaskRuntimeCoordinator:
         self._audit = audit
         self._sessions = session_store or RuntimeSessionStore(queue.store)
         self._idempotency = idempotency or IdempotencyLedger(queue.store)
+        self._pause_requests: dict[tuple[str, str, str], str] = {}
 
     @property
     def sessions(self) -> RuntimeSessionStore:
@@ -249,6 +254,116 @@ class TaskRuntimeCoordinator:
             ),
         )
         return self._finish(runtime.runtime_id, task_id, record.thread_id, result)
+
+    async def pause(
+        self,
+        runtime: AgentRuntimePort,
+        *,
+        task_id: str,
+        thread_id: str,
+    ) -> bool:
+        """Cooperatively stop active durable work and preserve an explicit resume cursor.
+
+        Nika reuses the runtime cancellation hook only as the process-local stop mechanism.
+        A successful pause never records CANCELLED: the existing durable runtime cursor is
+        retained as PAUSED, so process recreation leaves the task stopped until resume_saved()
+        is called explicitly. The method returns only after the runtime has acknowledged the
+        stop request and the PAUSED task/session state has committed locally.
+        """
+        record = self._sessions.get(task_id)
+        current = self._task_state(task_id)
+
+        if current == TaskState.PAUSED:
+            if record is None:
+                return True
+            if record.runtime_id != runtime.runtime_id or record.thread_id != thread_id:
+                raise ValueError("Paused task does not belong to the supplied runtime/thread")
+            if record.outcome == RuntimeOutcome.PAUSED:
+                return True
+            raise ValueError("Paused task still has an unconfirmed active runtime session")
+
+        if current != TaskState.RUNNING:
+            raise ValueError(f"Task {task_id} cannot be paused from state {current.value}")
+        if RuntimeCapability.DURABLE_RESUME not in runtime.capabilities:
+            raise ValueError("Safe active pause requires durable runtime resume support")
+        if RuntimeCapability.CANCELLATION not in runtime.capabilities:
+            raise ValueError("Safe active pause requires runtime cancellation support")
+        if record is None:
+            raise ValueError("Safe active pause requires a durable runtime session")
+        if record.runtime_id != runtime.runtime_id:
+            raise ValueError(
+                f"Task {task_id} belongs to runtime {record.runtime_id}, not {runtime.runtime_id}"
+            )
+        if record.thread_id != thread_id:
+            raise ValueError("Pause request thread does not match persisted runtime session")
+
+        pause_key = (runtime.runtime_id, task_id, thread_id)
+        if pause_key in self._pause_requests:
+            raise ValueError("Runtime pause is already in progress for this task/thread")
+        self._pause_requests[pause_key] = record.resume_token
+        try:
+            self._audit.append(
+                event_type="runtime.pause_requested",
+                entity_type="task",
+                entity_id=task_id,
+                payload={"runtime_id": runtime.runtime_id, "thread_id": thread_id},
+            )
+            accepted = await runtime.cancel(task_id=task_id, thread_id=thread_id)
+            if not accepted:
+                self._audit.append(
+                    event_type="runtime.pause_not_active",
+                    entity_type="task",
+                    entity_id=task_id,
+                    payload={"runtime_id": runtime.runtime_id, "thread_id": thread_id},
+                )
+                return False
+
+            with self._queue.store.connection() as conn:
+                current = self._task_state_with_connection(conn, task_id)
+                if current in _TERMINAL_TASK_STATES:
+                    self._audit.append_with_connection(
+                        conn,
+                        event_type="runtime.pause_not_applied",
+                        entity_type="task",
+                        entity_id=task_id,
+                        payload={
+                            "runtime_id": runtime.runtime_id,
+                            "thread_id": thread_id,
+                            "task_state": current.value,
+                        },
+                    )
+                    return False
+                if current == TaskState.RUNNING:
+                    self._queue.transition_with_connection(conn, task_id, TaskState.PAUSED)
+                elif current != TaskState.PAUSED:
+                    raise ValueError(
+                        f"Accepted runtime pause cannot be reconciled from task state {current.value}"
+                    )
+
+                self._sessions.record_result_with_connection(
+                    conn,
+                    task_id=task_id,
+                    runtime_id=runtime.runtime_id,
+                    thread_id=thread_id,
+                    result=RuntimeResult(
+                        outcome=RuntimeOutcome.PAUSED,
+                        resume_token=record.resume_token,
+                    ),
+                )
+                self._audit.append_with_connection(
+                    conn,
+                    event_type="runtime.pause_confirmed",
+                    entity_type="task",
+                    entity_id=task_id,
+                    payload={
+                        "runtime_id": runtime.runtime_id,
+                        "thread_id": thread_id,
+                        "previous_task_state": current.value,
+                    },
+                )
+            return True
+        finally:
+            self._pause_requests.pop(pause_key, None)
 
     async def cancel(
         self,
@@ -516,10 +631,44 @@ class TaskRuntimeCoordinator:
         A previously committed CANCELLED task is authoritative human intent. If an in-flight
         runtime coroutine races with accepted cancellation and reports a later outcome, Nika
         records that observation but does not resurrect or overwrite the cancelled task.
+        A confirmed PAUSED task is likewise authoritative: a cooperative runtime cancel used
+        to stop execution is normalized back to PAUSED and keeps the durable resume cursor.
         """
+        reported_outcome = result.outcome
         with self._queue.store.connection() as conn:
             current = self._task_state_with_connection(conn, task_id)
             cancellation_won = current == TaskState.CANCELLED
+            pause_key = (runtime_id, task_id, thread_id)
+            pause_token = self._pause_requests.get(pause_key)
+            if pause_token is None and current == TaskState.PAUSED:
+                row = conn.execute(
+                    """
+                    SELECT runtime_id, thread_id, resume_token, outcome
+                    FROM runtime_sessions
+                    WHERE task_id = ?
+                    """,
+                    (task_id,),
+                ).fetchone()
+                if (
+                    row is not None
+                    and row["runtime_id"] == runtime_id
+                    and row["thread_id"] == thread_id
+                    and row["outcome"] == RuntimeOutcome.PAUSED.value
+                ):
+                    pause_token = row["resume_token"]
+
+            pause_won = (
+                not cancellation_won
+                and reported_outcome == RuntimeOutcome.CANCELLED
+                and pause_token is not None
+            )
+            if pause_won:
+                result = RuntimeResult(
+                    outcome=RuntimeOutcome.PAUSED,
+                    events=result.events,
+                    output=result.output,
+                    resume_token=pause_token,
+                )
 
             if cancellation_won:
                 self._sessions.delete_with_connection(conn, task_id)
@@ -534,16 +683,13 @@ class TaskRuntimeCoordinator:
             else:
                 self._sessions.delete_with_connection(conn, task_id)
 
-            if not cancellation_won:
-                self._queue.transition_with_connection(
-                    conn,
-                    task_id,
-                    _OUTCOME_TO_STATE[result.outcome],
-                )
+            target_state = _OUTCOME_TO_STATE[result.outcome]
+            if not cancellation_won and current != target_state:
+                self._queue.transition_with_connection(conn, task_id, target_state)
 
             for event in result.events:
                 self._append_runtime_event_with_connection(conn, task_id, event)
-            if cancellation_won and result.outcome != RuntimeOutcome.CANCELLED:
+            if cancellation_won and reported_outcome != RuntimeOutcome.CANCELLED:
                 self._audit.append_with_connection(
                     conn,
                     event_type="runtime.finished_after_cancel",
@@ -552,7 +698,19 @@ class TaskRuntimeCoordinator:
                     payload={
                         "runtime_id": runtime_id,
                         "thread_id": thread_id,
-                        "runtime_outcome": result.outcome.value,
+                        "runtime_outcome": reported_outcome.value,
+                    },
+                )
+            if pause_won:
+                self._audit.append_with_connection(
+                    conn,
+                    event_type="runtime.finished_after_pause",
+                    entity_type="task",
+                    entity_id=task_id,
+                    payload={
+                        "runtime_id": runtime_id,
+                        "thread_id": thread_id,
+                        "runtime_outcome": reported_outcome.value,
                     },
                 )
             self._audit.append_with_connection(
@@ -568,7 +726,7 @@ class TaskRuntimeCoordinator:
                         if cancellation_won
                         else result.outcome.value
                     ),
-                    "runtime_reported_outcome": result.outcome.value,
+                    "runtime_reported_outcome": reported_outcome.value,
                     "resume_token": result.resume_token,
                     "error": result.error,
                     "error_code": result.error_code.value if result.error_code else None,
