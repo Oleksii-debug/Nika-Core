@@ -295,6 +295,39 @@ def test_local_and_api_routes_use_same_semantic_request_shape_without_fallback()
     assert local_request.fallback_provider_ids == api_request.fallback_provider_ids == ()
 
 
+def test_api_route_cancellation_propagates_and_does_not_launch_other_route() -> None:
+    entered = asyncio.Event()
+    audit = _Audit()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        entered.set()
+        await asyncio.Event().wait()
+        return httpx.Response(200, json={})
+
+    local = _LocalProvider()
+    api = CredentialRefOpenAICompatibleProvider(
+        config=_config(),
+        credential_resolver=_StaticResolver(_CANARY),
+        client_factory=_client_factory(httpx.MockTransport(handler)),
+    )
+    gateway = ModelGateway(audit_log=audit)
+    gateway.register(local)
+    gateway.register(api)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(gateway.complete(_request()))
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+    assert local.requests == []
+    assert any(event["event_type"] == "model.cancelled" for event in audit.events)
+    assert _CANARY not in repr(audit.events)
+
+
 def test_three_agent_calls_share_one_provider_neutral_model_request_contract() -> None:
     received: list[str] = []
 
