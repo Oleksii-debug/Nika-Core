@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from nika_core.data.sqlite import SQLiteStore
 from nika_core.runtime.retry import (
     RetryPolicy,
     ScriptRetryCondition,
@@ -13,6 +14,8 @@ from nika_core.runtime.retry import (
     evaluate_script_retry_intent,
     plan_script_retry,
 )
+from nika_core.scheduler.contracts import ScheduledJob, TriggerKind
+from nika_core.scheduler.store import ScheduledJobStore
 
 
 NOW = datetime(2026, 8, 27, 20, 0, tzinfo=UTC)
@@ -230,6 +233,46 @@ def test_retry_intent_round_trips_through_json_and_restart_rechecks_safety() -> 
     assert ready.disposition == ScriptRetryDisposition.READY
     assert unsafe_after_restart.disposition == ScriptRetryDisposition.NOT_RETRYABLE
     assert unsafe_after_restart.intent is None
+
+
+def test_retry_intent_survives_existing_scheduler_store_restart(tmp_path) -> None:
+    policy = RetryPolicy(max_retries=2, base_delay_seconds=3, max_delay_seconds=5)
+    planned = plan_script_retry(
+        policy,
+        operation_id="scheduled-op",
+        condition=ScriptRetryCondition.TEMPORARY_BUSY,
+        retries_used=0,
+        now=NOW,
+        replay_safe=True,
+        deadline=NOW + timedelta(minutes=1),
+    )
+    assert planned.intent is not None
+
+    database_path = tmp_path / "nika.db"
+    database = SQLiteStore(database_path)
+    database.initialize()
+    ScheduledJobStore(database).upsert(
+        ScheduledJob(
+            job_id="retry:scheduled-op:1",
+            action_id="script.retry",
+            trigger_kind=TriggerKind.DATE,
+            trigger={"run_date": planned.intent.not_before_utc.isoformat()},
+            payload={"script_retry_intent": planned.intent.to_payload()},
+        )
+    )
+
+    reopened = ScheduledJobStore(SQLiteStore(database_path)).get("retry:scheduled-op:1")
+    assert reopened is not None
+    restored = ScriptRetryIntent.from_payload(reopened.payload["script_retry_intent"])
+    decision = evaluate_script_retry_intent(
+        restored,
+        policy,
+        now=NOW + timedelta(seconds=3),
+        replay_safe=True,
+    )
+
+    assert restored == planned.intent
+    assert decision.disposition == ScriptRetryDisposition.READY
 
 
 def test_restart_rechecks_pause_cancel_deadline_and_attempt_policy() -> None:
