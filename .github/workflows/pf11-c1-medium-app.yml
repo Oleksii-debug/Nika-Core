@@ -1,0 +1,73 @@
+name: PF11 C1 Medium App Acceptance
+
+on:
+  pull_request:
+    paths:
+      - "src/nika_core/product_factory_c1_acceptance.py"
+      - "scripts/pf11_c1_medium_app.py"
+      - "tests/test_product_factory_c1_acceptance.py"
+      - ".github/workflows/pf11-c1-medium-app.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NIKA_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+concurrency:
+  group: pf11-c1-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  c1-medium-windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.NIKA_CANDIDATE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Verify exact candidate checkout identity
+        run: python scripts/qa_assert_checkout_identity.py
+      - name: Install factory, packaging and test dependencies
+        run: python -m pip install -e ".[gui,qa,dev]"
+      - name: Run C1 source quality and acceptance
+        shell: pwsh
+        run: |
+          python -m ruff check src/nika_core/product_factory_c1_acceptance.py scripts/pf11_c1_medium_app.py tests/test_product_factory_c1_acceptance.py
+          python -m pytest tests/test_product_factory_c1_acceptance.py -vv
+      - name: Build and prove generated medium Windows ProductProject
+        shell: pwsh
+        run: >-
+          python scripts/pf11_c1_medium_app.py
+          --root ./build/pf11-c1
+          --source-sha '${{ env.NIKA_CANDIDATE_SHA }}'
+          --evidence ./dist/pf11-c1-medium-app-evidence.json
+          --windows-package
+      - name: Verify evidence is fail-safe about human accessibility status
+        shell: pwsh
+        run: |
+          $evidence = Get-Content ./dist/pf11-c1-medium-app-evidence.json -Raw | ConvertFrom-Json
+          if ($evidence.human_tested -ne $false) { throw 'C1 evidence may not claim HUMAN_TESTED' }
+          if ($evidence.nvda_verified -ne $false) { throw 'C1 evidence may not claim NVDA_VERIFIED' }
+          if ($evidence.production_release_ready -ne $false) { throw 'C1 evidence may not claim production release readiness' }
+          if ($evidence.installed_executable_proven -ne $true) { throw 'C1 installer proof is missing' }
+          if ($evidence.packaged_restart_proven -ne $true) { throw 'C1 packaged restart proof is missing' }
+          if ($evidence.restart_recovery_proven -ne $true) { throw 'C1 factory restart recovery proof is missing' }
+          if ($evidence.all_components_accepted -ne $true) { throw 'C1 component acceptance is incomplete' }
+          if ($evidence.package_sha256.Length -ne 64) { throw 'C1 package SHA-256 is missing' }
+          if ($evidence.research_package_id -ne 'c1-research-local-windows-v1') { throw 'C1 research handoff proof is missing' }
+          if ($evidence.selected_option_id -ne 'local-tk-sqlite') { throw 'C1 selected product option proof is missing' }
+      - name: Upload exact C1 package evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: PF11-C1-medium-app-${{ env.NIKA_CANDIDATE_SHA }}
+          path: |
+            dist/pf11-c1-medium-app-evidence.json
+            build/pf11-c1/product/NikaC1ExpenseManager-windows-x64.zip
+          if-no-files-found: error
