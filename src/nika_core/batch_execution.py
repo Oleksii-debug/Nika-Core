@@ -4,11 +4,8 @@ from asyncio import gather as _gather
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Generic, TypeVar
 
 from nika_core.resources import ResourceManager
-
-TargetT = TypeVar("TargetT")
 
 
 class BatchStopReason(StrEnum):
@@ -64,7 +61,7 @@ class BatchExecutionReport:
         return sum(result.state is BatchTargetState.NOT_STARTED for result in self.results)
 
 
-class BoundedBatchExecutor(Generic[TargetT]):
+class BoundedBatchExecutor[TargetT]:
     """Execute declared targets in bounded batches under Nika's ResourceManager.
 
     Only the current batch is materialized as async work. Pause, cancel and deadline
