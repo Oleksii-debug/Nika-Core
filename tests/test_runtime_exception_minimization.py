@@ -2,13 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
-from nika_core.runtime.contracts import (
-    RuntimeErrorCode,
-    RuntimeOutcome,
-    RuntimeRequest,
-    RuntimeResumeProbeStatus,
-)
-from nika_core.runtime.langgraph_runtime import LangGraphRuntime
+import nika_core.runtime.contracts as runtime_contracts
+import nika_core.runtime.langgraph_runtime as langgraph_runtime
 
 
 _CANARY = "P10_05_SYNTHETIC_BACKEND_SECRET_7f31c2"
@@ -25,11 +20,11 @@ class _FailingGraph:
 
 
 def test_framework_exception_is_minimized_at_runtime_result_boundary() -> None:
-    runtime = LangGraphRuntime(_FailingGraph())
+    runtime = langgraph_runtime.LangGraphRuntime(_FailingGraph())
 
     result = asyncio.run(
         runtime.run(
-            RuntimeRequest(
+            runtime_contracts.RuntimeRequest(
                 task_id="runtime-minimized-error-task",
                 thread_id="runtime-minimized-error-thread",
                 payload={"safe": "value"},
@@ -37,14 +32,14 @@ def test_framework_exception_is_minimized_at_runtime_result_boundary() -> None:
         )
     )
 
-    assert result.outcome is RuntimeOutcome.FAILED
-    assert result.error_code is RuntimeErrorCode.INTERNAL
+    assert result.outcome is runtime_contracts.RuntimeOutcome.FAILED
+    assert result.error_code is runtime_contracts.RuntimeErrorCode.INTERNAL
     assert result.error == "runtime execution failed"
     assert _CANARY not in (result.error or "")
 
 
 def test_checkpoint_exception_is_minimized_at_resume_probe_boundary() -> None:
-    runtime = LangGraphRuntime(_FailingGraph())
+    runtime = langgraph_runtime.LangGraphRuntime(_FailingGraph())
 
     probe = asyncio.run(
         runtime.probe_resume(
@@ -54,6 +49,6 @@ def test_checkpoint_exception_is_minimized_at_resume_probe_boundary() -> None:
         )
     )
 
-    assert probe.status is RuntimeResumeProbeStatus.UNREADABLE
+    assert probe.status is runtime_contracts.RuntimeResumeProbeStatus.UNREADABLE
     assert probe.reason == "checkpoint lookup failed"
     assert _CANARY not in probe.reason
