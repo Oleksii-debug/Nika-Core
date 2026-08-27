@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
+from apscheduler.events import EVENT_JOB_MISSED, JobExecutionEvent
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
@@ -28,6 +30,7 @@ class APSchedulerAdapter(SchedulerPort):
         self._handler_resolver = handler_resolver
         self._audit = audit
         self._scheduler = BackgroundScheduler(timezone="UTC")
+        self._scheduler.add_listener(self._on_job_missed, EVENT_JOB_MISSED)
         self._started = False
 
     def start(self) -> None:
@@ -106,8 +109,11 @@ class APSchedulerAdapter(SchedulerPort):
         )
 
     def _dispatch(self, job_id: str) -> None:
-        job = self._required_job(job_id)
-        if not job.enabled:
+        # A cancellation can win after APScheduler has queued this callback but before the
+        # callback starts. In that race there is no durable job left to execute, so cancelling
+        # remains authoritative instead of surfacing a spurious KeyError.
+        job = self._jobs.get(job_id)
+        if job is None or not job.enabled:
             return
         if self._audit is not None:
             self._audit.append(
@@ -128,12 +134,40 @@ class APSchedulerAdapter(SchedulerPort):
                     payload={"action_id": job.action_id, "error_type": type(exc).__name__},
                 )
             raise
+
+        # DATE jobs are durable one-shot intents. APScheduler removes its in-memory DateTrigger
+        # after it fires, but ScheduledJobStore is Nika's restart authority. Retire that durable
+        # row only after successful execution so a later restart cannot replay a completed wait.
+        # Failed executions intentionally retain the row and remain subject to the existing
+        # explicit misfire_grace_seconds policy on recovery.
+        if job.trigger_kind is TriggerKind.DATE:
+            self._jobs.delete(job_id)
+
         if self._audit is not None:
             self._audit.append(
                 event_type="scheduler.job_completed",
                 entity_type="scheduled_job",
                 entity_id=job_id,
                 payload={"action_id": job.action_id},
+            )
+
+    def _on_job_missed(self, event: JobExecutionEvent) -> None:
+        # A DATE intent that is beyond its configured misfire grace is terminal. Keeping the
+        # durable row would reinstall the already-expired wait on every future process start.
+        job = self._jobs.get(event.job_id)
+        if job is None or job.trigger_kind is not TriggerKind.DATE:
+            return
+        if not self._jobs.delete(event.job_id):
+            return
+        if self._audit is not None:
+            self._audit.append(
+                event_type="scheduler.job_missed",
+                entity_type="scheduled_job",
+                entity_id=event.job_id,
+                payload={
+                    "action_id": job.action_id,
+                    "misfire_grace_seconds": job.misfire_grace_seconds,
+                },
             )
 
     def _required_job(self, job_id: str) -> ScheduledJob:
@@ -159,6 +193,20 @@ class APSchedulerAdapter(SchedulerPort):
 def _make_trigger(job: ScheduledJob) -> object:
     params = dict(job.trigger)
     if job.trigger_kind is TriggerKind.DATE:
+        run_date = params.get("run_date")
+        if run_date is None:
+            raise ValueError("DATE trigger requires run_date")
+        if isinstance(run_date, str):
+            normalized = run_date.replace("Z", "+00:00")
+            try:
+                run_date = datetime.fromisoformat(normalized)
+            except ValueError as exc:
+                raise ValueError("DATE run_date must be an ISO-8601 datetime") from exc
+        if not isinstance(run_date, datetime):
+            raise ValueError("DATE run_date must be a datetime or ISO-8601 string")
+        if run_date.tzinfo is None or run_date.utcoffset() is None:
+            raise ValueError("DATE run_date must be timezone-aware")
+        params["run_date"] = run_date.astimezone(UTC)
         return DateTrigger(**params)
     if job.trigger_kind is TriggerKind.INTERVAL:
         return IntervalTrigger(**params)
