@@ -119,10 +119,6 @@ class ProductProjectLifecycleService:
         ).hexdigest()
 
         with self.store.connection() as conn:
-            # Reserve the SQLite writer before the first durable idempotency/state read.
-            # This makes same-key replay and row-version validation one serialized authority
-            # interval instead of a read-then-write race across two concurrent connections.
-            conn.execute("BEGIN IMMEDIATE")
             replay = conn.execute(
                 "SELECT project_id,operation_kind,entity_id,entity_version,"
                 "input_fingerprint FROM product_project_mutation_idempotency "
