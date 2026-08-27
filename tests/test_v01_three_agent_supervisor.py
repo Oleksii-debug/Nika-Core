@@ -243,9 +243,18 @@ def test_fixed_three_agent_path_reaches_one_checked_terminal_result(tmp_path: Pa
     assert result.worker.state is MemberState.COMPLETED
     assert result.checker.state is MemberState.COMPLETED
     assert result.final_output == {
-        "verdict": "accepted",
-        "checked_task_id": "task-user-1",
-        "worker_state": "completed",
+        "status": "checked",
+        "worker_output": {
+            "evidence": "worker-evidence",
+            "shared_task_id": "task-user-1",
+        },
+        "checker_output": {
+            "verdict": "accepted",
+            "checked_task_id": "task-user-1",
+            "worker_state": "completed",
+        },
+        "worker_error": None,
+        "checker_error": None,
     }
 
 
@@ -275,9 +284,15 @@ def test_one_worker_failure_is_isolated_and_checker_still_finishes(tmp_path: Pat
     assert result.team_state.value == "completed"
     assert store.team_state("team-v01-failure").value == "completed"
     assert result.final_output == {
-        "verdict": "degraded",
-        "checked_task_id": "task-user-failure",
-        "worker_state": "failed",
+        "status": "degraded",
+        "worker_output": {},
+        "checker_output": {
+            "verdict": "degraded",
+            "checked_task_id": "task-user-failure",
+            "worker_state": "failed",
+        },
+        "worker_error": "RuntimeError",
+        "checker_error": None,
     }
 
 
