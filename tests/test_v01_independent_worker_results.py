@@ -41,7 +41,7 @@ from nika_core.runtime.contracts import (
     RuntimeResult,
     RuntimeResumeRequest,
 )
-from nika_core.tools import ToolRisk, ToolSpec
+from nika_core.tools import ToolCall, ToolExecutor, ToolRisk, ToolSpec
 
 
 class FixtureInspectionRuntime(AgentRuntimePort):
@@ -50,6 +50,18 @@ class FixtureInspectionRuntime(AgentRuntimePort):
         self.active = 0
         self.max_active = 0
         self.calls: list[tuple[str, str, str]] = []
+        self.tool_executor = ToolExecutor()
+        self.tool_executor.register(
+            ToolSpec("file.read", "Read declared source", ToolRisk.READ_ONLY),
+            self._read_source,
+        )
+
+    @staticmethod
+    async def _read_source(arguments: dict[str, object]) -> object:
+        path = arguments.get("path")
+        if not isinstance(path, str) or not path:
+            raise ValueError("path must be non-empty text")
+        return Path(path).read_text(encoding="utf-8")
 
     @property
     def runtime_id(self) -> str:
@@ -85,8 +97,18 @@ class FixtureInspectionRuntime(AgentRuntimePort):
             await asyncio.sleep(0.01)
             if assignment.member_id == self.fail_member:
                 raise RuntimeError("deterministic fixture worker failure")
-            text = Path(assignment.source.locator).read_text(encoding="utf-8")
-            result_set = _result_set(assignment, text=text)
+            tool_result = await self.tool_executor.execute(
+                ToolCall(
+                    call_id=assignment.tool_call_id,
+                    tool_id="file.read",
+                    arguments={"path": assignment.source.locator},
+                )
+            )
+            if not tool_result.ok or not isinstance(tool_result.output, str):
+                raise AssertionError("fixture source read must return text")
+            if tool_result.call_id != assignment.tool_call_id:
+                raise AssertionError("tool result identity must match assignment tool call")
+            result_set = _result_set(assignment, text=tool_result.output)
             return RuntimeResult(
                 outcome=RuntimeOutcome.COMPLETED,
                 output=encode_source_result(assignment, result_set),
