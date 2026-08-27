@@ -175,7 +175,7 @@ class V01ThreeAgentSupervisor:
             team_state=team_state,
             worker=worker,
             checker=checker,
-            final_output=self._terminal_output(worker, checker),
+            final_output=self._compare_outputs(worker, checker),
         )
 
     def _validated_root_grants(self) -> tuple[ToolGrant, ...]:
@@ -217,20 +217,32 @@ class V01ThreeAgentSupervisor:
         )
 
     @staticmethod
-    def _terminal_output(
+    def _compare_outputs(
         worker: V01ChildObservation,
         checker: V01ChildObservation,
     ) -> dict[str, object]:
         if checker.state is MemberState.COMPLETED:
-            return dict(checker.output)
+            return {
+                "status": (
+                    "checked" if worker.state is MemberState.COMPLETED else "degraded"
+                ),
+                "worker_output": dict(worker.output),
+                "checker_output": dict(checker.output),
+                "worker_error": worker.error,
+                "checker_error": checker.error,
+            }
         if worker.state is MemberState.COMPLETED:
             return {
                 "status": "worker_fallback",
                 "worker_output": dict(worker.output),
+                "checker_output": dict(checker.output),
+                "worker_error": worker.error,
                 "checker_error": checker.error,
             }
         return {
             "status": "failed",
+            "worker_output": dict(worker.output),
+            "checker_output": dict(checker.output),
             "worker_error": worker.error,
             "checker_error": checker.error,
         }
