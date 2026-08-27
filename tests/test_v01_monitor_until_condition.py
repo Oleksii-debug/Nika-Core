@@ -257,10 +257,10 @@ def test_canonical_deadline_cannot_be_duplicated_or_silently_changed(
 
 
 def test_foreign_or_malformed_monitor_state_fails_clearly(tmp_path: Path) -> None:
-    _, jobs, scheduler, _, service = _stack(tmp_path, _dt(17))
+    _, _, scheduler, _, service = _stack(tmp_path, _dt(17))
     scheduler.upsert(_job())
 
-    with pytest.raises(ValueError, match="is not a monitor-until job"):
+    with pytest.raises(TypeError, match="is not a monitor-until job"):
         service.status("monitor-a")
 
     malformed = replace(
