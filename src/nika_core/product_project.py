@@ -55,6 +55,12 @@ def _canonical(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _durable_int(value: Any, *, label: str, minimum: int) -> int:
+    if type(value) is not int or value < minimum:
+        raise ProductProjectError(f"invalid durable {label}")
+    return value
+
+
 def _reject_secret_material(value: Any, path: str = "project") -> None:
     if isinstance(value, dict):
         for key, child in value.items():
@@ -342,8 +348,10 @@ class ProductProjectSpec:
             ("credential ref", self.credential_refs),
         ):
             _require_unique_nonempty(refs, label=ref_name)
-        if self.supersedes_spec_version is not None and self.supersedes_spec_version < 1:
-            raise ProductProjectError("supersedes_spec_version must be positive")
+        if self.supersedes_spec_version is not None and (
+            type(self.supersedes_spec_version) is not int or self.supersedes_spec_version < 1
+        ):
+            raise ProductProjectError("supersedes_spec_version must be a positive integer")
         _reject_secret_material(self.to_dict())
 
     def to_dict(self) -> dict[str, Any]:
@@ -531,7 +539,16 @@ class ProductProjectRepository:
                     raise ProductProjectError(
                         "idempotency key was already used with different input"
                     )
-                return self._get_conn(conn, existing["project_id"])
+                stored_project_id = existing["project_id"]
+                if type(stored_project_id) is not str or not stored_project_id.strip():
+                    raise ProductProjectError(
+                        "invalid durable create idempotency project identity"
+                    )
+                if stored_project_id != project_id:
+                    raise ProductProjectError(
+                        "create idempotency record project identity mismatch"
+                    )
+                return self._get_conn(conn, project_id)
             if conn.execute(
                 "SELECT 1 FROM product_projects WHERE project_id = ?", (project_id,)
             ).fetchone():
@@ -565,75 +582,104 @@ class ProductProjectRepository:
         *,
         expected_row_version: int,
         change_reason: str = "specification revision",
+        idempotency_key: str | None = None,
     ) -> ProductProject:
-        if not change_reason.strip():
-            raise ProductProjectError("change_reason must not be empty")
-        now = _now()
-        with self.store.connection() as conn:
-            row = conn.execute(
-                "SELECT current_spec_version,row_version FROM product_projects "
-                "WHERE project_id = ?",
-                (project_id,),
-            ).fetchone()
-            if row is None:
-                raise KeyError(project_id)
-            if int(row["row_version"]) != expected_row_version:
-                raise StaleProjectVersionError(
-                    f"stale ProductProject write: expected {expected_row_version}, "
-                    f"current {row['row_version']}"
-                )
-            previous_spec_version = int(row["current_spec_version"])
-            spec_version = previous_spec_version + 1
-            stored_spec = replace(
-                spec,
-                supersedes_spec_version=previous_spec_version,
-                revision_reason=change_reason,
-            )
-            cursor = conn.execute(
-                "UPDATE product_projects SET current_spec_version=?, row_version=row_version+1, "
-                "updated_at=? WHERE project_id=? AND row_version=?",
-                (spec_version, now, project_id, expected_row_version),
-            )
-            if cursor.rowcount != 1:
-                raise StaleProjectVersionError("concurrent ProductProject update")
-            conn.execute(
-                "INSERT INTO product_project_specs(project_id,spec_version,spec_json,created_at) "
-                "VALUES (?,?,?,?)",
-                (project_id, spec_version, _canonical(stored_spec.to_dict()), now),
-            )
-            self._audit(
-                conn,
-                project_id,
-                "product_project.spec_versioned",
-                {
-                    "spec_version": spec_version,
-                    "supersedes_spec_version": previous_spec_version,
-                    "change_reason": change_reason,
-                },
-            )
-            return self._get_conn(conn, project_id)
+        # One authoritative PF0/PF12 transaction primitive owns every specification write.
+        # The compatibility service delegates to the same primitive; there is no second writer.
+        from nika_core.product_project_spec_durability import update_product_project_spec
+
+        return update_product_project_spec(
+            self.store,
+            project_id,
+            spec,
+            expected_row_version=expected_row_version,
+            change_reason=change_reason,
+            idempotency_key=idempotency_key,
+        )
 
     def spec_history(self, project_id: str) -> tuple[ProductSpecRevision, ...]:
         with self.store.connection() as conn:
+            project_row = conn.execute(
+                "SELECT current_spec_version FROM product_projects WHERE project_id=?",
+                (project_id,),
+            ).fetchone()
+            if project_row is None:
+                raise KeyError(project_id)
+            current_spec_version = _durable_int(
+                project_row["current_spec_version"],
+                label="ProductProject current_spec_version",
+                minimum=1,
+            )
             rows = conn.execute(
                 "SELECT spec_version,spec_json,created_at FROM product_project_specs "
                 "WHERE project_id=? ORDER BY spec_version",
                 (project_id,),
             ).fetchall()
-            if not rows and not conn.execute(
-                "SELECT 1 FROM product_projects WHERE project_id=?",
-                (project_id,),
-            ).fetchone():
-                raise KeyError(project_id)
+            if not rows:
+                raise ProductProjectError("ProductProject specification history is missing")
+            versions = tuple(
+                _durable_int(
+                    row["spec_version"],
+                    label="ProductProject spec_version",
+                    minimum=1,
+                )
+                for row in rows
+            )
+            expected_versions = tuple(range(1, current_spec_version + 1))
+            if versions != expected_versions:
+                raise ProductProjectError(
+                    "ProductProject specification history is not contiguous through "
+                    "current version"
+                )
             revisions: list[ProductSpecRevision] = []
-            for row in rows:
-                version = int(row["spec_version"])
-                spec = ProductProjectSpec.from_dict(json.loads(row["spec_json"]))
+            for row, version in zip(rows, versions, strict=True):
+                raw_spec = row["spec_json"]
+                if type(raw_spec) is not str:
+                    raise ProductProjectError(
+                        f"invalid ProductProject specification version {version} payload type"
+                    )
+                try:
+                    parsed_spec = json.loads(raw_spec)
+                except json.JSONDecodeError as exc:
+                    raise ProductProjectError(
+                        f"invalid ProductProject specification version {version} JSON"
+                    ) from exc
+                if type(parsed_spec) is not dict:
+                    raise ProductProjectError(
+                        f"invalid ProductProject specification version {version}: expected object"
+                    )
+                try:
+                    spec = ProductProjectSpec.from_dict(parsed_spec)
+                except ProductProjectError:
+                    raise
+                except (AttributeError, KeyError, TypeError, ValueError) as exc:
+                    raise ProductProjectError(
+                        f"invalid ProductProject specification version {version}"
+                    ) from exc
                 parent = spec.supersedes_spec_version
                 reason = spec.revision_reason
-                if version > 1 and parent is None:
+                if type(reason) is not str:
+                    raise ProductProjectError(
+                        f"invalid ProductProject specification version {version} revision reason"
+                    )
+                if version == 1:
+                    if parent is not None:
+                        raise ProductProjectError(
+                            "initial ProductProject specification has a parent"
+                        )
+                elif parent is None:
                     parent = version - 1
                     reason = reason or "legacy sequential specification"
+                else:
+                    if parent != version - 1:
+                        raise ProductProjectError(
+                            f"specification version {version} supersedes {parent}, "
+                            f"expected {version - 1}"
+                        )
+                    if not reason.strip():
+                        raise ProductProjectError(
+                            f"specification version {version} has no revision reason"
+                        )
                 revisions.append(
                     ProductSpecRevision(
                         spec_version=version,
@@ -710,19 +756,52 @@ class ProductProjectRepository:
 
     def _get_conn(self, conn: Any, project_id: str) -> ProductProject:
         row = conn.execute(
-            "SELECT p.*, s.spec_json FROM product_projects p JOIN product_project_specs s "
-            "ON s.project_id=p.project_id AND s.spec_version=p.current_spec_version "
-            "WHERE p.project_id=?",
+            "SELECT * FROM product_projects WHERE project_id=?",
             (project_id,),
         ).fetchone()
         if row is None:
             raise KeyError(project_id)
-        spec = ProductProjectSpec.from_dict(json.loads(row["spec_json"]))
+        spec_version = _durable_int(
+            row["current_spec_version"],
+            label="ProductProject current_spec_version",
+            minimum=1,
+        )
+        row_version = _durable_int(
+            row["row_version"],
+            label="ProductProject row_version",
+            minimum=0,
+        )
+        spec_row = conn.execute(
+            "SELECT spec_json FROM product_project_specs WHERE project_id=? AND spec_version=?",
+            (project_id, spec_version),
+        ).fetchone()
+        if spec_row is None:
+            raise ProductProjectError(
+                "current ProductProject specification is missing: "
+                f"project_id={project_id}, spec_version={spec_version}"
+            )
+        raw_spec = spec_row["spec_json"]
+        if type(raw_spec) is not str:
+            raise ProductProjectError("invalid current ProductProject specification payload type")
+        try:
+            parsed_spec = json.loads(raw_spec)
+        except json.JSONDecodeError as exc:
+            raise ProductProjectError("invalid current ProductProject specification JSON") from exc
+        if type(parsed_spec) is not dict:
+            raise ProductProjectError(
+                "invalid current ProductProject specification: expected object"
+            )
+        try:
+            spec = ProductProjectSpec.from_dict(parsed_spec)
+        except ProductProjectError:
+            raise
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise ProductProjectError("invalid current ProductProject specification") from exc
         return ProductProject(
             row["project_id"],
             row["name"],
-            int(row["current_spec_version"]),
-            int(row["row_version"]),
+            spec_version,
+            row_version,
             row["status"],
             spec,
             row["created_at"],
