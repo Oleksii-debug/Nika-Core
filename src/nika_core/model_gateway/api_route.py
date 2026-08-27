@@ -153,7 +153,16 @@ class CredentialRefOpenAICompatibleProvider:
                 supports_hard_cancellation=self._config.supports_hard_cancellation,
                 client_factory=self._client_factory,
             )
-            return await provider.complete(request)
+            try:
+                return await provider.complete(request)
+            except ModelGatewayError as error:
+                raise ModelGatewayError(
+                    error.code,
+                    str(error),
+                    provider_id=error.provider_id or self._config.provider_id,
+                    retryable=error.retryable,
+                    failure_effect=error.failure_effect,
+                ) from None
         finally:
             provider = None
             material = ""
