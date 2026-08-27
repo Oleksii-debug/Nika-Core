@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from nika_core.resources.contracts import ResourceBudget, ResourceObserverPort, ResourceSnapshot
+from nika_core.resources.contracts import (
+    ResourceBudget,
+    ResourceObserverPort,
+    ResourceOwnerProbePort,
+    ResourceProcessIdentity,
+    ResourceRequestIdentity,
+    ResourceSnapshot,
+)
 from nika_core.resources.manager import ResourceDecision, ResourceManager
 
 if TYPE_CHECKING:
@@ -14,6 +21,9 @@ __all__ = [
     "ResourceDecision",
     "ResourceManager",
     "ResourceObserverPort",
+    "ResourceOwnerProbePort",
+    "ResourceProcessIdentity",
+    "ResourceRequestIdentity",
     "ResourceSnapshot",
 ]
 
