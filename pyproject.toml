@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=75", "wheel"]
+requires = ["setuptools==84.0.0", "wheel==0.48.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -48,7 +48,7 @@ credentials = [
 ]
 deployment = ["ansible-runner==2.4.3; sys_platform != 'win32'"]
 dev = ["pytest>=8,<9", "ruff>=0.12,<1", "pytest-cov>=6,<8"]
-qa = ["pip-audit>=2,<3", "pyinstaller>=6,<7"]
+qa = ["pip-audit==2.10.1", "pyinstaller==6.22.2"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
