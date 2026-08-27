@@ -109,21 +109,29 @@ def _validate_observation(observation: NormalizedObservation, label: str) -> Non
         raise ValueError(f"{label} observation source_id is required")
     if observation.source_id != observation.source_id.strip():
         raise ValueError(f"{label} observation source_id must be normalized")
+    if not isinstance(observation.source_kind, SourceKind):
+        raise ValueError(f"{label} observation source_kind is invalid")
     if observation.content_id is not None:
         if not isinstance(observation.content_id, str) or not observation.content_id.strip():
             raise ValueError(f"{label} observation content_id must be non-empty or None")
         if observation.content_id != observation.content_id.strip():
             raise ValueError(f"{label} observation content_id must be normalized")
+    if not isinstance(observation.condition_matched, bool):
+        raise ValueError(f"{label} observation condition_matched must be boolean")
     if observation.error_code is not None:
         if not isinstance(observation.error_code, str) or not observation.error_code.strip():
             raise ValueError(f"{label} observation error_code must be non-empty or None")
         if observation.error_code != observation.error_code.strip():
             raise ValueError(f"{label} observation error_code must be normalized")
+    if observation.error_message is not None and not isinstance(observation.error_message, str):
+        raise ValueError(f"{label} observation error_message must be text or None")
     if observation.condition_matched and observation.content_id is None:
         raise ValueError(f"{label} observation condition cannot match without content")
     if observation.condition_matched and observation.error_code is not None:
         raise ValueError(f"{label} observation cannot be both matched and errored")
     for evidence in observation.evidence:
+        if not isinstance(evidence, ResearchEvidence):
+            raise ValueError(f"{label} observation evidence item is invalid")
         if evidence.source_id != observation.source_id:
             raise ValueError(f"{label} observation evidence source_id mismatch")
         if evidence.source_kind is not observation.source_kind:
@@ -151,7 +159,8 @@ def detect_observation_change(
 
     changed: bool | None = None
     if (
-        previous is not None
+        current.error_code is None
+        and previous is not None
         and previous.content_id is not None
         and previous.error_code is None
         and current.content_id is not None
