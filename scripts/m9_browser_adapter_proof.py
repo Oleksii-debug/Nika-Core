@@ -11,6 +11,7 @@ from nika_core.interaction import (
     FrameScope,
     InteractionAction,
     PlaywrightInteractionAdapter,
+    UnsupportedInteractionError,
     resolve_strict,
 )
 
@@ -54,6 +55,80 @@ def _exercise_form_and_spa(adapter: PlaywrightInteractionAdapter) -> None:
     after = adapter.observe()
     assert adapter.verify(before, after, button, InteractionAction.INVOKE, None)
     assert resolve_strict(after, ControlLocator(role="button", name="Готово"))
+
+
+def _set_and_verify(
+    adapter: PlaywrightInteractionAdapter,
+    locator: ControlLocator,
+    value: str,
+) -> None:
+    before = adapter.observe()
+    node = resolve_strict(before, locator)
+    adapter.focus(node)
+    adapter.act(node, InteractionAction.SET_VALUE, value)
+    after = adapter.observe()
+    assert adapter.verify(before, after, node, InteractionAction.SET_VALUE, value)
+
+
+def _prove_text_entry(adapter: PlaywrightInteractionAdapter) -> None:
+    secret_canary = "NIKA_SECRET_CANARY_TEXT_ENTRY_71f04d"
+    adapter.load_inline_fixture(
+        "<main><h1>Semantic text entry</h1>"
+        "<label for='short'>Коротке поле</label>"
+        "<input id='short' value='Старий вміст'>"
+        "<label for='notes'>Багаторядкові нотатки</label>"
+        "<textarea id='notes'>Стара нотатка</textarea>"
+        "<div role='textbox' aria-label='Редактор' contenteditable='true'>Стара чернетка</div>"
+        "<label for='disabled'>Заблоковане поле</label>"
+        "<input id='disabled' value='Не змінювати' disabled>"
+        "<label for='readonly'>Лише читання</label>"
+        "<textarea id='readonly' readonly>Не змінювати</textarea>"
+        "</main>"
+    )
+
+    # SET_VALUE is explicit replacement/fill semantics, not append semantics.
+    replacement = "Український текст: їжак, ґанок, єдність."
+    _set_and_verify(adapter, ControlLocator(role="textbox", label="Коротке поле"), replacement)
+    snapshot = adapter.observe()
+    short = resolve_strict(snapshot, ControlLocator(role="textbox", name="Коротке поле"))
+    assert short.value == replacement
+    assert "Старий вміст" not in (short.value or "")
+
+    # Empty text is a deliberate clear operation.
+    _set_and_verify(adapter, ControlLocator(label="Коротке поле"), "")
+    snapshot = adapter.observe()
+    assert resolve_strict(snapshot, ControlLocator(role="textbox", name="Коротке поле")).value in {
+        "",
+        None,
+    }
+
+    multiline = "Перший рядок\nДругий рядок\nТретій рядок"
+    _set_and_verify(
+        adapter,
+        ControlLocator(role="textbox", name="Багаторядкові нотатки"),
+        multiline,
+    )
+
+    # Playwright fill supports contenteditable; verification must not call input_value() for it.
+    editor_value = "Редактор: український Unicode — готово"
+    _set_and_verify(adapter, ControlLocator(role="textbox", name="Редактор"), editor_value)
+
+    # Non-editable failures are typed, bounded, and never include attempted secret content.
+    for locator in (
+        ControlLocator(role="textbox", name="Заблоковане поле"),
+        ControlLocator(role="textbox", name="Лише читання"),
+    ):
+        before = adapter.observe()
+        node = resolve_strict(before, locator)
+        try:
+            adapter.act(node, InteractionAction.SET_VALUE, secret_canary)
+        except UnsupportedInteractionError as exc:
+            assert "not editable" in str(exc)
+            assert secret_canary not in str(exc)
+        else:  # pragma: no cover - physical proof assertion
+            raise AssertionError("non-editable semantic text target accepted SET_VALUE")
+        after = adapter.observe()
+        assert secret_canary not in str(resolve_strict(after, locator).value)
 
 
 def _prove_ambiguity_and_scope(adapter: PlaywrightInteractionAdapter) -> None:
@@ -163,6 +238,7 @@ def main() -> None:
             page_id = session.new_page()
             adapter = PlaywrightInteractionAdapter(session=session, page_id=page_id)
             _exercise_form_and_spa(adapter)
+            _prove_text_entry(adapter)
             _prove_ambiguity_and_scope(adapter)
             _prove_frame(adapter)
             _prove_dialog(adapter)
