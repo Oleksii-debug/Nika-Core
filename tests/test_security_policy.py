@@ -106,7 +106,7 @@ def test_network_and_process_require_explicit_allowlist(tmp_path: Path) -> None:
             tool_id="process.test",
             risk=ToolRisk.LOCAL_WRITE,
             target="tests",
-            executable="/usr/bin/pytest",
+            executable="pytest",
         ),
         policy,
         ledger,
@@ -116,6 +116,105 @@ def test_network_and_process_require_explicit_allowlist(tmp_path: Path) -> None:
         policy.sandbox.authorize_network("evil.example")
     with pytest.raises(PermissionError, match="process executable"):
         policy.sandbox.authorize_executable("powershell.exe")
+
+
+def test_executable_name_grant_cannot_authorize_path_qualified_alias(tmp_path: Path) -> None:
+    sandbox = SandboxPolicy(
+        workspace_root=tmp_path,
+        allowed_executables=("pytest",),
+    )
+    sandbox.authorize_executable("pytest")
+
+    for executable in ("/tmp/pytest", r"C:\Temp\pytest"):
+        with pytest.raises(PermissionError, match="process executable"):
+            sandbox.authorize_executable(executable)
+
+
+def test_explicit_executable_path_requires_exact_path_scope(tmp_path: Path) -> None:
+    sandbox = SandboxPolicy(
+        workspace_root=tmp_path,
+        allowed_executables=("/usr/bin/pytest", r"C:\Tools\pytest.exe"),
+    )
+    sandbox.authorize_executable("/usr/bin/pytest")
+    sandbox.authorize_executable(r"c:\tools\PYTEST.EXE")
+
+    for executable in ("/tmp/pytest", r"C:\Other\pytest.exe"):
+        with pytest.raises(PermissionError, match="process executable"):
+            sandbox.authorize_executable(executable)
+
+
+def test_executable_path_parent_traversal_fails_closed(tmp_path: Path) -> None:
+    for executable in ("/usr/bin/../pytest", r"C:\Tools\..\pytest.exe"):
+        with pytest.raises(ValueError, match="parent traversal"):
+            SandboxPolicy(
+                workspace_root=tmp_path,
+                allowed_executables=(executable,),
+            )
+
+    sandbox = SandboxPolicy(
+        workspace_root=tmp_path,
+        allowed_executables=("/usr/bin/pytest",),
+    )
+    with pytest.raises(PermissionError, match="process executable"):
+        sandbox.authorize_executable("/usr/bin/../pytest")
+
+
+def test_empty_executable_allowlist_denies_every_process(tmp_path: Path) -> None:
+    sandbox = SandboxPolicy(workspace_root=tmp_path)
+    with pytest.raises(PermissionError, match="process executable"):
+        sandbox.authorize_executable("pytest")
+
+
+def test_executable_denial_precedes_approval_and_budget_consumption(tmp_path: Path) -> None:
+    intent = ActionIntent(
+        action_id="danger-process-1",
+        tool_id="danger.execute",
+        risk=ToolRisk.HIGH_IMPACT,
+        target="approved process",
+        executable="/untrusted/bin/pytest",
+    )
+    approval = _approval(intent, approval_id="approval-process-1")
+    approvals = ApprovalLedger()
+    budget = ExecutionBudget(max_process_launches=1)
+    budgets = ExecutionBudgetLedger(budget)
+    basename_only_policy = SecurityPolicy(
+        granted_tools=frozenset({"danger.execute"}),
+        sandbox=SandboxPolicy(
+            workspace_root=tmp_path / "workspace",
+            allowed_executables=("pytest",),
+        ),
+        budget=budget,
+    )
+    now = datetime(2026, 8, 18, 19, 0, tzinfo=UTC)
+
+    with pytest.raises(PermissionError, match="process executable"):
+        authorize_action(
+            intent,
+            basename_only_policy,
+            budgets,
+            approvals,
+            approval=approval,
+            now=now,
+        )
+    assert budgets.process_launches == 0
+
+    exact_path_policy = SecurityPolicy(
+        granted_tools=frozenset({"danger.execute"}),
+        sandbox=SandboxPolicy(
+            workspace_root=tmp_path / "workspace",
+            allowed_executables=("/untrusted/bin/pytest",),
+        ),
+        budget=budget,
+    )
+    authorize_action(
+        intent,
+        exact_path_policy,
+        budgets,
+        approvals,
+        approval=approval,
+        now=now,
+    )
+    assert budgets.process_launches == 1
 
 
 def test_high_impact_approval_is_exact_expiring_and_single_use(tmp_path: Path) -> None:
