@@ -9,11 +9,7 @@ from nika_core.builder.compiler import AgentCompiler
 from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.builder.spec import AgentDefinition
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.intelligence.contracts import (
-    DeterministicAction,
-    DeterministicEffectReservation,
-    DeterministicEffectStatus,
-)
+from nika_core.intelligence.contracts import DeterministicAction
 from nika_core.intelligence.runtime_effect_journal import RuntimeIdempotencyEffectJournal
 from nika_core.kernel.audit import AuditLog
 from nika_core.multi_agent import (
@@ -32,7 +28,7 @@ from nika_core.runtime.contracts import (
     RuntimeResult,
     RuntimeResumeRequest,
 )
-from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
+from nika_core.runtime.idempotency import IdempotencyLedger
 
 
 TEAM_ID = "team-v01-restart"
@@ -110,7 +106,7 @@ class JournaledRestartRuntime(AgentRuntimePort):
         self.cancelled.append((task_id, thread_id))
         return True
 
-    def probe_effect(self, *, member_id: str) -> DeterministicEffectReservation:
+    def probe_effect(self, *, member_id: str):
         return self._journal.reserve(
             task_id=self._task_id(member_id),
             action=self._effect_action(member_id),
@@ -125,7 +121,7 @@ class JournaledRestartRuntime(AgentRuntimePort):
             self._external_effects.append(member_id)
             self._journal.complete(reservation.operation_key)
             return
-        if reservation.status is DeterministicEffectStatus.COMPLETED:
+        if reservation.status.value == "completed":
             return
         raise RuntimeError(
             f"effect for {member_id} requires reconciliation: {reservation.status.value}"
@@ -276,7 +272,7 @@ def test_restart_retains_completed_worker_and_resumes_only_running_worker(
         f"team:{TEAM_ID}:{WORKER_1}"
     )
     assert len(worker_1_records) == 1
-    assert worker_1_records[0].status is IdempotencyStatus.COMPLETED
+    assert worker_1_records[0].status.value == "completed"
 
     restarted_sqlite = _sqlite(path)
     restarted_store = MultiAgentStore(restarted_sqlite)
@@ -292,7 +288,7 @@ def test_restart_retains_completed_worker_and_resumes_only_running_worker(
 
     replay_probe = restarted_runtime.probe_effect(member_id=WORKER_1)
     assert replay_probe.created is False
-    assert replay_probe.status is DeterministicEffectStatus.COMPLETED
+    assert replay_probe.status.value == "completed"
     assert external_effects == [WORKER_1]
 
     recovered = asyncio.run(restarted.recover_team(TEAM_ID))
