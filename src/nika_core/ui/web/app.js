@@ -24,6 +24,7 @@
     status_count: document.getElementById("product-project-status-count"),
     decision_count: document.getElementById("product-project-decision-count"),
   });
+  const productProjectUnavailableMessage = "Стан поточного ProductProject недоступний.";
   let actions = [];
   let actionsReady = false;
   let bridgeInitializationStarted = false;
@@ -108,6 +109,19 @@
     for (const node of Object.values(productProjectFields)) node.textContent = "";
   }
 
+  function renderProductProjectUnavailable(message) {
+    productProjectEmpty.textContent = message || productProjectUnavailableMessage;
+    productProjectEmpty.hidden = false;
+    productProjectSummary.hidden = true;
+    clearProductProjectFields();
+  }
+
+  function reportStateUnavailable() {
+    renderProductProjectUnavailable(productProjectUnavailableMessage);
+    announce(productProjectUnavailableMessage, true);
+    appendLog(productProjectUnavailableMessage);
+  }
+
   function renderProductProject(project) {
     if (project == null) {
       productProjectEmpty.textContent = "Поточний ProductProject не вибрано.";
@@ -117,10 +131,9 @@
       return true;
     }
     if (!validProductProject(project)) {
-      productProjectEmpty.textContent = "Стан поточного ProductProject недоступний або пошкоджений.";
-      productProjectEmpty.hidden = false;
-      productProjectSummary.hidden = true;
-      clearProductProjectFields();
+      renderProductProjectUnavailable(
+        "Стан поточного ProductProject недоступний або пошкоджений.",
+      );
       appendLog("Некоректний bounded ProductProject state відхилено інтерфейсом.");
       return false;
     }
@@ -133,10 +146,19 @@
   }
 
   async function refreshState() {
-    if (!globalThis.pywebview?.api?.get_state) return false;
-    const response = await globalThis.pywebview.api.get_state();
-    if (!response.ok) {
-      appendLog(response.message || "Не вдалося отримати стан програми.");
+    if (!globalThis.pywebview?.api?.get_state) {
+      reportStateUnavailable();
+      return false;
+    }
+    let response;
+    try {
+      response = await globalThis.pywebview.api.get_state();
+    } catch {
+      reportStateUnavailable();
+      return false;
+    }
+    if (!response?.ok) {
+      reportStateUnavailable();
       return false;
     }
     const state = response.state || {};
@@ -237,15 +259,16 @@
     try {
       const ready = await refreshKeymap();
       if (!ready) throw new Error("Action Registry bridge unavailable");
-      await refreshState();
+      const stateReady = await refreshState();
+      if (!stateReady) throw new Error("Desktop state bridge unavailable");
       document.documentElement.dataset.nikaReady = "true";
       announce("Nika Core готова до роботи.");
-    } catch (error) {
+    } catch {
       actionsReady = false;
       bridgeInitializationStarted = false;
       document.documentElement.dataset.nikaReady = "false";
       announce("Не вдалося завантажити команди Nika Core.", true);
-      appendLog(error instanceof Error ? error.message : String(error));
+      appendLog("Не вдалося ініціалізувати міст Nika Core.");
     }
   }
 
