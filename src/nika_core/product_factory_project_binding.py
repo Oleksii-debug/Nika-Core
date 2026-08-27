@@ -34,6 +34,7 @@ _DURABLE_REVIEW_CREDENTIAL_ASSIGNMENT = re.compile(
     r"client[-_]?secret|password|passwd|secret|auth|authorization|"
     r"access[-_]?token|refresh[-_]?token|oauth(?:[-_]?token)?|"
     r"cookie|set[-_]?cookie|session(?:[-_]?(?:id|token))?|"
+    r"aws[-_]?secret[-_]?access[-_]?key|aws[-_]?access[-_]?key[-_]?id|"
     r"awsaccesskeyid|x[-_]?amz[-_]?signature"
     r")[\'\"]?\s*(?:=|:)",
     re.IGNORECASE,
@@ -256,6 +257,11 @@ def _minimize_durable_work_record(record: WorkRecord) -> WorkRecord:
     recovery = coding_result.recovery_state
     failure = coding_result.failure
     review = record.review
+    safe_test_evidence = tuple(
+        evidence
+        for evidence in coding_result.test_evidence
+        if evidence.command in record.request.acceptance_commands
+    )
     safe_recovery = (
         None if recovery is None else replace(recovery, opaque_token=None)
     )
@@ -282,7 +288,8 @@ def _minimize_durable_work_record(record: WorkRecord) -> WorkRecord:
     else:
         safe_blocker = record.blocker
     if (
-        safe_recovery == recovery
+        safe_test_evidence == coding_result.test_evidence
+        and safe_recovery == recovery
         and safe_failure == failure
         and safe_review == review
         and safe_blocker == record.blocker
@@ -291,6 +298,7 @@ def _minimize_durable_work_record(record: WorkRecord) -> WorkRecord:
 
     safe_coding_result = replace(
         coding_result,
+        test_evidence=safe_test_evidence,
         recovery_state=safe_recovery,
         failure=safe_failure,
     )
@@ -323,7 +331,13 @@ def _durable_review_evidence_ref(value: str) -> str:
 
 
 def _reference_has_credential_assignment(value: str) -> bool:
-    return _DURABLE_REVIEW_CREDENTIAL_ASSIGNMENT.search(unquote(value)) is not None
+    decoded = value
+    for _ in range(3):
+        next_decoded = unquote(decoded)
+        if next_decoded == decoded:
+            break
+        decoded = next_decoded
+    return _DURABLE_REVIEW_CREDENTIAL_ASSIGNMENT.search(decoded) is not None
 
 
 def _reference_has_url_userinfo(value: str) -> bool:
