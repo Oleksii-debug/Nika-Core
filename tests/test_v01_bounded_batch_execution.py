@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-import nika_core.batch_execution as batch_execution
+from nika_core import batch_execution
 from nika_core.batch_execution import (
     BatchControlSnapshot,
     BatchStopReason,
