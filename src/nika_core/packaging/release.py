@@ -150,9 +150,7 @@ def _secret_assignment_value_is_placeholder(value: bytes) -> bool:
         return True
     if normalized.startswith(b"%") and normalized.endswith(b"%") and len(normalized) > 2:
         return True
-    if normalized.startswith((b"env:", b"keyring:", b"credential-ref:")):
-        return True
-    return False
+    return normalized.startswith((b"env:", b"keyring:", b"credential-ref:"))
 
 
 def _stream_contains_secret_assignment(handle: Any) -> bool:

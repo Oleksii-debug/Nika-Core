@@ -118,7 +118,7 @@ def test_secret_content_policy_allows_non_secret_references(
         b'{"api_key_backup":"public"}',
         b'{"password_hint":"demo"}',
         b'not-api-key = "public"\n',
-        '{"секретapi_key":"public"}'.encode("utf-8"),
+        '{"секретapi_key":"public"}'.encode(),
     ],
 )
 def test_secret_content_policy_requires_complete_credential_key_tokens(
