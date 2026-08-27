@@ -119,6 +119,8 @@ class BoundedBatchExecutor(Generic[TargetT]):
             owner_id=self._resource_owner_id,
         )
         effective_batch_size = min(self._batch_size, budget.max_concurrent)
+        if effective_batch_size <= 0:
+            raise RuntimeError("resource manager returned a non-positive concurrency budget")
 
         while next_index < len(declared):
             stop_reason = self._control_stop_reason(self._control())
