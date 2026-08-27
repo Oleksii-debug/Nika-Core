@@ -109,6 +109,7 @@ class SimulationExecutionEngine:
             )
         fill_price = apply_slippage(price, order.intent.side, order.policy.slippage_bps)
         notional = fill_quantity * fill_price
+        first_fill = quantity == order.intent.quantity
         fill = SimulatedFill(
             fill_id=f"fill:{order.approval_id}:{time_slice.index}:{fill_quantity}",
             approval_id=order.approval_id,
@@ -117,7 +118,7 @@ class SimulationExecutionEngine:
             side=order.intent.side,
             quantity=fill_quantity,
             price=fill_price,
-            fee=fee_for(notional, order.policy),
+            fee=fee_for(notional, order.policy, include_fixed_fee=first_fill),
             filled_at=time_slice.at,
             filled_slice=time_slice.index,
         )
