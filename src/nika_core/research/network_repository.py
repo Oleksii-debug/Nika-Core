@@ -41,6 +41,16 @@ def _canonical_stored_locator(locator: str) -> str:
         ) from exc
 
 
+def _canonical_stored_origin_locator(locator: str) -> str:
+    try:
+        return canonical_http_locator(locator)
+    except ResearchSourceIdentityError as exc:
+        raise ResearchSourceIdentityError(
+            "origin_identity_corrupt",
+            "stored HTTP provenance identity is invalid and cannot be used",
+        ) from exc
+
+
 class NetworkResearchRepository:
     def __init__(self, store: SQLiteStore) -> None:
         self._store = store
@@ -320,13 +330,55 @@ class NetworkResearchRepository:
         snapshot_id: str,
         locator: str,
     ) -> None:
+        canonical_locator = canonical_http_locator(locator)
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            chain = conn.execute(
+                """SELECT d.workspace_id AS document_workspace_id,
+                    s.workspace_id AS source_workspace_id, s.url AS source_url,
+                    h.source_id AS snapshot_source_id,
+                    h.document_id AS snapshot_document_id
+                FROM corpus_documents d
+                JOIN research_http_sources s ON s.source_id=?
+                JOIN research_http_snapshots h ON h.snapshot_id=?
+                WHERE d.document_id=?""",
+                (source_id, snapshot_id, document_id),
+            ).fetchone()
+            if chain is None:
+                raise ResearchSourceIdentityError(
+                    "origin_identity_conflict",
+                    "HTTP provenance chain cannot be bound to the requested identities",
+                )
+            _canonical_stored_locator(chain["source_url"])
+            if (
+                chain["document_workspace_id"] != chain["source_workspace_id"]
+                or chain["snapshot_source_id"] != source_id
+                or chain["snapshot_document_id"] != document_id
+            ):
+                raise ResearchSourceIdentityError(
+                    "origin_identity_conflict",
+                    "HTTP provenance chain crosses a durable identity boundary",
+                )
+
+            existing = conn.execute(
+                """SELECT locator FROM corpus_http_origins
+                WHERE document_id=? AND source_id=? AND snapshot_id=?""",
+                (document_id, source_id, snapshot_id),
+            ).fetchone()
+            if existing is not None:
+                existing_locator = _canonical_stored_origin_locator(existing["locator"])
+                if existing_locator != canonical_locator:
+                    raise ResearchSourceIdentityError(
+                        "origin_locator_conflict",
+                        "HTTP provenance edge is permanently bound to its original locator",
+                    )
+                return
+
             conn.execute(
                 """INSERT INTO corpus_http_origins(
                     document_id, source_id, snapshot_id, locator, observed_at
-                ) VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(document_id, source_id, snapshot_id) DO NOTHING""",
-                (document_id, source_id, snapshot_id, locator, _now()),
+                ) VALUES (?, ?, ?, ?, ?)""",
+                (document_id, source_id, snapshot_id, canonical_locator, _now()),
             )
 
     def evidence_for_document(self, document_id: str) -> tuple[ResearchEvidence, ...]:
@@ -338,9 +390,15 @@ class NetworkResearchRepository:
                 (document_id,),
             ).fetchall()
             http_rows = conn.execute(
-                """SELECT o.source_id, o.locator, o.observed_at, s.freshness
+                """SELECT o.source_id, o.snapshot_id, o.locator, o.observed_at,
+                    d.workspace_id AS document_workspace_id,
+                    s.workspace_id AS source_workspace_id, s.url AS source_url, s.freshness,
+                    h.source_id AS snapshot_source_id,
+                    h.document_id AS snapshot_document_id
                 FROM corpus_http_origins o
-                JOIN research_http_sources s ON s.source_id=o.source_id
+                LEFT JOIN corpus_documents d ON d.document_id=o.document_id
+                LEFT JOIN research_http_sources s ON s.source_id=o.source_id
+                LEFT JOIN research_http_snapshots h ON h.snapshot_id=o.snapshot_id
                 WHERE o.document_id=? ORDER BY o.observed_at, o.source_id, o.locator""",
                 (document_id,),
             ).fetchall()
@@ -354,16 +412,33 @@ class NetworkResearchRepository:
             )
             for row in local_rows
         ]
-        evidence.extend(
-            ResearchEvidence(
-                source_id=row["source_id"],
-                source_kind=SourceKind.HTTP,
-                locator=row["locator"],
-                observed_at=row["observed_at"],
-                freshness=FreshnessState(row["freshness"]),
+        for row in http_rows:
+            if (
+                row["document_workspace_id"] is None
+                or row["source_workspace_id"] is None
+                or row["source_url"] is None
+                or row["freshness"] is None
+                or row["snapshot_source_id"] is None
+                or row["snapshot_document_id"] is None
+                or row["document_workspace_id"] != row["source_workspace_id"]
+                or row["snapshot_source_id"] != row["source_id"]
+                or row["snapshot_document_id"] != document_id
+            ):
+                raise ResearchSourceIdentityError(
+                    "origin_identity_corrupt",
+                    "stored HTTP provenance identity is invalid and cannot be used",
+                )
+            _canonical_stored_locator(row["source_url"])
+            canonical_locator = _canonical_stored_origin_locator(row["locator"])
+            evidence.append(
+                ResearchEvidence(
+                    source_id=row["source_id"],
+                    source_kind=SourceKind.HTTP,
+                    locator=canonical_locator,
+                    observed_at=row["observed_at"],
+                    freshness=FreshnessState(row["freshness"]),
+                )
             )
-            for row in http_rows
-        )
         return tuple(
             sorted(
                 evidence,
@@ -462,20 +537,26 @@ class NetworkResearchRepository:
         items: list[ResearchResultItem] = []
         for row in rows:
             raw_evidence = json.loads(row["evidence_json"])
-            evidence = tuple(
-                ResearchEvidence(
-                    source_id=item["source_id"],
-                    source_kind=SourceKind(item["source_kind"]),
-                    locator=item["locator"],
-                    observed_at=item["observed_at"],
-                    freshness=(
-                        FreshnessState(item["freshness"])
-                        if item.get("freshness") is not None
-                        else None
-                    ),
+            evidence_items: list[ResearchEvidence] = []
+            for item in raw_evidence:
+                source_kind = SourceKind(item["source_kind"])
+                locator = item["locator"]
+                if source_kind is SourceKind.HTTP:
+                    locator = _canonical_stored_origin_locator(locator)
+                evidence_items.append(
+                    ResearchEvidence(
+                        source_id=item["source_id"],
+                        source_kind=source_kind,
+                        locator=locator,
+                        observed_at=item["observed_at"],
+                        freshness=(
+                            FreshnessState(item["freshness"])
+                            if item.get("freshness") is not None
+                            else None
+                        ),
+                    )
                 )
-                for item in raw_evidence
-            )
+            evidence = tuple(evidence_items)
             items.append(
                 ResearchResultItem(
                     ordinal=row["ordinal"],
