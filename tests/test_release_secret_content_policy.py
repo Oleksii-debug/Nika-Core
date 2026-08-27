@@ -66,6 +66,7 @@ def test_release_manifest_fails_closed_on_secret_content_under_benign_filename(
         ("settings.toml", f'client_secret = "{CANARY}"\n'.encode()),
         ("app.yaml", f"access_token: {CANARY}\n".encode()),
         ("nika.ini", f"password={CANARY}\n".encode()),
+        ("bom.properties", b"\xef\xbb\xbfapi_key=" + CANARY.encode() + b"\n"),
     ],
 )
 def test_release_manifest_rejects_high_confidence_secret_assignments(
@@ -109,6 +110,47 @@ def test_secret_content_policy_allows_non_secret_references(
     assert verify_release_manifest(bundle, _manifest(bundle)) == ()
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        b'{"not_api_key":"public"}',
+        b'{"public_password":"demo"}',
+        b'{"api_key_backup":"public"}',
+        b'{"password_hint":"demo"}',
+        b'not-api-key = "public"\n',
+        '{"секретapi_key":"public"}'.encode(),
+    ],
+)
+def test_secret_content_policy_requires_complete_credential_key_tokens(
+    tmp_path: Path,
+    content: bytes,
+) -> None:
+    bundle = _bundle(tmp_path, "config.json", content)
+    assert verify_release_manifest(bundle, _manifest(bundle)) == ()
+
+
+def test_secret_content_policy_ignores_assignment_text_inside_normal_json_value(
+    tmp_path: Path,
+) -> None:
+    bundle = _bundle(
+        tmp_path,
+        "config.json",
+        b'{"note":"public documentation says api_key=example"}',
+    )
+    assert verify_release_manifest(bundle, _manifest(bundle)) == ()
+
+
+def test_secret_content_policy_detects_inline_structural_json_key(tmp_path: Path) -> None:
+    bundle = _bundle(
+        tmp_path,
+        "config.json",
+        b'{"safe":"ok","api_key":"' + CANARY.encode() + b'"}',
+    )
+    assert verify_release_manifest(bundle, _manifest(bundle)) == (
+        "secret-content:config.json",
+    )
+
+
 def test_secret_content_policy_ignores_keyword_without_assignment(tmp_path: Path) -> None:
     bundle = _bundle(
         tmp_path,
@@ -125,3 +167,10 @@ def test_secret_assignment_across_scan_chunk_boundary_is_detected(tmp_path: Path
     assert verify_release_manifest(bundle, _manifest(bundle)) == (
         "secret-content:settings.conf",
     )
+
+
+def test_stream_window_boundary_is_not_treated_as_a_new_key_boundary(tmp_path: Path) -> None:
+    second_window_start = (64 * 1024) - (8 * 1024)
+    content = b"x" * second_window_start + b"api_key=public\n"
+    bundle = _bundle(tmp_path, "settings.conf", content)
+    assert verify_release_manifest(bundle, _manifest(bundle)) == ()
