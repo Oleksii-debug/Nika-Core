@@ -50,6 +50,14 @@ class FixtureActionRejected(RuntimeError):
     pass
 
 
+class FixtureActionOutcomeUnknown(RuntimeError):
+    pass
+
+
+class FixtureObservationUnknown(RuntimeError):
+    pass
+
+
 def _snapshot(
     *nodes: ControlNode,
     generation: int = 1,
@@ -111,7 +119,7 @@ def _verify_declared_observable_result(
             external_effect_complete=False,
             detail=str(exc),
         )
-    except Exception as exc:
+    except FixtureActionOutcomeUnknown as exc:
         return ObservableResultEvidence(
             status=ObservableResultStatus.UNCERTAIN,
             invoked=True,
@@ -128,7 +136,7 @@ def _verify_declared_observable_result(
         last_observation = observation
         try:
             after = observe()
-        except Exception as exc:
+        except FixtureObservationUnknown as exc:
             return ObservableResultEvidence(
                 status=ObservableResultStatus.UNCERTAIN,
                 invoked=True,
@@ -185,8 +193,9 @@ def _verify_declared_observable_result(
 
 @dataclass(slots=True)
 class ControlledBrowserFixture:
-    observations: list[SemanticSnapshot | Exception]
+    observations: list[SemanticSnapshot | FixtureObservationUnknown]
     rejected: bool = False
+    uncertain_action: bool = False
     invoke_calls: int = 0
     observe_calls: int = 0
 
@@ -194,13 +203,15 @@ class ControlledBrowserFixture:
         self.invoke_calls += 1
         if self.rejected:
             raise FixtureActionRejected("fixture action rejected")
+        if self.uncertain_action:
+            raise FixtureActionOutcomeUnknown("fixture transport lost after dispatch")
 
     def observe(self) -> SemanticSnapshot:
         self.observe_calls += 1
         if not self.observations:
-            raise RuntimeError("fixture observation sequence exhausted")
+            raise FixtureObservationUnknown("fixture observation sequence exhausted")
         item = self.observations.pop(0)
-        if isinstance(item, Exception):
+        if isinstance(item, FixtureObservationUnknown):
             raise item
         return item
 
@@ -328,9 +339,30 @@ def test_explicit_action_rejection_is_not_completion_or_uncertainty() -> None:
     assert fixture.observe_calls == 0
 
 
+def test_action_transport_loss_preserves_uncertainty() -> None:
+    before = _snapshot(_button())
+    fixture = ControlledBrowserFixture(observations=[before], uncertain_action=True)
+
+    evidence = _verify_declared_observable_result(
+        permitted=True,
+        invoke=fixture.invoke,
+        observe=fixture.observe,
+        before=before,
+        declared=_declared(),
+        max_observations=1,
+    )
+
+    assert evidence.status is ObservableResultStatus.UNCERTAIN
+    assert evidence.invoked is True
+    assert evidence.external_effect_complete is False
+    assert "action outcome could not be established" in evidence.detail
+
+
 def test_post_action_observation_failure_preserves_uncertainty() -> None:
     before = _snapshot(_button())
-    fixture = ControlledBrowserFixture(observations=[RuntimeError("page/session became stale")])
+    fixture = ControlledBrowserFixture(
+        observations=[FixtureObservationUnknown("page/session became stale")]
+    )
 
     evidence = _verify_declared_observable_result(
         permitted=True,
