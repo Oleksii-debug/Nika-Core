@@ -28,11 +28,17 @@ class ReuseSearchResult:
     attempted_sources: tuple[str, ...]
 
 
+def _candidate_identity(candidate: ReuseCandidate) -> tuple[str, frozenset[str], tuple[tuple[str, str], ...]]:
+    return candidate.digest, candidate.permissions, tuple(sorted(candidate.metadata.items()))
+
+
 class ReuseSearchPipeline:
     """Deterministically search capability metadata in the binding reuse order.
 
     Sources return metadata only. This layer never imports, installs, downloads, executes, or
     trusts candidate code. Permission widening is filtered before candidates can reach selection.
+    A single source may repeat an identical candidate, but it must not equivocate about immutable
+    identity for the same capability version.
     """
 
     def __init__(self, sources: tuple[ReuseMetadataSource, ...]) -> None:
@@ -49,6 +55,10 @@ class ReuseSearchPipeline:
     def search(self, gap: CapabilityGap) -> ReuseSearchResult:
         attempted: list[str] = []
         candidates: list[ReuseCandidate] = []
+        seen: dict[
+            tuple[str, str, str],
+            tuple[str, frozenset[str], tuple[tuple[str, str], ...]],
+        ] = {}
         for source_id in REUSE_SOURCE_ORDER:
             source = self._sources.get(source_id)
             if source is None:
@@ -61,6 +71,18 @@ class ReuseSearchPipeline:
                     )
                 if candidate.capability_id != gap.requested_capability:
                     continue
+                key = (source_id, candidate.capability_id, candidate.version)
+                identity = _candidate_identity(candidate)
+                prior = seen.get(key)
+                if prior is not None:
+                    if prior != identity:
+                        raise ValueError(
+                            "reuse metadata source "
+                            f"{source_id} returned conflicting identity for "
+                            f"{candidate.capability_id} version {candidate.version}"
+                        )
+                    continue
+                seen[key] = identity
                 if not candidate.permissions.issubset(gap.permission_ceiling):
                     continue
                 candidates.append(candidate)
