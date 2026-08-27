@@ -180,10 +180,10 @@ class LangGraphRuntime:
 
         try:
             snapshot = await state_reader(self._thread_config(thread_id))
-        except Exception as exc:  # noqa: BLE001 - checkpoint boundary must fail closed
+        except Exception:  # noqa: BLE001 - checkpoint boundary must fail closed
             return RuntimeResumeProbe(
                 status=RuntimeResumeProbeStatus.UNREADABLE,
-                reason=f"checkpoint lookup failed: {exc}",
+                reason="checkpoint lookup failed",
             )
 
         checkpoint_id = _checkpoint_id(snapshot)
@@ -288,14 +288,14 @@ class LangGraphRuntime:
             )
         except asyncio.CancelledError:
             return RuntimeResult(outcome=RuntimeOutcome.CANCELLED)
-        except Exception as exc:  # noqa: BLE001 - framework boundary normalizes unknown failures
+        except Exception:  # noqa: BLE001 - framework boundary normalizes unknown failures
             resume_token = await self._resume_token_if_safe(
                 task_id=task_id,
                 thread_id=thread_id,
             )
             return RuntimeResult(
                 outcome=RuntimeOutcome.FAILED,
-                error=str(exc),
+                error="runtime execution failed",
                 error_code=RuntimeErrorCode.INTERNAL,
                 resume_token=resume_token,
             )
