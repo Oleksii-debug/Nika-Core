@@ -277,6 +277,7 @@ class RepositoryRef:
     default_branch: str
     credential_ref: str | None = None
     case_sensitive_paths: bool = True
+    windows_path_semantics: bool = False
 
     def __post_init__(self) -> None:
         if not all(
@@ -437,9 +438,15 @@ class ProductRepositoryGraph:
         seen: dict[tuple[str, str], str] = {}
         for repository in self.repositories:
             provider = repository.provider.strip().casefold()
-            locator = repository.locator.strip().rstrip("/")
+            locator = repository.locator.strip()
             if provider == "github":
-                locator = locator.casefold()
+                locator = locator.rstrip("/").casefold()
+            elif provider == "local-git":
+                locator = posixpath.normpath(locator.replace("\\", "/"))
+                if locator != "/":
+                    locator = locator.rstrip("/")
+            else:
+                locator = locator.rstrip("/")
             key = (provider, locator)
             previous = seen.get(key)
             if previous is not None and previous != repository.repository_id:
@@ -458,7 +465,13 @@ class ProductRepositoryGraph:
                 )
             if not component.paths:
                 raise RepositoryGraphError(f"component {component.component_id} requires owned paths")
-            normalized = [_normalize_repo_path(path) for path in component.paths]
+            normalized = [
+                _normalize_repo_path(
+                    path,
+                    windows_path_semantics=repository.windows_path_semantics,
+                )
+                for path in component.paths
+            ]
             if len(normalized) != len(set(normalized)):
                 raise RepositoryGraphError(f"component {component.component_id} repeats an owned path")
             if len(component.dependencies) != len(set(component.dependencies)):
@@ -478,9 +491,16 @@ class ProductRepositoryGraph:
     def _validate_component_overlap(self) -> None:
         by_repo: dict[str, list[tuple[str, str]]] = {}
         for component in self.components:
+            repository = self._repositories_by_id[component.repository_id]
             for path in component.paths:
                 by_repo.setdefault(component.repository_id, []).append(
-                    (component.component_id, _normalize_repo_path(path))
+                    (
+                        component.component_id,
+                        _normalize_repo_path(
+                            path,
+                            windows_path_semantics=repository.windows_path_semantics,
+                        ),
+                    )
                 )
         for repository_id, entries in by_repo.items():
             repository = self._repositories_by_id[repository_id]
@@ -510,38 +530,107 @@ class ProductRepositoryGraph:
         repos = {component.repository_id for component in components}
         result: list[tuple[str, str]] = []
         for raw_path in lease.allowed_paths:
-            path = _normalize_repo_path(raw_path)
-            matches = [
-                component
-                for component in components
+            paths_by_repo: dict[str, str] = {}
+            errors_by_repo: dict[str, RepositoryGraphError] = {}
+            matches: list[ProductComponent] = []
+            for component in components:
+                repository_id = component.repository_id
+                if repository_id in errors_by_repo:
+                    continue
+                repository = self._repositories_by_id[repository_id]
+                if repository_id not in paths_by_repo:
+                    try:
+                        paths_by_repo[repository_id] = _normalize_repo_path(
+                            raw_path,
+                            windows_path_semantics=repository.windows_path_semantics,
+                        )
+                    except RepositoryGraphError as exc:
+                        errors_by_repo[repository_id] = exc
+                        continue
+                path = paths_by_repo[repository_id]
                 if any(
                     _path_within(
                         path,
-                        _normalize_repo_path(root),
-                        self._repositories_by_id[component.repository_id].case_sensitive_paths,
+                        _normalize_repo_path(
+                            root,
+                            windows_path_semantics=repository.windows_path_semantics,
+                        ),
+                        repository.case_sensitive_paths,
                     )
                     for root in component.paths
-                )
-            ]
+                ):
+                    matches.append(component)
             if not matches:
-                raise RepositoryGraphError(f"lease path {path} is outside component ownership")
+                if len(repos) == 1:
+                    only_repository = next(iter(repos))
+                    repository_error = errors_by_repo.get(only_repository)
+                    if repository_error is not None:
+                        raise repository_error
+                display_path = _normalize_repo_path(raw_path)
+                raise RepositoryGraphError(
+                    f"lease path {display_path} is outside component ownership"
+                )
             matching_repos = {component.repository_id for component in matches}
             if len(matching_repos) != 1:
-                raise RepositoryGraphError(f"lease path {path} is ambiguous across repositories")
-            result.append((next(iter(matching_repos)), path))
+                display_path = _normalize_repo_path(raw_path)
+                raise RepositoryGraphError(
+                    f"lease path {display_path} is ambiguous across repositories"
+                )
+            repository_id = next(iter(matching_repos))
+            result.append((repository_id, paths_by_repo[repository_id]))
         if not {repo_id for repo_id, _ in result}.issubset(repos):
             raise RepositoryGraphError("lease path repository mismatch")
         return tuple(result)
 
 
-def _normalize_repo_path(path: str) -> str:
-    candidate = path.replace("\\", "/").strip()
+def _normalize_repo_path(path: str, *, windows_path_semantics: bool = False) -> str:
+    raw_candidate = path.replace("\\", "/")
+    if windows_path_semantics:
+        _validate_windows_repo_path(raw_candidate, original=path)
+    candidate = raw_candidate if windows_path_semantics else raw_candidate.strip()
     if not candidate or candidate.startswith("/") or ":" in candidate.split("/", 1)[0]:
         raise RepositoryGraphError(f"repository path must be relative: {path!r}")
     normalized = posixpath.normpath(candidate)
     if normalized in {".", ".."} or normalized.startswith("../"):
         raise RepositoryGraphError(f"repository path escapes root: {path!r}")
-    return normalized.rstrip("/")
+    normalized = normalized.rstrip("/")
+    if windows_path_semantics:
+        _validate_windows_repo_path(normalized, original=path)
+    return normalized
+
+
+def _validate_windows_repo_path(path: str, *, original: str) -> None:
+    reserved_stems = {
+        "aux",
+        "con",
+        "conin$",
+        "conout$",
+        "nul",
+        "prn",
+        *(f"com{index}" for index in range(10)),
+        *(f"lpt{index}" for index in range(10)),
+        "com¹",
+        "com²",
+        "com³",
+        "lpt¹",
+        "lpt²",
+        "lpt³",
+    }
+    invalid_characters = frozenset('<>:"|?*')
+    for component in path.split("/"):
+        if component.startswith(" ") or component.endswith((" ", ".")):
+            raise RepositoryGraphError(
+                f"Windows repository path component has unsafe edge identity: {original!r}"
+            )
+        if any(character in invalid_characters or ord(character) < 32 for character in component):
+            raise RepositoryGraphError(
+                f"Windows repository path component contains reserved syntax: {original!r}"
+            )
+        stem = component.split(".", 1)[0].casefold()
+        if stem in reserved_stems:
+            raise RepositoryGraphError(
+                f"Windows repository path component uses a reserved device name: {original!r}"
+            )
 
 
 def _path_within(path: str, root: str, case_sensitive: bool) -> bool:
