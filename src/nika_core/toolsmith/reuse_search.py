@@ -14,6 +14,8 @@ REUSE_SOURCE_ORDER = (
     "approved_catalog",
 )
 
+CandidateIdentity = tuple[str, frozenset[str], tuple[tuple[str, str], ...]]
+
 
 @runtime_checkable
 class ReuseMetadataSource(Protocol):
@@ -28,7 +30,7 @@ class ReuseSearchResult:
     attempted_sources: tuple[str, ...]
 
 
-def _candidate_identity(candidate: ReuseCandidate) -> tuple[str, frozenset[str], tuple[tuple[str, str], ...]]:
+def _candidate_identity(candidate: ReuseCandidate) -> CandidateIdentity:
     return candidate.digest, candidate.permissions, tuple(sorted(candidate.metadata.items()))
 
 
@@ -55,10 +57,7 @@ class ReuseSearchPipeline:
     def search(self, gap: CapabilityGap) -> ReuseSearchResult:
         attempted: list[str] = []
         candidates: list[ReuseCandidate] = []
-        seen: dict[
-            tuple[str, str, str],
-            tuple[str, frozenset[str], tuple[tuple[str, str], ...]],
-        ] = {}
+        seen: dict[tuple[str, str, str], CandidateIdentity] = {}
         for source_id in REUSE_SOURCE_ORDER:
             source = self._sources.get(source_id)
             if source is None:
