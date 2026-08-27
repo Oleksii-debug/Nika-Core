@@ -114,5 +114,12 @@ def test_m12_workflow_keeps_signing_privilege_on_trusted_main_only() -> None:
     workflow = Path(".github/workflows/m12-prehuman-release-gate.yml").read_text(encoding="utf-8")
     assert "attest-main-distributable:" in workflow
     assert "if: github.event_name == 'push' && github.ref == 'refs/heads/main'" in workflow
-    for expected in ("id-token: write", "attestations: write", "artifact-metadata: write", "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6", "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093", "actions/checkout@11d5960a326750d5838078e36cf38b85af677262", "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065", "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", "--signer-workflow", "--source-digest '${{ github.sha }}'", "--source-ref '${{ github.ref }}'", "--deny-self-hosted-runners"):
+    main_job = workflow.split("  attest-main-distributable:", 1)[1]
+    permission_block = main_job.split("    permissions:\n", 1)[1].split("    steps:\n", 1)[0]
+    assert permission_block == (
+        "      contents: read\n"
+        "      id-token: write\n"
+        "      attestations: write\n"
+    )
+    for expected in ("actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6", "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093", "actions/checkout@11d5960a326750d5838078e36cf38b85af677262", "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065", "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", "--signer-workflow", "--source-digest '${{ github.sha }}'", "--source-ref '${{ github.ref }}'", "--deny-self-hosted-runners"):
         assert expected in workflow
