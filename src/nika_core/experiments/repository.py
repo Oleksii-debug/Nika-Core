@@ -9,6 +9,7 @@ from typing import Protocol
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.experiments.contracts import (
     ArtifactKind,
+    DatasetSplit,
     ExperimentDefinition,
     ExperimentSnapshot,
     ExperimentStatus,
@@ -18,6 +19,7 @@ from nika_core.experiments.contracts import (
     ReplayCase,
     StrategyRef,
 )
+from nika_core.experiments.decision import decide_terminal
 
 
 class ExperimentRepository(Protocol):
@@ -28,31 +30,6 @@ class ExperimentRepository(Protocol):
     def save(self, snapshot: ExperimentSnapshot) -> None: ...
 
 
-class InMemoryExperimentRepository:
-    """Deterministic test/prototype adapter behind the M8 repository port."""
-
-    def __init__(self) -> None:
-        self._items: dict[str, ExperimentSnapshot] = {}
-
-    def create(self, snapshot: ExperimentSnapshot) -> None:
-        experiment_id = snapshot.definition.experiment_id
-        if experiment_id in self._items:
-            raise ValueError(f"experiment already exists: {experiment_id}")
-        self._items[experiment_id] = deepcopy(snapshot)
-
-    def get(self, experiment_id: str) -> ExperimentSnapshot:
-        try:
-            return deepcopy(self._items[experiment_id])
-        except KeyError as exc:
-            raise KeyError(f"unknown experiment: {experiment_id}") from exc
-
-    def save(self, snapshot: ExperimentSnapshot) -> None:
-        experiment_id = snapshot.definition.experiment_id
-        if experiment_id not in self._items:
-            raise KeyError(f"unknown experiment: {experiment_id}")
-        self._items[experiment_id] = deepcopy(snapshot)
-
-
 _ALLOWED_TRANSITIONS = {
     (ExperimentStatus.DRAFT, ExperimentStatus.RUNNING),
     (ExperimentStatus.RUNNING, ExperimentStatus.COMPLETED),
@@ -61,15 +38,44 @@ _ALLOWED_TRANSITIONS = {
 }
 
 
+class InMemoryExperimentRepository:
+    """Deterministic test/prototype adapter behind the M8 repository port."""
+
+    def __init__(self) -> None:
+        self._items: dict[str, ExperimentSnapshot] = {}
+
+    def create(self, snapshot: ExperimentSnapshot) -> None:
+        _validate_new_snapshot(snapshot)
+        experiment_id = snapshot.definition.experiment_id
+        if experiment_id in self._items:
+            raise ValueError(f"experiment already exists: {experiment_id}")
+        self._items[experiment_id] = deepcopy(snapshot)
+
+    def get(self, experiment_id: str) -> ExperimentSnapshot:
+        try:
+            snapshot = deepcopy(self._items[experiment_id])
+        except KeyError as exc:
+            raise KeyError(f"unknown experiment: {experiment_id}") from exc
+        _validate_authority_state(snapshot)
+        return snapshot
+
+    def save(self, snapshot: ExperimentSnapshot) -> None:
+        experiment_id = snapshot.definition.experiment_id
+        if experiment_id not in self._items:
+            raise KeyError(f"unknown experiment: {experiment_id}")
+        current = self.get(experiment_id)
+        _validate_snapshot_change(current, snapshot)
+        self._items[experiment_id] = deepcopy(snapshot)
+
+
 class SQLiteExperimentRepository:
-    """Durable M8 adapter with immutable definition/evidence and atomic transitions."""
+    """Durable M8 adapter with immutable evidence and controlled transition authority."""
 
     def __init__(self, store: SQLiteStore) -> None:
         self._store = store
 
     def create(self, snapshot: ExperimentSnapshot) -> None:
-        if snapshot.status is not ExperimentStatus.DRAFT or snapshot.observations:
-            raise ValueError("new experiments must begin as an empty draft")
+        _validate_new_snapshot(snapshot)
         now = datetime.now(UTC).isoformat()
         payload = _encode_definition(snapshot.definition)
         with self._store.connection() as conn:
@@ -105,15 +111,7 @@ class SQLiteExperimentRepository:
         with self._store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             current = self._load(conn, experiment_id)
-            if _encode_definition(current.definition) != _encode_definition(snapshot.definition):
-                raise ValueError("experiment definition is immutable")
-            self._validate_evidence_append_only(current, snapshot)
-            transition = (current.status, snapshot.status)
-            if current.status != snapshot.status and transition not in _ALLOWED_TRANSITIONS:
-                raise ValueError(
-                    f"invalid experiment transition: {current.status.value} -> "
-                    f"{snapshot.status.value}"
-                )
+            _validate_snapshot_change(current, snapshot)
             current_keys = {_observation_key(item) for item in current.observations}
             now = datetime.now(UTC).isoformat()
             for item in snapshot.observations:
@@ -172,21 +170,6 @@ class SQLiteExperimentRepository:
         )
 
     @staticmethod
-    def _validate_evidence_append_only(
-        current: ExperimentSnapshot,
-        proposed: ExperimentSnapshot,
-    ) -> None:
-        proposed_map = {_observation_key(item): item for item in proposed.observations}
-        if len(proposed_map) != len(proposed.observations):
-            raise ValueError("duplicate observation evidence")
-        for item in current.observations:
-            candidate = proposed_map.get(_observation_key(item))
-            if candidate is None:
-                raise ValueError("experiment evidence is append-only")
-            if float(candidate.value) != float(item.value):
-                raise ValueError("recorded experiment evidence is immutable")
-
-    @staticmethod
     def _load(conn: sqlite3.Connection, experiment_id: str) -> ExperimentSnapshot:
         row = conn.execute(
             "SELECT definition_json, status, selected_candidate_id, previous_champion_id "
@@ -209,13 +192,91 @@ class SQLiteExperimentRepository:
             )
             for item in observation_rows
         )
-        return ExperimentSnapshot(
+        snapshot = ExperimentSnapshot(
             definition=_decode_definition(row["definition_json"]),
             status=ExperimentStatus(row["status"]),
             observations=observations,
             selected_candidate_id=row["selected_candidate_id"],
             previous_champion_id=row["previous_champion_id"],
         )
+        _validate_authority_state(snapshot)
+        return snapshot
+
+
+def _validate_new_snapshot(snapshot: ExperimentSnapshot) -> None:
+    if (
+        snapshot.status is not ExperimentStatus.DRAFT
+        or snapshot.observations
+        or snapshot.selected_candidate_id is not None
+        or snapshot.previous_champion_id is not None
+    ):
+        raise ValueError("new experiments must begin as an empty draft without decision state")
+
+
+def _validate_snapshot_change(
+    current: ExperimentSnapshot,
+    proposed: ExperimentSnapshot,
+) -> None:
+    if _encode_definition(current.definition) != _encode_definition(proposed.definition):
+        raise ValueError("experiment definition is immutable")
+    _validate_evidence_append_only(current, proposed)
+    transition = (current.status, proposed.status)
+    if current.status != proposed.status and transition not in _ALLOWED_TRANSITIONS:
+        raise ValueError(
+            f"invalid experiment transition: {current.status.value} -> {proposed.status.value}"
+        )
+    if proposed.observations != current.observations and not (
+        current.status is ExperimentStatus.RUNNING
+        and proposed.status is ExperimentStatus.RUNNING
+    ):
+        raise ValueError("experiment evidence may only be appended while remaining running")
+    _validate_authority_state(proposed)
+
+
+def _validate_authority_state(snapshot: ExperimentSnapshot) -> None:
+    if snapshot.status in (ExperimentStatus.DRAFT, ExperimentStatus.RUNNING):
+        if (
+            snapshot.selected_candidate_id is not None
+            or snapshot.previous_champion_id is not None
+        ):
+            raise ValueError("nonterminal experiment cannot contain decision state")
+        return
+
+    decision = decide_terminal(snapshot)
+    if snapshot.status in (ExperimentStatus.COMPLETED, ExperimentStatus.PROMOTED):
+        if snapshot.status is not decision.status:
+            raise ValueError("experiment terminal status conflicts with deterministic evidence")
+        if snapshot.selected_candidate_id != decision.selected_candidate_id:
+            raise ValueError("experiment selected candidate conflicts with deterministic evidence")
+        if snapshot.previous_champion_id != decision.previous_champion_id:
+            raise ValueError("experiment previous champion conflicts with deterministic evidence")
+        return
+
+    if snapshot.status is ExperimentStatus.ROLLED_BACK:
+        if decision.status is not ExperimentStatus.PROMOTED:
+            raise ValueError("rollback requires evidence for a prior promotion")
+        if snapshot.previous_champion_id != decision.previous_champion_id:
+            raise ValueError("rollback previous champion conflicts with promotion evidence")
+        if snapshot.selected_candidate_id != decision.previous_champion_id:
+            raise ValueError("rollback must restore the recorded previous champion")
+        return
+
+    raise ValueError(f"unsupported experiment status: {snapshot.status.value}")
+
+
+def _validate_evidence_append_only(
+    current: ExperimentSnapshot,
+    proposed: ExperimentSnapshot,
+) -> None:
+    proposed_map = {_observation_key(item): item for item in proposed.observations}
+    if len(proposed_map) != len(proposed.observations):
+        raise ValueError("duplicate observation evidence")
+    for item in current.observations:
+        candidate = proposed_map.get(_observation_key(item))
+        if candidate is None:
+            raise ValueError("experiment evidence is append-only")
+        if float(candidate.value) != float(item.value):
+            raise ValueError("recorded experiment evidence is immutable")
 
 
 def _observation_key(item: MetricObservation) -> tuple[str, str, str]:
@@ -232,6 +293,9 @@ def _encode_definition(definition: ExperimentDefinition) -> str:
                 "replay_id": item.replay_id,
                 "dataset_ref": item.dataset_ref,
                 "dataset_version": item.dataset_version,
+                "split": item.split.value,
+                "dataset_fingerprint": item.dataset_fingerprint,
+                "data_end_at": _encode_datetime(item.data_end_at),
             }
             for item in definition.replays
         ],
@@ -249,57 +313,166 @@ def _encode_definition(definition: ExperimentDefinition) -> str:
             ],
             "primary_higher_is_better": definition.policy.primary_higher_is_better,
         },
+        "evaluation_cutoff": _encode_datetime(definition.evaluation_cutoff),
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
-def _strategy_payload(item: StrategyRef) -> dict[str, str]:
+def _strategy_payload(item: StrategyRef) -> dict[str, object]:
     return {
         "candidate_id": item.candidate_id,
         "version": item.version,
         "artifact_kind": item.artifact_kind.value,
         "artifact_ref": item.artifact_ref,
         "permission_fingerprint": item.permission_fingerprint,
+        "training_dataset_fingerprints": list(item.training_dataset_fingerprints),
     }
 
 
 def _decode_definition(raw: str) -> ExperimentDefinition:
     payload = json.loads(raw)
-    policy = payload["policy"]
+    if not isinstance(payload, dict):
+        raise TypeError("persisted experiment definition must be an object")
+    policy = _required_mapping(payload.get("policy"), "policy")
+    challengers = _required_sequence(payload.get("challengers"), "challengers")
+    replays = _required_sequence(payload.get("replays"), "replays")
+    guardrails = _required_sequence(policy.get("guardrails"), "policy.guardrails")
     return ExperimentDefinition(
-        experiment_id=payload["experiment_id"],
-        champion=_decode_strategy(payload["champion"]),
-        challengers=tuple(_decode_strategy(item) for item in payload["challengers"]),
+        experiment_id=_required_string(payload.get("experiment_id"), "experiment_id"),
+        champion=_decode_strategy(_required_mapping(payload.get("champion"), "champion")),
+        challengers=tuple(
+            _decode_strategy(_required_mapping(item, "challenger")) for item in challengers
+        ),
         replays=tuple(
-            ReplayCase(
-                replay_id=item["replay_id"],
-                dataset_ref=item["dataset_ref"],
-                dataset_version=item["dataset_version"],
-            )
-            for item in payload["replays"]
+            _decode_replay(_required_mapping(item, "replay"))
+            for item in replays
         ),
         policy=PromotionPolicy(
-            primary_metric=policy["primary_metric"],
-            minimum_improvement=float(policy["minimum_improvement"]),
-            minimum_replays=int(policy["minimum_replays"]),
+            primary_metric=_required_string(
+                policy.get("primary_metric"),
+                "policy.primary_metric",
+            ),
+            minimum_improvement=_required_number(
+                policy.get("minimum_improvement"),
+                "policy.minimum_improvement",
+            ),
+            minimum_replays=_required_integer(
+                policy.get("minimum_replays"),
+                "policy.minimum_replays",
+            ),
             guardrails=tuple(
                 MetricRule(
-                    metric=item["metric"],
-                    higher_is_better=bool(item["higher_is_better"]),
-                    max_regression=float(item["max_regression"]),
+                    metric=_required_string(item.get("metric"), "guardrail.metric"),
+                    higher_is_better=_required_boolean(
+                        item.get("higher_is_better"),
+                        "guardrail.higher_is_better",
+                    ),
+                    max_regression=_required_number(
+                        item.get("max_regression"),
+                        "guardrail.max_regression",
+                    ),
                 )
-                for item in policy["guardrails"]
+                for item in (
+                    _required_mapping(raw_guardrail, "guardrail")
+                    for raw_guardrail in guardrails
+                )
             ),
-            primary_higher_is_better=bool(policy.get("primary_higher_is_better", True)),
+            primary_higher_is_better=_required_boolean(
+                policy.get("primary_higher_is_better", True),
+                "policy.primary_higher_is_better",
+            ),
         ),
+        evaluation_cutoff=_decode_datetime(payload.get("evaluation_cutoff")),
+    )
+
+
+def _decode_replay(payload: dict[str, object]) -> ReplayCase:
+    raw_split = payload.get("split", DatasetSplit.EVALUATION.value)
+    return ReplayCase(
+        replay_id=_required_string(payload.get("replay_id"), "replay.replay_id"),
+        dataset_ref=_required_string(payload.get("dataset_ref"), "replay.dataset_ref"),
+        dataset_version=_required_string(
+            payload.get("dataset_version"),
+            "replay.dataset_version",
+        ),
+        split=DatasetSplit(_required_string(raw_split, "replay.split")),
+        dataset_fingerprint=_optional_string(payload.get("dataset_fingerprint")),
+        data_end_at=_decode_datetime(payload.get("data_end_at")),
     )
 
 
 def _decode_strategy(payload: dict[str, object]) -> StrategyRef:
+    training = payload.get("training_dataset_fingerprints", ())
+    if not isinstance(training, (list, tuple)):
+        raise TypeError("training_dataset_fingerprints must be a sequence")
+    if any(not isinstance(item, str) for item in training):
+        raise TypeError("training_dataset_fingerprints must contain only strings")
     return StrategyRef(
-        candidate_id=str(payload["candidate_id"]),
-        version=str(payload["version"]),
-        artifact_kind=ArtifactKind(str(payload["artifact_kind"])),
-        artifact_ref=str(payload["artifact_ref"]),
-        permission_fingerprint=str(payload["permission_fingerprint"]),
+        candidate_id=_required_string(payload.get("candidate_id"), "strategy.candidate_id"),
+        version=_required_string(payload.get("version"), "strategy.version"),
+        artifact_kind=ArtifactKind(
+            _required_string(payload.get("artifact_kind"), "strategy.artifact_kind")
+        ),
+        artifact_ref=_required_string(payload.get("artifact_ref"), "strategy.artifact_ref"),
+        permission_fingerprint=_required_string(
+            payload.get("permission_fingerprint"),
+            "strategy.permission_fingerprint",
+        ),
+        training_dataset_fingerprints=tuple(training),
     )
+
+
+def _encode_datetime(value: datetime | None) -> str | None:
+    return None if value is None else value.isoformat()
+
+
+def _decode_datetime(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("persisted experiment datetime must be a string")
+    return datetime.fromisoformat(value)
+
+
+def _optional_string(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("persisted dataset fingerprint must be a string")
+    return value
+
+
+def _required_mapping(value: object, field: str) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise TypeError(f"persisted {field} must be an object")
+    return value
+
+
+def _required_sequence(value: object, field: str) -> list[object] | tuple[object, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(f"persisted {field} must be a sequence")
+    return value
+
+
+def _required_string(value: object, field: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"persisted {field} must be a string")
+    return value
+
+
+def _required_boolean(value: object, field: str) -> bool:
+    if type(value) is not bool:
+        raise TypeError(f"persisted {field} must be a boolean")
+    return value
+
+
+def _required_integer(value: object, field: str) -> int:
+    if type(value) is not int:
+        raise TypeError(f"persisted {field} must be an integer")
+    return value
+
+
+def _required_number(value: object, field: str) -> float:
+    if type(value) not in (int, float):
+        raise TypeError(f"persisted {field} must be numeric")
+    return float(value)

@@ -4,8 +4,17 @@ import asyncio
 from dataclasses import dataclass
 
 from nika_core.builder.repository import AgentDefinitionRepository
+from nika_core.multi_agent.cancellation import TeamCancellationJournal
 from nika_core.multi_agent.contracts import (
     AgentHandoff,
+    CancellationEffect,
+    CancellationEffectState,
+    CancellationOperation,
+    CancellationOperationState,
+    CancellationProbeRequest,
+    CancellationProbeState,
+    CancellationReconciliationPort,
+    CancellationReconciliationRequired,
     ChildRequest,
     EvaluationScore,
     HandoffKind,
@@ -43,10 +52,13 @@ class MultiAgentSupervisor:
         runtime: AgentRuntimePort,
         store: MultiAgentStore,
         definitions: AgentDefinitionRepository,
+        cancellation_reconciliation: CancellationReconciliationPort | None = None,
     ) -> None:
         self._runtime = runtime
         self._store = store
         self._definitions = definitions
+        self._cancellations = TeamCancellationJournal(store)
+        self._cancellation_reconciliation = cancellation_reconciliation
         self._recovering_teams: set[str] = set()
 
     async def fan_out(
@@ -56,6 +68,7 @@ class MultiAgentSupervisor:
         parent_id: str,
         requests: tuple[ChildRequest, ...],
     ) -> tuple[ChildExecution, ...]:
+        self._require_no_unfinished_cancellation(team_id)
         quota = self._store.quota(team_id)
         if len(requests) > quota.max_children_per_parent:
             raise RuntimeError("fan-out exceeds children-per-parent quota")
@@ -71,27 +84,23 @@ class MultiAgentSupervisor:
             )
             for request in requests
         }
-
-        members = tuple(
-            self._store.spawn_child(
+        task_handoffs = tuple(
+            AgentHandoff(
                 team_id=team_id,
-                parent_id=parent_id,
-                child_id=request.member_id,
-                agent_id=request.agent_id,
-                agent_version=request.agent_version,
-                thread_id=request.thread_id,
-                requested_grants=request.requested_grants,
-                task_handoff=AgentHandoff(
-                    team_id=team_id,
-                    sender_id=parent_id,
-                    recipient_id=request.member_id,
-                    kind=HandoffKind.TASK,
-                    payload=request.payload,
-                    handoff_id=f"task:{team_id}:{request.member_id}",
-                    correlation_id=f"team:{team_id}:{parent_id}:{request.member_id}",
-                ),
+                sender_id=parent_id,
+                recipient_id=request.member_id,
+                kind=HandoffKind.TASK,
+                payload=request.payload,
+                handoff_id=f"task:{team_id}:{request.member_id}",
+                correlation_id=f"team:{team_id}:{parent_id}:{request.member_id}",
             )
             for request in requests
+        )
+        members = self._store.spawn_children(
+            team_id=team_id,
+            parent_id=parent_id,
+            requests=requests,
+            task_handoffs=task_handoffs,
         )
         by_id = {request.member_id: request for request in requests}
         semaphore = asyncio.Semaphore(quota.max_parallel)
@@ -120,6 +129,7 @@ class MultiAgentSupervisor:
             return ()
         self._recovering_teams.add(team_id)
         try:
+            self._require_no_unfinished_cancellation(team_id)
             if self._store.team_state(team_id) is not TeamState.ACTIVE:
                 raise RuntimeError("team is not active")
             quota = self._store.quota(team_id)
@@ -140,25 +150,179 @@ class MultiAgentSupervisor:
 
     def finalize_team(self, team_id: str) -> TeamState:
         """Explicitly close a team once no further fan-out is planned."""
+        self._require_no_unfinished_cancellation(team_id)
         return self._store.finalize_team(team_id)
 
     async def cancel_team(self, team_id: str) -> tuple[TeamMember, ...]:
+        """Cancel product authority first, then reconcile exact external runtime effects.
+
+        The durable cancellation operation is written before the team is moved to CANCELLED.
+        The team/member CANCELLED state is committed before the first runtime cancel call. Every
+        external call is preceded by a durable DISPATCHING marker, so a crash or exception cannot
+        be retried blindly. An uncertain dispatch requires read-only reconciliation.
+        """
+        operation = self._cancellations.get(team_id)
         state = self._store.team_state(team_id)
-        if state is TeamState.CANCELLED:
+        if operation is None:
+            if state is TeamState.CANCELLED:
+                operation = self._cancellations.adopt_unjournaled_cancelled(team_id=team_id)
+            elif state is not TeamState.ACTIVE:
+                raise RuntimeError(f"team cannot be cancelled from terminal state: {state.value}")
+            else:
+                operation = self._cancellations.begin(team_id=team_id)
+        elif operation.state is CancellationOperationState.COMPLETED:
+            if state is not TeamState.CANCELLED:
+                raise RuntimeError("completed cancellation conflicts with durable team state")
             return self._store.members(team_id)
-        if state is not TeamState.ACTIVE:
-            raise RuntimeError(f"team cannot be cancelled from terminal state: {state.value}")
-        active = self._store.recoverable_members(team_id)
-        for member in active:
-            await self._runtime.cancel(
-                task_id=self._task_id(team_id, member.member_id),
-                thread_id=member.thread_id,
+
+        state = self._store.team_state(team_id)
+        if state is not TeamState.CANCELLED:
+            raise RuntimeError(
+                "unfinished cancellation conflicts with durable team state: "
+                f"{state.value}"
             )
-        return self._store.cancel_team(team_id)
+        return await self._drive_cancellation(operation)
+
+    async def reconcile_team_cancellation(self, team_id: str) -> tuple[TeamMember, ...]:
+        """Inspect uncertain external effects before any cancellation retry is allowed."""
+        operation = self._cancellations.get(team_id)
+        if operation is None:
+            raise KeyError(f"team has no durable cancellation operation: {team_id}")
+        if operation.state is CancellationOperationState.COMPLETED:
+            return self._store.members(team_id)
+        if self._cancellation_reconciliation is None:
+            raise CancellationReconciliationRequired(
+                "uncertain cancellation requires a configured reconciliation port"
+            )
+
+        for effect in operation.effects:
+            if effect.state not in {
+                CancellationEffectState.DISPATCHING,
+                CancellationEffectState.RECONCILE_REQUIRED,
+            }:
+                continue
+            request = CancellationProbeRequest(
+                operation_id=effect.operation_id,
+                team_id=effect.team_id,
+                member_id=effect.member_id,
+                task_id=effect.task_id,
+                thread_id=effect.thread_id,
+            )
+            try:
+                verdict = await self._cancellation_reconciliation.inspect_cancellation(request)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._mark_probe_unknown(effect, type(exc).__name__)
+                raise CancellationReconciliationRequired(
+                    "uncertain cancellation could not be reconciled"
+                ) from exc
+            if verdict is CancellationProbeState.CANCELLED:
+                self._cancellations.mark_confirmed(effect.operation_id, effect.member_id)
+            elif verdict is CancellationProbeState.NOT_CANCELLED:
+                self._cancellations.mark_not_cancelled(effect.operation_id, effect.member_id)
+            else:
+                self._mark_probe_unknown(effect, "probe_unknown")
+                raise CancellationReconciliationRequired(
+                    "uncertain cancellation remains unresolved after inspection"
+                )
+        operation = self._cancellations.get(team_id)
+        if operation is None:
+            raise RuntimeError("cancellation operation disappeared during reconciliation")
+        return await self._drive_cancellation(operation)
 
     @staticmethod
     def aggregate_evaluations(scores: tuple[EvaluationScore, ...]) -> dict[str, float]:
         return aggregate_scores(scores)
+
+    async def _drive_cancellation(
+        self,
+        operation: CancellationOperation,
+    ) -> tuple[TeamMember, ...]:
+        while True:
+            current = self._cancellations.get(operation.team_id)
+            if current is None:
+                raise RuntimeError("cancellation operation disappeared during execution")
+            if current.state is CancellationOperationState.COMPLETED:
+                return self._store.members(operation.team_id)
+            unresolved = next(
+                (
+                    effect
+                    for effect in current.effects
+                    if effect.state
+                    in {
+                        CancellationEffectState.DISPATCHING,
+                        CancellationEffectState.RECONCILE_REQUIRED,
+                    }
+                ),
+                None,
+            )
+            if unresolved is not None:
+                raise CancellationReconciliationRequired(
+                    "uncertain cancellation effect requires reconciliation before retry: "
+                    f"{unresolved.member_id}"
+                )
+            planned = next(
+                (
+                    effect
+                    for effect in current.effects
+                    if effect.state is CancellationEffectState.PLANNED
+                ),
+                None,
+            )
+            if planned is None:
+                self._cancellations.complete(current.operation_id)
+                return self._store.members(current.team_id)
+            self._cancellations.mark_dispatching(current.operation_id, planned.member_id)
+            try:
+                await self._runtime.cancel(
+                    task_id=planned.task_id,
+                    thread_id=planned.thread_id,
+                )
+            except asyncio.CancelledError:
+                self._mark_cancel_uncertain(planned, "CancelledError")
+                raise
+            except Exception as exc:
+                self._mark_cancel_uncertain(planned, type(exc).__name__)
+                raise CancellationReconciliationRequired(
+                    "uncertain cancellation result after external effect; reconciliation required"
+                ) from exc
+            self._cancellations.mark_confirmed(current.operation_id, planned.member_id)
+
+    def _mark_cancel_uncertain(self, effect: CancellationEffect, error_type: str) -> None:
+        try:
+            self._cancellations.mark_reconcile_required(
+                effect.operation_id,
+                effect.member_id,
+                error_type=error_type,
+            )
+        except Exception as persist_exc:
+            raise CancellationReconciliationRequired(
+                "uncertain cancellation result could not persist reconciliation state"
+            ) from persist_exc
+
+    def _mark_probe_unknown(self, effect: CancellationEffect, error_type: str) -> None:
+        if effect.state is CancellationEffectState.DISPATCHING:
+            self._cancellations.mark_reconcile_required(
+                effect.operation_id,
+                effect.member_id,
+                error_type=error_type,
+            )
+
+    def _require_no_unfinished_cancellation(self, team_id: str) -> None:
+        if self._cancellations.has_unfinished(team_id):
+            raise CancellationReconciliationRequired(
+                "team has an unfinished durable cancellation operation"
+            )
+
+    async def _cancel_after_execution_task_cancelled(self, team_id: str) -> None:
+        """Reuse durable team cancellation before any runtime cleanup side effect."""
+        try:
+            await self.cancel_team(team_id)
+        except CancellationReconciliationRequired:
+            operation = self._cancellations.get(team_id)
+            if operation is None or self._store.team_state(team_id) is not TeamState.CANCELLED:
+                raise
 
     async def _run_new_child(
         self,
@@ -181,15 +345,7 @@ class MultiAgentSupervisor:
                 )
             )
         except asyncio.CancelledError:
-            await self._runtime.cancel(
-                task_id=self._task_id(member.team_id, member.member_id),
-                thread_id=member.thread_id,
-            )
-            self._store.set_member_state(
-                team_id=member.team_id,
-                member_id=member.member_id,
-                state=MemberState.CANCELLED,
-            )
+            await self._cancel_after_execution_task_cancelled(member.team_id)
             raise
         except Exception as exc:  # noqa: BLE001 - isolate one worker from the team.
             return self._finish_exception(prepared, exc)
@@ -219,15 +375,7 @@ class MultiAgentSupervisor:
                 )
             )
         except asyncio.CancelledError:
-            await self._runtime.cancel(
-                task_id=self._task_id(member.team_id, member.member_id),
-                thread_id=member.thread_id,
-            )
-            self._store.set_member_state(
-                team_id=member.team_id,
-                member_id=member.member_id,
-                state=MemberState.CANCELLED,
-            )
+            await self._cancel_after_execution_task_cancelled(member.team_id)
             raise
         except Exception as exc:  # noqa: BLE001 - recovery failure belongs to this child.
             current = self._store.member(member.team_id, member.member_id)
