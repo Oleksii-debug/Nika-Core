@@ -438,9 +438,15 @@ class ProductRepositoryGraph:
         seen: dict[tuple[str, str], str] = {}
         for repository in self.repositories:
             provider = repository.provider.strip().casefold()
-            locator = repository.locator.strip().rstrip("/")
+            locator = repository.locator.strip()
             if provider == "github":
-                locator = locator.casefold()
+                locator = locator.rstrip("/").casefold()
+            elif provider == "local-git":
+                locator = posixpath.normpath(locator.replace("\\", "/"))
+                if locator != "/":
+                    locator = locator.rstrip("/")
+            else:
+                locator = locator.rstrip("/")
             key = (provider, locator)
             previous = seen.get(key)
             if previous is not None and previous != repository.repository_id:
