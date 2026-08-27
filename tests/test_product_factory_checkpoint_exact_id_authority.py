@@ -108,4 +108,8 @@ def test_exact_id_load_accepts_only_current_committed_host_head(tmp_path: Path) 
         match="canonical committed host-task head",
     ):
         restarted.load(first.checkpoint_id, host_task_id=task_id)
-    assert restarted.load(second.checkpoint_id, host_task_id=task_id).checkpoint_id == second.checkpoint_id
+    loaded_after_restart = restarted.load(
+        second.checkpoint_id,
+        host_task_id=task_id,
+    )
+    assert loaded_after_restart.checkpoint_id == second.checkpoint_id
