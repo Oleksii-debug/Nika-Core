@@ -12,6 +12,18 @@
   const tasksEmpty = document.getElementById("tasks-empty");
   const agentsEmpty = document.getElementById("agents-empty");
   const workspacesEmpty = document.getElementById("workspaces-empty");
+  const productProjectEmpty = document.getElementById("product-project-empty");
+  const productProjectSummary = document.getElementById("product-project-summary");
+  const productProjectFields = Object.freeze({
+    title: document.getElementById("product-project-title"),
+    project_id: document.getElementById("product-project-id"),
+    goal: document.getElementById("product-project-goal"),
+    state: document.getElementById("product-project-state"),
+    spec_version: document.getElementById("product-project-spec-version"),
+    blocker_count: document.getElementById("product-project-blocker-count"),
+    status_count: document.getElementById("product-project-status-count"),
+    decision_count: document.getElementById("product-project-decision-count"),
+  });
   let actions = [];
   let actionsReady = false;
   let bridgeInitializationStarted = false;
@@ -81,6 +93,45 @@
     }
   }
 
+  function validProductProject(project) {
+    if (!project || typeof project !== "object" || Array.isArray(project)) return false;
+    const stringFields = ["title", "project_id", "goal", "state"];
+    if (stringFields.some((field) => typeof project[field] !== "string" || !project[field].trim())) {
+      return false;
+    }
+    if (!Number.isInteger(project.spec_version) || project.spec_version < 1) return false;
+    const countFields = ["blocker_count", "status_count", "decision_count"];
+    return countFields.every((field) => Number.isInteger(project[field]) && project[field] >= 0);
+  }
+
+  function clearProductProjectFields() {
+    for (const node of Object.values(productProjectFields)) node.textContent = "";
+  }
+
+  function renderProductProject(project) {
+    if (project == null) {
+      productProjectEmpty.textContent = "Поточний ProductProject не вибрано.";
+      productProjectEmpty.hidden = false;
+      productProjectSummary.hidden = true;
+      clearProductProjectFields();
+      return true;
+    }
+    if (!validProductProject(project)) {
+      productProjectEmpty.textContent = "Стан поточного ProductProject недоступний або пошкоджений.";
+      productProjectEmpty.hidden = false;
+      productProjectSummary.hidden = true;
+      clearProductProjectFields();
+      appendLog("Некоректний bounded ProductProject state відхилено інтерфейсом.");
+      return false;
+    }
+    for (const [field, node] of Object.entries(productProjectFields)) {
+      node.textContent = String(project[field]);
+    }
+    productProjectEmpty.hidden = true;
+    productProjectSummary.hidden = false;
+    return true;
+  }
+
   async function refreshState() {
     if (!globalThis.pywebview?.api?.get_state) return false;
     const response = await globalThis.pywebview.api.get_state();
@@ -92,6 +143,7 @@
     renderItems(tasksList, tasksEmpty, state.tasks || [], (item) => `${item.command || "Без назви"} — ${item.state}`);
     renderItems(agentsList, agentsEmpty, state.agents || [], (item) => `${item.name} — ${item.goal}`);
     renderItems(workspacesList, workspacesEmpty, state.workspaces || [], (item) => `${item.name} — ${item.description || "Без опису"}`);
+    renderProductProject(state.product_project ?? null);
     return true;
   }
 
