@@ -206,8 +206,8 @@ def test_restart_roundtrip_cannot_replay_result_into_other_team_or_task() -> Non
     assert {"team_id", "task_id"}.issubset(restored_fields), (
         "restart-restored assignment has no typed team/task identity to reject replay"
     )
-    assert getattr(restored, "team_id") == _TEAM_A
-    assert getattr(restored, "task_id") == _TASK_A
+    assert restored.team_id == _TEAM_A  # type: ignore[attr-defined]
+    assert restored.task_id == _TASK_A  # type: ignore[attr-defined]
 
     other_team = replace(restored, team_id="team-b")
     with pytest.raises(SourceResultBindingError):
