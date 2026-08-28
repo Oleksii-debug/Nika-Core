@@ -17,7 +17,7 @@ _MAX_REFERENCE = 512
 _HTML_TAG_RE = re.compile(r"<\s*/?\s*[a-zA-Z!][^>]*>")
 _SENSITIVE_RE = re.compile(
     r"(?i)(?:authorization|proxy-authorization|set-cookie|cookie|bearer|"
-    r"api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret|"
+    r"api[_-]?key|token|password|passwd|secret|credential|signature|headers?|"
     r"session[_-]?id)"
 )
 _SAFE_OPAQUE_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,239}\Z")
