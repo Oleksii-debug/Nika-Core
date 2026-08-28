@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 
+from nika_core.kernel.audit import AuditLog
+
 
 class ToolRisk(StrEnum):
     READ_ONLY = "read_only"
@@ -63,7 +65,7 @@ class ToolExecutor:
     def __init__(
         self,
         *,
-        audit_log: object | None = None,
+        audit_log: AuditLog | None = None,
         approval_policy: ApprovalPolicy | None = None,
     ) -> None:
         self._tools: dict[str, tuple[ToolSpec, ToolHandler]] = {}
@@ -103,7 +105,7 @@ class ToolExecutor:
         except asyncio.CancelledError:
             self._audit("tool.cancelled", call, spec, {})
             raise
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - normalize adapter failures at the tool boundary.
             self._audit("tool.failed", call, spec, {"reason": type(exc).__name__})
             return ToolResult(call_id=call.call_id, tool_id=call.tool_id, error="tool failed")
         self._audit("tool.completed", call, spec, {})
