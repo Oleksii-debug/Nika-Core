@@ -408,6 +408,7 @@ class ModelGateway:
             request=request,
             payload={
                 "provider_id": provider_id,
+                "model": request.model or "default",
                 "code": error.code.value,
                 "failure_effect": error.failure_effect.value,
             },
