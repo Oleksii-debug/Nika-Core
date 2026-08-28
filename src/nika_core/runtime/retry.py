@@ -107,7 +107,7 @@ def _parse_utc(value: object, *, field_name: str) -> datetime:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{field_name} must be a timezone-aware ISO timestamp")
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError as exc:
         raise ValueError(f"{field_name} must be a timezone-aware ISO timestamp") from exc
     return _as_utc(parsed, field_name=field_name)
@@ -122,7 +122,7 @@ def _validate_retry_count(value: int, *, field_name: str, minimum: int) -> int:
 
 def _require_bool(value: bool, *, field_name: str) -> bool:
     if not isinstance(value, bool):
-        raise ValueError(f"{field_name} must be a boolean")
+        raise TypeError(f"{field_name} must be a boolean")
     return value
 
 
@@ -130,7 +130,7 @@ def _validate_retry_after(value: float | None) -> float | None:
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError("retry_after_seconds must be a finite non-negative number")
+        raise TypeError("retry_after_seconds must be a finite non-negative number")
     normalized = float(value)
     if not isfinite(normalized) or normalized < 0:
         raise ValueError("retry_after_seconds must be a finite non-negative number")
@@ -151,7 +151,7 @@ class ScriptRetryIntent:
         if not isinstance(self.operation_id, str) or not self.operation_id.strip():
             raise ValueError("operation_id must not be empty")
         if not isinstance(self.condition, ScriptRetryCondition):
-            raise ValueError("condition must be a ScriptRetryCondition")
+            raise TypeError("condition must be a ScriptRetryCondition")
         _validate_retry_count(self.retry_number, field_name="retry_number", minimum=1)
         not_before = _as_utc(self.not_before_utc, field_name="not_before_utc")
         deadline = (
@@ -179,7 +179,7 @@ class ScriptRetryIntent:
     @classmethod
     def from_payload(cls, payload: Mapping[str, object]) -> ScriptRetryIntent:
         if not isinstance(payload, Mapping):
-            raise ValueError("retry intent payload must be a mapping")
+            raise TypeError("retry intent payload must be a mapping")
         expected_keys = {
             "version",
             "operation_id",
@@ -199,17 +199,17 @@ class ScriptRetryIntent:
             raise ValueError("retry intent payload version is unsupported")
         operation_id = payload["operation_id"]
         if not isinstance(operation_id, str):
-            raise ValueError("operation_id must be text")
+            raise TypeError("operation_id must be text")
         condition_value = payload["condition"]
         if not isinstance(condition_value, str):
-            raise ValueError("condition must be text")
+            raise TypeError("condition must be text")
         try:
             condition = ScriptRetryCondition(condition_value)
         except ValueError as exc:
             raise ValueError("retry condition is unsupported") from exc
         retry_number = payload["retry_number"]
         if isinstance(retry_number, bool) or not isinstance(retry_number, int):
-            raise ValueError("retry_number must be a positive integer")
+            raise TypeError("retry_number must be a positive integer")
         deadline_value = payload["deadline_utc"]
         deadline = (
             None
@@ -252,7 +252,7 @@ def plan_script_retry(
 
     _validate_retry_count(retries_used, field_name="retries_used", minimum=0)
     if not isinstance(condition, ScriptRetryCondition):
-        raise ValueError("condition must be a ScriptRetryCondition")
+        raise TypeError("condition must be a ScriptRetryCondition")
     _require_bool(replay_safe, field_name="replay_safe")
     _require_bool(paused, field_name="paused")
     _require_bool(cancelled, field_name="cancelled")
@@ -310,7 +310,7 @@ def evaluate_script_retry_intent(
     """Re-evaluate a durable retry intent after wait or process restart."""
 
     if not isinstance(intent, ScriptRetryIntent):
-        raise ValueError("intent must be a ScriptRetryIntent")
+        raise TypeError("intent must be a ScriptRetryIntent")
     _require_bool(replay_safe, field_name="replay_safe")
     _require_bool(paused, field_name="paused")
     _require_bool(cancelled, field_name="cancelled")
