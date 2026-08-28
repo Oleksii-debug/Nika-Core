@@ -249,7 +249,7 @@ def test_security_canaries_never_escape_raw_html_credentials_headers_or_result_b
         display_name="<script>NAME-CANARY</script>",
         opened=True,
         attempted=True,
-        reason_code="Authorization: Bearer HEADER-CANARY",
+        reason_code="X-Custom-Header: HEADER-CANARY TOKEN-CANARY",
         evidence_ref="Cookie: SID=FACT-CANARY",
     )
     record = _record(
@@ -278,6 +278,7 @@ def test_security_canaries_never_escape_raw_html_credentials_headers_or_result_b
         "HEADER-CANARY",
         "FACT-CANARY",
         "alice",
+        "X-Custom-Header",
         "Authorization",
         "Bearer",
         "<script>",
