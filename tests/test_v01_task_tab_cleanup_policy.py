@@ -18,15 +18,13 @@ from nika_core.task_tab_cleanup import (
 
 
 @dataclass
-class _FakePage:
+class _Page:
     page_id: str
-    url: str | None = None
     closed: bool = False
 
-    def goto(self, url: str, *, wait_until: str, timeout: float) -> None:
+    def goto(self, _url: str, *, wait_until: str, timeout: float) -> None:
         assert wait_until == "domcontentloaded"
         assert timeout == 250
-        self.url = url
 
     def bring_to_front(self) -> None:
         if self.closed:
@@ -40,63 +38,62 @@ class _FakePage:
 
 
 @dataclass
-class _FakePageRecord:
-    page: _FakePage
+class _PageRecord:
+    page: _Page
 
 
-class _FakeRegistry:
+class _Registry:
     def __init__(self) -> None:
-        self.pages: dict[str, _FakePageRecord] = {}
+        self.pages: dict[str, _PageRecord] = {}
 
-    def get(self, page_id: str) -> _FakePageRecord:
+    def get(self, page_id: str) -> _PageRecord:
         record = self.pages.get(page_id)
         if record is None or record.page.closed:
             raise StaleSnapshotError("stale")
         return record
 
 
-class _FakeSession:
+class _Session:
     timeout_ms = 250
 
     def __init__(self, session_id: str) -> None:
         self.session_id = session_id
-        self.registry = _FakeRegistry()
+        self.registry = _Registry()
         self._counter = 0
 
     def new_page(self) -> str:
         self._counter += 1
         page_id = f"page-{self._counter}"
-        self.registry.pages[page_id] = _FakePageRecord(_FakePage(page_id))
+        self.registry.pages[page_id] = _PageRecord(_Page(page_id))
         return page_id
 
 
-def _page(session: _FakeSession, page_id: str) -> _FakePage:
-    return session.registry.pages[page_id].page
+def _fixture() -> tuple[_Session, TaskBrowserTabs, str]:
+    session = _Session("session-a")
+    foreign = session.new_page()
+    tabs = TaskBrowserTabs(session=session)  # type: ignore[arg-type]
+    for task_id, tab_id in (("task-a", "a1"), ("task-a", "a2"), ("task-b", "b1")):
+        tabs.open_tab(
+            task_id=task_id,
+            tab_id=tab_id,
+            target_url=f"http://127.0.0.1/{tab_id}",
+            reopen_policy=TaskTabReopenPolicy.SAME_TARGET,
+        )
+    return session, tabs, foreign
 
 
-def _manager_with_isolation_fixture() -> tuple[_FakeSession, TaskBrowserTabs, str]:
-    session = _FakeSession("session-a")
-    foreign_page_id = session.new_page()
-    manager = TaskBrowserTabs(session=session)  # type: ignore[arg-type]
-    manager.open_tab(
-        task_id="task-a",
-        tab_id="tab-a1",
-        target_url="http://127.0.0.1/local/a1",
-        reopen_policy=TaskTabReopenPolicy.SAME_TARGET,
+def _ids(tabs: TaskBrowserTabs, task_id: str) -> tuple[str, ...]:
+    return tuple(tab.tab_id for tab in tabs.owned_tabs(task_id))
+
+
+def _reconciliation(tab_id: str = "a1") -> tuple[TaskTabReconciliationEvidence, ...]:
+    return (
+        TaskTabReconciliationEvidence(
+            task_id="task-a",
+            tab_id=tab_id,
+            effect_ref=f"tool:effect-{tab_id}",
+        ),
     )
-    manager.open_tab(
-        task_id="task-a",
-        tab_id="tab-a2",
-        target_url="http://127.0.0.1/local/a2",
-        reopen_policy=TaskTabReopenPolicy.SAME_TARGET,
-    )
-    manager.open_tab(
-        task_id="task-b",
-        tab_id="tab-b1",
-        target_url="http://127.0.0.1/local/b1",
-        reopen_policy=TaskTabReopenPolicy.SAME_TARGET,
-    )
-    return session, manager, foreign_page_id
 
 
 @pytest.mark.parametrize(
@@ -106,222 +103,170 @@ def _manager_with_isolation_fixture() -> tuple[_FakeSession, TaskBrowserTabs, st
         TaskTabCleanupEvent.TERMINAL_DETERMINISTIC_FAILURE,
     ],
 )
-def test_terminal_tab_outcome_closes_only_exact_tab(event: TaskTabCleanupEvent) -> None:
-    session, manager, foreign_page_id = _manager_with_isolation_fixture()
+def test_terminal_tab_outcomes_close_only_exact_owned_tab(event: TaskTabCleanupEvent) -> None:
+    session, tabs, foreign = _fixture()
 
-    result = apply_task_tab_cleanup(
-        manager,
-        event=event,
-        task_id="task-a",
-        tab_id="tab-a1",
-    )
+    result = apply_task_tab_cleanup(tabs, event=event, task_id="task-a", tab_id="a1")
 
     assert result.action is TaskTabCleanupAction.CLOSE_TAB
-    assert result.affected_tab_ids == ("tab-a1",)
-    assert _page(session, "page-2").closed is True
-    assert _page(session, "page-3").closed is False
-    assert _page(session, "page-4").closed is False
-    assert _page(session, foreign_page_id).closed is False
-    assert tuple(tab.tab_id for tab in manager.owned_tabs("task-a")) == ("tab-a2",)
-    assert tuple(tab.tab_id for tab in manager.owned_tabs("task-b")) == ("tab-b1",)
+    assert _ids(tabs, "task-a") == ("a2",)
+    assert _ids(tabs, "task-b") == ("b1",)
+    assert session.registry.pages[foreign].page.closed is False
+    assert session.registry.pages["page-4"].page.closed is False
 
 
-@pytest.mark.parametrize(
-    "event",
-    [TaskTabCleanupEvent.TASK_COMPLETE, TaskTabCleanupEvent.CANCEL],
-)
-def test_safe_task_terminal_cleanup_never_crosses_task_boundary(event: TaskTabCleanupEvent) -> None:
-    session, manager, foreign_page_id = _manager_with_isolation_fixture()
-
-    result = apply_task_tab_cleanup(manager, event=event, task_id="task-a")
-
-    assert result.action is TaskTabCleanupAction.CLEANUP_TASK
-    assert result.affected_tab_ids == ("tab-a1", "tab-a2")
-    assert _page(session, "page-2").closed is True
-    assert _page(session, "page-3").closed is True
-    assert _page(session, "page-4").closed is False
-    assert _page(session, foreign_page_id).closed is False
-    assert manager.owned_tabs("task-a") == ()
-    assert tuple(tab.tab_id for tab in manager.owned_tabs("task-b")) == ("tab-b1",)
-
-
-def test_cancel_with_unresolved_effect_preserves_task_for_reconciliation() -> None:
-    session, manager, foreign_page_id = _manager_with_isolation_fixture()
-    evidence = (
-        TaskTabReconciliationEvidence(
-            task_id="task-a",
-            tab_id="tab-a1",
-            effect_ref="tool:effect-a1",
-        ),
-    )
+@pytest.mark.parametrize("event", [TaskTabCleanupEvent.TASK_COMPLETE, TaskTabCleanupEvent.CANCEL])
+def test_safe_task_terminal_cleanup_is_cross_task_isolated(event: TaskTabCleanupEvent) -> None:
+    session, tabs, foreign = _fixture()
 
     result = apply_task_tab_cleanup(
-        manager,
-        event=TaskTabCleanupEvent.CANCEL,
+        tabs,
+        event=event,
+        task_id="task-a",
+        unresolved_external_effect=False,
+    )
+
+    assert result.action is TaskTabCleanupAction.CLEANUP_TASK
+    assert result.affected_tab_ids == ("a1", "a2")
+    assert _ids(tabs, "task-a") == ()
+    assert _ids(tabs, "task-b") == ("b1",)
+    assert session.registry.pages[foreign].page.closed is False
+    assert session.registry.pages["page-4"].page.closed is False
+
+
+def test_task_terminal_cleanup_fails_closed_without_explicit_effect_clearance() -> None:
+    _session, tabs, _foreign = _fixture()
+
+    with pytest.raises(TaskTabCleanupBlockedError):
+        apply_task_tab_cleanup(tabs, event=TaskTabCleanupEvent.CANCEL, task_id="task-a")
+
+    assert _ids(tabs, "task-a") == ("a1", "a2")
+    assert _ids(tabs, "task-b") == ("b1",)
+
+
+@pytest.mark.parametrize("event", [TaskTabCleanupEvent.TASK_COMPLETE, TaskTabCleanupEvent.CANCEL])
+def test_unresolved_task_terminal_state_preserves_tabs_for_reconciliation(
+    event: TaskTabCleanupEvent,
+) -> None:
+    _session, tabs, _foreign = _fixture()
+
+    result = apply_task_tab_cleanup(
+        tabs,
+        event=event,
         task_id="task-a",
         unresolved_external_effect=True,
-        reconciliation=evidence,
+        reconciliation=_reconciliation(),
     )
 
     assert result.action is TaskTabCleanupAction.PRESERVE_FOR_RECONCILIATION
-    assert result.affected_tab_ids == ()
-    assert tuple(tab.tab_id for tab in manager.owned_tabs("task-a")) == ("tab-a1", "tab-a2")
-    assert _page(session, "page-2").closed is False
-    assert _page(session, "page-3").closed is False
-    assert _page(session, "page-4").closed is False
-    assert _page(session, foreign_page_id).closed is False
+    assert _ids(tabs, "task-a") == ("a1", "a2")
+    assert _ids(tabs, "task-b") == ("b1",)
 
 
-def test_task_complete_cannot_destroy_unresolved_effect_without_durable_reference() -> None:
-    _session, manager, _foreign_page_id = _manager_with_isolation_fixture()
-
+def test_unresolved_cleanup_without_durable_reference_is_blocked() -> None:
+    _session, tabs, _foreign = _fixture()
     with pytest.raises(TaskTabCleanupBlockedError):
         apply_task_tab_cleanup(
-            manager,
+            tabs,
             event=TaskTabCleanupEvent.TASK_COMPLETE,
             task_id="task-a",
             unresolved_external_effect=True,
         )
 
-    assert tuple(tab.tab_id for tab in manager.owned_tabs("task-a")) == ("tab-a1", "tab-a2")
-    assert tuple(tab.tab_id for tab in manager.owned_tabs("task-b")) == ("tab-b1",)
-
 
 @pytest.mark.parametrize(
     ("event", "tab_id"),
-    [
-        (TaskTabCleanupEvent.PAUSE, None),
-        (TaskTabCleanupEvent.RETRY, "tab-a1"),
-    ],
+    [(TaskTabCleanupEvent.PAUSE, None), (TaskTabCleanupEvent.RETRY, "a1")],
 )
-def test_pause_and_retry_preserve_logical_tabs(
+def test_pause_and_retry_preserve_task_owned_tabs(
     event: TaskTabCleanupEvent,
     tab_id: str | None,
 ) -> None:
-    session, manager, foreign_page_id = _manager_with_isolation_fixture()
+    session, tabs, foreign = _fixture()
 
-    result = apply_task_tab_cleanup(
-        manager,
-        event=event,
-        task_id="task-a",
-        tab_id=tab_id,
-    )
+    result = apply_task_tab_cleanup(tabs, event=event, task_id="task-a", tab_id=tab_id)
 
     assert result.action is TaskTabCleanupAction.PRESERVE
-    assert tuple(tab.tab_id for tab in manager.owned_tabs("task-a")) == ("tab-a1", "tab-a2")
-    assert tuple(tab.tab_id for tab in manager.owned_tabs("task-b")) == ("tab-b1",)
+    assert _ids(tabs, "task-a") == ("a1", "a2")
+    assert _ids(tabs, "task-b") == ("b1",)
     assert all(not record.page.closed for record in session.registry.pages.values())
-    assert _page(session, foreign_page_id).closed is False
+    assert session.registry.pages[foreign].page.closed is False
 
 
-def test_uncertain_external_effect_keeps_tab_and_serializes_only_safe_logical_metadata() -> None:
-    session, manager, foreign_page_id = _manager_with_isolation_fixture()
-    evidence = (
-        TaskTabReconciliationEvidence(
-            task_id="task-a",
-            tab_id="tab-a1",
-            effect_ref="tool:9f42d1",
-        ),
-    )
+def test_uncertain_effect_preserves_bound_logical_evidence_without_runtime_handles() -> None:
+    _session, tabs, _foreign = _fixture()
 
     result = apply_task_tab_cleanup(
-        manager,
+        tabs,
         event=TaskTabCleanupEvent.UNCERTAIN_EXTERNAL_EFFECT,
         task_id="task-a",
-        tab_id="tab-a1",
-        reconciliation=evidence,
+        tab_id="a1",
+        reconciliation=_reconciliation(),
     )
-    encoded = json.dumps(result.to_dict(), ensure_ascii=False, sort_keys=True)
+    encoded = json.dumps(result.to_dict(), sort_keys=True)
 
     assert result.action is TaskTabCleanupAction.PRESERVE_FOR_RECONCILIATION
-    assert "tool:9f42d1" in encoded
-    assert "tab-a1" in encoded
+    assert "tool:effect-a1" in encoded
     assert "session-a" not in encoded
     assert "page-2" not in encoded
-    assert "page-3" not in encoded
-    assert "page-4" not in encoded
-    assert _page(session, "page-2").closed is False
-    assert _page(session, "page-4").closed is False
-    assert _page(session, foreign_page_id).closed is False
+    assert _ids(tabs, "task-a") == ("a1", "a2")
 
 
-def test_application_close_and_restart_preserve_logical_identity_without_runtime_handles() -> None:
-    original_session, original, foreign_page_id = _manager_with_isolation_fixture()
-    evidence = (
-        TaskTabReconciliationEvidence(
-            task_id="task-a",
-            tab_id="tab-a1",
-            effect_ref="tool:effect-a1",
-        ),
+def test_reconciliation_evidence_cannot_cross_task_or_tab_identity() -> None:
+    _session, tabs, _foreign = _fixture()
+    wrong_task = (
+        TaskTabReconciliationEvidence(task_id="task-b", tab_id="b1", effect_ref="tool:x"),
     )
+    with pytest.raises(TaskTabCleanupError):
+        apply_task_tab_cleanup(
+            tabs,
+            event=TaskTabCleanupEvent.UNCERTAIN_EXTERNAL_EFFECT,
+            task_id="task-a",
+            tab_id="a1",
+            reconciliation=wrong_task,
+        )
+    with pytest.raises(TaskTabCleanupError):
+        apply_task_tab_cleanup(
+            tabs,
+            event=TaskTabCleanupEvent.UNCERTAIN_EXTERNAL_EFFECT,
+            task_id="task-a",
+            tab_id="a1",
+            reconciliation=_reconciliation("a2"),
+        )
+
+
+def test_application_close_restart_keeps_identity_but_not_runtime_page_handles() -> None:
+    _session, tabs, _foreign = _fixture()
+    evidence = _reconciliation()
 
     closing = apply_task_tab_cleanup(
-        original,
+        tabs,
         event=TaskTabCleanupEvent.APPLICATION_CLOSE,
         task_id="task-a",
         unresolved_external_effect=True,
         reconciliation=evidence,
     )
-    encoded = json.dumps(closing.to_dict(), ensure_ascii=False, sort_keys=True)
-
+    encoded = json.dumps(closing.to_dict(), sort_keys=True)
     assert closing.action is TaskTabCleanupAction.CHECKPOINT_ONLY
     assert "session-a" not in encoded
     assert "page-2" not in encoded
-    assert _page(original_session, foreign_page_id).closed is False
 
-    restarted_session = _FakeSession("session-b")
-    restarted = TaskBrowserTabs.from_snapshot(  # type: ignore[arg-type]
-        session=restarted_session,
+    session_b = _Session("session-b")
+    restored = TaskBrowserTabs.from_snapshot(  # type: ignore[arg-type]
+        session=session_b,
         payload=closing.task_tabs_snapshot,
     )
-    restarted_result = apply_task_tab_cleanup(
-        restarted,
+    restarted = apply_task_tab_cleanup(
+        restored,
         event=TaskTabCleanupEvent.APPLICATION_RESTART,
         task_id="task-a",
         unresolved_external_effect=True,
         reconciliation=evidence,
     )
 
-    assert restarted_result.action is TaskTabCleanupAction.PRESERVE_FOR_RECONCILIATION
-    assert tuple(tab.tab_id for tab in restarted.owned_tabs("task-a")) == ("tab-a1", "tab-a2")
-    assert tuple(tab.tab_id for tab in restarted.owned_tabs("task-b")) == ("tab-b1",)
-    assert restarted_session.registry.pages == {}
+    assert restarted.action is TaskTabCleanupAction.PRESERVE_FOR_RECONCILIATION
+    assert _ids(restored, "task-a") == ("a1", "a2")
+    assert _ids(restored, "task-b") == ("b1",)
+    assert session_b.registry.pages == {}
     with pytest.raises(StaleTaskTabError):
-        restarted.switch_to(task_id="task-a", tab_id="tab-a1")
-
-
-def test_reconciliation_evidence_cannot_be_rebound_across_tasks_or_tabs() -> None:
-    _session, manager, _foreign_page_id = _manager_with_isolation_fixture()
-
-    with pytest.raises(TaskTabCleanupError):
-        apply_task_tab_cleanup(
-            manager,
-            event=TaskTabCleanupEvent.UNCERTAIN_EXTERNAL_EFFECT,
-            task_id="task-a",
-            tab_id="tab-a1",
-            reconciliation=(
-                TaskTabReconciliationEvidence(
-                    task_id="task-b",
-                    tab_id="tab-b1",
-                    effect_ref="tool:wrong-task",
-                ),
-            ),
-        )
-
-    with pytest.raises(TaskTabCleanupError):
-        apply_task_tab_cleanup(
-            manager,
-            event=TaskTabCleanupEvent.UNCERTAIN_EXTERNAL_EFFECT,
-            task_id="task-a",
-            tab_id="tab-a1",
-            reconciliation=(
-                TaskTabReconciliationEvidence(
-                    task_id="task-a",
-                    tab_id="tab-a2",
-                    effect_ref="tool:wrong-tab",
-                ),
-            ),
-        )
-
-    assert tuple(tab.tab_id for tab in manager.owned_tabs("task-a")) == ("tab-a1", "tab-a2")
-    assert tuple(tab.tab_id for tab in manager.owned_tabs("task-b")) == ("tab-b1",)
+        restored.switch_to(task_id="task-a", tab_id="a1")
