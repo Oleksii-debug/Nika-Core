@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from platformdirs import user_data_path
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -12,7 +13,7 @@ class AppConfig(BaseSettings):
     schema_version: int = 1
     app_version: str = "0.0.2"
     database_path: Path = Field(
-        default=Path("./data/nika_core.db"),
+        default_factory=lambda: user_data_path("NikaCore", appauthor=False) / "nika_core.db",
         validation_alias=AliasChoices("NIKA_DB_PATH", "NIKA_DATABASE_PATH"),
     )
     log_level: str = "INFO"
@@ -32,6 +33,14 @@ class AppConfig(BaseSettings):
         if value < 1:
             raise ValueError("schema_version must be >= 1")
         return value
+
+    @field_validator("database_path")
+    @classmethod
+    def validate_database_path(cls, value: Path) -> Path:
+        expanded = value.expanduser()
+        if not expanded.is_absolute():
+            raise ValueError("database_path must be absolute")
+        return expanded
 
     @field_validator("log_level")
     @classmethod
