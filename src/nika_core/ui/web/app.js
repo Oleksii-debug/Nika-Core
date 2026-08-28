@@ -24,10 +24,72 @@
     status_count: document.getElementById("product-project-status-count"),
     decision_count: document.getElementById("product-project-decision-count"),
   });
+  const teamTaskEmpty = document.getElementById("team-task-empty");
+  const teamTaskSummary = document.getElementById("team-task-summary");
+  const teamMembersList = document.getElementById("team-members-list");
+  const teamEventsList = document.getElementById("team-events-list");
+  const teamEventsEmpty = document.getElementById("team-events-empty");
+  const teamRosterNote = document.getElementById("team-roster-note");
+  const teamFinalEmpty = document.getElementById("team-final-empty");
+  const teamFinalSummary = document.getElementById("team-final-summary");
+  const teamTaskFields = Object.freeze({
+    task_id: document.getElementById("team-task-id"),
+    command: document.getElementById("team-task-command"),
+    task_state: document.getElementById("team-task-state"),
+    team_id: document.getElementById("team-id"),
+    team_state: document.getElementById("team-state"),
+    roster_count: document.getElementById("team-roster-count"),
+  });
+  const teamFinalFields = Object.freeze({
+    status: document.getElementById("team-final-status"),
+    text: document.getElementById("team-final-text"),
+    task_id: document.getElementById("team-final-task-id"),
+    team_id: document.getElementById("team-final-team-id"),
+  });
   const productProjectUnavailableMessage = "Стан поточного ProductProject недоступний.";
+  const teamTaskUnavailableMessage = "Стан командного завдання недоступний.";
+  const teamRoleLabels = Object.freeze({
+    supervisor: "Координатор",
+    worker: "Виконавець",
+    checker: "Перевіряльник",
+  });
+  const allowedMemberStates = new Set([
+    "spawned",
+    "running",
+    "waiting_approval",
+    "completed",
+    "failed",
+    "cancelled",
+  ]);
+  const allowedTeamStates = new Set(["active", "completed", "failed", "cancelled"]);
+  const allowedOperations = new Set([
+    "Очікує підтвердження.",
+    "Роботу завершено.",
+    "Роботу завершено з помилкою.",
+    "Роботу скасовано.",
+    "Очікує запуску.",
+    "Координує командне завдання.",
+    "Перевіряє результат виконавця.",
+    "Виконує командне завдання.",
+  ]);
+  const eventMessages = Object.freeze({
+    "worker.assigned": "Завдання передано виконавцю.",
+    "checker.assigned": "Перевірку передано перевіряльнику.",
+    "worker.result": "Виконавець зберіг результат операції.",
+    "checker.result": "Перевіряльник зберіг результат операції.",
+    "worker.error": "Виконавець завершив операцію з помилкою.",
+    "checker.error": "Перевіряльник завершив операцію з помилкою.",
+  });
+  const finalMessages = Object.freeze({
+    completed: "Командне завдання завершено; збережені результати учасників доступні.",
+    failed: "Командне завдання завершено з помилкою; доступний безпечний стан учасників.",
+    cancelled: "Командне завдання скасовано; збережений стан доступний після перезапуску.",
+  });
   let actions = [];
   let actionsReady = false;
   let bridgeInitializationStarted = false;
+  let statePollHandle = null;
+  let teamStateSignature = null;
 
   function announce(message, assertive = false) {
     statusNode.setAttribute("aria-live", assertive ? "assertive" : "polite");
@@ -118,6 +180,7 @@
 
   function reportStateUnavailable() {
     renderProductProjectUnavailable(productProjectUnavailableMessage);
+    renderTeamTaskUnavailable();
     announce(productProjectUnavailableMessage, true);
     appendLog(productProjectUnavailableMessage);
   }
@@ -145,7 +208,231 @@
     return true;
   }
 
-  async function refreshState() {
+  function clearTeamTaskFields() {
+    for (const node of Object.values(teamTaskFields)) node.textContent = "";
+    for (const node of Object.values(teamFinalFields)) node.textContent = "";
+    teamMembersList.replaceChildren();
+    teamEventsList.replaceChildren();
+    teamRosterNote.textContent = "";
+    teamEventsEmpty.hidden = false;
+    teamFinalEmpty.hidden = false;
+    teamFinalSummary.hidden = true;
+  }
+
+  function renderTeamTaskUnavailable() {
+    teamTaskEmpty.textContent = teamTaskUnavailableMessage;
+    teamTaskEmpty.hidden = false;
+    teamTaskSummary.hidden = true;
+    clearTeamTaskFields();
+    teamStateSignature = "unavailable";
+  }
+
+  function validTeamMember(member) {
+    if (!member || typeof member !== "object" || Array.isArray(member)) return false;
+    if (
+      typeof member.member_id !== "string"
+      || !member.member_id.trim()
+      || !(member.role in teamRoleLabels)
+      || !allowedMemberStates.has(member.state)
+      || !allowedOperations.has(member.current_operation)
+    ) {
+      return false;
+    }
+    if (member.safe_error == null) return true;
+    return (
+      typeof member.safe_error === "object"
+      && !Array.isArray(member.safe_error)
+      && member.safe_error.code === "member_failed"
+    );
+  }
+
+  function validTeamEvent(event) {
+    return Boolean(
+      event
+      && typeof event === "object"
+      && !Array.isArray(event)
+      && typeof event.code === "string"
+      && Object.prototype.hasOwnProperty.call(eventMessages, event.code)
+      && typeof event.time === "string"
+      && event.time.trim(),
+    );
+  }
+
+  function validFinalResult(result, taskId, teamId) {
+    if (result == null) return true;
+    return Boolean(
+      result
+      && typeof result === "object"
+      && !Array.isArray(result)
+      && Object.prototype.hasOwnProperty.call(finalMessages, result.status)
+      && result.task_id === taskId
+      && result.team_id === teamId
+      && Number.isInteger(result.terminal_member_count)
+      && result.terminal_member_count >= 0
+      && Number.isInteger(result.result_record_count)
+      && result.result_record_count >= 0,
+    );
+  }
+
+  function validTeamTaskProjection(projection) {
+    if (!projection || typeof projection !== "object" || Array.isArray(projection)) return false;
+    if (projection.available !== true) return false;
+    const { task, team, members, events, final_result: finalResult } = projection;
+    if (
+      !task
+      || typeof task !== "object"
+      || Array.isArray(task)
+      || typeof task.task_id !== "string"
+      || !task.task_id.trim()
+      || typeof task.state !== "string"
+      || !task.state.trim()
+      || (task.command != null && (typeof task.command !== "string" || !task.command.trim()))
+    ) {
+      return false;
+    }
+    if (
+      !team
+      || typeof team !== "object"
+      || Array.isArray(team)
+      || typeof team.team_id !== "string"
+      || !team.team_id.trim()
+      || !allowedTeamStates.has(team.state)
+      || !Number.isInteger(team.member_count)
+      || team.member_count < 2
+      || team.member_count > 3
+      || team.expected_member_count !== 3
+      || typeof team.roster_complete !== "boolean"
+      || team.roster_complete !== (team.member_count === 3)
+    ) {
+      return false;
+    }
+    if (!Array.isArray(members) || members.length !== team.member_count || !members.every(validTeamMember)) {
+      return false;
+    }
+    const roles = members.map((member) => member.role);
+    if (new Set(roles).size !== roles.length || !roles.includes("supervisor") || !roles.includes("worker")) {
+      return false;
+    }
+    if ((team.roster_complete && !roles.includes("checker")) || (!team.roster_complete && roles.includes("checker"))) {
+      return false;
+    }
+    if (!Array.isArray(events) || !events.every(validTeamEvent)) return false;
+    return validFinalResult(finalResult, task.task_id, team.team_id);
+  }
+
+  function appendDefinitionItem(list, term, value) {
+    const dt = document.createElement("dt");
+    dt.textContent = term;
+    const dd = document.createElement("dd");
+    dd.textContent = value;
+    list.append(dt, dd);
+  }
+
+  function renderTeamMember(member) {
+    const item = document.createElement("li");
+    const heading = document.createElement("h4");
+    heading.textContent = teamRoleLabels[member.role];
+    const details = document.createElement("dl");
+    appendDefinitionItem(details, "Стан", member.state);
+    appendDefinitionItem(details, "Поточна операція", member.current_operation);
+    item.append(heading, details);
+    if (member.safe_error?.code === "member_failed") {
+      const error = document.createElement("p");
+      error.textContent = "Виконання учасника завершилося помилкою.";
+      item.appendChild(error);
+    }
+    return item;
+  }
+
+  function teamProjectionSignature(projection) {
+    if (projection == null) return "none";
+    return JSON.stringify({
+      task_id: projection.task.task_id,
+      team_id: projection.team.team_id,
+      team_state: projection.team.state,
+      roster_complete: projection.team.roster_complete,
+      members: projection.members.map((member) => [
+        member.member_id,
+        member.role,
+        member.state,
+        member.safe_error?.code || null,
+      ]),
+      events: projection.events.map((event) => [event.code, event.time]),
+      final_status: projection.final_result?.status || null,
+    });
+  }
+
+  function renderTeamTask(projection) {
+    if (projection == null) {
+      const nextSignature = "none";
+      const changed = teamStateSignature !== null && teamStateSignature !== nextSignature;
+      teamStateSignature = nextSignature;
+      teamTaskEmpty.textContent = "Реального командного завдання ще немає.";
+      teamTaskEmpty.hidden = false;
+      teamTaskSummary.hidden = true;
+      clearTeamTaskFields();
+      return { ok: true, changed };
+    }
+    if (
+      projection
+      && typeof projection === "object"
+      && !Array.isArray(projection)
+      && projection.available === false
+    ) {
+      const changed = teamStateSignature !== null && teamStateSignature !== "unavailable";
+      renderTeamTaskUnavailable();
+      return { ok: true, changed };
+    }
+    if (!validTeamTaskProjection(projection)) {
+      renderTeamTaskUnavailable();
+      appendLog("Некоректний bounded team state відхилено інтерфейсом.");
+      return { ok: false, changed: false };
+    }
+
+    const nextSignature = teamProjectionSignature(projection);
+    const changed = teamStateSignature !== null && teamStateSignature !== nextSignature;
+    teamStateSignature = nextSignature;
+    const { task, team, members, events, final_result: finalResult } = projection;
+    teamTaskFields.task_id.textContent = task.task_id;
+    teamTaskFields.command.textContent = task.command || "Команда не збережена у bounded projection.";
+    teamTaskFields.task_state.textContent = task.state;
+    teamTaskFields.team_id.textContent = team.team_id;
+    teamTaskFields.team_state.textContent = team.state;
+    teamTaskFields.roster_count.textContent = `${team.member_count} з ${team.expected_member_count}`;
+    teamRosterNote.textContent = team.roster_complete
+      ? "Усі три реальні учасники підтверджені durable state."
+      : `Підтверджено ${team.member_count} з ${team.expected_member_count} реальних учасників; відсутня роль не підставляється.`;
+
+    teamMembersList.replaceChildren();
+    for (const member of members) teamMembersList.appendChild(renderTeamMember(member));
+
+    teamEventsList.replaceChildren();
+    for (const event of events) {
+      const item = document.createElement("li");
+      item.textContent = `${event.time}: ${eventMessages[event.code]}`;
+      teamEventsList.appendChild(item);
+    }
+    teamEventsEmpty.hidden = events.length > 0;
+
+    if (finalResult == null) {
+      teamFinalEmpty.hidden = false;
+      teamFinalSummary.hidden = true;
+      for (const node of Object.values(teamFinalFields)) node.textContent = "";
+    } else {
+      teamFinalFields.status.textContent = finalResult.status;
+      teamFinalFields.text.textContent = finalMessages[finalResult.status];
+      teamFinalFields.task_id.textContent = finalResult.task_id;
+      teamFinalFields.team_id.textContent = finalResult.team_id;
+      teamFinalEmpty.hidden = true;
+      teamFinalSummary.hidden = false;
+    }
+
+    teamTaskEmpty.hidden = true;
+    teamTaskSummary.hidden = false;
+    return { ok: true, changed };
+  }
+
+  async function refreshState({ announceTeamTransitions = true } = {}) {
     if (!globalThis.pywebview?.api?.get_state) {
       reportStateUnavailable();
       return false;
@@ -165,7 +452,16 @@
     renderItems(tasksList, tasksEmpty, state.tasks || [], (item) => `${item.command || "Без назви"} — ${item.state}`);
     renderItems(agentsList, agentsEmpty, state.agents || [], (item) => `${item.name} — ${item.goal}`);
     renderItems(workspacesList, workspacesEmpty, state.workspaces || [], (item) => `${item.name} — ${item.description || "Без опису"}`);
-    renderProductProject(state.product_project ?? null);
+    const productReady = renderProductProject(state.product_project ?? null);
+    const teamRender = renderTeamTask(state.v01_team_task ?? null);
+    if (!teamRender.ok) {
+      announce(teamTaskUnavailableMessage, true);
+      return false;
+    }
+    if (!productReady) return false;
+    if (announceTeamTransitions && teamRender.changed) {
+      announce("Стан командного завдання оновлено.");
+    }
     return true;
   }
 
@@ -180,7 +476,8 @@
     const failed = result.status === "failed" || result.status === "rejected";
     announce(result.message || (result.status === "completed" ? "Виконано." : result.status), failed);
     appendLog(result.message);
-    await refreshState();
+    const stateReady = await refreshState();
+    document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
     const focusId = result.focus_id || (failed ? trigger?.dataset?.errorFocusTarget : trigger?.dataset?.focusTarget);
     if (focusId) focusElementById(focusId);
     else trigger?.focus?.();
@@ -252,6 +549,15 @@
     return true;
   }
 
+  function startStatePolling() {
+    if (statePollHandle !== null || typeof window.setInterval !== "function") return;
+    statePollHandle = window.setInterval(async () => {
+      if (document.hidden) return;
+      const ready = await refreshState();
+      document.documentElement.dataset.nikaReady = ready ? "true" : "false";
+    }, 1500);
+  }
+
   async function initializeBridge() {
     if (bridgeInitializationStarted) return;
     bridgeInitializationStarted = true;
@@ -259,17 +565,29 @@
     try {
       const ready = await refreshKeymap();
       if (!ready) throw new Error("Action Registry bridge unavailable");
-      const stateReady = await refreshState();
-      if (!stateReady) throw new Error("Desktop state bridge unavailable");
-      document.documentElement.dataset.nikaReady = "true";
-      announce("Nika Core готова до роботи.");
     } catch {
       actionsReady = false;
       bridgeInitializationStarted = false;
       document.documentElement.dataset.nikaReady = "false";
       announce("Не вдалося завантажити команди Nika Core.", true);
       appendLog("Не вдалося ініціалізувати міст Nika Core.");
+      return;
     }
+
+    let stateReady = false;
+    try {
+      stateReady = await refreshState({ announceTeamTransitions: false });
+    } catch {
+      reportStateUnavailable();
+    }
+    if (!stateReady) {
+      bridgeInitializationStarted = false;
+      document.documentElement.dataset.nikaReady = "false";
+      return;
+    }
+    document.documentElement.dataset.nikaReady = "true";
+    announce("Nika Core готова до роботи.");
+    startStatePolling();
   }
 
   document.getElementById("keymap-export").addEventListener("click", async () => {
@@ -305,6 +623,12 @@
     void dispatch(action.action_id, event.target instanceof HTMLElement ? event.target : null);
   });
 
+  window.addEventListener("beforeunload", () => {
+    if (statePollHandle !== null && typeof window.clearInterval === "function") {
+      window.clearInterval(statePollHandle);
+      statePollHandle = null;
+    }
+  });
   window.addEventListener("pywebviewready", () => { void initializeBridge(); });
   if (globalThis.pywebview?.api) void initializeBridge();
 })();

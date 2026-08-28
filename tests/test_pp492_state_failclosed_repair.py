@@ -35,7 +35,7 @@ def test_state_failure_hides_stale_product_project_projection() -> None:
     )
     refresh = _between(
         source,
-        "async function refreshState() {",
+        "async function refreshState(",
         "async function dispatch(actionId, trigger = null) {",
     )
 
@@ -55,7 +55,7 @@ def test_state_failure_does_not_echo_raw_backend_diagnostics() -> None:
     source = _source()
     refresh = _between(
         source,
-        "async function refreshState() {",
+        "async function refreshState(",
         "async function dispatch(actionId, trigger = null) {",
     )
 
@@ -65,7 +65,7 @@ def test_state_failure_does_not_echo_raw_backend_diagnostics() -> None:
     assert "announce(response.message" not in refresh
 
 
-def test_initialization_requires_a_successful_initial_state_snapshot() -> None:
+def test_initialization_preserves_truthful_state_failure_status() -> None:
     source = _source()
     initialize = _between(
         source,
@@ -73,13 +73,15 @@ def test_initialization_requires_a_successful_initial_state_snapshot() -> None:
         'document.getElementById("keymap-export")',
     )
 
-    state_refresh = "const stateReady = await refreshState();"
-    state_guard = 'if (!stateReady) throw new Error("Desktop state bridge unavailable");'
+    state_refresh = "stateReady = await refreshState({ announceTeamTransitions: false });"
+    state_guard = "if (!stateReady) {"
     ready_marker = 'document.documentElement.dataset.nikaReady = "true";'
     assert state_refresh in initialize
     assert state_guard in initialize
     assert initialize.index(state_refresh) < initialize.index(state_guard)
     assert initialize.index(state_guard) < initialize.index(ready_marker)
+    assert 'throw new Error("Desktop state bridge unavailable")' not in initialize
+    assert 'announce("Не вдалося завантажити команди Nika Core.", true);' in initialize
     assert "error.message" not in initialize
     assert "String(error)" not in initialize
 
