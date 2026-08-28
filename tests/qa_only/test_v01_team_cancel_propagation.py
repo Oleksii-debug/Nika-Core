@@ -335,6 +335,63 @@ def test_cancel_retains_completed_evidence_and_leaves_unrelated_team_untouched(
     assert all(not task_id.startswith("team:team-2:") for task_id, _ in runtime.cancelled)
 
 
+def test_late_completion_callback_cannot_revoke_pre_cancel_completed_evidence(
+    tmp_path: Path,
+) -> None:
+    sqlite, store = _make_store(tmp_path)
+    definitions = _definitions(sqlite)
+    _create_team(store, team_id="team-1")
+    completed = store.spawn_child(
+        team_id="team-1",
+        parent_id="root",
+        child_id="worker-done",
+        agent_id="worker",
+        agent_version=1,
+        thread_id="thread:team-1:worker-done",
+        requested_grants=(),
+    )
+    store.prepare_member_execution(
+        team_id="team-1",
+        member_id=completed.member_id,
+        resume_token="resume:done",
+    )
+    store.finish_member_execution(
+        team_id="team-1",
+        member_id=completed.member_id,
+        state=MemberState.COMPLETED,
+        outcome=RuntimeOutcome.COMPLETED.value,
+        payload={"evidence": "canonical"},
+    )
+    _spawn_running_child(store, team_id="team-1", member_id="worker-active")
+
+    supervisor = MultiAgentSupervisor(
+        runtime=_ImmediateRuntime(),
+        store=store,
+        definitions=definitions,
+    )
+    asyncio.run(supervisor.cancel_team("team-1"))
+
+    store.finish_member_execution(
+        team_id="team-1",
+        member_id="worker-done",
+        state=MemberState.COMPLETED,
+        outcome=RuntimeOutcome.COMPLETED.value,
+        payload={"evidence": "late-duplicate"},
+    )
+
+    with sqlite.connection() as conn:
+        rows = conn.execute(
+            "SELECT outcome, payload_json FROM multi_agent_results "
+            "WHERE team_id = ? AND member_id = ? ORDER BY result_id",
+            ("team-1", "worker-done"),
+        ).fetchall()
+
+    assert store.member("team-1", "worker-done").state is MemberState.COMPLETED
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == RuntimeOutcome.COMPLETED.value
+    assert json.loads(rows[0]["payload_json"]) == {"evidence": "canonical"}
+
+
 def test_cancel_persists_a_visible_terminal_reason(tmp_path: Path) -> None:
     sqlite, store = _make_store(tmp_path)
     definitions = _definitions(sqlite)
