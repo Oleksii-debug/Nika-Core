@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -57,20 +58,37 @@ def _date_job(*, job_id: str, action_id: str, task_id: str, run_at: datetime) ->
     )
 
 
+def _is_due_date_job(job: ScheduledJob, *, now: datetime) -> bool:
+    if job.trigger_kind is not TriggerKind.DATE:
+        return False
+    run_at = datetime.fromisoformat(str(job.trigger["run_date"]))
+    if run_at.tzinfo is None:
+        run_at = run_at.replace(tzinfo=UTC)
+    return run_at <= now
+
+
 def _run_due_date_jobs(
     adapter: APSchedulerAdapter,
     jobs: ScheduledJobStore,
     *,
     now: datetime,
+    task_id: str | None = None,
 ) -> None:
     for job in jobs.list_enabled():
-        if job.trigger_kind is not TriggerKind.DATE:
+        if task_id is not None and job.payload.get("task_id") != task_id:
             continue
-        run_at = datetime.fromisoformat(str(job.trigger["run_date"]))
-        if run_at.tzinfo is None:
-            run_at = run_at.replace(tzinfo=UTC)
-        if run_at <= now:
+        if _is_due_date_job(job, now=now):
             adapter._dispatch(job.job_id)
+
+
+def _job_ids_for_task(store: SQLiteStore, *, task_id: str) -> set[str]:
+    with store.connection() as conn:
+        rows = conn.execute("SELECT job_id, payload_json FROM scheduled_jobs").fetchall()
+    return {
+        str(row["job_id"])
+        for row in rows
+        if json.loads(row["payload_json"]).get("task_id") == task_id
+    }
 
 
 def test_cancelled_future_operation_never_fires_after_restart(tmp_path) -> None:
@@ -151,10 +169,8 @@ def test_cancelled_future_operation_never_fires_after_restart(tmp_path) -> None:
     _run_due_date_jobs(restarted_adapter, restarted_jobs, now=clock.now)
     first_restart_calls = dict(calls)
     state_after_first_restart = restarted_queue.get(cancelled_task_id).state
-    cancelled_row_after_first_restart = restarted_jobs.get(cancelled_job_id)
-    cancelled_executable_after_first_restart = bool(
-        cancelled_row_after_first_restart and cancelled_row_after_first_restart.enabled
-    )
+    first_cancelled_job_ids = _job_ids_for_task(restarted_store, task_id=cancelled_task_id)
+    replacement_ids_after_first_restart = first_cancelled_job_ids - {cancelled_job_id}
     restarted_adapter.shutdown(wait=False)
 
     repeated_store = SQLiteStore(db_path)
@@ -165,29 +181,36 @@ def test_cancelled_future_operation_never_fires_after_restart(tmp_path) -> None:
     repeated_adapter.start()
 
     repeated_rehydrated_cancelled = repeated_adapter.has_runtime_job(cancelled_job_id)
-    repeated_cancelled_row = repeated_jobs.get(cancelled_job_id)
-    if repeated_cancelled_row is not None and repeated_cancelled_row.enabled:
-        repeated_adapter._dispatch(cancelled_job_id)
+    _run_due_date_jobs(
+        repeated_adapter,
+        repeated_jobs,
+        now=clock.now,
+        task_id=cancelled_task_id,
+    )
     repeated_restart_calls = dict(calls)
     state_after_repeated_restart = repeated_queue.get(cancelled_task_id).state
+    repeated_cancelled_job_ids = _job_ids_for_task(repeated_store, task_id=cancelled_task_id)
+    replacement_ids_after_repeated_restart = repeated_cancelled_job_ids - {cancelled_job_id}
     repeated_adapter.shutdown(wait=False)
 
     actual = {
-        "first_rehydrated_cancelled": first_rehydrated_cancelled,
         "first_restart_calls": first_restart_calls,
         "state_after_first_restart": state_after_first_restart,
-        "cancelled_executable_after_first_restart": cancelled_executable_after_first_restart,
-        "repeated_rehydrated_cancelled": repeated_rehydrated_cancelled,
+        "replacement_ids_after_first_restart": replacement_ids_after_first_restart,
         "repeated_restart_calls": repeated_restart_calls,
         "state_after_repeated_restart": state_after_repeated_restart,
+        "replacement_ids_after_repeated_restart": replacement_ids_after_repeated_restart,
     }
     expected = {
-        "first_rehydrated_cancelled": False,
         "first_restart_calls": {"cancelled": 0, "unrelated": 1},
         "state_after_first_restart": TaskState.CANCELLED,
-        "cancelled_executable_after_first_restart": False,
-        "repeated_rehydrated_cancelled": False,
+        "replacement_ids_after_first_restart": set(),
         "repeated_restart_calls": {"cancelled": 0, "unrelated": 1},
         "state_after_repeated_restart": TaskState.CANCELLED,
+        "replacement_ids_after_repeated_restart": set(),
     }
-    assert actual == expected
+    diagnostics = {
+        "first_rehydrated_cancelled": first_rehydrated_cancelled,
+        "repeated_rehydrated_cancelled": repeated_rehydrated_cancelled,
+    }
+    assert actual == expected, diagnostics
