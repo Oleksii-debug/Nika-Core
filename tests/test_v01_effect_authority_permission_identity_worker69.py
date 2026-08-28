@@ -1,3 +1,14 @@
+"""QA_ONLY Worker69 oracle for V01-B06.
+
+This file deliberately does not patch the production authority or effect contracts.
+It proves whether durable completed-effect evidence can be mistaken for current
+permission after canonical authority changes.
+
+Target/action-intent substitution is already owned by QA PR #582 and is not
+duplicated here. This oracle covers the materially distinct project/permission
+authority identity carried by the Product Factory trusted plan.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -23,18 +34,6 @@ from nika_core.security.policy import (
     authorize_action,
 )
 from nika_core.tools import ToolCall, ToolEffectGuard, ToolExecutor, ToolRisk, ToolSpec
-
-
-"""QA_ONLY Worker69 oracle for V01-B06.
-
-This file deliberately does not patch the production authority or effect contracts.
-It proves whether durable completed-effect evidence can be mistaken for current
-permission after canonical authority changes.
-
-Target/action-intent substitution is already owned by QA PR #582 and is not
-duplicated here. This oracle covers the materially distinct project/permission
-authority identity carried by the Product Factory trusted plan.
-"""
 
 
 def _guard(path: Path, task_id: str) -> ToolEffectGuard:
@@ -226,6 +225,26 @@ def test_completed_effect_does_not_cross_trusted_authority_identity(
         "does not bind project_id/permission_ceiling/trusted_plan_fingerprint"
     )
     assert calls == 1
+
+
+def test_user_or_principal_scope_is_representable_at_effect_authority_boundary() -> None:
+    """A user/principal swap must be representable so it can be rejected deterministically."""
+    boundary_fields = (
+        set(ActionIntent.__dataclass_fields__)
+        | set(ApprovalEvidence.__dataclass_fields__)
+        | set(ToolCall.__dataclass_fields__)
+    )
+    identity_tokens = ("user", "principal", "subject", "actor", "authority")
+    represented = {
+        name
+        for name in boundary_fields
+        if any(token in name.casefold() for token in identity_tokens)
+    }
+
+    assert represented, (
+        "REAL_DEFECT: approval/effect boundary has no explicit user/principal/subject "
+        "or canonical authority identity, so user substitution cannot be bound or rejected"
+    )
 
 
 def test_exact_historical_effect_identity_replays_without_duplicate_effect(
