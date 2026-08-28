@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier, Event, Lock
 
@@ -73,11 +73,15 @@ def _call(task_id: str, *, value: str) -> ToolCall:
 
 def _execute_after_barrier(
     start: Barrier,
+    completed: Event,
     executor: ToolExecutor,
     call: ToolCall,
 ):
     start.wait(timeout=_WAIT_SECONDS)
-    return asyncio.run(executor.execute(call))
+    try:
+        return asyncio.run(executor.execute(call))
+    finally:
+        completed.set()
 
 
 def test_two_independent_executors_have_one_canonical_effect_owner_and_restart_replay(
@@ -96,22 +100,20 @@ def test_two_independent_executors_have_one_canonical_effect_owner_and_restart_r
         second.register(_spec(), handler)
         call = _call(task_id, value="same")
         start = Barrier(3)
+        first_completed = Event()
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             futures = [
-                pool.submit(_execute_after_barrier, start, first, call),
-                pool.submit(_execute_after_barrier, start, second, call),
+                pool.submit(_execute_after_barrier, start, first_completed, first, call),
+                pool.submit(_execute_after_barrier, start, first_completed, second, call),
             ]
             start.wait(timeout=_WAIT_SECONDS)
             assert handler.started.wait(timeout=_WAIT_SECONDS)
+            assert first_completed.wait(timeout=_WAIT_SECONDS)
 
-            done, _pending = wait(
-                futures,
-                timeout=_WAIT_SECONDS,
-                return_when=FIRST_COMPLETED,
-            )
+            done = [future for future in futures if future.done()]
             assert len(done) == 1
-            blocked = next(iter(done)).result(timeout=_WAIT_SECONDS)
+            blocked = done[0].result(timeout=_WAIT_SECONDS)
             assert not blocked.ok
             assert blocked.error == "tool effect not safe to execute"
             assert handler.calls == 1
@@ -155,21 +157,19 @@ def test_conflicting_argument_race_never_creates_second_owner_and_restart_preser
         call_x = _call(task_id, value="X")
         call_y = _call(task_id, value="Y")
         start = Barrier(3)
+        first_completed = Event()
 
         with ThreadPoolExecutor(max_workers=2) as pool:
-            future_x = pool.submit(_execute_after_barrier, start, first, call_x)
-            future_y = pool.submit(_execute_after_barrier, start, second, call_y)
+            future_x = pool.submit(_execute_after_barrier, start, first_completed, first, call_x)
+            future_y = pool.submit(_execute_after_barrier, start, first_completed, second, call_y)
             futures = [future_x, future_y]
             start.wait(timeout=_WAIT_SECONDS)
             assert handler.started.wait(timeout=_WAIT_SECONDS)
+            assert first_completed.wait(timeout=_WAIT_SECONDS)
 
-            done, _pending = wait(
-                futures,
-                timeout=_WAIT_SECONDS,
-                return_when=FIRST_COMPLETED,
-            )
+            done = [future for future in futures if future.done()]
             assert len(done) == 1
-            blocked = next(iter(done)).result(timeout=_WAIT_SECONDS)
+            blocked = done[0].result(timeout=_WAIT_SECONDS)
             assert not blocked.ok
             assert blocked.error == "tool effect not safe to execute"
             assert handler.calls == 1
