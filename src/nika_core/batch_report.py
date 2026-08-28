@@ -22,6 +22,7 @@ _SENSITIVE_RE = re.compile(
 )
 _SAFE_OPAQUE_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,239}\Z")
 _ALLOWED_REF_PREFIXES = ("artifact:", "evidence:", "record:", "result:", "sha256:")
+_BATCH_EFFECT_OPERATION_TYPE = "v01.batch_target_effect"
 
 
 class BatchReportProjectionError(RuntimeError):
@@ -395,6 +396,8 @@ def _validate_effect_record(
         raise BatchReportProjectionError("effect evidence operation key mismatch")
     if record.task_id != task_id:
         raise BatchReportProjectionError("effect evidence task identity mismatch")
+    if record.operation_type != _BATCH_EFFECT_OPERATION_TYPE:
+        raise BatchReportProjectionError("effect evidence operation type mismatch")
     if record.input_fingerprint != input_fingerprint:
         raise BatchReportProjectionError("effect evidence input fingerprint mismatch")
     _parse_timestamp(record.created_at)
