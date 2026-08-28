@@ -4,14 +4,14 @@ import subprocess
 import sys
 import textwrap
 
-import nika_core.data.sqlite as data_sqlite
-import nika_core.kernel.audit as kernel_audit
-import nika_core.kernel.task_queue as kernel_task_queue
-import nika_core.runtime.idempotency as runtime_idempotency
-import nika_core.runtime.recovery as runtime_recovery
-import nika_core.runtime.registry as runtime_registry
-import nika_core.runtime.session_store as runtime_session_store
-import nika_core.tools as tools
+from nika_core import tools
+from nika_core.data import sqlite as data_sqlite
+from nika_core.kernel import audit as kernel_audit
+from nika_core.kernel import task_queue as kernel_task_queue
+from nika_core.runtime import idempotency as runtime_idempotency
+from nika_core.runtime import recovery as runtime_recovery
+from nika_core.runtime import registry as runtime_registry
+from nika_core.runtime import session_store as runtime_session_store
 
 
 _CHILD = textwrap.dedent(
