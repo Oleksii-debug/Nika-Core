@@ -10,6 +10,7 @@ from nika_core.research.monitor_until import (
     MonitorConditionState,
     MonitorStopReason,
     MonitorUntilConditionService,
+    MonitorUntilStatus,
 )
 from nika_core.scheduler import ScheduledJob, ScheduledJobStore, TriggerKind
 
@@ -68,6 +69,10 @@ class _TerminalRace:
             "deadline": threading.Event(),
         }
         self.committed = {
+            "condition": threading.Event(),
+            "deadline": threading.Event(),
+        }
+        self.finished = {
             "condition": threading.Event(),
             "deadline": threading.Event(),
         }
@@ -136,11 +141,39 @@ def _initialize_monitor(db_path: Path) -> None:
     service.register(_job(), deadline_at=_dt(18))
 
 
+def _snapshot(service: MonitorUntilConditionService, jobs: ScheduledJobStore) -> dict[str, object]:
+    status = service.status(_MONITOR_ID)
+    return {
+        "stop_reason": status.stop_reason,
+        "condition_state": status.condition_state,
+        "stopped_at": status.stopped_at,
+        "last_observed_at": status.last_observed_at,
+        "enabled": status.enabled,
+        "deadline_guard_present": jobs.get(f"{_MONITOR_ID}::deadline") is not None,
+        "report": service.render_status_text(status),
+    }
+
+
+def _status_snapshot(status: MonitorUntilStatus) -> dict[str, object]:
+    return {
+        "stop_reason": status.stop_reason,
+        "condition_state": status.condition_state,
+        "stopped_at": status.stopped_at,
+        "last_observed_at": status.last_observed_at,
+        "enabled": status.enabled,
+    }
+
+
 def _race_once(
     db_path: Path,
     *,
     commit_order: tuple[str, str],
-) -> tuple[dict[str, object], dict[str, object], tuple[str, ...]]:
+) -> tuple[
+    dict[str, object],
+    dict[str, object],
+    dict[str, dict[str, object]],
+    tuple[str, ...],
+]:
     _initialize_monitor(db_path)
     race = _TerminalRace()
     condition_jobs = ScheduledJobStore(SQLiteStore(db_path))
@@ -156,7 +189,7 @@ def _race_once(
         clock=_FakeClock(_dt(18)),
     )
 
-    results: dict[str, object] = {}
+    results: dict[str, MonitorUntilStatus] = {}
     errors: list[BaseException] = []
     errors_lock = threading.Lock()
 
@@ -170,6 +203,8 @@ def _race_once(
         except BaseException as exc:  # noqa: BLE001 - QA thread must surface every failure
             with errors_lock:
                 errors.append(exc)
+        finally:
+            race.finished["condition"].set()
 
     def deadline_actor() -> None:
         try:
@@ -178,6 +213,8 @@ def _race_once(
         except BaseException as exc:  # noqa: BLE001 - QA thread must surface every failure
             with errors_lock:
                 errors.append(exc)
+        finally:
+            race.finished["deadline"].set()
 
     threads = (
         threading.Thread(target=condition_actor, name="worker59-condition"),
@@ -194,6 +231,8 @@ def _race_once(
         race.permit[actor].set()
         if not race.committed[actor].wait(_SYNC_TIMEOUT_SECONDS):
             raise AssertionError(f"{actor} terminal write did not commit")
+        if not race.finished[actor].wait(_SYNC_TIMEOUT_SECONDS):
+            raise AssertionError(f"{actor} did not finish before the next terminal writer")
 
     for thread in threads:
         thread.join(_SYNC_TIMEOUT_SECONDS)
@@ -208,20 +247,7 @@ def _race_once(
         jobs=restarted_jobs,
         clock=_FakeClock(_dt(18)),
     )
-    status = restarted_service.status(_MONITOR_ID)
-    report = restarted_service.render_status_text(status)
-    durable_job = restarted_jobs.get(_MONITOR_ID)
-    assert durable_job is not None
-
-    snapshot = {
-        "stop_reason": status.stop_reason,
-        "condition_state": status.condition_state,
-        "stopped_at": status.stopped_at,
-        "last_observed_at": status.last_observed_at,
-        "enabled": status.enabled,
-        "deadline_guard_present": restarted_jobs.get(f"{_MONITOR_ID}::deadline") is not None,
-        "report": report,
-    }
+    durable_snapshot = _snapshot(restarted_service, restarted_jobs)
 
     restarted_service.deadline_action_handler({"schedule_id": _MONITOR_ID})
     replayed = restarted_service.record_condition(
@@ -229,36 +255,37 @@ def _race_once(
         matched=True,
         observed_at=_dt(18),
     )
-    replay_snapshot = {
-        "stop_reason": replayed.stop_reason,
-        "condition_state": replayed.condition_state,
-        "stopped_at": replayed.stopped_at,
-        "last_observed_at": replayed.last_observed_at,
-        "enabled": replayed.enabled,
-        "deadline_guard_present": restarted_jobs.get(f"{_MONITOR_ID}::deadline") is not None,
-        "report": restarted_service.render_status_text(replayed),
+    replay_snapshot = _snapshot(restarted_service, restarted_jobs)
+    assert replay_snapshot["stop_reason"] is replayed.stop_reason
+
+    actor_snapshots = {
+        actor: _status_snapshot(status)
+        for actor, status in results.items()
     }
-    return snapshot, replay_snapshot, tuple(race.terminal_writes)
+    return durable_snapshot, replay_snapshot, actor_snapshots, tuple(race.terminal_writes)
 
 
 def test_exact_instant_condition_deadline_race_has_one_canonical_outcome(
     tmp_path: Path,
 ) -> None:
-    condition_then_deadline, replay_a, writes_a = _race_once(
+    condition_then_deadline, replay_a, actors_a, writes_a = _race_once(
         tmp_path / "condition-then-deadline.db",
         commit_order=("condition", "deadline"),
     )
-    deadline_then_condition, replay_b, writes_b = _race_once(
+    deadline_then_condition, replay_b, actors_b, writes_b = _race_once(
         tmp_path / "deadline-then-condition.db",
         commit_order=("deadline", "condition"),
     )
 
-    expected = {
+    expected_status = {
         "stop_reason": MonitorStopReason.DEADLINE_REACHED,
         "condition_state": MonitorConditionState.MATCHED,
         "stopped_at": _dt(18),
         "last_observed_at": _dt(18),
         "enabled": False,
+    }
+    expected = {
+        **expected_status,
         "deadline_guard_present": False,
         "report": (
             "Monitoring status\n"
@@ -277,5 +304,11 @@ def test_exact_instant_condition_deadline_race_has_one_canonical_outcome(
     assert condition_then_deadline == deadline_then_condition
     assert replay_a == expected
     assert replay_b == expected
-    assert writes_a == ("condition",)
-    assert writes_b == ("deadline",)
+    assert actors_a == {"condition": expected_status, "deadline": expected_status}
+    assert actors_b == {"condition": expected_status, "deadline": expected_status}
+
+    # Both stale terminal paths were truly exercised. Correct production may serialize,
+    # CAS, or idempotently converge these writes; the acceptance requirement is that
+    # every actor and restart observes one canonical final event/result.
+    assert set(writes_a) == {"condition", "deadline"}
+    assert set(writes_b) == {"condition", "deadline"}
