@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.task_state import TaskState
 from nika_core.research.models import ResearchResultSet, SourceKind
 from nika_core.research.network_repository import NetworkResearchRepository
 from nika_core.research.profiles import (
@@ -144,9 +145,17 @@ class DurablePreviousObservationLoader:
                 PreviousObservationErrorCode.IDENTITY_MISMATCH,
                 "durable previous observation profile/source-set identity does not match request",
             )
+        try:
+            profile_version = int(row["profile_version"])
+            source_set_version = int(row["source_set_version"])
+        except (TypeError, ValueError):
+            self._fail(
+                PreviousObservationErrorCode.CORRUPT_BASELINE,
+                "durable previous observation contains invalid version fields",
+            )
         if (
-            int(row["profile_version"]) != expected.profile_version
-            or int(row["source_set_version"]) != expected.source_set_version
+            profile_version != expected.profile_version
+            or source_set_version != expected.source_set_version
         ):
             self._fail(
                 PreviousObservationErrorCode.STALE_VERSION,
@@ -156,14 +165,27 @@ class DurablePreviousObservationLoader:
     def _validate_task_binding(self, task_id: str, series_id: str) -> None:
         with self._store.connection() as conn:
             binding = conn.execute(
-                """SELECT 1 FROM research_profile_series_tasks
-                WHERE series_id=? AND task_id=?""",
+                """SELECT t.state FROM research_profile_series_tasks b
+                JOIN tasks t ON t.task_id=b.task_id
+                WHERE b.series_id=? AND b.task_id=?""",
                 (series_id, task_id),
             ).fetchone()
         if binding is None:
             self._fail(
                 PreviousObservationErrorCode.IDENTITY_MISMATCH,
                 "durable previous observation task is not bound to the requested series",
+            )
+        try:
+            state = TaskState(binding["state"])
+        except ValueError:
+            self._fail(
+                PreviousObservationErrorCode.CORRUPT_BASELINE,
+                "durable previous observation task has an invalid state",
+            )
+        if state is not TaskState.COMPLETED:
+            self._fail(
+                PreviousObservationErrorCode.CORRUPT_BASELINE,
+                "durable previous observation task is not completed",
             )
 
     def _load_canonical_definitions(
