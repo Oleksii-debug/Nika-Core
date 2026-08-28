@@ -63,10 +63,13 @@ class _ReadyTransitionBarrierQueue(TaskQueue):
         self._barrier_used = False
 
     def transition(self, task_id: str, target: TaskState) -> TaskState:
-        if target == TaskState.READY and not self._barrier_used:
-            if self.get(task_id).state == TaskState.PAUSED:
-                self._barrier_used = True
-                self._barrier.wait(timeout=10)
+        if (
+            target == TaskState.READY
+            and not self._barrier_used
+            and self.get(task_id).state == TaskState.PAUSED
+        ):
+            self._barrier_used = True
+            self._barrier.wait(timeout=10)
         return super().transition(task_id, target)
 
 
@@ -115,20 +118,19 @@ def test_concurrent_duplicate_resume_across_independent_coordinators_starts_one_
         return asyncio.run(coordinators[index].resume_saved(runtime, task_id=task_id))
 
     results: list[RuntimeResult] = []
-    errors: list[BaseException] = []
+    errors: list[ValueError | sqlite3.OperationalError] = []
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [pool.submit(resume, index) for index in range(2)]
         for future in futures:
             try:
                 results.append(future.result())
-            except BaseException as exc:  # capture the losing fail-closed caller for assertions
+            except (ValueError, sqlite3.OperationalError) as exc:
                 errors.append(exc)
 
     assert len(results) == 1
     assert results[0].outcome == RuntimeOutcome.COMPLETED
     assert results[0].output == {"continued_from": thread_id}
     assert len(errors) == 1
-    assert isinstance(errors[0], (ValueError, sqlite3.OperationalError))
     assert runtime.resume_calls == 1
 
     restarted_store = SQLiteStore(db_path)
@@ -155,7 +157,10 @@ def test_terminal_completed_and_cancelled_states_reject_even_stale_paused_cursor
             queue.transition(task_id, TaskState.CANCELLED)
 
         runtime = _CountingResumeRuntime()
-        restarted = TaskRuntimeCoordinator(TaskQueue(SQLiteStore(db_path)), AuditLog(SQLiteStore(db_path)))
+        restarted = TaskRuntimeCoordinator(
+            TaskQueue(SQLiteStore(db_path)),
+            AuditLog(SQLiteStore(db_path)),
+        )
         with pytest.raises(ValueError, match="Invalid task transition"):
             asyncio.run(restarted.resume_saved(runtime, task_id=task_id))
 
