@@ -98,9 +98,9 @@ class V01PackagedTeamStateProvider:
             elif shared_task_id != normalized_task_id:
                 raise ValueError("conflicting V0.1 task identity")
             previous = stage_by_member.get(recipient_id)
-            if previous is not None and previous != stage:
-                raise ValueError("conflicting V0.1 member stage")
-            if stage in stage_by_member.values() and previous != stage:
+            if previous is not None:
+                raise ValueError("duplicate V0.1 member task handoff")
+            if stage in stage_by_member.values():
                 raise ValueError("duplicate V0.1 stage")
             stage_by_member[recipient_id] = stage
 
@@ -125,7 +125,11 @@ class V01PackagedTeamStateProvider:
         member_ids = {str(row["member_id"]) for row in member_rows}
         if root_id not in member_ids or set(roles) != member_ids:
             raise ValueError("V0.1 member roster mismatch")
-        if len(member_rows) == 3 and set(roles.values()) != {"supervisor", "worker", "checker"}:
+        if len(member_rows) == 3 and set(roles.values()) != {
+            "supervisor",
+            "worker",
+            "checker",
+        }:
             raise ValueError("V0.1 three-member roster is incomplete")
 
         result_rows = conn.execute(
@@ -159,11 +163,7 @@ class V01PackagedTeamStateProvider:
             for row in member_rows
         ]
         events = self._event_views(conn, team_id=team_id, roles=roles)
-        task_view = self._task_view(
-            base_state,
-            shared_task_id=shared_task_id,
-            team_state=team_state,
-        )
+        task_view = self._task_view(base_state, shared_task_id=shared_task_id)
         final_result = self._final_result(
             shared_task_id=shared_task_id,
             team_id=team_id,
@@ -191,7 +191,6 @@ class V01PackagedTeamStateProvider:
         base_state: Mapping[str, Any],
         *,
         shared_task_id: str,
-        team_state: str,
     ) -> dict[str, Any]:
         task: Mapping[str, Any] | None = None
         raw_tasks = base_state.get("tasks", ())
@@ -207,7 +206,7 @@ class V01PackagedTeamStateProvider:
                 task = matches[0]
         result: dict[str, Any] = {
             "task_id": shared_task_id,
-            "state": str(task.get("state")) if task is not None else team_state,
+            "state": str(task.get("state")) if task is not None else "not_in_task_queue",
         }
         if task is not None:
             command = task.get("command")
@@ -339,7 +338,7 @@ class V01PackagedTeamStateProvider:
         if team_state not in _TERMINAL_TEAM_STATES:
             return None
         summaries = {
-            "completed": "Командне завдання завершено; збережені результати учасників доступні.",
+            "completed": "Командне завдання завершено; записи результатів учасників зафіксовано.",
             "failed": "Командне завдання завершено з помилкою; доступний безпечний стан учасників.",
             "cancelled": "Командне завдання скасовано; збережений стан доступний після перезапуску.",
         }
