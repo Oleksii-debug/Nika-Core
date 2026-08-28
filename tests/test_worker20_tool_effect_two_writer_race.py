@@ -9,7 +9,6 @@ import nika_core.data.sqlite
 import nika_core.runtime.idempotency
 import nika_core.tools
 
-
 _RACE_ITERATIONS = 32
 _WAIT_SECONDS = 10.0
 
