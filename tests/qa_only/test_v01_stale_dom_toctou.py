@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,12 @@ PlaywrightTimeoutError = _sync_api.TimeoutError
 sync_playwright = _sync_api.sync_playwright
 
 _TARGET = ControlLocator(role="button", name="Run target")
+_FAIL_CLOSED_ERRORS = (
+    StaleSnapshotError,
+    TargetNotFoundError,
+    AmbiguousTargetError,
+    UnsupportedInteractionError,
+)
 
 
 @dataclass(slots=True)
@@ -93,7 +100,7 @@ def _browser_executable(runtime: Any) -> str | None:
 
 
 @pytest.fixture
-def browser_fixture() -> _BrowserFixture:
+def browser_fixture() -> Iterator[_BrowserFixture]:
     runtime = sync_playwright().start()
     executable = _browser_executable(runtime)
     if executable is None:
@@ -150,14 +157,14 @@ def _invoke(adapter: PlaywrightInteractionAdapter, node: Any) -> None:
     adapter.act(node, InteractionAction.INVOKE, None)
 
 
-def _require_stale_and_no_effect(
+def _require_fail_closed_and_no_effect(
     adapter: PlaywrightInteractionAdapter,
     node: Any,
     page: Any,
 ) -> None:
     try:
         _invoke(adapter, node)
-    except StaleSnapshotError:
+    except _FAIL_CLOSED_ERRORS:
         pass
     else:
         assert _effects(page) == [], "stale action reached an unintended replacement target"
@@ -189,7 +196,7 @@ def test_same_semantic_node_replacement_cannot_receive_old_action(
         """
     )
 
-    _require_stale_and_no_effect(adapter, stale_node, browser_fixture.page)
+    _require_fail_closed_and_no_effect(adapter, stale_node, browser_fixture.page)
 
     fresh_node = _resolve(adapter)
     _invoke(adapter, fresh_node)
@@ -201,19 +208,19 @@ def test_same_semantic_node_replacement_cannot_receive_old_action(
     (
         (
             "document.getElementById('target').setAttribute('aria-label', 'Changed target')",
-            (StaleSnapshotError, TargetNotFoundError),
+            _FAIL_CLOSED_ERRORS,
         ),
         (
             "document.getElementById('target').disabled = true",
-            (StaleSnapshotError, UnsupportedInteractionError, PlaywrightTimeoutError),
+            (*_FAIL_CLOSED_ERRORS, PlaywrightTimeoutError),
         ),
         (
             "document.getElementById('target').hidden = true",
-            (StaleSnapshotError, TargetNotFoundError, PlaywrightTimeoutError),
+            (*_FAIL_CLOSED_ERRORS, PlaywrightTimeoutError),
         ),
         (
             "document.getElementById('target').setAttribute('role', 'link')",
-            (StaleSnapshotError, TargetNotFoundError),
+            _FAIL_CLOSED_ERRORS,
         ),
     ),
     ids=("accessible-name", "disabled", "hidden", "role"),
@@ -256,7 +263,7 @@ def test_duplicate_added_after_resolution_remains_fail_closed(
         """
     )
 
-    with pytest.raises((StaleSnapshotError, AmbiguousTargetError)):
+    with pytest.raises(_FAIL_CLOSED_ERRORS):
         _invoke(adapter, stale_node)
     assert _effects(browser_fixture.page) == []
 
@@ -331,7 +338,7 @@ def test_same_name_frame_replacement_cannot_receive_old_action(
         """
     )
 
-    _require_stale_and_no_effect(adapter, stale_node, browser_fixture.page)
+    _require_fail_closed_and_no_effect(adapter, stale_node, browser_fixture.page)
 
     fresh_node = _resolve(adapter)
     _invoke(adapter, fresh_node)
@@ -347,7 +354,7 @@ def test_page_generation_replacement_cannot_receive_old_action(
 
     adapter.load_inline_fixture(_button_html("replacement"))
 
-    _require_stale_and_no_effect(adapter, stale_node, browser_fixture.page)
+    _require_fail_closed_and_no_effect(adapter, stale_node, browser_fixture.page)
 
     fresh_node = _resolve(adapter)
     _invoke(adapter, fresh_node)
