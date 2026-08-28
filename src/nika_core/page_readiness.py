@@ -113,6 +113,8 @@ def classify_page_readiness(
         return _result(PageReadinessState.PAGE_STALE, "semantic snapshot is stale")
 
     if signal == PageObservationSignal.CONTROL_DISABLED_TRANSIENT:
+        if not control.visible:
+            return _result(PageReadinessState.MISSING, "semantic target is not visible")
         if control.enabled:
             return _result(
                 PageReadinessState.VALIDATION_ERROR,
