@@ -1,19 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
-from threading import Barrier, Event, Lock
+import concurrent.futures
+import pathlib
+import threading
 
-from nika_core.data.sqlite import SQLiteStore
-from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
-from nika_core.tools import (
-    ToolCall,
-    ToolEffectGuard,
-    ToolExecutor,
-    ToolRisk,
-    ToolSpec,
-)
+import nika_core.data.sqlite
+import nika_core.runtime.idempotency
+import nika_core.tools
 
 
 _RACE_ITERATIONS = 32
@@ -22,9 +16,9 @@ _WAIT_SECONDS = 10.0
 
 class _BlockingHandler:
     def __init__(self) -> None:
-        self.started = Event()
-        self.release = Event()
-        self._lock = Lock()
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self._lock = threading.Lock()
         self.calls = 0
 
     async def __call__(self, arguments: dict[str, object]) -> object:
@@ -36,8 +30,11 @@ class _BlockingHandler:
         return {"published": arguments["value"]}
 
 
-def _guard(path: Path, task_id: str) -> tuple[ToolEffectGuard, IdempotencyLedger]:
-    store = SQLiteStore(path)
+def _guard(
+    path: pathlib.Path,
+    task_id: str,
+) -> tuple[nika_core.tools.ToolEffectGuard, nika_core.runtime.idempotency.IdempotencyLedger]:
+    store = nika_core.data.sqlite.SQLiteStore(path)
     store.initialize()
     with store.connection() as conn:
         conn.execute(
@@ -48,21 +45,21 @@ def _guard(path: Path, task_id: str) -> tuple[ToolEffectGuard, IdempotencyLedger
             """,
             (task_id, "2026-08-28T00:00:00+00:00", "2026-08-28T00:00:00+00:00"),
         )
-    ledger = IdempotencyLedger(store)
-    return ToolEffectGuard(ledger), ledger
+    ledger = nika_core.runtime.idempotency.IdempotencyLedger(store)
+    return nika_core.tools.ToolEffectGuard(ledger), ledger
 
 
-def _spec() -> ToolSpec:
-    return ToolSpec(
+def _spec() -> nika_core.tools.ToolSpec:
+    return nika_core.tools.ToolSpec(
         tool_id="publish",
         description="worker20 observable effect",
-        risk=ToolRisk.EXTERNAL_SIDE_EFFECT,
+        risk=nika_core.tools.ToolRisk.EXTERNAL_SIDE_EFFECT,
         timeout_seconds=30.0,
     )
 
 
-def _call(task_id: str, *, value: str) -> ToolCall:
-    return ToolCall(
+def _call(task_id: str, *, value: str) -> nika_core.tools.ToolCall:
+    return nika_core.tools.ToolCall(
         call_id="stable-effect",
         tool_id="publish",
         task_id=task_id,
@@ -72,10 +69,10 @@ def _call(task_id: str, *, value: str) -> ToolCall:
 
 
 def _execute_after_barrier(
-    start: Barrier,
-    completed: Event,
-    executor: ToolExecutor,
-    call: ToolCall,
+    start: threading.Barrier,
+    completed: threading.Event,
+    executor: nika_core.tools.ToolExecutor,
+    call: nika_core.tools.ToolCall,
 ):
     start.wait(timeout=_WAIT_SECONDS)
     try:
@@ -85,7 +82,7 @@ def _execute_after_barrier(
 
 
 def test_two_independent_executors_have_one_canonical_effect_owner_and_restart_replay(
-    tmp_path: Path,
+    tmp_path: pathlib.Path,
 ) -> None:
     for iteration in range(_RACE_ITERATIONS):
         database = tmp_path / f"same-input-{iteration}" / "state.db"
@@ -94,15 +91,15 @@ def test_two_independent_executors_have_one_canonical_effect_owner_and_restart_r
         second_guard, _second_ledger = _guard(database, task_id)
         handler = _BlockingHandler()
 
-        first = ToolExecutor(effect_guard=first_guard)
-        second = ToolExecutor(effect_guard=second_guard)
+        first = nika_core.tools.ToolExecutor(effect_guard=first_guard)
+        second = nika_core.tools.ToolExecutor(effect_guard=second_guard)
         first.register(_spec(), handler)
         second.register(_spec(), handler)
         call = _call(task_id, value="same")
-        start = Barrier(3)
-        first_completed = Event()
+        start = threading.Barrier(3)
+        first_completed = threading.Event()
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             futures = [
                 pool.submit(_execute_after_barrier, start, first_completed, first, call),
                 pool.submit(_execute_after_barrier, start, first_completed, second, call),
@@ -125,10 +122,10 @@ def test_two_independent_executors_have_one_canonical_effect_owner_and_restart_r
         assert handler.calls == 1
         records = first_ledger.list_for_task(task_id)
         assert len(records) == 1
-        assert records[0].status is IdempotencyStatus.COMPLETED
+        assert records[0].status is nika_core.runtime.idempotency.IdempotencyStatus.COMPLETED
 
         restarted_guard, restarted_ledger = _guard(database, task_id)
-        restarted = ToolExecutor(effect_guard=restarted_guard)
+        restarted = nika_core.tools.ToolExecutor(effect_guard=restarted_guard)
         restarted.register(_spec(), handler)
         replay = asyncio.run(restarted.execute(call))
 
@@ -137,11 +134,14 @@ def test_two_independent_executors_have_one_canonical_effect_owner_and_restart_r
         assert handler.calls == 1
         restarted_records = restarted_ledger.list_for_task(task_id)
         assert len(restarted_records) == 1
-        assert restarted_records[0].status is IdempotencyStatus.COMPLETED
+        assert (
+            restarted_records[0].status
+            is nika_core.runtime.idempotency.IdempotencyStatus.COMPLETED
+        )
 
 
 def test_conflicting_argument_race_never_creates_second_owner_and_restart_preserves_winner(
-    tmp_path: Path,
+    tmp_path: pathlib.Path,
 ) -> None:
     for iteration in range(_RACE_ITERATIONS):
         database = tmp_path / f"conflict-{iteration}" / "state.db"
@@ -150,16 +150,16 @@ def test_conflicting_argument_race_never_creates_second_owner_and_restart_preser
         second_guard, _second_ledger = _guard(database, task_id)
         handler = _BlockingHandler()
 
-        first = ToolExecutor(effect_guard=first_guard)
-        second = ToolExecutor(effect_guard=second_guard)
+        first = nika_core.tools.ToolExecutor(effect_guard=first_guard)
+        second = nika_core.tools.ToolExecutor(effect_guard=second_guard)
         first.register(_spec(), handler)
         second.register(_spec(), handler)
         call_x = _call(task_id, value="X")
         call_y = _call(task_id, value="Y")
-        start = Barrier(3)
-        first_completed = Event()
+        start = threading.Barrier(3)
+        first_completed = threading.Event()
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             future_x = pool.submit(_execute_after_barrier, start, first_completed, first, call_x)
             future_y = pool.submit(_execute_after_barrier, start, first_completed, second, call_y)
             futures = [future_x, future_y]
@@ -182,13 +182,13 @@ def test_conflicting_argument_race_never_creates_second_owner_and_restart_preser
         assert handler.calls == 1
         records = first_ledger.list_for_task(task_id)
         assert len(records) == 1
-        assert records[0].status is IdempotencyStatus.COMPLETED
+        assert records[0].status is nika_core.runtime.idempotency.IdempotencyStatus.COMPLETED
 
         winner_call = call_x if result_x.ok else call_y
         loser_call = call_y if result_x.ok else call_x
         winner_value = winner_call.arguments["value"]
         restarted_guard, restarted_ledger = _guard(database, task_id)
-        restarted = ToolExecutor(effect_guard=restarted_guard)
+        restarted = nika_core.tools.ToolExecutor(effect_guard=restarted_guard)
         restarted.register(_spec(), handler)
 
         replay = asyncio.run(restarted.execute(winner_call))
@@ -201,4 +201,7 @@ def test_conflicting_argument_race_never_creates_second_owner_and_restart_preser
         assert handler.calls == 1
         restarted_records = restarted_ledger.list_for_task(task_id)
         assert len(restarted_records) == 1
-        assert restarted_records[0].status is IdempotencyStatus.COMPLETED
+        assert (
+            restarted_records[0].status
+            is nika_core.runtime.idempotency.IdempotencyStatus.COMPLETED
+        )
