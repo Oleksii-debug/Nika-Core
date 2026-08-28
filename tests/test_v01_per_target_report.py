@@ -322,6 +322,23 @@ def test_effect_record_must_bind_task_operation_and_input_fingerprint() -> None:
             effect_records={target.operation_key: wrong},
         )
 
+    wrong_type = IdempotencyRecord(
+        operation_key=target.operation_key,
+        task_id="task-1",
+        operation_type="other.effect",
+        input_fingerprint=target.input_fingerprint,
+        status=IdempotencyStatus.PENDING,
+        result=None,
+        created_at="2026-08-28T20:00:00+00:00",
+        updated_at="2026-08-28T20:05:00+00:00",
+    )
+    with pytest.raises(BatchReportProjectionError, match="operation type mismatch"):
+        project_batch_report(
+            state,
+            batch_updated_at="2026-08-28T20:00:00Z",
+            effect_records={target.operation_key: wrong_type},
+        )
+
 
 def test_supplemental_facts_cannot_become_effect_success_or_uncertain_authority() -> None:
     state, target = _single_target()
