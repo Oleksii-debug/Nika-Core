@@ -6,8 +6,6 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 
-from nika_core.kernel.audit import AuditLog
-
 
 class ToolRisk(StrEnum):
     READ_ONLY = "read_only"
@@ -36,6 +34,7 @@ class ToolCall:
     call_id: str
     tool_id: str
     arguments: dict[str, object]
+    # Compatibility-only caller metadata. A positive value is never execution authority.
     approved: bool = False
 
 
@@ -55,6 +54,8 @@ class ToolHandler(Protocol):
     async def __call__(self, arguments: dict[str, object]) -> object: ...
 
 
+# Trusted-host policy boundary. Runtime/model callers may supply ToolCall data, but only
+# host-composed policy may grant positive execution authority.
 ApprovalPolicy = Callable[[ToolSpec, ToolCall], Awaitable[bool]]
 
 
@@ -62,7 +63,7 @@ class ToolExecutor:
     def __init__(
         self,
         *,
-        audit_log: AuditLog | None = None,
+        audit_log: object | None = None,
         approval_policy: ApprovalPolicy | None = None,
     ) -> None:
         self._tools: dict[str, tuple[ToolSpec, ToolHandler]] = {}
@@ -83,8 +84,8 @@ class ToolExecutor:
             return ToolResult(call_id=call.call_id, tool_id=call.tool_id, error="unknown tool")
         spec, handler = registered
         if spec.risk in {ToolRisk.EXTERNAL_SIDE_EFFECT, ToolRisk.HIGH_IMPACT}:
-            approved = call.approved
-            if not approved and self._approval_policy is not None:
+            approved = False
+            if self._approval_policy is not None:
                 approved = await self._approval_policy(spec, call)
             if not approved:
                 self._audit("tool.denied", call, spec, {"reason": "approval_required"})
@@ -102,7 +103,7 @@ class ToolExecutor:
         except asyncio.CancelledError:
             self._audit("tool.cancelled", call, spec, {})
             raise
-        except Exception as exc:  # noqa: BLE001 - normalize adapter failures at the tool boundary.
+        except Exception as exc:  # noqa: BLE001
             self._audit("tool.failed", call, spec, {"reason": type(exc).__name__})
             return ToolResult(call_id=call.call_id, tool_id=call.tool_id, error="tool failed")
         self._audit("tool.completed", call, spec, {})
