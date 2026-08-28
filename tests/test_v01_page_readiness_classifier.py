@@ -86,6 +86,16 @@ def test_classifier_covers_all_required_states() -> None:
         assert classify_page_readiness(**kwargs).state == expected
 
 
+def test_untyped_loading_string_is_validation_error_not_retryable() -> None:
+    result = classify_page_readiness(
+        snapshot=None,
+        locator=None,
+        signal="loading",  # type: ignore[arg-type]
+    )
+    assert result.state == PageReadinessState.VALIDATION_ERROR
+    assert result.retry_candidate is False
+
+
 def test_only_explicit_transient_states_are_retry_candidates() -> None:
     retryable = {
         PageReadinessState.LOADING,
