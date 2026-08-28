@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import replace
+import json
 
 import httpx
 import pytest
 
+from nika_core.config import AppConfig
 from nika_core.model_gateway.api_route import (
     ApiModelRouteConfig,
     CredentialRefOpenAICompatibleProvider,
@@ -94,6 +95,30 @@ class _LocalProvider:
         )
 
 
+class _UnavailableCloudProvider:
+    def __init__(self) -> None:
+        self._capabilities = ProviderCapabilities(
+            provider_id="offline-api",
+            kind=ProviderKind.CLOUD,
+            supports_private_data=False,
+        )
+        self.requests: list[ModelRequest] = []
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return self._capabilities
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        self.requests.append(request)
+        raise ModelGatewayError(
+            ModelErrorCode.UNAVAILABLE,
+            "configured model provider is unavailable",
+            provider_id=self.capabilities.provider_id,
+            retryable=True,
+            failure_effect=ModelFailureEffect.NO_EFFECT,
+        )
+
+
 def _config(**overrides: object) -> ApiModelRouteConfig:
     values: dict[str, object] = {
         "provider_id": "approved-api",
@@ -110,6 +135,7 @@ def _request(
     *,
     request_id: str = "request-1",
     provider_id: str = "approved-api",
+    model: str = "model-a",
     privacy: PrivacyClass = PrivacyClass.PUBLIC,
 ) -> ModelRequest:
     return ModelRequest(
@@ -118,7 +144,7 @@ def _request(
             ModelMessage(role="system", content="Work as one V0.1 agent."),
             ModelMessage(role="user", content="Return a short deterministic fixture result."),
         ),
-        model="model-a",
+        model=model,
         provider_id=provider_id,
         privacy=privacy,
         timeout_seconds=2.0,
@@ -315,6 +341,153 @@ def test_local_and_api_routes_use_same_semantic_request_shape_without_fallback()
     assert local_request.model == api_request.model
     assert local_request.timeout_seconds == api_request.timeout_seconds
     assert local_request.fallback_provider_ids == api_request.fallback_provider_ids == ()
+
+
+@pytest.mark.parametrize(
+    ("selected_provider", "selected_model", "updated_provider", "updated_model"),
+    (
+        ("ollama", "qwen3:8b", "approved-api", "model-a"),
+        ("approved-api", "model-a", "ollama", "qwen3:8b"),
+    ),
+)
+def test_running_task_route_survives_default_change_and_restart(
+    selected_provider: str,
+    selected_model: str,
+    updated_provider: str,
+    updated_model: str,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "model": payload["model"],
+                "choices": [{"message": {"content": "api ok"}}],
+            },
+        )
+
+    audit = _Audit()
+    local = _LocalProvider()
+    api = CredentialRefOpenAICompatibleProvider(
+        config=_config(),
+        credential_resolver=_StaticResolver(_CANARY),
+        client_factory=_client_factory(httpx.MockTransport(handler)),
+    )
+    gateway = ModelGateway(audit_log=audit)
+    gateway.register(local)
+    gateway.register(api)
+
+    settings = AppConfig(model_provider=selected_provider)
+    running_request = _request(
+        request_id="route-running",
+        provider_id=settings.model_provider,
+        model=selected_model,
+    )
+    durable_route = json.dumps(
+        {"provider_id": running_request.provider_id, "model": running_request.model},
+        sort_keys=True,
+    )
+
+    settings.model_provider = updated_provider
+    running_response = asyncio.run(gateway.complete(running_request))
+    new_response = asyncio.run(
+        gateway.complete(
+            _request(
+                request_id="route-new",
+                provider_id=settings.model_provider,
+                model=updated_model,
+            )
+        )
+    )
+
+    assert running_response.provider_id == selected_provider
+    assert running_response.model == selected_model
+    assert new_response.provider_id == updated_provider
+    assert new_response.model == updated_model
+    assert running_request.provider_id == selected_provider
+    assert running_request.model == selected_model
+    assert running_request.fallback_provider_ids == ()
+    assert _CANARY not in durable_route
+    assert _CREDENTIAL_REF not in durable_route
+    assert api.credential_ref == _CREDENTIAL_REF
+    assert all(event["event_type"] != "model.fallback" for event in audit.events)
+
+    completed = [
+        event["payload"]
+        for event in audit.events
+        if event["event_type"] == "model.completed"
+    ]
+    assert [
+        (payload["provider_id"], payload["model"])  # type: ignore[index]
+        for payload in completed
+    ] == [(selected_provider, selected_model), (updated_provider, updated_model)]
+    assert _CANARY not in repr(audit.events)
+    assert _CREDENTIAL_REF not in repr(audit.events)
+
+    restored = json.loads(durable_route)
+    restart_audit = _Audit()
+    restart_gateway = ModelGateway(audit_log=restart_audit)
+    restart_gateway.register(_LocalProvider())
+    restart_api = CredentialRefOpenAICompatibleProvider(
+        config=_config(),
+        credential_resolver=_StaticResolver(_CANARY),
+        client_factory=_client_factory(httpx.MockTransport(handler)),
+    )
+    restart_gateway.register(restart_api)
+    restored_request = _request(
+        request_id="route-restarted",
+        provider_id=restored["provider_id"],
+        model=restored["model"],
+    )
+
+    restarted_response = asyncio.run(restart_gateway.complete(restored_request))
+
+    assert restarted_response.provider_id == selected_provider
+    assert restarted_response.model == selected_model
+    assert all(event["event_type"] != "model.fallback" for event in restart_audit.events)
+    assert any(
+        event["event_type"] == "model.completed"
+        and event["payload"].get("provider_id") == selected_provider  # type: ignore[union-attr]
+        and event["payload"].get("model") == selected_model  # type: ignore[union-attr]
+        for event in restart_audit.events
+    )
+    assert _CANARY not in repr(restart_audit.events)
+    assert _CREDENTIAL_REF not in repr(restart_audit.events)
+
+
+def test_unavailable_declared_provider_never_switches_route_and_keeps_safe_identity() -> None:
+    audit = _Audit()
+    local = _LocalProvider()
+    unavailable = _UnavailableCloudProvider()
+    gateway = ModelGateway(audit_log=audit)
+    gateway.register(local)
+    gateway.register(unavailable)
+
+    with pytest.raises(ModelGatewayError) as caught:
+        asyncio.run(
+            gateway.complete(
+                _request(
+                    request_id="route-unavailable",
+                    provider_id="offline-api",
+                    model="offline-model",
+                )
+            )
+        )
+
+    error = caught.value
+    assert error.code is ModelErrorCode.UNAVAILABLE
+    assert error.provider_id == "offline-api"
+    assert unavailable.requests
+    assert local.requests == []
+    assert all(event["event_type"] != "model.fallback" for event in audit.events)
+    assert any(
+        event["event_type"] == "model.failed"
+        and event["payload"].get("provider_id") == "offline-api"  # type: ignore[union-attr]
+        and event["payload"].get("model") == "offline-model"  # type: ignore[union-attr]
+        for event in audit.events
+    )
+    assert _CANARY not in repr(audit.events)
+    assert _CREDENTIAL_REF not in repr(audit.events)
 
 
 def test_api_route_cancellation_propagates_and_does_not_launch_other_route() -> None:
