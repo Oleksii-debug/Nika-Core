@@ -7,11 +7,33 @@ from threading import Barrier, Event, Lock
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
-from nika_core.tools import ToolCall, ToolEffectGuard, ToolExecutor, ToolRisk, ToolSpec
+from nika_core.tools import (
+    ToolCall,
+    ToolEffectGuard,
+    ToolExecutor,
+    ToolRisk,
+    ToolSpec,
+)
 
 
 _RACE_ITERATIONS = 32
 _WAIT_SECONDS = 10.0
+
+
+class _BlockingHandler:
+    def __init__(self) -> None:
+        self.started = Event()
+        self.release = Event()
+        self._lock = Lock()
+        self.calls = 0
+
+    async def __call__(self, arguments: dict[str, object]) -> object:
+        with self._lock:
+            self.calls += 1
+        self.started.set()
+        if not self.release.wait(timeout=_WAIT_SECONDS):
+            raise AssertionError("worker20 handler release was not signalled")
+        return {"published": arguments["value"]}
 
 
 def _guard(path: Path, task_id: str) -> tuple[ToolEffectGuard, IdempotencyLedger]:
@@ -66,19 +88,7 @@ def test_two_independent_executors_have_one_canonical_effect_owner_and_restart_r
         task_id = f"worker20-same-{iteration}"
         first_guard, first_ledger = _guard(database, task_id)
         second_guard, _second_ledger = _guard(database, task_id)
-        handler_started = Event()
-        release_handler = Event()
-        handler_lock = Lock()
-        handler_calls = 0
-
-        async def handler(arguments: dict[str, object]) -> object:
-            nonlocal handler_calls
-            with handler_lock:
-                handler_calls += 1
-            handler_started.set()
-            if not release_handler.wait(timeout=_WAIT_SECONDS):
-                raise AssertionError("worker20 handler release was not signalled")
-            return {"published": arguments["value"]}
+        handler = _BlockingHandler()
 
         first = ToolExecutor(effect_guard=first_guard)
         second = ToolExecutor(effect_guard=second_guard)
@@ -93,7 +103,7 @@ def test_two_independent_executors_have_one_canonical_effect_owner_and_restart_r
                 pool.submit(_execute_after_barrier, start, second, call),
             ]
             start.wait(timeout=_WAIT_SECONDS)
-            assert handler_started.wait(timeout=_WAIT_SECONDS)
+            assert handler.started.wait(timeout=_WAIT_SECONDS)
 
             done, _pending = wait(
                 futures,
@@ -104,13 +114,13 @@ def test_two_independent_executors_have_one_canonical_effect_owner_and_restart_r
             blocked = next(iter(done)).result(timeout=_WAIT_SECONDS)
             assert not blocked.ok
             assert blocked.error == "tool effect not safe to execute"
-            assert handler_calls == 1
+            assert handler.calls == 1
 
-            release_handler.set()
+            handler.release.set()
             results = [future.result(timeout=_WAIT_SECONDS) for future in futures]
 
         assert sum(result.ok for result in results) == 1
-        assert handler_calls == 1
+        assert handler.calls == 1
         records = first_ledger.list_for_task(task_id)
         assert len(records) == 1
         assert records[0].status is IdempotencyStatus.COMPLETED
@@ -122,7 +132,7 @@ def test_two_independent_executors_have_one_canonical_effect_owner_and_restart_r
 
         assert replay.ok
         assert replay.output == {"published": "same"}
-        assert handler_calls == 1
+        assert handler.calls == 1
         restarted_records = restarted_ledger.list_for_task(task_id)
         assert len(restarted_records) == 1
         assert restarted_records[0].status is IdempotencyStatus.COMPLETED
@@ -136,19 +146,7 @@ def test_conflicting_argument_race_never_creates_second_owner_and_restart_preser
         task_id = f"worker20-conflict-{iteration}"
         first_guard, first_ledger = _guard(database, task_id)
         second_guard, _second_ledger = _guard(database, task_id)
-        handler_started = Event()
-        release_handler = Event()
-        handler_lock = Lock()
-        handler_calls = 0
-
-        async def handler(arguments: dict[str, object]) -> object:
-            nonlocal handler_calls
-            with handler_lock:
-                handler_calls += 1
-            handler_started.set()
-            if not release_handler.wait(timeout=_WAIT_SECONDS):
-                raise AssertionError("worker20 handler release was not signalled")
-            return {"published": arguments["value"]}
+        handler = _BlockingHandler()
 
         first = ToolExecutor(effect_guard=first_guard)
         second = ToolExecutor(effect_guard=second_guard)
@@ -163,7 +161,7 @@ def test_conflicting_argument_race_never_creates_second_owner_and_restart_preser
             future_y = pool.submit(_execute_after_barrier, start, second, call_y)
             futures = [future_x, future_y]
             start.wait(timeout=_WAIT_SECONDS)
-            assert handler_started.wait(timeout=_WAIT_SECONDS)
+            assert handler.started.wait(timeout=_WAIT_SECONDS)
 
             done, _pending = wait(
                 futures,
@@ -174,14 +172,14 @@ def test_conflicting_argument_race_never_creates_second_owner_and_restart_preser
             blocked = next(iter(done)).result(timeout=_WAIT_SECONDS)
             assert not blocked.ok
             assert blocked.error == "tool effect not safe to execute"
-            assert handler_calls == 1
+            assert handler.calls == 1
 
-            release_handler.set()
+            handler.release.set()
             result_x = future_x.result(timeout=_WAIT_SECONDS)
             result_y = future_y.result(timeout=_WAIT_SECONDS)
 
         assert result_x.ok is not result_y.ok
-        assert handler_calls == 1
+        assert handler.calls == 1
         records = first_ledger.list_for_task(task_id)
         assert len(records) == 1
         assert records[0].status is IdempotencyStatus.COMPLETED
@@ -200,7 +198,7 @@ def test_conflicting_argument_race_never_creates_second_owner_and_restart_preser
         assert replay.output == {"published": winner_value}
         assert not conflict.ok
         assert conflict.error == "tool effect not safe to execute"
-        assert handler_calls == 1
+        assert handler.calls == 1
         restarted_records = restarted_ledger.list_for_task(task_id)
         assert len(restarted_records) == 1
         assert restarted_records[0].status is IdempotencyStatus.COMPLETED
