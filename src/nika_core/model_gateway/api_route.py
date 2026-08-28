@@ -170,7 +170,7 @@ class CredentialRefOpenAICompatibleProvider:
     def _resolve_material(self) -> str:
         try:
             material = self._credential_resolver.resolve(self._config.credential_ref)
-        except Exception:
+        except Exception:  # noqa: BLE001 - untrusted resolvers may fail with arbitrary exception types
             raise ModelGatewayError(
                 ModelErrorCode.AUTHENTICATION,
                 "model credential could not be resolved",
