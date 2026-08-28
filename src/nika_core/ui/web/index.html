@@ -18,6 +18,7 @@
     <button type="button" data-action-id="nav.agents" data-focus-target="agents-heading">Агенти</button>
     <button type="button" data-action-id="nav.logs" data-focus-target="logs-heading">Журнал</button>
     <button type="button" data-action-id="nav.workspaces" data-focus-target="workspaces-heading">Робочі простори</button>
+    <a href="#team-task-heading">Командне завдання</a>
     <a href="#product-project-heading">ProductProject</a>
     <a href="#keyboard-heading">Клавіатура</a>
   </nav>
@@ -40,6 +41,48 @@
       <h2 id="tasks-heading" tabindex="-1">Завдання</h2>
       <p id="tasks-empty">Завдань ще немає.</p>
       <ol id="tasks-list" aria-label="Список завдань"></ol>
+    </section>
+
+    <section aria-labelledby="team-task-heading">
+      <h2 id="team-task-heading" tabindex="-1">Командне завдання</h2>
+      <p id="team-task-empty">Реального командного завдання ще немає.</p>
+      <div id="team-task-summary" hidden>
+        <dl aria-label="Стан командного завдання">
+          <dt>Ідентифікатор завдання</dt>
+          <dd id="team-task-id">—</dd>
+          <dt>Команда</dt>
+          <dd id="team-task-command">—</dd>
+          <dt>Стан завдання</dt>
+          <dd id="team-task-state">—</dd>
+          <dt>Ідентифікатор команди</dt>
+          <dd id="team-id">—</dd>
+          <dt>Стан команди</dt>
+          <dd id="team-state">—</dd>
+          <dt>Реальні учасники</dt>
+          <dd id="team-roster-count">—</dd>
+        </dl>
+
+        <h3 id="team-members-heading">Учасники команди</h3>
+        <p id="team-roster-note"></p>
+        <ol id="team-members-list" aria-labelledby="team-members-heading"></ol>
+
+        <h3 id="team-events-heading">Безпечний журнал команди</h3>
+        <p id="team-events-empty">Подій ще немає.</p>
+        <ol id="team-events-list" aria-labelledby="team-events-heading"></ol>
+
+        <h3 id="team-final-heading">Підсумок командного завдання</h3>
+        <p id="team-final-empty">Фінального результату ще немає.</p>
+        <dl id="team-final-summary" aria-labelledby="team-final-heading" hidden>
+          <dt>Стан</dt>
+          <dd id="team-final-status">—</dd>
+          <dt>Підсумок</dt>
+          <dd id="team-final-text">—</dd>
+          <dt>Посилання на завдання</dt>
+          <dd id="team-final-task-id">—</dd>
+          <dt>Посилання на команду</dt>
+          <dd id="team-final-team-id">—</dd>
+        </dl>
+      </div>
     </section>
 
     <section aria-labelledby="product-project-heading">
