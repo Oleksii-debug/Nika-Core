@@ -5,6 +5,9 @@ import hmac
 import json
 import os
 import sqlite3
+import stat
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -15,9 +18,15 @@ from uuid import uuid4
 from nika_core.data.schema import SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
+from nika_core.reliability.recovery_lease import (
+    RecoveryFileLease,
+    RecoveryLeaseError,
+    exclusive_sqlite_lease,
+)
 
 _MANIFEST_VERSION = 1
 _RESTORE_MARKER_VERSION = 1
+_RESTORE_STATE_VERSION = b"nika-sqlite-restore-state-v2\x00"
 
 
 class BackupRecoveryError(RuntimeError):
@@ -86,6 +95,16 @@ class SQLiteRecoveryManager:
         self._audit = audit or AuditLog(store)
 
     def create_backup(self, backup_path: Path | str) -> BackupArtifact:
+        with self._hold_recovery_lease():
+            return self._create_backup(backup_path, record_audit=True)
+
+    def _create_backup(
+        self,
+        backup_path: Path | str,
+        *,
+        record_audit: bool,
+        source_connection: sqlite3.Connection | None = None,
+    ) -> BackupArtifact:
         self._ensure_no_interrupted_restore()
         source = self._store.path.resolve()
         destination = Path(backup_path).resolve()
@@ -102,7 +121,10 @@ class SQLiteRecoveryManager:
         temp_manifest = self._temporary_path(manifest_path, "manifest")
         published_db = False
         try:
-            self._copy_database(source, temp_db)
+            if source_connection is None:
+                self._copy_database(source, temp_db)
+            else:
+                self._copy_connection_to_database(source_connection, temp_db)
             schema = self._validate_database(temp_db, require_supported=True)
             digest = self._sha256_file(temp_db)
             size = temp_db.stat().st_size
@@ -136,19 +158,23 @@ class SQLiteRecoveryManager:
             schema_version=schema,
             created_at=created_at,
         )
-        self._audit_if_possible(
-            "reliability.backup_created",
-            {
-                "backup_file": destination.name,
-                "sha256": digest,
-                "size_bytes": size,
-                "schema_version": schema,
-            },
-        )
+        if record_audit:
+            self._audit_if_possible(
+                "reliability.backup_created",
+                {
+                    "backup_file": destination.name,
+                    "sha256": digest,
+                    "size_bytes": size,
+                    "schema_version": schema,
+                },
+            )
         return artifact
 
     def verify_backup(self, backup_path: Path | str) -> BackupArtifact:
-        database = Path(backup_path).resolve()
+        configured_database = Path(backup_path)
+        if self._is_indirect_path(configured_database):
+            raise BackupVerificationError("backup database and manifest must be direct files")
+        database = configured_database.resolve()
         manifest_path = self._manifest_path(database)
         if not database.is_file():
             raise BackupVerificationError(f"backup database does not exist: {database}")
@@ -156,6 +182,9 @@ class SQLiteRecoveryManager:
             raise BackupVerificationError(
                 f"backup manifest does not exist: {manifest_path}"
             )
+        if self._is_indirect_path(database) or self._is_indirect_path(manifest_path):
+            raise BackupVerificationError("backup database and manifest must be direct files")
+        self._ensure_backup_artifact_coherent(database)
         manifest = self._read_json(manifest_path)
         expected = {
             "format_version",
@@ -187,6 +216,12 @@ class SQLiteRecoveryManager:
             raise BackupVerificationError("backup database SHA-256 does not match manifest")
         if self._validate_database(database, require_supported=True) != schema:
             raise BackupVerificationError("backup schema version does not match manifest")
+        self._ensure_backup_artifact_coherent(database)
+        if database.stat().st_size != size:
+            raise BackupVerificationError("backup database size changed during verification")
+        actual_sha = self._sha256_file(database)
+        if not self._equal(actual_sha, expected_sha):
+            raise BackupVerificationError("backup database changed during verification")
 
         created_at = manifest["created_at"]
         if not isinstance(created_at, str):
@@ -202,9 +237,14 @@ class SQLiteRecoveryManager:
         return BackupArtifact(database, manifest_path, actual_sha, size, schema, created_at)
 
     def prepare_restore(self, backup_path: Path | str) -> RestorePlan:
+        with self._hold_recovery_lease():
+            return self._prepare_restore_unlocked(backup_path)
+
+    def _prepare_restore_unlocked(self, backup_path: Path | str) -> RestorePlan:
         self._ensure_no_interrupted_restore()
         backup = self.verify_backup(backup_path)
-        target = self._store.path.resolve()
+        target = self._resolve_direct_restore_target(self._store.path)
+        self._ensure_restore_family_coherent(target)
         if target == backup.database_path:
             raise ValueError("restore source must differ from the live database")
         current_exists = target.exists()
@@ -230,10 +270,18 @@ class SQLiteRecoveryManager:
                 "current_schema_version": current_schema,
             },
         )
+        self._ensure_restore_family_coherent(target)
         current_exists = target.exists()
         current_sha = self._sha256_file(target) if current_exists else None
+        current_state_sha = (
+            self._restore_state_sha256(target) if current_exists else None
+        )
         fingerprint = self._restore_fingerprint(
-            backup.sha256, target, current_exists, current_sha
+            backup.sha256,
+            target,
+            current_exists,
+            current_sha,
+            current_state_sha,
         )
         return RestorePlan(
             backup,
@@ -252,21 +300,29 @@ class SQLiteRecoveryManager:
         confirmation_fingerprint: str,
         allow_replace_unrecoverable_current: bool = False,
     ) -> RestoreResult:
+        with self._hold_recovery_lease():
+            return self._restore_unlocked(
+                plan,
+                confirmation_fingerprint=confirmation_fingerprint,
+                allow_replace_unrecoverable_current=allow_replace_unrecoverable_current,
+            )
+
+    def _restore_unlocked(
+        self,
+        plan: RestorePlan,
+        *,
+        confirmation_fingerprint: str,
+        allow_replace_unrecoverable_current: bool,
+    ) -> RestoreResult:
         self._ensure_no_interrupted_restore()
         if not self._equal(confirmation_fingerprint, plan.confirmation_fingerprint):
             raise PermissionError("restore confirmation does not match the prepared preview")
 
         backup = self.verify_backup(plan.backup.database_path)
-        target = self._store.path.resolve()
+        target = self._resolve_direct_restore_target(self._store.path)
         if target != plan.target_path:
             raise RestorePlanStaleError("restore target changed after preview")
-        current_exists = target.exists()
-        current_sha = self._sha256_file(target) if current_exists else None
-        fingerprint = self._restore_fingerprint(
-            backup.sha256, target, current_exists, current_sha
-        )
-        if not self._equal(fingerprint, plan.confirmation_fingerprint):
-            raise RestorePlanStaleError("live database changed after restore preview")
+        current_exists = self._assert_restore_plan_current(plan, backup, target)
 
         target.parent.mkdir(parents=True, exist_ok=True)
         staged = self._temporary_path(target, "restore-stage")
@@ -275,49 +331,42 @@ class SQLiteRecoveryManager:
         quarantine_manifest: Path | None = None
         copy_completed = False
         try:
-            self._copy_database(backup.database_path, staged)
+            self._stage_verified_backup(backup, staged)
             SQLiteStore(staged).initialize()
             if self._validate_database(staged, require_supported=True) != SCHEMA_VERSION:
                 raise BackupVerificationError(
                     "staged restore did not migrate to the current schema"
                 )
-            if current_exists and plan.current_is_healthy:
-                safety = self.create_backup(
-                    target.parent / self._safety_backup_name(target)
-                )
-            elif current_exists and not allow_replace_unrecoverable_current:
-                raise RestoreSafetyError(
-                    "current database is corrupt or unsupported; destructive replacement "
-                    "requires allow_replace_unrecoverable_current=True after explicit review"
-                )
 
-            self._append_restore_completed(
-                staged, target, backup, safety, current_exists and not plan.current_is_healthy
-            )
-            if current_exists and not plan.current_is_healthy:
-                quarantine, quarantine_manifest = self._replace_unrecoverable(
-                    staged, target, plan, backup
+            if current_exists and plan.current_is_healthy:
+                safety = self._restore_healthy_current(
+                    staged=staged,
+                    target=target,
+                    plan=plan,
+                    backup=backup,
                 )
                 copy_completed = True
             else:
-                self._copy_database(staged, target, overwrite=current_exists)
-                copy_completed = True
-
-            if self._validate_database(target, require_supported=True) != SCHEMA_VERSION:
-                raise BackupVerificationError(
-                    "restored database is not on the current schema"
-                )
-        except Exception:
-            if copy_completed and safety is not None:
-                try:
-                    self._copy_database(safety.database_path, target, overwrite=True)
-                    self._validate_database(target, require_supported=False)
-                except Exception as rollback_exc:
+                if current_exists and not allow_replace_unrecoverable_current:
                     raise RestoreSafetyError(
-                        "restore failed and rollback from the safety backup also failed"
-                    ) from rollback_exc
-            elif not current_exists and target.exists():
-                target.unlink(missing_ok=True)
+                        "current database is corrupt or unsupported; destructive replacement "
+                        "requires allow_replace_unrecoverable_current=True after explicit review"
+                    )
+                self._append_restore_completed(
+                    staged,
+                    target,
+                    backup,
+                    None,
+                    current_exists,
+                )
+                if current_exists:
+                    quarantine, quarantine_manifest = self._replace_unrecoverable(
+                        staged, target, plan, backup
+                    )
+                else:
+                    self._publish_database_no_clobber(staged, target)
+                copy_completed = True
+        except Exception:
             self._audit_if_possible(
                 "reliability.restore_failed",
                 {
@@ -335,8 +384,63 @@ class SQLiteRecoveryManager:
             target, SCHEMA_VERSION, safety, quarantine, quarantine_manifest
         )
 
+    def _restore_healthy_current(
+        self,
+        *,
+        staged: Path,
+        target: Path,
+        plan: RestorePlan,
+        backup: BackupArtifact,
+    ) -> BackupArtifact:
+        try:
+            with exclusive_sqlite_lease(target) as live_connection:
+                self._assert_restore_plan_current(plan, backup, target)
+                safety = self._create_backup(
+                    target.parent / self._safety_backup_name(target),
+                    record_audit=False,
+                    source_connection=live_connection,
+                )
+                self._append_restore_completed(staged, target, backup, safety, False)
+                copy_completed = False
+                try:
+                    self._copy_database_to_connection(staged, live_connection)
+                    copy_completed = True
+                    if (
+                        self._validate_connection(
+                            live_connection,
+                            require_supported=True,
+                        )
+                        != SCHEMA_VERSION
+                    ):
+                        raise BackupVerificationError(
+                            "restored database is not on the current schema"
+                        )
+                except Exception:
+                    if copy_completed:
+                        try:
+                            self._copy_database_to_connection(
+                                safety.database_path,
+                                live_connection,
+                            )
+                            self._validate_connection(
+                                live_connection,
+                                require_supported=False,
+                            )
+                        except Exception as rollback_exc:
+                            raise RestoreSafetyError(
+                                "restore failed and rollback from the safety backup also failed"
+                            ) from rollback_exc
+                    raise
+                return safety
+        except RecoveryLeaseError as exc:
+            raise RestoreSafetyError(str(exc)) from exc
+
     def recover_interrupted_restore(self) -> InterruptedRestoreResult | None:
-        target = self._store.path.resolve()
+        with self._hold_recovery_lease():
+            return self._recover_interrupted_restore_unlocked()
+
+    def _recover_interrupted_restore_unlocked(self) -> InterruptedRestoreResult | None:
+        target = self._resolve_direct_restore_target(self._store.path)
         marker_path = self._restore_marker_path(target)
         if not marker_path.exists():
             return None
@@ -389,10 +493,10 @@ class SQLiteRecoveryManager:
 
         if not target.exists() and stage.exists():
             self._move_sidecars_to_quarantine(target, marker)
-            os.replace(stage, target)
-            self._fsync_directory(target.parent)
+            self._publish_database_no_clobber(stage, target)
             self._validate_marker_target(target, stage_sha)
             self._publish_quarantine_manifest(marker, target)
+            stage.unlink(missing_ok=True)
             marker_path.unlink(missing_ok=True)
             self._fsync_directory(target.parent)
             return InterruptedRestoreResult(
@@ -454,8 +558,7 @@ class SQLiteRecoveryManager:
             os.replace(target, quarantine)
             self._move_sidecars_to_quarantine(target, typed_marker)
             self._fsync_directory(target.parent)
-            os.replace(staged, target)
-            self._fsync_directory(target.parent)
+            self._publish_database_no_clobber(staged, target)
             self._validate_marker_target(target, stage_sha)
             quarantine_manifest = self._publish_quarantine_manifest(
                 typed_marker, target
@@ -478,10 +581,16 @@ class SQLiteRecoveryManager:
     def _rollback_quarantine(self, target: Path, marker: dict[str, Any]) -> None:
         quarantine = target.parent / marker["quarantine_file"]
         old_sha = marker["current_sha256"]
+        stage_sha = marker["stage_sha256"]
         failed: Path | None = None
         if target.exists():
-            if self._equal(self._sha256_file(target), old_sha):
+            target_sha = self._sha256_file(target)
+            if self._equal(target_sha, old_sha):
                 return
+            if not self._equal(target_sha, stage_sha):
+                raise RestoreSafetyError(
+                    "quarantine rollback refused to overwrite an unknown restore target"
+                )
             failed = self._temporary_path(target, "failed-restore")
             os.replace(target, failed)
         if not quarantine.exists():
@@ -696,32 +805,212 @@ class SQLiteRecoveryManager:
                 "recover_interrupted_restore() before new backup/restore work"
             )
 
+    @contextmanager
+    def _hold_recovery_lease(self) -> Iterator[None]:
+        target = self._store.path.resolve()
+        try:
+            with RecoveryFileLease(self._recovery_lease_path(target)):
+                yield
+        except RecoveryLeaseError as exc:
+            raise RestoreSafetyError(str(exc)) from exc
+
+    def _assert_restore_plan_current(
+        self,
+        plan: RestorePlan,
+        backup: BackupArtifact,
+        target: Path,
+    ) -> bool:
+        try:
+            self._ensure_restore_family_coherent(target)
+            current_exists = target.exists()
+            current_sha = self._sha256_file(target) if current_exists else None
+            current_state_sha = (
+                self._restore_state_sha256(target) if current_exists else None
+            )
+        except (OSError, BackupRecoveryError) as exc:
+            raise RestorePlanStaleError(
+                "live database changed after restore preview"
+            ) from exc
+        fingerprint = self._restore_fingerprint(
+            backup.sha256,
+            target,
+            current_exists,
+            current_sha,
+            current_state_sha,
+        )
+        if not self._equal(fingerprint, plan.confirmation_fingerprint):
+            raise RestorePlanStaleError("live database changed after restore preview")
+        return current_exists
+
+    @classmethod
+    def _resolve_direct_restore_target(cls, configured_target: Path) -> Path:
+        if cls._is_indirect_path(configured_target):
+            raise RestoreSafetyError("restore target must not be an indirect filesystem path")
+        return configured_target.resolve()
+
+    @classmethod
+    def _ensure_restore_family_coherent(cls, target: Path) -> None:
+        wal = cls._wal_path(target)
+        shm = cls._shm_path(target)
+        if cls._is_indirect_path(target):
+            raise RestoreSafetyError("restore target must not be an indirect filesystem path")
+        if target.exists() and not target.is_file():
+            raise RestoreSafetyError("restore target is not a regular database file")
+        for sidecar in (wal, shm):
+            if cls._is_indirect_path(sidecar):
+                raise RestoreSafetyError("SQLite restore sidecar must not be indirect")
+            if sidecar.exists() and not sidecar.is_file():
+                raise RestoreSafetyError("SQLite restore sidecar is not a regular file")
+        if not target.exists() and (wal.exists() or shm.exists()):
+            raise RestoreSafetyError(
+                "live database is missing while SQLite sidecars remain"
+            )
+
+    @classmethod
+    def _ensure_backup_artifact_coherent(cls, database: Path) -> None:
+        wal = cls._wal_path(database)
+        shm = cls._shm_path(database)
+        for sidecar in (wal, shm):
+            if cls._is_indirect_path(sidecar):
+                raise BackupVerificationError("backup SQLite sidecar must not be indirect")
+            if sidecar.exists():
+                raise BackupVerificationError(
+                    "backup artifact has SQLite sidecar state not bound by its manifest"
+                )
+
+    @classmethod
+    def _validate_locked_backup_source(
+        cls,
+        artifact: BackupArtifact,
+        connection: sqlite3.Connection,
+    ) -> None:
+        database = artifact.database_path
+        if cls._is_indirect_path(database) or not database.is_file():
+            raise BackupVerificationError("backup database identity changed before staging")
+        wal = cls._wal_path(database)
+        shm = cls._shm_path(database)
+        for sidecar in (wal, shm):
+            if cls._is_indirect_path(sidecar):
+                raise BackupVerificationError("backup SQLite sidecar must not be indirect")
+            if sidecar.exists() and not sidecar.is_file():
+                raise BackupVerificationError("backup SQLite sidecar is not a regular file")
+        if wal.exists() and wal.stat().st_size > 0:
+            raise BackupVerificationError(
+                "backup artifact has durable WAL state not bound by its manifest"
+            )
+        if database.stat().st_size != artifact.size_bytes:
+            raise BackupVerificationError("backup database size changed before staging")
+        if not cls._equal(cls._sha256_file(database), artifact.sha256):
+            raise BackupVerificationError("backup database changed before staging")
+        if (
+            cls._validate_connection(connection, require_supported=True)
+            != artifact.schema_version
+        ):
+            raise BackupVerificationError("backup schema version changed before staging")
+
+    @classmethod
+    def _stage_verified_backup(cls, artifact: BackupArtifact, staged: Path) -> None:
+        cls._ensure_backup_artifact_coherent(artifact.database_path)
+        try:
+            with exclusive_sqlite_lease(artifact.database_path) as source_connection:
+                cls._validate_locked_backup_source(artifact, source_connection)
+                cls._copy_connection_to_database(source_connection, staged)
+                cls._validate_locked_backup_source(artifact, source_connection)
+        except RecoveryLeaseError as exc:
+            raise BackupVerificationError(
+                "backup source cannot be held stable for restore staging"
+            ) from exc
+
+    @staticmethod
+    def _is_indirect_path(path: Path) -> bool:
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            return False
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        file_attributes = getattr(info, "st_file_attributes", 0)
+        return stat.S_ISLNK(info.st_mode) or bool(file_attributes & reparse_flag)
+
+    @classmethod
+    def _restore_state_sha256(cls, target: Path) -> str:
+        """Hash the logical durable main+WAL representation approved for restore.
+
+        A missing WAL and a zero-byte WAL both represent no durable WAL frames. SQLite
+        may create an empty WAL while establishing exclusive locking, so treating those
+        two representations as equivalent prevents the recovery lock from invalidating
+        its own confirmation. Any non-empty WAL remains byte-for-byte authority.
+        """
+        cls._ensure_restore_family_coherent(target)
+        digest = hashlib.sha256()
+        digest.update(_RESTORE_STATE_VERSION)
+        main = target
+        wal = cls._wal_path(target)
+
+        digest.update(b"main\x00present\x00")
+        main_size = main.stat().st_size
+        digest.update(str(main_size).encode("ascii"))
+        digest.update(b"\x00")
+        with main.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+
+        digest.update(b"wal\x00")
+        if not wal.exists() or wal.stat().st_size == 0:
+            digest.update(b"empty\x00")
+            return digest.hexdigest()
+        digest.update(b"present\x00")
+        wal_size = wal.stat().st_size
+        digest.update(str(wal_size).encode("ascii"))
+        digest.update(b"\x00")
+        with wal.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
     @classmethod
     def _validate_database(cls, path: Path, *, require_supported: bool) -> int:
         try:
             conn = sqlite3.connect(path, timeout=1.0)
-            conn.row_factory = sqlite3.Row
             try:
                 conn.execute("PRAGMA query_only = ON")
-                conn.execute("PRAGMA trusted_schema = OFF")
-                integrity = tuple(
-                    str(row[0]) for row in conn.execute("PRAGMA integrity_check")
-                )
-                if integrity != ("ok",):
-                    detail = "; ".join(integrity[:5]) or "no integrity result"
-                    raise BackupVerificationError(
-                        f"SQLite integrity check failed: {detail}"
-                    )
-                if conn.execute("PRAGMA foreign_key_check").fetchall():
-                    raise BackupVerificationError("SQLite foreign-key check failed")
-                versions = tuple(
-                    int(row[0])
-                    for row in conn.execute(
-                        "SELECT version FROM schema_migrations ORDER BY version"
-                    )
+                return cls._validate_connection(
+                    conn,
+                    require_supported=require_supported,
                 )
             finally:
                 conn.close()
+        except BackupVerificationError:
+            raise
+        except (sqlite3.DatabaseError, OSError, ValueError) as exc:
+            raise BackupVerificationError(
+                f"SQLite database validation failed: {exc}"
+            ) from exc
+
+    @classmethod
+    def _validate_connection(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        require_supported: bool,
+    ) -> int:
+        try:
+            connection.execute("PRAGMA trusted_schema = OFF")
+            integrity = tuple(
+                str(row[0]) for row in connection.execute("PRAGMA integrity_check")
+            )
+            if integrity != ("ok",):
+                detail = "; ".join(integrity[:5]) or "no integrity result"
+                raise BackupVerificationError(
+                    f"SQLite integrity check failed: {detail}"
+                )
+            if connection.execute("PRAGMA foreign_key_check").fetchall():
+                raise BackupVerificationError("SQLite foreign-key check failed")
+            versions = tuple(
+                int(row[0])
+                for row in connection.execute(
+                    "SELECT version FROM schema_migrations ORDER BY version"
+                )
+            )
         except BackupVerificationError:
             raise
         except (sqlite3.DatabaseError, OSError, ValueError) as exc:
@@ -760,12 +1049,69 @@ class SQLiteRecoveryManager:
             source_conn.close()
 
     @staticmethod
+    def _copy_connection_to_database(
+        source_connection: sqlite3.Connection,
+        destination: Path,
+    ) -> None:
+        if destination.exists():
+            raise FileExistsError(f"SQLite destination already exists: {destination}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        target_connection = sqlite3.connect(destination, timeout=5.0)
+        try:
+            source_connection.backup(target_connection, pages=128, sleep=0.05)
+        finally:
+            target_connection.close()
+
+    @staticmethod
+    def _copy_database_to_connection(
+        source: Path,
+        destination_connection: sqlite3.Connection,
+    ) -> None:
+        if not source.is_file():
+            raise FileNotFoundError(f"SQLite source does not exist: {source}")
+        source_connection = sqlite3.connect(source, timeout=5.0)
+        try:
+            source_connection.execute("PRAGMA query_only = ON")
+            source_connection.backup(
+                destination_connection,
+                pages=128,
+                sleep=0.05,
+            )
+        finally:
+            source_connection.close()
+
+    @classmethod
+    def _publish_database_no_clobber(cls, staged: Path, target: Path) -> None:
+        cls._ensure_restore_family_coherent(target)
+        if target.exists():
+            raise RestorePlanStaleError("restore target appeared before publication")
+        try:
+            os.link(staged, target)
+        except FileExistsError as exc:
+            raise RestorePlanStaleError(
+                "restore target appeared before publication"
+            ) from exc
+        except OSError as exc:
+            raise RestoreSafetyError(
+                "atomic no-clobber restore publication is unavailable"
+            ) from exc
+        try:
+            cls._fsync_directory(target.parent)
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
+
+    @staticmethod
     def _manifest_path(database: Path) -> Path:
         return database.with_name(f"{database.name}.manifest.json")
 
     @staticmethod
     def _restore_marker_path(target: Path) -> Path:
         return target.with_name(f".{target.name}.restore-in-progress.json")
+
+    @staticmethod
+    def _recovery_lease_path(target: Path) -> Path:
+        return target.with_name(f".{target.name}.nika-recovery.lock")
 
     @staticmethod
     def _wal_path(target: Path) -> Path:
@@ -845,12 +1191,14 @@ class SQLiteRecoveryManager:
         target: Path,
         current_exists: bool,
         current_sha: str | None,
+        current_state_sha: str | None,
     ) -> str:
         payload = json.dumps(
             {
                 "backup_sha256": backup_sha,
                 "current_exists": current_exists,
                 "current_sha256": current_sha,
+                "current_state_sha256": current_state_sha,
                 "target": str(target),
             },
             ensure_ascii=False,
