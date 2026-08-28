@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.kernel.task_state import TaskState
 from nika_core.research.models import ResearchResultSet, SourceKind
 from nika_core.research.network_repository import NetworkResearchRepository
 from nika_core.research.profiles import (
@@ -165,27 +164,14 @@ class DurablePreviousObservationLoader:
     def _validate_task_binding(self, task_id: str, series_id: str) -> None:
         with self._store.connection() as conn:
             binding = conn.execute(
-                """SELECT t.state FROM research_profile_series_tasks b
-                JOIN tasks t ON t.task_id=b.task_id
-                WHERE b.series_id=? AND b.task_id=?""",
+                """SELECT 1 FROM research_profile_series_tasks
+                WHERE series_id=? AND task_id=?""",
                 (series_id, task_id),
             ).fetchone()
         if binding is None:
             self._fail(
                 PreviousObservationErrorCode.IDENTITY_MISMATCH,
                 "durable previous observation task is not bound to the requested series",
-            )
-        try:
-            state = TaskState(binding["state"])
-        except ValueError:
-            self._fail(
-                PreviousObservationErrorCode.CORRUPT_BASELINE,
-                "durable previous observation task has an invalid state",
-            )
-        if state is not TaskState.COMPLETED:
-            self._fail(
-                PreviousObservationErrorCode.CORRUPT_BASELINE,
-                "durable previous observation task is not completed",
             )
 
     def _load_canonical_definitions(
