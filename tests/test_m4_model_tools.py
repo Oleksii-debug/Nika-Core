@@ -419,7 +419,9 @@ def test_tool_timeout_is_normalized() -> None:
         ToolSpec(tool_id="slow", description="slow", timeout_seconds=0.001), handler
     )
 
-    result = asyncio.run(executor.execute(ToolCall(call_id="call-3", tool_id="slow", arguments={})))
+    result = asyncio.run(
+        executor.execute(ToolCall(call_id="call-3", tool_id="slow", arguments={}))
+    )
 
     assert not result.ok
     assert result.error == "tool timed out"
@@ -427,13 +429,24 @@ def test_tool_timeout_is_normalized() -> None:
 
 def test_mcp_official_sdk_in_process_discovery_and_call() -> None:
     server = MCPServer("nika-m4-test")
+    approval_calls = 0
 
     @server.tool()
     async def add(left: int, right: int) -> dict[str, int]:
         """Add two integers."""
         return {"sum": left + right}
 
-    adapter = MCPClientAdapter(MCPServerConfig(server_id="test", target=server))
+    async def approve(spec: ToolSpec, call: ToolCall) -> bool:
+        nonlocal approval_calls
+        approval_calls += 1
+        assert spec.risk is ToolRisk.EXTERNAL_SIDE_EFFECT
+        assert call.tool_id == "mcp:test:add"
+        return True
+
+    adapter = MCPClientAdapter(
+        MCPServerConfig(server_id="test", target=server),
+        approval_policy=approve,
+    )
 
     specs = asyncio.run(adapter.list_tools())
     assert len(specs) == 1
@@ -454,3 +467,4 @@ def test_mcp_official_sdk_in_process_discovery_and_call() -> None:
 
     assert result.ok
     assert result.output == {"sum": 5}
+    assert approval_calls == 1
