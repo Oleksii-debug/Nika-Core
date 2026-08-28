@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime, timedelta
+import json
 
 import pytest
 
@@ -317,16 +317,66 @@ def test_restart_rechecks_pause_cancel_deadline_and_attempt_policy() -> None:
     assert stricter_policy.disposition == ScriptRetryDisposition.ATTEMPTS_EXHAUSTED
 
 
+def test_same_instant_cancel_then_deadline_dominate_pause_and_ready_retry() -> None:
+    policy = RetryPolicy(max_retries=2)
+    logical_instant = NOW + timedelta(seconds=10)
+    intent = ScriptRetryIntent(
+        operation_id="same-instant-op",
+        condition=ScriptRetryCondition.TEMPORARY_BUSY,
+        retry_number=1,
+        not_before_utc=NOW + timedelta(seconds=1),
+        deadline_utc=logical_instant,
+    )
+    restored = ScriptRetryIntent.from_payload(intent.to_payload())
+
+    cancelled = evaluate_script_retry_intent(
+        restored,
+        policy,
+        now=logical_instant,
+        replay_safe=True,
+        paused=True,
+        cancelled=True,
+    )
+    deadline = evaluate_script_retry_intent(
+        restored,
+        policy,
+        now=logical_instant,
+        replay_safe=True,
+        paused=True,
+    )
+    planning_cancelled = plan_script_retry(
+        policy,
+        operation_id="same-instant-plan",
+        condition=ScriptRetryCondition.TEMPORARY_BUSY,
+        retries_used=0,
+        now=logical_instant,
+        replay_safe=True,
+        deadline=logical_instant,
+        paused=True,
+        cancelled=True,
+    )
+
+    assert cancelled.disposition == ScriptRetryDisposition.CANCELLED
+    assert cancelled.intent is None
+    assert deadline.disposition == ScriptRetryDisposition.DEADLINE_EXCEEDED
+    assert deadline.intent is None
+    assert planning_cancelled.disposition == ScriptRetryDisposition.CANCELLED
+    assert planning_cancelled.intent is None
+
+
 @pytest.mark.parametrize(
-    "payload_patch",
+    ("payload_patch", "expected_error"),
     [
-        {"version": 2},
-        {"retry_number": True},
-        {"condition": "arbitrary_transient"},
-        {"not_before_utc": "2026-08-27T20:00:00"},
+        ({"version": 2}, ValueError),
+        ({"retry_number": True}, TypeError),
+        ({"condition": "arbitrary_transient"}, ValueError),
+        ({"not_before_utc": "2026-08-27T20:00:00"}, ValueError),
     ],
 )
-def test_durable_intent_codec_fails_closed(payload_patch: dict[str, object]) -> None:
+def test_durable_intent_codec_fails_closed(
+    payload_patch: dict[str, object],
+    expected_error: type[Exception],
+) -> None:
     payload = ScriptRetryIntent(
         operation_id="codec-op",
         condition=ScriptRetryCondition.TEMPORARY_BUSY,
@@ -336,12 +386,12 @@ def test_durable_intent_codec_fails_closed(payload_patch: dict[str, object]) -> 
     ).to_payload()
     payload.update(payload_patch)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(expected_error):
         ScriptRetryIntent.from_payload(payload)
 
 
 def test_retry_safety_flags_require_real_booleans() -> None:
-    with pytest.raises(ValueError, match="replay_safe"):
+    with pytest.raises(TypeError, match="replay_safe"):
         plan_script_retry(
             RetryPolicy(max_retries=1),
             operation_id="op",
@@ -353,7 +403,7 @@ def test_retry_safety_flags_require_real_booleans() -> None:
 
 
 def test_retry_intent_rejects_untyped_condition_and_float_version() -> None:
-    with pytest.raises(ValueError, match="ScriptRetryCondition"):
+    with pytest.raises(TypeError, match="ScriptRetryCondition"):
         ScriptRetryIntent(
             operation_id="op",
             condition="temporary_busy",  # type: ignore[arg-type]
