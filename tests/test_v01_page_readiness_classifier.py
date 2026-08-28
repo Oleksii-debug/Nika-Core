@@ -125,6 +125,16 @@ def test_invisible_control_is_fail_closed_not_automatic_retry() -> None:
     assert result.retry_candidate is False
 
 
+def test_transient_disabled_hint_cannot_override_hidden_control() -> None:
+    result = classify_page_readiness(
+        snapshot=_snapshot(_button(enabled=False, visible=False)),
+        locator=ControlLocator(role="button", name="Save"),
+        signal=PageObservationSignal.CONTROL_DISABLED_TRANSIENT,
+    )
+    assert result.state == PageReadinessState.MISSING
+    assert result.retry_candidate is False
+
+
 def test_exception_text_is_not_used_as_readiness_authority(monkeypatch: pytest.MonkeyPatch) -> None:
     def arbitrary_failure(*args: object, **kwargs: object) -> ControlNode:
         raise RuntimeError("temporarily busy page closed ambiguous loading")
