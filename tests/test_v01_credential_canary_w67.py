@@ -53,12 +53,8 @@ def _raw_db(store: SQLiteStore) -> str:
             ("research_http_sources", "url, final_url, last_error_message"),
             ("research_http_attempts", "requested_url, final_url, error_message"),
         ):
-            try:
-                for row in conn.execute(f"SELECT {columns} FROM {table}").fetchall():
-                    rows.extend("" if value is None else str(value) for value in row)
-            except Exception:
-                # The audit is interested in current-main persisted surfaces that exist.
-                continue
+            for row in conn.execute(f"SELECT {columns} FROM {table}").fetchall():
+                rows.extend("" if value is None else str(value) for value in row)
     return "\n".join(rows)
 
 
@@ -165,7 +161,7 @@ def test_monitor_error_canary_is_not_persisted_or_reported(tmp_path) -> None:
     network.record_attempt(
         source_id="w67-source",
         attempt_number=1,
-        disposition=RefreshDisposition.ERROR,
+        disposition=RefreshDisposition.FAILED,
         requested_url=safe_url,
         final_url=safe_url,
         status_code=None,
@@ -175,7 +171,7 @@ def test_monitor_error_canary_is_not_persisted_or_reported(tmp_path) -> None:
     )
     network.finalize_source(
         "w67-source",
-        disposition=RefreshDisposition.ERROR,
+        disposition=RefreshDisposition.FAILED,
         final_url=safe_url,
         status_code=None,
         error_code="synthetic_failure",
