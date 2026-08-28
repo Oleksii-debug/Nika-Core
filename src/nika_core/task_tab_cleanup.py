@@ -100,7 +100,7 @@ def apply_task_tab_cleanup(
     event: TaskTabCleanupEvent,
     task_id: str,
     tab_id: str | None = None,
-    unresolved_external_effect: bool = False,
+    unresolved_external_effect: bool | None = None,
     reconciliation: tuple[TaskTabReconciliationEvidence, ...] = (),
 ) -> TaskTabCleanupResult:
     """Apply the minimum safe cleanup allowed by the supplied lifecycle event.
@@ -111,8 +111,8 @@ def apply_task_tab_cleanup(
 
     if not isinstance(event, TaskTabCleanupEvent):
         raise TypeError("event must be a TaskTabCleanupEvent")
-    if not isinstance(unresolved_external_effect, bool):
-        raise TypeError("unresolved_external_effect must be a bool")
+    if unresolved_external_effect is not None and not isinstance(unresolved_external_effect, bool):
+        raise TypeError("unresolved_external_effect must be a bool or None")
     if not isinstance(reconciliation, tuple):
         raise TypeError("reconciliation must be a tuple")
 
@@ -122,7 +122,10 @@ def apply_task_tab_cleanup(
     if tab_id is not None and tab_id not in owned_by_id:
         raise TaskTabCleanupError("cleanup target is not owned by the supplied task")
 
-    uncertainty = unresolved_external_effect or event is TaskTabCleanupEvent.UNCERTAIN_EXTERNAL_EFFECT
+    uncertainty = (
+        unresolved_external_effect is True
+        or event is TaskTabCleanupEvent.UNCERTAIN_EXTERNAL_EFFECT
+    )
     _validate_reconciliation(
         task_id=task_id,
         tab_id=tab_id,
@@ -151,6 +154,10 @@ def apply_task_tab_cleanup(
         )
 
     if event in {TaskTabCleanupEvent.TASK_COMPLETE, TaskTabCleanupEvent.CANCEL}:
+        if unresolved_external_effect is None:
+            raise TaskTabCleanupBlockedError(
+                "task-terminal cleanup requires explicit external-effect clearance"
+            )
         if uncertainty:
             return _result(
                 tabs=tabs,
