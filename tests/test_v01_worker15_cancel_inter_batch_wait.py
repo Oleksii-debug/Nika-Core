@@ -43,10 +43,10 @@ class _DeterministicDueRunner:
                 continue
             raw_run_date = job.trigger.get("run_date")
             if not isinstance(raw_run_date, str):
-                raise AssertionError("test oracle requires persisted ISO-8601 DATE run_date")
-            run_date = datetime.fromisoformat(raw_run_date.replace("Z", "+00:00"))
+                raise TypeError("test oracle requires persisted ISO-8601 DATE run_date")
+            run_date = datetime.fromisoformat(raw_run_date)
             if run_date.tzinfo is None or run_date.utcoffset() is None:
-                raise AssertionError("test oracle requires timezone-aware DATE run_date")
+                raise ValueError("test oracle requires timezone-aware DATE run_date")
             if run_date.astimezone(UTC) <= self._clock.now.astimezone(UTC):
                 self._adapter._dispatch(job.job_id)
 
