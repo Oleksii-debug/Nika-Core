@@ -17,7 +17,6 @@ from nika_core.runtime.retry import (
 from nika_core.scheduler.contracts import ScheduledJob, TriggerKind
 from nika_core.scheduler.store import ScheduledJobStore
 
-
 NOW = datetime(2026, 8, 27, 20, 0, tzinfo=UTC)
 
 
