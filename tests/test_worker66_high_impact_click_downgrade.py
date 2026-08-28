@@ -1,7 +1,7 @@
 """QA_ONLY Worker66 oracle for V0.1 high-impact click risk downgrade.
 
 DO NOT MERGE. The controlled adapter has no network, browser, account, message,
-delete, or publish side effect. Canonical effect identity is the machine tool_id;
+delete, or publish side effect. Canonical effect risk comes from backend ToolSpec;
 the accessible control name is deliberately identical for every case.
 """
 
@@ -33,23 +33,47 @@ from nika_core.security.policy import (
     SandboxPolicy,
     SecurityPolicy,
 )
+from nika_core.tools import ToolRisk, ToolSpec
 
 
 @dataclass(frozen=True, slots=True)
 class EffectCase:
-    effect_id: str
-    required_risk: InteractionRisk
+    spec: ToolSpec
 
     @property
-    def tool_id(self) -> str:
-        return f"interaction.effect.{self.effect_id}"
+    def effect_id(self) -> str:
+        return self.spec.tool_id.rsplit(".", 1)[-1]
 
 
 _APPROVAL_EFFECTS = (
-    EffectCase("send", InteractionRisk.R2_EXTERNAL_SIDE_EFFECT),
-    EffectCase("delete", InteractionRisk.R4_HIGH_IMPACT),
-    EffectCase("publish", InteractionRisk.R4_HIGH_IMPACT),
-    EffectCase("account_change", InteractionRisk.R4_HIGH_IMPACT),
+    EffectCase(
+        ToolSpec(
+            "interaction.effect.send",
+            "Controlled send effect",
+            risk=ToolRisk.EXTERNAL_SIDE_EFFECT,
+        )
+    ),
+    EffectCase(
+        ToolSpec(
+            "interaction.effect.delete",
+            "Controlled delete effect",
+            risk=ToolRisk.HIGH_IMPACT,
+        )
+    ),
+    EffectCase(
+        ToolSpec(
+            "interaction.effect.publish",
+            "Controlled publish effect",
+            risk=ToolRisk.HIGH_IMPACT,
+        )
+    ),
+    EffectCase(
+        ToolSpec(
+            "interaction.effect.account_change",
+            "Controlled account change effect",
+            risk=ToolRisk.HIGH_IMPACT,
+        )
+    ),
 )
 
 
@@ -119,10 +143,13 @@ class ControlledEffectAdapter:
         return True
 
 
-def _coordinator(tmp_path: Path, effect: EffectCase) -> tuple[SemanticInteractionCoordinator, ControlledEffectAdapter]:
+def _coordinator(
+    tmp_path: Path,
+    effect: EffectCase,
+) -> tuple[SemanticInteractionCoordinator, ControlledEffectAdapter]:
     adapter = ControlledEffectAdapter(effect)
     policy = SecurityPolicy(
-        granted_tools=frozenset({effect.tool_id}),
+        granted_tools=frozenset({effect.spec.tool_id}),
         sandbox=SandboxPolicy(workspace_root=tmp_path),
         budget=ExecutionBudget(),
     )
@@ -140,7 +167,7 @@ def _generic_click(effect: EffectCase) -> InteractionRequest:
     return InteractionRequest(
         task_id="worker66-controlled-task",
         operation_key=f"worker66-{effect.effect_id}",
-        tool_id=effect.tool_id,
+        tool_id=effect.spec.tool_id,
         target="controlled-resource-42",
         locator=ControlLocator(role="button", name="Continue"),
         action=InteractionAction.INVOKE,
@@ -153,8 +180,8 @@ def test_generic_click_cannot_downgrade_canonical_effect_risk(
     tmp_path: Path,
     effect: EffectCase,
 ) -> None:
-    """Approval-requiring machine effects must fail closed before adapter.act."""
-    assert effect.required_risk.approval_required is True
+    """Backend ToolSpec requiring approval must fail closed before adapter.act."""
+    assert effect.spec.risk in {ToolRisk.EXTERNAL_SIDE_EFFECT, ToolRisk.HIGH_IMPACT}
     coordinator, adapter = _coordinator(tmp_path, effect)
 
     with pytest.raises(PermissionBlockedError):
@@ -164,8 +191,14 @@ def test_generic_click_cannot_downgrade_canonical_effect_risk(
 
 
 def test_oracle_does_not_make_all_interactions_high_impact(tmp_path: Path) -> None:
-    """A declared harmless controlled local invoke remains a positive control."""
-    harmless = EffectCase("open_details", InteractionRisk.R0_OBSERVE)
+    """A backend-declared harmless controlled local invoke remains a positive control."""
+    harmless = EffectCase(
+        ToolSpec(
+            "interaction.effect.open_details",
+            "Controlled local details effect",
+            risk=ToolRisk.READ_ONLY,
+        )
+    )
     coordinator, adapter = _coordinator(tmp_path, harmless)
 
     result = coordinator.execute(_generic_click(harmless))
