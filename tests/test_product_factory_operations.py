@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from pf8_effect_journal_fake import MemoryEffectJournal
 
 from nika_core.product_factory_operations import (
     MaintenanceState,
@@ -79,6 +80,22 @@ class FakeOperationsPort:
     def inspect(self, request: MaintenanceRequest) -> MaintenanceResult:
         self.inspected.append(request)
         return self.results.pop(0)
+
+
+class FakeApprovalAuthority:
+    def verify(
+        self,
+        *,
+        project_id: str,
+        service: DeployableService,
+        request: MaintenanceRequest,
+    ) -> bool:
+        return (
+            project_id == "p-social"
+            and request.service_id == service.service_id
+            and request.approval_ref == "approval:operator-42"
+            and request.evidence_refs == (f"health:{service.service_id}",)
+        )
 
 
 def test_staged_wave_waits_for_exact_dependency_health() -> None:
@@ -188,15 +205,21 @@ def test_maintenance_requires_approval_and_uncertain_result_reconciles() -> None
         MaintenanceResult(False, True, ("fake:uncertain",)),
         MaintenanceResult(True, False, ("fake:inspected",)),
     )
-    coordinator = ProductOperationsCoordinator("p-social", port)
+    coordinator = ProductOperationsCoordinator(
+        "p-social",
+        port,
+        FakeApprovalAuthority(),
+        MemoryEffectJournal(),
+    )
     api = _service("api", sha=60)
     coordinator.register(api)
+    coordinator.record_observation(_observation(api, (0, 1)))
     unapproved = MaintenanceRequest(
         "maint-1",
         "api",
         MaintenanceAction.RESTART,
         "dependency upgrade",
-        ("plan:maint-1",),
+        ("health:api",),
     )
     with pytest.raises(ProductOperationsError, match="explicit approval"):
         coordinator.request_maintenance(unapproved)
@@ -207,7 +230,7 @@ def test_maintenance_requires_approval_and_uncertain_result_reconciles() -> None
         "api",
         MaintenanceAction.RESTART,
         "dependency upgrade",
-        ("plan:maint-1",),
+        ("health:api",),
         approval_ref="approval:operator-42",
     )
     first = coordinator.request_maintenance(approved)
