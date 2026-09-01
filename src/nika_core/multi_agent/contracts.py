@@ -67,6 +67,17 @@ class TeamMember:
 
 
 @dataclass(frozen=True, slots=True)
+class StoredMemberResult:
+    outcome: str
+    payload: dict[str, Any]
+    error: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.outcome.strip():
+            raise ValueError("stored member result outcome must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
 class AgentHandoff:
     team_id: str
     sender_id: str

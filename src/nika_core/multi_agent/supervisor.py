@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.multi_agent.contracts import (
@@ -19,11 +19,25 @@ from nika_core.multi_agent.store import MultiAgentStore
 from nika_core.runtime.contracts import (
     AgentRuntimePort,
     RuntimeCapability,
+    RuntimeErrorCode,
     RuntimeOutcome,
     RuntimeRequest,
     RuntimeResult,
     RuntimeResumeMode,
     RuntimeResumeRequest,
+)
+
+_SAFE_EXCEPTION_NAMES = frozenset(
+    {
+        "AssertionError",
+        "KeyError",
+        "OSError",
+        "PermissionError",
+        "RuntimeError",
+        "TimeoutError",
+        "TypeError",
+        "ValueError",
+    }
 )
 
 
@@ -236,7 +250,10 @@ class MultiAgentSupervisor:
         return self._finish_result(current, result)
 
     def _finish_exception(self, member: TeamMember, exc: Exception) -> ChildExecution:
-        error = type(exc).__name__
+        exception_name = type(exc).__name__
+        error = (
+            exception_name if exception_name in _SAFE_EXCEPTION_NAMES else "WorkerException"
+        )
         updated = self._store.finish_member_execution(
             team_id=member.team_id,
             member_id=member.member_id,
@@ -252,20 +269,37 @@ class MultiAgentSupervisor:
         return ChildExecution(member=updated, result=None, exception=error)
 
     def _finish_result(self, member: TeamMember, result: RuntimeResult) -> ChildExecution:
-        state = self._state_for_result(result)
-        kind = HandoffKind.ERROR if result.outcome is RuntimeOutcome.FAILED else HandoffKind.RESULT
-        payload = dict(result.output)
+        safe_error = self._safe_runtime_error(result)
+        safe_result = replace(result, error=safe_error)
+        state = self._state_for_result(safe_result)
+        kind = (
+            HandoffKind.ERROR
+            if safe_result.outcome is RuntimeOutcome.FAILED
+            else HandoffKind.RESULT
+        )
+        payload = dict(safe_result.output)
         updated = self._store.finish_member_execution(
             team_id=member.team_id,
             member_id=member.member_id,
             state=state,
-            resume_token=result.resume_token,
-            outcome=result.outcome.value,
+            resume_token=safe_result.resume_token,
+            outcome=safe_result.outcome.value,
             payload=payload,
-            error=result.error,
+            error=safe_error,
             result_handoff=self._result_handoff(member, kind=kind, payload=payload),
         )
-        return ChildExecution(member=updated, result=result)
+        return ChildExecution(member=updated, result=safe_result)
+
+    @staticmethod
+    def _safe_runtime_error(result: RuntimeResult) -> str | None:
+        if result.outcome is not RuntimeOutcome.FAILED:
+            return None
+        if result.error_code is not None:
+            try:
+                return RuntimeErrorCode(result.error_code).value
+            except ValueError:
+                return "RuntimeFailure"
+        return "RuntimeFailure"
 
     def _initial_resume_token(
         self,
