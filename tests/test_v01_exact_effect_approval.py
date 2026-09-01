@@ -8,6 +8,9 @@ from pathlib import Path
 
 import pytest
 
+from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.task_queue import TaskQueue
+from nika_core.runtime.idempotency import IdempotencyLedger
 from nika_core.security import (
     V01_APPROVAL_AUTHORITY_VERSION,
     ActionIntent,
@@ -20,7 +23,7 @@ from nika_core.security import (
     SecurityPolicy,
     authorize_action,
 )
-from nika_core.tools import ToolCall, ToolExecutor, ToolRisk, ToolSpec
+from nika_core.tools import ToolCall, ToolEffectGuard, ToolExecutor, ToolRisk, ToolSpec
 
 NOW = datetime(2026, 8, 28, 20, 0, tzinfo=UTC)
 SEED = b"worker62-deterministic-seed-for-tests-only-0123456789"
@@ -304,3 +307,94 @@ def test_toolcall_approved_true_cannot_bypass_host_policy() -> None:
     )
     assert result.error == "approval required"
     assert called is False
+
+
+def test_durable_replay_requires_current_matching_exact_authority(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "exact-effect.db")
+    store.initialize()
+    task_id = TaskQueue(store).create(workspace_id="b06", agent_id="worker62").task_id
+    authority = _authority()
+    intent_a = _intent(task_id=task_id, target="Account A")
+    call = ToolCall(
+        call_id="stable-approved-effect",
+        tool_id=intent_a.tool_id,
+        task_id=task_id,
+        arguments=json.loads(intent_a.normalized_arguments_json),
+        approved=True,
+    )
+    spec = ToolSpec(
+        tool_id=intent_a.tool_id,
+        description="publish exact effect",
+        risk=ToolRisk.HIGH_IMPACT,
+    )
+    handler_calls = 0
+
+    async def handler(_arguments: dict[str, object]) -> object:
+        nonlocal handler_calls
+        handler_calls += 1
+        return {"published": "Account A"}
+
+    def executor_for(intent: ActionIntent) -> ToolExecutor:
+        evidence = _issue(authority, intent)
+
+        async def approve(_spec: ToolSpec, _call: ToolCall):
+            decision = authorize_action(
+                intent,
+                _policy(tmp_path, authority),
+                ExecutionBudgetLedger(ExecutionBudget(max_network_calls=4)),
+                ApprovalLedger(),
+                approval=evidence,
+                now=NOW + timedelta(seconds=2),
+            )
+            return decision.tool_authorization
+
+        executor = ToolExecutor(
+            approval_policy=approve,
+            effect_guard=ToolEffectGuard(IdempotencyLedger(store)),
+        )
+        executor.register(spec, handler)
+        return executor
+
+    swapped_call = replace(
+        call,
+        arguments={"nested": {"a": 1, "b": 2}, "title": "post-approval swap"},
+    )
+    swapped = asyncio.run(executor_for(intent_a).execute(swapped_call))
+
+    assert not swapped.ok
+    assert swapped.error == "approval required"
+    assert handler_calls == 0
+    assert IdempotencyLedger(store).list_for_task(task_id) == ()
+
+    completed = asyncio.run(executor_for(intent_a).execute(call))
+
+    assert completed.ok
+    assert completed.output == {"published": "Account A"}
+    assert handler_calls == 1
+
+    replayed = asyncio.run(executor_for(intent_a).execute(call))
+
+    assert replayed.ok
+    assert replayed.output == {"published": "Account A"}
+    assert handler_calls == 1
+
+    async def revoked(_spec: ToolSpec, _call: ToolCall):
+        raise PermissionError("current permission was revoked")
+
+    revoked_executor = ToolExecutor(
+        approval_policy=revoked,
+        effect_guard=ToolEffectGuard(IdempotencyLedger(store)),
+    )
+    revoked_executor.register(spec, handler)
+    denied_replay = asyncio.run(revoked_executor.execute(call))
+
+    assert not denied_replay.ok
+    assert denied_replay.error == "approval required"
+    assert handler_calls == 1
+
+    intent_b = replace(intent_a, target="Account B")
+    blocked = asyncio.run(executor_for(intent_b).execute(call))
+
+    assert not blocked.ok
+    assert blocked.error == "tool effect not safe to execute"
+    assert handler_calls == 1

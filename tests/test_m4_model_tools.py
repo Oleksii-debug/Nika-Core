@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 from mcp.server import MCPServer
 
+from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.task_queue import TaskQueue
 from nika_core.mcp_boundary import MCPClientAdapter, MCPServerConfig
 from nika_core.model_gateway.contracts import (
     ModelErrorCode,
@@ -23,7 +26,15 @@ from nika_core.model_gateway.providers import (
     DeterministicMockProvider,
     OpenAICompatibleProvider,
 )
-from nika_core.tools import ToolCall, ToolExecutor, ToolRisk, ToolSpec
+from nika_core.runtime.idempotency import IdempotencyLedger
+from nika_core.tools import (
+    ToolAuthorization,
+    ToolCall,
+    ToolEffectGuard,
+    ToolExecutor,
+    ToolRisk,
+    ToolSpec,
+)
 
 
 def request(**overrides: object) -> ModelRequest:
@@ -427,25 +438,38 @@ def test_tool_timeout_is_normalized() -> None:
     assert result.error == "tool timed out"
 
 
-def test_mcp_official_sdk_in_process_discovery_and_call() -> None:
+def test_mcp_official_sdk_in_process_discovery_and_call(tmp_path: Path) -> None:
     server = MCPServer("nika-m4-test")
     approval_calls = 0
+    store = SQLiteStore(tmp_path / "mcp-state.db")
+    store.initialize()
+    task_id = TaskQueue(store).create(workspace_id="m4", agent_id="mcp").task_id
 
     @server.tool()
     async def add(left: int, right: int) -> dict[str, int]:
         """Add two integers."""
         return {"sum": left + right}
 
-    async def approve(spec: ToolSpec, call: ToolCall) -> bool:
+    async def approve(spec: ToolSpec, call: ToolCall) -> ToolAuthorization:
+        from nika_core.tools import tool_arguments_fingerprint
+
         nonlocal approval_calls
         approval_calls += 1
         assert spec.risk is ToolRisk.EXTERNAL_SIDE_EFFECT
         assert call.tool_id == "mcp:test:add"
-        return True
+        return ToolAuthorization(
+            tool_id=spec.tool_id,
+            task_id=call.task_id or "",
+            risk=spec.risk,
+            arguments_fingerprint=tool_arguments_fingerprint(call.arguments),
+            effect_fingerprint="mcp-add-effect-v1",
+            approval_fingerprint="mcp-add-approval-v1",
+        )
 
     adapter = MCPClientAdapter(
         MCPServerConfig(server_id="test", target=server),
         approval_policy=approve,
+        effect_guard=ToolEffectGuard(IdempotencyLedger(store)),
     )
 
     specs = asyncio.run(adapter.list_tools())
@@ -459,6 +483,7 @@ def test_mcp_official_sdk_in_process_discovery_and_call() -> None:
             ToolCall(
                 call_id="mcp-call-1",
                 tool_id="mcp:test:add",
+                task_id=task_id,
                 arguments={"left": 2, "right": 3},
                 approved=True,
             )

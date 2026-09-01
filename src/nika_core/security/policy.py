@@ -12,7 +12,7 @@ from threading import RLock
 from types import MappingProxyType
 from typing import Protocol
 
-from nika_core.tools import ToolRisk
+from nika_core.tools import ToolAuthorization, ToolRisk
 
 V01_APPROVAL_AUTHORITY_VERSION = "nika-v01-approval-v1"
 _EFFECT_INTENT_SCHEMA = "nika-v01-effect-intent-v1"
@@ -141,7 +141,7 @@ def _normalize_host(value: str | None, *, label: str) -> str | None:
 
 
 def _normalize_json_value(value: object, *, path: str = "arguments") -> object:
-    if value is None or isinstance(value, bool) or isinstance(value, int):
+    if value is None or isinstance(value, (bool, int)):
         return value
     if isinstance(value, float):
         if not math.isfinite(value):
@@ -158,7 +158,7 @@ def _normalize_json_value(value: object, *, path: str = "arguments") -> object:
         normalized: dict[str, object] = {}
         for raw_key, raw_value in value.items():
             if not isinstance(raw_key, str):
-                raise ValueError(f"{path} keys must be strings")
+                raise TypeError(f"{path} keys must be strings")
             key = unicodedata.normalize("NFC", raw_key)
             if key in normalized:
                 raise ValueError(f"{path} contains duplicate normalized key {key!r}")
@@ -178,7 +178,7 @@ def _freeze_json_value(value: object) -> object:
 def _canonical_arguments(arguments: Mapping[str, object]) -> tuple[str, Mapping[str, object]]:
     normalized = _normalize_json_value(arguments)
     if not isinstance(normalized, dict):
-        raise ValueError("arguments must be a mapping")
+        raise TypeError("arguments must be a mapping")
     encoded = json.dumps(
         normalized,
         allow_nan=False,
@@ -549,6 +549,7 @@ class SecurityPolicy:
 class SecurityDecision:
     action_id: str
     approved: bool
+    tool_authorization: ToolAuthorization | None
     resolved_write_path: Path | None = None
 
 
@@ -578,6 +579,8 @@ def authorize_action(
         raise ValueError("current time must be timezone-aware")
 
     if intent.requires_approval:
+        if approval is None:
+            raise PermissionError("explicit approval is required")
         for value, label in (
             (intent.task_id, "task_id"),
             (intent.project_id, "project_id"),
@@ -588,8 +591,6 @@ def authorize_action(
         verifier = policy.approval_verifier
         if verifier is None:
             raise PermissionError("trusted approval verifier is required")
-        if approval is None:
-            raise PermissionError("explicit approval is required")
         # Fixed lock order: trusted authority -> local replay ledger -> resource budget.
         # Validation is non-mutating. All local authority/budget state commits only after every
         # exact-effect, authenticity, expiry and budget check succeeds.
@@ -606,5 +607,17 @@ def authorize_action(
     return SecurityDecision(
         action_id=intent.action_id,
         approved=True,
+        tool_authorization=(
+            ToolAuthorization(
+                tool_id=intent.tool_id,
+                task_id=intent.task_id or "",
+                risk=intent.risk,
+                arguments_fingerprint=intent.arguments_fingerprint,
+                effect_fingerprint=intent.effect_fingerprint,
+                approval_fingerprint=intent.approval_fingerprint,
+            )
+            if intent.requires_approval
+            else None
+        ),
         resolved_write_path=resolved_write,
     )

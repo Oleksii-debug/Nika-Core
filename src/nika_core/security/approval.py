@@ -126,13 +126,13 @@ class _PendingApproval:
 
 class _HmacApprovalVerifier:
     __slots__ = (
-        "_issuer_id",
-        "_authority_version",
-        "_secret",
-        "_lock",
-        "_used",
-        "_issued",
         "_audit_sink",
+        "_authority_version",
+        "_issued",
+        "_issuer_id",
+        "_lock",
+        "_secret",
+        "_used",
     )
 
     def __init__(
