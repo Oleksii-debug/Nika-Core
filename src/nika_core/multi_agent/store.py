@@ -11,6 +11,7 @@ from nika_core.multi_agent.contracts import (
     AgentHandoff,
     HandoffKind,
     MemberState,
+    StoredMemberResult,
     TeamMember,
     TeamQuota,
     TeamState,
@@ -50,6 +51,7 @@ class MultiAgentStore:
         root_thread_id: str,
         root_grants: tuple[ToolGrant, ...],
         quota: TeamQuota,
+        root_task_handoff: AgentHandoff | None = None,
     ) -> TeamMember:
         now = datetime.now(UTC).isoformat()
         root = TeamMember(
@@ -76,6 +78,13 @@ class MultiAgentStore:
                 ),
             )
             self._insert_member(conn, root, now)
+            if root_task_handoff is not None:
+                self._validate_root_task_handoff(
+                    root_task_handoff,
+                    team_id=team_id,
+                    root_member_id=root_member_id,
+                )
+                self._insert_handoff_with_connection(conn, root_task_handoff, now)
             self._audit.append_with_connection(
                 conn,
                 event_type="multi_agent.team_created",
@@ -213,6 +222,30 @@ class MultiAgentStore:
         if not isinstance(payload, dict):
             raise TypeError("persisted task handoff payload must be an object")
         return payload
+
+    def member_result(self, team_id: str, member_id: str) -> StoredMemberResult:
+        """Return the one terminal result record used for deterministic reconstruction."""
+        with self._store.connection() as conn:
+            rows = conn.execute(
+                "SELECT outcome, payload_json, error FROM multi_agent_results "
+                "WHERE team_id = ? AND member_id = ? ORDER BY result_id LIMIT 2",
+                (team_id, member_id),
+            ).fetchall()
+        if not rows:
+            raise KeyError(f"no persisted result for {team_id}/{member_id}")
+        if len(rows) > 1:
+            raise RuntimeError(f"ambiguous persisted result for {team_id}/{member_id}")
+        payload = json.loads(rows[0]["payload_json"])
+        if not isinstance(payload, dict):
+            raise TypeError("persisted member result payload must be an object")
+        error = rows[0]["error"]
+        if error is not None and not isinstance(error, str):
+            raise TypeError("persisted member result error must be text")
+        return StoredMemberResult(
+            outcome=str(rows[0]["outcome"]),
+            payload=payload,
+            error=error,
+        )
 
     def prepare_member_execution(
         self,
@@ -586,6 +619,20 @@ class MultiAgentStore:
                 now,
             ),
         )
+
+    @staticmethod
+    def _validate_root_task_handoff(
+        handoff: AgentHandoff,
+        *,
+        team_id: str,
+        root_member_id: str,
+    ) -> None:
+        if handoff.team_id != team_id:
+            raise ValueError("root task handoff team does not match created team")
+        if handoff.sender_id != root_member_id or handoff.recipient_id != root_member_id:
+            raise ValueError("root task handoff must be bound to the root member")
+        if handoff.kind is not HandoffKind.TASK:
+            raise ValueError("root journey handoff must be TASK")
 
     @staticmethod
     def _validate_task_handoff(
