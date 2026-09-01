@@ -159,6 +159,29 @@ def test_deadline_guard_stops_monitor_and_removes_future_jobs(tmp_path: Path) ->
     assert scheduler.runtime_jobs == {}
 
 
+def test_reconcile_repairs_enabled_terminal_record(tmp_path: Path) -> None:
+    _, jobs, _, clock, service = _stack(tmp_path, _dt(17))
+    service.register(_job(), deadline_at=_dt(18))
+    clock.set(_dt(18))
+    service.deadline_action_handler({"schedule_id": "monitor-a"})
+    terminal = jobs.get("monitor-a")
+    assert terminal is not None
+    revision_key = ScheduledJobStore.REVISION_KEY
+    revision = terminal.payload[revision_key]
+    assert isinstance(revision, int)
+    malformed = replace(
+        terminal,
+        payload={**terminal.payload, revision_key: revision + 1},
+        enabled=True,
+    )
+    assert jobs.compare_and_swap(terminal, malformed)
+
+    repaired = service.reconcile("monitor-a")
+
+    assert repaired.stop_reason is MonitorStopReason.DEADLINE_REACHED
+    assert repaired.enabled is False
+
+
 def test_before_check_fails_closed_when_deadline_passed_during_downtime(
     tmp_path: Path,
 ) -> None:
@@ -190,6 +213,26 @@ def test_exact_deadline_tie_is_deterministically_deadline_first(tmp_path: Path) 
     assert status.stopped_at == _dt(18)
     assert "deadline reached" in service.render_status_text(status).casefold()
     assert "exact deadline" in service.render_status_text(status).casefold()
+
+
+def test_late_delivery_of_pre_deadline_match_corrects_deadline_terminal(
+    tmp_path: Path,
+) -> None:
+    _, _, _, clock, service = _stack(tmp_path, _dt(17))
+    service.register(_job(), deadline_at=_dt(18))
+    clock.set(_dt(18))
+    service.deadline_action_handler({"schedule_id": "monitor-a"})
+
+    corrected = service.record_condition(
+        "monitor-a",
+        matched=True,
+        observed_at=_dt(17, 59),
+    )
+
+    assert corrected.stop_reason is MonitorStopReason.CONDITION_MET
+    assert corrected.condition_state is MonitorConditionState.MATCHED
+    assert corrected.stopped_at == _dt(17, 59)
+    assert corrected.last_observed_at == _dt(17, 59)
 
 
 def test_unmatched_condition_is_canonical_and_monitor_remains_active(

@@ -84,6 +84,7 @@ class MonitorUntilConditionService:
 
         existing = self._jobs.get(job.job_id)
         if existing is not None:
+            existing = self._ensure_revisioned(existing)
             status = self._status_from_job(existing)
             self._assert_same_registration(existing, job, deadline)
             if status.stop_reason is not None:
@@ -91,8 +92,9 @@ class MonitorUntilConditionService:
                 return status
             return self.reconcile(job.job_id)
 
-        if self.META_KEY in job.payload:
-            raise ValueError(f"payload key {self.META_KEY!r} is reserved")
+        for reserved_key in (self.META_KEY, ScheduledJobStore.REVISION_KEY):
+            if reserved_key in job.payload:
+                raise ValueError(f"payload key {reserved_key!r} is reserved")
         now = self._now()
         terminal = now >= deadline
         metadata = {
@@ -105,7 +107,12 @@ class MonitorUntilConditionService:
             "stopped_at": deadline.isoformat() if terminal else None,
             "last_observed_at": None,
         }
-        persisted = self._with_metadata(job, metadata, enabled=(job.enabled and not terminal))
+        persisted = self._with_metadata(
+            job,
+            metadata,
+            enabled=(job.enabled and not terminal),
+            revision=0,
+        )
         self._scheduler.upsert(persisted)
         if terminal:
             self._remove_deadline_guard(job.job_id)
@@ -117,13 +124,11 @@ class MonitorUntilConditionService:
         return self._status_from_job(self._required_job(schedule_id))
 
     def reconcile(self, schedule_id: str) -> MonitorUntilStatus:
-        job = self._required_job(schedule_id)
+        job = self._ensure_revisioned(self._required_job(schedule_id))
         status = self._status_from_job(job)
         if status.stop_reason is not None:
             if job.enabled:
-                self._scheduler.upsert(
-                    self._with_metadata(job, self._metadata(job), enabled=False)
-                )
+                self._set_enabled(schedule_id, enabled=False)
             self._remove_deadline_guard(schedule_id)
             return self._status_from_job(self._required_job(schedule_id))
 
@@ -141,7 +146,7 @@ class MonitorUntilConditionService:
 
     def before_check(self, schedule_id: str) -> bool:
         """Return True only when a scheduled monitor may perform its next check."""
-        job = self._required_job(schedule_id)
+        job = self._ensure_revisioned(self._required_job(schedule_id))
         status = self._status_from_job(job)
         if status.stop_reason is not None:
             return False
@@ -164,65 +169,92 @@ class MonitorUntilConditionService:
         observed_at: datetime,
     ) -> MonitorUntilStatus:
         observed = _as_utc(observed_at, "observed_at")
-        job = self._required_job(schedule_id)
-        status = self._status_from_job(job)
-        if status.stop_reason is not None:
-            return status
-        if status.last_observed_at is not None and observed < status.last_observed_at:
-            raise ValueError("condition observation is older than canonical monitor state")
-
         condition_state = (
             MonitorConditionState.MATCHED if matched else MonitorConditionState.NOT_MET
         )
-        if observed >= status.deadline_at:
-            return self._stop(
-                job,
-                reason=MonitorStopReason.DEADLINE_REACHED,
-                condition_state=condition_state,
-                stopped_at=status.deadline_at,
-                last_observed_at=observed,
-            )
-        if matched:
-            return self._stop(
-                job,
-                reason=MonitorStopReason.CONDITION_MET,
-                condition_state=MonitorConditionState.MATCHED,
-                stopped_at=observed,
-                last_observed_at=observed,
-            )
+        while True:
+            job = self._ensure_revisioned(self._required_job(schedule_id))
+            status = self._status_from_job(job)
+            if status.stop_reason is not None:
+                if (
+                    matched
+                    and observed <= status.deadline_at
+                    and status.stop_reason is MonitorStopReason.DEADLINE_REACHED
+                ):
+                    terminal_reason = (
+                        MonitorStopReason.CONDITION_MET
+                        if observed < status.deadline_at
+                        else MonitorStopReason.DEADLINE_REACHED
+                    )
+                    return self._stop(
+                        job,
+                        reason=terminal_reason,
+                        condition_state=MonitorConditionState.MATCHED,
+                        stopped_at=(
+                            observed
+                            if terminal_reason is MonitorStopReason.CONDITION_MET
+                            else status.deadline_at
+                        ),
+                        last_observed_at=observed,
+                    )
+                return status
+            if status.last_observed_at is not None and observed < status.last_observed_at:
+                raise ValueError("condition observation is older than canonical monitor state")
 
-        metadata = self._metadata(job)
-        metadata.update(
-            {
-                "condition_state": MonitorConditionState.NOT_MET.value,
-                "last_observed_at": observed.isoformat(),
-            }
-        )
-        self._scheduler.upsert(self._with_metadata(job, metadata, enabled=job.enabled))
-        return self._status_from_job(self._required_job(schedule_id))
+            if observed >= status.deadline_at:
+                return self._stop(
+                    job,
+                    reason=MonitorStopReason.DEADLINE_REACHED,
+                    condition_state=condition_state,
+                    stopped_at=status.deadline_at,
+                    last_observed_at=observed,
+                )
+            if matched:
+                return self._stop(
+                    job,
+                    reason=MonitorStopReason.CONDITION_MET,
+                    condition_state=MonitorConditionState.MATCHED,
+                    stopped_at=observed,
+                    last_observed_at=observed,
+                )
+
+            metadata = self._metadata(job)
+            metadata.update(
+                {
+                    "condition_state": MonitorConditionState.NOT_MET.value,
+                    "last_observed_at": observed.isoformat(),
+                }
+            )
+            updated = self._next_revision(job, metadata, enabled=job.enabled)
+            if self._jobs.compare_and_swap(job, updated):
+                self._scheduler.upsert(updated)
+                return self._status_from_job(self._required_job(schedule_id))
 
     def pause(self, schedule_id: str) -> MonitorUntilStatus:
-        status = self.status(schedule_id)
-        if status.stop_reason is not None:
-            return status
-        self._scheduler.pause(schedule_id)
-        return self.status(schedule_id)
+        return self._set_enabled(schedule_id, enabled=False)
 
     def resume(self, schedule_id: str) -> MonitorUntilStatus:
-        status = self.status(schedule_id)
-        if status.stop_reason is not None:
-            return status
-        if self._now() >= status.deadline_at:
-            return self._stop(
-                self._required_job(schedule_id),
-                reason=MonitorStopReason.DEADLINE_REACHED,
-                condition_state=status.condition_state,
-                stopped_at=status.deadline_at,
-                last_observed_at=status.last_observed_at,
-            )
-        self._scheduler.resume(schedule_id)
-        self._ensure_deadline_guard(schedule_id, status.deadline_at)
-        return self.status(schedule_id)
+        while True:
+            job = self._ensure_revisioned(self._required_job(schedule_id))
+            status = self._status_from_job(job)
+            if status.stop_reason is not None:
+                return status
+            if self._now() >= status.deadline_at:
+                return self._stop(
+                    job,
+                    reason=MonitorStopReason.DEADLINE_REACHED,
+                    condition_state=status.condition_state,
+                    stopped_at=status.deadline_at,
+                    last_observed_at=status.last_observed_at,
+                )
+            if job.enabled:
+                self._ensure_deadline_guard(schedule_id, status.deadline_at)
+                return status
+            updated = self._next_revision(job, self._metadata(job), enabled=True)
+            if self._jobs.compare_and_swap(job, updated):
+                self._scheduler.upsert(updated)
+                self._ensure_deadline_guard(schedule_id, status.deadline_at)
+                return self._status_from_job(self._required_job(schedule_id))
 
     def deadline_action_handler(self, payload: dict[str, object]) -> None:
         schedule_id = payload.get("schedule_id")
@@ -271,29 +303,133 @@ class MonitorUntilConditionService:
         stopped_at: datetime,
         last_observed_at: datetime | None,
     ) -> MonitorUntilStatus:
-        current = self._status_from_job(job)
-        if current.stop_reason is not None:
-            self._remove_deadline_guard(job.job_id)
-            return current
+        stopped = _as_utc(stopped_at, "stopped_at")
+        observed = (
+            _as_utc(last_observed_at, "last_observed_at")
+            if last_observed_at is not None
+            else None
+        )
+        while True:
+            current_job = self._ensure_revisioned(self._required_job(job.job_id))
+            current = self._status_from_job(current_job)
+            metadata = self._merged_terminal_metadata(
+                current_job,
+                current,
+                reason=reason,
+                condition_state=condition_state,
+                stopped_at=stopped,
+                last_observed_at=observed,
+            )
+            same_revision = self._with_metadata(
+                current_job,
+                metadata,
+                enabled=False,
+                revision=self._revision(current_job),
+            )
+            if same_revision == current_job:
+                canonical = current_job
+                break
+            updated = self._next_revision(current_job, metadata, enabled=False)
+            if self._jobs.compare_and_swap(current_job, updated):
+                canonical = updated
+                break
+
+        # The durable CAS happens before runtime synchronization. A stale concurrent
+        # scheduler upsert therefore cannot erase the newer canonical revision.
+        self._scheduler.upsert(canonical)
+        self._remove_deadline_guard(job.job_id)
+        return self._status_from_job(self._required_job(job.job_id))
+
+    def _merged_terminal_metadata(
+        self,
+        job: ScheduledJob,
+        current: MonitorUntilStatus,
+        *,
+        reason: MonitorStopReason,
+        condition_state: MonitorConditionState,
+        stopped_at: datetime,
+        last_observed_at: datetime | None,
+    ) -> dict[str, object]:
+        if reason is MonitorStopReason.CONDITION_MET and (
+            condition_state is not MonitorConditionState.MATCHED
+            or stopped_at >= current.deadline_at
+        ):
+            raise ValueError("condition terminal event must match strictly before deadline")
+        if (
+            reason is MonitorStopReason.DEADLINE_REACHED
+            and stopped_at != current.deadline_at
+        ):
+            raise ValueError("deadline terminal event must use the canonical deadline")
         metadata = self._metadata(job)
+        condition_stops = [
+            value
+            for value in (
+                (
+                    current.stopped_at
+                    if current.stop_reason is MonitorStopReason.CONDITION_MET
+                    else None
+                ),
+                stopped_at if reason is MonitorStopReason.CONDITION_MET else None,
+            )
+            if value is not None
+        ]
+        if condition_stops:
+            condition_stop = min(condition_stops)
+            metadata.update(
+                {
+                    "condition_state": MonitorConditionState.MATCHED.value,
+                    "stop_reason": MonitorStopReason.CONDITION_MET.value,
+                    "stopped_at": condition_stop.isoformat(),
+                    "last_observed_at": condition_stop.isoformat(),
+                }
+            )
+            return metadata
+
+        matched = (
+            current.condition_state is MonitorConditionState.MATCHED
+            or condition_state is MonitorConditionState.MATCHED
+        )
+        observations = [
+            value
+            for value in (current.last_observed_at, last_observed_at)
+            if value is not None
+        ]
+        latest_observation = max(observations) if observations else None
+        final_condition = (
+            MonitorConditionState.MATCHED
+            if matched
+            else (
+                condition_state
+                if latest_observation is not None
+                else current.condition_state
+            )
+        )
         metadata.update(
             {
-                "condition_state": condition_state.value,
-                "stop_reason": reason.value,
-                "stopped_at": _as_utc(stopped_at, "stopped_at").isoformat(),
+                "condition_state": final_condition.value,
+                "stop_reason": MonitorStopReason.DEADLINE_REACHED.value,
+                "stopped_at": current.deadline_at.isoformat(),
                 "last_observed_at": (
-                    _as_utc(last_observed_at, "last_observed_at").isoformat()
-                    if last_observed_at is not None
+                    latest_observation.isoformat()
+                    if latest_observation is not None
                     else None
                 ),
             }
         )
-        # Persist enabled=False before removing the derived guard. APSchedulerAdapter
-        # dispatch re-reads the durable job and therefore fails closed if a runtime
-        # wake-up races this terminalization.
-        self._scheduler.upsert(self._with_metadata(job, metadata, enabled=False))
-        self._remove_deadline_guard(job.job_id)
-        return self._status_from_job(self._required_job(job.job_id))
+        return metadata
+
+    def _set_enabled(self, schedule_id: str, *, enabled: bool) -> MonitorUntilStatus:
+        while True:
+            job = self._ensure_revisioned(self._required_job(schedule_id))
+            status = self._status_from_job(job)
+            if status.stop_reason is not None and (enabled or not job.enabled):
+                return status
+            if job.enabled is enabled:
+                return status
+            updated = self._next_revision(job, self._metadata(job), enabled=enabled)
+            if self._jobs.compare_and_swap(job, updated):
+                self._scheduler.upsert(updated)
+                return self._status_from_job(self._required_job(schedule_id))
 
     def _ensure_deadline_guard(self, schedule_id: str, deadline: datetime) -> None:
         guard_id = self._deadline_job_id(schedule_id)
@@ -330,8 +466,10 @@ class MonitorUntilConditionService:
             raise ValueError("existing monitor has a different canonical deadline")
         existing_payload = dict(existing.payload)
         existing_payload.pop(self.META_KEY, None)
+        existing_payload.pop(ScheduledJobStore.REVISION_KEY, None)
         requested_payload = dict(requested.payload)
         requested_payload.pop(self.META_KEY, None)
+        requested_payload.pop(ScheduledJobStore.REVISION_KEY, None)
         if (
             existing.action_id != requested.action_id
             or existing.trigger_kind is not requested.trigger_kind
@@ -394,9 +532,12 @@ class MonitorUntilConditionService:
         metadata: dict[str, object],
         *,
         enabled: bool,
+        revision: int | None = None,
     ) -> ScheduledJob:
         payload = dict(job.payload)
         payload[self.META_KEY] = dict(metadata)
+        if revision is not None:
+            payload[ScheduledJobStore.REVISION_KEY] = revision
         return ScheduledJob(
             job_id=job.job_id,
             action_id=job.action_id,
@@ -408,6 +549,41 @@ class MonitorUntilConditionService:
             max_instances=job.max_instances,
             misfire_grace_seconds=job.misfire_grace_seconds,
         )
+
+    def _next_revision(
+        self,
+        job: ScheduledJob,
+        metadata: dict[str, object],
+        *,
+        enabled: bool,
+    ) -> ScheduledJob:
+        revision = self._revision(job)
+        return self._with_metadata(
+            job,
+            metadata,
+            enabled=enabled,
+            revision=revision + 1,
+        )
+
+    def _ensure_revisioned(self, job: ScheduledJob) -> ScheduledJob:
+        if ScheduledJobStore.REVISION_KEY not in job.payload:
+            migrated = self._with_metadata(
+                job,
+                self._metadata(job),
+                enabled=job.enabled,
+                revision=0,
+            )
+            self._scheduler.upsert(migrated)
+            return self._required_job(job.job_id)
+        self._revision(job)
+        return job
+
+    @staticmethod
+    def _revision(job: ScheduledJob) -> int:
+        raw = job.payload.get(ScheduledJobStore.REVISION_KEY)
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+            raise ValueError("monitor scheduled job has an invalid revision")
+        return raw
 
     def _required_job(self, schedule_id: str) -> ScheduledJob:
         job = self._jobs.get(schedule_id)
