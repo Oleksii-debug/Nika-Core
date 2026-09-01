@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from dataclasses import replace
 from typing import Protocol
 
@@ -37,8 +38,8 @@ class _UntypedProviderTimeout(Exception):
 async def _invoke_provider(provider: ModelProvider, request: ModelRequest) -> ModelResponse:
     try:
         return await provider.complete(request)
-    except TimeoutError as exc:
-        raise _UntypedProviderTimeout from exc
+    except TimeoutError:
+        raise _UntypedProviderTimeout from None
 
 
 _NO_FALLBACK_CODES = frozenset(
@@ -57,6 +58,17 @@ _SAFE_FALLBACK_CODES = frozenset(
         ModelErrorCode.TIMEOUT,
     }
 )
+_SAFE_PROVIDER_MESSAGES = {
+    ModelErrorCode.INVALID_REQUEST: "model provider rejected the request",
+    ModelErrorCode.UNAVAILABLE: "model provider is unavailable",
+    ModelErrorCode.TIMEOUT: "model provider request timed out",
+    ModelErrorCode.CANCELLED: "model provider request was cancelled",
+    ModelErrorCode.AUTHENTICATION: "model provider authentication failed",
+    ModelErrorCode.POLICY_DENIED: "model provider policy denied the request",
+    ModelErrorCode.RATE_LIMITED: "model provider rate limit was reached",
+    ModelErrorCode.RESOURCE_LIMIT: "model provider resource limit was reached",
+    ModelErrorCode.PROVIDER_ERROR: "model provider failed",
+}
 
 
 class ModelGateway:
@@ -128,18 +140,21 @@ class ModelGateway:
                     "provider_id": capabilities.provider_id,
                     "provider_kind": capabilities.kind.value,
                     "privacy": request.privacy.value,
-                    "model": request.model or "default",
+                    "model_fingerprint": model_identity_fingerprint(request.model),
                     "attempt": index + 1,
                     "cost_class": cost_class.value,
                     "resource_class": resource_class.value,
                 },
             )
 
+            response: ModelResponse | None = None
+            terminal_error: ModelGatewayError | None = None
+            cancelled = False
             try:
                 response = await asyncio.wait_for(
                     _invoke_provider(provider, attempt_request), timeout=remaining
                 )
-            except _UntypedProviderTimeout as exc:
+            except _UntypedProviderTimeout:
                 error = ModelGatewayError(
                     ModelErrorCode.PROVIDER_ERROR,
                     "model provider raised an untyped timeout failure",
@@ -147,8 +162,8 @@ class ModelGateway:
                     retryable=False,
                 )
                 self._audit_failure(request, capabilities.provider_id, error)
-                raise error from exc
-            except TimeoutError as exc:
+                terminal_error = error
+            except TimeoutError:
                 error = ModelGatewayError(
                     ModelErrorCode.TIMEOUT,
                     "model request exceeded its total deadline",
@@ -160,24 +175,22 @@ class ModelGateway:
                 if self._can_fallback(error=error, index=index, providers=providers):
                     self._audit_fallback(request, provider, providers[index + 1], error)
                     continue
-                raise error from exc
+                terminal_error = error
             except asyncio.CancelledError:
                 self._audit(
                     event_type="model.cancelled",
                     request=request,
                     payload={"provider_id": capabilities.provider_id},
                 )
-                raise
+                cancelled = True
             except ModelGatewayError as raw_error:
                 error = self._normalize_provider_error(raw_error, capabilities.provider_id)
                 self._audit_failure(request, capabilities.provider_id, error)
                 if self._can_fallback(error=error, index=index, providers=providers):
                     self._audit_fallback(request, provider, providers[index + 1], error)
                     continue
-                if error is raw_error:
-                    raise
-                raise error from raw_error
-            except Exception as exc:
+                terminal_error = error
+            except Exception:  # noqa: BLE001 - provider implementations are untrusted
                 error = ModelGatewayError(
                     ModelErrorCode.PROVIDER_ERROR,
                     "model provider failed without a typed Nika error",
@@ -185,11 +198,28 @@ class ModelGateway:
                     retryable=False,
                 )
                 self._audit_failure(request, capabilities.provider_id, error)
-                raise error from exc
+                terminal_error = error
 
+            # Raise only after leaving the provider exception handler. This keeps
+            # untrusted diagnostics out of public __cause__/__context__ chains.
+            if cancelled:
+                raise asyncio.CancelledError()
+            if terminal_error is not None:
+                raise terminal_error
+            if response is None:
+                error = ModelGatewayError(
+                    ModelErrorCode.PROVIDER_ERROR,
+                    "model provider completed without a response",
+                    provider_id=capabilities.provider_id,
+                    retryable=False,
+                )
+                self._audit_failure(request, capabilities.provider_id, error)
+                raise error
+
+            validation_error: ModelGatewayError | None = None
             try:
                 self._validate_response(request, capabilities, response)
-            except (TypeError, ValueError) as exc:
+            except (TypeError, ValueError):
                 error = ModelGatewayError(
                     ModelErrorCode.PROVIDER_ERROR,
                     "model provider returned an invalid normalized response",
@@ -197,14 +227,16 @@ class ModelGateway:
                     retryable=False,
                 )
                 self._audit_failure(request, capabilities.provider_id, error)
-                raise error from exc
+                validation_error = error
+            if validation_error is not None:
+                raise validation_error
 
             self._audit(
                 event_type="model.completed",
                 request=request,
                 payload={
                     "provider_id": response.provider_id,
-                    "model": response.model,
+                    "model_fingerprint": model_identity_fingerprint(response.model),
                     "input_tokens": response.usage.input_tokens,
                     "output_tokens": response.usage.output_tokens,
                     "total_tokens": response.usage.total_tokens,
@@ -322,15 +354,13 @@ class ModelGateway:
                 provider_id=provider_id,
                 retryable=False,
             )
-        if error.provider_id is None:
-            return ModelGatewayError(
-                error.code,
-                str(error),
-                provider_id=provider_id,
-                retryable=error.retryable,
-                failure_effect=error.failure_effect,
-            )
-        return error
+        return ModelGatewayError(
+            error.code,
+            _SAFE_PROVIDER_MESSAGES[error.code],
+            provider_id=provider_id,
+            retryable=error.retryable,
+            failure_effect=error.failure_effect,
+        )
 
     @staticmethod
     def _validate_response(
@@ -408,7 +438,7 @@ class ModelGateway:
             request=request,
             payload={
                 "provider_id": provider_id,
-                "model": request.model or "default",
+                "model_fingerprint": model_identity_fingerprint(request.model),
                 "code": error.code.value,
                 "failure_effect": error.failure_effect.value,
             },
@@ -472,3 +502,11 @@ class ModelGateway:
             entity_id=request.request_id,
             payload=payload,
         )
+
+
+def model_identity_fingerprint(model: str | None) -> str:
+    """Return a stable content-free projection for untrusted model identity metadata."""
+
+    value = model if model is not None else "<provider-default>"
+    digest = hashlib.sha256(value.encode("utf-8", errors="surrogatepass")).hexdigest()
+    return f"sha256:{digest}"

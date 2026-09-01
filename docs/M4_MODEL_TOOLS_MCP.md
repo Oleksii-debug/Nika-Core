@@ -32,7 +32,18 @@ Model and tool execution are bounded by deadlines and cancellation. ModelGateway
 
 Normalized provider responses fail closed at the gateway boundary. The gateway rejects wrong request/provider/kind identity, non-`ModelResponse` values and whitespace-only response text before `model.completed`. Shared `ModelUsage` rejects booleans, negative/non-integer token counts and totals smaller than the sum of all known input/output token components. A provider total may be larger than those known components because provider accounting can include categories that the shared contract does not separately expose. Shared `ModelResponse` enforces response-text type plus identity/model/usage/latency shape, but intentionally remains able to represent untrusted whitespace text so non-gateway consumers can apply their own defensive content policy. Direct HTTP/Ollama adapters reject malformed response objects, choices/messages, empty text, invalid model values and malformed usage instead of manufacturing plausible defaults.
 
-Audit records contain provider/tool identifiers, risk class, model/usage/latency, cost/resource class, error class and the normalized `failure_effect` for provider-attempt failures/fallbacks. Route-selection and policy failures that occur before the first provider attempt also emit `model.failed` with `phase=preflight`, the typed error code and provider identity when one is known. Ambiguous preflight failures do not fabricate a provider identity. Audit evidence does **not** record prompts, request metadata, tool arguments, API keys or raw provider responses.
+Audit records contain provider/tool identifiers, risk class, a stable SHA-256 model-identity
+fingerprint, usage/latency, cost/resource class, error class and the normalized `failure_effect`
+for provider-attempt failures/fallbacks. Raw requested or returned model identifiers are not
+persisted because an identifier is an untrusted metadata channel and may contain credential-like
+query material. Route-selection and policy failures that occur before the first provider attempt
+also emit `model.failed` with `phase=preflight`, the typed error code and provider identity when
+one is known. Ambiguous preflight failures do not fabricate a provider identity. Audit evidence
+does **not** record prompts, request metadata, tool arguments, API keys or raw provider responses.
+
+Provider-originated exception messages and chains are also untrusted. The gateway preserves only
+validated error code, provider identity, retryability and failure-effect semantics, while exposing
+a bounded Nika-owned public message with no raw provider `__cause__` or `__context__`.
 
 `supports_hard_cancellation` means the underlying inference is proven stopped, not merely that the Python caller or HTTP socket was cancelled. The shared `ProviderCapabilities` contract itself defaults this field to `False`, so a newly added adapter cannot accidentally inherit hard-cancellation credit. Generic HTTP providers also default it to `False`. An adapter may opt in only when its upstream/provider path has separate evidence for hard server-side cancellation. Even hard cancellation does not by itself prove that no billable or externally visible effect occurred before cancellation, so effect-safety evidence remains separate.
 
@@ -46,7 +57,13 @@ The dedicated Ollama adapter sends `stream: false` so one Nika request produces 
 
 Ollama is local and may receive private/sensitive data under Nika's local routing policy. It does **not** currently claim hard server-side cancellation because the adopted native API path does not provide a separately proven hard-cancel guarantee for an active generation.
 
-API keys for OpenAI-compatible providers are runtime constructor inputs only. They are never included in request metadata, persisted configuration or audit payloads by this implementation.
+API keys for OpenAI-compatible providers are resolved only at the host execution boundary. The
+durable `ApiModelRouteConfig` stores an opaque credential reference such as
+`env:NIKA_MODEL_API_KEY`, never credential material. `CredentialRefOpenAICompatibleProvider`
+resolves that reference immediately before the request, clears local material references after the
+attempt, and normalizes resolver/transport failures without exposing secret-bearing diagnostics.
+Credentials are never included in `ModelRequest`, task route state, audit payloads or public
+errors.
 
 HTTP failure mapping is fail-closed:
 - 401 -> `AUTHENTICATION`;
@@ -62,6 +79,19 @@ Those HTTP codes describe retry classification only. The direct HTTP adapter doe
 The deterministic test suite drives both the OpenAI-compatible provider and native Ollama provider through real HTTPX request/response transport boundaries using `MockTransport`. This is protocol/adapter evidence, not a substitute for a live-provider proof.
 
 For the live-provider gate, focused CI may install Ollama and run `scripts/m4_ollama_proof.py` through the same `ModelGateway` and `OllamaProvider` contracts. The proof requires a non-empty response and the expected local-provider identity; it does not assert model prose. Large models are never pulled by ordinary shared CI merely to prove adapter plumbing.
+
+## Multi-agent runtime route
+
+`ModelGatewayAgentRuntime` is the single thin `AgentRuntimePort` adapter for both local and API
+routes. Its configured provider ID and kind are explicit and fixed for a running task; it never
+adds an implicit fallback. Local routes advertise `LOCAL_MODELS`; cloud/API routes do not. The
+runtime validates the returned provider ID/kind, projects model identity only as the canonical
+content-free fingerprint, and converts gateway failures to bounded accessible runtime errors.
+
+The same multi-agent supervisor fixture runs two child agents through native Ollama and through the
+credential-reference OpenAI-compatible route. API privacy denial is proven before credential
+resolution or transport. This is deterministic protocol/composition evidence; it does not claim a
+real cloud request, live credential, model download, or resumable provider inference.
 
 ## Standardized tools
 
@@ -85,6 +115,8 @@ The acceptance suite constructs a real official `MCPServer` in process, discover
 8. native Ollama request contract proves `/api/chat`, `stream: false`, default `think: false`, generic documented `low`/`medium`/`high`/`max` level validation, `done: true` completion, model override and usage normalization;
 9. route preflight failures produce redacted typed audit evidence without prompt/metadata leakage or fabricated provider identity, and provider-attempt audit records retain normalized failure-effect certainty;
 10. no secrets, request metadata or prompt content appear in Git/audit evidence;
-11. exact green SHA is current-main-compatible before merge.
+11. one provider-neutral multi-agent runtime exercises both the local Ollama route and an explicit
+    credential-reference API route without implicit fallback;
+12. exact green SHA is current-main-compatible before merge.
 
 Live Ollama execution is useful focused evidence but does not award physical-Windows Foundry inference credit. Embedded Foundry implementation/lifecycle remains a separate ownership lane. HUMAN_TESTED and NVDA_VERIFIED remain human-only states.

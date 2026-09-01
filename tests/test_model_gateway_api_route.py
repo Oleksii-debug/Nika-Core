@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
+import hashlib
 import json
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -27,7 +28,6 @@ from nika_core.model_gateway.contracts import (
     ProviderKind,
 )
 from nika_core.model_gateway.gateway import ModelGateway
-
 
 _CANARY = "synthetic-worker48-secret-do-not-log"
 _CREDENTIAL_REF = "env:NIKA_WORKER48_API_KEY"
@@ -151,6 +151,10 @@ def _request(
     )
 
 
+def _model_fingerprint(model: str) -> str:
+    return "sha256:" + hashlib.sha256(model.encode()).hexdigest()
+
+
 def _client_factory(handler: httpx.MockTransport):
     def factory(*, timeout: float) -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=handler, timeout=timeout)
@@ -236,7 +240,8 @@ def test_api_route_resolves_credential_only_at_execution_and_redacts_audit() -> 
     assert _CREDENTIAL_REF not in repr(audit.events)
     assert any(
         event["event_type"] == "model.completed"
-        and event["payload"].get("model") == "model-a"  # type: ignore[union-attr]
+        and event["payload"].get("model_fingerprint")  # type: ignore[union-attr]
+        == _model_fingerprint("model-a")
         for event in audit.events
     )
 
@@ -418,9 +423,12 @@ def test_running_task_route_survives_default_change_and_restart(
         if event["event_type"] == "model.completed"
     ]
     assert [
-        (payload["provider_id"], payload["model"])  # type: ignore[index]
+        (payload["provider_id"], payload["model_fingerprint"])  # type: ignore[index]
         for payload in completed
-    ] == [(selected_provider, selected_model), (updated_provider, updated_model)]
+    ] == [
+        (selected_provider, _model_fingerprint(selected_model)),
+        (updated_provider, _model_fingerprint(updated_model)),
+    ]
     assert _CANARY not in repr(audit.events)
     assert _CREDENTIAL_REF not in repr(audit.events)
 
@@ -448,7 +456,8 @@ def test_running_task_route_survives_default_change_and_restart(
     assert any(
         event["event_type"] == "model.completed"
         and event["payload"].get("provider_id") == selected_provider  # type: ignore[union-attr]
-        and event["payload"].get("model") == selected_model  # type: ignore[union-attr]
+        and event["payload"].get("model_fingerprint")  # type: ignore[union-attr]
+        == _model_fingerprint(selected_model)
         for event in restart_audit.events
     )
     assert _CANARY not in repr(restart_audit.events)
@@ -483,7 +492,8 @@ def test_unavailable_declared_provider_never_switches_route_and_keeps_safe_ident
     assert any(
         event["event_type"] == "model.failed"
         and event["payload"].get("provider_id") == "offline-api"  # type: ignore[union-attr]
-        and event["payload"].get("model") == "offline-model"  # type: ignore[union-attr]
+        and event["payload"].get("model_fingerprint")  # type: ignore[union-attr]
+        == _model_fingerprint("offline-model")
         for event in audit.events
     )
     assert _CANARY not in repr(audit.events)
