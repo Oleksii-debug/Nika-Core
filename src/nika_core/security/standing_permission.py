@@ -4,17 +4,25 @@ import hashlib
 import json
 import re
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
 from nika_core.security.policy import ActionIntent
-from nika_core.tools import ToolRisk
+from nika_core.tools import (
+    ToolAuthorization,
+    ToolCall,
+    ToolRisk,
+    ToolSpec,
+    tool_arguments_fingerprint,
+)
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
 _ACTION_RE = re.compile(r"^[a-z0-9_.:-]{1,160}$")
 _BROAD = frozenset({"*", "all", "any", "everything"})
+_STANDING_AUTHORITY_VERSION = "nika-v01-standing-permission-v1"
 _RISK_ORDER = {
     ToolRisk.READ_ONLY: 0,
     ToolRisk.LOCAL_WRITE: 1,
@@ -41,6 +49,26 @@ class PermissionContext:
         _identity(self.user_id, "user_id")
         _identity(self.project_id, "project_id")
         _identity(self.task_id, "task_id")
+
+
+@dataclass(frozen=True, slots=True)
+class StandingPermissionBinding:
+    """Trusted host metadata that callers cannot substitute through ToolCall."""
+
+    permission_id: str
+    subject_id: str
+    context: PermissionContext
+    target: str
+    resource_id: str
+    network_host: str | None
+
+    def __post_init__(self) -> None:
+        _permission_id(self.permission_id)
+        _identity(self.subject_id, "subject_id")
+        _identity(self.target, "target")
+        _identity(self.resource_id, "resource_id")
+        if self.network_host is not None:
+            object.__setattr__(self, "network_host", _site(self.network_host))
 
 
 @dataclass(frozen=True, slots=True)
@@ -467,6 +495,89 @@ class StandingPermissionStore:
                 "reason": "scope_or_state_denied",
                 "use_risk": use.intent.risk.value,
             },
+        )
+
+
+class StandingPermissionPolicy:
+    """Adapt bounded standing authority to the canonical ToolExecutor policy boundary."""
+
+    def __init__(
+        self,
+        permissions: StandingPermissionStore,
+        binding: StandingPermissionBinding,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._permissions = permissions
+        self._binding = binding
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    async def __call__(self, spec: ToolSpec, call: ToolCall) -> ToolAuthorization:
+        binding = self._binding
+        if spec.tool_id != call.tool_id:
+            raise PermissionError("tool call does not match the registered action class")
+        if spec.risk is ToolRisk.HIGH_IMPACT:
+            raise PermissionError("high-impact action requires fresh explicit per-action approval")
+        if spec.risk is not ToolRisk.EXTERNAL_SIDE_EFFECT:
+            raise PermissionError("standing policy is only an external-effect approval adapter")
+        if call.task_id != binding.context.task_id:
+            raise PermissionError("tool call task is outside standing permission context")
+        _identity(call.call_id, "call_id")
+
+        intent = ActionIntent(
+            action_id=call.call_id,
+            tool_id=spec.tool_id,
+            risk=spec.risk,
+            target=binding.target,
+            network_host=binding.network_host,
+            task_id=call.task_id,
+            project_id=binding.context.project_id,
+            site=binding.network_host,
+            resource=binding.resource_id,
+            arguments=call.arguments,
+            effect_id=call.call_id,
+            authority_version=_STANDING_AUTHORITY_VERSION,
+        )
+        permission = self._permissions.authorize(
+            binding.permission_id,
+            StandingPermissionUse(
+                subject_id=binding.subject_id,
+                context=binding.context,
+                intent=intent,
+                resource_id=binding.resource_id,
+            ),
+            now=self._clock(),
+        )
+        authorized_intent = ActionIntent(
+            action_id=intent.action_id,
+            tool_id=intent.tool_id,
+            risk=intent.risk,
+            target=intent.target,
+            network_host=intent.network_host,
+            task_id=intent.task_id,
+            project_id=intent.project_id,
+            site=intent.site,
+            resource=intent.resource,
+            arguments=call.arguments,
+            effect_id=intent.effect_id,
+            authority_version=intent.authority_version,
+            scope=(
+                ("standing_permission_id", permission.permission_id),
+                ("standing_scope_fingerprint", permission.scope_fingerprint),
+            ),
+        )
+        arguments_fingerprint = tool_arguments_fingerprint(call.arguments)
+        if arguments_fingerprint != authorized_intent.arguments_fingerprint:
+            raise StandingPermissionIntegrityError(
+                "standing authorization argument canonicalization mismatch"
+            )
+        return ToolAuthorization(
+            tool_id=spec.tool_id,
+            task_id=call.task_id,
+            risk=spec.risk,
+            arguments_fingerprint=arguments_fingerprint,
+            effect_fingerprint=authorized_intent.effect_fingerprint,
+            approval_fingerprint=authorized_intent.approval_fingerprint,
         )
 
 

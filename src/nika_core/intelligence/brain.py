@@ -385,6 +385,12 @@ class DeterministicBrain:
         if task_id is None:  # validated at run entry
             raise AssertionError("durable deterministic task identity is unavailable")
 
+        if spec.risk in {ToolRisk.EXTERNAL_SIDE_EFFECT, ToolRisk.HIGH_IMPACT}:
+            return await self._execute_external_tool_action(
+                action=action,
+                task_id=task_id,
+            )
+
         try:
             reservation = journal.reserve(
                 task_id=task_id,
@@ -460,6 +466,41 @@ class DeterministicBrain:
                 f"tool effect succeeded but durable completion record failed: {type(exc).__name__}",
             )
         return None
+
+    async def _execute_external_tool_action(
+        self,
+        *,
+        action: DeterministicAction,
+        task_id: str,
+    ) -> _ToolExecutionFailure | None:
+        """Delegate one external effect to ToolExecutor's canonical durable guard."""
+        if action.tool_id is None:  # pragma: no cover - caller invariant
+            return None
+        result = await self._tools.execute(
+            ToolCall(
+                call_id=f"deterministic:{action.action_id}",
+                tool_id=action.tool_id,
+                arguments=dict(action.arguments),
+                approved=False,
+                task_id=task_id,
+            )
+        )
+        if result.ok:
+            return None
+        if result.error in {
+            "tool effect not safe to execute",
+            "tool timed out",
+            "tool failed",
+            "tool result durability failed",
+        }:
+            return _ToolExecutionFailure(
+                DeterministicErrorCode.SIDE_EFFECT_RECONCILIATION_REQUIRED,
+                result.error,
+            )
+        return _ToolExecutionFailure(
+            DeterministicErrorCode.TOOL_EXECUTION_FAILED,
+            result.error or "tool failed",
+        )
 
     async def _execute_tool_call(
         self,

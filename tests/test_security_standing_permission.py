@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -10,15 +11,19 @@ import pytest
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
+from nika_core.kernel.task_queue import TaskQueue
+from nika_core.runtime.idempotency import IdempotencyLedger
 from nika_core.security.policy import ActionIntent
 from nika_core.security.standing_permission import (
     PermissionContext,
+    StandingPermissionBinding,
     StandingPermissionConflictError,
+    StandingPermissionPolicy,
     StandingPermissionScope,
     StandingPermissionStore,
     StandingPermissionUse,
 )
-from nika_core.tools import ToolRisk
+from nika_core.tools import ToolCall, ToolEffectGuard, ToolExecutor, ToolRisk, ToolSpec
 
 
 def _context() -> PermissionContext:
@@ -294,6 +299,156 @@ def test_revoke_cannot_commit_inside_an_inflight_authorization_decision(tmp_path
             _use(),
             now=start + timedelta(minutes=3),
         )
+
+
+def test_standing_policy_executes_and_restart_replays_only_current_exact_effect(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "integrated.db")
+    store.initialize()
+    task_id = TaskQueue(store).create(workspace_id="b06", agent_id="worker70").task_id
+    context = PermissionContext(user_id="user-1", project_id="project-1", task_id=task_id)
+    start = datetime(2026, 8, 28, 18, 0, tzinfo=UTC)
+    permissions = StandingPermissionStore(store, audit_log=AuditLog(store))
+    permissions.initialize()
+    permissions.grant(
+        permission_id="perm-integrated",
+        scope=_scope(context=context, granted_at=start),
+    )
+    binding = StandingPermissionBinding(
+        permission_id="perm-integrated",
+        subject_id="agent-parent",
+        context=context,
+        target="target:listing-1",
+        resource_id="resource:price",
+        network_host="EXAMPLE.TEST.",
+    )
+    spec = ToolSpec(
+        tool_id="browser.inspect",
+        description="inspect exact listing",
+        risk=ToolRisk.EXTERNAL_SIDE_EFFECT,
+    )
+    call = ToolCall(
+        call_id="effect-listing-1",
+        tool_id=spec.tool_id,
+        task_id=task_id,
+        arguments={"field": "price", "locale": "uk-UA"},
+    )
+    handler_calls = 0
+
+    async def handler(arguments: dict[str, object]) -> object:
+        nonlocal handler_calls
+        handler_calls += 1
+        return {"arguments": arguments, "price": 42}
+
+    def executor(current_permissions: StandingPermissionStore) -> ToolExecutor:
+        policy = StandingPermissionPolicy(
+            current_permissions,
+            binding,
+            clock=lambda: start + timedelta(minutes=1),
+        )
+        current = ToolExecutor(
+            approval_policy=policy,
+            effect_guard=ToolEffectGuard(IdempotencyLedger(store)),
+        )
+        current.register(spec, handler)
+        return current
+
+    first = asyncio.run(executor(permissions).execute(call))
+    assert first.ok
+    assert first.output == {"arguments": call.arguments, "price": 42}
+    assert handler_calls == 1
+
+    restarted_permissions = StandingPermissionStore(store, audit_log=AuditLog(store))
+    restarted_permissions.initialize()
+    replayed = asyncio.run(executor(restarted_permissions).execute(call))
+    assert replayed.ok
+    assert replayed.output == first.output
+    assert handler_calls == 1
+
+    swapped_arguments = asyncio.run(
+        executor(restarted_permissions).execute(
+            replace(call, arguments={"field": "title", "locale": "uk-UA"})
+        )
+    )
+    assert not swapped_arguments.ok
+    assert swapped_arguments.error == "tool effect not safe to execute"
+    assert handler_calls == 1
+
+    restarted_permissions.revoke(
+        "perm-integrated",
+        revoked_at=start + timedelta(minutes=2),
+    )
+    revoked_replay = asyncio.run(executor(restarted_permissions).execute(call))
+    assert not revoked_replay.ok
+    assert revoked_replay.error == "approval required"
+    assert handler_calls == 1
+
+
+def test_standing_policy_denies_changed_trusted_scope_task_and_high_impact(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "integrated-denials.db")
+    store.initialize()
+    task_id = TaskQueue(store).create(workspace_id="b06", agent_id="worker70").task_id
+    context = PermissionContext(user_id="user-1", project_id="project-1", task_id=task_id)
+    start = datetime(2026, 8, 28, 18, 0, tzinfo=UTC)
+    permissions = StandingPermissionStore(store)
+    permissions.initialize()
+    permissions.grant(
+        permission_id="perm-integrated",
+        scope=_scope(context=context, granted_at=start),
+    )
+    spec = ToolSpec(
+        tool_id="browser.inspect",
+        description="inspect exact listing",
+        risk=ToolRisk.EXTERNAL_SIDE_EFFECT,
+    )
+    handler_calls = 0
+
+    async def handler(_arguments: dict[str, object]) -> object:
+        nonlocal handler_calls
+        handler_calls += 1
+        return "unexpected"
+
+    def executor(binding: StandingPermissionBinding, registered: ToolSpec) -> ToolExecutor:
+        policy = StandingPermissionPolicy(
+            permissions,
+            binding,
+            clock=lambda: start + timedelta(minutes=1),
+        )
+        current = ToolExecutor(
+            approval_policy=policy,
+            effect_guard=ToolEffectGuard(IdempotencyLedger(store)),
+        )
+        current.register(registered, handler)
+        return current
+
+    changed_target = StandingPermissionBinding(
+        permission_id="perm-integrated",
+        subject_id="agent-parent",
+        context=context,
+        target="target:listing-2",
+        resource_id="resource:price",
+        network_host="example.test",
+    )
+    call = ToolCall(
+        call_id="denied-target",
+        tool_id=spec.tool_id,
+        task_id=task_id,
+        arguments={"field": "price"},
+    )
+    assert asyncio.run(executor(changed_target, spec).execute(call)).error == "approval required"
+
+    exact_binding = replace(changed_target, target="target:listing-1")
+    changed_task = replace(call, call_id="denied-task", task_id="task-other")
+    assert asyncio.run(executor(exact_binding, spec).execute(changed_task)).error == (
+        "approval required"
+    )
+
+    high_impact = replace(spec, risk=ToolRisk.HIGH_IMPACT)
+    high_impact_call = replace(call, call_id="denied-high-impact")
+    assert asyncio.run(executor(exact_binding, high_impact).execute(high_impact_call)).error == (
+        "approval required"
+    )
+    assert handler_calls == 0
+    assert IdempotencyLedger(store).list_for_task(task_id) == ()
 
 
 def test_child_agent_cannot_widen_parent_and_parent_revoke_cascades(tmp_path) -> None:
