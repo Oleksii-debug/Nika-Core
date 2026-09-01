@@ -20,7 +20,7 @@ from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
 from nika_core.runtime.recovery import RecoveryDisposition, RuntimeRecoveryService
 from nika_core.runtime.registry import RuntimeRegistry
 from nika_core.runtime.session_store import RuntimeSessionStore
-from nika_core.tools import ToolExecutor, ToolRisk, ToolSpec
+from nika_core.tools import ToolEffectGuard, ToolExecutor, ToolRisk, ToolSpec
 
 
 class _SimulatedProcessLoss(BaseException):
@@ -302,7 +302,10 @@ def test_approval_denial_releases_unused_effect_reservation(tmp_path) -> None:
     async def approve(_spec, _call) -> bool:
         return True
 
-    approved_tools = ToolExecutor(approval_policy=approve)
+    approved_tools = ToolExecutor(
+        approval_policy=approve,
+        effect_guard=ToolEffectGuard(ledger),
+    )
     approved_tools.register(
         ToolSpec(
             tool_id="write.result",
@@ -319,6 +322,14 @@ def test_approval_denial_releases_unused_effect_reservation(tmp_path) -> None:
     assert approved.ok
     assert calls == 1
     assert ledger.list_for_task(task_id)[0].status == IdempotencyStatus.COMPLETED
+
+    replayed = _run(
+        _brain(tools=approved_tools, journal=journal),
+        action,
+        task_id=task_id,
+    )
+    assert replayed.ok
+    assert calls == 1
 
 
 def test_pending_effect_takes_reconciliation_precedence_over_changed_arguments(tmp_path) -> None:

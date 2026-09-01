@@ -79,7 +79,13 @@ class RuntimeRecoveryService:
 
     def inspect(self) -> tuple[RecoveryCandidate, ...]:
         """Return deterministic recovery decisions for every persisted runtime session."""
-        candidates = tuple(self._classify(record) for record in self._sessions.list_resumable())
+        records = self._sessions.list_resumable()
+        promoted_operation_keys = tuple(
+            operation_key
+            for task_id in dict.fromkeys(record.task_id for record in records)
+            for operation_key in self._idempotency.promote_pending_to_uncertain(task_id)
+        )
+        candidates = tuple(self._classify(record) for record in records)
         self._audit.append(
             event_type="runtime.recovery_inventory",
             entity_type="runtime_recovery",
@@ -103,6 +109,7 @@ class RuntimeRecoveryService:
                     }
                     for item in candidates
                 ),
+                "pending_promoted_count": len(promoted_operation_keys),
             },
         )
         return candidates
