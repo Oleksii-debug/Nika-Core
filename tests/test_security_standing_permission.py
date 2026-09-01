@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from threading import Event
 
 import pytest
 
@@ -223,6 +225,75 @@ def test_revoke_blocks_future_use_and_survives_restart(tmp_path) -> None:
     assert record.revoked_at == start + timedelta(minutes=2)
     with pytest.raises(PermissionError, match="revoked"):
         restarted.authorize("perm-root", _use(), now=start + timedelta(minutes=4))
+
+
+def test_revoke_cannot_commit_inside_an_inflight_authorization_decision(tmp_path) -> None:
+    class BlockingUseAudit:
+        def __init__(self) -> None:
+            self.use_checked = Event()
+            self.release_use = Event()
+
+        def append_with_connection(
+            self,
+            _conn,
+            *,
+            event_type: str,
+            entity_type: str,
+            entity_id: str,
+            payload: dict[str, object],
+        ) -> int:
+            del entity_type, entity_id, payload
+            if event_type == "standing_permission.used":
+                self.use_checked.set()
+                assert self.release_use.wait(timeout=5)
+            return 1
+
+        def append(self, **_kwargs) -> int:
+            return 1
+
+    store = SQLiteStore(tmp_path / "race.db")
+    store.initialize()
+    audit = BlockingUseAudit()
+    permissions = StandingPermissionStore(store, audit_log=audit)  # type: ignore[arg-type]
+    permissions.initialize()
+    start = datetime(2026, 8, 28, 18, 0, tzinfo=UTC)
+    permissions.grant(permission_id="perm-race", scope=_scope(granted_at=start))
+    revoke_started = Event()
+    revoke_completed = Event()
+
+    def authorize():
+        return permissions.authorize(
+            "perm-race",
+            _use(),
+            now=start + timedelta(minutes=1),
+        )
+
+    def revoke():
+        revoke_started.set()
+        try:
+            return permissions.revoke(
+                "perm-race",
+                revoked_at=start + timedelta(minutes=2),
+            )
+        finally:
+            revoke_completed.set()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        authorized = pool.submit(authorize)
+        assert audit.use_checked.wait(timeout=5)
+        revoked = pool.submit(revoke)
+        assert revoke_started.wait(timeout=5)
+        assert not revoke_completed.wait(timeout=0.2)
+        audit.release_use.set()
+        assert authorized.result(timeout=5).permission_id == "perm-race"
+        assert revoked.result(timeout=5).revoked_at == start + timedelta(minutes=2)
+
+    with pytest.raises(PermissionError, match="revoked"):
+        permissions.authorize(
+            "perm-race",
+            _use(),
+            now=start + timedelta(minutes=3),
+        )
 
 
 def test_child_agent_cannot_widen_parent_and_parent_revoke_cascades(tmp_path) -> None:

@@ -247,6 +247,7 @@ class StandingPermissionStore:
         _permission_id(permission_id)
         instant = _utc(revoked_at or datetime.now(UTC), "revoked_at")
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             current = self._require(conn, permission_id)
             if current.revoked_at is not None:
                 return current
@@ -271,6 +272,10 @@ class StandingPermissionStore:
         instant = _utc(now or datetime.now(UTC), "now")
         try:
             with self._store.connection() as conn:
+                # Authorization and revocation share one SQLite write-serialization point.
+                # This prevents revoke from committing while an active-state decision is
+                # still being returned to the effect-dispatch policy.
+                conn.execute("BEGIN IMMEDIATE")
                 current = self._require(conn, permission_id)
                 cursor = current
                 visited: set[str] = set()
@@ -569,7 +574,7 @@ def _site(value: str) -> str:
 
 def _sites(values: tuple[str, ...]) -> tuple[str, ...]:
     if not isinstance(values, tuple):
-        raise ValueError("site scope must be an explicit tuple")
+        raise TypeError("site scope must be an explicit tuple")
     return tuple(sorted({_site(value) for value in values}))
 
 
