@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-import nika_core.runtime.contracts as runtime_contracts
+from nika_core.runtime import contracts as runtime_contracts
 from nika_core.runtime import langgraph_runtime
 
 
