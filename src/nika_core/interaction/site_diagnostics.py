@@ -221,7 +221,7 @@ class PlaywrightSiteDiagnosticsProbe:
             raise ValueError("site diagnostics shadow_root_count is malformed")
         shadow_truncated = data.get("shadow_scan_truncated", False)
         if not isinstance(shadow_truncated, bool):
-            raise ValueError("site diagnostics shadow_scan_truncated is malformed")
+            raise TypeError("site diagnostics shadow_scan_truncated is malformed")
 
         ready_state = _safe_text(data.get("ready_state")).casefold()
         if ready_state not in {"loading", "interactive", "complete"}:

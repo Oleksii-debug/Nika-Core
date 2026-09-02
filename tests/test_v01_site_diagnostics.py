@@ -160,6 +160,10 @@ def test_site_model_rejects_oversized_or_malformed_payloads() -> None:
     with pytest.raises(ValueError, match="shadow_root_count"):
         _capture(malformed)
 
+    malformed = dict(payload, controls=[], shadow_scan_truncated="yes")
+    with pytest.raises(TypeError, match="shadow_scan_truncated"):
+        _capture(malformed)
+
 
 def test_site_model_fail_closes_unknown_urls_and_form_methods() -> None:
     model, _ = _capture(
