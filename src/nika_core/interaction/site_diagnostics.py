@@ -119,13 +119,13 @@ def _safe_url(value: object) -> str:
 
 def _mapping(value: object, field: str) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
-        raise ValueError(f"site diagnostics {field} is malformed")
+        raise TypeError(f"site diagnostics {field} is malformed")
     return value
 
 
 def _sequence(value: object, field: str, maximum: int) -> Sequence[object]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
-        raise ValueError(f"site diagnostics {field} is malformed")
+        raise TypeError(f"site diagnostics {field} is malformed")
     if len(value) > maximum:
         raise ValueError(f"site diagnostics {field} exceeded bounded size")
     return value
