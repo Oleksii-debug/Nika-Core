@@ -12,6 +12,13 @@ _VALUE_NAME = "NikaCore"
 _MAX_RUN_COMMAND_LENGTH = 260
 
 
+def _windows_utf16_code_units(value: str) -> int:
+    try:
+        return len(value.encode("utf-16-le")) // 2
+    except UnicodeEncodeError as exc:
+        raise ValueError("Autostart command is not valid Windows UTF-16 text") from exc
+
+
 class AutostartState(StrEnum):
     DISABLED = "disabled"
     ENABLED = "enabled"
@@ -99,7 +106,7 @@ class WindowsAutostartService:
 
     def _validated_command(self) -> str:
         command = self.expected_command
-        if len(command) > _MAX_RUN_COMMAND_LENGTH:
+        if _windows_utf16_code_units(command) > _MAX_RUN_COMMAND_LENGTH:
             raise ValueError(
                 "Autostart command exceeds the Windows Run-key 260-character limit"
             )
@@ -109,10 +116,18 @@ class WindowsAutostartService:
         registered = self._backend.read()
         if registered is None:
             return AutostartStatus(AutostartState.DISABLED, None)
-        if len(registered) > _MAX_RUN_COMMAND_LENGTH:
+        try:
+            registered_units = _windows_utf16_code_units(registered)
+        except ValueError:
+            return AutostartStatus(AutostartState.STALE, registered)
+        if registered_units > _MAX_RUN_COMMAND_LENGTH:
             return AutostartStatus(AutostartState.STALE, registered)
         expected = self.expected_command
-        if len(expected) > _MAX_RUN_COMMAND_LENGTH:
+        try:
+            expected_units = _windows_utf16_code_units(expected)
+        except ValueError:
+            return AutostartStatus(AutostartState.STALE, registered)
+        if expected_units > _MAX_RUN_COMMAND_LENGTH:
             return AutostartStatus(AutostartState.STALE, registered)
         if registered == expected:
             return AutostartStatus(AutostartState.ENABLED, registered)

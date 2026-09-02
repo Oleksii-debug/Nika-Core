@@ -116,3 +116,34 @@ def test_legacy_oversized_registration_is_never_reported_enabled() -> None:
         service.enable()
     assert backend.writes == []
     assert backend.value == service.expected_command
+
+
+def test_astral_unicode_command_is_bounded_by_utf16_code_units() -> None:
+    backend = FakeBackend()
+    executable = Path("C:\\" + ("\U0001f600" * 253) + ".exe")
+    service = WindowsAutostartService(executable, backend)
+    command = service.expected_command
+
+    assert len(command) == 260
+    assert len(command.encode("utf-16-le")) // 2 == 513
+
+    with pytest.raises(ValueError, match="260-character limit"):
+        service.enable()
+
+    assert backend.writes == []
+    assert backend.value is None
+
+
+def test_legacy_astral_unicode_registration_is_never_reported_enabled() -> None:
+    backend = FakeBackend()
+    executable = Path("C:\\" + ("\U0001f600" * 253) + ".exe")
+    service = WindowsAutostartService(executable, backend)
+    backend.value = service.expected_command
+
+    status = service.status()
+
+    assert status.state is AutostartState.STALE
+    assert status.registered_command == service.expected_command
+    with pytest.raises(ValueError, match="260-character limit"):
+        service.enable()
+    assert backend.writes == []
