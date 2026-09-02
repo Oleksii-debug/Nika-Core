@@ -73,3 +73,31 @@ def test_malformed_or_foreign_command_is_never_reported_enabled() -> None:
 def test_relative_executable_path_fails_closed() -> None:
     with pytest.raises(ValueError, match="must be absolute"):
         WindowsAutostartService(Path("Nika.exe"), FakeBackend())
+
+
+def _service_with_command_length(length: int, backend: FakeBackend) -> WindowsAutostartService:
+    prefix = "C:\\"
+    suffix = ".exe"
+    path = prefix + ("a" * (length - len(prefix) - len(suffix))) + suffix
+    service = WindowsAutostartService(Path(path), backend)
+    assert len(service.expected_command) == length
+    return service
+
+
+def test_run_command_exactly_260_characters_is_allowed() -> None:
+    backend = FakeBackend()
+    service = _service_with_command_length(260, backend)
+
+    assert service.enable().state is AutostartState.ENABLED
+    assert backend.writes == [service.expected_command]
+
+
+def test_run_command_over_260_characters_fails_before_write() -> None:
+    backend = FakeBackend()
+    service = _service_with_command_length(261, backend)
+
+    with pytest.raises(ValueError, match="260-character limit"):
+        service.enable()
+
+    assert backend.writes == []
+    assert backend.value is None
