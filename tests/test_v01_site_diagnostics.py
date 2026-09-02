@@ -93,6 +93,11 @@ def test_site_model_is_bounded_redacted_and_drops_url_secrets() -> None:
     assert "localstorage" not in lowered
     assert "sessionstorage" not in lowered
     assert ".value" not in lowered
+    assert "document.queryselectorall" not in lowered
+    assert "document.forms" not in lowered
+    assert "array.from" not in lowered
+    assert "document.createtreewalker" in lowered
+    assert "while (el && scanned < 500)" in lowered
 
 
 def test_site_model_does_not_expose_input_values_and_preserves_semantic_metadata() -> None:

@@ -25,7 +25,7 @@ _SECRET_RE: Final = re.compile(
 _READ_ONLY_SITE_MODEL_JS: Final = r"""
 () => {
   const compact = (value) => typeof value === "string"
-    ? value.replace(/\s+/g, " ").trim().slice(0, 160)
+    ? value.slice(0, 1024).replace(/\s+/g, " ").trim().slice(0, 160)
     : "";
   const visible = (el) => {
     const style = globalThis.getComputedStyle(el);
@@ -39,44 +39,60 @@ _READ_ONLY_SITE_MODEL_JS: Final = r"""
     if (el.labels && el.labels.length === 1) return compact(el.labels[0].textContent || "");
     return compact(el.getAttribute("title") || el.getAttribute("name") || "");
   };
-  const controls = Array.from(document.querySelectorAll(
-    "button,input,textarea,select,[role],[contenteditable='true']"
-  )).slice(0, 100).map((el) => ({
-    tag: compact(el.tagName.toLowerCase()), role: roleFor(el), name: nameFor(el),
-    enabled: !(el.disabled || el.getAttribute("aria-disabled") === "true"),
-    visible: visible(el), contenteditable: el.getAttribute("contenteditable") === "true"
-  }));
-  const headings = Array.from(document.querySelectorAll("h1,h2,h3,h4,h5,h6,[role='heading']"))
-    .slice(0, 40).map((el) => ({
-      level: Number(el.getAttribute("aria-level") || el.tagName.slice(1) || 0),
-      text: compact(el.textContent || "")
-    }));
-  const forms = Array.from(document.forms).slice(0, 20).map((form) => ({
-    name: compact(form.getAttribute("aria-label") || form.getAttribute("name") || ""),
-    method: compact((form.getAttribute("method") || "get").toLowerCase()),
-    action: compact(form.action || "")
-  }));
-  const frames = Array.from(document.querySelectorAll("iframe")).slice(0, 20).map((frame) => ({
-    name: compact(frame.getAttribute("name") || ""), title: compact(frame.getAttribute("title") || ""),
-    src: compact(frame.src || "")
-  }));
+  const controls = [];
+  const headings = [];
+  const forms = [];
+  const frames = [];
   let shadowRootCount = 0;
-  let shadowScanned = 0;
-  let shadowScanTruncated = false;
+  let scanned = 0;
+  let scanTruncated = false;
   if (document.documentElement) {
     const walker = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_ELEMENT);
     let el = walker.currentNode;
-    while (el && shadowScanned < 500) {
+    while (el && scanned < 500) {
       if (el.shadowRoot) shadowRootCount += 1;
-      shadowScanned += 1;
+      const tag = el.tagName.toLowerCase();
+      const role = roleFor(el);
+      const contenteditable = el.getAttribute("contenteditable") === "true";
+      if (controls.length < 100 && (
+        tag === "button" || tag === "input" || tag === "textarea" || tag === "select"
+        || el.hasAttribute("role") || contenteditable
+      )) {
+        controls.push({
+          tag: compact(tag), role: compact(role), name: nameFor(el),
+          enabled: !(el.disabled || el.getAttribute("aria-disabled") === "true"),
+          visible: visible(el), contenteditable
+        });
+      }
+      if (headings.length < 40 && (/^h[1-6]$/.test(tag) || role === "heading")) {
+        const nativeLevel = /^h[1-6]$/.test(tag) ? tag.slice(1) : "0";
+        headings.push({
+          level: Number(el.getAttribute("aria-level") || nativeLevel),
+          text: compact(el.textContent || "")
+        });
+      }
+      if (forms.length < 20 && tag === "form") {
+        forms.push({
+          name: compact(el.getAttribute("aria-label") || el.getAttribute("name") || ""),
+          method: compact((el.getAttribute("method") || "get").toLowerCase()),
+          action: compact(el.action || "")
+        });
+      }
+      if (frames.length < 20 && tag === "iframe") {
+        frames.push({
+          name: compact(el.getAttribute("name") || ""), title: compact(el.getAttribute("title") || ""),
+          src: compact(el.src || "")
+        });
+      }
+      scanned += 1;
       el = walker.nextNode();
     }
-    shadowScanTruncated = Boolean(el);
+    scanTruncated = Boolean(el);
   }
   return {
     url: String(globalThis.location.href), title: compact(document.title),
     ready_state: String(document.readyState), controls, headings, forms, frames,
-    shadow_root_count: shadowRootCount, shadow_scan_truncated: shadowScanTruncated
+    shadow_root_count: shadowRootCount, shadow_scan_truncated: scanTruncated
   };
 }
 """
