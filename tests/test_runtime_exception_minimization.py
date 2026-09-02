@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
-from nika_core.runtime import contracts as runtime_contracts, langgraph_runtime
+from nika_core.runtime import contracts as runtime_contracts
+from nika_core.runtime import langgraph_runtime
 
 _CANARY = "P10_05_SYNTHETIC_BACKEND_SECRET_7f31c2"
 
