@@ -9,6 +9,7 @@ from typing import Protocol
 
 _RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _VALUE_NAME = "NikaCore"
+_MAX_RUN_COMMAND_LENGTH = 260
 
 
 class AutostartState(StrEnum):
@@ -96,6 +97,14 @@ class WindowsAutostartService:
     def expected_command(self) -> str:
         return subprocess.list2cmdline([self._executable])
 
+    def _validated_command(self) -> str:
+        command = self.expected_command
+        if len(command) > _MAX_RUN_COMMAND_LENGTH:
+            raise ValueError(
+                "Autostart command exceeds the Windows Run-key 260-character limit"
+            )
+        return command
+
     def status(self) -> AutostartStatus:
         registered = self._backend.read()
         if registered is None:
@@ -105,10 +114,11 @@ class WindowsAutostartService:
         return AutostartStatus(AutostartState.STALE, registered)
 
     def enable(self) -> AutostartStatus:
+        command = self._validated_command()
         current = self.status()
         if current.state is AutostartState.ENABLED:
             return current
-        self._backend.write(self.expected_command)
+        self._backend.write(command)
         verified = self.status()
         if verified.state is not AutostartState.ENABLED:
             raise RuntimeError("Nika autostart registration did not verify after write")
