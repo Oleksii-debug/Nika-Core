@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Final
+from typing import Final
 from urllib.parse import urlsplit, urlunsplit
 
 from .domain import StaleSnapshotError
