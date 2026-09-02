@@ -33,10 +33,24 @@ _READ_ONLY_SITE_MODEL_JS: Final = r"""
     return Boolean(el.getClientRects().length);
   };
   const roleFor = (el) => compact(el.getAttribute("role") || "");
+  const directTextFor = (el) => {
+    if (el.isContentEditable) return "";
+    let text = "";
+    let child = el.firstChild;
+    let childScanned = 0;
+    while (child && childScanned < 32 && text.length < 1024) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        text += (child.nodeValue || "").slice(0, 1024 - text.length);
+      }
+      child = child.nextSibling;
+      childScanned += 1;
+    }
+    return compact(text);
+  };
   const nameFor = (el) => {
     const aria = compact(el.getAttribute("aria-label") || "");
     if (aria) return aria;
-    if (el.labels && el.labels.length === 1) return compact(el.labels[0].textContent || "");
+    if (el.labels && el.labels.length === 1) return directTextFor(el.labels[0]);
     return compact(el.getAttribute("title") || el.getAttribute("name") || "");
   };
   const controls = [];
@@ -68,7 +82,7 @@ _READ_ONLY_SITE_MODEL_JS: Final = r"""
         const nativeLevel = /^h[1-6]$/.test(tag) ? tag.slice(1) : "0";
         headings.push({
           level: Number(el.getAttribute("aria-level") || nativeLevel),
-          text: compact(el.textContent || "")
+          text: directTextFor(el)
         });
       }
       if (forms.length < 20 && tag === "form") {

@@ -98,6 +98,13 @@ def test_site_model_is_bounded_redacted_and_drops_url_secrets() -> None:
     assert "array.from" not in lowered
     assert "document.createtreewalker" in lowered
     assert "while (el && scanned < 500)" in lowered
+    assert "textcontent" not in lowered
+    assert "if (el.iscontenteditable) return \"\";" in lowered
+    assert "text: directtextfor(el)" in lowered
+    assert "return directtextfor(el.labels[0]);" in lowered
+    assert "el.firstchild" in lowered
+    assert "child.nextsibling" in lowered
+    assert "while (child && childscanned < 32 && text.length < 1024)" in lowered
 
 
 def test_site_model_does_not_expose_input_values_and_preserves_semantic_metadata() -> None:
