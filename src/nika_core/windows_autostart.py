@@ -15,8 +15,8 @@ _MAX_RUN_COMMAND_LENGTH = 260
 def _windows_utf16_code_units(value: str) -> int:
     try:
         return len(value.encode("utf-16-le")) // 2
-    except UnicodeEncodeError as exc:
-        raise ValueError("Autostart command is not valid Windows UTF-16 text") from exc
+    except UnicodeEncodeError:
+        raise ValueError("Autostart command is not valid Windows UTF-16 text") from None
 
 
 class AutostartState(StrEnum):
@@ -95,6 +95,8 @@ class WindowsAutostartService:
 
     def __init__(self, executable: Path, backend: AutostartBackend | None = None) -> None:
         executable_text = str(executable.expanduser())
+        if "\x00" in executable_text:
+            raise ValueError("Autostart executable path must not contain NUL")
         if not PureWindowsPath(executable_text).is_absolute():
             raise ValueError("Autostart executable path must be absolute")
         self._executable = executable_text

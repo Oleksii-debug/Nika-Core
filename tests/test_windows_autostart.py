@@ -75,6 +75,11 @@ def test_relative_executable_path_fails_closed() -> None:
         WindowsAutostartService(Path("Nika.exe"), FakeBackend())
 
 
+def test_nul_in_executable_path_fails_closed() -> None:
+    with pytest.raises(ValueError, match="NUL"):
+        WindowsAutostartService(Path("C:\\Nika\x00Shadow.exe"), FakeBackend())
+
+
 def _service_with_command_length(length: int, backend: FakeBackend) -> WindowsAutostartService:
     prefix = "C:\\"
     suffix = ".exe"
