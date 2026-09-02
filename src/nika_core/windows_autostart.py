@@ -109,7 +109,12 @@ class WindowsAutostartService:
         registered = self._backend.read()
         if registered is None:
             return AutostartStatus(AutostartState.DISABLED, None)
-        if registered == self.expected_command:
+        if len(registered) > _MAX_RUN_COMMAND_LENGTH:
+            return AutostartStatus(AutostartState.STALE, registered)
+        expected = self.expected_command
+        if len(expected) > _MAX_RUN_COMMAND_LENGTH:
+            return AutostartStatus(AutostartState.STALE, registered)
+        if registered == expected:
             return AutostartStatus(AutostartState.ENABLED, registered)
         return AutostartStatus(AutostartState.STALE, registered)
 

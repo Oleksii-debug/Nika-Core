@@ -101,3 +101,18 @@ def test_run_command_over_260_characters_fails_before_write() -> None:
 
     assert backend.writes == []
     assert backend.value is None
+
+
+def test_legacy_oversized_registration_is_never_reported_enabled() -> None:
+    backend = FakeBackend()
+    service = _service_with_command_length(261, backend)
+    backend.value = service.expected_command
+
+    status = service.status()
+
+    assert status.state is AutostartState.STALE
+    assert status.registered_command == service.expected_command
+    with pytest.raises(ValueError, match="260-character limit"):
+        service.enable()
+    assert backend.writes == []
+    assert backend.value == service.expected_command
