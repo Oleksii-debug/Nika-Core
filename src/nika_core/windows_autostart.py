@@ -4,7 +4,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Protocol
 
 _RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -86,15 +86,15 @@ class WindowsAutostartService:
     """
 
     def __init__(self, executable: Path, backend: AutostartBackend | None = None) -> None:
-        expanded = executable.expanduser()
-        if not expanded.is_absolute():
+        executable_text = str(executable.expanduser())
+        if not PureWindowsPath(executable_text).is_absolute():
             raise ValueError("Autostart executable path must be absolute")
-        self._executable = expanded
+        self._executable = executable_text
         self._backend = backend or WindowsRunKeyBackend()
 
     @property
     def expected_command(self) -> str:
-        return subprocess.list2cmdline([str(self._executable)])
+        return subprocess.list2cmdline([self._executable])
 
     def status(self) -> AutostartStatus:
         registered = self._backend.read()
