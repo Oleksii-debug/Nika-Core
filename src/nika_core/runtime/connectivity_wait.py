@@ -11,6 +11,7 @@ from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.task_state import TaskState
 from nika_core.runtime.retry import (
     RetryPolicy,
+    ScriptRetryCondition,
     ScriptRetryDisposition,
     ScriptRetryIntent,
     evaluate_script_retry_intent,
@@ -52,9 +53,9 @@ class _WaitBinding:
 class ConnectivityWaitService:
     """Crash-durable pre-effect network wait composed from existing Nika contracts.
 
-    This service never performs the external effect. It only owns one durable retry-wake
-    record and the task transition from WAITING_TOOL to RETRYING. The caller must still
-    revalidate current approval/effect authority before performing any external action.
+    This service never performs the external effect. It owns only durable connectivity
+    retry intent and the WAITING_TOOL -> RETRYING continuation grant. The effect caller
+    must still revalidate current approval/effect authority before any external action.
     """
 
     def __init__(
@@ -82,8 +83,9 @@ class ConnectivityWaitService:
     ) -> None:
         if not isinstance(intent, ScriptRetryIntent):
             raise TypeError("intent must be a ScriptRetryIntent")
-        if intent.condition.value != "recoverable_network_failure":
+        if intent.condition is not ScriptRetryCondition.RECOVERABLE_NETWORK_FAILURE:
             raise ValueError("connectivity wait requires a recoverable network retry intent")
+
         job = _job_from_intent(
             job_id=job_id,
             action_id=action_id,
@@ -101,7 +103,10 @@ class ConnectivityWaitService:
                 entity_id=job_id,
                 payload=_audit_payload(task_id=task_id, intent=intent),
             )
-        self._activate_runtime(job, event_type="runtime.connectivity_wait_activation_failed")
+
+        # Durable DB state is already authoritative. If runtime installation fails, expose
+        # that failure to the caller; scheduler startup can rehydrate the enabled DATE job.
+        self._activate_runtime(job)
 
     def evaluate(
         self,
@@ -174,8 +179,8 @@ class ConnectivityWaitService:
                 reason="retry_authority_not_ready",
             )
 
-        # Deliberately observed before the write claim so concurrent callers can race only
-        # on SQLite authority, not on timing-dependent in-process ownership.
+        # Observe before the SQLite write claim so simultaneous wake callers contend on
+        # canonical durable authority rather than an in-process ownership flag.
         initially_available = self._probe.is_available()
         runtime_job: ScheduledJob | None = None
         with self._queue.store.connection() as conn:
@@ -337,10 +342,7 @@ class ConnectivityWaitService:
                 )
 
         if runtime_job is not None:
-            self._activate_runtime(
-                runtime_job,
-                event_type="runtime.connectivity_wait_reschedule_activation_failed",
-            )
+            self._activate_runtime(runtime_job)
         return result
 
     def _disable_terminal(
@@ -395,18 +397,9 @@ class ConnectivityWaitService:
             payload={"reason": reason},
         )
 
-    def _activate_runtime(self, job: ScheduledJob, *, event_type: str) -> None:
-        if self._scheduler is None:
-            return
-        try:
+    def _activate_runtime(self, job: ScheduledJob) -> None:
+        if self._scheduler is not None:
             self._scheduler.upsert(job)
-        except Exception as exc:  # durable DB state remains authoritative after failure
-            self._audit.append(
-                event_type=event_type,
-                entity_type="scheduled_job",
-                entity_id=job.job_id,
-                payload={"error_type": type(exc).__name__},
-            )
 
 
 def _job_from_intent(
