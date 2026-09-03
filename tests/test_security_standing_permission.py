@@ -5,7 +5,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from threading import Event
+from threading import Barrier, Event, Lock
 
 import pytest
 
@@ -89,6 +89,31 @@ def _permissions(tmp_path, *, with_audit: bool = True):
     return store, audit, permissions
 
 
+def _synchronize_initial_absence_reads(
+    permissions: StandingPermissionStore,
+    permission_id: str,
+) -> None:
+    both_observed_absent = Barrier(2)
+    counter_lock = Lock()
+    absent_reads = 0
+    original_get = permissions._get
+
+    def synchronized_get(conn, current_permission_id):
+        nonlocal absent_reads
+        record = original_get(conn, current_permission_id)
+        should_wait = False
+        if current_permission_id == permission_id and record is None:
+            with counter_lock:
+                if absent_reads < 2:
+                    absent_reads += 1
+                    should_wait = True
+        if should_wait:
+            both_observed_absent.wait(timeout=5)
+        return record
+
+    permissions._get = synchronized_get  # type: ignore[method-assign]
+
+
 def test_exact_scope_authorizes_and_every_material_boundary_fails_closed(tmp_path) -> None:
     _store, _audit, permissions = _permissions(tmp_path)
     start = datetime(2026, 8, 28, 18, 0, tzinfo=UTC)
@@ -131,6 +156,142 @@ def test_scope_is_exact_finite_and_cannot_be_rebound_under_same_authority(tmp_pa
     for changed in changed_scopes:
         with pytest.raises(StandingPermissionConflictError, match="new authority"):
             permissions.grant(permission_id="perm-root", scope=changed)
+
+
+def test_identical_concurrent_grants_converge_once_and_survive_restart(tmp_path) -> None:
+    store, audit, permissions = _permissions(tmp_path)
+    assert audit is not None
+    scope = _scope()
+    _synchronize_initial_absence_reads(permissions, "perm-concurrent")
+
+    def grant():
+        return permissions.grant(permission_id="perm-concurrent", scope=scope)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = (pool.submit(grant), pool.submit(grant))
+        first, second = (future.result(timeout=10) for future in futures)
+
+    assert first.permission_id == second.permission_id == "perm-concurrent"
+    assert first.scope_fingerprint == second.scope_fingerprint
+    with store.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) AS count FROM standing_permissions WHERE permission_id = ?",
+            ("perm-concurrent",),
+        ).fetchone()["count"]
+    assert count == 1
+    assert tuple(
+        event.event_type
+        for event in audit.list_for(
+            entity_type="standing_permission",
+            entity_id="perm-concurrent",
+        )
+    ) == ("standing_permission.granted",)
+
+    restarted = StandingPermissionStore(store, audit_log=AuditLog(store))
+    restarted.initialize()
+    replayed = restarted.grant(permission_id="perm-concurrent", scope=scope)
+    assert replayed.scope_fingerprint == first.scope_fingerprint
+
+
+def test_conflicting_concurrent_grants_keep_one_canonical_authority(tmp_path) -> None:
+    store, audit, permissions = _permissions(tmp_path)
+    assert audit is not None
+    first_scope = _scope()
+    second_scope = replace(first_scope, targets=("target:listing-2",))
+    _synchronize_initial_absence_reads(permissions, "perm-conflict")
+
+    def grant(scope):
+        try:
+            return permissions.grant(permission_id="perm-conflict", scope=scope)
+        except StandingPermissionConflictError as exc:
+            return exc
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = (pool.submit(grant, first_scope), pool.submit(grant, second_scope))
+        outcomes = tuple(future.result(timeout=10) for future in futures)
+
+    records = tuple(
+        outcome for outcome in outcomes if not isinstance(outcome, StandingPermissionConflictError)
+    )
+    conflicts = tuple(
+        outcome for outcome in outcomes if isinstance(outcome, StandingPermissionConflictError)
+    )
+    assert len(records) == len(conflicts) == 1
+    assert str(conflicts[0]) == (
+        "permission id belongs to different authority; changed scope requires new authority"
+    )
+    canonical = permissions.get("perm-conflict")
+    assert canonical is not None
+    assert canonical.scope_fingerprint == records[0].scope_fingerprint
+    with store.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) AS count FROM standing_permissions WHERE permission_id = ?",
+            ("perm-conflict",),
+        ).fetchone()["count"]
+    assert count == 1
+    assert tuple(
+        event.event_type
+        for event in audit.list_for(
+            entity_type="standing_permission",
+            entity_id="perm-conflict",
+        )
+    ) == ("standing_permission.granted",)
+
+
+def test_identical_concurrent_delegations_converge_and_audit_once(tmp_path) -> None:
+    store, audit, permissions = _permissions(tmp_path)
+    assert audit is not None
+    start = datetime(2026, 8, 28, 18, 0, tzinfo=UTC)
+    permissions.grant(
+        permission_id="perm-parent",
+        scope=_scope(
+            targets=("target:listing-1", "target:listing-2"),
+            resources=("resource:price", "resource:title"),
+            granted_at=start,
+            expires_at=start + timedelta(hours=4),
+        ),
+    )
+    child = _scope(
+        subject_id="agent-child",
+        targets=("target:listing-1",),
+        resources=("resource:price",),
+        risk_ceiling=ToolRisk.READ_ONLY,
+        granted_at=start + timedelta(minutes=1),
+        expires_at=start + timedelta(hours=2),
+    )
+    _synchronize_initial_absence_reads(permissions, "perm-child-concurrent")
+
+    def delegate():
+        return permissions.delegate(
+            parent_permission_id="perm-parent",
+            permission_id="perm-child-concurrent",
+            scope=child,
+            delegated_by_subject_id="agent-parent",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = (pool.submit(delegate), pool.submit(delegate))
+        first, second = (future.result(timeout=10) for future in futures)
+
+    assert first.permission_id == second.permission_id == "perm-child-concurrent"
+    assert first.scope_fingerprint == second.scope_fingerprint
+    assert tuple(
+        event.event_type
+        for event in audit.list_for(
+            entity_type="standing_permission",
+            entity_id="perm-child-concurrent",
+        )
+    ) == ("standing_permission.delegated",)
+
+    restarted = StandingPermissionStore(store, audit_log=AuditLog(store))
+    restarted.initialize()
+    replayed = restarted.delegate(
+        parent_permission_id="perm-parent",
+        permission_id="perm-child-concurrent",
+        scope=child,
+        delegated_by_subject_id="agent-parent",
+    )
+    assert replayed.scope_fingerprint == first.scope_fingerprint
 
 
 def test_approve_all_forever_shapes_and_high_impact_are_rejected() -> None:

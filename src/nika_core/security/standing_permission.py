@@ -218,17 +218,19 @@ class StandingPermissionStore:
         with self._store.connection() as conn:
             existing = self._get(conn, permission_id)
             if existing is not None:
-                if (
-                    existing.parent_permission_id is None
-                    and existing.scope_fingerprint == material.fingerprint
-                ):
-                    return existing
-                raise StandingPermissionConflictError(
-                    "permission id belongs to different authority; "
-                    "changed scope requires new authority"
+                return self._same_authority_or_conflict(
+                    existing,
+                    parent_permission_id=None,
+                    scope_fingerprint=material.fingerprint,
                 )
-            record = self._insert(conn, permission_id, None, material)
-            self._audit(conn, "standing_permission.granted", record)
+            record, created = self._insert(conn, permission_id, None, material)
+            record = self._same_authority_or_conflict(
+                record,
+                parent_permission_id=None,
+                scope_fingerprint=material.fingerprint,
+            )
+            if created:
+                self._audit(conn, "standing_permission.granted", record)
             return record
 
     def delegate(
@@ -248,22 +250,24 @@ class StandingPermissionStore:
         with self._store.connection() as conn:
             existing = self._get(conn, permission_id)
             if existing is not None:
-                if (
-                    existing.parent_permission_id == parent_permission_id
-                    and existing.scope_fingerprint == child.fingerprint
-                ):
-                    return existing
-                raise StandingPermissionConflictError(
-                    "permission id belongs to different authority; "
-                    "changed scope requires new authority"
+                return self._same_authority_or_conflict(
+                    existing,
+                    parent_permission_id=parent_permission_id,
+                    scope_fingerprint=child.fingerprint,
                 )
             parent = self._require(conn, parent_permission_id)
             self._active(parent, scope.granted_at)
             if _hash(delegated_by_subject_id) != parent._scope.subject_hash:
                 raise PermissionError("delegator is not the parent permission subject")
             self._child_subset(parent._scope, child)
-            record = self._insert(conn, permission_id, parent_permission_id, child)
-            self._audit(conn, "standing_permission.delegated", record)
+            record, created = self._insert(conn, permission_id, parent_permission_id, child)
+            record = self._same_authority_or_conflict(
+                record,
+                parent_permission_id=parent_permission_id,
+                scope_fingerprint=child.fingerprint,
+            )
+            if created:
+                self._audit(conn, "standing_permission.delegated", record)
             return record
 
     def revoke(
@@ -397,14 +401,32 @@ class StandingPermissionStore:
         permission_id: str,
         parent_permission_id: str | None,
         scope: _ScopeRecord,
-    ) -> StoredStandingPermission:
-        conn.execute(
+    ) -> tuple[StoredStandingPermission, bool]:
+        inserted = conn.execute(
             "INSERT INTO standing_permissions("
             "permission_id, parent_permission_id, scope_json, scope_fingerprint, revoked_at) "
-            "VALUES (?, ?, ?, ?, NULL)",
+            "VALUES (?, ?, ?, ?, NULL) "
+            "ON CONFLICT(permission_id) DO NOTHING "
+            "RETURNING permission_id",
             (permission_id, parent_permission_id, _json(scope.payload), scope.fingerprint),
+        ).fetchone()
+        return self._require(conn, permission_id), inserted is not None
+
+    @staticmethod
+    def _same_authority_or_conflict(
+        permission: StoredStandingPermission,
+        *,
+        parent_permission_id: str | None,
+        scope_fingerprint: str,
+    ) -> StoredStandingPermission:
+        if (
+            permission.parent_permission_id == parent_permission_id
+            and permission.scope_fingerprint == scope_fingerprint
+        ):
+            return permission
+        raise StandingPermissionConflictError(
+            "permission id belongs to different authority; changed scope requires new authority"
         )
-        return self._require(conn, permission_id)
 
     def _get(
         self,
@@ -700,8 +722,10 @@ def _hash(value: str) -> str:
 
 
 def _is_hash(value: object) -> bool:
-    return isinstance(value, str) and len(value) == 64 and all(
-        char in "0123456789abcdef" for char in value
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(char in "0123456789abcdef" for char in value)
     )
 
 
