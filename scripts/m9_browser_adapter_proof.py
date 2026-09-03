@@ -87,7 +87,6 @@ def _prove_text_entry(adapter: PlaywrightInteractionAdapter) -> None:
         "</main>"
     )
 
-    # SET_VALUE is explicit replacement/fill semantics, not append semantics.
     replacement = "Український текст: їжак, ґанок, єдність."
     _set_and_verify(adapter, ControlLocator(role="textbox", label="Коротке поле"), replacement)
     snapshot = adapter.observe()
@@ -95,7 +94,6 @@ def _prove_text_entry(adapter: PlaywrightInteractionAdapter) -> None:
     assert short.value == replacement
     assert "Старий вміст" not in (short.value or "")
 
-    # Empty text is a deliberate clear operation.
     _set_and_verify(adapter, ControlLocator(label="Коротке поле"), "")
     snapshot = adapter.observe()
     assert resolve_strict(snapshot, ControlLocator(role="textbox", name="Коротке поле")).value in {
@@ -110,11 +108,9 @@ def _prove_text_entry(adapter: PlaywrightInteractionAdapter) -> None:
         multiline,
     )
 
-    # Playwright fill supports contenteditable; verification must not call input_value() for it.
     editor_value = "Редактор: український Unicode — готово"
     _set_and_verify(adapter, ControlLocator(role="textbox", name="Редактор"), editor_value)
 
-    # Non-editable failures are typed, bounded, and never include attempted secret content.
     for locator in (
         ControlLocator(role="textbox", name="Заблоковане поле"),
         ControlLocator(role="textbox", name="Лише читання"),
@@ -170,7 +166,10 @@ def _prove_frame(adapter: PlaywrightInteractionAdapter) -> None:
         "srcdoc=\"<main><button>Кнопка у фреймі</button></main>\"></iframe></main>"
     )
     assert adapter.session.registry is not None
-    adapter.session.registry.get(adapter.page_id).page.wait_for_load_state("load")
+    page = adapter.session.registry.get(adapter.page_id).page
+    page.frame_locator("iframe[name='details']").get_by_role(
+        "button", name="Кнопка у фреймі", exact=True
+    ).wait_for()
     framed = PlaywrightInteractionAdapter(
         session=adapter.session,
         page_id=adapter.page_id,
@@ -185,7 +184,6 @@ def _prove_stale_frame_and_dom_identity(adapter: PlaywrightInteractionAdapter) -
     assert adapter.session.registry is not None
     page = adapter.session.registry.get(adapter.page_id).page
 
-    # Same semantic role/name on a replacement DOM element must not inherit old authority.
     adapter.load_inline_fixture(
         "<main><button id='stable' aria-label='Стабільна дія' "
         "onclick=\"window.__nikaDomEffects=(window.__nikaDomEffects||0)+1\">"
@@ -221,15 +219,14 @@ def _prove_stale_frame_and_dom_identity(adapter: PlaywrightInteractionAdapter) -
     adapter.act(fresh_node, InteractionAction.INVOKE, None)
     assert page.evaluate("() => window.__nikaDomEffects") == 1
 
-    # Unscoped identical semantics across root and child frame must be ambiguous.
     adapter.load_inline_fixture(
         "<main><button>Спільна дія</button>"
         "<iframe name='duplicate' "
         "srcdoc=\"<main><button>Спільна дія</button></main>\"></iframe></main>"
     )
-    duplicate_frame = page.frame(name="duplicate")
-    assert duplicate_frame is not None
-    duplicate_frame.get_by_role("button", name="Спільна дія", exact=True).wait_for()
+    page.frame_locator("iframe[name='duplicate']").get_by_role(
+        "button", name="Спільна дія", exact=True
+    ).wait_for()
     try:
         resolve_strict(adapter.observe(), ControlLocator(role="button", name="Спільна дія"))
     except AmbiguousTargetError:
@@ -237,16 +234,15 @@ def _prove_stale_frame_and_dom_identity(adapter: PlaywrightInteractionAdapter) -
     else:  # pragma: no cover - physical proof assertion
         raise AssertionError("root/child identical semantics did not fail ambiguous")
 
-    # Replacing an iframe with the same semantic target invalidates the old child-frame identity.
     adapter.load_inline_fixture(
         "<main><iframe name='stale-frame' "
         "srcdoc=\"<main><button onclick='parent.__nikaFrameEffects=(parent.__nikaFrameEffects||0)+1'>"
         "Frame action</button></main>\"></iframe></main>"
     )
     page.evaluate("() => { window.__nikaFrameEffects = 0; }")
-    first_frame = page.frame(name="stale-frame")
-    assert first_frame is not None
-    first_frame.get_by_role("button", name="Frame action", exact=True).wait_for()
+    page.frame_locator("iframe[name='stale-frame']").get_by_role(
+        "button", name="Frame action", exact=True
+    ).wait_for()
     framed = PlaywrightInteractionAdapter(
         session=adapter.session,
         page_id=adapter.page_id,
@@ -267,9 +263,9 @@ def _prove_stale_frame_and_dom_identity(adapter: PlaywrightInteractionAdapter) -
         }
         """
     )
-    replacement_frame = page.frame(name="stale-frame")
-    assert replacement_frame is not None
-    replacement_frame.get_by_role("button", name="Frame action", exact=True).wait_for()
+    page.frame_locator("iframe[name='stale-frame']").get_by_role(
+        "button", name="Frame action", exact=True
+    ).wait_for()
     try:
         framed.act(old_node, InteractionAction.INVOKE, None)
     except StaleSnapshotError:
