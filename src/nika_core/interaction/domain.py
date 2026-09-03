@@ -27,6 +27,8 @@ class BrowserContextIdentity:
     context_id: str
     page_id: str
     document_generation: int
+    frame_id: str | None = None
+    frame_document_generation: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
