@@ -214,7 +214,8 @@ def test_langgraph_adapter_checkpoint_probe_normalizes_unreadable_failure() -> N
 
     assert probe.status == RuntimeResumeProbeStatus.UNREADABLE
     assert probe.checkpoint_id is None
-    assert "bad checkpoint bytes" in probe.reason
+    assert probe.reason == "checkpoint lookup failed"
+    assert "bad checkpoint bytes" not in probe.reason
 
 
 def test_langgraph_adapter_cancels_active_execution_and_advertises_capability() -> None:
@@ -302,7 +303,8 @@ def test_langgraph_adapter_converts_runtime_exception_without_fake_cursor() -> N
     assert result.outcome == RuntimeOutcome.FAILED
     assert result.error_code == RuntimeErrorCode.INTERNAL
     assert result.resume_token is None
-    assert "No fake response configured" in (result.error or "")
+    assert result.error == "runtime execution failed"
+    assert "No fake response configured" not in (result.error or "")
 
 
 def test_langgraph_adapter_does_not_leak_framework_objects() -> None:
