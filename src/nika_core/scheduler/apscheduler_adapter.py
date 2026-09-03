@@ -51,12 +51,15 @@ class APSchedulerAdapter(SchedulerPort):
 
     def upsert(self, job: ScheduledJob) -> None:
         self._jobs.upsert(job)
+        effective_job = job
         if self._started:
-            if job.enabled and self._task_authority_allows(job):
-                self._install(job)
+            allowed = job.enabled and self._task_authority_allows(job)
+            effective_job = self._required_job(job.job_id)
+            if allowed:
+                self._install(effective_job)
             elif self._scheduler.get_job(job.job_id) is not None:
                 self._scheduler.remove_job(job.job_id)
-        self._audit_change("scheduler.job_upserted", job)
+        self._audit_change("scheduler.job_upserted", effective_job)
 
     def remove(self, job_id: str) -> bool:
         removed = self._jobs.delete(job_id)
@@ -91,7 +94,10 @@ class APSchedulerAdapter(SchedulerPort):
             max_instances=job.max_instances,
             misfire_grace_seconds=job.misfire_grace_seconds,
         )
-        if self._started and self._task_authority_allows(enabled_job):
+        allowed = self._task_authority_allows(enabled_job)
+        if not allowed:
+            return
+        if self._started:
             self._install(enabled_job)
         self._audit_change("scheduler.job_resumed", enabled_job)
 
