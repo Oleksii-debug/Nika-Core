@@ -264,6 +264,8 @@ class V01PackagedTeamStateProvider:
     def _operation(*, role: str, state: str) -> str:
         if state == "waiting_approval":
             return "Очікує підтвердження."
+        if state == "paused":
+            return "Роботу призупинено."
         if state == "completed":
             return "Роботу завершено."
         if state == "failed":
