@@ -4,10 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from nika_core.interaction.site_diagnostics import (
-    PlaywrightSiteDiagnosticsProbe,
-    StaleSnapshotError,
-)
+from nika_core.interaction import site_diagnostics
 
 
 _PAYLOAD = {
@@ -58,10 +55,12 @@ class _Session:
         self.registry = _Registry(record)
 
 
-def _probe(*, advance_generation: bool) -> PlaywrightSiteDiagnosticsProbe:
+def _probe(*, advance_generation: bool) -> site_diagnostics.PlaywrightSiteDiagnosticsProbe:
     record = _Record()
     record.page = _Page(record, advance_generation=advance_generation)
-    return PlaywrightSiteDiagnosticsProbe(_Session(record), "page-1")  # type: ignore[arg-type]
+    return site_diagnostics.PlaywrightSiteDiagnosticsProbe(
+        _Session(record), "page-1"  # type: ignore[arg-type]
+    )
 
 
 def test_site_model_capture_preserves_stable_document_generation() -> None:
@@ -74,5 +73,5 @@ def test_site_model_capture_preserves_stable_document_generation() -> None:
 
 
 def test_site_model_fails_closed_if_document_generation_changes_during_capture() -> None:
-    with pytest.raises(StaleSnapshotError):
+    with pytest.raises(site_diagnostics.StaleSnapshotError):
         _probe(advance_generation=True).capture()
