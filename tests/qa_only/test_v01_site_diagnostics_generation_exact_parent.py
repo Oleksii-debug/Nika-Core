@@ -1,9 +1,3 @@
-from __future__ import annotations
-
-from dataclasses import dataclass
-
-import pytest
-
 from nika_core.interaction import site_diagnostics
 
 
@@ -20,10 +14,10 @@ _PAYLOAD = {
 }
 
 
-@dataclass
 class _Record:
-    page: object | None = None
-    document_generation: int = 7
+    def __init__(self) -> None:
+        self.page: object | None = None
+        self.document_generation = 7
 
 
 class _Page:
@@ -73,5 +67,10 @@ def test_site_model_capture_preserves_stable_document_generation() -> None:
 
 
 def test_site_model_fails_closed_if_document_generation_changes_during_capture() -> None:
-    with pytest.raises(site_diagnostics.StaleSnapshotError):
+    try:
         _probe(advance_generation=True).capture()
+    except site_diagnostics.StaleSnapshotError:
+        return
+    raise AssertionError(
+        "Site Model capture relabeled old-document evidence with a replacement document generation"
+    )
