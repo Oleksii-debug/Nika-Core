@@ -87,9 +87,7 @@ def _definition(agent_id: str) -> AgentDefinition:
         goal="Complete one deterministic V0.1 role.",
         instructions="Use only the declared read-only fixture capability.",
         model_profile="test",
-        tool_grants=(
-            ToolGrant(tool_id="file.read", max_risk=0, scopes=("fixture",)),
-        ),
+        tool_grants=(ToolGrant(tool_id="file.read", max_risk=0, scopes=("fixture",)),),
         enabled=True,
     )
 
@@ -137,11 +135,7 @@ def _open(
     store = MultiAgentStore(sqlite)
     definitions = AgentDefinitionRepository(sqlite)
     runtime = DeterministicRuntime()
-    coordinator = MultiAgentSupervisor(
-        runtime=runtime,
-        store=store,
-        definitions=definitions,
-    )
+    coordinator = MultiAgentSupervisor(runtime=runtime, store=store, definitions=definitions)
     adapter = V01ThreeAgentSupervisor(
         coordinator=coordinator,
         store=store,
@@ -180,10 +174,13 @@ def test_restart_after_worker_before_checker_continues_same_team(
         )
 
     assert [member.state for member in first_store.members("team-restart-mid-stage")] == [
-        MemberState.SPAWNED,
+        MemberState.COMPLETED,
         MemberState.COMPLETED,
     ]
-    assert len(first_runtime.requests) == 1
+    assert [request.payload["member_id"] for request in first_runtime.requests] == [
+        "supervisor",
+        "worker",
+    ]
 
     restarted_runtime, restarted_store, restarted_coordinator, restarted_adapter = _open(db_path)
     assert asyncio.run(restarted_coordinator.recover_team("team-restart-mid-stage")) == ()
@@ -230,10 +227,14 @@ def test_restart_after_checker_before_finalize_reconstructs_without_reexecution(
             )
         )
 
-    assert len(first_runtime.requests) == 2
+    assert [request.payload["member_id"] for request in first_runtime.requests] == [
+        "supervisor",
+        "worker",
+        "checker",
+    ]
     assert first_store.team_state("team-restart-finalize") is TeamState.ACTIVE
     assert [member.state for member in first_store.members("team-restart-finalize")] == [
-        MemberState.SPAWNED,
+        MemberState.COMPLETED,
         MemberState.COMPLETED,
         MemberState.COMPLETED,
     ]
