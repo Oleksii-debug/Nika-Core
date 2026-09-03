@@ -130,13 +130,30 @@ def test_terminal_task_authority_suppresses_rehydrated_wakes(tmp_path) -> None:
     reopened = SQLiteStore(db_path)
     reopened.initialize()
     reopened_jobs = ScheduledJobStore(reopened)
-    restarted = APSchedulerAdapter(reopened_jobs, resolve, audit=AuditLog(reopened))
+    reopened_audit = AuditLog(reopened)
+    restarted = APSchedulerAdapter(reopened_jobs, resolve, audit=reopened_audit)
     restarted.start()
     for action_id in (*linked_jobs, "missing-task", "invalid-task"):
         assert not restarted.has_runtime_job(f"job-{action_id}")
         restarted._dispatch(f"job-{action_id}")
     assert calls == ["live", "unrelated"]
     restarted.shutdown(wait=False)
+
+    restarted.resume("job-cancelled")
+    assert reopened_jobs.get("job-cancelled").enabled is False
+    cancelled_audit = reopened_audit.list_for(
+        entity_type="scheduled_job",
+        entity_id="job-cancelled",
+    )
+    assert cancelled_audit[-1].event_type == "scheduler.job_suppressed_task_authority"
+    assert all(event.event_type != "scheduler.job_resumed" for event in cancelled_audit)
+
+    third = APSchedulerAdapter(reopened_jobs, resolve, audit=reopened_audit)
+    third.start()
+    assert not third.has_runtime_job("job-cancelled")
+    third._dispatch("job-cancelled")
+    assert calls == ["live", "unrelated"]
+    third.shutdown(wait=False)
 
 
 def test_repeated_stop_of_one_cancelled_task_is_idempotent(tmp_path) -> None:
