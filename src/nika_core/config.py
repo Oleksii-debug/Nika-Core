@@ -1,9 +1,21 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
+from platformdirs import user_data_path
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_SOURCE_DATABASE_PATH = Path("./data/nika_core.db")
+_PACKAGED_APP_NAME = "NikaCore"
+
+
+def default_database_path() -> Path:
+    """Return the stable default database path for the current runtime mode."""
+    if getattr(sys, "frozen", False):
+        return user_data_path(_PACKAGED_APP_NAME, appauthor=False) / "nika_core.db"
+    return _SOURCE_DATABASE_PATH
 
 
 class AppConfig(BaseSettings):
@@ -12,7 +24,7 @@ class AppConfig(BaseSettings):
     schema_version: int = 1
     app_version: str = "0.0.2"
     database_path: Path = Field(
-        default=Path("./data/nika_core.db"),
+        default_factory=default_database_path,
         validation_alias=AliasChoices("NIKA_DB_PATH", "NIKA_DATABASE_PATH"),
     )
     log_level: str = "INFO"
