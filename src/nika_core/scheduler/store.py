@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime
 
 from nika_core.data.sqlite import SQLiteStore
@@ -12,47 +13,59 @@ class ScheduledJobStore:
         self._store = store
 
     def upsert(self, job: ScheduledJob) -> None:
+        with self._store.connection() as conn:
+            self.upsert_with_connection(conn, job)
+
+    def upsert_with_connection(self, conn: sqlite3.Connection, job: ScheduledJob) -> None:
+        """Upsert one job inside a caller-owned SQLite transaction."""
         _validate_job(job)
         now = datetime.now(UTC).isoformat()
-        with self._store.connection() as conn:
-            existing = conn.execute(
-                "SELECT created_at FROM scheduled_jobs WHERE job_id = ?", (job.job_id,)
-            ).fetchone()
-            created_at = existing["created_at"] if existing else now
-            conn.execute(
-                """INSERT INTO scheduled_jobs(
-                    job_id, action_id, trigger_kind, trigger_json, payload_json, enabled,
-                    coalesce, max_instances, misfire_grace_seconds, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(job_id) DO UPDATE SET
-                    action_id = excluded.action_id,
-                    trigger_kind = excluded.trigger_kind,
-                    trigger_json = excluded.trigger_json,
-                    payload_json = excluded.payload_json,
-                    enabled = excluded.enabled,
-                    coalesce = excluded.coalesce,
-                    max_instances = excluded.max_instances,
-                    misfire_grace_seconds = excluded.misfire_grace_seconds,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    job.job_id,
-                    job.action_id,
-                    job.trigger_kind.value,
-                    json.dumps(job.trigger, sort_keys=True, separators=(",", ":")),
-                    json.dumps(job.payload, sort_keys=True, separators=(",", ":")),
-                    int(job.enabled),
-                    int(job.coalesce),
-                    job.max_instances,
-                    job.misfire_grace_seconds,
-                    created_at,
-                    now,
-                ),
-            )
+        existing = conn.execute(
+            "SELECT created_at FROM scheduled_jobs WHERE job_id = ?", (job.job_id,)
+        ).fetchone()
+        created_at = existing["created_at"] if existing else now
+        conn.execute(
+            """INSERT INTO scheduled_jobs(
+                job_id, action_id, trigger_kind, trigger_json, payload_json, enabled,
+                coalesce, max_instances, misfire_grace_seconds, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(job_id) DO UPDATE SET
+                action_id = excluded.action_id,
+                trigger_kind = excluded.trigger_kind,
+                trigger_json = excluded.trigger_json,
+                payload_json = excluded.payload_json,
+                enabled = excluded.enabled,
+                coalesce = excluded.coalesce,
+                max_instances = excluded.max_instances,
+                misfire_grace_seconds = excluded.misfire_grace_seconds,
+                updated_at = excluded.updated_at
+            """,
+            (
+                job.job_id,
+                job.action_id,
+                job.trigger_kind.value,
+                json.dumps(job.trigger, sort_keys=True, separators=(",", ":")),
+                json.dumps(job.payload, sort_keys=True, separators=(",", ":")),
+                int(job.enabled),
+                int(job.coalesce),
+                job.max_instances,
+                job.misfire_grace_seconds,
+                created_at,
+                now,
+            ),
+        )
 
     def get(self, job_id: str) -> ScheduledJob | None:
         with self._store.connection() as conn:
-            row = conn.execute("SELECT * FROM scheduled_jobs WHERE job_id = ?", (job_id,)).fetchone()
+            return self.get_with_connection(conn, job_id)
+
+    def get_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        job_id: str,
+    ) -> ScheduledJob | None:
+        """Read one job inside a caller-owned SQLite transaction."""
+        row = conn.execute("SELECT * FROM scheduled_jobs WHERE job_id = ?", (job_id,)).fetchone()
         return _from_row(row) if row else None
 
     def list_enabled(self) -> tuple[ScheduledJob, ...]:
@@ -64,10 +77,19 @@ class ScheduledJobStore:
 
     def set_enabled(self, job_id: str, enabled: bool) -> bool:
         with self._store.connection() as conn:
-            cursor = conn.execute(
-                "UPDATE scheduled_jobs SET enabled = ?, updated_at = ? WHERE job_id = ?",
-                (int(enabled), datetime.now(UTC).isoformat(), job_id),
-            )
+            return self.set_enabled_with_connection(conn, job_id, enabled)
+
+    def set_enabled_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        job_id: str,
+        enabled: bool,
+    ) -> bool:
+        """Set durable enabled state inside a caller-owned SQLite transaction."""
+        cursor = conn.execute(
+            "UPDATE scheduled_jobs SET enabled = ?, updated_at = ? WHERE job_id = ?",
+            (int(enabled), datetime.now(UTC).isoformat(), job_id),
+        )
         return cursor.rowcount > 0
 
     def delete(self, job_id: str) -> bool:
