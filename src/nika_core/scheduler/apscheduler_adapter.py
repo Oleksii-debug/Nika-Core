@@ -9,11 +9,15 @@ from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from nika_core.kernel.audit import AuditLog
+from nika_core.kernel.task_state import TaskState
 from nika_core.scheduler.contracts import ScheduledJob, SchedulerPort, TriggerKind
 from nika_core.scheduler.store import ScheduledJobStore
 
 ActionHandler = Callable[[dict[str, Any]], None]
 HandlerResolver = Callable[[str], ActionHandler]
+_TERMINAL_TASK_STATES = frozenset(
+    {TaskState.CANCELLED, TaskState.COMPLETED, TaskState.ARCHIVED}
+)
 
 
 class APSchedulerAdapter(SchedulerPort):
@@ -34,7 +38,8 @@ class APSchedulerAdapter(SchedulerPort):
         if self._started:
             return
         for job in self._jobs.list_enabled():
-            self._install(job)
+            if self._task_authority_allows(job):
+                self._install(job)
         self._scheduler.start()
         self._started = True
 
@@ -47,7 +52,7 @@ class APSchedulerAdapter(SchedulerPort):
     def upsert(self, job: ScheduledJob) -> None:
         self._jobs.upsert(job)
         if self._started:
-            if job.enabled:
+            if job.enabled and self._task_authority_allows(job):
                 self._install(job)
             elif self._scheduler.get_job(job.job_id) is not None:
                 self._scheduler.remove_job(job.job_id)
@@ -86,7 +91,7 @@ class APSchedulerAdapter(SchedulerPort):
             max_instances=job.max_instances,
             misfire_grace_seconds=job.misfire_grace_seconds,
         )
-        if self._started:
+        if self._started and self._task_authority_allows(enabled_job):
             self._install(enabled_job)
         self._audit_change("scheduler.job_resumed", enabled_job)
 
@@ -107,7 +112,7 @@ class APSchedulerAdapter(SchedulerPort):
 
     def _dispatch(self, job_id: str) -> None:
         job = self._required_job(job_id)
-        if not job.enabled:
+        if not job.enabled or not self._task_authority_allows(job):
             return
         if self._audit is not None:
             self._audit.append(
@@ -134,6 +139,50 @@ class APSchedulerAdapter(SchedulerPort):
                 entity_type="scheduled_job",
                 entity_id=job_id,
                 payload={"action_id": job.action_id},
+            )
+
+    def _task_authority_allows(self, job: ScheduledJob) -> bool:
+        if "task_id" not in job.payload:
+            return True
+        task_id = job.payload["task_id"]
+        if not isinstance(task_id, str) or not task_id or task_id != task_id.strip():
+            self._suppress_task_linked_job(job, reason="invalid_task_binding")
+            return False
+        task_state = self._jobs.task_state(task_id)
+        if task_state is None:
+            self._suppress_task_linked_job(job, reason="missing_task")
+            return False
+        if task_state in _TERMINAL_TASK_STATES:
+            self._suppress_task_linked_job(
+                job,
+                reason="terminal_task",
+                task_state=task_state,
+            )
+            return False
+        return True
+
+    def _suppress_task_linked_job(
+        self,
+        job: ScheduledJob,
+        *,
+        reason: str,
+        task_state: TaskState | None = None,
+    ) -> None:
+        self._jobs.set_enabled(job.job_id, False)
+        if self._started and self._scheduler.get_job(job.job_id) is not None:
+            self._scheduler.remove_job(job.job_id)
+        if self._audit is not None:
+            payload: dict[str, Any] = {
+                "action_id": job.action_id,
+                "reason": reason,
+            }
+            if task_state is not None:
+                payload["task_state"] = task_state.value
+            self._audit.append(
+                event_type="scheduler.job_suppressed_task_authority",
+                entity_type="scheduled_job",
+                entity_id=job.job_id,
+                payload=payload,
             )
 
     def _required_job(self, job_id: str) -> ScheduledJob:
