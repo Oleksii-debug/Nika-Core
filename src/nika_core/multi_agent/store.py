@@ -23,6 +23,7 @@ _NONTERMINAL_MEMBER_STATES = frozenset(
         MemberState.SPAWNED,
         MemberState.RUNNING,
         MemberState.WAITING_APPROVAL,
+        MemberState.PAUSED,
     }
 )
 _TERMINAL_MEMBER_STATES = frozenset(
@@ -528,7 +529,7 @@ class MultiAgentStore:
             )
             conn.execute(
                 "UPDATE multi_agent_members SET state = ?, updated_at = ? WHERE team_id = ? "
-                "AND state IN (?, ?, ?)",
+                "AND state IN (?, ?, ?, ?)",
                 (
                     MemberState.CANCELLED.value,
                     now,
@@ -536,6 +537,7 @@ class MultiAgentStore:
                     MemberState.SPAWNED.value,
                     MemberState.RUNNING.value,
                     MemberState.WAITING_APPROVAL.value,
+                    MemberState.PAUSED.value,
                 ),
             )
             self._audit.append_with_connection(

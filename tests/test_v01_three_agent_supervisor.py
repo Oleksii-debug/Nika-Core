@@ -276,10 +276,19 @@ def test_fixed_three_agent_path_reaches_one_checked_terminal_result(tmp_path: Pa
         max_total_agents=3,
         max_parallel=1,
     )
-    assert len(runtime.requests) == 2
+    assert len(runtime.requests) == 3
     assert runtime.max_active == 1
 
-    worker_request, checker_request = runtime.requests
+    supervisor_request, worker_request, checker_request = runtime.requests
+    assert [request.payload["member_id"] for request in runtime.requests] == [
+        "supervisor",
+        "researcher",
+        "checker",
+    ]
+    assert supervisor_request.payload["parent_id"] is None
+    assert supervisor_request.payload["agent_id"] == "supervisor"
+    assert all(request.timeout_seconds == 300.0 for request in runtime.requests)
+
     worker_handoff = worker_request.payload["handoff"]
     checker_handoff = checker_request.payload["handoff"]
     assert isinstance(worker_handoff, dict)
@@ -329,8 +338,8 @@ def test_one_worker_failure_is_isolated_and_checker_still_finishes(tmp_path: Pat
         )
     )
 
-    assert len(runtime.requests) == 2
-    checker_handoff = runtime.requests[1].payload["handoff"]
+    assert len(runtime.requests) == 3
+    checker_handoff = runtime.requests[2].payload["handoff"]
     assert isinstance(checker_handoff, dict)
     assert checker_handoff["worker_observation"] == {
         "member_id": "researcher",
@@ -381,7 +390,11 @@ def test_restart_after_worker_continues_same_team_without_reexecution(
             )
         )
 
-    assert len(first_runtime.requests) == 1
+    assert len(first_runtime.requests) == 2
+    assert [request.payload["member_id"] for request in first_runtime.requests] == [
+        "supervisor",
+        "researcher",
+    ]
     assert [member.member_id for member in first_store.members("team-restart-worker")] == [
         "supervisor",
         "researcher",
@@ -428,7 +441,7 @@ def test_restart_after_checker_reconstructs_final_result_without_reexecution(
             )
         )
 
-    assert len(first_runtime.requests) == 2
+    assert len(first_runtime.requests) == 3
     assert first_store.team_state("team-restart-finalize").value == "active"
 
     restarted_runtime, restarted_store, restarted_adapter = _open_existing(tmp_path)
@@ -467,7 +480,7 @@ def test_restart_rejects_changed_logical_task_identity(tmp_path: Path) -> None:
             team_id="team-exact",
         )
     )
-    assert len(first_runtime.requests) == 2
+    assert len(first_runtime.requests) == 3
 
     restarted_runtime, _store, restarted_adapter = _open_existing(tmp_path)
     with pytest.raises(PermissionError, match="task identity"):
@@ -499,7 +512,7 @@ def test_runtime_result_error_is_bounded_before_storage_and_projection(tmp_path:
 
     assert result.worker.state is MemberState.FAILED
     assert result.worker.error == RuntimeErrorCode.INTERNAL.value
-    checker_handoff = runtime.requests[1].payload["handoff"]
+    checker_handoff = runtime.requests[2].payload["handoff"]
     assert isinstance(checker_handoff, dict)
     assert checker_handoff["worker_observation"]["error"] == RuntimeErrorCode.INTERNAL.value
     serialized_result = json.dumps(result.final_output, ensure_ascii=False, sort_keys=True)
@@ -526,7 +539,8 @@ def test_child_permission_expansion_fails_before_runtime_execution(tmp_path: Pat
         )
 
     assert runtime.requests == []
-    assert [member.member_id for member in store.members("team-permission")] == ["supervisor"]
+    with pytest.raises(KeyError, match="unknown team"):
+        store.team_state("team-permission")
 
 
 def test_root_permission_expansion_fails_before_team_creation(tmp_path: Path) -> None:

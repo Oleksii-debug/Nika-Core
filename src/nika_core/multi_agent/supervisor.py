@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
+from math import isfinite
 
 from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.multi_agent.contracts import (
@@ -39,6 +40,7 @@ _SAFE_EXCEPTION_NAMES = frozenset(
         "ValueError",
     }
 )
+_DEFAULT_RUNTIME_TIMEOUT_SECONDS = 300.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,11 +59,45 @@ class MultiAgentSupervisor:
         runtime: AgentRuntimePort,
         store: MultiAgentStore,
         definitions: AgentDefinitionRepository,
+        runtime_timeout_seconds: float = _DEFAULT_RUNTIME_TIMEOUT_SECONDS,
     ) -> None:
+        timeout = float(runtime_timeout_seconds)
+        if not isfinite(timeout) or timeout <= 0:
+            raise ValueError("runtime_timeout_seconds must be a positive finite value")
         self._runtime = runtime
         self._store = store
         self._definitions = definitions
+        self._runtime_timeout_seconds = timeout
         self._recovering_teams: set[str] = set()
+
+    async def run_root_member(self, *, team_id: str, member_id: str) -> ChildExecution:
+        """Execute or crash-resume the durable root member through AgentRuntimePort once.
+
+        The V0.1 representative team stores the supervisor as the root member. This method
+        makes that same durable identity operational without adding another coordinator or
+        another agent. Terminal roots are replayed from durable evidence and PAUSED roots stay
+        paused until an explicit resume path is selected by the caller.
+        """
+        if self._store.team_state(team_id) is not TeamState.ACTIVE:
+            raise RuntimeError("team is not active")
+        member = self._store.member(team_id, member_id)
+        if member.parent_id is not None:
+            raise ValueError("root execution requires the team root member")
+        self._definitions.require_active(member.agent_id, member.agent_version)
+
+        if member.state in {
+            MemberState.COMPLETED,
+            MemberState.FAILED,
+            MemberState.CANCELLED,
+            MemberState.WAITING_APPROVAL,
+            MemberState.PAUSED,
+        }:
+            return ChildExecution(member=member, result=None)
+        if member.state is MemberState.SPAWNED:
+            return await self._run_new_root(member)
+        if member.state is MemberState.RUNNING:
+            return await self._recover_root(member)
+        raise RuntimeError(f"unsupported root member state: {member.state.value}")
 
     async def fan_out(
         self,
@@ -124,8 +160,8 @@ class MultiAgentSupervisor:
     async def recover_team(self, team_id: str) -> tuple[ChildExecution, ...]:
         """Recover persisted child work once per team for this supervisor instance.
 
-        WAITING_APPROVAL children remain untouched because resuming them requires an explicit
-        human decision. SPAWNED children are safe to start from their persisted TASK handoff;
+        WAITING_APPROVAL and PAUSED children remain untouched because resuming either requires an
+        explicit decision. SPAWNED children are safe to start from their persisted TASK handoff;
         RUNNING children resume only from the recovery cursor persisted before execution.
         A duplicate concurrent recovery call on the same supervisor returns no work rather than
         issuing a second runtime resume while the first recovery attempt is still active.
@@ -174,6 +210,74 @@ class MultiAgentSupervisor:
     def aggregate_evaluations(scores: tuple[EvaluationScore, ...]) -> dict[str, float]:
         return aggregate_scores(scores)
 
+    async def _run_new_root(self, member: TeamMember) -> ChildExecution:
+        resume_token = self._initial_resume_token(
+            team_id=member.team_id,
+            member_id=member.member_id,
+            thread_id=member.thread_id,
+        )
+        self._store.set_member_state(
+            team_id=member.team_id,
+            member_id=member.member_id,
+            state=MemberState.RUNNING,
+            resume_token=resume_token,
+        )
+        prepared = self._store.member(member.team_id, member.member_id)
+        payload = self._store.task_payload(member.team_id, member.member_id)
+        try:
+            result = await self._runtime.run(
+                RuntimeRequest(
+                    task_id=self._task_id(member.team_id, member.member_id),
+                    thread_id=member.thread_id,
+                    payload=self._runtime_payload(prepared, payload),
+                    timeout_seconds=self._runtime_timeout_seconds,
+                )
+            )
+        except asyncio.CancelledError:
+            await self._runtime.cancel(
+                task_id=self._task_id(member.team_id, member.member_id),
+                thread_id=member.thread_id,
+            )
+            self._store.set_member_state(
+                team_id=member.team_id,
+                member_id=member.member_id,
+                state=MemberState.CANCELLED,
+            )
+            raise
+        except Exception as exc:  # noqa: BLE001 - isolate root runtime failure from persistence.
+            return self._finish_exception(prepared, exc)
+        return self._finish_result(prepared, result)
+
+    async def _recover_root(self, member: TeamMember) -> ChildExecution:
+        try:
+            if not member.resume_token:
+                raise RuntimeError("running root has no durable resume token")
+            result = await self._runtime.resume(
+                RuntimeResumeRequest(
+                    task_id=self._task_id(member.team_id, member.member_id),
+                    thread_id=member.thread_id,
+                    resume_token=member.resume_token,
+                    mode=RuntimeResumeMode.CONTINUE,
+                    timeout_seconds=self._runtime_timeout_seconds,
+                )
+            )
+        except asyncio.CancelledError:
+            await self._runtime.cancel(
+                task_id=self._task_id(member.team_id, member.member_id),
+                thread_id=member.thread_id,
+            )
+            self._store.set_member_state(
+                team_id=member.team_id,
+                member_id=member.member_id,
+                state=MemberState.CANCELLED,
+            )
+            raise
+        except Exception as exc:  # noqa: BLE001 - recovery failure belongs to root execution.
+            current = self._store.member(member.team_id, member.member_id)
+            return self._finish_exception(current, exc)
+        current = self._store.member(member.team_id, member.member_id)
+        return self._finish_result(current, result)
+
     async def _run_new_child(
         self,
         member: TeamMember,
@@ -192,6 +296,7 @@ class MultiAgentSupervisor:
                     task_id=self._task_id(member.team_id, member.member_id),
                     thread_id=member.thread_id,
                     payload=self._runtime_payload(prepared, handoff_payload),
+                    timeout_seconds=self._runtime_timeout_seconds,
                 )
             )
         except asyncio.CancelledError:
@@ -230,6 +335,7 @@ class MultiAgentSupervisor:
                     thread_id=member.thread_id,
                     resume_token=member.resume_token,
                     mode=RuntimeResumeMode.CONTINUE,
+                    timeout_seconds=self._runtime_timeout_seconds,
                 )
             )
         except asyncio.CancelledError:
@@ -254,17 +360,22 @@ class MultiAgentSupervisor:
         error = (
             exception_name if exception_name in _SAFE_EXCEPTION_NAMES else "WorkerException"
         )
+        result_handoff = (
+            None
+            if member.parent_id is None
+            else self._result_handoff(
+                member,
+                kind=HandoffKind.ERROR,
+                payload={"error": error},
+            )
+        )
         updated = self._store.finish_member_execution(
             team_id=member.team_id,
             member_id=member.member_id,
             state=MemberState.FAILED,
             outcome="exception",
             error=error,
-            result_handoff=self._result_handoff(
-                member,
-                kind=HandoffKind.ERROR,
-                payload={"error": error},
-            ),
+            result_handoff=result_handoff,
         )
         return ChildExecution(member=updated, result=None, exception=error)
 
@@ -272,12 +383,28 @@ class MultiAgentSupervisor:
         safe_error = self._safe_runtime_error(result)
         safe_result = replace(result, error=safe_error)
         state = self._state_for_result(safe_result)
+        if state is MemberState.PAUSED:
+            self._store.set_member_state(
+                team_id=member.team_id,
+                member_id=member.member_id,
+                state=MemberState.PAUSED,
+                resume_token=safe_result.resume_token,
+            )
+            return ChildExecution(
+                member=self._store.member(member.team_id, member.member_id),
+                result=safe_result,
+            )
         kind = (
             HandoffKind.ERROR
             if safe_result.outcome is RuntimeOutcome.FAILED
             else HandoffKind.RESULT
         )
         payload = dict(safe_result.output)
+        result_handoff = (
+            None
+            if member.parent_id is None
+            else self._result_handoff(member, kind=kind, payload=payload)
+        )
         updated = self._store.finish_member_execution(
             team_id=member.team_id,
             member_id=member.member_id,
@@ -286,7 +413,7 @@ class MultiAgentSupervisor:
             outcome=safe_result.outcome.value,
             payload=payload,
             error=safe_error,
-            result_handoff=self._result_handoff(member, kind=kind, payload=payload),
+            result_handoff=result_handoff,
         )
         return ChildExecution(member=updated, result=safe_result)
 
@@ -385,7 +512,7 @@ class MultiAgentSupervisor:
         return {
             RuntimeOutcome.COMPLETED: MemberState.COMPLETED,
             RuntimeOutcome.WAITING_APPROVAL: MemberState.WAITING_APPROVAL,
-            RuntimeOutcome.PAUSED: MemberState.RUNNING,
+            RuntimeOutcome.PAUSED: MemberState.PAUSED,
             RuntimeOutcome.CANCELLED: MemberState.CANCELLED,
             RuntimeOutcome.FAILED: MemberState.FAILED,
         }[result.outcome]

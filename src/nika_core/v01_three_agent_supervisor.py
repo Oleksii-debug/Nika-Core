@@ -20,7 +20,7 @@ from nika_core.multi_agent.store import MultiAgentStore
 from nika_core.multi_agent.supervisor import MultiAgentSupervisor
 from nika_core.runtime.contracts import RuntimeErrorCode
 
-_JOURNEY_SCHEMA = "nika-v01-three-agent-v1"
+_JOURNEY_SCHEMA = "nika-v01-three-agent-v2"
 _SAFE_OBSERVATION_ERRORS = frozenset(
     {
         "AssertionError",
@@ -136,12 +136,17 @@ class V01ThreeAgentSupervisor:
             raise ValueError("team_id must not be empty")
 
         root_grants = self._validated_root_grants()
+        # Validate all configured privilege attenuation before the root runtime turn. A bad child
+        # configuration must fail closed without granting the supervisor a partial execution.
+        self._validated_role_grants(self._config.worker, root_grants)
+        self._validated_role_grants(self._config.checker, root_grants)
         self._ensure_team(
             team_id=fixed_team_id,
             shared_task_id=task_id,
             user_goal=goal,
             root_grants=root_grants,
         )
+        await self._ensure_root(team_id=fixed_team_id)
 
         worker = await self._ensure_child(
             role=self._config.worker,
@@ -243,6 +248,32 @@ class V01ThreeAgentSupervisor:
         if state is TeamState.COMPLETED and actual_ids != expected_ids:
             raise RuntimeError("completed V0.1 team is missing durable child evidence")
 
+    async def _ensure_root(self, *, team_id: str) -> None:
+        member = self._store.member(team_id, self._config.root_member_id)
+        if member.state in {MemberState.SPAWNED, MemberState.RUNNING}:
+            if self._store.team_state(team_id) is not TeamState.ACTIVE:
+                raise RuntimeError("terminal V0.1 team cannot start missing supervisor evidence")
+            await self._coordinator.run_root_member(
+                team_id=team_id,
+                member_id=self._config.root_member_id,
+            )
+            member = self._store.member(team_id, self._config.root_member_id)
+
+        if member.state in {
+            MemberState.SPAWNED,
+            MemberState.RUNNING,
+            MemberState.WAITING_APPROVAL,
+            MemberState.PAUSED,
+        }:
+            raise RuntimeError(
+                f"V0.1 supervisor has no terminal durable result: {member.state.value}"
+            )
+        if member.state is not MemberState.COMPLETED:
+            raise RuntimeError(f"V0.1 supervisor runtime failed closed: {member.state.value}")
+        result = self._store.member_result(team_id, member.member_id)
+        if result.outcome != "completed":
+            raise RuntimeError("durable supervisor state conflicts with its result outcome")
+
     async def _ensure_child(
         self,
         *,
@@ -278,6 +309,7 @@ class V01ThreeAgentSupervisor:
             MemberState.SPAWNED,
             MemberState.RUNNING,
             MemberState.WAITING_APPROVAL,
+            MemberState.PAUSED,
         }:
             raise RuntimeError(
                 f"V0.1 child has no terminal durable result: {member.state.value}"
@@ -306,9 +338,7 @@ class V01ThreeAgentSupervisor:
         root_grants: tuple[ToolGrant, ...],
         payload: dict[str, object],
     ) -> None:
-        active = self._definitions.require_active(role.agent_id, role.agent_version)
-        attenuate_grants(active.definition.tool_grants, role.requested_grants)
-        expected_grants = attenuate_grants(root_grants, role.requested_grants)
+        expected_grants = self._validated_role_grants(role, root_grants)
         if (
             existing.parent_id != self._config.root_member_id
             or existing.depth != 1
@@ -320,6 +350,15 @@ class V01ThreeAgentSupervisor:
             raise PermissionError("existing child does not match V0.1 journey")
         if self._store.task_payload(team_id, role.member_id) != payload:
             raise PermissionError("existing child task does not match V0.1 journey")
+
+    def _validated_role_grants(
+        self,
+        role: V01ChildAssignment,
+        root_grants: tuple[ToolGrant, ...],
+    ) -> tuple[ToolGrant, ...]:
+        active = self._definitions.require_active(role.agent_id, role.agent_version)
+        attenuate_grants(active.definition.tool_grants, role.requested_grants)
+        return attenuate_grants(root_grants, role.requested_grants)
 
     def _config_fingerprint(self) -> str:
         def assignment(role: V01ChildAssignment) -> dict[str, object]:

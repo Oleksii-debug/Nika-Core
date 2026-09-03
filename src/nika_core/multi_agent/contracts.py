@@ -20,6 +20,7 @@ class MemberState(StrEnum):
     SPAWNED = "spawned"
     RUNNING = "running"
     WAITING_APPROVAL = "waiting_approval"
+    PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
