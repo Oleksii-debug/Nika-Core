@@ -13,7 +13,7 @@ from nika_core.runtime.contracts import (
     RuntimeResumeProbe,
     RuntimeResumeProbeStatus,
 )
-from nika_core.runtime.idempotency import IdempotencyLedger
+from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
 from nika_core.runtime.recovery import RecoveryDisposition, RuntimeRecoveryService
 from nika_core.runtime.registry import RuntimeRegistry
 from nika_core.runtime.session_store import RuntimeSessionStore
@@ -137,6 +137,13 @@ def test_pending_external_side_effect_blocks_automatic_crash_resume(tmp_path: Pa
 
     assert candidate.disposition == RecoveryDisposition.RECONCILE_SIDE_EFFECTS
     assert candidate.unresolved_operation_keys == ("send:message:42",)
+    assert ledger.require("send:message:42").status == IdempotencyStatus.UNCERTAIN
+
+    repeated = recovery.inspect()[0]
+
+    assert repeated.disposition == RecoveryDisposition.RECONCILE_SIDE_EFFECTS
+    assert repeated.unresolved_operation_keys == ("send:message:42",)
+    assert ledger.require("send:message:42").status == IdempotencyStatus.UNCERTAIN
 
 
 def test_waiting_approval_is_never_auto_resumed(tmp_path: Path):

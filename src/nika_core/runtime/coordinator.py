@@ -763,12 +763,11 @@ class TaskRuntimeCoordinator:
                 thread_id=record.thread_id,
                 resume_token=record.resume_token,
             )
-        except Exception as exc:
-            raise ValueError(f"resume checkpoint probe raised: {exc}") from exc
+        except Exception:  # noqa: BLE001 - adapter diagnostics are untrusted at this boundary
+            raise ValueError("runtime resume checkpoint probe failed") from None
         if not probe.can_resume or not probe.checkpoint_id:
             raise ValueError(
-                "runtime resume checkpoint is not readable: "
-                f"{probe.status.value}: {probe.reason}"
+                "runtime resume checkpoint is not readable: " f"{probe.status.value}"
             )
         return probe.checkpoint_id
 
