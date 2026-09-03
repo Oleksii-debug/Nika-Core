@@ -158,14 +158,14 @@ global.pywebview = {{
 eval(fs.readFileSync(process.argv[1], "utf8"));
 
 setTimeout(() => {{
-  const logText = element("activity-log").children.map((node) => node.textContent).join("\n");
+  const logText = element("activity-log").children.map((node) => node.textContent).join("\\n");
   const renderedText = [
     element("app-status").textContent,
     element("product-project-empty").textContent,
     element("product-project-id").textContent,
     element("product-project-state").textContent,
     logText,
-  ].join("\n");
+  ].join("\\n");
   console.log(JSON.stringify({{
     ready: document.documentElement.dataset.nikaReady || null,
     summary_hidden: element("product-project-summary").hidden,

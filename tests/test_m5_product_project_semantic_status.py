@@ -42,7 +42,7 @@ def test_product_project_renderer_tracks_bounded_bridge_projection() -> None:
     render_block = _between(
         source,
         "function renderProductProject(project) {",
-        "async function refreshState() {",
+        "async function refreshState(",
     )
     assert "if (project == null)" in render_block
     assert "if (!validProductProject(project))" in render_block
@@ -69,7 +69,7 @@ def test_product_project_renderer_rejects_malformed_snapshot_fail_closed() -> No
     renderer = _between(
         source,
         "function renderProductProject(project) {",
-        "async function refreshState() {",
+        "async function refreshState(",
     )
     assert "Стан поточного ProductProject недоступний або пошкоджений." in renderer
     assert "productProjectSummary.hidden = true;" in renderer
