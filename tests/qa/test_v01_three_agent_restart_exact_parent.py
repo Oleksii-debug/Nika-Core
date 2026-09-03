@@ -1,269 +1,102 @@
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
-import pytest
-
-from nika_core.builder.compiler import AgentCompiler
-from nika_core.builder.repository import AgentDefinitionRepository
-from nika_core.builder.spec import AgentDefinition, ToolGrant
+from nika_core.builder.spec import ToolGrant
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.multi_agent import MemberState, MultiAgentStore, MultiAgentSupervisor, TeamState
-from nika_core.runtime.contracts import (
-    AgentRuntimePort,
-    RuntimeCapability,
-    RuntimeOutcome,
-    RuntimeRequest,
-    RuntimeResult,
-    RuntimeResumeRequest,
-)
-from nika_core.tools import ToolRisk, ToolSpec
-from nika_core.v01_three_agent_supervisor import (
-    V01ChildAssignment,
-    V01ThreeAgentConfig,
-    V01ThreeAgentSupervisor,
+from nika_core.multi_agent import (
+    AgentHandoff,
+    HandoffKind,
+    MemberState,
+    MultiAgentStore,
+    TeamQuota,
 )
 
 
-class SimulatedProcessCrash(RuntimeError):
-    pass
-
-
-class DeterministicRuntime(AgentRuntimePort):
-    def __init__(self) -> None:
-        self.requests: list[RuntimeRequest] = []
-
-    @property
-    def runtime_id(self) -> str:
-        return "worker41-v01-b02-restart-oracle"
-
-    @property
-    def capabilities(self) -> frozenset[RuntimeCapability]:
-        return frozenset({RuntimeCapability.PARALLELISM, RuntimeCapability.SUBAGENTS})
-
-    async def run(self, request: RuntimeRequest) -> RuntimeResult:
-        self.requests.append(request)
-        member_id = str(request.payload["member_id"])
-        handoff = request.payload["handoff"]
-        assert isinstance(handoff, dict)
-        shared_task_id = str(handoff["shared_task_id"])
-        if member_id == "checker":
-            worker_observation = handoff["worker_observation"]
-            assert isinstance(worker_observation, dict)
-            return RuntimeResult(
-                outcome=RuntimeOutcome.COMPLETED,
-                output={
-                    "verdict": "accepted",
-                    "checked_task_id": shared_task_id,
-                    "worker_state": worker_observation["state"],
-                },
-            )
-        return RuntimeResult(
-            outcome=RuntimeOutcome.COMPLETED,
-            output={"evidence": "worker-evidence", "shared_task_id": shared_task_id},
-        )
-
-    async def resume(self, request: RuntimeResumeRequest) -> RuntimeResult:
-        raise AssertionError(f"unexpected child runtime resume: {request.task_id}")
-
-    async def cancel(self, *, task_id: str, thread_id: str) -> bool:
-        del task_id, thread_id
-        return True
-
-
-def _compiler() -> AgentCompiler:
-    return AgentCompiler(
-        tools=(ToolSpec("file.read", "Read fixture", ToolRisk.READ_ONLY),),
-        model_profiles={"test"},
-    )
-
-
-def _definition(agent_id: str) -> AgentDefinition:
-    return AgentDefinition(
-        agent_id=agent_id,
-        version=1,
-        name=agent_id,
-        goal="Complete one deterministic V0.1 role.",
-        instructions="Use only the declared read-only fixture capability.",
-        model_profile="test",
-        tool_grants=(ToolGrant(tool_id="file.read", max_risk=0, scopes=("fixture",)),),
-        enabled=True,
-    )
-
-
-def _initialize_definitions(db_path: Path) -> None:
+def _store(db_path: Path) -> MultiAgentStore:
     sqlite = SQLiteStore(db_path)
     sqlite.initialize()
-    definitions = AgentDefinitionRepository(sqlite)
-    compiler = _compiler()
-    for agent_id in ("supervisor", "worker", "checker-agent"):
-        definition = _definition(agent_id)
-        definitions.save_draft(compiler.compile(definition))
-        definitions.activate(definition)
+    return MultiAgentStore(sqlite)
 
 
-def _config() -> V01ThreeAgentConfig:
-    grant = ToolGrant(tool_id="file.read", max_risk=0, scopes=("fixture",))
-    return V01ThreeAgentConfig(
-        root_member_id="supervisor",
-        root_agent_id="supervisor",
+def _result_handoff(team_id: str, worker_id: str) -> AgentHandoff:
+    return AgentHandoff(
+        team_id=team_id,
+        sender_id=worker_id,
+        recipient_id="checker",
+        kind=HandoffKind.RESULT,
+        payload={"worker": worker_id, "evidence": f"evidence:{worker_id}"},
+        handoff_id=f"result:{team_id}:{worker_id}",
+        correlation_id=f"team:{team_id}:checker:{worker_id}",
+    )
+
+
+def test_two_terminal_worker_handoffs_survive_close_reopen_for_checker(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "nika.db"
+    store = _store(db_path)
+    grant = ToolGrant(tool_id="file.read", max_risk=0, scopes=("workspace",))
+    store.create_team(
+        team_id="team-restart",
+        root_member_id="checker",
+        root_agent_id="checker-agent",
         root_agent_version=1,
+        root_thread_id="thread:checker",
         root_grants=(grant,),
-        worker=V01ChildAssignment(
-            member_id="worker",
-            agent_id="worker",
-            agent_version=1,
-            requested_grants=(grant,),
-            instruction="Inspect the controlled fixture and return evidence.",
+        quota=TeamQuota(
+            max_depth=1,
+            max_children_per_parent=2,
+            max_total_agents=3,
+            max_parallel=2,
         ),
-        checker=V01ChildAssignment(
-            member_id="checker",
-            agent_id="checker-agent",
-            agent_version=1,
-            requested_grants=(grant,),
-            instruction="Independently check the worker evidence.",
+        root_task_handoff=AgentHandoff(
+            team_id="team-restart",
+            sender_id="checker",
+            recipient_id="checker",
+            kind=HandoffKind.TASK,
+            payload={"task_id": "task-restart"},
+            handoff_id="task:checker",
         ),
     )
-
-
-def _open(
-    db_path: Path,
-) -> tuple[DeterministicRuntime, MultiAgentStore, MultiAgentSupervisor, V01ThreeAgentSupervisor]:
-    sqlite = SQLiteStore(db_path)
-    sqlite.initialize()
-    store = MultiAgentStore(sqlite)
-    definitions = AgentDefinitionRepository(sqlite)
-    runtime = DeterministicRuntime()
-    coordinator = MultiAgentSupervisor(runtime=runtime, store=store, definitions=definitions)
-    adapter = V01ThreeAgentSupervisor(
-        coordinator=coordinator,
-        store=store,
-        definitions=definitions,
-        config=_config(),
-    )
-    return runtime, store, coordinator, adapter
-
-
-def test_restart_after_worker_before_checker_continues_same_team(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A process crash between stages must not strand the durable logical task."""
-    db_path = tmp_path / "nika.db"
-    _initialize_definitions(db_path)
-    first_runtime, first_store, first_coordinator, first_adapter = _open(db_path)
-    original_fan_out = first_coordinator.fan_out
-    fan_out_calls = 0
-
-    async def crash_before_checker(**kwargs: object):
-        nonlocal fan_out_calls
-        fan_out_calls += 1
-        if fan_out_calls == 2:
-            raise SimulatedProcessCrash("between worker and checker")
-        return await original_fan_out(**kwargs)
-
-    monkeypatch.setattr(first_coordinator, "fan_out", crash_before_checker)
-    with pytest.raises(SimulatedProcessCrash, match="between worker and checker"):
-        asyncio.run(
-            first_adapter.run(
-                user_goal="Inspect once, check once, return one team result.",
-                shared_task_id="task-restart-mid-stage",
-                team_id="team-restart-mid-stage",
-            )
+    for worker_id in ("worker-a", "worker-b"):
+        store.spawn_child(
+            team_id="team-restart",
+            parent_id="checker",
+            child_id=worker_id,
+            agent_id=f"{worker_id}-agent",
+            agent_version=1,
+            thread_id=f"thread:{worker_id}",
+            requested_grants=(grant,),
+            task_handoff=AgentHandoff(
+                team_id="team-restart",
+                sender_id="checker",
+                recipient_id=worker_id,
+                kind=HandoffKind.TASK,
+                payload={"task_id": "task-restart", "worker_id": worker_id},
+                handoff_id=f"task:{worker_id}",
+            ),
+        )
+        store.prepare_member_execution(
+            team_id="team-restart",
+            member_id=worker_id,
+            resume_token=f"resume:{worker_id}",
+        )
+        store.finish_member_execution(
+            team_id="team-restart",
+            member_id=worker_id,
+            state=MemberState.COMPLETED,
+            outcome="completed",
+            payload={"worker": worker_id, "evidence": f"evidence:{worker_id}"},
+            result_handoff=_result_handoff("team-restart", worker_id),
         )
 
-    assert [member.state for member in first_store.members("team-restart-mid-stage")] == [
-        MemberState.COMPLETED,
-        MemberState.COMPLETED,
+    restarted = _store(db_path)
+    assert restarted.recoverable_children("team-restart") == ()
+    handoffs = restarted.inbound_result_handoffs("team-restart", "checker")
+    assert [handoff.sender_id for handoff in handoffs] == ["worker-a", "worker-b"]
+    assert [handoff.payload["evidence"] for handoff in handoffs] == [
+        "evidence:worker-a",
+        "evidence:worker-b",
     ]
-    assert [request.payload["member_id"] for request in first_runtime.requests] == [
-        "supervisor",
-        "worker",
-    ]
-
-    restarted_runtime, restarted_store, restarted_coordinator, restarted_adapter = _open(db_path)
-    assert asyncio.run(restarted_coordinator.recover_team("team-restart-mid-stage")) == ()
-
-    result = asyncio.run(
-        restarted_adapter.run(
-            user_goal="Inspect once, check once, return one team result.",
-            shared_task_id="task-restart-mid-stage",
-            team_id="team-restart-mid-stage",
-        )
-    )
-
-    assert result.team_state is TeamState.COMPLETED
-    assert result.final_output["status"] == "checked"
-    assert [member.member_id for member in restarted_store.members("team-restart-mid-stage")] == [
-        "supervisor",
-        "worker",
-        "checker",
-    ]
-    assert len(restarted_runtime.requests) == 1
-    assert restarted_runtime.requests[0].payload["member_id"] == "checker"
-
-
-def test_restart_after_checker_before_finalize_reconstructs_without_reexecution(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Terminal child evidence must yield the same final result after process restart."""
-    db_path = tmp_path / "nika.db"
-    _initialize_definitions(db_path)
-    first_runtime, first_store, first_coordinator, first_adapter = _open(db_path)
-
-    def crash_before_finalize(team_id: str) -> TeamState:
-        assert team_id == "team-restart-finalize"
-        raise SimulatedProcessCrash("after checker before final result")
-
-    monkeypatch.setattr(first_coordinator, "finalize_team", crash_before_finalize)
-    with pytest.raises(SimulatedProcessCrash, match="after checker before final result"):
-        asyncio.run(
-            first_adapter.run(
-                user_goal="Inspect once, check once, return one team result.",
-                shared_task_id="task-restart-finalize",
-                team_id="team-restart-finalize",
-            )
-        )
-
-    assert [request.payload["member_id"] for request in first_runtime.requests] == [
-        "supervisor",
-        "worker",
-        "checker",
-    ]
-    assert first_store.team_state("team-restart-finalize") is TeamState.ACTIVE
-    assert [member.state for member in first_store.members("team-restart-finalize")] == [
-        MemberState.COMPLETED,
-        MemberState.COMPLETED,
-        MemberState.COMPLETED,
-    ]
-
-    restarted_runtime, restarted_store, restarted_coordinator, restarted_adapter = _open(db_path)
-    assert asyncio.run(restarted_coordinator.recover_team("team-restart-finalize")) == ()
-
-    result = asyncio.run(
-        restarted_adapter.run(
-            user_goal="Inspect once, check once, return one team result.",
-            shared_task_id="task-restart-finalize",
-            team_id="team-restart-finalize",
-        )
-    )
-
-    assert restarted_runtime.requests == []
-    assert result.team_state is TeamState.COMPLETED
-    assert result.final_output == {
-        "status": "checked",
-        "worker_output": {
-            "evidence": "worker-evidence",
-            "shared_task_id": "task-restart-finalize",
-        },
-        "checker_output": {
-            "verdict": "accepted",
-            "checked_task_id": "task-restart-finalize",
-            "worker_state": "completed",
-        },
-        "worker_error": None,
-        "checker_error": None,
-    }
-    assert restarted_store.team_state("team-restart-finalize") is TeamState.COMPLETED
+    assert all(handoff.kind is HandoffKind.RESULT for handoff in handoffs)

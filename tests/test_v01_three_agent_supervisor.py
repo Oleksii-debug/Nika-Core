@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
+from collections.abc import Mapping
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -10,7 +11,27 @@ from nika_core.builder.compiler import AgentCompiler
 from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.builder.spec import AgentDefinition, ToolGrant
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.multi_agent import MemberState, MultiAgentStore, MultiAgentSupervisor, TeamQuota
+from nika_core.multi_agent import (
+    AgentHandoff,
+    CheckerStatus,
+    HandoffKind,
+    MemberState,
+    MultiAgentStore,
+    MultiAgentSupervisor,
+    SourceInspectionAssignment,
+    TeamQuota,
+    TeamState,
+    V01CheckerAgent,
+    encode_source_result,
+)
+from nika_core.research.models import (
+    FreshnessState,
+    ResearchEvidence,
+    ResearchResultItem,
+    ResearchResultSet,
+    SourceKind,
+    SourceSpec,
+)
 from nika_core.runtime.contracts import (
     AgentRuntimePort,
     RuntimeCapability,
@@ -23,21 +44,28 @@ from nika_core.runtime.contracts import (
 from nika_core.tools import ToolRisk, ToolSpec
 from nika_core.v01_three_agent_supervisor import (
     V01ChildAssignment,
+    V01SourceWorkerAssignment,
     V01ThreeAgentConfig,
     V01ThreeAgentSupervisor,
 )
 
 
-class RecordingRuntime(AgentRuntimePort):
+class RecordingScenarioRuntime(AgentRuntimePort):
     def __init__(
         self,
         *,
         fail_member: str | None = None,
         failed_result_member: str | None = None,
-        raw_error: str = "raw runtime failure",
+        cancelled_member: str | None = None,
+        corrupt_member: str | None = None,
+        corrupt_checker: bool = False,
+        raw_error: str = "provider leaked secret text",
     ) -> None:
         self.fail_member = fail_member
         self.failed_result_member = failed_result_member
+        self.cancelled_member = cancelled_member
+        self.corrupt_member = corrupt_member
+        self.corrupt_checker = corrupt_checker
         self.raw_error = raw_error
         self.requests: list[RuntimeRequest] = []
         self.active = 0
@@ -45,17 +73,22 @@ class RecordingRuntime(AgentRuntimePort):
 
     @property
     def runtime_id(self) -> str:
-        return "v01-three-agent-test"
+        return "v01-three-agent-scenario-test"
 
     @property
     def capabilities(self) -> frozenset[RuntimeCapability]:
         return frozenset(
             {
                 RuntimeCapability.CANCELLATION,
+                RuntimeCapability.DURABLE_RESUME,
                 RuntimeCapability.PARALLELISM,
                 RuntimeCapability.SUBAGENTS,
             }
         )
+
+    @staticmethod
+    def initial_resume_token(*, task_id: str, thread_id: str) -> str:
+        return f"resume:{task_id}:{thread_id}"
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
         self.requests.append(request)
@@ -63,45 +96,64 @@ class RecordingRuntime(AgentRuntimePort):
         self.active += 1
         self.max_active = max(self.max_active, self.active)
         try:
-            await asyncio.sleep(0)
+            await asyncio.sleep(0.01 if member_id.startswith("worker-") else 0)
             if member_id == self.fail_member:
                 raise RuntimeError("isolated worker failure")
-            handoff = request.payload["handoff"]
-            assert isinstance(handoff, dict)
-            shared_task_id = str(handoff["shared_task_id"])
             if member_id == self.failed_result_member:
                 return RuntimeResult(
                     outcome=RuntimeOutcome.FAILED,
                     error=self.raw_error,
                     error_code=RuntimeErrorCode.INTERNAL,
                 )
+            if member_id == self.cancelled_member:
+                return RuntimeResult(outcome=RuntimeOutcome.CANCELLED)
             if member_id == "checker":
-                observation = handoff["worker_observation"]
-                assert isinstance(observation, dict)
-                return RuntimeResult(
-                    outcome=RuntimeOutcome.COMPLETED,
-                    output={
-                        "verdict": (
-                            "accepted"
-                            if observation["state"] == MemberState.COMPLETED.value
-                            else "degraded"
-                        ),
-                        "checked_task_id": shared_task_id,
-                        "worker_state": observation["state"],
-                    },
-                )
-            return RuntimeResult(
-                outcome=RuntimeOutcome.COMPLETED,
-                output={
-                    "evidence": "worker-evidence",
-                    "shared_task_id": shared_task_id,
-                },
-            )
+                return self._checker_result(request)
+            return self._worker_result(request)
         finally:
             self.active -= 1
 
+    def _worker_result(self, request: RuntimeRequest) -> RuntimeResult:
+        handoff = cast(Mapping[str, object], request.payload["handoff"])
+        assignment = SourceInspectionAssignment.from_payload(
+            cast(Mapping[str, object], handoff["source_assignment"])
+        )
+        assert request.task_id != assignment.task_id
+        assert request.task_id != assignment.effect_id
+        text = Path(assignment.source.locator).read_text(encoding="utf-8")
+        output = encode_source_result(assignment, _result_set(assignment, text=text))
+        if assignment.member_id == self.corrupt_member:
+            result_set = cast(dict[str, object], output["result_set"])
+            items = cast(list[dict[str, object]], result_set["items"])
+            items[0]["snippet"] = "tampered after digest"
+        return RuntimeResult(outcome=RuntimeOutcome.COMPLETED, output=output)
+
+    def _checker_result(self, request: RuntimeRequest) -> RuntimeResult:
+        handoff = cast(Mapping[str, object], request.payload["handoff"])
+        assignments = tuple(
+            SourceInspectionAssignment.from_payload(cast(Mapping[str, object], item))
+            for item in cast(list[object], handoff["source_assignments"])
+        )
+        inbound = tuple(
+            _handoff_from_payload(cast(Mapping[str, object], item))
+            for item in cast(list[object], request.payload["inbound_handoffs"])
+        )
+        summary = V01CheckerAgent().compare(
+            team_id=str(request.payload["team_id"]),
+            task_id=str(handoff["shared_task_id"]),
+            checker_id=str(request.payload["member_id"]),
+            assignments=assignments,
+            handoffs=inbound,
+        ).to_payload()
+        if self.corrupt_checker:
+            summary["task_id"] = "other-task"
+        return RuntimeResult(
+            outcome=RuntimeOutcome.COMPLETED,
+            output={"checker_summary": summary},
+        )
+
     async def resume(self, request: RuntimeResumeRequest) -> RuntimeResult:
-        raise AssertionError(f"unexpected resume: {request.task_id}")
+        raise AssertionError(f"terminal member must not resume: {request.task_id}")
 
     async def cancel(self, *, task_id: str, thread_id: str) -> bool:
         del task_id, thread_id
@@ -112,136 +164,149 @@ class SimulatedProcessCrash(RuntimeError):
     pass
 
 
+def _handoff_from_payload(value: Mapping[str, object]) -> AgentHandoff:
+    return AgentHandoff(
+        handoff_id=str(value["handoff_id"]),
+        team_id=str(value["team_id"]),
+        sender_id=str(value["sender_id"]),
+        recipient_id=str(value["recipient_id"]),
+        kind=HandoffKind(str(value["kind"])),
+        correlation_id=str(value["correlation_id"]),
+        payload=cast(dict[str, object], value["payload"]),
+    )
+
+
+def _result_set(
+    assignment: SourceInspectionAssignment,
+    *,
+    text: str,
+) -> ResearchResultSet:
+    return ResearchResultSet(
+        result_set_id=f"result:{assignment.assignment_id}",
+        workspace_id=assignment.source.workspace_id,
+        query="compare declared condition",
+        items=(
+            ResearchResultItem(
+                ordinal=0,
+                document_id=f"doc:{assignment.source.source_id}",
+                title="controlled source",
+                snippet=text,
+                rank=1.0,
+                why_matched="deterministic declared-source fixture",
+                evidence=(
+                    ResearchEvidence(
+                        source_id=assignment.source.source_id,
+                        source_kind=assignment.source.kind,
+                        locator=assignment.source.locator,
+                        observed_at="2026-09-03T00:00:00+00:00",
+                        freshness=FreshnessState.CURRENT,
+                    ),
+                ),
+            ),
+        ),
+        created_at="2026-09-03T00:00:01+00:00",
+    )
+
+
 def _compiler() -> AgentCompiler:
     return AgentCompiler(
         tools=(
-            ToolSpec("web.read", "Read web content", ToolRisk.READ_ONLY),
-            ToolSpec("file.read", "Read workspace files", ToolRisk.READ_ONLY),
+            ToolSpec("file.read", "Read declared source", ToolRisk.READ_ONLY),
+            ToolSpec("web.read", "Read web source", ToolRisk.READ_ONLY),
         ),
         model_profiles={"test"},
     )
 
 
-def _definition(*, agent_id: str, grants: tuple[ToolGrant, ...]) -> AgentDefinition:
+def _definition(agent_id: str, grants: tuple[ToolGrant, ...]) -> AgentDefinition:
     return AgentDefinition(
         agent_id=agent_id,
         version=1,
         name=agent_id,
-        goal="Complete the fixed V0.1 team role.",
-        instructions="Use only declared capabilities and return structured evidence.",
+        goal="Complete one bounded V0.1 Scenario A role.",
+        instructions="Use only declared evidence and return canonical structured output.",
         model_profile="test",
         tool_grants=grants,
         enabled=True,
     )
 
 
-def _save_and_activate(
-    repository: AgentDefinitionRepository,
-    definition: AgentDefinition,
-) -> None:
-    repository.save_draft(_compiler().compile(definition))
-    repository.activate(definition)
-
-
-def _grants() -> tuple[
-    tuple[ToolGrant, ...],
-    tuple[ToolGrant, ...],
-    tuple[ToolGrant, ...],
-]:
-    return (
-        (
-            ToolGrant(tool_id="web.read", max_risk=0, scopes=("example.com",)),
-            ToolGrant(tool_id="file.read", max_risk=0, scopes=("workspace",)),
-        ),
-        (ToolGrant(tool_id="web.read", max_risk=0, scopes=("example.com",)),),
-        (ToolGrant(tool_id="file.read", max_risk=0, scopes=("workspace",)),),
-    )
-
-
 def _config(
+    source_a: Path,
+    source_b: Path,
     *,
-    root_grants: tuple[ToolGrant, ...] | None = None,
-    worker_grants: tuple[ToolGrant, ...] | None = None,
+    checker_grants: tuple[ToolGrant, ...] | None = None,
+    worker_a_grants: tuple[ToolGrant, ...] | None = None,
 ) -> V01ThreeAgentConfig:
-    supervisor_grants, researcher_grants, checker_grants = _grants()
+    grant = ToolGrant(tool_id="file.read", max_risk=0, scopes=("workspace",))
     return V01ThreeAgentConfig(
-        root_member_id="supervisor",
-        root_agent_id="supervisor",
-        root_agent_version=1,
-        root_grants=supervisor_grants if root_grants is None else root_grants,
-        worker=V01ChildAssignment(
-            member_id="researcher",
-            agent_id="researcher",
-            agent_version=1,
-            requested_grants=researcher_grants if worker_grants is None else worker_grants,
-            instruction="Research the user goal and return evidence.",
-        ),
         checker=V01ChildAssignment(
             member_id="checker",
             agent_id="checker-agent",
             agent_version=1,
-            requested_grants=checker_grants,
-            instruction="Review the worker evidence against the user goal.",
+            requested_grants=(grant,) if checker_grants is None else checker_grants,
+            instruction="Compare exactly two canonical source results and return the typed summary.",
+        ),
+        workers=(
+            V01SourceWorkerAssignment(
+                member_id="worker-a",
+                agent_id="worker-a-agent",
+                agent_version=1,
+                requested_grants=(grant,) if worker_a_grants is None else worker_a_grants,
+                instruction="Inspect only declared source A.",
+                source=SourceSpec(
+                    source_id="source-a",
+                    workspace_id="workspace",
+                    kind=SourceKind.LOCAL_FILE,
+                    locator=str(source_a),
+                ),
+                max_items=1,
+            ),
+            V01SourceWorkerAssignment(
+                member_id="worker-b",
+                agent_id="worker-b-agent",
+                agent_version=1,
+                requested_grants=(grant,),
+                instruction="Inspect only declared source B.",
+                source=SourceSpec(
+                    source_id="source-b",
+                    workspace_id="workspace",
+                    kind=SourceKind.LOCAL_FILE,
+                    locator=str(source_b),
+                ),
+                max_items=1,
+            ),
         ),
     )
 
 
-def _open_existing(
-    tmp_path: Path,
-) -> tuple[RecordingRuntime, MultiAgentStore, V01ThreeAgentSupervisor]:
-    sqlite = SQLiteStore(tmp_path / "nika.db")
+def _initialize(db_path: Path) -> None:
+    sqlite = SQLiteStore(db_path)
     sqlite.initialize()
-    store = MultiAgentStore(sqlite)
     definitions = AgentDefinitionRepository(sqlite)
-    runtime = RecordingRuntime()
-    adapter = V01ThreeAgentSupervisor(
-        coordinator=MultiAgentSupervisor(
-            runtime=runtime,
-            store=store,
-            definitions=definitions,
-        ),
-        store=store,
-        definitions=definitions,
-        config=_config(),
-    )
-    return runtime, store, adapter
+    compiler = _compiler()
+    grant = ToolGrant(tool_id="file.read", max_risk=0, scopes=("workspace",))
+    for agent_id in ("checker-agent", "worker-a-agent", "worker-b-agent"):
+        definition = _definition(agent_id, (grant,))
+        definitions.save_draft(compiler.compile(definition))
+        definitions.activate(definition)
 
 
-def _build(
-    tmp_path: Path,
+def _open(
+    db_path: Path,
+    source_a: Path,
+    source_b: Path,
     *,
-    fail_member: str | None = None,
-    failed_result_member: str | None = None,
-    raw_error: str = "raw runtime failure",
-    root_grants: tuple[ToolGrant, ...] | None = None,
-    worker_grants: tuple[ToolGrant, ...] | None = None,
-) -> tuple[RecordingRuntime, MultiAgentStore, V01ThreeAgentSupervisor]:
-    sqlite = SQLiteStore(tmp_path / "nika.db")
+    runtime: RecordingScenarioRuntime | None = None,
+    config: V01ThreeAgentConfig | None = None,
+) -> tuple[RecordingScenarioRuntime, MultiAgentStore, MultiAgentSupervisor, V01ThreeAgentSupervisor]:
+    sqlite = SQLiteStore(db_path)
     sqlite.initialize()
     store = MultiAgentStore(sqlite)
     definitions = AgentDefinitionRepository(sqlite)
-
-    supervisor_grants, researcher_grants, checker_grants = _grants()
-    _save_and_activate(
-        definitions,
-        _definition(agent_id="supervisor", grants=supervisor_grants),
-    )
-    _save_and_activate(
-        definitions,
-        _definition(agent_id="researcher", grants=researcher_grants),
-    )
-    _save_and_activate(
-        definitions,
-        _definition(agent_id="checker-agent", grants=checker_grants),
-    )
-
-    runtime = RecordingRuntime(
-        fail_member=fail_member,
-        failed_result_member=failed_result_member,
-        raw_error=raw_error,
-    )
+    active_runtime = runtime or RecordingScenarioRuntime()
     coordinator = MultiAgentSupervisor(
-        runtime=runtime,
+        runtime=active_runtime,
         store=store,
         definitions=definitions,
     )
@@ -249,315 +314,344 @@ def _build(
         coordinator=coordinator,
         store=store,
         definitions=definitions,
-        config=_config(root_grants=root_grants, worker_grants=worker_grants),
+        config=config or _config(source_a, source_b),
     )
-    return runtime, store, adapter
+    return active_runtime, store, coordinator, adapter
 
 
-def test_fixed_three_agent_path_reaches_one_checked_terminal_result(tmp_path: Path) -> None:
-    runtime, store, adapter = _build(tmp_path)
+def _fixture(tmp_path: Path, *, same: bool = False) -> tuple[Path, Path, Path]:
+    source_a = tmp_path / "source-a.txt"
+    source_b = tmp_path / "source-b.txt"
+    source_a.write_text("same evidence" if same else "alpha evidence", encoding="utf-8")
+    source_b.write_text("same evidence" if same else "beta evidence", encoding="utf-8")
+    db_path = tmp_path / "nika.db"
+    _initialize(db_path)
+    return db_path, source_a, source_b
+
+
+def test_two_source_workers_and_checker_reach_one_terminal_result(tmp_path: Path) -> None:
+    db_path, source_a, source_b = _fixture(tmp_path, same=True)
+    runtime, store, _, adapter = _open(db_path, source_a, source_b)
 
     result = asyncio.run(
         adapter.run(
-            user_goal="Compare the controlled evidence and return one result.",
-            shared_task_id="task-user-1",
-            team_id="team-v01-1",
+            user_goal="Compare two declared sources.",
+            shared_task_id="task-v01-a",
+            team_id="team-v01-a",
         )
     )
 
-    assert [member.member_id for member in store.members("team-v01-1")] == [
-        "supervisor",
-        "researcher",
+    assert [member.member_id for member in store.members("team-v01-a")] == [
         "checker",
+        "worker-a",
+        "worker-b",
     ]
-    assert store.quota("team-v01-1") == TeamQuota(
+    assert store.quota("team-v01-a") == TeamQuota(
         max_depth=1,
         max_children_per_parent=2,
         max_total_agents=3,
-        max_parallel=1,
+        max_parallel=2,
     )
-    assert len(runtime.requests) == 3
-    assert runtime.max_active == 1
-
-    supervisor_request, worker_request, checker_request = runtime.requests
     assert [request.payload["member_id"] for request in runtime.requests] == [
-        "supervisor",
-        "researcher",
+        "worker-a",
+        "worker-b",
         "checker",
     ]
-    assert supervisor_request.payload["parent_id"] is None
-    assert supervisor_request.payload["agent_id"] == "supervisor"
+    assert runtime.max_active == 2
     assert all(request.timeout_seconds == 300.0 for request in runtime.requests)
+    worker_effects: set[str] = set()
+    for request in runtime.requests[:2]:
+        handoff = cast(dict[str, object], request.payload["handoff"])
+        assignment = SourceInspectionAssignment.from_payload(
+            cast(Mapping[str, object], handoff["source_assignment"])
+        )
+        assert assignment.team_id == "team-v01-a"
+        assert assignment.task_id == "task-v01-a"
+        assert assignment.effect_id != request.task_id
+        worker_effects.add(assignment.effect_id)
+    assert len(worker_effects) == 2
+    checker_request = runtime.requests[2]
+    assert checker_request.payload["parent_id"] is None
+    assert len(cast(list[object], checker_request.payload["inbound_handoffs"])) == 2
 
-    worker_handoff = worker_request.payload["handoff"]
-    checker_handoff = checker_request.payload["handoff"]
-    assert isinstance(worker_handoff, dict)
-    assert isinstance(checker_handoff, dict)
-    assert worker_handoff["shared_task_id"] == "task-user-1"
-    assert checker_handoff["shared_task_id"] == "task-user-1"
-    assert checker_handoff["worker_observation"] == {
-        "member_id": "researcher",
-        "state": "completed",
-        "output": {
-            "evidence": "worker-evidence",
-            "shared_task_id": "task-user-1",
-        },
-        "error": None,
-    }
-    assert worker_request.payload["tool_grants"][0]["tool_id"] == "web.read"
-    assert checker_request.payload["tool_grants"][0]["tool_id"] == "file.read"
-
-    assert result.shared_task_id == "task-user-1"
-    assert result.team_state.value == "completed"
-    assert result.worker.state is MemberState.COMPLETED
+    assert result.team_state is TeamState.COMPLETED
+    assert [worker.state for worker in result.workers] == [
+        MemberState.COMPLETED,
+        MemberState.COMPLETED,
+    ]
     assert result.checker.state is MemberState.COMPLETED
-    assert result.final_output == {
-        "status": "checked",
-        "worker_output": {
-            "evidence": "worker-evidence",
-            "shared_task_id": "task-user-1",
-        },
-        "checker_output": {
-            "verdict": "accepted",
-            "checked_task_id": "task-user-1",
-            "worker_state": "completed",
-        },
-        "worker_error": None,
-        "checker_error": None,
-    }
+    assert result.final_output["status"] == CheckerStatus.AGREE.value
+    assert result.final_output["checker_output_validated"] is True
+    summary = cast(dict[str, object], result.final_output["checker_summary"])
+    assert summary["schema"] == "nika.v01.checker-summary:v2"
+    assert summary["task_id"] == "task-v01-a"
 
 
-def test_one_worker_failure_is_isolated_and_checker_still_finishes(tmp_path: Path) -> None:
-    runtime, store, adapter = _build(tmp_path, fail_member="researcher")
+def test_worker_failure_is_isolated_and_checker_returns_typed_degraded_result(
+    tmp_path: Path,
+) -> None:
+    db_path, source_a, source_b = _fixture(tmp_path)
+    runtime = RecordingScenarioRuntime(fail_member="worker-a")
+    runtime, store, _, adapter = _open(
+        db_path,
+        source_a,
+        source_b,
+        runtime=runtime,
+    )
 
     result = asyncio.run(
         adapter.run(
-            user_goal="Return a checked result even if research fails.",
-            shared_task_id="task-user-failure",
-            team_id="team-v01-failure",
+            user_goal="Compare despite one isolated source failure.",
+            shared_task_id="task-failure",
+            team_id="team-failure",
         )
     )
 
-    assert len(runtime.requests) == 3
-    checker_handoff = runtime.requests[2].payload["handoff"]
-    assert isinstance(checker_handoff, dict)
-    assert checker_handoff["worker_observation"] == {
-        "member_id": "researcher",
-        "state": "failed",
-        "output": {},
-        "error": "RuntimeError",
-    }
-    assert result.worker.state is MemberState.FAILED
-    assert result.worker.error == "RuntimeError"
-    assert result.checker.state is MemberState.COMPLETED
-    assert result.team_state.value == "completed"
-    assert store.team_state("team-v01-failure").value == "completed"
-    assert result.final_output == {
-        "status": "degraded",
-        "worker_output": {},
-        "checker_output": {
-            "verdict": "degraded",
-            "checked_task_id": "task-user-failure",
-            "worker_state": "failed",
-        },
-        "worker_error": "RuntimeError",
-        "checker_error": None,
-    }
+    assert store.member("team-failure", "worker-a").state is MemberState.FAILED
+    assert store.member("team-failure", "worker-b").state is MemberState.COMPLETED
+    assert store.member("team-failure", "checker").state is MemberState.COMPLETED
+    assert [request.payload["member_id"] for request in runtime.requests] == [
+        "worker-a",
+        "worker-b",
+        "checker",
+    ]
+    assert result.final_output["status"] == CheckerStatus.WORKER_ERROR.value
+    summary = cast(dict[str, object], result.final_output["checker_summary"])
+    sources = cast(list[dict[str, object]], summary["sources"])
+    assert sources[0]["state"] == "worker_error"
+    assert "result_set" not in sources[0]
+    assert sources[1]["state"] == "valid"
 
 
-def test_restart_after_worker_continues_same_team_without_reexecution(
+def test_worker_cancellation_is_isolated_and_reported_as_worker_error(tmp_path: Path) -> None:
+    db_path, source_a, source_b = _fixture(tmp_path)
+    runtime = RecordingScenarioRuntime(cancelled_member="worker-a")
+    _, store, _, adapter = _open(db_path, source_a, source_b, runtime=runtime)
+
+    result = asyncio.run(
+        adapter.run(
+            user_goal="Report one cancelled source worker.",
+            shared_task_id="task-cancelled-worker",
+            team_id="team-cancelled-worker",
+        )
+    )
+
+    assert store.member("team-cancelled-worker", "worker-a").state is MemberState.CANCELLED
+    assert store.member("team-cancelled-worker", "worker-b").state is MemberState.COMPLETED
+    assert result.team_state is TeamState.COMPLETED
+    assert result.final_output["status"] == CheckerStatus.WORKER_ERROR.value
+
+
+def test_checker_failure_makes_team_failed_and_never_claims_validated_comparison(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    first_runtime, first_store, first_adapter = _build(tmp_path)
-    original_fan_out = first_adapter._coordinator.fan_out
-    fan_out_calls = 0
+    db_path, source_a, source_b = _fixture(tmp_path)
+    runtime = RecordingScenarioRuntime(fail_member="checker")
+    _, store, _, adapter = _open(db_path, source_a, source_b, runtime=runtime)
+
+    result = asyncio.run(
+        adapter.run(
+            user_goal="Fail closed when the checker fails.",
+            shared_task_id="task-checker-failure",
+            team_id="team-checker-failure",
+        )
+    )
+
+    assert store.member("team-checker-failure", "checker").state is MemberState.FAILED
+    assert result.team_state is TeamState.FAILED
+    assert result.final_output["status"] == CheckerStatus.EVIDENCE_INVALID.value
+    assert result.final_output["checker_output_validated"] is False
+
+
+def test_tampered_worker_evidence_fails_closed_without_synthetic_result(tmp_path: Path) -> None:
+    db_path, source_a, source_b = _fixture(tmp_path)
+    runtime = RecordingScenarioRuntime(corrupt_member="worker-b")
+    _, _, _, adapter = _open(db_path, source_a, source_b, runtime=runtime)
+
+    result = asyncio.run(
+        adapter.run(
+            user_goal="Reject modified evidence.",
+            shared_task_id="task-tamper",
+            team_id="team-tamper",
+        )
+    )
+
+    assert result.final_output["status"] == CheckerStatus.EVIDENCE_INVALID.value
+    summary = cast(dict[str, object], result.final_output["checker_summary"])
+    sources = cast(list[dict[str, object]], summary["sources"])
+    invalid = next(item for item in sources if item["worker_id"] == "worker-b")
+    assert invalid["state"] == "evidence_invalid"
+    assert "result_set" not in invalid
+
+
+def test_checker_runtime_output_must_match_deterministic_summary(tmp_path: Path) -> None:
+    db_path, source_a, source_b = _fixture(tmp_path, same=True)
+    runtime = RecordingScenarioRuntime(corrupt_checker=True)
+    _, _, _, adapter = _open(db_path, source_a, source_b, runtime=runtime)
+
+    result = asyncio.run(
+        adapter.run(
+            user_goal="Verify checker output.",
+            shared_task_id="task-checker-bind",
+            team_id="team-checker-bind",
+        )
+    )
+
+    assert result.final_output["status"] == CheckerStatus.EVIDENCE_INVALID.value
+    assert result.final_output["checker_output_validated"] is False
+
+
+def test_restart_after_workers_runs_only_missing_checker(tmp_path: Path) -> None:
+    db_path, source_a, source_b = _fixture(tmp_path)
+    first_runtime, first_store, first_coordinator, first_adapter = _open(
+        db_path,
+        source_a,
+        source_b,
+    )
 
     async def crash_before_checker(**kwargs: object):
-        nonlocal fan_out_calls
-        fan_out_calls += 1
-        if fan_out_calls == 2:
-            raise SimulatedProcessCrash("between worker and checker")
-        return await original_fan_out(**kwargs)
+        del kwargs
+        raise SimulatedProcessCrash("after workers before checker")
 
-    monkeypatch.setattr(first_adapter._coordinator, "fan_out", crash_before_checker)
-    with pytest.raises(SimulatedProcessCrash, match="between worker and checker"):
+    first_coordinator.run_root_member = crash_before_checker  # type: ignore[method-assign]
+    with pytest.raises(SimulatedProcessCrash, match="after workers"):
         asyncio.run(
             first_adapter.run(
-                user_goal="Inspect once, check once, return one result.",
-                shared_task_id="task-restart-worker",
-                team_id="team-restart-worker",
+                user_goal="Resume the exact durable comparison.",
+                shared_task_id="task-restart-workers",
+                team_id="team-restart-workers",
             )
         )
 
-    assert len(first_runtime.requests) == 2
     assert [request.payload["member_id"] for request in first_runtime.requests] == [
-        "supervisor",
-        "researcher",
+        "worker-a",
+        "worker-b",
     ]
-    assert [member.member_id for member in first_store.members("team-restart-worker")] == [
-        "supervisor",
-        "researcher",
+    assert [member.state for member in first_store.members("team-restart-workers")] == [
+        MemberState.SPAWNED,
+        MemberState.COMPLETED,
+        MemberState.COMPLETED,
     ]
 
-    restarted_runtime, restarted_store, restarted_adapter = _open_existing(tmp_path)
+    restarted_runtime, _, _, restarted_adapter = _open(db_path, source_a, source_b)
     result = asyncio.run(
         restarted_adapter.run(
-            user_goal="Inspect once, check once, return one result.",
-            shared_task_id="task-restart-worker",
-            team_id="team-restart-worker",
+            user_goal="Resume the exact durable comparison.",
+            shared_task_id="task-restart-workers",
+            team_id="team-restart-workers",
         )
     )
 
-    assert result.team_state.value == "completed"
-    assert result.final_output["status"] == "checked"
     assert [request.payload["member_id"] for request in restarted_runtime.requests] == [
         "checker"
     ]
-    assert [member.member_id for member in restarted_store.members("team-restart-worker")] == [
-        "supervisor",
-        "researcher",
-        "checker",
-    ]
+    assert result.team_state is TeamState.COMPLETED
+    assert result.final_output["checker_output_validated"] is True
 
 
-def test_restart_after_checker_reconstructs_final_result_without_reexecution(
+def test_restart_after_checker_reconstructs_identical_result_without_runtime(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    first_runtime, first_store, first_adapter = _build(tmp_path)
+    db_path, source_a, source_b = _fixture(tmp_path)
+    first_runtime, first_store, first_coordinator, first_adapter = _open(
+        db_path,
+        source_a,
+        source_b,
+    )
 
-    def crash_before_finalize(team_id: str):
+    def crash_before_finalize(team_id: str) -> TeamState:
         assert team_id == "team-restart-finalize"
         raise SimulatedProcessCrash("after checker before finalize")
 
-    monkeypatch.setattr(first_adapter._coordinator, "finalize_team", crash_before_finalize)
-    with pytest.raises(SimulatedProcessCrash, match="after checker before finalize"):
+    first_coordinator.finalize_team = crash_before_finalize  # type: ignore[method-assign]
+    with pytest.raises(SimulatedProcessCrash, match="before finalize"):
         asyncio.run(
             first_adapter.run(
-                user_goal="Inspect once, check once, return one result.",
+                user_goal="Reconstruct one exact result.",
                 shared_task_id="task-restart-finalize",
                 team_id="team-restart-finalize",
             )
         )
-
     assert len(first_runtime.requests) == 3
-    assert first_store.team_state("team-restart-finalize").value == "active"
+    assert first_store.team_state("team-restart-finalize") is TeamState.ACTIVE
 
-    restarted_runtime, restarted_store, restarted_adapter = _open_existing(tmp_path)
+    restarted_runtime, _, _, restarted_adapter = _open(db_path, source_a, source_b)
     result = asyncio.run(
         restarted_adapter.run(
-            user_goal="Inspect once, check once, return one result.",
+            user_goal="Reconstruct one exact result.",
             shared_task_id="task-restart-finalize",
             team_id="team-restart-finalize",
         )
     )
 
     assert restarted_runtime.requests == []
-    assert restarted_store.team_state("team-restart-finalize").value == "completed"
-    assert result.final_output == {
-        "status": "checked",
-        "worker_output": {
-            "evidence": "worker-evidence",
-            "shared_task_id": "task-restart-finalize",
-        },
-        "checker_output": {
-            "verdict": "accepted",
-            "checked_task_id": "task-restart-finalize",
-            "worker_state": "completed",
-        },
-        "worker_error": None,
-        "checker_error": None,
-    }
+    assert result.team_state is TeamState.COMPLETED
+    assert result.final_output["checker_output_validated"] is True
 
 
 def test_restart_rejects_changed_logical_task_identity(tmp_path: Path) -> None:
-    first_runtime, _first_store, first_adapter = _build(tmp_path)
+    db_path, source_a, source_b = _fixture(tmp_path)
+    _, _, _, adapter = _open(db_path, source_a, source_b)
     asyncio.run(
-        first_adapter.run(
-            user_goal="One exact goal.",
-            shared_task_id="task-exact",
-            team_id="team-exact",
+        adapter.run(
+            user_goal="Keep exact task identity.",
+            shared_task_id="task-original",
+            team_id="team-identity",
         )
     )
-    assert len(first_runtime.requests) == 3
 
-    restarted_runtime, _store, restarted_adapter = _open_existing(tmp_path)
+    _, _, _, restarted = _open(db_path, source_a, source_b)
     with pytest.raises(PermissionError, match="task identity"):
         asyncio.run(
-            restarted_adapter.run(
-                user_goal="Changed goal.",
-                shared_task_id="task-changed",
-                team_id="team-exact",
+            restarted.run(
+                user_goal="Keep exact task identity.",
+                shared_task_id="task-substituted",
+                team_id="team-identity",
             )
         )
-    assert restarted_runtime.requests == []
 
 
-def test_runtime_result_error_is_bounded_before_storage_and_projection(tmp_path: Path) -> None:
-    canary = "PROVIDER-SECRET-IN-RUNTIME-ERROR"
-    runtime, _store, adapter = _build(
-        tmp_path,
-        failed_result_member="researcher",
-        raw_error=canary,
+def test_runtime_error_text_is_bounded_before_storage_and_projection(tmp_path: Path) -> None:
+    db_path, source_a, source_b = _fixture(tmp_path)
+    secret = "api-key=must-not-persist"
+    runtime = RecordingScenarioRuntime(
+        failed_result_member="worker-a",
+        raw_error=secret,
     )
+    _, store, _, adapter = _open(db_path, source_a, source_b, runtime=runtime)
 
     result = asyncio.run(
         adapter.run(
-            user_goal="Contain provider failure text.",
-            shared_task_id="task-safe-error",
-            team_id="team-safe-error",
+            user_goal="Bound provider failure output.",
+            shared_task_id="task-error",
+            team_id="team-error",
         )
     )
 
-    assert result.worker.state is MemberState.FAILED
-    assert result.worker.error == RuntimeErrorCode.INTERNAL.value
-    checker_handoff = runtime.requests[2].payload["handoff"]
-    assert isinstance(checker_handoff, dict)
-    assert checker_handoff["worker_observation"]["error"] == RuntimeErrorCode.INTERNAL.value
-    serialized_result = json.dumps(result.final_output, ensure_ascii=False, sort_keys=True)
-    assert canary not in serialized_result
-
-    with SQLiteStore(tmp_path / "nika.db").connection() as conn:
-        durable_dump = "\n".join(conn.iterdump())
-    assert canary not in durable_dump
+    persisted = store.member_result("team-error", "worker-a")
+    assert persisted.error == RuntimeErrorCode.INTERNAL.value
+    assert secret not in str(result.final_output)
 
 
-def test_child_permission_expansion_fails_before_runtime_execution(tmp_path: Path) -> None:
-    broader_worker_grants = (
-        ToolGrant(tool_id="file.read", max_risk=0, scopes=("workspace",)),
+def test_permission_expansion_fails_before_any_runtime_execution(tmp_path: Path) -> None:
+    db_path, source_a, source_b = _fixture(tmp_path)
+    web_grant = ToolGrant(tool_id="web.read", max_risk=0, scopes=("example.com",))
+    config = _config(source_a, source_b, worker_a_grants=(web_grant,))
+    runtime, store, _, adapter = _open(
+        db_path,
+        source_a,
+        source_b,
+        config=config,
     )
-    runtime, store, adapter = _build(tmp_path, worker_grants=broader_worker_grants)
 
-    with pytest.raises(PermissionError, match="ungranted tool"):
+    with pytest.raises(PermissionError, match="activated definition|ungranted tool"):
         asyncio.run(
             adapter.run(
-                user_goal="Do not expand child permissions.",
+                user_goal="Do not widen permissions.",
                 shared_task_id="task-permission",
                 team_id="team-permission",
             )
         )
-
     assert runtime.requests == []
-    with pytest.raises(KeyError, match="unknown team"):
+    with pytest.raises(KeyError):
         store.team_state("team-permission")
-
-
-def test_root_permission_expansion_fails_before_team_creation(tmp_path: Path) -> None:
-    broader_root_grants = (
-        ToolGrant(tool_id="shell.exec", max_risk=1, scopes=("workspace",)),
-    )
-    runtime, store, adapter = _build(tmp_path, root_grants=broader_root_grants)
-
-    with pytest.raises(PermissionError, match="ungranted tool"):
-        asyncio.run(
-            adapter.run(
-                user_goal="Do not expand root permissions.",
-                shared_task_id="task-root-permission",
-                team_id="team-root-permission",
-            )
-        )
-
-    assert runtime.requests == []
-    with pytest.raises(KeyError, match="unknown team"):
-        store.team_state("team-root-permission")

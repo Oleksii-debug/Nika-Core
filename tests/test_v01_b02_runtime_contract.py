@@ -11,10 +11,14 @@ from nika_core.runtime.contracts import RuntimeOutcome, RuntimeResult
 
 
 def test_v01_b02_fresh_resume_timeout_and_paused_mapping_are_explicit() -> None:
+    root_source = inspect.getsource(MultiAgentSupervisor._run_new_root)
     fresh_source = inspect.getsource(MultiAgentSupervisor._run_new_child)
+    root_resume_source = inspect.getsource(MultiAgentSupervisor._recover_root)
     resume_source = inspect.getsource(MultiAgentSupervisor._recover_child)
 
+    assert "timeout_seconds=" in root_source
     assert "timeout_seconds=" in fresh_source
+    assert "timeout_seconds=" in root_resume_source
     assert "timeout_seconds=" in resume_source
     paused = MultiAgentSupervisor._state_for_result(
         RuntimeResult(outcome=RuntimeOutcome.PAUSED, resume_token="pause-token")

@@ -224,12 +224,20 @@ class MultiAgentSupervisor:
         )
         prepared = self._store.member(member.team_id, member.member_id)
         payload = self._store.task_payload(member.team_id, member.member_id)
+        inbound_handoffs = self._store.inbound_result_handoffs(
+            member.team_id,
+            member.member_id,
+        )
         try:
             result = await self._runtime.run(
                 RuntimeRequest(
                     task_id=self._task_id(member.team_id, member.member_id),
                     thread_id=member.thread_id,
-                    payload=self._runtime_payload(prepared, payload),
+                    payload=self._runtime_payload(
+                        prepared,
+                        payload,
+                        inbound_handoffs=inbound_handoffs,
+                    ),
                     timeout_seconds=self._runtime_timeout_seconds,
                 )
             )
@@ -396,7 +404,7 @@ class MultiAgentSupervisor:
             )
         kind = (
             HandoffKind.ERROR
-            if safe_result.outcome is RuntimeOutcome.FAILED
+            if safe_result.outcome in {RuntimeOutcome.FAILED, RuntimeOutcome.CANCELLED}
             else HandoffKind.RESULT
         )
         payload = dict(safe_result.output)
@@ -474,6 +482,8 @@ class MultiAgentSupervisor:
     def _runtime_payload(
         member: TeamMember,
         handoff_payload: dict[str, object],
+        *,
+        inbound_handoffs: tuple[AgentHandoff, ...] = (),
     ) -> dict[str, object]:
         return {
             "team_id": member.team_id,
@@ -483,6 +493,18 @@ class MultiAgentSupervisor:
             "agent_version": member.agent_version,
             "tool_grants": [grant.model_dump(mode="json") for grant in member.tool_grants],
             "handoff": handoff_payload,
+            "inbound_handoffs": [
+                {
+                    "handoff_id": handoff.handoff_id,
+                    "team_id": handoff.team_id,
+                    "sender_id": handoff.sender_id,
+                    "recipient_id": handoff.recipient_id,
+                    "kind": handoff.kind.value,
+                    "correlation_id": handoff.correlation_id,
+                    "payload": dict(handoff.payload),
+                }
+                for handoff in inbound_handoffs
+            ],
         }
 
     @staticmethod
