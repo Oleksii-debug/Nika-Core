@@ -77,6 +77,14 @@ class SQLiteStore:
                 "multi-agent state database schema "
                 f"{current} is newer than supported schema {MULTI_AGENT_STATE_SCHEMA_VERSION}"
             )
+        legacy_members_exist = (
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'multi_agent_members'"
+            ).fetchone()
+            is not None
+        )
+        if not legacy_members_exist:
+            return
         for version in range(current + 1, MULTI_AGENT_STATE_SCHEMA_VERSION + 1):
             statements = MULTI_AGENT_STATE_MIGRATIONS.get(version)
             if statements is None:
