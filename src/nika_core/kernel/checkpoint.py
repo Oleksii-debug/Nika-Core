@@ -5,6 +5,7 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import NoReturn
 
 from nika_core.data.sqlite import SQLiteStore
 
@@ -19,7 +20,35 @@ class Checkpoint:
 
 
 def _canonical_json(payload: dict[str, object]) -> str:
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    try:
+        return json.dumps(
+            payload,
+            allow_nan=False,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Checkpoint payload must be a JSON object with finite values") from exc
+
+
+def _reject_non_finite(_value: str) -> NoReturn:
+    raise ValueError("Checkpoint payload contains a non-finite number")
+
+
+def _decode_payload(payload_json: str, checksum_sha256: str) -> dict[str, object]:
+    expected = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+    if expected != checksum_sha256:
+        raise ValueError("Checkpoint checksum mismatch")
+    try:
+        payload = json.loads(payload_json, parse_constant=_reject_non_finite)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ValueError("Checkpoint payload is invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("Checkpoint payload must be a JSON object")
+    if _canonical_json(payload) != payload_json:
+        raise ValueError("Checkpoint payload is not canonical JSON")
+    return payload
 
 
 class CheckpointService:
@@ -53,15 +82,18 @@ class CheckpointService:
                 SELECT checkpoint_id, task_id, stage, payload_json, checksum_sha256
                 FROM checkpoints
                 WHERE task_id = ?
-                ORDER BY created_at DESC, rowid DESC
+                ORDER BY rowid DESC
                 LIMIT 1
                 """,
                 (task_id,),
             ).fetchone()
         if row is None:
             return None
-        payload_json = row[3]
-        expected = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
-        if expected != row[4]:
-            raise ValueError("Checkpoint checksum mismatch")
-        return Checkpoint(row[0], row[1], row[2], json.loads(payload_json), row[4])
+        payload = _decode_payload(row["payload_json"], row["checksum_sha256"])
+        return Checkpoint(
+            row["checkpoint_id"],
+            row["task_id"],
+            row["stage"],
+            payload,
+            row["checksum_sha256"],
+        )
