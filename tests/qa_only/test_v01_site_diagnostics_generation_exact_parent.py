@@ -4,8 +4,10 @@ from dataclasses import dataclass
 
 import pytest
 
-from nika_core.interaction.domain import StaleSnapshotError
-from nika_core.interaction.site_diagnostics import PlaywrightSiteDiagnosticsProbe
+from nika_core.interaction.site_diagnostics import (
+    PlaywrightSiteDiagnosticsProbe,
+    StaleSnapshotError,
+)
 
 
 _PAYLOAD = {
