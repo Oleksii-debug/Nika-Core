@@ -11,6 +11,7 @@ from nika_core.interaction import (
     FrameScope,
     InteractionAction,
     PlaywrightInteractionAdapter,
+    StaleSnapshotError,
     UnsupportedInteractionError,
     resolve_strict,
 )
@@ -179,6 +180,112 @@ def _prove_frame(adapter: PlaywrightInteractionAdapter) -> None:
     assert resolve_strict(snapshot, ControlLocator(role="button", name="Кнопка у фреймі"))
 
 
+def _prove_stale_frame_and_dom_identity(adapter: PlaywrightInteractionAdapter) -> None:
+    """Physical Chromium proof for the #592/#593 stale-target families."""
+    assert adapter.session.registry is not None
+    page = adapter.session.registry.get(adapter.page_id).page
+
+    # Same semantic role/name on a replacement DOM element must not inherit old authority.
+    adapter.load_inline_fixture(
+        "<main><button id='stable' aria-label='Стабільна дія' "
+        "onclick=\"window.__nikaDomEffects=(window.__nikaDomEffects||0)+1\">"
+        "Стабільна дія</button></main>"
+    )
+    page.evaluate("() => { window.__nikaDomEffects = 0; }")
+    stale_snapshot = adapter.observe()
+    stale_node = resolve_strict(
+        stale_snapshot,
+        ControlLocator(role="button", name="Стабільна дія"),
+    )
+    page.evaluate(
+        """
+        () => {
+          const oldNode = document.getElementById('stable');
+          const replacement = oldNode.cloneNode(true);
+          oldNode.replaceWith(replacement);
+        }
+        """
+    )
+    try:
+        adapter.act(stale_node, InteractionAction.INVOKE, None)
+    except StaleSnapshotError:
+        pass
+    else:  # pragma: no cover - physical proof assertion
+        raise AssertionError("same-semantics replacement reused stale DOM authority")
+    assert page.evaluate("() => window.__nikaDomEffects") == 0
+
+    fresh_node = resolve_strict(
+        adapter.observe(),
+        ControlLocator(role="button", name="Стабільна дія"),
+    )
+    adapter.act(fresh_node, InteractionAction.INVOKE, None)
+    assert page.evaluate("() => window.__nikaDomEffects") == 1
+
+    # Unscoped identical semantics across root and child frame must be ambiguous.
+    adapter.load_inline_fixture(
+        "<main><button>Спільна дія</button>"
+        "<iframe name='duplicate' "
+        "srcdoc=\"<main><button>Спільна дія</button></main>\"></iframe></main>"
+    )
+    duplicate_frame = page.frame(name="duplicate")
+    assert duplicate_frame is not None
+    duplicate_frame.get_by_role("button", name="Спільна дія", exact=True).wait_for()
+    try:
+        resolve_strict(adapter.observe(), ControlLocator(role="button", name="Спільна дія"))
+    except AmbiguousTargetError:
+        pass
+    else:  # pragma: no cover - physical proof assertion
+        raise AssertionError("root/child identical semantics did not fail ambiguous")
+
+    # Replacing an iframe with the same semantic target invalidates the old child-frame identity.
+    adapter.load_inline_fixture(
+        "<main><iframe name='stale-frame' "
+        "srcdoc=\"<main><button onclick='parent.__nikaFrameEffects=(parent.__nikaFrameEffects||0)+1'>"
+        "Frame action</button></main>\"></iframe></main>"
+    )
+    page.evaluate("() => { window.__nikaFrameEffects = 0; }")
+    first_frame = page.frame(name="stale-frame")
+    assert first_frame is not None
+    first_frame.get_by_role("button", name="Frame action", exact=True).wait_for()
+    framed = PlaywrightInteractionAdapter(
+        session=adapter.session,
+        page_id=adapter.page_id,
+        frame_scope=FrameScope(name="stale-frame"),
+    )
+    old_node = resolve_strict(
+        framed.observe(),
+        ControlLocator(role="button", name="Frame action"),
+    )
+    page.evaluate(
+        """
+        () => {
+          const oldFrame = document.querySelector("iframe[name='stale-frame']");
+          const replacement = document.createElement('iframe');
+          replacement.name = 'stale-frame';
+          replacement.srcdoc = "<main><button onclick='parent.__nikaFrameEffects=(parent.__nikaFrameEffects||0)+1'>Frame action</button></main>";
+          oldFrame.replaceWith(replacement);
+        }
+        """
+    )
+    replacement_frame = page.frame(name="stale-frame")
+    assert replacement_frame is not None
+    replacement_frame.get_by_role("button", name="Frame action", exact=True).wait_for()
+    try:
+        framed.act(old_node, InteractionAction.INVOKE, None)
+    except StaleSnapshotError:
+        pass
+    else:  # pragma: no cover - physical proof assertion
+        raise AssertionError("replacement frame reused stale child-frame authority")
+    assert page.evaluate("() => window.__nikaFrameEffects") == 0
+
+    fresh_frame_node = resolve_strict(
+        framed.observe(),
+        ControlLocator(role="button", name="Frame action"),
+    )
+    framed.act(fresh_frame_node, InteractionAction.INVOKE, None)
+    assert page.evaluate("() => window.__nikaFrameEffects") == 1
+
+
 def _prove_dialog(adapter: PlaywrightInteractionAdapter) -> None:
     adapter.load_inline_fixture(
         "<main><button onclick=\"alert('Підтвердити')\">Діалог</button></main>"
@@ -241,6 +348,7 @@ def main() -> None:
             _prove_text_entry(adapter)
             _prove_ambiguity_and_scope(adapter)
             _prove_frame(adapter)
+            _prove_stale_frame_and_dom_identity(adapter)
             _prove_dialog(adapter)
             _prove_download(adapter, root)
             _prove_navigation(adapter)
