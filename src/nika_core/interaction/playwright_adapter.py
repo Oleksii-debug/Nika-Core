@@ -457,6 +457,33 @@ class PlaywrightInteractionAdapter:
             raise AmbiguousTargetError(f"semantic target became ambiguous: {count} matches")
         return locator
 
+    @staticmethod
+    def _text_entry_kind(locator: Any) -> str:
+        kind = locator.evaluate(
+            """
+            el => {
+              const tag = el.tagName.toLowerCase();
+              if (tag === 'input') return 'input';
+              if (tag === 'textarea') return 'textarea';
+              if (el.isContentEditable) return 'contenteditable';
+              return 'unsupported';
+            }
+            """
+        )
+        return str(kind)
+
+    @classmethod
+    def _text_entry_value(cls, locator: Any) -> str:
+        kind = cls._text_entry_kind(locator)
+        if kind in {"input", "textarea"}:
+            return str(locator.input_value())
+        if kind == "contenteditable":
+            text = locator.text_content()
+            return "" if text is None else str(text)
+        raise UnsupportedInteractionError(
+            "SET_VALUE requires input, textarea, or contenteditable semantics"
+        )
+
     def observe(self) -> SemanticSnapshot:
         record = self._record()
         root = self._root()
@@ -516,6 +543,15 @@ class PlaywrightInteractionAdapter:
         if action is InteractionAction.SET_VALUE:
             if value is None:
                 raise ValueError("SET_VALUE requires a value")
+            kind = self._text_entry_kind(locator)
+            if kind == "unsupported":
+                raise UnsupportedInteractionError(
+                    "SET_VALUE requires input, textarea, or contenteditable semantics"
+                )
+            if not bool(locator.is_editable()):
+                raise UnsupportedInteractionError(f"SET_VALUE target is not editable ({kind})")
+            # SET_VALUE is intentionally fill/replace semantics. Empty text clears the editor;
+            # appending requires a distinct future contract rather than implicit keyboard behavior.
             locator.fill(value)
             return
         if action is InteractionAction.SELECT:
@@ -583,7 +619,7 @@ class PlaywrightInteractionAdapter:
         if action is InteractionAction.FOCUS:
             return bool(locator.evaluate("el => el === document.activeElement"))
         if action is InteractionAction.SET_VALUE:
-            return value is not None and locator.input_value() == value
+            return value is not None and self._text_entry_value(locator) == value
         if action is InteractionAction.SELECT:
             selected = locator.evaluate(
                 "el => el.selectedOptions && el.selectedOptions.length === 1 "
