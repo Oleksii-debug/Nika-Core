@@ -13,6 +13,8 @@ from nika_core.runtime import contracts as runtime_contracts
 from nika_core.runtime import langgraph_runtime
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
 from nika_core.runtime.idempotency import IdempotencyLedger
+from nika_core.runtime.recovery import RecoveryDisposition, RuntimeRecoveryService
+from nika_core.runtime.registry import RuntimeRegistry
 from nika_core.runtime.session_store import RuntimeSessionStore
 
 _CANARY = "P10_05_SYNTHETIC_BACKEND_SECRET_7f31c2"
@@ -81,6 +83,23 @@ def _active_runtime_task(tmp_path: Path) -> tuple[SQLiteStore, TaskQueue, str]:
 def _assert_no_recovery_effect(store: SQLiteStore, task_id: str) -> None:
     records = IdempotencyLedger(store).list_for_task(task_id)
     assert all(record.operation_type != "runtime.recovery_resume" for record in records)
+
+
+def _startup_recovery(
+    store: SQLiteStore,
+    queue: TaskQueue,
+    audit: AuditLog,
+    runtime: _RaisingCoordinatorProbeRuntime,
+) -> RuntimeRecoveryService:
+    runtimes = RuntimeRegistry()
+    runtimes.register(runtime)
+    return RuntimeRecoveryService(
+        queue=queue,
+        audit=audit,
+        runtimes=runtimes,
+        sessions=RuntimeSessionStore(store),
+        idempotency=IdempotencyLedger(store),
+    )
 
 
 def test_framework_exception_is_minimized_at_runtime_result_boundary() -> None:
@@ -159,5 +178,47 @@ def test_coordinator_probe_reason_is_minimized_before_recovery_claim(tmp_path: P
         assert runtime.resume_calls == 0
         assert queue.get(task_id).state == TaskState.RUNNING
         _assert_no_recovery_effect(store, task_id)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "runtime_factory",
+    [_RaisingCoordinatorProbeRuntime, _UnsafeReasonCoordinatorProbeRuntime],
+)
+def test_startup_recovery_probe_diagnostics_are_minimized_before_resume(
+    tmp_path: Path,
+    runtime_factory,
+) -> None:
+    async def scenario() -> None:
+        store, queue, task_id = _active_runtime_task(tmp_path)
+        audit = AuditLog(store)
+        runtime = runtime_factory()
+        recovery = _startup_recovery(store, queue, audit, runtime)
+
+        executions = await recovery.resume_safe_crash_sessions(max_count=1)
+
+        assert len(executions) == 1
+        execution = executions[0]
+        assert execution.result is None
+        assert execution.candidate.disposition is RecoveryDisposition.CHECKPOINT_UNAVAILABLE
+        assert execution.error == "runtime resume checkpoint is not readable: unreadable"
+        assert _CANARY not in (execution.error or "")
+        assert _CANARY not in execution.candidate.reason
+        assert runtime.resume_calls == 0
+        assert queue.get(task_id).state == TaskState.RUNNING
+        _assert_no_recovery_effect(store, task_id)
+
+        blocked = [
+            event
+            for event in audit.list_for(entity_type="task", entity_id=task_id)
+            if event.event_type == "runtime.recovery_checkpoint_blocked"
+        ]
+        assert len(blocked) == 1
+        payload_text = str(dict(blocked[0].payload))
+        assert _CANARY not in payload_text
+        assert blocked[0].payload["reason"] == (
+            "runtime resume checkpoint is not readable: unreadable"
+        )
 
     asyncio.run(scenario())

@@ -15,7 +15,10 @@ from nika_core.runtime.contracts import (
 )
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
 from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
-from nika_core.runtime.recovery_claims import recovery_claim_is_reclaimable
+from nika_core.runtime.recovery_claims import (
+    RECOVERY_RESUME_OPERATION_TYPE,
+    recovery_claim_is_reclaimable,
+)
 from nika_core.runtime.registry import RuntimeRegistry
 from nika_core.runtime.session_store import RuntimeSessionRecord, RuntimeSessionStore
 
@@ -94,8 +97,26 @@ class RuntimeRecoveryService:
         ACTIVE/RUNNING candidates are provisional until ``resume_safe_crash_sessions`` performs
         the runtime-specific async checkpoint preflight. The sync inventory deliberately never
         touches third-party checkpoint objects.
+
+        Generic external-effect reservations left PENDING across process recreation have unknown
+        outcomes and are promoted to UNCERTAIN. Canonical runtime recovery claims are excluded:
+        their CLAIMED/EFFECT_STARTED metadata and lease determine whether recovery is reclaimable
+        or must remain fail-closed.
         """
-        candidates = tuple(self._classify(record) for record in self._sessions.list_resumable())
+        records = self._sessions.list_resumable()
+        promoted_operation_keys: list[str] = []
+        for task_id in dict.fromkeys(record.task_id for record in records):
+            pending = self._idempotency.list_for_task(
+                task_id,
+                status=IdempotencyStatus.PENDING,
+            )
+            for operation in pending:
+                if operation.operation_type == RECOVERY_RESUME_OPERATION_TYPE:
+                    continue
+                self._idempotency.mark_uncertain(operation.operation_key)
+                promoted_operation_keys.append(operation.operation_key)
+
+        candidates = tuple(self._classify(record) for record in records)
         self._audit.append(
             event_type="runtime.recovery_inventory",
             entity_type="runtime_recovery",
@@ -120,6 +141,7 @@ class RuntimeRecoveryService:
                     }
                     for item in candidates
                 ),
+                "pending_promoted_count": len(promoted_operation_keys),
             },
         )
         return candidates
@@ -236,10 +258,10 @@ class RuntimeRecoveryService:
                 thread_id=record.thread_id,
                 resume_token=record.resume_token,
             )
-        except Exception as exc:  # noqa: BLE001 - a broken probe must fail closed
+        except Exception:  # noqa: BLE001 - provider diagnostics are untrusted at this boundary
             probe = RuntimeResumeProbe(
                 status=RuntimeResumeProbeStatus.UNREADABLE,
-                reason=f"resume checkpoint probe raised: {exc}",
+                reason="checkpoint lookup failed",
             )
 
         current = self._sessions.get(candidate.task_id)
@@ -258,7 +280,10 @@ class RuntimeRecoveryService:
                 replace(
                     candidate,
                     disposition=RecoveryDisposition.CHECKPOINT_UNAVAILABLE,
-                    reason=f"{probe.status.value}: {probe.reason}",
+                    reason=(
+                        "runtime resume checkpoint is not readable: "
+                        f"{probe.status.value}"
+                    ),
                 ),
                 probe,
             )
