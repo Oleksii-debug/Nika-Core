@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.task_state import TaskState
 from nika_core.scheduler.contracts import ScheduledJob, TriggerKind
 
 
@@ -61,6 +62,15 @@ class ScheduledJobStore:
                 "SELECT * FROM scheduled_jobs WHERE enabled = 1 ORDER BY job_id"
             ).fetchall()
         return tuple(_from_row(row) for row in rows)
+
+    def task_state(self, task_id: str) -> TaskState | None:
+        """Return canonical durable task authority for a declared scheduler binding."""
+        with self._store.connection() as conn:
+            row = conn.execute(
+                "SELECT state FROM tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return TaskState(row["state"]) if row is not None else None
 
     def set_enabled(self, job_id: str, enabled: bool) -> bool:
         with self._store.connection() as conn:
