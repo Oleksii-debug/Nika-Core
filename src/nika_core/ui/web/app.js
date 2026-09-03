@@ -57,6 +57,7 @@
     "spawned",
     "running",
     "waiting_approval",
+    "paused",
     "completed",
     "failed",
     "cancelled",
@@ -64,6 +65,7 @@
   const allowedTeamStates = new Set(["active", "completed", "failed", "cancelled"]);
   const allowedOperations = new Set([
     "Очікує підтвердження.",
+    "Роботу призупинено.",
     "Роботу завершено.",
     "Роботу завершено з помилкою.",
     "Роботу скасовано.",
