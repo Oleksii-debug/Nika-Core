@@ -46,12 +46,13 @@ class APSchedulerAdapter(SchedulerPort):
 
     def upsert(self, job: ScheduledJob) -> None:
         self._jobs.upsert(job)
+        durable = self._required_job(job.job_id)
         if self._started:
-            if job.enabled:
-                self._install(job)
-            elif self._scheduler.get_job(job.job_id) is not None:
-                self._scheduler.remove_job(job.job_id)
-        self._audit_change("scheduler.job_upserted", job)
+            if durable.enabled:
+                self._install(durable)
+            elif self._scheduler.get_job(durable.job_id) is not None:
+                self._scheduler.remove_job(durable.job_id)
+        self._audit_change("scheduler.job_upserted", durable)
 
     def remove(self, job_id: str) -> bool:
         removed = self._jobs.delete(job_id)

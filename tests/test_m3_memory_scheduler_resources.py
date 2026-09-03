@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -191,6 +192,54 @@ def test_scheduler_rejects_invalid_job_contract(tmp_path: Path) -> None:
                 trigger_kind=TriggerKind.INTERVAL,
                 trigger={"seconds": 1},
                 max_instances=0,
+            )
+        )
+
+
+def test_scheduler_revision_cas_rejects_stale_writes_and_runtime_state(
+    tmp_path: Path,
+) -> None:
+    jobs = ScheduledJobStore(_store(tmp_path))
+    revision_key = ScheduledJobStore.REVISION_KEY
+    original = ScheduledJob(
+        job_id="revisioned",
+        action_id="health.sample",
+        trigger_kind=TriggerKind.INTERVAL,
+        trigger={"minutes": 10},
+        payload={revision_key: 0},
+    )
+    adapter = APSchedulerAdapter(jobs, lambda _action_id: lambda _payload: None)
+    adapter.upsert(original)
+    adapter.start()
+    assert adapter.has_runtime_job(original.job_id)
+
+    terminal = replace(
+        original,
+        payload={revision_key: 1},
+        enabled=False,
+    )
+    assert jobs.compare_and_swap(original, terminal)
+    assert not jobs.compare_and_swap(original, terminal)
+
+    adapter.upsert(original)
+
+    assert jobs.get(original.job_id) == terminal
+    assert not adapter.has_runtime_job(original.job_id)
+    with pytest.raises(ValueError, match="compare_and_swap"):
+        jobs.upsert(replace(terminal, payload={revision_key: 2}))
+    adapter.shutdown()
+
+
+def test_scheduler_rejects_invalid_revision_type(tmp_path: Path) -> None:
+    jobs = ScheduledJobStore(_store(tmp_path))
+    with pytest.raises(ValueError, match="non-negative integer"):
+        jobs.upsert(
+            ScheduledJob(
+                job_id="bad-revision",
+                action_id="health.sample",
+                trigger_kind=TriggerKind.INTERVAL,
+                trigger={"seconds": 1},
+                payload={ScheduledJobStore.REVISION_KEY: True},
             )
         )
 
