@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+from nika_core.runtime.connectivity_wait import ConnectivityWaitService
+
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.task_state import TaskState
-from nika_core.runtime.connectivity_wait import ConnectivityWaitService
 from nika_core.runtime.retry import (
     RetryPolicy,
     ScriptRetryCondition,
