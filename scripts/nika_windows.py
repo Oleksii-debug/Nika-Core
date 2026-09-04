@@ -48,13 +48,12 @@ def build_windows_bridge(
     store.initialize()
     actions = build_default_action_registry()
     keymap = Keymap(store, actions)
-    team_runtime = V01PackagedThreeAgentRuntime(store=store, config=config)
     backend = DesktopBackend(
         queue=TaskQueue(store),
         agents=AgentRegistry(store),
         workspaces=WorkspaceRegistry(store),
         audit=AuditLog(store),
-        runtime=team_runtime,
+        runtime=V01PackagedThreeAgentRuntime(store=store, config=config),
     )
     products = ProductProjectCommandService(ProductProjectRepository(store))
     product_router = PackagedProductCommandRouter(
