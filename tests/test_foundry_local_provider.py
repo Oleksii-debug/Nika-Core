@@ -177,7 +177,9 @@ def test_foundry_local_inference_never_downloads_uncached_model() -> None:
         asyncio.run(gateway.complete(request()))
 
     assert exc_info.value.code is ModelErrorCode.UNAVAILABLE
-    assert "explicit model download action" in str(exc_info.value)
+    assert str(exc_info.value) == "model provider is unavailable"
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
     assert model.downloaded is False
     assert model.is_loaded is False
 

@@ -122,12 +122,12 @@ def test_ollama_supports_validated_native_thinking_levels() -> None:
     assert response.text == "answer"
 
 
-@pytest.mark.parametrize("level", ["low", "medium", "high", " LOW "])
+@pytest.mark.parametrize("level", ["low", "medium", "high", "max", " LOW "])
 def test_ollama_accepts_documented_thinking_levels(level: str) -> None:
     OllamaProvider(default_model="model", think=level)
 
 
-@pytest.mark.parametrize("level", ["", "off", "max", "maximum", "turbo"])
+@pytest.mark.parametrize("level", ["", "off", "maximum", "turbo"])
 def test_ollama_rejects_unknown_thinking_levels(level: str) -> None:
     with pytest.raises(ValueError, match="think level"):
         OllamaProvider(default_model="model", think=level)
@@ -181,6 +181,30 @@ def test_ollama_http_failure_is_normalized() -> None:
 def test_ollama_invalid_native_schema_fails_closed() -> None:
     transport = httpx.MockTransport(
         lambda _request: httpx.Response(200, json={"model": "qwen3:8b", "done": True})
+    )
+
+    def client_factory(**kwargs: Any) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=transport, **kwargs)
+
+    provider = OllamaProvider(default_model="qwen3:8b", client_factory=client_factory)
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        asyncio.run(provider.complete(_request()))
+
+    assert exc_info.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert exc_info.value.retryable is False
+
+
+def test_ollama_rejects_incomplete_non_streaming_response() -> None:
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            json={
+                "model": "qwen3:8b",
+                "message": {"role": "assistant", "content": "partial"},
+                "done": False,
+            },
+        )
     )
 
     def client_factory(**kwargs: Any) -> httpx.AsyncClient:
