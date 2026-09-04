@@ -8,7 +8,7 @@ from nika_core.data.sqlite import SQLiteStore
 
 _STATE_KEY = "v01_team_task"
 _UNAVAILABLE_MESSAGE = "Стан командного завдання недоступний."
-_ALLOWED_STAGES = frozenset({"worker", "checker"})
+_ALLOWED_STAGES = frozenset({"worker", "checker", "source_worker"})
 _TERMINAL_TEAM_STATES = frozenset({"completed", "failed", "cancelled"})
 _TERMINAL_MEMBER_STATES = frozenset({"completed", "failed", "cancelled"})
 
@@ -100,13 +100,17 @@ class V01PackagedTeamStateProvider:
             previous = stage_by_member.get(recipient_id)
             if previous is not None:
                 raise ValueError("duplicate V0.1 member task handoff")
-            if stage in stage_by_member.values():
+            if stage != "source_worker" and stage in stage_by_member.values():
                 raise ValueError("duplicate V0.1 stage")
             stage_by_member[recipient_id] = stage
+            if sum(item == "source_worker" for item in stage_by_member.values()) > 2:
+                raise ValueError("too many V0.1 source workers")
 
         if not saw_v01_marker:
             return None
-        if shared_task_id is None or "worker" not in stage_by_member.values():
+        if shared_task_id is None or not {"worker", "source_worker"}.intersection(
+            stage_by_member.values()
+        ):
             raise ValueError("incomplete V0.1 team identity")
 
         member_rows = conn.execute(
@@ -121,16 +125,22 @@ class V01PackagedTeamStateProvider:
         root_id = str(team["root_member_id"])
         roles: dict[str, str] = {root_id: "supervisor"}
         for member_id, stage in stage_by_member.items():
-            roles[member_id] = stage
+            roles[member_id] = "worker" if stage == "source_worker" else stage
         member_ids = {str(row["member_id"]) for row in member_rows}
         if root_id not in member_ids or set(roles) != member_ids:
             raise ValueError("V0.1 member roster mismatch")
-        if len(member_rows) == 3 and set(roles.values()) != {
-            "supervisor",
-            "worker",
-            "checker",
-        }:
-            raise ValueError("V0.1 three-member roster is incomplete")
+        if len(member_rows) == 3:
+            legacy_roster = set(roles.values()) == {
+                "supervisor",
+                "worker",
+                "checker",
+            }
+            canonical_roster = (
+                roles.get(root_id) == "checker"
+                and sum(role == "worker" for role in roles.values()) == 2
+            )
+            if not legacy_roster and not canonical_roster:
+                raise ValueError("V0.1 three-member roster is incomplete")
 
         result_rows = conn.execute(
             "SELECT result_id, member_id, outcome, error, created_at "
