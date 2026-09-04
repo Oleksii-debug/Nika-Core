@@ -103,7 +103,8 @@ def test_completed_step_is_not_repeated_after_process_object_recreation(tmp_path
                 RuntimeRequest("task-restart", thread_id, {"prepared": False}, max_steps=20)
             )
             assert failed.outcome == RuntimeOutcome.FAILED
-            assert "intentional transient failure" in (failed.error or "")
+            assert failed.error == "runtime execution failed"
+            assert "intentional transient failure" not in (failed.error or "")
             assert _line_count(side_effect) == 1
 
         # The connection, compiled graph and runtime above are all gone. A fresh set of objects
