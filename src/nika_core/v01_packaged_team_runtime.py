@@ -4,7 +4,8 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping, cast
+from collections.abc import Mapping
+from typing import cast
 
 from nika_core.builder.compiler import AgentCompiler
 from nika_core.builder.repository import AgentDefinitionRepository
@@ -90,7 +91,7 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
 
     @staticmethod
     def initial_resume_token(*, task_id: str, thread_id: str) -> str:
-        material = f"{_RUNTIME_ID}\0{task_id}\0{thread_id}".encode("utf-8")
+        material = f"{_RUNTIME_ID}\0{task_id}\0{thread_id}".encode()
         return "v01:" + hashlib.sha256(material).hexdigest()
 
     async def probe_resume(
@@ -107,7 +108,7 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
                 reason="Persisted V0.1 runtime cursor does not match task identity.",
             )
         checkpoint = hashlib.sha256(
-            f"v01-packaged-checkpoint\0{expected}".encode("utf-8")
+            f"v01-packaged-checkpoint\0{expected}".encode()
         ).hexdigest()
         return RuntimeResumeProbe(
             status=RuntimeResumeProbeStatus.READY,
@@ -168,7 +169,7 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
                 shared_task_id=task_id,
                 team_id=team_id,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - runtime boundary fails closed without diagnostics
             return self._failed()
 
         if result.team_state is TeamState.CANCELLED:
@@ -205,7 +206,7 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
                     member_id=member_id,
                     handoff=handoff,
                 )
-        except Exception:
+        except Exception:  # noqa: BLE001 - runtime boundary fails closed without diagnostics
             return self._failed()
         return self._failed()
 
@@ -238,7 +239,7 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
                     + document.text
                     + "\0"
                     + document.media_type
-                ).encode("utf-8")
+                ).encode()
             ).hexdigest()[:24],
             workspace_id=assignment.source.workspace_id,
             query="compare declared condition",
@@ -422,7 +423,7 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
 
     @staticmethod
     def _team_id(task_id: str) -> str:
-        digest = hashlib.sha256(task_id.encode("utf-8")).hexdigest()[:24]
+        digest = hashlib.sha256(task_id.encode()).hexdigest()[:24]
         return f"v01-team-{digest}"
 
     @staticmethod
