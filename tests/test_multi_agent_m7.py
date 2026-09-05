@@ -100,6 +100,10 @@ def _compiler() -> AgentCompiler:
             ToolSpec("file.read", "Read workspace files", ToolRisk.READ_ONLY),
         ),
         model_profiles={"test"},
+        permission_catalog={
+            "web.read": frozenset({"example.com", "docs.example.com"}),
+            "file.read": frozenset({"workspace"}),
+        },
     )
 
 
