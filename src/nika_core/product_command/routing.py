@@ -37,15 +37,27 @@ _TOOLSMITH_PATTERNS = (
         re.IGNORECASE,
     ),
 )
+_AGENT_BUILDER_PATTERNS = (
+    re.compile(
+        r"\b(create|build|configure|define|design)\b.*\b(agent|assistant)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(створи|створити|побудуй|побудувати|налаштуй|налаштувати|сконфігуруй|"
+        r"сконфігурувати|визнач|визначити|спроєктуй|спроєктувати)\b.*\b(агент|агента|"
+        r"асистент|асистента)\b",
+        re.IGNORECASE,
+    ),
+)
 
 
 def route_command(text: str, *, active_project_id: str | None = None) -> CommandRouteDecision:
     """Classify command intent without an LLM or hidden project mutation.
 
     The router deliberately recognizes only high-confidence English and Ukrainian Product
-    Factory or Toolsmith wording. Everything else remains an ordinary AgentTask. Mixed
-    high-confidence intents require an explicit user decision instead of silently choosing
-    a long-lived or capability-building path.
+    Factory, Toolsmith, or Agent Builder wording. Everything else remains an ordinary AgentTask.
+    Mixed high-confidence specialized intents require an explicit user decision instead of
+    silently choosing a long-lived, capability-building, or agent-definition path.
     """
     normalized = " ".join(text.split())
     if not normalized:
@@ -55,10 +67,12 @@ def route_command(text: str, *, active_project_id: str | None = None) -> Command
 
     product = any(pattern.search(normalized) for pattern in _PRODUCT_PATTERNS)
     toolsmith = any(pattern.search(normalized) for pattern in _TOOLSMITH_PATTERNS)
-    if product and toolsmith:
+    agent_builder = any(pattern.search(normalized) for pattern in _AGENT_BUILDER_PATTERNS)
+    matched_routes = sum((product, toolsmith, agent_builder))
+    if matched_routes > 1:
         return CommandRouteDecision(
             route=CommandRouteKind.AMBIGUOUS,
-            reason="Command matches both long-lived product and capability-building intent.",
+            reason="Command matches more than one specialized route.",
             requires_user_decision=True,
             normalized_goal=normalized,
         )
@@ -75,8 +89,14 @@ def route_command(text: str, *, active_project_id: str | None = None) -> Command
             reason="Command explicitly requests a reusable tool or missing capability.",
             normalized_goal=normalized,
         )
+    if agent_builder:
+        return CommandRouteDecision(
+            route=CommandRouteKind.AGENT_BUILDER,
+            reason="Command explicitly requests a new or configured agent definition.",
+            normalized_goal=normalized,
+        )
     return CommandRouteDecision(
         route=CommandRouteKind.AGENT_TASK,
-        reason="No high-confidence long-lived product or capability-building intent was found.",
+        reason="No high-confidence specialized intent was found.",
         normalized_goal=normalized,
     )
