@@ -28,6 +28,8 @@ from nika_core.ui.bridge import UIActionBridge
 from nika_core.ui.bridge_models import UIResult
 from nika_core.ui.desktop_backend import DesktopBackend
 from nika_core.ui.shell import launch_windows_shell
+from nika_core.v01_packaged_team_runtime import V01PackagedThreeAgentRuntime
+from nika_core.v01_packaged_team_state import V01PackagedTeamStateProvider
 
 
 def _focus(focus_id: str, message: str) -> UIResult:
@@ -51,6 +53,7 @@ def build_windows_bridge(
         agents=AgentRegistry(store),
         workspaces=WorkspaceRegistry(store),
         audit=AuditLog(store),
+        runtime=V01PackagedThreeAgentRuntime(store=store, config=config),
     )
     products = ProductProjectCommandService(ProductProjectRepository(store))
     product_router = PackagedProductCommandRouter(
@@ -63,6 +66,10 @@ def build_windows_bridge(
         base_state=backend.snapshot,
         router=product_router,
         command_center=command_center,
+    )
+    packaged_state = V01PackagedTeamStateProvider(
+        base_state=product_state,
+        store=store,
     )
     bridge = UIActionBridge(
         actions,
@@ -86,7 +93,7 @@ def build_windows_bridge(
                 "command-input", "Командне поле активне."
             ),
         },
-        state_provider=product_state,
+        state_provider=packaged_state,
     )
     return bridge, products
 
