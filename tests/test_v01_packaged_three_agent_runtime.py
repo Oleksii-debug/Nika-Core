@@ -128,3 +128,42 @@ def test_packaged_runtime_missing_source_config_fails_closed_without_team(
         row = conn.execute("SELECT COUNT(*) AS count FROM multi_agent_teams").fetchone()
     assert row is not None
     assert int(row["count"]) == 0
+
+
+def test_packaged_runtime_rejects_source_outside_declared_root_without_team(
+    tmp_path: Path,
+) -> None:
+    declared_root = tmp_path / "declared-root"
+    declared_root.mkdir()
+    source_a = tmp_path / "outside-a.txt"
+    source_b = tmp_path / "outside-b.txt"
+    source_a.write_text("outside controlled evidence A", encoding="utf-8")
+    source_b.write_text("outside controlled evidence B", encoding="utf-8")
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    runtime = V01PackagedThreeAgentRuntime(
+        store=store,
+        config=AppConfig(
+            database_path=tmp_path / "nika.db",
+            v01_source_root=declared_root,
+            v01_source_a=source_a,
+            v01_source_b=source_b,
+        ),
+    )
+
+    result = asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id="packaged-task-outside-root",
+                thread_id="desktop-packaged-task-outside-root",
+                payload={"command": "Run the representative team."},
+            )
+        )
+    )
+
+    assert result.outcome is RuntimeOutcome.FAILED
+    assert result.error == "V0.1 packaged three-agent execution failed closed."
+    with store.connection() as conn:
+        row = conn.execute("SELECT COUNT(*) AS count FROM multi_agent_teams").fetchone()
+    assert row is not None
+    assert int(row["count"]) == 0
