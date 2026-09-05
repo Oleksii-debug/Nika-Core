@@ -117,15 +117,24 @@ class DownloadBroker:
 
 
 @dataclass(slots=True)
-class _PageRecord:
-    page: Any
-    page_id: str
+class _FrameRecord:
+    frame: Any
+    frame_id: str
     document_generation: int = 1
 
 
 @dataclass(slots=True)
+class _PageRecord:
+    page: Any
+    page_id: str
+    document_generation: int = 1
+    frames: dict[str, _FrameRecord] = field(default_factory=dict)
+    frame_by_object: dict[int, str] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class PageRegistry:
-    """Stable per-session identities for pages, popups and tabs."""
+    """Stable per-session identities for pages, frames, popups and tabs."""
 
     context: Any
     pages: dict[str, _PageRecord] = field(default_factory=dict)
@@ -138,6 +147,24 @@ class PageRegistry:
         # is a slotted dataclass; use an ordinary lambda instead.
         self.context.on("page", lambda page: self.register(page))
 
+    @staticmethod
+    def _frame_is_main(record: _PageRecord, frame: Any) -> bool:
+        return frame == record.page.main_frame
+
+    def _register_frame(self, record: _PageRecord, frame: Any) -> _FrameRecord:
+        object_id = id(frame)
+        existing_id = record.frame_by_object.get(object_id)
+        if existing_id is not None:
+            return record.frames[existing_id]
+        frame_id = "main" if self._frame_is_main(record, frame) else uuid.uuid4().hex
+        if frame_id == "main" and frame_id in record.frames:
+            # A replaced main-frame wrapper must never inherit a stale object binding.
+            frame_id = uuid.uuid4().hex
+        frame_record = _FrameRecord(frame=frame, frame_id=frame_id)
+        record.frames[frame_id] = frame_record
+        record.frame_by_object[object_id] = frame_id
+        return frame_record
+
     def register(self, page: Any) -> str:
         object_id = id(page)
         existing = self._by_object.get(object_id)
@@ -147,12 +174,25 @@ class PageRegistry:
         record = _PageRecord(page=page, page_id=page_id)
         self.pages[page_id] = record
         self._by_object[object_id] = page_id
+        self._register_frame(record, page.main_frame)
+        for frame in tuple(page.frames):
+            self._register_frame(record, frame)
+
+        def on_frame_attached(frame: Any, *, registered_page_id: str = page_id) -> None:
+            current = self.pages.get(registered_page_id)
+            if current is not None:
+                self._register_frame(current, frame)
 
         def on_navigation(frame: Any, *, registered_page_id: str = page_id) -> None:
             current = self.pages.get(registered_page_id)
-            if current is not None and frame == current.page.main_frame:
+            if current is None:
+                return
+            frame_record = self._register_frame(current, frame)
+            frame_record.document_generation += 1
+            if self._frame_is_main(current, frame):
                 current.document_generation += 1
 
+        page.on("frameattached", on_frame_attached)
         page.on("framenavigated", on_navigation)
         page.on("close", lambda _page: self.remove(page_id))
         return page_id
@@ -167,6 +207,28 @@ class PageRegistry:
         if record is None or record.page.is_closed():
             raise StaleSnapshotError("browser page is closed or no longer registered")
         return record
+
+    def frame_identity(self, page_id: str, frame: Any) -> tuple[str, int]:
+        record = self.get(page_id)
+        frame_record = self._register_frame(record, frame)
+        return frame_record.frame_id, frame_record.document_generation
+
+    def frame_by_identity(
+        self,
+        page_id: str,
+        frame_id: str,
+        document_generation: int,
+    ) -> Any:
+        record = self.get(page_id)
+        frame_record = record.frames.get(frame_id)
+        if frame_record is None or frame_record.document_generation != document_generation:
+            raise StaleSnapshotError("browser frame identity or document generation changed")
+        if frame_record.frame not in tuple(record.page.frames):
+            raise StaleSnapshotError("browser frame detached after observation")
+        is_detached = getattr(frame_record.frame, "is_detached", None)
+        if callable(is_detached) and bool(is_detached()):
+            raise StaleSnapshotError("browser frame detached after observation")
+        return frame_record.frame
 
 
 @dataclass(slots=True)
@@ -235,6 +297,10 @@ class _SemanticDescriptor:
     name: str
     text: str | None
     ancestors: tuple[tuple[str, str, str | None], ...]
+    page_document_generation: int
+    frame_id: str
+    frame_document_generation: int
+    element_token: str | None
 
 
 @dataclass(slots=True)
@@ -269,6 +335,63 @@ class PlaywrightInteractionAdapter:
         if len(frames) != 1:
             raise AmbiguousTargetError(f"Frame target is ambiguous: {len(frames)} matches")
         return frames[0]
+
+    def _frame_identity(self, root: Any) -> tuple[str, int]:
+        record = self._record()
+        if root is record.page:
+            return "main", record.document_generation
+        registry = self.session.registry
+        frame_identity = getattr(registry, "frame_identity", None)
+        if callable(frame_identity):
+            return frame_identity(self.page_id, root)
+        return f"object:{id(root)}", 1
+
+    def _observation_roots(self) -> tuple[tuple[Any, str, int], ...]:
+        record = self._record()
+        if self.frame_scope is not None:
+            root = self._root()
+            frame_id, generation = self._frame_identity(root)
+            return ((root, frame_id, generation),)
+
+        roots: list[tuple[Any, str, int]] = [
+            (record.page, "main", record.document_generation)
+        ]
+        for frame in tuple(record.page.frames):
+            if frame == record.page.main_frame:
+                continue
+            is_detached = getattr(frame, "is_detached", None)
+            if callable(is_detached) and bool(is_detached()):
+                continue
+            frame_id, generation = self._frame_identity(frame)
+            roots.append((frame, frame_id, generation))
+        return tuple(roots)
+
+    def _root_for_descriptor(self, descriptor: _SemanticDescriptor) -> Any:
+        record = self._record()
+        if record.document_generation != descriptor.page_document_generation:
+            raise StaleSnapshotError("browser page document changed after observation")
+        if descriptor.frame_id == "main":
+            if descriptor.frame_document_generation != record.document_generation:
+                raise StaleSnapshotError("browser main document generation changed")
+            return record.page
+
+        registry = self.session.registry
+        frame_by_identity = getattr(registry, "frame_by_identity", None)
+        if callable(frame_by_identity):
+            return frame_by_identity(
+                self.page_id,
+                descriptor.frame_id,
+                descriptor.frame_document_generation,
+            )
+
+        for frame in tuple(record.page.frames):
+            frame_id, generation = self._frame_identity(frame)
+            if (
+                frame_id == descriptor.frame_id
+                and generation == descriptor.frame_document_generation
+            ):
+                return frame
+        raise StaleSnapshotError("browser frame identity changed after observation")
 
     def load_inline_fixture(self, html: str) -> None:
         """Load local proof/test HTML; this helper is not an agent navigation action surface."""
@@ -349,13 +472,46 @@ class PlaywrightInteractionAdapter:
             locator = locator.filter(has_text=re.compile(rf"^{re.escape(text)}$"))
         return locator
 
+    @staticmethod
+    def _element_instance_token(locator: Any) -> str | None:
+        if locator.count() != 1:
+            return None
+        evaluate = getattr(locator, "evaluate", None)
+        if not callable(evaluate):
+            # Deterministic unit fakes cannot expose DOM object identity. Frame/document identity
+            # remains enforced there; real Playwright targets always expose evaluate().
+            return "semantic-only"
+        token = evaluate(
+            """
+            el => {
+              if (!globalThis.__nikaSemanticNodeIdentityState) {
+                Object.defineProperty(globalThis, '__nikaSemanticNodeIdentityState', {
+                  value: {next: 1, ids: new WeakMap()},
+                  enumerable: false,
+                  configurable: false,
+                  writable: false
+                });
+              }
+              const state = globalThis.__nikaSemanticNodeIdentityState;
+              let value = state.ids.get(el);
+              if (value === undefined) {
+                value = state.next;
+                state.next += 1;
+                state.ids.set(el, value);
+              }
+              return String(value);
+            }
+            """
+        )
+        return str(token)
+
     def _locator_for_descriptor(
         self,
         descriptor: _SemanticDescriptor,
         *,
         root: Any | None = None,
     ) -> Any:
-        scope = self._root() if root is None else root
+        scope = self._root_for_descriptor(descriptor) if root is None else root
         for role, name, text in descriptor.ancestors:
             candidate = self._semantic_locator(scope, role, name, text)
             if candidate.count() != 1:
@@ -363,15 +519,20 @@ class PlaywrightInteractionAdapter:
             scope = candidate
         return self._semantic_locator(scope, descriptor.role, descriptor.name, descriptor.text)
 
-    def _parse_snapshot(self, snapshot: str) -> tuple[ControlNode, ...]:
+    def _parse_snapshot(
+        self,
+        snapshot: str,
+        *,
+        root: Any,
+        page_document_generation: int,
+        frame_id: str,
+        frame_document_generation: int,
+    ) -> tuple[ControlNode, ...]:
         controls: list[ControlNode] = []
         stack: list[tuple[int, str, str, str | None, str]] = []
-        descriptors: dict[str, _SemanticDescriptor] = {}
         occurrences: dict[
             tuple[tuple[tuple[str, str, str | None], ...], str, str, str | None], int
         ] = {}
-        root = self._root()
-        generation = self._record().document_generation
 
         for raw_line in snapshot.splitlines():
             match = _ARIA_LINE.match(raw_line)
@@ -390,8 +551,32 @@ class PlaywrightInteractionAdapter:
             semantic_key = (ancestor_semantics, role, name, descriptor_text)
             ordinal = occurrences.get(semantic_key, 0) + 1
             occurrences[semantic_key] = ordinal
+
+            provisional = _SemanticDescriptor(
+                node_id="",
+                role=role,
+                name=name,
+                text=descriptor_text,
+                ancestors=ancestor_semantics,
+                page_document_generation=page_document_generation,
+                frame_id=frame_id,
+                frame_document_generation=frame_document_generation,
+                element_token=None,
+            )
+            locator = self._locator_for_descriptor(provisional, root=root)
+            element_token = self._element_instance_token(locator)
             node_id = "pw:" + hashlib.sha256(
-                repr((self.page_id, generation, semantic_key, ordinal)).encode("utf-8")
+                repr(
+                    (
+                        self.page_id,
+                        page_document_generation,
+                        frame_id,
+                        frame_document_generation,
+                        semantic_key,
+                        ordinal,
+                        element_token,
+                    )
+                ).encode("utf-8")
             ).hexdigest()[:24]
 
             attrs = list(self._state_attributes(match.group("state")))
@@ -414,9 +599,12 @@ class PlaywrightInteractionAdapter:
                 name=name,
                 text=descriptor_text,
                 ancestors=ancestor_semantics,
+                page_document_generation=page_document_generation,
+                frame_id=frame_id,
+                frame_document_generation=frame_document_generation,
+                element_token=element_token,
             )
-            descriptors[node_id] = descriptor
-            locator = self._locator_for_descriptor(descriptor, root=root)
+            self._node_descriptors[node_id] = descriptor
             bounds: tuple[int, int, int, int] | None = None
             if locator.count() == 1:
                 box = locator.bounding_box()
@@ -442,7 +630,6 @@ class PlaywrightInteractionAdapter:
             )
             stack.append((indent, role, name, descriptor_text, node_id))
 
-        self._node_descriptors = descriptors
         return tuple(controls)
 
     def _locator_for_node(self, node: ControlNode) -> Any:
@@ -455,28 +642,94 @@ class PlaywrightInteractionAdapter:
             raise TargetNotFoundError("semantic target disappeared before action")
         if count != 1:
             raise AmbiguousTargetError(f"semantic target became ambiguous: {count} matches")
+        if self._element_instance_token(locator) != descriptor.element_token:
+            raise StaleSnapshotError("semantic target DOM identity changed before action")
+        is_visible = getattr(locator, "is_visible", None)
+        if node.visible and callable(is_visible) and not bool(is_visible()):
+            raise StaleSnapshotError("semantic target became hidden before action")
+        is_enabled = getattr(locator, "is_enabled", None)
+        if node.enabled and callable(is_enabled) and not bool(is_enabled()):
+            raise StaleSnapshotError("semantic target became disabled before action")
         return locator
+
+    @staticmethod
+    def _text_entry_kind(locator: Any) -> str:
+        kind = locator.evaluate(
+            """
+            el => {
+              const tag = el.tagName.toLowerCase();
+              if (tag === 'input') return 'input';
+              if (tag === 'textarea') return 'textarea';
+              if (el.isContentEditable) return 'contenteditable';
+              return 'unsupported';
+            }
+            """
+        )
+        return str(kind)
+
+    @classmethod
+    def _text_entry_value(cls, locator: Any) -> str:
+        kind = cls._text_entry_kind(locator)
+        if kind in {"input", "textarea"}:
+            return str(locator.input_value())
+        if kind == "contenteditable":
+            text = locator.text_content()
+            return "" if text is None else str(text)
+        raise UnsupportedInteractionError(
+            "SET_VALUE requires input, textarea, or contenteditable semantics"
+        )
 
     def observe(self) -> SemanticSnapshot:
         record = self._record()
-        root = self._root()
-        mutation_before = self._mutation_counter(root)
-        snapshot_text = root.locator("body").aria_snapshot()
-        mutation_after = self._mutation_counter(root)
-        if mutation_after != mutation_before:
-            raise StaleSnapshotError("semantic tree mutated while being observed")
-        controls = self._parse_snapshot(snapshot_text)
+        self._node_descriptors = {}
+        controls: list[ControlNode] = []
+        revision_parts: list[str] = []
+        roots = self._observation_roots()
+
+        for root, frame_id, frame_generation in roots:
+            mutation_before = self._mutation_counter(root)
+            snapshot_text = root.locator("body").aria_snapshot()
+            mutation_after = self._mutation_counter(root)
+            if mutation_after != mutation_before:
+                raise StaleSnapshotError("semantic tree mutated while being observed")
+            controls.extend(
+                self._parse_snapshot(
+                    snapshot_text,
+                    root=root,
+                    page_document_generation=record.document_generation,
+                    frame_id=frame_id,
+                    frame_document_generation=frame_generation,
+                )
+            )
+            revision_parts.append(
+                f"{frame_id}\0{frame_generation}\0{mutation_after}\0{snapshot_text}"
+            )
+
+        if self.frame_scope is None:
+            scope_material = repr(tuple((frame_id, generation) for _, frame_id, generation in roots))
+            scope_generation = int.from_bytes(
+                hashlib.sha256(scope_material.encode("utf-8")).digest()[:8],
+                "big",
+            )
+            frame_id = "*"
+            frame_document_generation = scope_generation
+        else:
+            _, frame_id, frame_document_generation = roots[0]
+
         browser = BrowserContextIdentity(
             session_id=self.session.session_id,
             context_id=self.session.context_id,
             page_id=self.page_id,
             document_generation=record.document_generation,
+            frame_id=frame_id,
+            frame_document_generation=frame_document_generation,
         )
+        revision_text = "\n".join(revision_parts)
         return SemanticSnapshot(
             target=InteractionTarget(browser=browser),
             generation=record.document_generation,
-            revision=self._semantic_revision(snapshot_text, mutation_after),
-            controls=controls,
+            revision=self._semantic_revision(revision_text, len(roots)),
+            controls=tuple(controls),
         )
 
     def capture_focus(self) -> str | None:
@@ -516,6 +769,15 @@ class PlaywrightInteractionAdapter:
         if action is InteractionAction.SET_VALUE:
             if value is None:
                 raise ValueError("SET_VALUE requires a value")
+            kind = self._text_entry_kind(locator)
+            if kind == "unsupported":
+                raise UnsupportedInteractionError(
+                    "SET_VALUE requires input, textarea, or contenteditable semantics"
+                )
+            if not bool(locator.is_editable()):
+                raise UnsupportedInteractionError(f"SET_VALUE target is not editable ({kind})")
+            # SET_VALUE is intentionally fill/replace semantics. Empty text clears the editor;
+            # appending requires a distinct future contract rather than implicit keyboard behavior.
             locator.fill(value)
             return
         if action is InteractionAction.SELECT:
@@ -564,8 +826,13 @@ class PlaywrightInteractionAdapter:
         if (
             before.target.browser is not None
             and after.target.browser is not None
-            and before.target.browser.document_generation
-            != after.target.browser.document_generation
+            and (
+                before.target.browser.document_generation
+                != after.target.browser.document_generation
+                or before.target.browser.frame_id != after.target.browser.frame_id
+                or before.target.browser.frame_document_generation
+                != after.target.browser.frame_document_generation
+            )
         ):
             return action is InteractionAction.INVOKE
         if action is InteractionAction.INVOKE:
@@ -583,7 +850,7 @@ class PlaywrightInteractionAdapter:
         if action is InteractionAction.FOCUS:
             return bool(locator.evaluate("el => el === document.activeElement"))
         if action is InteractionAction.SET_VALUE:
-            return value is not None and locator.input_value() == value
+            return value is not None and self._text_entry_value(locator) == value
         if action is InteractionAction.SELECT:
             selected = locator.evaluate(
                 "el => el.selectedOptions && el.selectedOptions.length === 1 "
