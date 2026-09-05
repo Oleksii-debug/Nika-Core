@@ -259,9 +259,11 @@ def test_real_windows_composition_root_uses_product_command_center_without_ui_ed
     assert "ProductCommandCenter" in source
     assert "PackagedProductCommandRouter" in source
     assert "PackagedProductStateProvider" in source
+    assert "V01PackagedTeamStateProvider" in source
     assert '"task.create": backend.create_task' not in source
     assert '"task.create": product_router.create' in source
-    assert "state_provider=product_state" in source
+    assert "base_state=product_state" in source
+    assert "state_provider=packaged_state" in source
 
 
 def test_headless_pf11_composition_proof_survives_process_restart(tmp_path: Path) -> None:

@@ -193,6 +193,17 @@ class DesktopBackend:
     def stop_agent(self, _payload: Mapping[str, Any]) -> UIResult:
         record = self._only_controllable(action="зупинки")
         if record is None:
+            cancelled = self._only_with_state(
+                TaskState.CANCELLED,
+                action="повторної зупинки",
+            )
+            if cancelled is not None:
+                return UIResult(
+                    request_id="desktop-handler",
+                    status="completed",
+                    message="Завдання вже скасовано; додаткових дій не виконано.",
+                    focus_id="tasks-heading",
+                )
             raise ValueError("Немає активного завдання агента для зупинки.")
 
         cancel_future: Future[bool] | None = None
