@@ -72,7 +72,8 @@ def test_windows_bridge_composes_team_projection_into_existing_pywebview_state()
     assert "packaged_state = V01PackagedTeamStateProvider(" in source
     assert "base_state=product_state," in source
     assert "store=store," in source
-    assert "state_provider=packaged_state," in source
+    assert "state_provider=source_state," in source
+    assert '**packaged_state(), "v01_sources": source_settings.snapshot()' in source
     assert "launch_windows_shell(bridge" in source
 
 

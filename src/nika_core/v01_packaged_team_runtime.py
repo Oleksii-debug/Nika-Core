@@ -20,7 +20,7 @@ from nika_core.multi_agent import (
     V01CheckerAgent,
     encode_source_result,
 )
-from nika_core.research.local import extract_local_file, resolve_local_file
+from nika_core.research.local import extract_local_file
 from nika_core.research.models import (
     FreshnessState,
     ResearchEvidence,
@@ -42,6 +42,7 @@ from nika_core.runtime.contracts import (
     RuntimeResumeRequest,
 )
 from nika_core.tools import ToolRisk, ToolSpec
+from nika_core.v01_source_settings import MAX_SOURCE_BYTES, V01SourceSettings
 from nika_core.v01_three_agent_supervisor import (
     V01ChildAssignment,
     V01SourceWorkerAssignment,
@@ -56,15 +57,20 @@ _CHECKER_ID = "v01.checker"
 _WORKER_A_ID = "v01.source-a"
 _WORKER_B_ID = "v01.source-b"
 _GRANT = ToolGrant(tool_id="file.read", max_risk=0, scopes=("workspace",))
-_MAX_SOURCE_BYTES = 16 * 1024 * 1024
 
 
 class V01PackagedThreeAgentRuntime(AgentRuntimePort):
     """Thin packaged AgentRuntimePort over the canonical V0.1 three-agent team."""
 
-    def __init__(self, *, store: SQLiteStore, config: AppConfig) -> None:
+    def __init__(
+        self,
+        *,
+        store: SQLiteStore,
+        config: AppConfig,
+        source_settings: V01SourceSettings | None = None,
+    ) -> None:
         self._sqlite = store
-        self._config = config
+        self._sources = source_settings or V01SourceSettings(store, config)
         self._multi_store = MultiAgentStore(store)
         self._definitions = AgentDefinitionRepository(store)
         self._coordinator = MultiAgentSupervisor(
@@ -155,7 +161,7 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
 
     async def _run_outer(self, *, task_id: str, command: str) -> RuntimeResult:
         try:
-            _root, source_a, source_b = self._source_config()
+            _root, source_a, source_b = self._source_config(task_id)
             self._ensure_definitions()
             team_id = self._team_id(task_id)
             adapter = V01ThreeAgentSupervisor(
@@ -224,11 +230,19 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
             return self._failed()
         if assignment.source.kind is not SourceKind.LOCAL_FILE:
             return self._failed()
-        root, _, _ = self._source_config()
+        if (
+            assignment.task_id != handoff.get("shared_task_id")
+            or self._team_id(assignment.task_id) != team_id
+        ):
+            return self._failed()
+        root, source_a, source_b = self._source_config(assignment.task_id)
+        expected = {"worker-a": ("source-a", source_a), "worker-b": ("source-b", source_b)}
+        if expected.get(member_id) != (assignment.source.source_id, Path(assignment.source.locator)):
+            return self._failed()
         document = extract_local_file(
             assignment.source.locator,
             allowed_root=root,
-            max_bytes=_MAX_SOURCE_BYTES,
+            max_bytes=MAX_SOURCE_BYTES,
         )
         observed_at = datetime.now(UTC).isoformat()
         result_set = ResearchResultSet(
@@ -295,31 +309,25 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
             output={"checker_summary": summary.to_payload()},
         )
 
-    def _source_config(self) -> tuple[Path, Path, Path]:
-        raw_root = self._config.v01_source_root
-        raw_a = self._config.v01_source_a
-        raw_b = self._config.v01_source_b
-        if raw_root is None or raw_a is None or raw_b is None:
-            raise ValueError("V0.1 source configuration is incomplete")
-        root = Path(raw_root).resolve()
-        if not root.is_dir():
-            raise ValueError("V0.1 source root is unavailable")
-
-        def resolve(raw: Path) -> Path:
-            candidate = Path(raw)
-            if not candidate.is_absolute():
-                candidate = root / candidate
-            return resolve_local_file(
-                candidate,
-                allowed_root=root,
-                max_bytes=_MAX_SOURCE_BYTES,
+    def _source_config(self, task_id: str) -> tuple[Path, Path, Path]:
+        # A pre-setup team may be adopted only with the very same declared sources.
+        # New tasks bind before team creation; later configuration cannot retarget them.
+        legacy_sources = None
+        try:
+            handoff = self._multi_store.task_payload(self._team_id(task_id), "checker")
+        except KeyError:
+            handoff = None
+        if handoff is not None:
+            raw = handoff.get("source_assignments")
+            if not isinstance(raw, list) or len(raw) != 2:
+                raise ValueError("invalid stored source assignments")
+            first, second = (
+                SourceInspectionAssignment.from_payload(cast(Mapping[str, object], item))
+                for item in raw
             )
-
-        source_a = resolve(raw_a)
-        source_b = resolve(raw_b)
-        if source_a == source_b:
-            raise ValueError("V0.1 Scenario A requires two distinct source files")
-        return root, source_a, source_b
+            legacy_sources = (first.source.locator, second.source.locator)
+        selection = self._sources.for_task(task_id, legacy_sources=legacy_sources)
+        return Path(selection.root), Path(selection.source_a), Path(selection.source_b)
 
     @staticmethod
     def _scenario_config(*, source_a: Path, source_b: Path) -> V01ThreeAgentConfig:

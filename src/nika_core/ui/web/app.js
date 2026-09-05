@@ -6,6 +6,14 @@
   const keymapBody = document.getElementById("keymap-body");
   const keymapJson = document.getElementById("keymap-json");
   const commandInput = document.getElementById("command-input");
+  const sourceInputs = Object.freeze({
+    root: document.getElementById("source-root"),
+    source_a: document.getElementById("source-a"),
+    source_b: document.getElementById("source-b"),
+  });
+  const sourceStatus = document.getElementById("source-setup-status");
+  let sourceRevision = 0;
+  let sourceDirty = false;
   const tasksList = document.getElementById("tasks-list");
   const agentsList = document.getElementById("agents-list");
   const workspacesList = document.getElementById("workspaces-list");
@@ -434,6 +442,32 @@
     return { ok: true, changed };
   }
 
+  function renderSourceSetup(selection) {
+    if (!sourceStatus || selection == null) return;
+    if (!["ready", "missing"].includes(selection.status)
+        || !Number.isSafeInteger(selection.revision) || selection.revision < 0
+        || !Object.keys(sourceInputs).every((key) => typeof selection[key] === "string")) {
+      sourceStatus.textContent = "Налаштування джерел недоступні або несумісні.";
+      return;
+    }
+    sourceStatus.textContent = selection.status === "ready"
+      ? "Джерела збережено. Можна створити нове командне завдання."
+      : "Спочатку вкажіть папку та два файли й натисніть «Зберегти джерела».";
+    if (sourceDirty) return;
+    sourceRevision = selection.revision;
+    for (const [key, input] of Object.entries(sourceInputs)) {
+      if (input) input.value = selection[key];
+    }
+  }
+
+  for (const input of Object.values(sourceInputs)) {
+    input?.addEventListener("input", () => { sourceDirty = true; });
+  }
+  document.getElementById("source-reload")?.addEventListener("click", async () => {
+    sourceDirty = false;
+    if (await refreshState()) announce("Збережені налаштування перечитано.");
+  });
+
   async function refreshState({ announceTeamTransitions = true } = {}) {
     if (!globalThis.pywebview?.api?.get_state) {
       reportStateUnavailable();
@@ -451,6 +485,7 @@
       return false;
     }
     const state = response.state || {};
+    renderSourceSetup(state.v01_sources ?? null);
     renderItems(tasksList, tasksEmpty, state.tasks || [], (item) => `${item.command || "Без назви"} — ${item.state}`);
     renderItems(agentsList, agentsEmpty, state.agents || [], (item) => `${item.name} — ${item.goal}`);
     renderItems(workspacesList, workspacesEmpty, state.workspaces || [], (item) => `${item.name} — ${item.description || "Без опису"}`);
@@ -474,8 +509,13 @@
     }
     const payload = {};
     if (actionId === "task.create") payload.command = commandInput.value.trim();
+    if (actionId === "team.sources.configure") {
+      payload.revision = sourceRevision;
+      for (const [key, input] of Object.entries(sourceInputs)) payload[key] = input?.value ?? "";
+    }
     const result = await globalThis.pywebview.api.dispatch({ request_id: requestId(), action_id: actionId, payload });
     const failed = result.status === "failed" || result.status === "rejected";
+    if (actionId === "team.sources.configure" && result.status === "completed") sourceDirty = false;
     announce(result.message || (result.status === "completed" ? "Виконано." : result.status), failed);
     appendLog(result.message);
     const stateReady = await refreshState();
