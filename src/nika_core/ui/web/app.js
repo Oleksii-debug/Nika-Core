@@ -320,12 +320,16 @@
       return false;
     }
     const roles = members.map((member) => member.role);
-    if (new Set(roles).size !== roles.length || !roles.includes("supervisor") || !roles.includes("worker")) {
-      return false;
-    }
-    if ((team.roster_complete && !roles.includes("checker")) || (!team.roster_complete && roles.includes("checker"))) {
-      return false;
-    }
+    const memberIds = members.map((member) => member.member_id);
+    if (new Set(memberIds).size !== memberIds.length) return false;
+    const count = (role) => roles.filter((item) => item === role).length;
+    const legacyRoster = count("supervisor") === 1 && count("worker") === 1
+      && count("checker") === (team.roster_complete ? 1 : 0);
+    const sourceRoster = count("supervisor") === 0 && count("checker") === 1
+      && count("worker") === (team.roster_complete ? 2 : 1);
+    if (!legacyRoster && !sourceRoster) return false;
+    if (!team.roster_complete
+        && (team.state === "completed" || finalResult?.status === "completed")) return false;
     if (!Array.isArray(events) || !events.every(validTeamEvent)) return false;
     return validFinalResult(finalResult, task.task_id, team.team_id);
   }

@@ -194,10 +194,8 @@ def test_accepted_task_keeps_sources_if_settings_change_before_runtime_start(
     state = bridge.get_state()["state"]
     assert state["v01_sources"]["root"] == b["root"]
     assert state["v01_team_task"]["team"]["member_count"] == 3
-    proof = Path(__file__).resolve().parents[1] / "scripts" / "m5_uia_proof.ps1"
     final = state["v01_team_task"]["final_result"]
     assert final["status"] == "completed"
-    assert final["summary"] in proof.read_text(encoding="utf-8")
     with store.connection() as conn:
         count = conn.execute("SELECT COUNT(*) FROM multi_agent_results").fetchone()[0]
     for path in Path(a["root"]).iterdir():

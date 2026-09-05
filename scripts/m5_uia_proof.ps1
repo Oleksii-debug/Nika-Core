@@ -577,7 +577,7 @@ try {
         Set-BoundControlFocus $startControl
         [System.Windows.Forms.SendKeys]::SendWait(' ')
         try {
-            Wait-DescendantName 'Командне завдання завершено; записи результатів учасників зафіксовано.' ([System.Windows.Automation.ControlType]::Text) | Out-Null
+            Wait-DescendantName 'Командне завдання завершено; збережені результати учасників доступні.' ([System.Windows.Automation.ControlType]::Text) | Out-Null
         } catch {
             # Diagnostics are restricted to this proof's clean, controlled database
             # and the exact bound Nika window. No source contents or stored payloads.

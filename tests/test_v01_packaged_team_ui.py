@@ -53,7 +53,7 @@ def test_renderer_uses_backend_members_only_and_polling_never_moves_focus() -> N
 
     assert "for (const member of members)" in render
     assert 'document.createElement("h4")' in source
-    assert 'teamMembersList.appendChild(renderTeamMember(member))' in render
+    assert "teamMembersList.appendChild(renderTeamMember(member))" in render
     assert "innerHTML" not in source
     assert "setInterval" in polling
     assert ".focus(" not in polling
@@ -77,7 +77,9 @@ def test_windows_bridge_composes_team_projection_into_existing_pywebview_state()
     assert "launch_windows_shell(bridge" in source
 
 
-def _rendered_team_snapshot() -> dict[str, object]:
+def _rendered_team_snapshot(
+    *, live_projection: dict[str, object] | None = None
+) -> dict[str, object]:
     if _NODE is None:
         pytest.skip("Node.js is required for the packaged team renderer canary regression")
 
@@ -139,6 +141,8 @@ def _rendered_team_snapshot() -> dict[str, object]:
         },
         "raw_checkpoint": canary,
     }
+    if live_projection is not None:
+        projection = live_projection
     harness = f"""
 const fs = require("fs");
 const PROJECTION = {json.dumps(projection, ensure_ascii=False)};
@@ -273,3 +277,90 @@ def test_renderer_shows_three_real_members_and_never_echoes_raw_secret_fields() 
     assert "Виконання учасника завершилося помилкою." in text
     assert "Перевіряльник завершив операцію з помилкою." in text
     assert "PACKAGED_TEAM_RAW_SECRET_CANARY" not in text
+
+
+def test_renderer_accepts_actual_packaged_team_and_rejects_duplicate_member_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nika_core.config import AppConfig
+    from nika_core.ui.desktop_backend import DesktopBackend
+    from scripts.nika_windows import build_windows_bridge
+
+    source_root = tmp_path / "Джерела команди"
+    source_root.mkdir()
+    for name in ("А.txt", "Б.txt"):
+        (source_root / name).write_text("Контрольоване спільне свідчення.", encoding="utf-8")
+    config = AppConfig(database_path=tmp_path / "nika.db")
+    pending = []
+    original_start = DesktopBackend._schedule_start
+    monkeypatch.setattr(
+        DesktopBackend,
+        "_schedule_start",
+        lambda self, task, command: pending.append((self, task, command)),
+    )
+    bridge, _ = build_windows_bridge(config)
+    assert (
+        bridge.dispatch(
+            {
+                "request_id": "live-sources",
+                "action_id": "team.sources.configure",
+                "payload": {
+                    "root": str(source_root),
+                    "source_a": "А.txt",
+                    "source_b": "Б.txt",
+                    "revision": 0,
+                },
+            }
+        )["status"]
+        == "completed"
+    )
+    assert (
+        bridge.dispatch(
+            {
+                "request_id": "live-task",
+                "action_id": "task.create",
+                "payload": {"command": "Порівняй джерела"},
+            }
+        )["status"]
+        == "accepted"
+    )
+    backend, task_id, command = pending.pop()
+    original_start(backend, task_id, command)
+    backend.close()
+    projection = bridge.get_state()["state"]["v01_team_task"]
+    assert projection["team"]["state"] == "completed"
+    assert sorted(member["role"] for member in projection["members"]) == [
+        "checker",
+        "worker",
+        "worker",
+    ]
+    rendered = _rendered_team_snapshot(live_projection=projection)
+    assert rendered["ready"] == "true"
+    assert rendered["member_count"] == 3
+    assert rendered["summary_hidden"] is False
+    completed_text = "Командне завдання завершено; збережені результати учасників доступні."
+    assert completed_text in rendered["rendered"]
+    assert completed_text in (_ROOT / "scripts" / "m5_uia_proof.ps1").read_text(encoding="utf-8")
+    partial = json.loads(json.dumps(projection))
+    partial["members"] = [
+        member for member in partial["members"] if member["member_id"] != "worker-b"
+    ]
+    partial["team"].update(member_count=2, roster_complete=False, state="active")
+    partial["final_result"] = None
+    waiting = _rendered_team_snapshot(live_projection=partial)
+    assert waiting["ready"] == "true"
+    assert waiting["member_count"] == 2
+    assert completed_text not in waiting["rendered"]
+    partial["final_result"] = projection["final_result"]
+    assert _rendered_team_snapshot(live_projection=partial)["summary_hidden"] is True
+    for fault in ("duplicate_identity", "missing_checker"):
+        invalid = json.loads(json.dumps(projection))
+        if fault == "duplicate_identity":
+            invalid["members"][1]["member_id"] = invalid["members"][0]["member_id"]
+        else:
+            for member in invalid["members"]:
+                member["role"] = "worker"
+        rejected = _rendered_team_snapshot(live_projection=invalid)
+        assert rejected["ready"] == "false"
+        assert rejected["summary_hidden"] is True
+        assert rejected["member_count"] == 0
