@@ -576,7 +576,30 @@ try {
         Set-BoundControlValue $commandControl 'Порівняй два контрольовані джерела.'
         Set-BoundControlFocus $startControl
         [System.Windows.Forms.SendKeys]::SendWait(' ')
-        Wait-DescendantName 'Командне завдання завершено; записи результатів учасників зафіксовано.' ([System.Windows.Automation.ControlType]::Text) | Out-Null
+        try {
+            Wait-DescendantName 'Командне завдання завершено; записи результатів учасників зафіксовано.' ([System.Windows.Automation.ControlType]::Text) | Out-Null
+        } catch {
+            # Diagnostics are restricted to this proof's clean, controlled database
+            # and the exact bound Nika window. No source contents or stored payloads.
+            $diagnosticWindow = Find-ExactWindow
+            if ($null -ne $diagnosticWindow) {
+                $diagnosticNames = Get-BoundDescendantNames $diagnosticWindow
+                Write-Host ('Controlled proof UIA names: ' + (($diagnosticNames | Select-Object -Unique | Select-Object -First 120) -join ' | '))
+            }
+            $stateProbe = @'
+import sqlite3, sys
+from pathlib import Path
+with sqlite3.connect(Path(sys.argv[1]).resolve().as_uri() + '?mode=ro', uri=True) as db:
+    for table in ('tasks', 'multi_agent_teams', 'multi_agent_members'):
+        counts = {}
+        for state in ('ready', 'running', 'active', 'completed', 'failed', 'cancelled', 'paused'):
+            counts[state] = db.execute('SELECT COUNT(*) FROM ' + table + ' WHERE LOWER(state) = ?', (state,)).fetchone()[0]
+        print('Controlled proof states:', table, counts)
+    print('Controlled proof result rows:', db.execute('SELECT COUNT(*) FROM multi_agent_results').fetchone()[0])
+'@
+            $stateProbe | python - $env:NIKA_DB_PATH
+            throw
+        }
         Write-Host 'Packaged source setup -> save action -> canonical task/team -> visible completed result verified.'
     }
 
