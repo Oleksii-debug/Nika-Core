@@ -80,6 +80,7 @@ def test_saved_unicode_setup_survives_restart_and_audit_omits_paths(tmp_path: Pa
         {"source_a": ""},
         {"source_b": 123},
         {"revision": True},
+        {"schema_version": True},
         {"permission": "unrestricted"},
     ],
 )
@@ -102,6 +103,28 @@ def test_oversized_source_is_rejected_before_any_selection_is_saved(tmp_path: Pa
         handle.truncate(16 * 1024 * 1024 + 1)
     assert settings.configure({**paths, "revision": 0}).status == "rejected"
     assert settings.snapshot()["status"] == "missing"
+
+
+@pytest.mark.parametrize("corrupt_revision", ["PRIVATE_REVISION_CANARY", 1.5, 1 << 53])
+def test_corrupt_revision_keeps_other_state_readable_and_blocks_new_tasks(
+    tmp_path: Path, corrupt_revision: object
+) -> None:
+    store, config, settings = _settings(tmp_path)
+    paths = _files(tmp_path / "Файли")
+    assert settings.configure({**paths, "revision": 0}).status == "completed"
+    # SQLite's numeric affinity and revision > 0 check alone also accept text
+    # or a positive non-integral number. The service must validate stored types.
+    with store.connection() as conn:
+        conn.execute("UPDATE v01_source_settings SET revision = ?", (corrupt_revision,))
+    bridge, _ = build_windows_bridge(config)
+    state = bridge.get_state()
+    assert state["ok"] is True
+    assert state["state"]["v01_sources"] == {"status": "invalid"}
+    result = _dispatch(bridge, "task.create", {"command": "Порівняй джерела"})
+    assert result["status"] == "rejected"
+    assert "PRIVATE_REVISION_CANARY" not in json.dumps([state, result])
+    assert TaskQueue(store).list_recent() == ()
+    assert settings.configure({**paths, "revision": 1}).status == "rejected"
 
 
 def test_symlink_cannot_escape_declared_root(tmp_path: Path) -> None:
@@ -171,6 +194,10 @@ def test_accepted_task_keeps_sources_if_settings_change_before_runtime_start(
     state = bridge.get_state()["state"]
     assert state["v01_sources"]["root"] == b["root"]
     assert state["v01_team_task"]["team"]["member_count"] == 3
+    proof = Path(__file__).resolve().parents[1] / "scripts" / "m5_uia_proof.ps1"
+    final = state["v01_team_task"]["final_result"]
+    assert final["status"] == "completed"
+    assert final["summary"] in proof.read_text(encoding="utf-8")
     with store.connection() as conn:
         count = conn.execute("SELECT COUNT(*) FROM multi_agent_results").fetchone()[0]
     for path in Path(a["root"]).iterdir():

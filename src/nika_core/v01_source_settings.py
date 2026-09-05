@@ -18,6 +18,7 @@ from nika_core.research.local import local_media_type, resolve_local_file
 from nika_core.ui.bridge_models import UIResult
 
 MAX_SOURCE_BYTES = 16 * 1024 * 1024
+MAX_SETUP_REVISION = (1 << 53) - 1
 _SCHEMA_VERSION = 1
 _MIGRATIONS = {
     1: (
@@ -49,6 +50,13 @@ class SourceSelection(BaseModel):
     root: str = Field(min_length=1, max_length=32767)
     source_a: str = Field(min_length=1, max_length=32767)
     source_b: str = Field(min_length=1, max_length=32767)
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def schema_integer(cls, value: Any) -> int:
+        if type(value) is not int or value != 1:
+            raise ValueError("unsupported source schema")
+        return value
 
     @field_validator("root", "source_a", "source_b")
     @classmethod
@@ -100,7 +108,7 @@ class SourceSelection(BaseModel):
 
 
 class _SetupRequest(SourceSelection):
-    revision: int = Field(ge=0)
+    revision: int = Field(ge=0, lt=MAX_SETUP_REVISION)
 
 
 class V01SourceSettings:
@@ -134,8 +142,18 @@ class V01SourceSettings:
                     (version, datetime.now(UTC).isoformat()),
                 )
 
+    @staticmethod
+    def _revision(row: sqlite3.Row | None) -> int:
+        if row is None:
+            return 0
+        revision = row["revision"]
+        if type(revision) is not int or not 0 < revision <= MAX_SETUP_REVISION:
+            raise SourceSetupError("Збережена версія налаштувань джерел некоректна.")
+        return revision
+
     def _selected(self, conn: sqlite3.Connection) -> SourceSelection:
         row = conn.execute("SELECT * FROM v01_source_settings WHERE singleton = 1").fetchone()
+        self._revision(row)
         selection = (
             SourceSelection.from_stored(row["selection_json"]) if row else self._default_selection()
         )
@@ -204,7 +222,7 @@ class V01SourceSettings:
             )
             return {
                 "status": "ready" if selection else "missing",
-                "revision": int(row["revision"]) if row else 0,
+                "revision": self._revision(row),
                 "root": selection.root if selection else "",
                 "source_a": selection.source_a if selection else "",
                 "source_b": selection.source_b if selection else "",
@@ -225,7 +243,7 @@ class V01SourceSettings:
                 ).fetchone()
                 if row:
                     SourceSelection.from_stored(row["selection_json"])
-                revision = int(row["revision"]) if row else 0
+                revision = self._revision(row)
                 if revision != request.revision:
                     raise SourceSetupError(
                         "Налаштування вже змінено в іншому вікні. "

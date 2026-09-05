@@ -576,7 +576,7 @@ try {
         Set-BoundControlValue $commandControl 'Порівняй два контрольовані джерела.'
         Set-BoundControlFocus $startControl
         [System.Windows.Forms.SendKeys]::SendWait(' ')
-        Wait-DescendantName 'Командне завдання завершено; збережені результати учасників доступні.' | Out-Null
+        Wait-DescendantName 'Командне завдання завершено; записи результатів учасників зафіксовано.' ([System.Windows.Automation.ControlType]::Text) | Out-Null
         Write-Host 'Packaged source setup -> save action -> canonical task/team -> visible completed result verified.'
     }
 
