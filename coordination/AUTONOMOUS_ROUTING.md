@@ -1,239 +1,300 @@
 # Nika Core — current autonomous routing
 
-EPOCH: EPOCH-0003
+EPOCH: EPOCH-0004
 STATUS: ACTIVE
-AUDIT_TIME: 2026-09-06T22:20:00+02:00
+AUDIT_TIME: 2026-09-06T23:18:00+02:00
 AUDIT_BASE_MAIN: 8cba6f5fba3f98bee0a575b41b7210bd80247d1c
-LAST_GLOBAL_AUDIT: 2026-09-06T22:20:00+02:00
+LAST_GLOBAL_AUDIT: 2026-09-06T23:18:00+02:00
 NEXT_AUDIT_RULE: first eligible coordinator-capable worker after >=6h, or immediately after a major integration/blocker/Windows-NVDA readiness change
 FAILOVER_AUDIT_RULE: another capable worker may refresh after approximately 8h without a valid audit
 CURRENT_VERSION: V0.1_ONLY_UNTIL_RELEASE
 
 ## Source-of-truth hierarchy
 
-1. Live GitHub `main`, exact candidate heads, reviews and Actions are technical truth.
+1. Live GitHub main, exact candidate heads, reviews and Actions are technical truth.
 2. This file is the current project-local routing authority.
-3. Issue #553 is the durable coordination/ownership/event stream and may carry a newer emergency routing checkpoint while a routing PR is pending.
-4. Google Drive mirrors this routing in owner-readable form for cross-account continuity.
-5. Static Scheduled Task prompts define only stable home lanes and startup procedure. They never override newer live routing.
+3. Issue #553 is the durable ownership/event stream and may carry an emergency routing checkpoint newer than this branch.
+4. Google Drive mirrors routing in owner-readable form for cross-account continuity.
+5. Static Scheduled Task prompts define stable home lanes and startup procedure only. They never carry exact PR/SHA priorities and never override this routing.
 
-Every recurring worker, Codex Cloud run and Work run must reread this hierarchy before substantive work.
+Every Scheduled Worker, Codex Cloud run and Work run must reread this hierarchy before substantive work.
 
-## Current owner-facing V0.1 truth
+## Owner-facing V0.1 truth
 
-### Already integrated and must not be reimplemented
+### Integrated and DO NOT REIMPLEMENT
 
-- real packaged three-agent execution path;
-- packaged user source setup for the representative V0.1 journey;
-- provider-neutral ModelGateway composition with practical local and configured API routes;
+The following foundations are already on main and are regression/composition dependencies only:
+
+- real packaged canonical three-agent execution;
+- durable keyboard source setup and task-source binding;
+- one provider-neutral multi-agent ModelGateway runtime with practical local and configured API routes;
+- canonical credential-reference API route boundary;
 - startup/runtime recovery foundations;
+- terminal task authority over scheduled wakes;
 - durable pre-effect offline/reconnect wait and safe continuation;
 - fail-closed PENDING/UNCERTAIN external-effect semantics: ambiguous effects are not blindly resent;
-- semantic browser stale-DOM/frame/document identity hardening;
+- browser stale-DOM/frame/document semantic authority;
 - Windows autostart backend;
-- canonical per-user data/recovery/migration foundations.
+- canonical per-user data location, legacy-data adoption and recovery foundations.
 
-These are integrated foundations, not proof that the complete final Windows product is released.
+These foundations do not mean the complete Windows release is finished.
 
 ### Still open before usable Windows/NVDA V0.1
 
-- active durable Pause/Resume across process/Windows restart;
-- current-main recurrence / hibernate / missed-run lifecycle;
-- one accepted current-main browser Scenario B: 20 declared targets, max 5 active, task-owned tabs, semantic action, observable verification, effect-safe retry/isolation, durable cursor/wait and bounded per-target report;
-- one accepted current-main monitoring Scenario A: durable previous/current observation, change detection, condition/deadline, recurrence and report;
-- packaged model-selection/configuration path: saved user choice must select the already-integrated local/API ModelGateway runtime and survive restart without leaking credentials;
-- user-visible Windows autostart setting plus real packaged restart/persistence proof on the current integrated product;
-- final clean-install/package/update/recovery/SBOM/provenance/governance qualification;
-- exact integrated V0.1 release candidate;
-- human Windows keyboard/NVDA acceptance and repair loop.
+1. Durable active Pause/Resume across process/Windows restart.
+2. Current-main recurrence / hibernate / missed-run lifecycle.
+3. One accepted current-main browser Scenario B:
+   20 declared targets -> max 5 active -> bounded readiness -> task-owned tabs -> semantic action -> observable verification -> effect-safe retry/isolation -> durable cursor/wait -> bounded per-target report -> pause/restart/resume -> cancel.
+4. One accepted current-main monitoring Scenario A using accepted recurrence and durable observation/change/condition/report components.
+5. Packaged user provider/model selection -> durable safe config -> already-integrated ModelGatewayAgentRuntime -> same three-agent task after restart.
+6. User-visible Windows autostart settings + current-main packaged restart proof.
+7. Final Session/Worker Control Center truth for real task/team/model/offline/recovering/paused/uncertain states.
+8. Final package/install/update/recovery/SBOM/provenance/governance qualification.
+9. One exact integrated release candidate.
+10. Oleksii human Windows keyboard/NVDA acceptance and repair loop.
 
 HUMAN_TESTED=false
 NVDA_VERIFIED=false
 PRODUCTION_RELEASE_READY=false
 
-## Current product evidence
+## Current main / governance
 
-- Current audited main at this epoch: `8cba6f5fba3f98bee0a575b41b7210bd80247d1c`.
-- Exact current-main Core CI is terminal SUCCESS.
-- Main branch protection / required-status enforcement is not proven and remains a release-governance blocker.
-- Current exact-main Core green alone is not final package/release evidence.
+- Audit main: 8cba6f5fba3f98bee0a575b41b7210bd80247d1c.
+- Current-main Core CI is terminal SUCCESS.
+- main is not protected and required-status enforcement is off. This remains a release-governance blocker.
+- Future Living Agent/voice/mobile/self-learning/Product Factory implementation is preserved in architecture but frozen until V0.1 unless a concrete direct V0.1 dependency is proven.
 
-## Do not repeat / stale or superseded work
+## Classification of prior directions
 
-- STOP_STALE: new offline/reconnect implementation. The current foundation is already integrated; only regression/composition work remains.
-- STOP_STALE: new local/API ModelGateway core/provider router. The unified runtime path is already integrated.
-- STOP_STALE: new source-setup implementation. Source setup is integrated.
-- STOP_STALE: new stale-DOM/frame semantic browser authority implementation. It is integrated.
-- STOP_STALE: a second Windows autostart backend. The backend is integrated.
-- STOP_STALE as merge targets: historical cursor branches superseded by the newest exact-current successor process. Preserve unique evidence only.
-- STOP_STALE as merge target: historical connectivity candidate superseded by the integrated successor.
-- QA_ONLY: evidence/oracles only; NEVER_MERGE.
-- FROZEN_FUTURE_SCOPE: Living Agent voice, Telegram/mobile embodiment, camera, self-learning source expansion, Product Factory and other V0.2+ work unless a concrete direct V0.1 dependency is proven.
-- Historical green/audit on an old SHA is evidence only and never transfers to a moved candidate.
+- Offline/reconnect implementation: STOP_STALE. Keep only regression/composition coverage.
+- Local/API ModelGateway core/provider router: STOP_STALE. PROMOTE packaged model/provider choice.
+- Source setup: STOP_STALE. Keep as final product dependency.
+- Browser stale-DOM/frame authority: STOP_STALE. Keep as Scenario-B dependency.
+- Windows autostart backend: STOP_STALE. PROMOTE packaged setting/restart proof.
+- Durable recurrence/hibernate: KEEP/PROMOTE; current-main repair is active.
+- Durable Pause/Resume restart: PROMOTE after recurrence ownership permits.
+- Durable batch cursor: PROMOTE; waiting independent same-head qualification.
+- Task-owned tabs: KEEP but current candidate has a precise owner repair before acceptance.
+- Bounded batch executor: KEEP/PROMOTE; current-main qualification active.
+- Typed page readiness: KEEP/PROMOTE; current-main qualification active.
+- Full Scenario B: PROMOTE after the above leaves qualify.
+- Full monitoring Scenario A: PROMOTE after recurrence qualifies.
+- QA_ONLY branches: NEVER_MERGE; preserve unique evidence only.
+- Historical superseded production branches: STOP_STALE as merge targets after unique fixes/evidence are mapped.
 
-## Old-direction classification
+## Independent-audit fail-safe
 
-- Offline/reconnect: STOP_STALE as implementation; KEEP as integrated regression dependency.
-- Local/API ModelGateway core: STOP_STALE as implementation; PROMOTE the final packaged model-choice seam.
-- Durable Pause/Resume: PROMOTE.
-- Recurrence/hibernate/misfire: PROMOTE.
-- Browser durable cursor: CHANGE to the newest current-main successor; older cursor candidates are STOP_STALE/SUPERSEDED.
-- Full browser Scenario B composition: PROMOTE.
-- Monitoring component lineages: CHANGE from isolated components to one current-main composition; do not create a second monitoring/scheduler framework.
-- Windows autostart backend: STOP_STALE as backend implementation; PROMOTE accessible UI/settings + packaged restart proof.
-- Final package/install/recovery/governance: PROMOTE.
-- Living Agent / voice / 12-6 learning loops: KEEP as official future architecture, FROZEN for V0.1 production work.
+The five-worker topology must never deadlock because Integrator cannot self-audit.
 
-## Worker 1 — Stability / continuity
+Worker 1 has a secondary independent-auditor duty for OTHER lanes:
 
-HOME_LANE: runtime/task durability, pause/resume, restart, offline/reconnect, recurrence, no duplicate actions.
+1. before beginning a new Stability source mutation, inspect the routing audit queue;
+2. if an exact-head production candidate from another lane is CI-green and waiting only independent same-head review, audit it first;
+3. Worker 1 must NEVER independently clear a Stability candidate authored/owned by Worker 1;
+4. after external audit queue is consumed, Worker 1 returns to Stability development;
+5. Worker 5 remains merge-only and never self-audits.
 
-CURRENT_TARGET:
-1. Repair and converge current-main durable recurrence/hibernate candidate. The currently known candidate is semantically narrow but has a small Ruff/lint RED and stale base; fix only exact lint defects, converge current main, preserve canonical scheduler/cancel/effect authority, rerun focused/Core/M12 and request independent audit.
-2. PROMOTE durable active Pause/Resume across restart. Reuse the incumbent historical pause lineage; do not fork a second runtime coordinator. If the incumbent has not moved, produce a thin current-main successor only after ownership verification.
-3. Keep integrated offline/reconnect and uncertain-effect behavior as regression/composition dependencies, not new implementations.
+Current external audit priority:
+- durable batch cursor first when exact head remains unchanged and green;
+- Windows autostart/settings next after its current exact head finishes required gates;
+- then other cross-lane exact-green leaves in routing order.
 
-AVOID:
-- second scheduler;
-- second effect ledger;
-- reimplementing integrated reconnect;
-- touching browser/UI/model ownership without an explicit dependency handoff.
+## Worker 1 — Stability / continuity + external audit fail-safe
 
-## Worker 2 — AI / ModelGateway
+HOME_LANE:
+long tasks; pause/resume; restart; recurrence; hibernate/misfire; offline/reconnect regression; no duplicate effects.
 
-HOME_LANE: local AI, API AI, ModelGateway, model configuration and future 12-6-compatible port boundary.
+STARTUP:
+read this routing file, newest Issue #553 routing checkpoint, live main, open ownership and exact Actions; classify the previous target KEEP / CHANGE / STOP_STALE / COLLISION / PROMOTE.
 
-CURRENT_TARGET:
-1. Do NOT rebuild local/API routes; they are integrated.
-2. PROMOTE the final packaged model-selection seam: user-configured provider/model -> durable safe settings -> same integrated ModelGatewayAgentRuntime -> real three-agent product task.
-3. Prove restart-stable provider/model identity, bounded timeout/cancel, safe credential reference/config boundary, no raw secret in task/handoff/audit/UI, no silent local<->cloud switching and no silent model download.
-4. Keep 12-6 as a future replaceable brain/provider boundary only. Do not start 12-6/Living Agent implementation under V0.1.
+CURRENT DEVELOPMENT TARGET:
+- finish the incumbent recurrence current-main repair with only the already-localized compatibility/lint corrections; preserve canonical scheduler/cancel/effect authorities;
+- after recurrence is independently accepted/integrated or ownership blocks further work, take durable active Pause/Resume across restart from the incumbent lineage;
+- do not rebuild offline/reconnect.
 
-If another active owner already owns the packaged setting/UI source, implement only backend/config/runtime seam or provide a compatibility handoff rather than colliding.
+CURRENT AUDIT DUTY:
+- consume exact-green external audit leaves before new Stability mutation;
+- never self-audit recurrence/pause work owned by this worker.
+
+If current work is waiting CI/owner, perform a useful independent audit or take the next unowned Stability package instead of idling.
+
+## Worker 2 — AI / ModelGateway product composition
+
+HOME_LANE:
+local AI; API AI; ModelGateway; user provider/model configuration; future 12-6-compatible brain port.
+
+DO_NOT_REPEAT:
+- local/API provider router;
+- ModelGateway core;
+- new local/API runtime adapter.
+
+CURRENT TARGET:
+- implement/qualify the final packaged provider/model selection seam;
+- user choice must be durable, safe and restart-stable;
+- the choice must drive the already-integrated ModelGatewayAgentRuntime used by the real three-agent task;
+- no silent local/cloud switching;
+- no raw credentials in task state, handoffs, audit or UI;
+- no silent model download;
+- bounded timeout/cancel and safe error projection.
+
+12-6 remains a future replaceable brain/provider boundary only. No Living Agent/voice/self-learning source expansion before V0.1.
+
+If UI files are owned by Worker 4, stay on backend/config/runtime seam and publish compatibility handoff rather than colliding.
 
 ## Worker 3 — Actions / browser / monitoring
 
-HOME_LANE: semantic browser execution, bounded batches, monitoring and long automation.
+HOME_LANE:
+browser; bounded batches; task-owned tabs; readiness; durable cursor; per-target report; monitoring; long automation.
 
-CURRENT_TARGET:
-1. Take the newest durable batch-cursor successor and keep it exact-current. A predecessor already passed Core/M12 + independent audit but became stale only because main moved through coordination/docs commits; REUSE the audited two-file semantic delta, do not rewrite the cursor engine.
-2. After cursor integration, compose one current-main Scenario B:
-   declared 20 targets -> max 5 active -> task-owned tabs -> governed navigation -> semantic action -> observable verification -> effect-safe retry/isolation -> durable inter-batch wait/cursor -> pause/restart/resume -> bounded per-target report -> cancel stops future work.
-3. Then compose one current-main monitoring Scenario A using existing observation/change/condition/report components plus accepted recurrence. No second scheduler/monitor engine.
+CURRENT LIVE FRONT:
+- durable batch cursor is green but still requires independent same-head audit before integration;
+- task-owned tabs candidate has a real Work-found defect: ordinary ephemeral query/fragment navigation must remain allowed under NEVER policy while durable SAME_TARGET persistence must reject query/fragment material. Repair only this distinction; do not create a new tab manager;
+- bounded max-five batch executor current-main qualification is active;
+- typed page-readiness current-main qualification is active.
 
-CURRENT_FIRST_PRODUCT_BREAK: no accepted one-head Scenario B yet.
+CURRENT TARGET ORDER:
+1. repair the precise task-tab persistence-vs-ephemeral-navigation defect;
+2. finish current qualification of bounded executor and typed readiness;
+3. after cursor/tabs/readiness/batch leaves qualify, compose one exact Scenario B rather than accumulating sibling greens;
+4. add existing observable verification, effect-safe retry/isolation, durable inter-batch wait and per-target report;
+5. after recurrence acceptance, compose monitoring Scenario A from existing monitor components.
 
-## Worker 4 — Windows / user readiness
+No second browser/scheduler/retry/monitor engine.
 
-HOME_LANE: Windows 11, accessibility, keyboard-only, packaged UX, autostart settings, package/install QA.
+## Worker 4 — Windows / accessibility / package readiness
 
-CURRENT_TARGET:
-1. Converge the existing packaged autostart-settings/restart-proof candidate onto current main. Its old exact head had Core/M11/M12 success; that evidence cannot transfer, but the implementation should be reused rather than rewritten.
-2. Prove user-visible checkbox/settings truth against the integrated autostart backend and actual packaged restart persistence.
-3. Continue final Session/Worker Control Center product truth: real task/team/model/offline/recovering/paused/uncertain states; Start/Pause/Resume/Cancel backed by durable state; no JS-owned lifecycle.
-4. Prepare and automate keyboard/focus/UIA/package checks on the exact composed candidate.
-5. Prepare the human NVDA protocol, but never set HUMAN_TESTED/NVDA_VERIFIED from automation.
+HOME_LANE:
+Windows 11; keyboard-only; WebView2/UIA; autostart settings; Session/Worker Control Center; package/install QA.
 
-## Worker 5 — Integration / release / periodic coordinator
+CURRENT TARGET:
+- finish current-main qualification of the existing packaged autostart settings/restart-proof lineage;
+- do not create a second autostart backend;
+- prove backend-acknowledged read/enable/disable/stale state, no blind retry, keyboard/focus semantics and packaged restart persistence;
+- continue Session/Worker Control Center only against real durable backend state;
+- expose real task/team/model/offline/recovering/paused/uncertain truth;
+- prepare exact package/install/restart/UIA evidence.
 
-HOME_LANE: guarded integration, exact release candidate, packaging/recovery/governance, ownership and periodic whole-project audit.
+Automation may prove keyboard/UIA mechanics but never HUMAN_TESTED or NVDA_VERIFIED.
 
-NORMAL_RUN:
-- integrate only exact-current, dependency-ready, same-head required-CI-green, independently cleared production candidates one at a time;
-- after each merge reread main, rebuild dependencies and invalidate stale evidence;
-- continue real package/recovery/governance work rather than acting as a permanent passive coordinator.
+## Worker 5 — Integrator / release / periodic coordinator
 
-COORDINATION_DUTY:
-- if no valid audit exists, >=6h elapsed, or a major trigger occurred, perform full audit and update this routing epoch;
-- after audit immediately resume productive integration/release work;
-- if no audit by ~8h, another capable worker may perform failover refresh.
+HOME_LANE:
+guarded integration; release candidate; packaging/recovery/governance; ownership resolution; periodic whole-project audit.
 
-CURRENT_INTEGRATION_FRONTIER:
-- no stale predecessor should be merged merely because it was green;
-- consume the first requalified current-main leaf among recurrence/pause, cursor/Scenario-B, packaged model selection and autostart UI;
-- branch protection/required status enforcement remains a final governance blocker.
+NORMAL RUN:
+- read latest four worker checkpoints and this routing;
+- integrate only exact-current, dependency-ready, required-CI-green, independently cleared production candidates;
+- one merge at a time;
+- after every merge reread main, Actions and ownership, then rebuild the queue;
+- never merge QA_ONLY;
+- between merges perform real package/governance/integration work.
 
-## Current candidate routing
+COORDINATION DUTY:
+- if no valid audit exists, >=6h elapsed, or a major trigger occurs, perform full project audit and increment routing epoch;
+- after audit immediately return to productive integration/release work;
+- failover audit may be performed by another capable worker after ~8h.
+
+CURRENT MERGE FRONT:
+- cursor once independently same-head cleared and unchanged;
+- recurrence only after current CI + independent audit by someone other than its author;
+- autostart settings after current gates + independent audit;
+- browser leaves only after current exact qualification and any routed repair.
+
+Governance blocker:
+main branch protection/required-status enforcement remains off and must be resolved before release readiness can be true.
+
+## Current candidate state at EPOCH-0004
+
+### Recurrence / hibernate
+CLASSIFICATION: KEEP / ACTIVE_OWNER / WAITING_CI.
+The incumbent was repaired and converged onto current main; fresh Core/M12 are running. If green, route to an independent auditor that is not Worker 1.
 
 ### Durable batch cursor
-CLASSIFICATION: CHANGE / PROMOTE.
-A recent exact head passed Core + complete M12 and independent review, but main advanced through coordination/docs changes. Create/reuse only a thin exact-current successor of the already-audited delta. Do not restart design.
+CLASSIFICATION: PROMOTE / WAITING_AUDIT.
+Current exact head has Core + complete M12 green and is mergeable, but no independent same-head review is yet recorded. Worker 1 audit fail-safe owns the next review if unchanged.
 
-### Durable recurrence
-CLASSIFICATION: REAL_DEFECT + BASE_STALE.
-The current known candidate fails on a small Ruff-only set before functional tests and is also based on an older main. Repair the narrow lint defects, converge to current main, then exact requalification. No scheduler redesign.
+### Task-owned browser tabs
+CLASSIFICATION: REAL_DEFECT / ACTIVE_OWNER.
+Current-main candidate exists, but Work found an over-broad query/fragment rejection. Keep durable SAME_TARGET secret-safe, while allowing ordinary ephemeral query/fragment navigation under NEVER policy. Owner repairs and requalifies exact head.
 
-### Packaged autostart settings
-CLASSIFICATION: CHANGE / BASE_STALE.
-The known exact head passed Core + M11 + M12, but current main moved. Reuse implementation, converge, re-run current exact gates and independent review. Backend autostart itself is already integrated.
+### Bounded max-five batch execution
+CLASSIFICATION: KEEP / WAITING_CI.
+Current-main thin successor exists; fresh Core/M12 are running.
+
+### Typed page readiness
+CLASSIFICATION: KEEP / WAITING_CI.
+Current-main thin successor exists; fresh Core/M12 are running.
+
+### Windows autostart settings / packaged restart proof
+CLASSIFICATION: PROMOTE / WAITING_CI_THEN_AUDIT.
+Current-main candidate exists and M11 already passed; Core/M12 are running. If green, Worker 1 may independently audit it after cursor, provided Worker 1 did not author it.
+
+### Packaged model/provider selection
+CLASSIFICATION: PROMOTE / UNLEASED_OR_OWNER_CHECK_REQUIRED.
+ModelGateway/local/API runtime is already integrated. The remaining work is durable user selection -> same runtime -> restart-stable product path. Worker 2 owns discovery/claim of the thin unowned seam.
 
 ## Codex Cloud
 
 CURRENT_ACTIVE_PACKAGE: NONE CONFIRMED BY THIS AUDIT.
 
 NEXT_RECOMMENDED_PACKAGE:
-Perform a repository-wide stale/superseded V0.1 PR retirement and exact reuse/dependency sweep without duplicating Workers 1–5:
-- preserve unique QA evidence/oracle references;
-- mark historical production predecessors as superseded when a current successor/integrated implementation exists;
-- identify branches with any unique unintegrated production fix before closure;
-- close/archive only when evidence is preserved and no unique production fix remains;
-- leave a compact current-main candidate graph.
-After cleanup, take the highest-value explicitly unleased integration seam from the latest routing epoch.
+Repository-wide stale/superseded V0.1 retirement and exact reuse/dependency map, disjoint from active Worker 1–5 source ownership:
+- map open historical production/QA lineages;
+- preserve unique QA evidence and unique unintegrated fixes;
+- mark/close only truly superseded work;
+- produce the compact current-main dependency/reuse graph;
+- then take the highest-value explicitly unleased seam from this routing.
 
-Codex must checkpoint after every coherent phase so credit exhaustion is recoverable.
+Codex checkpoints after every coherent phase so credit exhaustion is recoverable without Oleksii.
 
 ## Work / principal architect
 
-CURRENT_ACTIVE_PACKAGE: NONE CONFIRMED BY THIS AUDIT.
+RECENT_RESULT:
+The latest Work-style audit found the concrete task-owned-tabs persistence-vs-ephemeral-navigation defect now routed to Worker 3. This is useful product evidence and changes current B04 acceptance.
 
 NEXT_RECOMMENDED_PACKAGE:
-Deep V0.1 end-to-end product-path audit:
-clean Windows package -> source/model settings -> three-agent task -> browser/monitor work -> offline/restart/pause -> result/report -> package data/recovery.
-Find the first cross-system failure not already leased by Workers 1–5. Implement only that disjoint hard package or route it precisely. Refresh routing immediately after any major result.
+Deep clean-package V0.1 cross-system audit, disjoint from Worker source leases:
+package/source/model settings -> real three-agent task -> browser/monitor -> offline/restart/pause -> result/report -> data recovery.
+Find the FIRST cross-system user-visible failure not already leased. Implement only that disjoint hard package if clearly unowned; otherwise route precisely and continue auditing.
 
-## Parallel and integration order
+## Parallel / integration order
 
-Safe parallel fronts, subject to ownership:
-A. Pause/recurrence continuity.
-B. Batch cursor -> Scenario B.
-C. Packaged model-selection seam.
-D. Autostart UI/package restart proof.
+Parallel fronts:
+A. recurrence -> Pause/Resume continuity;
+B. cursor audit + tabs repair + bounded batch + page readiness;
+C. packaged model/provider selection;
+D. current autostart settings/restart proof;
+E. package/governance preparation that does not assume unintegrated features.
 
-Then converge:
-1. full current-main Scenario B;
-2. full current-main monitoring Scenario A;
-3. exact Windows release candidate;
-4. clean install/update/recovery/SBOM/provenance/governance;
-5. full automated V0.1 acceptance;
-6. Oleksii human Windows + NVDA test;
-7. repair any human-found defects;
-8. V0.1 release.
-
-## Ownership / collision invariant
-
-Before any production mutation:
-- reread this file, Issue #553, open PRs/branches and recent claims;
-- one writer per semantic source slice;
-- active incumbent owner wins;
-- shared-contract edit requires a compatibility decision;
-- if collision exists, audit/route/choose another independent package instead of forking.
+Convergence:
+1. accepted browser leaves -> one exact Scenario B;
+2. accepted recurrence -> one exact monitoring Scenario A;
+3. packaged model selection + Windows control-center truth;
+4. exact Windows release candidate;
+5. clean install/update/recovery/SBOM/provenance/governance;
+6. complete automated V0.1 acceptance;
+7. Oleksii human Windows keyboard + NVDA test;
+8. repair human-found defects;
+9. V0.1 release.
 
 ## Audit cadence
 
-LAST_GLOBAL_AUDIT: 2026-09-06T22:20:00+02:00
-NEXT_FULL_AUDIT_NOT_BEFORE: 2026-09-07T04:20:00+02:00 unless a major trigger occurs
-FAILOVER_AUDIT_AFTER: approximately 2026-09-07T06:20:00+02:00 if no valid refresh exists
+LAST_GLOBAL_AUDIT: 2026-09-06T23:18:00+02:00
+NEXT_FULL_AUDIT_NOT_BEFORE: 2026-09-07T05:18:00+02:00 unless a major trigger occurs
+FAILOVER_AUDIT_AFTER: approximately 2026-09-07T07:18:00+02:00 if no valid refresh exists
 
 Major trigger:
 - major V0.1 merge;
-- blocker closes/appears;
+- a blocker opens/closes;
 - Windows/NVDA/package readiness changes;
-- Work/Codex major package completes;
-- collision/stale ownership discovered;
+- Work/Codex completes a major package;
+- collision or stale ownership is found;
 - routing contradicts live project truth.
 
-## Short owner-readable summary
+## Short owner-readable Ukrainian summary
 
-Nika V0.1 has moved materially beyond a prototype: real packaged three-agent execution, source setup, local/API AI through one gateway, safe pre-effect offline recovery, semantic browser safety and Windows autostart backend are already integrated. The release is still not ready for daily NVDA use. The shortest path now is to finish durable Pause/recurrence, one complete browser Scenario B, one complete monitoring Scenario A, packaged model/autostart settings, then build and qualify one exact Windows release candidate and run the human NVDA test.
+Nika V0.1 вже має реальну команду з трьох агентів, налаштування джерел, єдиний local/API AI шлях, безпечне відновлення після втрати мережі, захист від повторення невизначених зовнішніх дій, базовий автозапуск Windows, відновлення даних і значну частину безпечної браузерної взаємодії.
 
-Oleksii should not need to manually rewrite worker prompts or choose routine next tasks. The workers, Codex and Work are required to read this routing state, compare it with live evidence, drop stale assignments and continue the highest-value unowned V0.1 work automatically.
+Головне, що ще не завершено: Pause/Resume після перезапуску, recurrence/hibernate, повний 20-target browser сценарій, повний monitoring сценарій, користувацький вибір моделі, фінальний autostart UI/restart proof, installer/package/governance та реальна перевірка Олексієм з NVDA.
+
+Олексій не повинен вручну переписувати п'ять Scheduled Tasks або розподіляти звичайну технічну роботу. П'ять стабільних воркерів читають цей живий план, автоматично відкидають завершене/застаріле/зайняте і переходять до наступного незайнятого V0.1 пакета.
