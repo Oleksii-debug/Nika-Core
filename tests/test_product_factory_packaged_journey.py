@@ -263,7 +263,8 @@ def test_real_windows_composition_root_uses_product_command_center_without_ui_ed
     assert '"task.create": backend.create_task' not in source
     assert '"task.create": product_router.create' in source
     assert "base_state=product_state" in source
-    assert "state_provider=packaged_state" in source
+    assert "state_provider=source_state" in source
+    assert '**packaged_state(), "v01_sources": source_settings.snapshot()' in source
 
 
 def test_headless_pf11_composition_proof_survives_process_restart(tmp_path: Path) -> None:
