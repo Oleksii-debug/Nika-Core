@@ -5,6 +5,9 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.multi_agent.checker import V01CheckerAgent
+from nika_core.multi_agent.contracts import AgentHandoff, HandoffKind
+from nika_core.multi_agent.research_results import SourceInspectionAssignment
 
 _STATE_KEY = "v01_team_task"
 _UNAVAILABLE_MESSAGE = "Стан командного завдання недоступний."
@@ -72,6 +75,7 @@ class V01PackagedTeamStateProvider:
         ).fetchall()
 
         stage_by_member: dict[str, str] = {}
+        task_payload_by_member: dict[str, dict[str, Any]] = {}
         shared_task_id: str | None = None
         saw_v01_marker = False
         for row in task_rows:
@@ -103,6 +107,7 @@ class V01PackagedTeamStateProvider:
             if stage != "source_worker" and stage in stage_by_member.values():
                 raise ValueError("duplicate V0.1 stage")
             stage_by_member[recipient_id] = stage
+            task_payload_by_member[recipient_id] = payload
             if sum(item == "source_worker" for item in stage_by_member.values()) > 2:
                 raise ValueError("too many V0.1 source workers")
 
@@ -143,7 +148,7 @@ class V01PackagedTeamStateProvider:
                 raise ValueError("V0.1 three-member roster is incomplete")
 
         result_rows = conn.execute(
-            "SELECT result_id, member_id, outcome, error, created_at "
+            "SELECT result_id, member_id, outcome, payload_json, error, created_at "
             "FROM multi_agent_results WHERE team_id = ? "
             "ORDER BY result_id",
             (team_id,),
@@ -174,12 +179,23 @@ class V01PackagedTeamStateProvider:
         ]
         events = self._event_views(conn, team_id=team_id, roles=roles)
         task_view = self._task_view(base_state, shared_task_id=shared_task_id)
+        comparison = self._comparison_view(
+            conn,
+            shared_task_id=shared_task_id,
+            team_id=team_id,
+            team_state=team_state,
+            root_id=root_id,
+            roles=roles,
+            task_payload_by_member=task_payload_by_member,
+            result_rows=result_rows,
+        )
         final_result = self._final_result(
             shared_task_id=shared_task_id,
             team_id=team_id,
             team_state=team_state,
             members=members,
             result_count=len(result_rows),
+            comparison=comparison,
         )
         return {
             "available": True,
@@ -339,6 +355,131 @@ class V01PackagedTeamStateProvider:
         return events
 
     @staticmethod
+    def _comparison_view(
+        conn: Any,
+        *,
+        shared_task_id: str,
+        team_id: str,
+        team_state: str,
+        root_id: str,
+        roles: Mapping[str, str],
+        task_payload_by_member: Mapping[str, Mapping[str, Any]],
+        result_rows: list[Any],
+    ) -> dict[str, Any] | None:
+        """Reconstruct a bounded safe checker verdict from canonical durable evidence.
+
+        The detailed checker payload contains source locators and result snippets, so none of
+        it crosses this presentation boundary. Legacy teams keep their historical generic
+        terminal summary. Canonical three-agent teams fail closed to evidence_invalid when the
+        persisted checker result cannot be reproduced exactly from durable assignments and
+        worker handoffs.
+        """
+        if team_state != "completed" or roles.get(root_id) != "checker":
+            return None
+
+        invalid = {
+            "status": "evidence_invalid",
+            "validated": False,
+            "source_states": [],
+            "agreement_count": 0,
+            "difference_count": 0,
+        }
+        try:
+            checker_task = task_payload_by_member.get(root_id)
+            if not isinstance(checker_task, Mapping) or checker_task.get("stage") != "checker":
+                return invalid
+            raw_assignments = checker_task.get("source_assignments")
+            if not isinstance(raw_assignments, list) or len(raw_assignments) != 2:
+                return invalid
+            assignments = tuple(
+                SourceInspectionAssignment.from_payload(item)
+                for item in raw_assignments
+                if isinstance(item, Mapping)
+            )
+            if len(assignments) != 2:
+                return invalid
+
+            handoff_rows = conn.execute(
+                "SELECT handoff_id, team_id, sender_id, recipient_id, kind, correlation_id, "
+                "payload_json FROM multi_agent_handoffs "
+                "WHERE team_id = ? AND recipient_id = ? AND kind IN ('result', 'error') "
+                "ORDER BY created_at, handoff_id",
+                (team_id, root_id),
+            ).fetchall()
+            handoffs: list[AgentHandoff] = []
+            for row in handoff_rows:
+                payload = json.loads(row["payload_json"])
+                if not isinstance(payload, dict):
+                    return invalid
+                handoffs.append(
+                    AgentHandoff(
+                        handoff_id=str(row["handoff_id"]),
+                        team_id=str(row["team_id"]),
+                        sender_id=str(row["sender_id"]),
+                        recipient_id=str(row["recipient_id"]),
+                        kind=HandoffKind(str(row["kind"])),
+                        correlation_id=str(row["correlation_id"]),
+                        payload=payload,
+                    )
+                )
+
+            expected = V01CheckerAgent().compare(
+                team_id=team_id,
+                task_id=shared_task_id,
+                checker_id=root_id,
+                assignments=assignments,
+                handoffs=tuple(handoffs),
+            ).to_payload()
+            checker_rows = [row for row in result_rows if str(row["member_id"]) == root_id]
+            if len(checker_rows) != 1:
+                return invalid
+            checker_row = checker_rows[0]
+            if checker_row["outcome"] != "completed" or checker_row["error"] is not None:
+                return invalid
+            persisted = json.loads(checker_row["payload_json"])
+            if not isinstance(persisted, dict) or persisted.get("checker_summary") != expected:
+                return invalid
+
+            sources = expected.get("sources")
+            agreements = expected.get("agreements")
+            differences = expected.get("differences")
+            status = expected.get("status")
+            if (
+                status not in {
+                    "agree",
+                    "disagree",
+                    "partial",
+                    "missing",
+                    "worker_error",
+                    "evidence_invalid",
+                }
+                or not isinstance(sources, list)
+                or len(sources) != 2
+                or not isinstance(agreements, list)
+                or len(agreements) > 100
+                or not isinstance(differences, list)
+                or len(differences) > 100
+            ):
+                return invalid
+            source_states: list[str] = []
+            for source in sources:
+                if not isinstance(source, Mapping):
+                    return invalid
+                state = source.get("state")
+                if state not in {"valid", "missing", "worker_error", "evidence_invalid"}:
+                    return invalid
+                source_states.append(str(state))
+            return {
+                "status": str(status),
+                "validated": True,
+                "source_states": source_states,
+                "agreement_count": len(agreements),
+                "difference_count": len(differences),
+            }
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return invalid
+
+    @staticmethod
     def _final_result(
         *,
         shared_task_id: str,
@@ -346,6 +487,7 @@ class V01PackagedTeamStateProvider:
         team_state: str,
         members: list[dict[str, Any]],
         result_count: int,
+        comparison: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
         if team_state not in _TERMINAL_TEAM_STATES:
             return None
@@ -357,7 +499,7 @@ class V01PackagedTeamStateProvider:
         terminal_members = sum(
             1 for member in members if member["state"] in _TERMINAL_MEMBER_STATES
         )
-        return {
+        result: dict[str, Any] = {
             "status": team_state,
             "summary": summaries[team_state],
             "task_id": shared_task_id,
@@ -365,3 +507,6 @@ class V01PackagedTeamStateProvider:
             "terminal_member_count": terminal_members,
             "result_record_count": result_count,
         }
+        if comparison is not None:
+            result["comparison"] = comparison
+        return result
