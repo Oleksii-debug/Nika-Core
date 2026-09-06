@@ -22,9 +22,21 @@
     <a href="#source-setup-heading">Джерела команди</a>
     <a href="#product-project-heading">ProductProject</a>
     <a href="#keyboard-heading">Клавіатура</a>
+    <a href="#autostart-heading">Автозапуск Windows</a>
   </nav>
 
   <main id="main" tabindex="-1">
+    <section aria-labelledby="autostart-heading">
+      <h2 id="autostart-heading" tabindex="-1">Автозапуск Windows</h2>
+      <p id="autostart-help">Змініть позначку й натисніть «Зберегти автозапуск». Налаштування діє лише для вашого облікового запису. Воно відкриває програму після входу у Windows, але не надає дозволу повторювати незавершені дії.</p>
+      <label for="autostart-enabled">Запускати Nika разом із Windows</label>
+      <input id="autostart-enabled" type="checkbox" aria-describedby="autostart-help autostart-status" disabled>
+      <p id="autostart-status">Перевірка автозапуску.</p>
+      <div class="actions">
+        <button type="button" id="autostart-save" data-action-id="settings.autostart.configure" disabled>Зберегти автозапуск</button>
+        <button type="button" data-action-id="settings.autostart.refresh" data-error-focus-target="autostart-heading">Перечитати автозапуск</button>
+      </div>
+    </section>
     <section aria-labelledby="source-setup-heading">
       <h2 id="source-setup-heading" tabindex="-1">Джерела команди</h2>
       <p id="source-setup-help">Виберіть папку та два різні файли для порівняння командою. Підтримуються TXT, MD, HTML, CSV, JSON, PDF, DOCX та XLSX, до 16 МіБ кожен. Нові налаштування застосовуються до нових завдань; розпочаті зберігають свої джерела.</p>

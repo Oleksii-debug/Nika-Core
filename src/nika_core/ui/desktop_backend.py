@@ -19,7 +19,9 @@ from nika_core.runtime.contracts import (
 )
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
 from nika_core.runtime.reference import ReferenceRuntime
+from nika_core.ui.autostart_settings import AutostartSettings
 from nika_core.ui.bridge_models import UIResult
+from nika_core.windows_autostart import WindowsAutostartService
 
 _LOGGER = logging.getLogger(__name__)
 _DEFAULT_AGENT_ID = "nika.default"
@@ -90,6 +92,7 @@ class DesktopBackend:
         audit: AuditLog,
         runtime: AgentRuntimePort | None = None,
         prepare_task_payload: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        autostart_service: WindowsAutostartService | None = None,
     ) -> None:
         self._queue = queue
         self._agents = agents
@@ -98,6 +101,7 @@ class DesktopBackend:
         self._coordinator = TaskRuntimeCoordinator(queue, audit)
         self._runtime = runtime or ReferenceRuntime()
         self._prepare_task_payload = prepare_task_payload
+        self.autostart_settings = AutostartSettings(autostart_service, audit)
         self._runtime_loop: _DesktopRuntimeLoop | None = None
         self._active_lock = threading.Lock()
         self._active_threads: dict[str, str] = {}
@@ -258,6 +262,7 @@ class DesktopBackend:
 
     def snapshot(self) -> dict[str, Any]:
         return {
+            "autostart": self.autostart_settings.snapshot(),
             "tasks": [self._task_view(record) for record in self._queue.list_recent(limit=50)],
             "agents": [
                 {

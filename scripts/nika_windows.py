@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ from nika_core.ui.shell import launch_windows_shell
 from nika_core.v01_packaged_team_runtime import V01PackagedThreeAgentRuntime
 from nika_core.v01_packaged_team_state import V01PackagedTeamStateProvider
 from nika_core.v01_source_settings import V01SourceSettings
+from nika_core.windows_autostart import WindowsAutostartService
 
 
 def _focus(focus_id: str, message: str) -> UIResult:
@@ -59,6 +61,11 @@ def build_windows_bridge(
             store=store, config=config, source_settings=source_settings
         ),
         prepare_task_payload=source_settings.prepare_task_payload,
+        autostart_service=(
+            WindowsAutostartService(Path(sys.executable))
+            if sys.platform == "win32" and getattr(sys, "frozen", False)
+            else None
+        ),
     )
     products = ProductProjectCommandService(ProductProjectRepository(store))
     product_router = PackagedProductCommandRouter(
@@ -89,19 +96,15 @@ def build_windows_bridge(
             "task.resume": backend.resume_task,
             "agent.stop": backend.stop_agent,
             "team.sources.configure": source_settings.configure,
-            "nav.tasks": lambda _payload: _focus(
-                "tasks-heading", "Завдання відкрито."
-            ),
-            "nav.agents": lambda _payload: _focus(
-                "agents-heading", "Агенти відкрито."
-            ),
+            "settings.autostart.configure": backend.autostart_settings.configure,
+            "settings.autostart.refresh": backend.autostart_settings.refresh,
+            "nav.tasks": lambda _payload: _focus("tasks-heading", "Завдання відкрито."),
+            "nav.agents": lambda _payload: _focus("agents-heading", "Агенти відкрито."),
             "nav.logs": lambda _payload: _focus("logs-heading", "Журнал відкрито."),
             "nav.workspaces": lambda _payload: _focus(
                 "workspaces-heading", "Робочі простори відкрито."
             ),
-            "command.focus": lambda _payload: _focus(
-                "command-input", "Командне поле активне."
-            ),
+            "command.focus": lambda _payload: _focus("command-input", "Командне поле активне."),
         },
         state_provider=source_state,
     )
@@ -240,10 +243,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--pf11-proof-output", type=Path)
     parser.add_argument(
         "--pf11-proof-command",
-        default=(
-            "Створи застосунок для керування витратами"
-            " малого бізнесу"
-        ),
+        default=("Створи застосунок для керування витратами малого бізнесу"),
     )
     args = parser.parse_args(argv)
     from nika_core.reliability.legacy_database import LegacyDatabaseConflict

@@ -2,10 +2,14 @@ param(
     [Parameter(Mandatory=$true)][string]$ExePath,
     [string]$WindowTitle = 'Nika Core M5 Proof',
     [ValidateRange(30, 120)][int]$StartupTimeoutSeconds = 90,
-    [switch]$VerifySourceSetup
+    [switch]$VerifySourceSetup,
+    [ValidateSet('None', 'Enable', 'Observe', 'Disable')][string]$AutostartPhase = 'None'
 )
 
 $ErrorActionPreference = 'Stop'
+if ($AutostartPhase -ne 'None' -and ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted')) {
+    throw 'Autostart mutation proof is restricted to an isolated GitHub-hosted Windows runner.'
+}
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Windows.Forms
@@ -107,6 +111,18 @@ try {
         [System.Environment]::SetEnvironmentVariable($name, $null, 'Process')
     }
     $ExePath = [System.IO.Path]::GetFullPath((Resolve-Path -LiteralPath $ExePath).Path)
+    $autostartCommand = if ($ExePath -match '[ \t]') { '"' + $ExePath + '"' } else { $ExePath }
+    if ($AutostartPhase -ne 'None') {
+        $runKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Run')
+        try { $existingAutostart = if ($null -eq $runKey) { $null } else { $runKey.GetValue('NikaCore', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } }
+        finally { if ($null -ne $runKey) { $runKey.Dispose() } }
+        if ($AutostartPhase -eq 'Enable' -and $null -ne $existingAutostart) {
+            throw 'Autostart enable proof refuses an existing NikaCore registration.'
+        }
+        if ($AutostartPhase -ne 'Enable' -and $existingAutostart -cne $autostartCommand) {
+            throw 'Autostart continuation requires the exact proof-owned executable registration.'
+        }
+    }
     $expectedExecutablePath = $ExePath
     $process = Start-Process -FilePath $ExePath -PassThru
     $expectedProcessId = $process.Id
@@ -560,6 +576,36 @@ try {
     Wait-FocusName $tasksControl
     [System.Windows.Forms.SendKeys]::SendWait('^+p')
     Wait-FocusName $commandControl
+
+    if ($AutostartPhase -ne 'None') {
+        $autostartControl = Wait-DescendantName 'Запускати Nika разом із Windows' ([System.Windows.Automation.ControlType]::CheckBox)
+        $autostartSaveControl = Wait-DescendantName 'Зберегти автозапуск' ([System.Windows.Automation.ControlType]::Button)
+        $initialToggle = if ($AutostartPhase -eq 'Enable') { [System.Windows.Automation.ToggleState]::Off } else { [System.Windows.Automation.ToggleState]::On }
+        $target = Resolve-BoundControlIdentity $autostartControl
+        if ($target.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Current.ToggleState -ne $initialToggle) {
+            throw 'Packaged autostart checkbox does not reflect persisted OS state.'
+        }
+        if ($AutostartPhase -ne 'Observe') {
+            Set-BoundControlFocus $autostartControl
+            [System.Windows.Forms.SendKeys]::SendWait(' ')
+            Set-BoundControlFocus $autostartSaveControl
+            [System.Windows.Forms.SendKeys]::SendWait(' ')
+            Wait-FocusName $autostartControl
+        }
+        $expectedStateText = if ($AutostartPhase -eq 'Disable') { 'Автозапуск вимкнено.' } else { 'Автозапуск увімкнено для цього застосунку.' }
+        Wait-DescendantName $expectedStateText ([System.Windows.Automation.ControlType]::Text) | Out-Null
+        $target = Resolve-BoundControlIdentity $autostartControl
+        $expectedToggle = if ($AutostartPhase -eq 'Disable') { [System.Windows.Automation.ToggleState]::Off } else { [System.Windows.Automation.ToggleState]::On }
+        if ($target.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Current.ToggleState -ne $expectedToggle) {
+            throw 'Packaged autostart checkbox acknowledgement is inconsistent.'
+        }
+        $runKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Run')
+        try { $actualAutostart = if ($null -eq $runKey) { $null } else { $runKey.GetValue('NikaCore', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } }
+        finally { if ($null -ne $runKey) { $runKey.Dispose() } }
+        $expectedAutostart = if ($AutostartPhase -eq 'Disable') { $null } else { $autostartCommand }
+        if ($actualAutostart -cne $expectedAutostart) { throw 'Actual per-user autostart registration does not match the UI acknowledgement.' }
+        Write-Host "Packaged autostart phase $AutostartPhase verified through exact semantic controls and OS readback."
+    }
 
     if ($VerifySourceSetup) {
         $sourceRootControl = Wait-DescendantName 'Папка джерел — повний шлях' ([System.Windows.Automation.ControlType]::Edit)
