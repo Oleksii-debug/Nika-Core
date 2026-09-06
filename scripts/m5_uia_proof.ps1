@@ -575,8 +575,12 @@ try {
         Wait-FocusName $commandControl
         Set-BoundControlValue $commandControl 'Порівняй два контрольовані джерела.'
         Set-BoundControlFocus $startControl
-        [System.Windows.Forms.SendKeys]::SendWait(' ')
         try {
+            # Exercise the registered task.create shortcut on a non-editable
+            # control. Never retry this effect: require its observable focus
+            # acknowledgement before waiting for the actual terminal result.
+            [System.Windows.Forms.SendKeys]::SendWait('^n')
+            Wait-FocusName $tasksControl
             Wait-DescendantName 'Командне завдання завершено; збережені результати учасників доступні.' ([System.Windows.Automation.ControlType]::Text) | Out-Null
         } catch {
             # Diagnostics are restricted to this proof's clean, controlled database

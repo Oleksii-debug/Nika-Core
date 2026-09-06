@@ -4,6 +4,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from time import monotonic, sleep
 
 import pytest
 
@@ -283,6 +284,9 @@ def test_renderer_accepts_actual_packaged_team_and_rejects_duplicate_member_iden
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from nika_core.config import AppConfig
+    from nika_core.data.sqlite import SQLiteStore
+    from nika_core.kernel.task_queue import TaskQueue
+    from nika_core.kernel.task_state import TaskState
     from nika_core.ui.desktop_backend import DesktopBackend
     from scripts.nika_windows import build_windows_bridge
 
@@ -326,7 +330,13 @@ def test_renderer_accepts_actual_packaged_team_and_rejects_duplicate_member_iden
     )
     backend, task_id, command = pending.pop()
     original_start(backend, task_id, command)
+    queue = TaskQueue(SQLiteStore(config.database_path))
+    deadline = monotonic() + 20
+    while queue.get(task_id).state in {TaskState.READY, TaskState.RUNNING}:
+        assert monotonic() < deadline, "Packaged team did not finish within 20 seconds"
+        sleep(0.01)
     backend.close()
+    assert queue.get(task_id).state is TaskState.COMPLETED
     projection = bridge.get_state()["state"]["v01_team_task"]
     assert projection["team"]["state"] == "completed"
     assert sorted(member["role"] for member in projection["members"]) == [

@@ -5,6 +5,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
+from time import monotonic, sleep
 
 import pytest
 
@@ -188,6 +189,10 @@ def test_accepted_task_keeps_sources_if_settings_change_before_runtime_start(
     assert len(accepted.payload["v01_source_selection"]) == 64
     assert a["root"] not in json.dumps(accepted.payload)
     original_start(backend, task_id, command)
+    deadline = monotonic() + 20
+    while TaskQueue(store).get(task_id).state in {TaskState.READY, TaskState.RUNNING}:
+        assert monotonic() < deadline, "Accepted source task did not finish within 20 seconds"
+        sleep(0.01)
     backend.close()
     assert TaskQueue(store).get(task_id).state is TaskState.COMPLETED
     assert settings.for_task(task_id).root == a["root"]
