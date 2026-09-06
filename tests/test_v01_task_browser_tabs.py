@@ -207,6 +207,22 @@ def test_closed_runtime_page_is_stale_and_reopens_only_when_allowed() -> None:
     assert _page(session, "page-2").focused == 1
 
 
+def test_never_reopen_allows_ephemeral_query_navigation_without_persisting_url() -> None:
+    session = _FakeSession("session-a")
+    manager = TaskBrowserTabs(session=session)  # type: ignore[arg-type]
+
+    tab = manager.open_tab(
+        task_id="task-a",
+        tab_id="ephemeral-query",
+        target_url="https://example.test/search?q=value",
+        reopen_policy=TaskTabReopenPolicy.NEVER,
+    )
+
+    assert tab.reopen_url is None
+    assert _page(session, "page-1").url == "https://example.test/search?q=value"
+    assert manager.snapshot()["tabs"][0]["reopen_url"] is None
+
+
 def test_durable_reopen_url_rejects_query_and_fragment_material() -> None:
     session = _FakeSession("session-a")
     manager = TaskBrowserTabs(session=session)  # type: ignore[arg-type]
@@ -225,6 +241,7 @@ def test_durable_reopen_url_rejects_query_and_fragment_material() -> None:
         )
 
     assert manager.snapshot() == {"schema_version": 1, "tabs": []}
+    assert session.registry.pages == {}
 
 
 def test_navigation_contract_rejects_coordinate_like_and_unsafe_url_bypasses() -> None:
