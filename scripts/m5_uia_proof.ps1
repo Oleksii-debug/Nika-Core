@@ -1,7 +1,8 @@
 param(
     [Parameter(Mandatory=$true)][string]$ExePath,
     [string]$WindowTitle = 'Nika Core M5 Proof',
-    [ValidateRange(30, 120)][int]$StartupTimeoutSeconds = 90
+    [ValidateRange(30, 120)][int]$StartupTimeoutSeconds = 90,
+    [switch]$VerifySourceSetup
 )
 
 $ErrorActionPreference = 'Stop'
@@ -58,6 +59,11 @@ $expectedExecutablePath = $null
 $boundWindowHandle = $null
 $boundWindowRuntimeId = $null
 $script:nextControlGeneration = 1
+$sourceProofRoot = $null
+$previousProofEnvironment = @{}
+foreach ($name in @('NIKA_DB_PATH', 'NIKA_V01_SOURCE_ROOT', 'NIKA_V01_SOURCE_A', 'NIKA_V01_SOURCE_B')) {
+    $previousProofEnvironment[$name] = [System.Environment]::GetEnvironmentVariable($name, 'Process')
+}
 
 function Get-ElementRuntimeId([System.Windows.Automation.AutomationElement]$Element) {
     $runtimeId = $Element.GetRuntimeId()
@@ -89,6 +95,17 @@ function Add-UniqueAutomationElement($Elements, [System.Windows.Automation.Autom
 }
 
 try {
+    # Use controlled data in a private temporary directory. A real user's database
+    # and environment-provided sources must never be used by this automated proof.
+    $sourceProofRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('nika-uia-source-' + [guid]::NewGuid().ToString('N'))
+    $sourceFolder = Join-Path $sourceProofRoot 'Джерела команди'
+    New-Item -ItemType Directory -Path $sourceFolder -Force | Out-Null
+    'Контрольоване спільне свідчення.' | Set-Content -LiteralPath (Join-Path $sourceFolder 'Джерело А.txt') -Encoding utf8
+    'Контрольоване спільне свідчення.' | Set-Content -LiteralPath (Join-Path $sourceFolder 'Джерело Б.txt') -Encoding utf8
+    $env:NIKA_DB_PATH = Join-Path $sourceProofRoot 'nika-proof.db'
+    foreach ($name in @('NIKA_V01_SOURCE_ROOT', 'NIKA_V01_SOURCE_A', 'NIKA_V01_SOURCE_B')) {
+        [System.Environment]::SetEnvironmentVariable($name, $null, 'Process')
+    }
     $ExePath = [System.IO.Path]::GetFullPath((Resolve-Path -LiteralPath $ExePath).Path)
     $expectedExecutablePath = $ExePath
     $process = Start-Process -FilePath $ExePath -PassThru
@@ -518,6 +535,17 @@ try {
         }
     }
 
+    function Set-BoundControlValue($Control, [string]$Value) {
+        Set-BoundControlFocus $Control
+        $target = Resolve-BoundControlIdentity $Control
+        $valuePattern = $target.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+        if ($valuePattern.Current.IsReadOnly) { throw 'A required source input is read-only.' }
+        $valuePattern.SetValue($Value)
+        $target = Resolve-BoundControlIdentity $Control
+        $verifiedPattern = $target.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+        if ($verifiedPattern.Current.Value -cne $Value) { throw 'Semantic input value was not applied.' }
+    }
+
     # The DOM can be visible in UIA before the asynchronous pywebview JS API call
     # has returned the Action Registry/keymap. Wait for the application's explicit
     # ready status so this gate tests keyboard behavior rather than an initialization race.
@@ -533,6 +561,52 @@ try {
     [System.Windows.Forms.SendKeys]::SendWait('^+p')
     Wait-FocusName $commandControl
 
+    if ($VerifySourceSetup) {
+        $sourceRootControl = Wait-DescendantName 'Папка джерел — повний шлях' ([System.Windows.Automation.ControlType]::Edit)
+        $sourceAControl = Wait-DescendantName 'Перший файл — назва в цій папці або повний шлях' ([System.Windows.Automation.ControlType]::Edit)
+        $sourceBControl = Wait-DescendantName 'Другий файл — назва в цій папці або повний шлях' ([System.Windows.Automation.ControlType]::Edit)
+        $saveSourcesControl = Wait-DescendantName 'Зберегти джерела' ([System.Windows.Automation.ControlType]::Button)
+        Set-BoundControlValue $sourceRootControl $sourceFolder
+        Set-BoundControlValue $sourceAControl 'Джерело А.txt'
+        Set-BoundControlValue $sourceBControl 'Джерело Б.txt'
+        Set-BoundControlFocus $saveSourcesControl
+        [System.Windows.Forms.SendKeys]::SendWait(' ')
+        Wait-DescendantName 'Джерела збережено. Можна створити нове командне завдання.' ([System.Windows.Automation.ControlType]::Text) | Out-Null
+        Wait-FocusName $commandControl
+        Set-BoundControlValue $commandControl 'Порівняй два контрольовані джерела.'
+        Set-BoundControlFocus $startControl
+        try {
+            # Exercise the registered task.create shortcut on a non-editable
+            # control. Never retry this effect: require its observable focus
+            # acknowledgement before waiting for the actual terminal result.
+            [System.Windows.Forms.SendKeys]::SendWait('^n')
+            Wait-FocusName $tasksControl
+            Wait-DescendantName 'Командне завдання завершено; збережені результати учасників доступні.' ([System.Windows.Automation.ControlType]::Text) | Out-Null
+        } catch {
+            # Diagnostics are restricted to this proof's clean, controlled database
+            # and the exact bound Nika window. No source contents or stored payloads.
+            $diagnosticWindow = Find-ExactWindow
+            if ($null -ne $diagnosticWindow) {
+                $diagnosticNames = Get-BoundDescendantNames $diagnosticWindow
+                Write-Host ('Controlled proof UIA names: ' + (($diagnosticNames | Select-Object -Unique | Select-Object -First 120) -join ' | '))
+            }
+            $stateProbe = @'
+import sqlite3, sys
+from pathlib import Path
+with sqlite3.connect(Path(sys.argv[1]).resolve().as_uri() + '?mode=ro', uri=True) as db:
+    for table in ('tasks', 'multi_agent_teams', 'multi_agent_members'):
+        counts = {}
+        for state in ('ready', 'running', 'active', 'completed', 'failed', 'cancelled', 'paused'):
+            counts[state] = db.execute('SELECT COUNT(*) FROM ' + table + ' WHERE LOWER(state) = ?', (state,)).fetchone()[0]
+        print('Controlled proof states:', table, counts)
+    print('Controlled proof result rows:', db.execute('SELECT COUNT(*) FROM multi_agent_results').fetchone()[0])
+'@
+            $stateProbe | python - $env:NIKA_DB_PATH
+            throw
+        }
+        Write-Host 'Packaged source setup -> save action -> canonical task/team -> visible completed result verified.'
+    }
+
     Write-Host 'WebView2 UI Automation descendants, exact semantic identity, and keyboard/focus flow verified successfully.'
     Write-Host (($names | Select-Object -Unique | Select-Object -First 40) -join ' | ')
 }
@@ -540,6 +614,12 @@ finally {
     if ($null -ne $startupWatch) { $startupWatch.Stop() }
     if ($null -ne $process -and !$process.HasExited) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    }
+    foreach ($name in $previousProofEnvironment.Keys) {
+        [System.Environment]::SetEnvironmentVariable($name, $previousProofEnvironment[$name], 'Process')
+    }
+    if ($null -ne $sourceProofRoot) {
+        Remove-Item -LiteralPath $sourceProofRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
     if ($null -eq $previousWebView2BrowserArgs) {
         Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue

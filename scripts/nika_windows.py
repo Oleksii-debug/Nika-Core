@@ -28,6 +28,9 @@ from nika_core.ui.bridge import UIActionBridge
 from nika_core.ui.bridge_models import UIResult
 from nika_core.ui.desktop_backend import DesktopBackend
 from nika_core.ui.shell import launch_windows_shell
+from nika_core.v01_packaged_team_runtime import V01PackagedThreeAgentRuntime
+from nika_core.v01_packaged_team_state import V01PackagedTeamStateProvider
+from nika_core.v01_source_settings import V01SourceSettings
 
 
 def _focus(focus_id: str, message: str) -> UIResult:
@@ -46,11 +49,16 @@ def build_windows_bridge(
     store.initialize()
     actions = build_default_action_registry()
     keymap = Keymap(store, actions)
+    source_settings = V01SourceSettings(store, config)
     backend = DesktopBackend(
         queue=TaskQueue(store),
         agents=AgentRegistry(store),
         workspaces=WorkspaceRegistry(store),
         audit=AuditLog(store),
+        runtime=V01PackagedThreeAgentRuntime(
+            store=store, config=config, source_settings=source_settings
+        ),
+        prepare_task_payload=source_settings.prepare_task_payload,
     )
     products = ProductProjectCommandService(ProductProjectRepository(store))
     product_router = PackagedProductCommandRouter(
@@ -64,6 +72,14 @@ def build_windows_bridge(
         router=product_router,
         command_center=command_center,
     )
+    packaged_state = V01PackagedTeamStateProvider(
+        base_state=product_state,
+        store=store,
+    )
+
+    def source_state() -> Mapping[str, Any]:
+        return {**packaged_state(), "v01_sources": source_settings.snapshot()}
+
     bridge = UIActionBridge(
         actions,
         keymap,
@@ -72,6 +88,7 @@ def build_windows_bridge(
             "task.pause": backend.pause_task,
             "task.resume": backend.resume_task,
             "agent.stop": backend.stop_agent,
+            "team.sources.configure": source_settings.configure,
             "nav.tasks": lambda _payload: _focus(
                 "tasks-heading", "Завдання відкрито."
             ),
@@ -86,7 +103,7 @@ def build_windows_bridge(
                 "command-input", "Командне поле активне."
             ),
         },
-        state_provider=product_state,
+        state_provider=source_state,
     )
     return bridge, products
 
@@ -229,7 +246,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
-    config = AppConfig.from_environment()
+    from nika_core.reliability.legacy_database import LegacyDatabaseConflict
+    from nika_core.ui.startup_error import show_recovery_error
+
+    try:
+        config = AppConfig.from_environment()
+    except LegacyDatabaseConflict as exc:
+        show_recovery_error(str(exc))
+        return 1
     if args.pf11_proof:
         return _run_pf11_proof(
             config,

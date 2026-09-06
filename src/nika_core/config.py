@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from platformdirs import user_data_path
@@ -16,6 +17,9 @@ class AppConfig(BaseSettings):
         default_factory=lambda: user_data_path("NikaCore", appauthor=False) / "nika_core.db",
         validation_alias=AliasChoices("NIKA_DB_PATH", "NIKA_DATABASE_PATH"),
     )
+    v01_source_root: Path | None = None
+    v01_source_a: Path | None = None
+    v01_source_b: Path | None = None
     log_level: str = "INFO"
     model_provider: str = "mock"
 
@@ -60,4 +64,12 @@ class AppConfig(BaseSettings):
 
     @classmethod
     def from_environment(cls) -> AppConfig:
-        return cls()
+        config = cls()
+        if getattr(sys, "frozen", False) and "database_path" not in config.model_fields_set:
+            from nika_core.reliability.legacy_database import (
+                default_legacy_locations,
+                prepare_default_database,
+            )
+
+            prepare_default_database(config.database_path, default_legacy_locations())
+        return config
