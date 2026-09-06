@@ -10,6 +10,7 @@ def build_default_action_registry() -> ActionRegistry:
         ActionDefinition("task.pause", "Pause task", "Tasks", "Ctrl+P"),
         ActionDefinition("task.resume", "Resume task", "Tasks", "Ctrl+R"),
         ActionDefinition("agent.stop", "Stop agent", "Agents", "Ctrl+Shift+S"),
+        ActionDefinition("team.sources.configure", "Зберегти джерела команди", "Джерела", None),
         ActionDefinition("nav.tasks", "Open tasks", "Navigation", "Alt+1"),
         ActionDefinition("nav.agents", "Open agents", "Navigation", "Alt+2"),
         ActionDefinition("nav.logs", "Open logs", "Navigation", "Alt+3"),

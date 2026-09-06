@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from collections.abc import Coroutine, Mapping
+from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import Future
 from typing import Any
 
@@ -89,6 +89,7 @@ class DesktopBackend:
         workspaces: WorkspaceRegistry,
         audit: AuditLog,
         runtime: AgentRuntimePort | None = None,
+        prepare_task_payload: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     ) -> None:
         self._queue = queue
         self._agents = agents
@@ -96,6 +97,7 @@ class DesktopBackend:
         self._audit = audit
         self._coordinator = TaskRuntimeCoordinator(queue, audit)
         self._runtime = runtime or ReferenceRuntime()
+        self._prepare_task_payload = prepare_task_payload
         self._runtime_loop: _DesktopRuntimeLoop | None = None
         self._active_lock = threading.Lock()
         self._active_threads: dict[str, str] = {}
@@ -107,10 +109,15 @@ class DesktopBackend:
         command = str(payload.get("command", "")).strip()
         if not command:
             raise ValueError("Введіть команду перед створенням завдання.")
+        task_payload: dict[str, Any] = {"command": command}
+        if self._prepare_task_payload is not None:
+            task_payload = dict(self._prepare_task_payload(task_payload))
+            if task_payload.get("command") != command:
+                raise ValueError("Підготовка завдання не може змінювати його команду.")
         record = self._queue.create(
             workspace_id=_DEFAULT_WORKSPACE_ID,
             agent_id=_DEFAULT_AGENT_ID,
-            payload={"command": command},
+            payload=task_payload,
         )
         self._queue.transition(record.task_id, TaskState.READY)
         self._schedule_start(record.task_id, command)
@@ -193,6 +200,17 @@ class DesktopBackend:
     def stop_agent(self, _payload: Mapping[str, Any]) -> UIResult:
         record = self._only_controllable(action="зупинки")
         if record is None:
+            cancelled = self._only_with_state(
+                TaskState.CANCELLED,
+                action="повторної зупинки",
+            )
+            if cancelled is not None:
+                return UIResult(
+                    request_id="desktop-handler",
+                    status="completed",
+                    message="Завдання вже скасовано; додаткових дій не виконано.",
+                    focus_id="tasks-heading",
+                )
             raise ValueError("Немає активного завдання агента для зупинки.")
 
         cancel_future: Future[bool] | None = None

@@ -1,8 +1,8 @@
 # Nika Core — roadmap and progress truth
 
-Baseline created: 2026-08-17. Scope reconciled: 2026-08-19. Product-factory scope expanded: 2026-08-20.
+Baseline created: 2026-08-17. Scope reconciled: 2026-08-19. Product-factory scope expanded: 2026-08-20. Web/Cloud product direction bound: 2026-09-04.
 
-Progress is acceptance-gate based, not commit-count based. Regressions may reduce readiness. **Historical Core milestone credit and the expanded Full Product Vision are separate measurements.** See `docs/FULL_PRODUCT_VISION_2026-08-19.md` and `docs/AUTONOMOUS_PRODUCT_FACTORY.md`.
+Progress is acceptance-gate based, not commit-count based. Regressions may reduce readiness. **Historical Core milestone credit and the expanded Full Product Vision are separate measurements.** See `docs/FULL_PRODUCT_VISION_2026-08-19.md`, `docs/AUTONOMOUS_PRODUCT_FACTORY.md`, and `docs/WEB_CLOUD_PRODUCT_ARCHITECTURE.md`.
 
 ## Track A — Core foundation milestone history
 
@@ -117,11 +117,33 @@ Telegram is deliberately **not** an active planned workspace. If it is ever requ
 ### F11 — Full Product integration/release
 Goal: all capabilities claimed for a chosen release are integrated on one exact head, complete Core/Windows/security/accessibility/product-journey gates pass, a fresh candidate is built, and only that exact candidate enters the human Windows/NVDA protocol.
 
+### F12 — Web/Cloud multi-client product architecture
+Goal: preserve the current Windows/NVDA product while making the same Nika domain/runtime usable by a future commercial Web/Cloud edition without a rewrite.
+
+Binding architecture: `docs/WEB_CLOUD_PRODUCT_ARCHITECTURE.md`.
+
+Required direction:
+- Windows and Web are presentation clients over one stable Nika application/domain boundary;
+- new domain logic must not be coupled directly to Windows controls;
+- future server APIs map to the same command/query contracts used by the packaged UI bridge;
+- Nika Cloud may execute long-running tasks independently of the user's laptop power state;
+- an optional Nika Node provides explicitly authorized access to local Windows files/apps/browser state through an outbound authenticated channel;
+- remote-desktop/video streaming is not the normal web product architecture;
+- browser/local clients are treated as untrusted for authentication, entitlement, permission and billing truth;
+- multi-tenant isolation, server-side validation, scoped credentials, quotas and audit are mandatory before commercial Web production;
+- Web accessibility has its own keyboard/screen-reader release gate and does not inherit NVDA verification from Windows.
+
+This track is architectural preparation now, not a request to stop V0.1 and build the full website immediately. Current work should only avoid creating Windows-only domain coupling that would force a later rewrite.
+
 ## Product Journey rule
 
 Every user-facing capability must prove this complete chain:
 
 `packaged Windows UI -> semantic action/command -> validated bridge/API -> real Nika service/runtime -> persisted state/result -> accessible visible feedback -> restart/resume where relevant`.
+
+For the future Web edition the equivalent chain is:
+
+`authenticated accessible Web UI -> validated network command/API -> same Nika application/domain service -> persisted state/result -> accessible Web feedback -> reconnect/resume where relevant`.
 
 A subsystem with backend tests but no usable final-window path is not complete.
 
@@ -135,7 +157,8 @@ Binding reuse sources now include:
 - `docs/FULL_PRODUCT_VISION_2026-08-19.md` for end-state scope;
 - `docs/AUTONOMOUS_PRODUCT_FACTORY.md` for durable product creation/operation scope;
 - `docs/AUTONOMOUS_PRODUCT_FACTORY_ACCEPTANCE.md` for product-factory gates;
-- `docs/AUTONOMOUS_BUSINESS_FACTORY.md` for business-orchestration scope.
+- `docs/AUTONOMOUS_BUSINESS_FACTORY.md` for business-orchestration scope;
+- `docs/WEB_CLOUD_PRODUCT_ARCHITECTURE.md` for the binding Windows/Web/Cloud/Node separation and commercial security direction.
 
 Every lane uses **REUSE -> ADAPT -> CUSTOM (thin)**. Do not rebuild generic schedulers, planners, inference engines, browser engines, Windows automation stacks, coding workers, OCR/speech engines, vector databases, retry engines, resource monitors, build systems or deployment provider APIs when maintained compatible components satisfy the requirement.
 
@@ -147,14 +170,19 @@ Manual Deep Research developer chats may be real implementation lanes. When the 
 
 Product Factory work must additionally allocate explicit ownership by ProductProject/component/repository. Multiple automated tasks may cooperate, but they must not duplicate the same branch/component or compete to update shared canonical state.
 
+Web/Cloud work follows the same rule: server/API, Web client, Windows client, Nika Node, deployment/security and billing may be separate components, but shared domain contracts have one owner and one canonical source of truth.
+
 ## CI/release policy
 
 Coherent PR/main gates run the shared verification harness on Ubuntu and Windows where applicable. Focused Windows/WebView2/package/security/embedded-model proofs are added when they provide material evidence. Do not rebuild the Windows EXE or download large models on every source push.
 
 Base Nika Core remains model-independent and comparatively small. Models and heavyweight workers are optional components; updating the application must not require re-downloading unchanged local models or user data.
 
+A future Web/Cloud release adds separate server, browser-accessibility, multi-tenant security and deployment gates; it must not weaken the Windows gates.
+
 ## Human truth
 
 - HUMAN_TESTED: false until the designated person executes the exact manual protocol.
 - NVDA_VERIFIED: false until the exact packaged candidate passes the real Windows/NVDA protocol.
 - Automated semantic/UIA tests never award those states.
+- WEB_ACCESSIBILITY_VERIFIED and WEB_PRODUCTION_READY are separate future states and must not be inferred from Windows readiness.

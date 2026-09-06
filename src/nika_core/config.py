@@ -15,6 +15,9 @@ class AppConfig(BaseSettings):
         default=Path("./data/nika_core.db"),
         validation_alias=AliasChoices("NIKA_DB_PATH", "NIKA_DATABASE_PATH"),
     )
+    v01_source_root: Path | None = None
+    v01_source_a: Path | None = None
+    v01_source_b: Path | None = None
     log_level: str = "INFO"
     model_provider: str = "mock"
 
