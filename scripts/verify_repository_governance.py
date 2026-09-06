@@ -69,7 +69,7 @@ class GitHubRestClient:
             headers["Authorization"] = f"Bearer {self._token}"
         request = Request(f"{self._api_base}{path}", headers=headers, method="GET")
         try:
-            with urlopen(request, timeout=self._timeout) as response:  # noqa: S310
+            with urlopen(request, timeout=self._timeout) as response:
                 payload = response.read().decode("utf-8")
         except HTTPError as exc:
             message = _safe_http_error_message(exc)
