@@ -66,7 +66,7 @@ class TaskOwnedTab:
             return
         if self.reopen_url is None:
             raise ValueError("reopen URL is required when reopen policy permits reconstruction")
-        _validate_navigation_url(self.reopen_url)
+        _validate_durable_reopen_url(self.reopen_url)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -131,6 +131,8 @@ class TaskBrowserTabs:
 
         _validate_identity("task_id", task_id)
         _validate_navigation_url(target_url)
+        if reopen_policy is TaskTabReopenPolicy.SAME_TARGET:
+            _validate_durable_reopen_url(target_url)
         logical_tab_id = uuid.uuid4().hex if tab_id is None else tab_id
         _validate_identity("tab_id", logical_tab_id)
         key = (task_id, logical_tab_id)
@@ -312,6 +314,11 @@ def _validate_navigation_url(value: str) -> None:
         raise ValueError("browser target URL must use http or https with an explicit host")
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("browser target URL must not contain userinfo credentials")
+
+
+def _validate_durable_reopen_url(value: str) -> None:
+    _validate_navigation_url(value)
+    parsed = urlsplit(value)
     if parsed.query or parsed.fragment:
         raise ValueError(
             "browser target URL must not contain query or fragment in durable reopen state"
