@@ -13,6 +13,7 @@ from nika_core.kernel.task_queue import TaskQueue
 from nika_core.mcp_boundary import MCPClientAdapter, MCPServerConfig
 from nika_core.model_gateway.contracts import (
     ModelErrorCode,
+    ModelFailureEffect,
     ModelGatewayError,
     ModelMessage,
     ModelRequest,
@@ -126,6 +127,7 @@ def test_http_provider_failure_maps_to_typed_gateway_error() -> None:
             base_url="https://provider.invalid/v1",
             kind=ProviderKind.CLOUD,
             default_model="controlled-model",
+            supports_private_data=True,
             client_factory=client_factory,
         ),
         default=True,
@@ -219,6 +221,7 @@ def test_gateway_uses_explicit_fallback_after_retryable_failure() -> None:
                 "temporarily unavailable",
                 provider_id=self.capabilities.provider_id,
                 retryable=True,
+                failure_effect=ModelFailureEffect.NO_EFFECT,
             )
 
     class FallbackProvider(DeterministicMockProvider):

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from dataclasses import replace
+from typing import Protocol
 
-from nika_core.kernel.audit import AuditLog
-from nika_core.model_gateway.contracts import (
+from .contracts import (
     ModelErrorCode,
+    ModelFailureEffect,
     ModelGatewayError,
     ModelProvider,
     ModelRequest,
@@ -15,8 +17,38 @@ from nika_core.model_gateway.contracts import (
 )
 
 
+class _AuditLogPort(Protocol):
+    def append(
+        self,
+        *,
+        event_type: str,
+        entity_type: str,
+        entity_id: str,
+        payload: dict[str, object] | None = None,
+    ) -> int: ...
+
+
+_SAFE_FALLBACK_CODES = frozenset(
+    {
+        ModelErrorCode.UNAVAILABLE,
+        ModelErrorCode.RATE_LIMITED,
+        ModelErrorCode.TIMEOUT,
+    }
+)
+_SAFE_PROVIDER_MESSAGES = {
+    ModelErrorCode.INVALID_REQUEST: "model provider rejected the request",
+    ModelErrorCode.UNAVAILABLE: "model provider is unavailable",
+    ModelErrorCode.TIMEOUT: "model provider request timed out",
+    ModelErrorCode.CANCELLED: "model provider request was cancelled",
+    ModelErrorCode.AUTHENTICATION: "model provider authentication failed",
+    ModelErrorCode.RATE_LIMITED: "model provider rate limit was reached",
+    ModelErrorCode.RESOURCE_LIMIT: "model provider resource limit was reached",
+    ModelErrorCode.PROVIDER_ERROR: "model provider failed",
+}
+
+
 class ModelGateway:
-    def __init__(self, *, audit_log: AuditLog | None = None) -> None:
+    def __init__(self, *, audit_log: _AuditLogPort | None = None) -> None:
         self._providers: dict[str, ModelProvider] = {}
         self._defaults: dict[ProviderKind, str] = {}
         self._audit_log = audit_log
@@ -65,48 +97,79 @@ class ModelGateway:
                     "provider_id": capabilities.provider_id,
                     "provider_kind": capabilities.kind.value,
                     "privacy": request.privacy.value,
-                    "model": request.model or "default",
+                    "model_fingerprint": model_identity_fingerprint(request.model),
                     "attempt": index + 1,
                 },
             )
 
+            response: ModelResponse | None = None
+            terminal_error: ModelGatewayError | None = None
+            cancelled = False
             try:
                 response = await asyncio.wait_for(
                     provider.complete(attempt_request), timeout=remaining
                 )
-            except TimeoutError as exc:
-                retryable = capabilities.supports_hard_cancellation
+            except TimeoutError:
                 error = ModelGatewayError(
                     ModelErrorCode.TIMEOUT,
                     "model request exceeded its deadline",
                     provider_id=capabilities.provider_id,
-                    retryable=retryable,
+                    retryable=capabilities.supports_hard_cancellation,
+                    failure_effect=ModelFailureEffect.UNKNOWN,
                 )
                 self._audit_failure(request, capabilities.provider_id, error)
                 if self._can_fallback(error=error, index=index, providers=providers):
                     self._audit_fallback(request, provider, providers[index + 1], error)
                     continue
-                raise error from exc
+                terminal_error = error
             except asyncio.CancelledError:
                 self._audit(
                     event_type="model.cancelled",
                     request=request,
                     payload={"provider_id": capabilities.provider_id},
                 )
-                raise
-            except ModelGatewayError as error:
+                cancelled = True
+            except ModelGatewayError as raw_error:
+                error = self._normalize_provider_error(
+                    raw_error, capabilities.provider_id
+                )
                 self._audit_failure(request, capabilities.provider_id, error)
                 if self._can_fallback(error=error, index=index, providers=providers):
                     self._audit_fallback(request, provider, providers[index + 1], error)
                     continue
-                raise
+                terminal_error = error
+            except Exception:  # noqa: BLE001 - provider implementations are untrusted
+                error = ModelGatewayError(
+                    ModelErrorCode.PROVIDER_ERROR,
+                    "model provider failed without a typed Nika error",
+                    provider_id=capabilities.provider_id,
+                    retryable=False,
+                )
+                self._audit_failure(request, capabilities.provider_id, error)
+                terminal_error = error
+
+            # Raise after the provider exception handler so provider-controlled
+            # diagnostics are not retained as public cause/context chains.
+            if cancelled:
+                raise asyncio.CancelledError()
+            if terminal_error is not None:
+                raise terminal_error
+            if response is None:
+                error = ModelGatewayError(
+                    ModelErrorCode.PROVIDER_ERROR,
+                    "model provider completed without a response",
+                    provider_id=capabilities.provider_id,
+                    retryable=False,
+                )
+                self._audit_failure(request, capabilities.provider_id, error)
+                raise error
 
             self._audit(
                 event_type="model.completed",
                 request=request,
                 payload={
                     "provider_id": response.provider_id,
-                    "model": response.model,
+                    "model_fingerprint": model_identity_fingerprint(response.model),
                     "input_tokens": response.usage.input_tokens,
                     "output_tokens": response.usage.output_tokens,
                     "total_tokens": response.usage.total_tokens,
@@ -147,22 +210,74 @@ class ModelGateway:
     def _validate_privacy_route(
         self, request: ModelRequest, providers: tuple[ModelProvider, ...]
     ) -> None:
-        if request.privacy is not PrivacyClass.SENSITIVE:
+        if request.privacy is PrivacyClass.PUBLIC:
             return
         for provider in providers:
             capabilities = provider.capabilities
             if not capabilities.supports_private_data:
                 raise ModelGatewayError(
                     ModelErrorCode.INVALID_REQUEST,
-                    "sensitive data cannot be routed to this provider",
+                    "private data cannot be routed to this provider",
                     provider_id=capabilities.provider_id,
                 )
+
+    @staticmethod
+    def _normalize_provider_error(
+        error: ModelGatewayError, provider_id: str
+    ) -> ModelGatewayError:
+        if not isinstance(error.code, ModelErrorCode):
+            return ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                "model provider returned an invalid error code",
+                provider_id=provider_id,
+                retryable=False,
+            )
+        if not isinstance(error.retryable, bool):
+            return ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                "model provider returned an invalid retryable flag",
+                provider_id=provider_id,
+                retryable=False,
+            )
+        if not isinstance(error.failure_effect, ModelFailureEffect):
+            return ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                "model provider returned an invalid failure effect state",
+                provider_id=provider_id,
+                retryable=False,
+            )
+        if error.provider_id is not None and error.provider_id != provider_id:
+            return ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                "model provider returned an error for another provider identity",
+                provider_id=provider_id,
+                retryable=False,
+            )
+        safe_message = _SAFE_PROVIDER_MESSAGES[error.code]
+        if provider_id == "foundry-local" and error.code is ModelErrorCode.UNAVAILABLE:
+            safe_message = (
+                "Foundry Local model is unavailable; use the explicit model download "
+                "action before inference if the model is not cached"
+            )
+        return ModelGatewayError(
+            error.code,
+            safe_message,
+            provider_id=provider_id,
+            retryable=error.retryable,
+            failure_effect=error.failure_effect,
+        )
 
     @staticmethod
     def _can_fallback(
         *, error: ModelGatewayError, index: int, providers: tuple[ModelProvider, ...]
     ) -> bool:
-        if not error.retryable or index + 1 >= len(providers):
+        if index + 1 >= len(providers):
+            return False
+        if error.code not in _SAFE_FALLBACK_CODES:
+            return False
+        if not error.retryable:
+            return False
+        if error.failure_effect is not ModelFailureEffect.NO_EFFECT:
             return False
         return not (
             error.code is ModelErrorCode.TIMEOUT
@@ -175,7 +290,12 @@ class ModelGateway:
         self._audit(
             event_type="model.failed",
             request=request,
-            payload={"provider_id": provider_id, "code": error.code.value},
+            payload={
+                "provider_id": provider_id,
+                "model_fingerprint": model_identity_fingerprint(request.model),
+                "code": error.code.value,
+                "failure_effect": error.failure_effect.value,
+            },
         )
 
     def _audit_fallback(
@@ -192,6 +312,7 @@ class ModelGateway:
                 "from_provider_id": current.capabilities.provider_id,
                 "to_provider_id": fallback.capabilities.provider_id,
                 "reason": error.code.value,
+                "failure_effect": error.failure_effect.value,
             },
         )
 
@@ -235,3 +356,11 @@ class ModelGateway:
             entity_id=request.request_id,
             payload=payload,
         )
+
+
+def model_identity_fingerprint(model: str | None) -> str:
+    """Return a stable content-free projection for untrusted model identity metadata."""
+
+    value = model if model is not None else "<provider-default>"
+    digest = hashlib.sha256(value.encode("utf-8", errors="surrogatepass")).hexdigest()
+    return f"sha256:{digest}"
