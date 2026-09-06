@@ -246,7 +246,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
-    config = AppConfig.from_environment()
+    from nika_core.reliability.legacy_database import LegacyDatabaseConflict
+    from nika_core.ui.startup_error import show_recovery_error
+
+    try:
+        config = AppConfig.from_environment()
+    except LegacyDatabaseConflict as exc:
+        show_recovery_error(str(exc))
+        return 1
     if args.pf11_proof:
         return _run_pf11_proof(
             config,
