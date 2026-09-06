@@ -412,7 +412,7 @@ def test_naive_time_and_invalid_interval_fail_before_persistence(tmp_path: Path)
             recurrence_id="naive",
             action_id="monitor.check",
             interval_seconds=60,
-            start_at=datetime(2030, 1, 1, 12, 0),
+            start_at=datetime.fromisoformat("2030-01-01T12:00:00"),
         )
     with pytest.raises(ValueError, match="positive integer"):
         service.create(

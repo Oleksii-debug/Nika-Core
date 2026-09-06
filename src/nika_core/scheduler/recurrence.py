@@ -111,11 +111,7 @@ class DurableRecurrenceService:
         deadline = (
             _require_aware_utc(deadline_at, "deadline_at") if deadline_at is not None else None
         )
-        if deadline is not None and deadline <= anchor:
-            status = RecurrenceStatus.COMPLETED
-            terminal_reason = RecurrenceTerminalReason.DEADLINE
-            next_due = None
-        elif deadline is not None and self._now() >= deadline:
+        if deadline is not None and (deadline <= anchor or self._now() >= deadline):
             status = RecurrenceStatus.COMPLETED
             terminal_reason = RecurrenceTerminalReason.DEADLINE
             next_due = None
@@ -400,7 +396,7 @@ def _decode_job(
     metadata = job.payload.get(_RECURRENCE_PAYLOAD_KEY)
     target_payload = job.payload.get(_TARGET_PAYLOAD_KEY)
     if not isinstance(metadata, dict) or not isinstance(target_payload, dict):
-        raise ValueError("durable recurrence payload is corrupt")
+        raise TypeError("durable recurrence payload is corrupt")
     if metadata.get("version") != _RECURRENCE_VERSION:
         raise ValueError("unsupported durable recurrence payload version")
     recurrence_id = _required_text(metadata.get("recurrence_id"), "persisted recurrence_id")
@@ -477,7 +473,7 @@ def _first_future_slot(
 
 
 def _occurrence_id(recurrence_id: str, scheduled_for: datetime) -> str:
-    material = f"{recurrence_id}\0{_iso(scheduled_for)}".encode("utf-8")
+    material = f"{recurrence_id}\0{_iso(scheduled_for)}".encode()
     return "recurrence-occurrence-v1:" + hashlib.sha256(material).hexdigest()
 
 
@@ -494,7 +490,7 @@ def _validate_interval(value: object) -> int:
 
 def _parse_iso(value: object, label: str) -> datetime:
     if not isinstance(value, str):
-        raise ValueError(f"{label} must be a timezone-aware ISO-8601 string")
+        raise TypeError(f"{label} must be a timezone-aware ISO-8601 string")
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError as exc:
