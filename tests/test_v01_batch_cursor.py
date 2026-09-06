@@ -15,6 +15,7 @@ from nika_core.batch_cursor import (
     IntentKind,
 )
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.task_queue import TaskQueue
 from nika_core.memory import MemoryService
 from nika_core.runtime.idempotency import IdempotencyLedger
 
@@ -23,6 +24,13 @@ def _services(tmp_path: Path) -> tuple[MemoryService, IdempotencyLedger, SQLiteS
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
     return MemoryService(store), IdempotencyLedger(store), store
+
+
+def _task(store: SQLiteStore, label: str) -> str:
+    return TaskQueue(store).create(
+        workspace_id=f"batch-cursor-{label}",
+        agent_id="batch-cursor",
+    ).task_id
 
 
 def _targets(count: int = 20) -> list[BatchTargetSpec]:
@@ -39,11 +47,12 @@ def _confirm(cursor: BatchCursor, target_id: str, result: dict[str, object]) -> 
 
 
 def test_restart_after_three_of_five_preserves_exact_next_target(tmp_path: Path) -> None:
-    memory, ledger, _ = _services(tmp_path)
+    memory, ledger, store = _services(tmp_path)
+    task_id = _task(store, "3-of-5")
     cursor = BatchCursor.create(
         memory,
         ledger,
-        task_id="task-3-of-5",
+        task_id=task_id,
         cursor_id="cursor",
         targets=_targets(),
         batch_size=5,
@@ -55,7 +64,7 @@ def test_restart_after_three_of_five_preserves_exact_next_target(tmp_path: Path)
     restarted = BatchCursor.restore(
         memory,
         ledger,
-        task_id="task-3-of-5",
+        task_id=task_id,
         cursor_id="cursor",
         targets=_targets(),
         batch_size=5,
@@ -76,11 +85,12 @@ def test_restart_after_three_of_five_preserves_exact_next_target(tmp_path: Path)
 def test_restart_exactly_between_batches_preserves_durable_next_intent(
     tmp_path: Path,
 ) -> None:
-    memory, ledger, _ = _services(tmp_path)
+    memory, ledger, store = _services(tmp_path)
+    task_id = _task(store, "between")
     cursor = BatchCursor.create(
         memory,
         ledger,
-        task_id="task-between",
+        task_id=task_id,
         cursor_id="cursor",
         targets=_targets(),
         batch_size=5,
@@ -99,7 +109,7 @@ def test_restart_exactly_between_batches_preserves_durable_next_intent(
     restarted = BatchCursor.restore(
         memory,
         ledger,
-        task_id="task-between",
+        task_id=task_id,
         cursor_id="cursor",
         targets=_targets(),
         batch_size=5,
@@ -124,11 +134,12 @@ def test_restart_exactly_between_batches_preserves_durable_next_intent(
 
 
 def test_completed_target_never_executes_twice_after_restart(tmp_path: Path) -> None:
-    memory, ledger, _ = _services(tmp_path)
+    memory, ledger, store = _services(tmp_path)
+    task_id = _task(store, "replay")
     cursor = BatchCursor.create(
         memory,
         ledger,
-        task_id="task-replay",
+        task_id=task_id,
         cursor_id="cursor",
         targets=_targets(2),
         batch_size=2,
@@ -138,7 +149,7 @@ def test_completed_target_never_executes_twice_after_restart(tmp_path: Path) -> 
     restarted = BatchCursor.restore(
         memory,
         ledger,
-        task_id="task-replay",
+        task_id=task_id,
         cursor_id="cursor",
         targets=_targets(2),
         batch_size=2,
@@ -150,7 +161,7 @@ def test_completed_target_never_executes_twice_after_restart(tmp_path: Path) -> 
     assert restarted.state.targets[0].confirmed_result == {"remote_id": "result-0"}
     assert restarted.next_target() is not None
     assert restarted.next_target().target_id == "target-1"
-    records = ledger.list_for_task("task-replay")
+    records = ledger.list_for_task(task_id)
     assert len(records) == 1
     assert records[0].operation_key == grant.operation_key
 
@@ -245,11 +256,12 @@ def test_malformed_restored_state_fails_closed(tmp_path: Path) -> None:
 def test_restart_with_unresolved_in_flight_effect_becomes_uncertain(
     tmp_path: Path,
 ) -> None:
-    memory, ledger, _ = _services(tmp_path)
+    memory, ledger, store = _services(tmp_path)
+    task_id = _task(store, "uncertain")
     cursor = BatchCursor.create(
         memory,
         ledger,
-        task_id="task-uncertain",
+        task_id=task_id,
         cursor_id="cursor",
         targets=_targets(2),
         batch_size=2,
@@ -260,7 +272,7 @@ def test_restart_with_unresolved_in_flight_effect_becomes_uncertain(
     restarted = BatchCursor.restore(
         memory,
         ledger,
-        task_id="task-uncertain",
+        task_id=task_id,
         cursor_id="cursor",
         targets=_targets(2),
         batch_size=2,
@@ -278,11 +290,12 @@ def test_restart_with_unresolved_in_flight_effect_becomes_uncertain(
 
 
 def test_restart_heals_cursor_from_durable_completed_effect(tmp_path: Path) -> None:
-    memory, ledger, _ = _services(tmp_path)
+    memory, ledger, store = _services(tmp_path)
+    task_id = _task(store, "heal")
     cursor = BatchCursor.create(
         memory,
         ledger,
-        task_id="task-heal",
+        task_id=task_id,
         cursor_id="cursor",
         targets=_targets(2),
         batch_size=2,
@@ -295,7 +308,7 @@ def test_restart_heals_cursor_from_durable_completed_effect(tmp_path: Path) -> N
     restarted = BatchCursor.restore(
         memory,
         ledger,
-        task_id="task-heal",
+        task_id=task_id,
         cursor_id="cursor",
         targets=_targets(2),
         batch_size=2,
@@ -350,19 +363,20 @@ def test_restore_binds_current_workflow_input_before_any_effect(
             batch_size=batch_size,
         )
 
-    assert ledger.list_for_task("task-bind") == []
+    assert ledger.list_for_task("task-bind") == ()
 
 
 def test_crash_after_effect_completion_preserves_exact_inter_batch_wake(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    memory, ledger, _ = _services(tmp_path)
+    memory, ledger, store = _services(tmp_path)
+    task_id = _task(store, "crash-order")
     targets = _targets(2)
     cursor = BatchCursor.create(
         memory,
         ledger,
-        task_id="task-crash-order",
+        task_id=task_id,
         cursor_id="cursor",
         targets=targets,
         batch_size=1,
@@ -385,7 +399,7 @@ def test_crash_after_effect_completion_preserves_exact_inter_batch_wake(
     restarted = BatchCursor.restore(
         memory,
         ledger,
-        task_id="task-crash-order",
+        task_id=task_id,
         cursor_id="cursor",
         targets=targets,
         batch_size=1,
@@ -401,4 +415,4 @@ def test_crash_after_effect_completion_preserves_exact_inter_batch_wake(
     replay = restarted.begin_effect("target-0")
     assert replay.execute is False
     assert replay.reason == "already_confirmed"
-    assert len(ledger.list_for_task("task-crash-order")) == 1
+    assert len(ledger.list_for_task(task_id)) == 1
