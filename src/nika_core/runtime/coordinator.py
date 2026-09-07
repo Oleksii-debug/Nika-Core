@@ -539,6 +539,16 @@ class TaskRuntimeCoordinator:
                         "Accepted runtime pause conflicts with the durable paused session"
                     )
                 else:
+                    if operation_status is IdempotencyStatus.PENDING:
+                        self._idempotency.complete_with_connection(
+                            conn,
+                            operation_key,
+                            {
+                                "accepted": True,
+                                "applied": True,
+                                "task_state": TaskState.PAUSED.value,
+                            },
+                        )
                     applied = True
             elif current_state is TaskState.RUNNING and current_record == record:
                 self._queue.transition_with_connection(conn, task_id, TaskState.PAUSED)
@@ -552,6 +562,16 @@ class TaskRuntimeCoordinator:
                         resume_token=record.resume_token,
                     ),
                 )
+                if operation_status is IdempotencyStatus.PENDING:
+                    self._idempotency.complete_with_connection(
+                        conn,
+                        operation_key,
+                        {
+                            "accepted": True,
+                            "applied": True,
+                            "task_state": TaskState.PAUSED.value,
+                        },
+                    )
                 applied = True
             else:
                 if operation_status is IdempotencyStatus.PENDING:
