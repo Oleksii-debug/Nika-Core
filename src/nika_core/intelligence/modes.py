@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import Protocol
 
 from nika_core.model_gateway.contracts import (
     ModelRequest,
@@ -23,6 +22,7 @@ class IntelligenceMode(StrEnum):
 
 class IntelligenceModeErrorCode(StrEnum):
     MODE_DISABLED = "mode_disabled"
+    DETERMINISTIC_PATH_REQUIRED = "deterministic_path_required"
     RESPONSE_MISMATCH = "response_mismatch"
     INVALID_CONFIGURATION = "invalid_configuration"
 
@@ -96,199 +96,155 @@ class IntelligenceModePolicy:
 
 
 @dataclass(frozen=True, slots=True)
-class IntelligenceModeStatus:
-    """Secret-free metadata safe for diagnostics/settings presentation."""
+class IntelligenceRoute:
+    """Resolved execution boundary without credentials, prompts or provider URLs."""
 
     mode: IntelligenceMode
     enabled: bool
     provider_id: str | None
     provider_kind: ProviderKind
-
-
-class DeterministicCompletionPort(Protocol):
-    """Adapter boundary for model-free deterministic intelligence.
-
-    Implementations may adapt DeterministicBrain or another deterministic
-    workflow to this narrow completion shape. They do not call ModelGateway.
-    """
-
-    async def complete(self, request: ModelRequest) -> ModelResponse: ...
+    uses_model_gateway: bool
 
 
 class IntelligenceModeRouter:
-    """Route one explicit intelligence mode without cross-mode fallback."""
+    """Resolve one explicit mode and execute only model-backed routes via ModelGateway.
+
+    Deterministic mode deliberately does not emulate a model completion. Callers
+    resolve that mode and invoke the existing structured DeterministicBrain path.
+    """
 
     def __init__(
         self,
         *,
         gateway: ModelGateway,
-        deterministic: DeterministicCompletionPort,
         policy: IntelligenceModePolicy | None = None,
     ) -> None:
         self._gateway = gateway
-        self._deterministic = deterministic
         self._policy = policy or IntelligenceModePolicy()
 
-    def statuses(self) -> tuple[IntelligenceModeStatus, ...]:
+    def statuses(self) -> tuple[IntelligenceRoute, ...]:
         """Return bounded route status with no prompt, URL or credential material."""
 
         return (
-            IntelligenceModeStatus(
+            IntelligenceRoute(
                 mode=IntelligenceMode.DETERMINISTIC,
                 enabled=True,
                 provider_id=None,
                 provider_kind=ProviderKind.NO_LLM,
+                uses_model_gateway=False,
             ),
-            IntelligenceModeStatus(
+            IntelligenceRoute(
                 mode=IntelligenceMode.EMBEDDED_LOCAL,
                 enabled=self._policy.embedded_local_enabled,
                 provider_id=self._policy.embedded_provider_id,
                 provider_kind=ProviderKind.LOCAL,
+                uses_model_gateway=True,
             ),
-            IntelligenceModeStatus(
+            IntelligenceRoute(
                 mode=IntelligenceMode.LOCAL_OLLAMA,
                 enabled=self._policy.local_ollama_enabled,
                 provider_id=self._policy.ollama_provider_id,
                 provider_kind=ProviderKind.LOCAL,
+                uses_model_gateway=True,
             ),
-            IntelligenceModeStatus(
+            IntelligenceRoute(
                 mode=IntelligenceMode.EXTERNAL_API,
                 enabled=self._policy.external_api_enabled,
                 provider_id=self._policy.external_provider_id,
                 provider_kind=ProviderKind.CLOUD,
+                uses_model_gateway=True,
             ),
         )
 
-    async def complete(
-        self,
-        mode: IntelligenceMode,
-        request: ModelRequest,
-    ) -> ModelResponse:
+    def resolve(self, mode: IntelligenceMode) -> IntelligenceRoute:
         if not isinstance(mode, IntelligenceMode):
             raise TypeError("mode must be IntelligenceMode")
-        if not isinstance(request, ModelRequest):
-            raise TypeError("request must be ModelRequest")
 
-        if mode is IntelligenceMode.DETERMINISTIC:
-            deterministic_request = replace(
-                request,
-                provider_id=None,
-                provider_kind=ProviderKind.NO_LLM,
-                fallback_provider_ids=(),
-            )
-            response = await self._deterministic.complete(deterministic_request)
-            self._validate_response(
+        routes = {route.mode: route for route in self.statuses()}
+        route = routes.get(mode)
+        if route is None:
+            raise IntelligenceModeError(
+                IntelligenceModeErrorCode.INVALID_CONFIGURATION,
+                "unsupported intelligence mode",
                 mode=mode,
-                request=request,
-                response=response,
-                expected_kind=ProviderKind.NO_LLM,
-                expected_provider_id=None,
             )
-            return response
-
-        if mode is IntelligenceMode.EMBEDDED_LOCAL:
-            self._require_enabled(mode, self._policy.embedded_local_enabled)
-            return await self._complete_with_gateway(
+        self._require_enabled(route)
+        if route.uses_model_gateway and route.provider_id is None:
+            raise IntelligenceModeError(
+                IntelligenceModeErrorCode.INVALID_CONFIGURATION,
+                "model-backed intelligence mode has no provider identity",
                 mode=mode,
-                request=request,
-                provider_id=self._policy.embedded_provider_id,
-                expected_kind=ProviderKind.LOCAL,
             )
+        return route
 
-        if mode is IntelligenceMode.LOCAL_OLLAMA:
-            self._require_enabled(mode, self._policy.local_ollama_enabled)
-            return await self._complete_with_gateway(
-                mode=mode,
-                request=request,
-                provider_id=self._policy.ollama_provider_id,
-                expected_kind=ProviderKind.LOCAL,
-            )
-
-        if mode is IntelligenceMode.EXTERNAL_API:
-            self._require_enabled(mode, self._policy.external_api_enabled)
-            provider_id = self._policy.external_provider_id
-            if provider_id is None:
-                raise IntelligenceModeError(
-                    IntelligenceModeErrorCode.INVALID_CONFIGURATION,
-                    "external API mode has no approved provider identity",
-                    mode=mode,
-                )
-            return await self._complete_with_gateway(
-                mode=mode,
-                request=request,
-                provider_id=provider_id,
-                expected_kind=ProviderKind.CLOUD,
-            )
-
-        raise IntelligenceModeError(
-            IntelligenceModeErrorCode.INVALID_CONFIGURATION,
-            "unsupported intelligence mode",
-            mode=mode,
-        )
-
-    async def _complete_with_gateway(
+    async def complete_model(
         self,
-        *,
         mode: IntelligenceMode,
         request: ModelRequest,
-        provider_id: str,
-        expected_kind: ProviderKind,
     ) -> ModelResponse:
+        if not isinstance(request, ModelRequest):
+            raise TypeError("request must be ModelRequest")
+        route = self.resolve(mode)
+        if not route.uses_model_gateway:
+            raise IntelligenceModeError(
+                IntelligenceModeErrorCode.DETERMINISTIC_PATH_REQUIRED,
+                "deterministic mode must execute through DeterministicBrain",
+                mode=mode,
+            )
+        if route.provider_id is None:  # resolve() proves this for model-backed routes.
+            raise AssertionError("model-backed intelligence route has no provider identity")
+
         routed_request = replace(
             request,
-            provider_id=provider_id,
+            provider_id=route.provider_id,
             provider_kind=None,
             fallback_provider_ids=(),
         )
         response = await self._gateway.complete(routed_request)
         self._validate_response(
-            mode=mode,
+            route=route,
             request=request,
             response=response,
-            expected_kind=expected_kind,
-            expected_provider_id=provider_id,
         )
         return response
 
     @staticmethod
-    def _require_enabled(mode: IntelligenceMode, enabled: bool) -> None:
-        if not enabled:
+    def _require_enabled(route: IntelligenceRoute) -> None:
+        if not route.enabled:
             raise IntelligenceModeError(
                 IntelligenceModeErrorCode.MODE_DISABLED,
-                f"intelligence mode is disabled: {mode.value}",
-                mode=mode,
+                f"intelligence mode is disabled: {route.mode.value}",
+                mode=route.mode,
             )
 
     @staticmethod
     def _validate_response(
         *,
-        mode: IntelligenceMode,
+        route: IntelligenceRoute,
         request: ModelRequest,
         response: ModelResponse,
-        expected_kind: ProviderKind,
-        expected_provider_id: str | None,
     ) -> None:
         if not isinstance(response, ModelResponse):
             raise IntelligenceModeError(
                 IntelligenceModeErrorCode.RESPONSE_MISMATCH,
                 "intelligence boundary returned an invalid response",
-                mode=mode,
+                mode=route.mode,
             )
         if response.request_id != request.request_id:
             raise IntelligenceModeError(
                 IntelligenceModeErrorCode.RESPONSE_MISMATCH,
                 "intelligence response request identity does not match",
-                mode=mode,
+                mode=route.mode,
             )
-        if response.provider_kind is not expected_kind:
+        if response.provider_kind is not route.provider_kind:
             raise IntelligenceModeError(
                 IntelligenceModeErrorCode.RESPONSE_MISMATCH,
                 "intelligence response crossed the selected provider boundary",
-                mode=mode,
+                mode=route.mode,
             )
-        if expected_provider_id is not None and response.provider_id != expected_provider_id:
+        if response.provider_id != route.provider_id:
             raise IntelligenceModeError(
                 IntelligenceModeErrorCode.RESPONSE_MISMATCH,
                 "intelligence response came from an unexpected provider",
-                mode=mode,
+                mode=route.mode,
             )
