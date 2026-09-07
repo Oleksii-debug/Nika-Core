@@ -240,11 +240,20 @@ class ModelGateway:
     @staticmethod
     def _validate_success_response(
         *,
-        response: ModelResponse,
+        response: object,
         request: ModelRequest,
         trusted_provider_id: str,
         trusted_provider_kind: ProviderKind,
     ) -> ModelGatewayError | None:
+        if not isinstance(response, ModelResponse):
+            return ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                "model provider returned an invalid success response",
+                provider_id=trusted_provider_id,
+                retryable=False,
+                failure_effect=ModelFailureEffect.UNKNOWN,
+            )
+
         invalid = (
             response.request_id != request.request_id
             or response.provider_id != trusted_provider_id
