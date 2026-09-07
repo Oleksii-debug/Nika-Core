@@ -108,6 +108,31 @@ def test_install_rejects_canonical_user_data_root_before_mutation(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
+def test_install_rejects_explicit_database_path_inside_destination(tmp_path: Path) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    bundle = _bundle(tmp_path / "release-explicit-db", "v1")
+    destination = tmp_path / "Custom Install" / "Nika Core"
+    explicit_database = destination / "durable" / "nika_core.db"
+    env = os.environ.copy()
+    env["NIKA_DB_PATH"] = str(explicit_database)
+    env.pop("NIKA_DATABASE_PATH", None)
+
+    result = _run(
+        shell,
+        mode="Install",
+        destination=destination,
+        bundle=bundle,
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert not destination.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
 def test_failed_install_post_activation_verification_leaves_no_active_destination(
     tmp_path: Path,
 ) -> None:
