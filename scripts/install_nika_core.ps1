@@ -32,6 +32,36 @@ function Test-NikaPathWithin {
     )
 }
 
+function Assert-NikaNoReparsePathChain {
+    param([Parameter(Mandatory=$true)][string]$Path)
+
+    $fullPath = Get-NikaFullPath $Path
+    $volumeRoot = [System.IO.Path]::GetPathRoot($fullPath).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    )
+    $current = $fullPath
+    while (-not [string]::IsNullOrWhiteSpace($current)) {
+        if ([System.StringComparer]::OrdinalIgnoreCase.Equals($current, $volumeRoot)) {
+            break
+        }
+        if (Test-Path -LiteralPath $current) {
+            $item = Get-Item -LiteralPath $current -Force
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Reparse points are forbidden in installer path authority."
+            }
+        }
+        $next = Split-Path -Parent $current
+        if (
+            [string]::IsNullOrWhiteSpace($next) -or
+            [System.StringComparer]::OrdinalIgnoreCase.Equals($next, $current)
+        ) {
+            break
+        }
+        $current = Get-NikaFullPath $next
+    }
+}
+
 function Assert-NikaSafeDestination {
     param(
         [Parameter(Mandatory=$true)][string]$DestinationPath,
@@ -103,6 +133,7 @@ function Assert-NikaReleaseBundle {
     if (-not (Test-Path -LiteralPath $BundleRoot -PathType Container)) {
         throw "BundlePath does not exist."
     }
+    Assert-NikaNoReparsePathChain -Path $BundleRoot
     $manifestPath = Join-Path $BundleRoot "release-manifest.json"
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
         throw "Release manifest is missing."
@@ -216,6 +247,7 @@ $leaf = Split-Path -Leaf $destinationPath
 if ([string]::IsNullOrWhiteSpace($parent) -or [string]::IsNullOrWhiteSpace($leaf)) {
     throw "Destination must name an application directory."
 }
+Assert-NikaNoReparsePathChain -Path $destinationPath
 Assert-NikaSafeDestination -DestinationPath $destinationPath
 
 $rollbackPath = Join-Path $parent (".$leaf.rollback")
@@ -224,8 +256,12 @@ if ($Mode -eq "Rollback") {
     if (-not (Test-Path -LiteralPath $rollbackPath -PathType Container)) {
         throw "No rollback image is available."
     }
+    Assert-NikaNoReparsePathChain -Path $destinationPath
+    Assert-NikaNoReparsePathChain -Path $rollbackPath
     Assert-NikaReleaseBundle -BundleRoot (Get-NikaFullPath $rollbackPath)
     New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    Assert-NikaNoReparsePathChain -Path $destinationPath
+    Assert-NikaNoReparsePathChain -Path $rollbackPath
     if (-not (Test-Path -LiteralPath $destinationPath -PathType Container)) {
         [System.IO.Directory]::Move($rollbackPath, $destinationPath)
         Write-Output $destinationPath
@@ -266,28 +302,50 @@ if ($Mode -eq "Update") {
     Assert-NikaReleaseBundle -BundleRoot $destinationPath
 }
 
+Assert-NikaNoReparsePathChain -Path $destinationPath
+Assert-NikaNoReparsePathChain -Path $bundleRoot
 New-Item -ItemType Directory -Path $parent -Force | Out-Null
+Assert-NikaNoReparsePathChain -Path $destinationPath
 $stagePath = Join-Path $parent (".$leaf.staging-$([Guid]::NewGuid().ToString('N'))")
 try {
     Copy-NikaBundleToStage -BundleRoot $bundleRoot -StagePath $stagePath
 
+    Assert-NikaNoReparsePathChain -Path $stagePath
+    Assert-NikaNoReparsePathChain -Path $destinationPath
+
     if ($Mode -eq "Install") {
         [System.IO.Directory]::Move($stagePath, $destinationPath)
+        Assert-NikaNoReparsePathChain -Path $destinationPath
+        Assert-NikaReleaseBundle -BundleRoot $destinationPath
     }
     else {
         if (Test-Path -LiteralPath $rollbackPath) {
+            Assert-NikaNoReparsePathChain -Path $rollbackPath
             Remove-Item -LiteralPath $rollbackPath -Recurse -Force
         }
+        Assert-NikaNoReparsePathChain -Path $destinationPath
         [System.IO.Directory]::Move($destinationPath, $rollbackPath)
+        $failedActivationPath = Join-Path $parent (".$leaf.failed-$([Guid]::NewGuid().ToString('N'))")
         try {
+            Assert-NikaNoReparsePathChain -Path $stagePath
+            Assert-NikaNoReparsePathChain -Path $rollbackPath
             [System.IO.Directory]::Move($stagePath, $destinationPath)
+            Assert-NikaNoReparsePathChain -Path $destinationPath
+            Assert-NikaReleaseBundle -BundleRoot $destinationPath
         }
         catch {
+            if (Test-Path -LiteralPath $destinationPath -PathType Container) {
+                Assert-NikaNoReparsePathChain -Path $destinationPath
+                [System.IO.Directory]::Move($destinationPath, $failedActivationPath)
+            }
             if (
                 -not (Test-Path -LiteralPath $destinationPath) -and
                 (Test-Path -LiteralPath $rollbackPath -PathType Container)
             ) {
+                Assert-NikaNoReparsePathChain -Path $rollbackPath
                 [System.IO.Directory]::Move($rollbackPath, $destinationPath)
+                Assert-NikaNoReparsePathChain -Path $destinationPath
+                Assert-NikaReleaseBundle -BundleRoot $destinationPath
             }
             throw
         }
@@ -295,9 +353,9 @@ try {
 }
 finally {
     if (Test-Path -LiteralPath $stagePath) {
+        Assert-NikaNoReparsePathChain -Path $stagePath
         Remove-Item -LiteralPath $stagePath -Recurse -Force
     }
 }
 
-Assert-NikaReleaseBundle -BundleRoot $destinationPath
 Write-Output $destinationPath
