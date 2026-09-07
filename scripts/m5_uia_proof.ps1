@@ -303,6 +303,22 @@ try {
         return $true
     }
 
+    function Add-AddressableBoundCandidate(
+        $Candidates,
+        [System.Windows.Automation.AutomationElement]$Candidate
+    ) {
+        # Before control authority exists, provider artifacts without RuntimeId are
+        # not addressable controls. Omit them from this enumeration and let the
+        # caller retry from fresh roots. Once an identity is captured, RuntimeId
+        # loss remains fatal in Resolve-BoundControlIdentity.
+        try {
+            Get-ElementRuntimeId $Candidate 1 10 | Out-Null
+        } catch [NikaUiaRuntimeIdUnavailableException] {
+            return
+        }
+        Add-UniqueAutomationElement $Candidates $Candidate
+    }
+
     function Find-BoundDescendantName(
         [System.Windows.Automation.AutomationElement]$ExactWindow,
         [string]$Expected,
@@ -328,14 +344,14 @@ try {
         foreach ($searchRoot in (Get-BoundSearchRoots $ExactWindow)) {
             try {
                 if (Test-ElementMatchesSemanticLocator $searchRoot $Expected $ExpectedControlType) {
-                    Add-UniqueAutomationElement $candidates $searchRoot
+                    Add-AddressableBoundCandidate $candidates $searchRoot
                 }
                 $matches = $searchRoot.FindAll(
                     [System.Windows.Automation.TreeScope]::Descendants,
                     $condition
                 )
                 for ($index = 0; $index -lt $matches.Count; $index++) {
-                    Add-UniqueAutomationElement $candidates $matches.Item($index)
+                    Add-AddressableBoundCandidate $candidates $matches.Item($index)
                 }
             } catch [System.Windows.Automation.ElementNotAvailableException] {
                 # Never choose from a partially enumerated candidate set. The caller
