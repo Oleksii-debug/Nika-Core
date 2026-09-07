@@ -334,8 +334,8 @@ try {
             Assert-NikaReleaseBundle -BundleRoot $destinationPath
         }
         catch {
+            $activationError = $_
             if (Test-Path -LiteralPath $destinationPath -PathType Container) {
-                Assert-NikaNoReparsePathChain -Path $destinationPath
                 [System.IO.Directory]::Move($destinationPath, $failedActivationPath)
             }
             if (
@@ -347,7 +347,7 @@ try {
                 Assert-NikaNoReparsePathChain -Path $destinationPath
                 Assert-NikaReleaseBundle -BundleRoot $destinationPath
             }
-            throw
+            throw $activationError
         }
     }
 }
