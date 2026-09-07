@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Barrier
 
@@ -127,3 +128,21 @@ def test_conditional_user_memory_still_requires_explicit_approval(tmp_path: Path
             value="uk",
             expected_updated_at=None,
         )
+
+
+def test_compare_and_put_can_replace_logically_expired_record(tmp_path: Path) -> None:
+    memory = MemoryService(_store(tmp_path))
+    memory.put(
+        **_identity(),
+        value={"mode": "expired"},
+        expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+
+    replacement = memory.compare_and_put(
+        **_identity(),
+        value={"mode": "replacement"},
+        expected_updated_at=None,
+    )
+
+    assert replacement.value == {"mode": "replacement"}
+    assert replacement.expires_at is None
