@@ -16,7 +16,7 @@ class IntelligenceMode(StrEnum):
 
     DETERMINISTIC = "deterministic"
     EMBEDDED_LOCAL = "embedded_local"
-    LOCAL_OLLAMA = "local_ollama"
+    EXTERNAL_LOCAL = "external_local"
     EXTERNAL_API = "external_api"
 
 
@@ -51,16 +51,16 @@ class IntelligenceModePolicy:
     """
 
     embedded_provider_id: str = "foundry-local"
-    ollama_provider_id: str = "ollama"
+    external_local_provider_id: str = "ollama"
     external_provider_id: str | None = None
     embedded_local_enabled: bool = True
-    local_ollama_enabled: bool = True
+    external_local_enabled: bool = True
     external_api_enabled: bool = False
 
     def __post_init__(self) -> None:
         for name, enabled in (
             ("embedded_local_enabled", self.embedded_local_enabled),
-            ("local_ollama_enabled", self.local_ollama_enabled),
+            ("external_local_enabled", self.external_local_enabled),
             ("external_api_enabled", self.external_api_enabled),
         ):
             if type(enabled) is not bool:
@@ -68,7 +68,7 @@ class IntelligenceModePolicy:
 
         provider_ids = {
             "embedded_provider_id": self.embedded_provider_id,
-            "ollama_provider_id": self.ollama_provider_id,
+            "external_local_provider_id": self.external_local_provider_id,
         }
         if self.external_provider_id is not None:
             provider_ids["external_provider_id"] = self.external_provider_id
@@ -141,9 +141,9 @@ class IntelligenceModeRouter:
                 uses_model_gateway=True,
             ),
             IntelligenceRoute(
-                mode=IntelligenceMode.LOCAL_OLLAMA,
-                enabled=self._policy.local_ollama_enabled,
-                provider_id=self._policy.ollama_provider_id,
+                mode=IntelligenceMode.EXTERNAL_LOCAL,
+                enabled=self._policy.external_local_enabled,
+                provider_id=self._policy.external_local_provider_id,
                 provider_kind=ProviderKind.LOCAL,
                 uses_model_gateway=True,
             ),
