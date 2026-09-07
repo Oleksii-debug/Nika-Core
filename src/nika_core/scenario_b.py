@@ -64,11 +64,18 @@ from nika_core.tools import ToolCall, ToolExecutor, ToolResult, ToolRisk, ToolSp
 _INPUT_TOOL_ID = "v01.scenario_b.semantic_set_value"
 _INVOKE_TOOL_ID = "v01.scenario_b.semantic_invoke"
 _TABS_MEMORY_NAMESPACE = "v01.scenario_b.task_tabs"
+_PRE_EFFECT_DENIAL_ERRORS = frozenset(
+    {
+        "approval required",
+        "durable effect guard required",
+    }
+)
 _UNKNOWN_EFFECT_ERRORS = frozenset(
     {
         "tool failed",
         "tool timed out",
         "tool result durability failed",
+        "tool effect not safe to execute",
     }
 )
 
@@ -459,7 +466,13 @@ class ScenarioBService:
         if not result.ok:
             error = result.error or "tool failed"
             self._set_reason_fact(target, _safe_reason_code(error))
-            if error in _UNKNOWN_EFFECT_ERRORS:
+            if error in _PRE_EFFECT_DENIAL_ERRORS:
+                due = self.clock() + timedelta(seconds=self.inter_batch_delay_seconds)
+                self.cursor.mark_external_pre_effect_denial(
+                    target.target_id,
+                    next_batch_not_before=due,
+                )
+            elif error in _UNKNOWN_EFFECT_ERRORS:
                 self.cursor.mark_external_uncertain(
                     target.target_id,
                     {"reason": "canonical_tool_effect_unresolved"},
