@@ -37,15 +37,16 @@ PRODUCTION_RELEASE_READY=false.
 Integrated/do-not-repeat foundation includes packaged three-agent execution, source setup, local/API ModelGateway, checker handoffs, durable provider/model selection backend, offline/reconnect and uncertain-effect safety, semantic browser stale-DOM/frame protection, durable batch cursor, Windows autostart backend + visible settings, canonical per-user data/recovery foundations.
 
 ## Nearest V0.1 remaining gates
-1. Durable active Pause/Resume and restart/recovery truth. Incumbent #654 lineage remains owned by Worker1; current independent QA has identified a pause-confirmation crash-window defect that must be resolved or disproven on exact head.
-2. Recurrence/hibernate/missed-run lifecycle on current main.
-3. One complete current-main browser Scenario B.
-4. One complete current-main monitoring Scenario A.
-5. User-visible packaged provider/model selector over the already-integrated canonical backend.
-6. Exact package/install/update/legacy-data/recovery/SBOM/notices/provenance qualification.
-7. Binding repository governance; branch protection/required-status enforcement is currently disabled.
-8. One exact Windows release candidate.
-9. Human Windows/NVDA protocol after PRE_HUMAN_READY only.
+1. Durable active Pause/Resume and restart/recovery truth. Incumbent #654 remains Worker1-owned; its newest repair addresses the independent successful-Pause return-boundary crash finding, but acceptance still requires fresh exact-head gates and non-self same-head audit.
+2. Packaged startup recovery before shell exposure. Fresh current-main QA #652 proves scripts/nika_windows.py currently launches the shell without composing canonical RuntimeRecoveryService inventory/reconciliation. Repair must REUSE existing recovery authority and coordinate with current #663 launcher ownership or its immediate successor.
+3. Recurrence/hibernate/missed-run lifecycle on current main.
+4. One complete current-main browser Scenario B.
+5. One complete current-main monitoring Scenario A.
+6. User-visible packaged provider/model selector over the already-integrated canonical backend; #663 is the incumbent Windows lineage and prior-head evidence is stale after each repair.
+7. Exact package/install/update/legacy-data/recovery/SBOM/notices/provenance qualification. #657 is superseded by current-main #660.
+8. Binding repository governance; branch protection/required-status enforcement is currently disabled.
+9. One exact Windows release candidate.
+10. Human Windows/NVDA protocol after PRE_HUMAN_READY only.
 
 Avoid cosmetic V0.1-only polish that final-product work will replace.
 
@@ -79,7 +80,7 @@ Read-only JS/CDP/DOM diagnostics are allowed to understand unfamiliar sites but 
 Parallel/future: controlled tool registry/MCP/capability-gap and agent-autonomy contracts. Never create a second browser/retry/cursor/monitor/effect system.
 
 ## Worker 4 — Windows Journey
-Nearest checkpoint: visible provider/model selector over canonical backend, truthful task/team lifecycle/recovery, clean package/install/restart, keyboard/UIA evidence and human protocol preparation.
+Nearest checkpoint: visible provider/model selector over canonical backend, and canonical startup recovery inventory/reconciliation BEFORE shell exposure, plus truthful task/team lifecycle/recovery, clean package/install/restart, keyboard/UIA evidence and human protocol preparation. Current #663 owns the Windows launcher/UI slice; any startup-recovery repair on scripts/nika_windows.py must be coordinated into that lineage or an immediate successor.
 Parallel/future: integrate memory/voice/multimodal/resource/background status into the Windows journey when those engines are owned elsewhere and contracts are stable. Do not create duplicate backend truth.
 
 ## Worker 5 — Coordinator + Integrator
