@@ -32,6 +32,42 @@ function Test-NikaPathWithin {
     )
 }
 
+function Get-NikaCanonicalDataRoot {
+    $databasePath = [System.Environment]::GetEnvironmentVariable("NIKA_DB_PATH")
+    if ([string]::IsNullOrWhiteSpace($databasePath)) {
+        $databasePath = [System.Environment]::GetEnvironmentVariable("NIKA_DATABASE_PATH")
+    }
+    if ([string]::IsNullOrWhiteSpace($databasePath)) {
+        $localAppData = [System.Environment]::GetEnvironmentVariable("LOCALAPPDATA")
+        if ([string]::IsNullOrWhiteSpace($localAppData)) {
+            throw "LOCALAPPDATA is required to resolve the canonical Nika Core data root."
+        }
+        $databasePath = Join-Path (Join-Path $localAppData "NikaCore") "nika_core.db"
+    }
+    elseif (-not [System.IO.Path]::IsPathRooted($databasePath)) {
+        throw "Configured Nika Core database path must be absolute."
+    }
+
+    $canonicalDatabase = Get-NikaFullPath $databasePath
+    $dataRoot = Split-Path -Parent $canonicalDatabase
+    if ([string]::IsNullOrWhiteSpace($dataRoot)) {
+        throw "Configured Nika Core database path has no safe parent."
+    }
+    return Get-NikaFullPath $dataRoot
+}
+
+function Assert-NikaDestinationDataSeparation {
+    param([Parameter(Mandatory=$true)][string]$DestinationPath)
+
+    $dataRoot = Get-NikaCanonicalDataRoot
+    if (
+        (Test-NikaPathWithin -Path $DestinationPath -Root $dataRoot) -or
+        (Test-NikaPathWithin -Path $dataRoot -Root $DestinationPath)
+    ) {
+        throw "Application destination must not overlap the canonical Nika Core data root."
+    }
+}
+
 function Assert-NikaNoReparsePathChain {
     param([Parameter(Mandatory=$true)][string]$Path)
 
@@ -249,6 +285,7 @@ if ([string]::IsNullOrWhiteSpace($parent) -or [string]::IsNullOrWhiteSpace($leaf
 }
 Assert-NikaNoReparsePathChain -Path $destinationPath
 Assert-NikaSafeDestination -DestinationPath $destinationPath
+Assert-NikaDestinationDataSeparation -DestinationPath $destinationPath
 
 $rollbackPath = Join-Path $parent (".$leaf.rollback")
 
@@ -270,19 +307,53 @@ if ($Mode -eq "Rollback") {
 
     Assert-NikaReleaseBundle -BundleRoot $destinationPath
     $swapPath = Join-Path $parent (".$leaf.swap-$([Guid]::NewGuid().ToString('N'))")
+    $rollbackPhase = "start"
     try {
         [System.IO.Directory]::Move($destinationPath, $swapPath)
+        $rollbackPhase = "active-staged"
         [System.IO.Directory]::Move($rollbackPath, $destinationPath)
+        $rollbackPhase = "rollback-activated"
         [System.IO.Directory]::Move($swapPath, $rollbackPath)
+        $rollbackPhase = "complete"
     }
     catch {
-        if (
-            -not (Test-Path -LiteralPath $destinationPath) -and
-            (Test-Path -LiteralPath $swapPath -PathType Container)
-        ) {
-            [System.IO.Directory]::Move($swapPath, $destinationPath)
+        $rollbackError = $_
+        try {
+            if ($rollbackPhase -eq "active-staged") {
+                if (
+                    -not (Test-Path -LiteralPath $destinationPath) -and
+                    (Test-Path -LiteralPath $swapPath -PathType Container)
+                ) {
+                    [System.IO.Directory]::Move($swapPath, $destinationPath)
+                }
+            }
+            elseif ($rollbackPhase -eq "rollback-activated") {
+                if (
+                    (Test-Path -LiteralPath $destinationPath -PathType Container) -and
+                    -not (Test-Path -LiteralPath $rollbackPath)
+                ) {
+                    [System.IO.Directory]::Move($destinationPath, $rollbackPath)
+                }
+                if (
+                    -not (Test-Path -LiteralPath $destinationPath) -and
+                    (Test-Path -LiteralPath $swapPath -PathType Container)
+                ) {
+                    [System.IO.Directory]::Move($swapPath, $destinationPath)
+                }
+            }
+
+            Assert-NikaNoReparsePathChain -Path $destinationPath
+            Assert-NikaNoReparsePathChain -Path $rollbackPath
+            Assert-NikaReleaseBundle -BundleRoot $destinationPath
+            Assert-NikaReleaseBundle -BundleRoot $rollbackPath
+            if (Test-Path -LiteralPath $swapPath) {
+                throw "Rollback recovery left an unresolved swap image."
+            }
         }
-        throw
+        catch {
+            throw "Rollback failed and the verified pre-command pair could not be restored."
+        }
+        throw $rollbackError
     }
     Write-Output $destinationPath
     exit 0
@@ -314,9 +385,22 @@ try {
     Assert-NikaNoReparsePathChain -Path $destinationPath
 
     if ($Mode -eq "Install") {
-        [System.IO.Directory]::Move($stagePath, $destinationPath)
-        Assert-NikaNoReparsePathChain -Path $destinationPath
-        Assert-NikaReleaseBundle -BundleRoot $destinationPath
+        $failedInstallPath = Join-Path $parent (".$leaf.failed-$([Guid]::NewGuid().ToString('N'))")
+        try {
+            [System.IO.Directory]::Move($stagePath, $destinationPath)
+            Assert-NikaNoReparsePathChain -Path $destinationPath
+            Assert-NikaReleaseBundle -BundleRoot $destinationPath
+        }
+        catch {
+            $activationError = $_
+            if (Test-Path -LiteralPath $destinationPath -PathType Container) {
+                [System.IO.Directory]::Move($destinationPath, $failedInstallPath)
+            }
+            if (Test-Path -LiteralPath $destinationPath) {
+                throw "Install activation failed and the invalid destination could not be quarantined."
+            }
+            throw $activationError
+        }
     }
     else {
         if (Test-Path -LiteralPath $rollbackPath) {
