@@ -1,5 +1,26 @@
 # Nika Core — roadmap and progress truth
 
+## Binding continuous-product strategy — 2026-09-07
+
+Nika Core is **one continuously developed Full Product**, not a sequence of mostly separate products. Labels such as V0.1, V0.2 and later versions are **acceptance checkpoints** inside one production lineage. They provide exact evidence, rollback and release slices; they do not reset architecture, duplicate completed components or require a new product-development cycle.
+
+Current routing principle: optimize for **what most shortens the path to complete Full Nika while preserving the nearest acceptance checkpoint**.
+
+Nearest checkpoint: **V0.1**. Close only the remaining real product gates needed for an honest Windows candidate: durable active Pause/Resume and restart/recovery; recurrence/hibernate; one complete browser Scenario B; one complete monitoring Scenario A; packaged user model-selection journey; package/install/update/legacy-data/recovery/SBOM/notices/provenance/governance; exact Windows candidate; then human Windows/NVDA acceptance. Avoid checkpoint-only cosmetic work that a Full Product capability will replace.
+
+After V0.1 passes, development **continues immediately in the same codebase**. No separate “start V0.2” project is created. Safe independent Full Product work may proceed in parallel before V0.1 when contracts and ownership are disjoint and the checkpoint is not delayed.
+
+Dependency-priority graph:
+`runtime/durability -> AI/model layer -> browser/tools -> agent autonomy -> memory -> voice/perception -> resource governor -> background life -> learning/self-improvement integration -> phone/Telegram/multimodal surfaces -> full Windows/NVDA product journey -> final packaging/release`.
+
+This is a dependency graph, not a set of artificial phase walls: independent nodes may advance in parallel when their contracts are stable.
+
+Every worker/Codex/Work cycle classifies its relevant surface as **DONE / IN_PROGRESS / STALE / BLOCKED / NEXT / DO_NOT_REPEAT**, reuses the incumbent production lineage, and follows **REUSE -> ADAPT -> CUSTOM (thin)**. Exact green/audit credit stays bound to the exact source SHA.
+
+Live technical truth always comes from GitHub main, exact candidate heads, reviews and Actions. At this coordination snapshot the starting main is `7e8be7cb7ed3b62f55b1b9f5971bc45514427160`; current-main Core CI and M12 are green. HUMAN_TESTED=false. NVDA_VERIFIED=false. PRODUCTION_RELEASE_READY=false.
+
+---
+
 Baseline created: 2026-08-17. Scope reconciled: 2026-08-19. Product-factory scope expanded: 2026-08-20. Web/Cloud product direction bound: 2026-09-04.
 
 Progress is acceptance-gate based, not commit-count based. Regressions may reduce readiness. **Historical Core milestone credit and the expanded Full Product Vision are separate measurements.** See `docs/FULL_PRODUCT_VISION_2026-08-19.md`, `docs/AUTONOMOUS_PRODUCT_FACTORY.md`, and `docs/WEB_CLOUD_PRODUCT_ARCHITECTURE.md`.
