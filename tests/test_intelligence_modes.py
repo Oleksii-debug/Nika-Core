@@ -153,7 +153,7 @@ def test_embedded_local_mode_pins_foundry_and_strips_fallbacks() -> None:
     assert other.requests == []
     routed = gateway.requests[0]
     assert routed.provider_id == "foundry-local"
-    assert routed.provider_kind is None
+    assert routed.provider_kind is ProviderKind.LOCAL
     assert routed.fallback_provider_ids == ()
 
 
@@ -425,3 +425,54 @@ def test_invalid_request_type_fails_before_gateway() -> None:
         )
 
     assert gateway.requests == []
+
+
+@pytest.mark.parametrize(
+    ("mode", "policy", "registered_kind"),
+    (
+        (
+            IntelligenceMode.EMBEDDED_LOCAL,
+            IntelligenceModePolicy(),
+            ProviderKind.CLOUD,
+        ),
+        (
+            IntelligenceMode.EXTERNAL_LOCAL,
+            IntelligenceModePolicy(),
+            ProviderKind.CLOUD,
+        ),
+        (
+            IntelligenceMode.EXTERNAL_API,
+            IntelligenceModePolicy(
+                external_api_enabled=True,
+                external_provider_id="approved-cloud",
+            ),
+            ProviderKind.LOCAL,
+        ),
+    ),
+)
+def test_mode_kind_mismatch_fails_before_provider_execution(
+    mode: IntelligenceMode,
+    policy: IntelligenceModePolicy,
+    registered_kind: ProviderKind,
+) -> None:
+    gateway = RecordingGateway()
+    route = IntelligenceModeRouter(gateway=gateway, policy=policy).resolve(mode)
+    assert route.provider_id is not None
+    provider = RecordingProvider(
+        provider_id=route.provider_id,
+        kind=registered_kind,
+        supports_private_data=True,
+    )
+    gateway.register(provider)
+    router = IntelligenceModeRouter(gateway=gateway, policy=policy)
+
+    with pytest.raises(ModelGatewayError) as caught:
+        asyncio.run(router.complete_model(mode, _request()))
+
+    assert caught.value.code is ModelErrorCode.INVALID_REQUEST
+    assert caught.value.provider_id == route.provider_id
+    assert caught.value.failure_effect is ModelFailureEffect.NO_EFFECT
+    assert provider.requests == []
+    assert len(gateway.requests) == 1
+    assert gateway.requests[0].provider_id == route.provider_id
+    assert gateway.requests[0].provider_kind is route.provider_kind
