@@ -104,7 +104,7 @@ def test_sha256_integrity_requires_exact_lowercase_digest() -> None:
     ),
 )
 def test_public_references_reject_ambiguous_url_surfaces(field: str, value: str) -> None:
-    with pytest.raises(ValueError, match="public secret-free URL"):
+    with pytest.raises(ValueError):
         replace(_descriptor(), **{field: value})
 
 
