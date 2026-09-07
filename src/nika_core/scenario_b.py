@@ -497,9 +497,15 @@ class ScenarioBService:
             },
             task_id=self.task_id,
         )
-        result = await self.tool_executor.execute(invoke_call)
+        result = await self.tool_executor.execute(
+            invoke_call,
+            pre_handler_authority=lambda: self._pre_handler_task_authority(target),
+        )
         if not result.ok:
             error = result.error or "tool failed"
+            if error == "pre-handler authority denied":
+                self.cursor.reset_external_prepared(target.target_id)
+                raise ScenarioBTaskAuthorityError(error)
             if error in _PRE_EFFECT_DENIAL_ERRORS:
                 if self._reconcile_pre_effect_denial(target, invoke_call):
                     return
@@ -518,6 +524,13 @@ class ScenarioBService:
             dict(output),
             next_batch_not_before=due,
         )
+
+    def _pre_handler_task_authority(self, target: ScenarioBTarget) -> bool:
+        try:
+            self._require_task_action_authority(target)
+        except ScenarioBAuthorityError:
+            return False
+        return True
 
     def _task_state(self) -> TaskState:
         try:
