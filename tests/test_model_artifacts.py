@@ -98,6 +98,9 @@ def test_sha256_integrity_requires_exact_lowercase_digest() -> None:
         ("license_reference", "https://licenses.example.test/model?edition=one"),
         ("source_reference", "env:MODEL_SOURCE_REFERENCE"),
         ("license_reference", "credential:MODEL_LICENSE_REFERENCE"),
+        ("source_reference", "file:///home/user/private-model.bin"),
+        ("source_reference", "/home/user/private-model.bin"),
+        ("source_reference", "C:\\Users\\User\\private-model.bin"),
     ),
 )
 def test_public_references_reject_ambiguous_url_surfaces(field: str, value: str) -> None:
@@ -304,3 +307,15 @@ def test_direct_deserialization_rejects_non_list_set_like_fields() -> None:
     raw["resources"] = resources
     with pytest.raises(ModelArtifactRegistryError, match="cpu architectures"):
         ModelArtifactDescriptor.from_json(json.dumps(raw))
+
+
+def test_direct_constructor_rejects_string_instead_of_tuple_metadata() -> None:
+    with pytest.raises(TypeError, match="capabilities"):
+        replace(_descriptor(), capabilities="text.chat")  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="cpu_architectures"):
+        replace(
+            _descriptor(),
+            resources=ModelArtifactResources(
+                cpu_architectures="amd64",  # type: ignore[arg-type]
+            ),
+        )
