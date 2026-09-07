@@ -62,7 +62,7 @@ def test_download_timeout_rejects_non_numeric_or_boolean_before_manager(
     ),
 )
 def test_download_timeout_rejects_non_finite_or_non_positive_before_manager(
-    value: float | int,
+    value: float,
 ) -> None:
     provider, calls = _provider_with_forbidden_manager()
 
