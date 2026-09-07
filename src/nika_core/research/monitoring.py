@@ -123,8 +123,13 @@ def _validate_observation(observation: NormalizedObservation, label: str) -> Non
             raise ValueError(f"{label} observation error_code must be non-empty or None")
         if observation.error_code != observation.error_code.strip():
             raise ValueError(f"{label} observation error_code must be normalized")
-    if observation.error_message is not None and not isinstance(observation.error_message, str):
-        raise ValueError(f"{label} observation error_message must be text or None")
+    if observation.error_message is not None:
+        if not isinstance(observation.error_message, str) or not observation.error_message.strip():
+            raise ValueError(f"{label} observation error_message must be non-empty or None")
+        if observation.error_message != observation.error_message.strip():
+            raise ValueError(f"{label} observation error_message must be normalized")
+        if observation.error_code is None:
+            raise ValueError(f"{label} observation error_message requires error_code")
     if observation.condition_matched and observation.content_id is None:
         raise ValueError(f"{label} observation condition cannot match without content")
     if observation.condition_matched and observation.error_code is not None:
@@ -169,8 +174,6 @@ def detect_observation_change(
 
     if current.error_code is not None:
         status = ChangeDetectionStatus.ERROR
-    elif current.condition_matched:
-        status = ChangeDetectionStatus.CONDITION_MATCHED
     elif (
         current.content_id is None
         or previous is None
@@ -178,6 +181,8 @@ def detect_observation_change(
         or previous.content_id is None
     ):
         status = ChangeDetectionStatus.UNKNOWN
+    elif current.condition_matched:
+        status = ChangeDetectionStatus.CONDITION_MATCHED
     elif changed:
         status = ChangeDetectionStatus.CHANGED
     else:
