@@ -80,7 +80,11 @@ class ModelRequest:
             self.timeout_seconds, (int, float)
         ):
             raise TypeError("timeout_seconds must be numeric")
-        if not isfinite(float(self.timeout_seconds)) or self.timeout_seconds <= 0:
+        try:
+            finite_timeout = isfinite(float(self.timeout_seconds))
+        except OverflowError:
+            finite_timeout = False
+        if not finite_timeout or self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be finite and greater than zero")
         if self.temperature is not None and not 0 <= self.temperature <= 2:
             raise ValueError("temperature must be between 0 and 2")
@@ -145,7 +149,13 @@ class ModelResourcePolicy:
                 continue
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise TypeError(f"{name} must be numeric")
-            if not isfinite(float(value)) or not 0 < value <= 100:
+            if not 0 < value <= 100:
+                raise ValueError(f"{name} must be finite and in the range (0, 100]")
+            try:
+                finite_value = isfinite(float(value))
+            except OverflowError:
+                finite_value = False
+            if not finite_value:
                 raise ValueError(f"{name} must be finite and in the range (0, 100]")
         if self.min_available_memory_bytes is not None:
             if isinstance(self.min_available_memory_bytes, bool) or not isinstance(
