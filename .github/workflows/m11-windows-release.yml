@@ -26,6 +26,7 @@ on:
       - "src/nika_core/ui/**"
       - "scripts/nika_windows.py"
       - "scripts/m11_release.py"
+      - "scripts/m11_sbom_evidence.py"
       - "scripts/m5_uia_proof.ps1"
       - "scripts/v01_autostart_uia_proof.ps1"
       - "scripts/qa_assert_checkout_identity.py"
