@@ -185,15 +185,17 @@ def _ruleset_controls(ruleset: dict[str, Any]) -> dict[str, Any]:
             for check in checks:
                 if isinstance(check, dict) and isinstance(check.get("context"), str):
                     required_checks.add(check["context"])
-    bypass_actors = ruleset.get("bypass_actors", [])
-    if not isinstance(bypass_actors, list):
-        bypass_actors = []
+    bypass_actors_visible = "bypass_actors" in ruleset and isinstance(
+        ruleset.get("bypass_actors"), list
+    )
+    bypass_actors = ruleset.get("bypass_actors") if bypass_actors_visible else []
     return {
         "pull_request": "pull_request" in rule_types,
         "no_force_push": "non_fast_forward" in rule_types,
         "no_delete": "deletion" in rule_types,
         "required_checks": required_checks,
         "bypass_actor_count": len(bypass_actors),
+        "bypass_actors_visible": bypass_actors_visible,
     }
 
 
@@ -317,9 +319,18 @@ def inspect_repository_governance(
         )
 
     observed_ruleset_bypass_actor_count = sum(
-        item["bypass_actor_count"] for item in active_rulesets
+        item["bypass_actor_count"]
+        for item in active_rulesets
+        if item["bypass_actors_visible"]
     )
-    proof_rulesets = [item for item in active_rulesets if item["bypass_actor_count"] == 0]
+    rulesets_without_bypass_evidence = [
+        item for item in active_rulesets if not item["bypass_actors_visible"]
+    ]
+    proof_rulesets = [
+        item
+        for item in active_rulesets
+        if item["bypass_actors_visible"] and item["bypass_actor_count"] == 0
+    ]
     ruleset_combined = {
         "pull_request": any(item["pull_request"] for item in proof_rulesets),
         "no_force_push": any(item["no_force_push"] for item in proof_rulesets),
@@ -358,6 +369,7 @@ def inspect_repository_governance(
         ],
         "ruleset_bypass_actor_count": observed_ruleset_bypass_actor_count,
         "proof_eligible_ruleset_count": len(proof_rulesets),
+        "ruleset_bypass_evidence_missing_count": len(rulesets_without_bypass_evidence),
     }
 
     blockers: list[str] = []
@@ -377,6 +389,11 @@ def inspect_repository_governance(
     if missing_checks:
         blockers.append("REQUIRED_STATUS_CHECKS_MISSING")
 
+    if rulesets_without_bypass_evidence:
+        evidence_errors.extend(
+            f"ruleset_{item.get('id')}:bypass_actors_not_visible"
+            for item in rulesets_without_bypass_evidence
+        )
     if protected and protection is None and not proof_rulesets:
         blockers.append("PROTECTION_DETAILS_NOT_PROVEN")
 
