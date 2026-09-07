@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
 
@@ -242,3 +244,62 @@ def test_product_project_schema_v1_upgrades_without_data_loss(tmp_path) -> None:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     assert version == PRODUCT_PROJECT_SCHEMA_VERSION
     assert {"product_decisions", "product_project_mutation_idempotency"} <= tables
+
+
+
+def test_concurrent_identical_decision_write_replays_one_canonical_result(tmp_path) -> None:
+    store, projects, _ = _repos(tmp_path)
+    _handoff(projects)
+    barrier = Barrier(2)
+
+    def write() -> tuple[int, str, tuple[str, ...]]:
+        repository = ProductDecisionRepository(store)
+        barrier.wait()
+        stored = repository.record(
+            "p1",
+            _decision(),
+            expected_row_version=0,
+            idempotency_key="decision:concurrent:identical",
+        )
+        return (
+            stored.decision_version,
+            stored.created_at,
+            stored.evidence_package_ids,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = tuple(pool.map(lambda _index: write(), range(2)))
+
+    assert results[0] == results[1]
+    assert results[0][0] == 1
+    assert results[0][2] == ("research-1",)
+    assert projects.get("p1").row_version == 1
+    assert len(ProductDecisionRepository(store).history("p1", "decision-1")) == 1
+
+
+def test_concurrent_conflicting_reuse_of_idempotency_key_fails_closed(tmp_path) -> None:
+    store, projects, _ = _repos(tmp_path)
+    _handoff(projects)
+    barrier = Barrier(2)
+
+    def write(rationale: str) -> str:
+        repository = ProductDecisionRepository(store)
+        barrier.wait()
+        try:
+            repository.record(
+                "p1",
+                _decision(rationale=rationale),
+                expected_row_version=0,
+                idempotency_key="decision:concurrent:conflict",
+            )
+        except ProductProjectError as exc:
+            assert "different mutation input" in str(exc)
+            return "conflict"
+        return "recorded"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = tuple(pool.map(write, ("candidate-a", "candidate-b")))
+
+    assert sorted(results) == ["conflict", "recorded"]
+    assert projects.get("p1").row_version == 1
+    assert len(ProductDecisionRepository(store).history("p1", "decision-1")) == 1
