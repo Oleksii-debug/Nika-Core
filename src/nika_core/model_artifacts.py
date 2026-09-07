@@ -190,8 +190,20 @@ class ModelArtifactDescriptor:
         if not isinstance(raw, dict) or set(raw) != _DESCRIPTOR_KEYS:
             raise ModelArtifactRegistryError("stored model artifact schema is invalid")
         resources = raw.get("resources")
+        capabilities = raw.get("capabilities")
         if not isinstance(resources, dict) or set(resources) != _RESOURCE_KEYS:
             raise ModelArtifactRegistryError("stored model artifact resource schema is invalid")
+        if not isinstance(capabilities, list) or not all(
+            isinstance(value, str) for value in capabilities
+        ):
+            raise ModelArtifactRegistryError("stored model artifact capabilities are invalid")
+        architectures = resources.get("cpu_architectures")
+        if not isinstance(architectures, list) or not all(
+            isinstance(value, str) for value in architectures
+        ):
+            raise ModelArtifactRegistryError(
+                "stored model artifact cpu architectures are invalid"
+            )
         try:
             return cls(
                 schema_version=raw["schema_version"],
@@ -204,13 +216,13 @@ class ModelArtifactDescriptor:
                 integrity_basis=ModelIntegrityBasis(raw["integrity_basis"]),
                 sha256=raw["sha256"],
                 size_bytes=raw["size_bytes"],
-                capabilities=tuple(raw["capabilities"]),
+                capabilities=tuple(capabilities),
                 resources=ModelArtifactResources(
                     min_system_memory_bytes=resources["min_system_memory_bytes"],
                     min_available_memory_bytes=resources["min_available_memory_bytes"],
                     min_vram_bytes=resources["min_vram_bytes"],
                     recommended_memory_bytes=resources["recommended_memory_bytes"],
-                    cpu_architectures=tuple(resources["cpu_architectures"]),
+                    cpu_architectures=tuple(architectures),
                 ),
             )
         except (KeyError, TypeError, ValueError) as exc:
@@ -376,7 +388,10 @@ def _clean_text(name: str, value: str, *, label: bool = False) -> str:
 
 def _public_reference(name: str, value: str) -> str:
     text = _clean_text(name, value)
-    if text.startswith(("http://", "https://")):
+    lowered = text.lower()
+    if lowered.startswith(("env:", "credential:", "secret:")):
+        raise ValueError(f"{name} must be public provenance, not a credential reference")
+    if lowered.startswith(("http://", "https://")):
         parsed = urlsplit(text)
         if (
             parsed.scheme not in {"http", "https"}
