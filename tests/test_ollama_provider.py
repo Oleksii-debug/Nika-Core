@@ -266,3 +266,42 @@ def test_ollama_constructor_rejects_empty_identity_inputs() -> None:
 
     with pytest.raises(ValueError, match="base_url"):
         OllamaProvider(default_model="qwen3:8b", base_url=" ")
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    (
+        "http://ollama.example.test:11434",
+        "https://192.0.2.10:11434",
+        "http://user:pass@localhost:11434",
+        "http://localhost:11434/api",
+        "http://localhost:11434?mode=test",
+        "http://localhost:11434#fragment",
+        "ftp://localhost:11434",
+        " http://localhost:11434",
+    ),
+)
+def test_ollama_rejects_nonlocal_or_ambiguous_base_url(base_url: str) -> None:
+    with pytest.raises(ValueError, match="Ollama|base_url"):
+        OllamaProvider(default_model="qwen3:8b", base_url=base_url)
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    (
+        "http://localhost:11434",
+        "http://127.0.0.1:11434",
+        "http://[::1]:11434",
+        "https://localhost:11434/",
+    ),
+)
+def test_ollama_accepts_explicit_loopback_roots(base_url: str) -> None:
+    provider = OllamaProvider(default_model="qwen3:8b", base_url=base_url)
+
+    assert provider.capabilities.kind is ProviderKind.LOCAL
+    assert provider.capabilities.supports_private_data is True
+
+
+def test_ollama_rejects_surrounding_whitespace_in_model_identity() -> None:
+    with pytest.raises(ValueError, match="surrounding whitespace"):
+        OllamaProvider(default_model=" qwen3:8b ")
