@@ -20,7 +20,7 @@ _RELEASE_FILE_KEYS = frozenset({"path", "size", "sha256"})
 _WINDOWS_FORBIDDEN_CHARS = frozenset('<>"|?*')
 _SECRET_RELEASE_BASENAMES = frozenset({".env", "token.json", "cookies.txt"})
 _SECRET_CONTENT_SUFFIXES = frozenset(
-    {".json", ".toml", ".yaml", ".yml", ".ini", ".cfg", ".conf", ".properties"}
+    {".json", ".toml", ".yaml", ".yml", ".ini", ".cfg", ".conf", ".properties", ".txt", ".log"}
 )
 _SECRET_SCAN_CHUNK_BYTES = 64 * 1024
 _SECRET_SCAN_OVERLAP_BYTES = 8 * 1024
