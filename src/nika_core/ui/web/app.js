@@ -29,6 +29,26 @@
   let modelDirty = false;
   let modelPending = false;
   let modelGeneration = 0;
+  const recoveryStatus = document.getElementById("recovery-status");
+  const recoverySummary = document.getElementById("recovery-summary");
+  const recoveryFields = Object.freeze({
+    auto_resume_count: document.getElementById("recovery-auto-count"),
+    manual_resume_count: document.getElementById("recovery-manual-count"),
+    approval_count: document.getElementById("recovery-approval-count"),
+    uncertain_count: document.getElementById("recovery-uncertain-count"),
+    blocked_count: document.getElementById("recovery-blocked-count"),
+    resume_failed_count: document.getElementById("recovery-failed-count"),
+  });
+  const allowedRecoveryStatuses = new Set([
+    "not_started",
+    "inventory",
+    "ready",
+    "recovering",
+    "manual",
+    "attention",
+    "failed",
+  ]);
+  let recoverySignature = null;
   const autostartInput = document.getElementById("autostart-enabled");
   const autostartSave = document.getElementById("autostart-save");
   const autostartStatus = document.getElementById("autostart-status");
@@ -210,6 +230,7 @@
   }
 
   function reportStateUnavailable() {
+    renderStartupRecovery(null);
     renderModelSettings(null);
     renderProductProjectUnavailable(productProjectUnavailableMessage);
     renderTeamTaskUnavailable();
@@ -466,6 +487,63 @@
     teamTaskEmpty.hidden = true;
     teamTaskSummary.hidden = false;
     return { ok: true, changed };
+  }
+
+  function validStartupRecovery(snapshot) {
+    if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return false;
+    if (snapshot.schema_version !== 1 || !allowedRecoveryStatuses.has(snapshot.status)) return false;
+    return Object.keys(recoveryFields).every((field) => (
+      Number.isSafeInteger(snapshot[field]) && snapshot[field] >= 0
+    ));
+  }
+
+  function renderStartupRecovery(snapshot) {
+    if (!recoveryStatus || !recoverySummary) {
+      return { ok: false, changed: false, message: "Стан відновлення недоступний." };
+    }
+    if (!validStartupRecovery(snapshot)) {
+      const changed = recoverySignature !== "invalid";
+      recoverySignature = "invalid";
+      recoveryStatus.textContent = "Стан відновлення недоступний або несумісний.";
+      recoverySummary.hidden = true;
+      for (const node of Object.values(recoveryFields)) {
+        if (node) node.textContent = "—";
+      }
+      return {
+        ok: false,
+        changed,
+        message: "Стан відновлення після перезапуску недоступний або несумісний.",
+        assertive: true,
+      };
+    }
+
+    for (const [field, node] of Object.entries(recoveryFields)) {
+      if (node) node.textContent = String(snapshot[field]);
+    }
+    recoverySummary.hidden = false;
+
+    const messages = {
+      not_started: "Перевірка незавершеної роботи ще не почалася.",
+      inventory: "Nika перевіряє незавершену роботу після перезапуску.",
+      ready: "Перевірку відновлення завершено. Немає роботи, яку треба автоматично або вручну продовжити.",
+      recovering: "Nika безпечно продовжує лише crash-left роботу з перевіреним checkpoint.",
+      manual: "Є робота, що очікує ручного продовження або підтвердження. Автоматичний запуск не виконується.",
+      attention: "Є невизначена або заблокована робота. Автоматичний повтор не виконується; потрібна перевірка стану.",
+      failed: "Не вдалося безпечно перевірити незавершену роботу. Автоматичне продовження заблоковано.",
+    };
+    const nextSignature = JSON.stringify([
+      snapshot.status,
+      ...Object.keys(recoveryFields).map((field) => snapshot[field]),
+    ]);
+    const changed = recoverySignature !== null && recoverySignature !== nextSignature;
+    recoverySignature = nextSignature;
+    recoveryStatus.textContent = messages[snapshot.status];
+    return {
+      ok: true,
+      changed,
+      message: messages[snapshot.status],
+      assertive: ["attention", "failed"].includes(snapshot.status),
+    };
   }
 
   function setModelControlsDisabled(disabled) {
@@ -826,6 +904,7 @@
       return false;
     }
     const state = response.state || {};
+    const recoveryRender = renderStartupRecovery(state.startup_recovery ?? null);
     if (autostartReadGeneration === autostartGeneration) renderAutostart(state.autostart ?? null);
     if (modelReadGeneration === modelGeneration) renderModelSettings(state.v01_model_settings ?? null);
     renderSourceSetup(state.v01_sources ?? null);
@@ -834,12 +913,18 @@
     renderItems(workspacesList, workspacesEmpty, state.workspaces || [], (item) => `${item.name} — ${item.description || "Без опису"}`);
     const productReady = renderProductProject(state.product_project ?? null);
     const teamRender = renderTeamTask(state.v01_team_task ?? null);
+    if (!recoveryRender.ok) {
+      announce(recoveryRender.message, true);
+      return false;
+    }
     if (!teamRender.ok) {
       announce(teamTaskUnavailableMessage, true);
       return false;
     }
     if (!productReady) return false;
-    if (announceTeamTransitions && teamRender.changed) {
+    if (announceTeamTransitions && recoveryRender.changed) {
+      announce(recoveryRender.message, recoveryRender.assertive);
+    } else if (announceTeamTransitions && teamRender.changed) {
       announce("Стан командного завдання оновлено.");
     }
     return true;
