@@ -69,8 +69,8 @@ class ResourceManager:
         """Return deterministic read-only capacity telemetry without changing admission state."""
         budget = self.get_budget(scope=scope, owner_id=owner_id)
         snapshot = self._observer.snapshot()
-        active_count = len(self._active.get((scope, owner_id), set()))
-        queued_count = len(self._queues.get((scope, owner_id), ()))
+        active_count = self.active_count(scope=scope, owner_id=owner_id)
+        queued_count = len(self.queued(scope=scope, owner_id=owner_id))
         pressure_reasons: list[str] = []
 
         if active_count >= budget.max_concurrent:

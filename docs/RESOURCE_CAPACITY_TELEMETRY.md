@@ -32,3 +32,16 @@ Future background-life and autonomy policy can consume one stable read-only capa
 ## Evidence boundary
 
 Automated tests use deterministic fake measurements and monkeypatched psutil calls. They prove contract normalization and no-mutation behavior only. They are not physical-laptop performance evidence and do not set `HUMAN_TESTED` or `NVDA_VERIFIED`.
+
+## Compatibility with historical M3 durability lineage
+
+Historical open PR #357 contains a stale-base resource-durability design with SQLite-authoritative
+FIFO leases, process-generation recovery and broader disk/RSS/GPU budgets. This candidate does
+not copy or compete with that authority. The read-only status projection deliberately obtains
+active and queued counts through the public `ResourceManager.active_count()` and
+`ResourceManager.queued()` methods rather than current private in-memory fields. A future
+current-main convergence of the accepted #357 durability semantics can therefore change the
+storage behind those methods without changing this telemetry contract.
+
+Any future adoption of #357 must be a separate compatibility-reviewed convergence against live
+main; its old CI and schema evidence cannot be transferred.
