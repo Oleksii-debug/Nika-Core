@@ -205,6 +205,53 @@ def test_observation_detector_reports_error_and_unknown_explicitly() -> None:
     assert unknown.changed is None
 
 
+def test_observation_detector_rejects_error_message_without_code() -> None:
+    malformed_current = _observation(
+        "normalized-doc-a",
+        error_message="fetch failed",
+    )
+    with pytest.raises(ValueError, match="error_message requires error_code"):
+        detect_observation_change(_observation("normalized-doc-a"), malformed_current)
+
+    malformed_previous = _observation(
+        "normalized-doc-a",
+        error_message="previous fetch failed",
+    )
+    with pytest.raises(ValueError, match="error_message requires error_code"):
+        detect_observation_change(malformed_previous, _observation("normalized-doc-a"))
+
+
+@pytest.mark.parametrize("message", ["", "   ", " trailing "])
+def test_observation_detector_rejects_empty_or_unnormalized_error_message(
+    message: str,
+) -> None:
+    malformed = _observation(
+        None,
+        error_code="fetch_failed",
+        error_message=message,
+    )
+    with pytest.raises(ValueError, match="error_message"):
+        detect_observation_change(_observation("normalized-doc-a"), malformed)
+
+
+def test_condition_match_requires_trusted_comparable_baseline() -> None:
+    first_observation = detect_observation_change(
+        None,
+        _observation("normalized-doc-a", condition_matched=True),
+    )
+    prior_error = detect_observation_change(
+        _observation(None, error_code="fetch_failed", error_message="prior failure"),
+        _observation("normalized-doc-a", condition_matched=True),
+    )
+
+    assert first_observation.status is ChangeDetectionStatus.UNKNOWN
+    assert first_observation.changed is None
+    assert first_observation.condition_matched is True
+    assert prior_error.status is ChangeDetectionStatus.UNKNOWN
+    assert prior_error.changed is None
+    assert prior_error.condition_matched is True
+
+
 def test_observation_detector_rejects_cross_source_comparison() -> None:
     current = NormalizedObservation(
         source_id="web-b",
