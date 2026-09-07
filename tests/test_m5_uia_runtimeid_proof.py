@@ -42,7 +42,6 @@ def test_runtime_id_retry_does_not_swallow_stale_element_identity() -> None:
     assert "throw" in helper
 
 
-
 def test_runtime_id_unavailable_retries_fresh_lookup_only_before_authority_capture() -> None:
     text = PROOF.read_text(encoding="utf-8")
 
@@ -61,3 +60,21 @@ def test_runtime_id_unavailable_retries_fresh_lookup_only_before_authority_captu
     assert "catch [NikaUiaRuntimeIdUnavailableException]" not in resolve_body
     assert "$originalRuntimeId = Get-ElementRuntimeId $Identity.Element" in resolve_body
     assert "$resolvedRuntimeId = Get-ElementRuntimeId $resolved" in resolve_body
+
+
+def test_autostart_observe_is_read_only_but_mutations_remain_generation_bound() -> None:
+    text = PROOF.read_text(encoding="utf-8")
+
+    assert "if ($AutostartPhase -ne 'Observe') {" in text
+    assert "$target = if ($AutostartPhase -eq 'Observe')" in text
+    assert "$autostartControl.Element" in text
+    assert "Resolve-BoundControlIdentity $autostartControl" in text
+    assert "$freshReadOnlyControl = Wait-DescendantName 'Запускати Nika разом із Windows'" in text
+    assert "$target = $freshReadOnlyControl.Element" in text
+
+    mutation_start = text.index("if ($AutostartPhase -ne 'Observe') {", text.index("$initialToggle"))
+    mutation_end = text.index("$expectedStateText =", mutation_start)
+    mutation_body = text[mutation_start:mutation_end]
+    assert "Set-BoundControlFocus $autostartControl" in mutation_body
+    assert "Set-BoundControlFocus $autostartSaveControl" in mutation_body
+    assert "[System.Windows.Forms.SendKeys]::SendWait(' ')" in mutation_body
