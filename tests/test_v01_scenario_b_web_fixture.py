@@ -55,7 +55,7 @@ def test_deterministic_failure_never_records_effect()->None:
 
 def test_navigation_result_is_observable_and_effect_counted_once()->None:
     with ScenarioBFixtureServer() as fixture:
-        status,headers,_,location=_request(fixture.url("/actions/scenario-b-17"),method="POST"); assert status==200; assert location.endswith("/results/scenario-b-17"); assert "Navigation result confirmed" in _request(location)[2].decode()
+        status,_,_,location=_request(fixture.url("/actions/scenario-b-17"),method="POST"); assert status==200; assert location.endswith("/results/scenario-b-17"); assert "Navigation result confirmed" in _request(location)[2].decode()
         state=_json(fixture.url("/state/scenario-b-17")); assert state["attempt_count"]==1; assert state["effect_count"]==1
 
 def test_ambiguous_action_family_declares_no_retry_and_never_records_effect()->None:
