@@ -9,9 +9,9 @@ from nika_core.kernel.task_state import TaskState
 from nika_core.runtime.contracts import (
     RuntimeCapability,
     RuntimeOutcome,
+    RuntimeResult,
     RuntimeResumeProbe,
     RuntimeResumeProbeStatus,
-    RuntimeResult,
 )
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
 from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
