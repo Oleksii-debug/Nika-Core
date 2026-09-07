@@ -38,6 +38,7 @@ from nika_core.batch_report import (
 )
 from nika_core.interaction import (
     AmbiguousTargetError,
+    BrowserSession,
     ControlLocator,
     InteractionAction,
     PlaywrightInteractionAdapter,
@@ -46,6 +47,7 @@ from nika_core.interaction import (
     resolve_strict,
     validate_snapshot,
 )
+from nika_core.memory import MemoryScope, MemoryService
 from nika_core.page_readiness import (
     PageObservationSignal,
     PageReadinessResult,
@@ -57,13 +59,13 @@ from nika_core.runtime.idempotency import IdempotencyLedger
 from nika_core.task_browser_tabs import (
     TaskBrowserTabError,
     TaskBrowserTabs,
-    TaskTabReopenDeniedError,
     TaskTabReopenPolicy,
 )
 from nika_core.tools import ToolCall, ToolExecutor, ToolResult, ToolRisk, ToolSpec
 
 _INPUT_TOOL_ID = "v01.scenario_b.semantic_set_value"
 _INVOKE_TOOL_ID = "v01.scenario_b.semantic_invoke"
+_TABS_MEMORY_NAMESPACE = "v01.scenario_b.task_tabs"
 _UNKNOWN_EFFECT_ERRORS = frozenset(
     {
         "tool failed",
@@ -283,6 +285,7 @@ class ScenarioBService:
     executor: BoundedBatchExecutor[ScenarioBTarget]
     tool_executor: ToolExecutor
     idempotency: IdempotencyLedger
+    memory: MemoryService
     targets: Sequence[ScenarioBTarget]
     semantic_tools: ScenarioBSemanticTools
     inter_batch_delay_seconds: float = 60.0
@@ -301,6 +304,7 @@ class ScenarioBService:
             raise ValueError("inter-batch delay must not be negative")
         if self.cursor.state.task_id != self.task_id:
             raise ValueError("Scenario-B cursor belongs to a different task")
+        self._restore_or_validate_tabs()
         target_ids = [target.target_id for target in self.targets]
         if len(target_ids) != len(set(target_ids)):
             raise ValueError("Scenario-B target identities must be unique")
@@ -512,22 +516,52 @@ class ScenarioBService:
                 target_url=target.url,
                 reopen_policy=target.reopen_policy,
             )
+            self._persist_tabs()
             return tab_id
-        try:
-            self.tabs.switch_to(
-                task_id=self.task_id,
-                tab_id=tab_id,
-                reopen_if_stale=True,
-            )
-        except TaskTabReopenDeniedError:
-            self.tabs.close_tab(task_id=self.task_id, tab_id=tab_id)
-            self.tabs.open_tab(
-                task_id=self.task_id,
-                tab_id=tab_id,
-                target_url=target.url,
-                reopen_policy=target.reopen_policy,
-            )
+        self.tabs.switch_to(
+            task_id=self.task_id,
+            tab_id=tab_id,
+            reopen_if_stale=True,
+        )
         return tab_id
+
+    def _restore_or_validate_tabs(self) -> None:
+        record = self.memory.get(
+            scope=MemoryScope.TASK,
+            owner_id=self.task_id,
+            namespace=_TABS_MEMORY_NAMESPACE,
+            key=self.cursor.state.cursor_id,
+        )
+        current = tuple(tab.to_dict() for tab in self.tabs.owned_tabs(self.task_id))
+        if record is None:
+            self._persist_tabs()
+            return
+
+        restored = restore_scenario_b_tabs(
+            self.memory,
+            session=self.tabs.session,
+            task_id=self.task_id,
+            cursor_id=self.cursor.state.cursor_id,
+        )
+        durable = tuple(tab.to_dict() for tab in restored.owned_tabs(self.task_id))
+        if current:
+            if current != durable:
+                raise ScenarioBCompositionError(
+                    "runtime task-tab ownership conflicts with durable Scenario-B state"
+                )
+            return
+
+        self.tabs = restored
+        if isinstance(self.semantic_tools, ScenarioBSemanticTools):
+            self.semantic_tools.tabs = restored
+
+    def _persist_tabs(self) -> None:
+        persist_scenario_b_tabs(
+            self.memory,
+            self.tabs,
+            task_id=self.task_id,
+            cursor_id=self.cursor.state.cursor_id,
+        )
 
     def _set_open_fact(self, target: ScenarioBTarget, *, opened: bool) -> None:
         cursor_target = _cursor_target(self.cursor, target.target_id)
@@ -596,6 +630,59 @@ class ScenarioBService:
             effect_records=records,
             facts=tuple(self._facts.values()),
         )
+
+
+def persist_scenario_b_tabs(
+    memory: MemoryService,
+    tabs: TaskBrowserTabs,
+    *,
+    task_id: str,
+    cursor_id: str,
+) -> None:
+    """Persist only task-owned logical tab identity; never runtime browser handles."""
+
+    snapshot = tabs.snapshot()
+    payload = {
+        "schema_version": snapshot["schema_version"],
+        "tabs": [tab.to_dict() for tab in tabs.owned_tabs(task_id)],
+    }
+    memory.put(
+        scope=MemoryScope.TASK,
+        owner_id=task_id,
+        namespace=_TABS_MEMORY_NAMESPACE,
+        key=cursor_id,
+        value=payload,
+    )
+
+
+def restore_scenario_b_tabs(
+    memory: MemoryService,
+    *,
+    session: BrowserSession,
+    task_id: str,
+    cursor_id: str,
+) -> TaskBrowserTabs:
+    """Restore logical task-tab ownership with deliberately stale runtime bindings."""
+
+    record = memory.get(
+        scope=MemoryScope.TASK,
+        owner_id=task_id,
+        namespace=_TABS_MEMORY_NAMESPACE,
+        key=cursor_id,
+    )
+    if record is None:
+        return TaskBrowserTabs(session=session)
+
+    restored = TaskBrowserTabs.from_snapshot(session=session, payload=record.value)
+    raw = restored.snapshot().get("tabs")
+    if not isinstance(raw, list) or any(
+        not isinstance(item, dict) or item.get("task_id") != task_id
+        for item in raw
+    ):
+        raise ScenarioBCompositionError(
+            "durable Scenario-B tab state contains foreign task ownership"
+        )
+    return restored
 
 
 def _required_action_identity(
