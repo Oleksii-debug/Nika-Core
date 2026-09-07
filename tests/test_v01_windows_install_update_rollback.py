@@ -81,6 +81,11 @@ def test_installer_contract_reuses_manifest_and_never_elevates() -> None:
     assert "runas" not in payload.casefold()
     assert "[System.IO.Path]::GetRelativePath" not in payload
     assert "$item.PSIsContainer" in payload
+    assert (
+        'throw "Release bundle contains a reparse point."\n'
+        "        }\n"
+        "        if ($item.Length -ne [int64]$size)"
+    ) in payload
 
 
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
