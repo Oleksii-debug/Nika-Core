@@ -609,21 +609,38 @@ try {
     # ready status so this gate tests keyboard behavior rather than an initialization race.
     Wait-DescendantName 'Nika Core готова до роботи.' | Out-Null
 
-    $startControl = Wait-DescendantName 'Створити завдання' ([System.Windows.Automation.ControlType]::Button)
-    $tasksControl = Wait-DescendantName 'Завдання' ([System.Windows.Automation.ControlType]::Text)
-    $commandControl = Wait-DescendantName 'Що має зробити Nika?' ([System.Windows.Automation.ControlType]::Edit)
+    $startControl = $null
+    $tasksControl = $null
+    $commandControl = $null
+    if ($AutostartPhase -ne 'Observe') {
+        $startControl = Wait-DescendantName 'Створити завдання' ([System.Windows.Automation.ControlType]::Button)
+        $tasksControl = Wait-DescendantName 'Завдання' ([System.Windows.Automation.ControlType]::Text)
+        $commandControl = Wait-DescendantName 'Що має зробити Nika?' ([System.Windows.Automation.ControlType]::Edit)
 
-    Set-BoundControlFocus $startControl
-    [System.Windows.Forms.SendKeys]::SendWait('%1')
-    Wait-FocusName $tasksControl
-    [System.Windows.Forms.SendKeys]::SendWait('^+p')
-    Wait-FocusName $commandControl
+        Set-BoundControlFocus $startControl
+        [System.Windows.Forms.SendKeys]::SendWait('%1')
+        Wait-FocusName $tasksControl
+        [System.Windows.Forms.SendKeys]::SendWait('^+p')
+        Wait-FocusName $commandControl
+    }
 
     if ($AutostartPhase -ne 'None') {
         $autostartControl = Wait-DescendantName 'Запускати Nika разом із Windows' ([System.Windows.Automation.ControlType]::CheckBox)
         $autostartSaveControl = Wait-DescendantName 'Зберегти автозапуск' ([System.Windows.Automation.ControlType]::Button)
         $initialToggle = if ($AutostartPhase -eq 'Enable') { [System.Windows.Automation.ToggleState]::Off } else { [System.Windows.Automation.ToggleState]::On }
-        $target = Resolve-BoundControlIdentity $autostartControl
+        # Observe is read-only persistence evidence after a fresh process restart.
+        # It never receives mutation authority: use the freshly and uniquely resolved
+        # semantic element that already acquired a mandatory RuntimeId, and do not
+        # attempt to restore a previous UIA provider generation. Enable/Disable keep
+        # strict generation-bound Resolve-BoundControlIdentity before every action.
+        $target = if ($AutostartPhase -eq 'Observe') {
+            $autostartControl.Element
+        } else {
+            Resolve-BoundControlIdentity $autostartControl
+        }
+        if (-not (Test-ElementMatchesSemanticLocator $target 'Запускати Nika разом із Windows' ([System.Windows.Automation.ControlType]::CheckBox))) {
+            throw 'Packaged autostart checkbox changed semantic identity.'
+        }
         if ($target.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Current.ToggleState -ne $initialToggle) {
             throw 'Packaged autostart checkbox does not reflect persisted OS state.'
         }
@@ -636,7 +653,12 @@ try {
         }
         $expectedStateText = if ($AutostartPhase -eq 'Disable') { 'Автозапуск вимкнено.' } else { 'Автозапуск увімкнено для цього застосунку.' }
         Wait-DescendantName $expectedStateText ([System.Windows.Automation.ControlType]::Text) | Out-Null
-        $target = Resolve-BoundControlIdentity $autostartControl
+        if ($AutostartPhase -eq 'Observe') {
+            $freshReadOnlyControl = Wait-DescendantName 'Запускати Nika разом із Windows' ([System.Windows.Automation.ControlType]::CheckBox)
+            $target = $freshReadOnlyControl.Element
+        } else {
+            $target = Resolve-BoundControlIdentity $autostartControl
+        }
         $expectedToggle = if ($AutostartPhase -eq 'Disable') { [System.Windows.Automation.ToggleState]::Off } else { [System.Windows.Automation.ToggleState]::On }
         if ($target.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Current.ToggleState -ne $expectedToggle) {
             throw 'Packaged autostart checkbox acknowledgement is inconsistent.'
