@@ -155,6 +155,7 @@ class ToolEffectConflictError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class ToolEffectReservation:
     operation_key: str
+    effect_intent_fingerprint: str
     completed_result: Mapping[str, object] | None = None
 
 
@@ -174,6 +175,7 @@ class ToolEffectGuard:
             raise ValueError("call_id must not be empty")
 
         operation_key = self._operation_key(task_id=task_id, call_id=call.call_id)
+        effect_intent_fingerprint = self.effect_intent_fingerprint(spec=spec, call=call)
         input_fingerprint = self._fingerprint(spec=spec, call=call)
         try:
             record, created = self._ledger.reserve_once(
@@ -208,11 +210,15 @@ class ToolEffectGuard:
             raise ToolEffectConflictError("tool effect reservation failed closed") from exc
 
         if created:
-            return ToolEffectReservation(operation_key=operation_key)
+            return ToolEffectReservation(
+                operation_key=operation_key,
+                effect_intent_fingerprint=effect_intent_fingerprint,
+            )
         if record.status is IdempotencyStatus.COMPLETED:
             completed = dict(record.result or {})
             return ToolEffectReservation(
                 operation_key=operation_key,
+                effect_intent_fingerprint=effect_intent_fingerprint,
                 completed_result=completed,
             )
         raise ToolEffectConflictError(
@@ -226,6 +232,7 @@ class ToolEffectGuard:
         *,
         task_id: str,
         call_id: str,
+        expected_effect_intent_fingerprint: str,
     ) -> IdempotencyRecord | None:
         """Read exact durable tool-effect truth without granting execution authority.
 
@@ -233,14 +240,30 @@ class ToolEffectGuard:
         replay, complete, or mutate an effect, and it validates the canonical task/call
         operation identity before returning evidence to a recovery composition.
         """
-        if not task_id.strip() or not call_id.strip():
-            raise ValueError("tool effect observation requires task_id and call_id")
+        if (
+            not task_id.strip()
+            or not call_id.strip()
+            or not expected_effect_intent_fingerprint.strip()
+        ):
+            raise ValueError(
+                "tool effect observation requires task_id, call_id and effect intent fingerprint"
+            )
         operation_key = cls._operation_key(task_id=task_id, call_id=call_id)
         record = ledger.get(operation_key)
         if record is None:
             return None
         if record.task_id != task_id or record.operation_type != cls._OPERATION_TYPE:
             raise ToolEffectConflictError("tool effect observation identity mismatch")
+        if record.status is IdempotencyStatus.COMPLETED:
+            result = record.result
+            if (
+                not isinstance(result, Mapping)
+                or result.get("effect_intent_fingerprint")
+                != expected_effect_intent_fingerprint
+            ):
+                raise ToolEffectConflictError(
+                    "completed tool effect intent identity mismatch"
+                )
         return record
 
     def complete(self, reservation: ToolEffectReservation, output: object) -> None:
@@ -250,9 +273,15 @@ class ToolEffectGuard:
             # Never certify a result as COMPLETED if restart cannot reproduce it.
             # ToolExecutor will convert this finalize failure into UNCERTAIN.
             raise ValueError("durable tool result must be JSON-compatible") from exc
+        if not reservation.effect_intent_fingerprint.strip():
+            raise ValueError("tool effect intent fingerprint must not be empty")
         self._ledger.complete(
             reservation.operation_key,
-            {"completed": True, "output": output},
+            {
+                "completed": True,
+                "effect_intent_fingerprint": reservation.effect_intent_fingerprint,
+                "output": output,
+            },
         )
 
     def mark_uncertain(self, reservation: ToolEffectReservation) -> None:
@@ -269,6 +298,26 @@ class ToolEffectGuard:
             separators=(",", ":"),
         ).encode("utf-8")
         return f"tool:{hashlib.sha256(identity).hexdigest()}"
+
+    @staticmethod
+    def effect_intent_fingerprint(*, spec: ToolSpec, call: ToolCall) -> str:
+        payload = {
+            "arguments": call.arguments,
+            "risk": spec.risk.value,
+            "tool_id": spec.tool_id,
+            "version": "tool-effect-intent-v1",
+        }
+        try:
+            encoded = json.dumps(
+                payload,
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("durable tool arguments must be JSON-compatible") from exc
+        return hashlib.sha256(encoded).hexdigest()
 
     @staticmethod
     def _fingerprint(*, spec: ToolSpec, call: ToolCall) -> str:
