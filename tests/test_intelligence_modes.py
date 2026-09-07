@@ -157,7 +157,7 @@ def test_embedded_local_mode_pins_foundry_and_strips_fallbacks() -> None:
     assert routed.fallback_provider_ids == ()
 
 
-def test_local_ollama_mode_pins_ollama_and_strips_fallbacks() -> None:
+def test_external_local_mode_defaults_to_ollama_and_strips_fallbacks() -> None:
     gateway = RecordingGateway()
     ollama = RecordingProvider(provider_id="ollama", kind=ProviderKind.LOCAL)
     other = RecordingProvider(provider_id="untrusted-fallback", kind=ProviderKind.CLOUD)
@@ -166,13 +166,33 @@ def test_local_ollama_mode_pins_ollama_and_strips_fallbacks() -> None:
     router = IntelligenceModeRouter(gateway=gateway)
 
     response = asyncio.run(
-        router.complete_model(IntelligenceMode.LOCAL_OLLAMA, _request())
+        router.complete_model(IntelligenceMode.EXTERNAL_LOCAL, _request())
     )
 
     assert response.provider_id == "ollama"
     assert len(ollama.requests) == 1
     assert other.requests == []
     assert gateway.requests[0].fallback_provider_ids == ()
+
+
+def test_external_local_mode_can_pin_another_registered_local_provider() -> None:
+    gateway = RecordingGateway()
+    local_api = RecordingProvider(provider_id="local-openai", kind=ProviderKind.LOCAL)
+    ollama = RecordingProvider(provider_id="ollama", kind=ProviderKind.LOCAL)
+    gateway.register(local_api)
+    gateway.register(ollama)
+    router = IntelligenceModeRouter(
+        gateway=gateway,
+        policy=IntelligenceModePolicy(external_local_provider_id="local-openai"),
+    )
+
+    response = asyncio.run(
+        router.complete_model(IntelligenceMode.EXTERNAL_LOCAL, _request())
+    )
+
+    assert response.provider_id == "local-openai"
+    assert len(local_api.requests) == 1
+    assert ollama.requests == []
 
 
 def test_selected_mode_never_uses_incoming_fallback_after_safe_provider_failure() -> None:
@@ -265,8 +285,8 @@ def test_external_private_route_is_blocked_before_provider_call() -> None:
             IntelligenceModePolicy(embedded_local_enabled=False),
         ),
         (
-            IntelligenceMode.LOCAL_OLLAMA,
-            IntelligenceModePolicy(local_ollama_enabled=False),
+            IntelligenceMode.EXTERNAL_LOCAL,
+            IntelligenceModePolicy(external_local_enabled=False),
         ),
     ),
 )
@@ -335,7 +355,7 @@ def test_response_request_identity_substitution_fails_closed() -> None:
     router = IntelligenceModeRouter(gateway=gateway)
 
     with pytest.raises(IntelligenceModeError) as caught:
-        asyncio.run(router.complete_model(IntelligenceMode.LOCAL_OLLAMA, _request()))
+        asyncio.run(router.complete_model(IntelligenceMode.EXTERNAL_LOCAL, _request()))
 
     assert caught.value.code is IntelligenceModeErrorCode.RESPONSE_MISMATCH
 
@@ -362,8 +382,8 @@ def test_statuses_are_secret_free_and_external_is_opt_in() -> None:
 @pytest.mark.parametrize(
     "kwargs",
     (
-        {"embedded_provider_id": "local", "ollama_provider_id": "local"},
-        {"ollama_provider_id": " ollama"},
+        {"embedded_provider_id": "local", "external_local_provider_id": "local"},
+        {"external_local_provider_id": " ollama"},
         {"external_provider_id": "ollama"},
         {"embedded_provider_id": "bad\nprovider"},
         {"external_provider_id": "https://api.example.test"},
@@ -387,7 +407,7 @@ def test_invalid_mode_type_fails_before_any_execution() -> None:
     router = IntelligenceModeRouter(gateway=gateway)
 
     with pytest.raises(TypeError, match="IntelligenceMode"):
-        router.resolve("local_ollama")  # type: ignore[arg-type]
+        router.resolve("external_local")  # type: ignore[arg-type]
 
     assert gateway.requests == []
 
@@ -399,7 +419,7 @@ def test_invalid_request_type_fails_before_gateway() -> None:
     with pytest.raises(TypeError, match="ModelRequest"):
         asyncio.run(
             router.complete_model(
-                IntelligenceMode.LOCAL_OLLAMA,
+                IntelligenceMode.EXTERNAL_LOCAL,
                 "request",  # type: ignore[arg-type]
             )
         )
