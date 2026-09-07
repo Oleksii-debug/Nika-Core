@@ -29,9 +29,10 @@ The verifier requires all of the following before returning `PASS`:
 3. classic branch protection applies to administrators and has no `bypass_pull_request_allowances` for users, teams, or apps when it is used as evidence;
 4. force pushes are blocked;
 5. branch deletion is blocked;
-6. the stable Core CI contexts `Verify (ubuntu-latest)` and `Verify (windows-latest)` are required;
-7. active rulesets used as evidence have an explicitly visible `bypass_actors` field and no bypass actors; a missing/hidden field is unknown evidence, never equivalent to an empty list;
-8. when `--expected-head` is supplied, the observed branch head is exactly that SHA.
+6. the stable Core CI contexts `Verify (ubuntu-latest)` and `Verify (windows-latest)` are required and are provenance-bound to the GitHub Actions App observed on the exact branch head; legacy context-only checks, `app_id=-1`, missing app binding, wrong app binding, or ruleset checks without the matching `integration_id` do not count;
+7. only active `target=branch` rulesets may prove branch governance; GitHub ref patterns are evaluated with path-separator-aware wildcard semantics, never Python's slash-crossing glob behavior;
+8. every active ruleset targeting the branch has an explicitly visible `bypass_actors` field and no bypass actors, even when classic protection independently proves other controls; hidden/missing bypass evidence is fail-closed;
+9. when `--expected-head` is supplied, the observed branch head is exactly that SHA.
 
 Path-conditional or routinely skipped workflows are deliberately not made universal required checks. M11/M12 remain release/acceptance evidence and can be added to repository protection only after their exact stable check surfaces are proven suitable for every protected-branch change.
 
