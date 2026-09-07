@@ -1,5 +1,19 @@
 # Nika Core — current autonomous routing
 
+## LIVE REFRESH — EPOCH-CONTINUOUS-0002 — 2026-09-07
+CURRENT_MAIN: `c0ed340c8ee6ddfab011f861f5e6f49017ff5286` (merged independently audited #662 release archive/manifest/secret-safety).
+LIVE_OVERRIDES_OLDER_SNAPSHOT: true.
+BRANCH_PROTECTION: disabled; required-status enforcement off; release blocker.
+DONE_DO_NOT_REPEAT: #641 durable batch cursor; #656 checker handoffs; #659 Windows autostart/settings; #651 durable model selection backend; #662 archive/manifest/secret-safety.
+IN_PROGRESS: #654 Worker1 Pause/Resume/Cancel; #638 Worker1 recurrence; #674 Worker2 intelligence/model routing; #677 Worker3 exact Scenario-B composition; #663/#672 Worker4 Windows journey/shared UIA; #676 Worker5 install/update/rollback; #665 Worker5 governance evaluator.
+BLOCKED: #654 current-main head `636b13523f604825f5c7b362bee812a5e114689c` has authoritative Core RED on confirmed user-Pause generation vs later _finish(PAUSED) rewrite; Worker1 owns repair and unchanged #669 replay. #672 shared packaged UIA is requalifying a read-only Observe/fresh semantic identity repair. Live governance is still administratively disabled.
+NEXT_INTEGRATION_RULE: merge one unchanged exact-current production head only after all binding gates and independent same-head audit; QA_ONLY never merges; after merge reread main and invalidate stale evidence.
+PACKAGE_FRONT: #676 exact head `0482f59ce1b15ddc25288bf5069c4972da37d00d` repairs installer directory/reparse control flow and is in fresh Core/M12; #665 Core green/M12 pending; #660 and SBOM/provenance lineages remain separate ownership/collision checks.
+HUMAN_TESTED=false.
+NVDA_VERIFIED=false.
+PRODUCTION_RELEASE_READY=false.
+
+
 EPOCH: EPOCH-CONTINUOUS-0001
 STATUS: ACTIVE
 STRATEGY: ONE_CONTINUOUS_FULL_PRODUCT
