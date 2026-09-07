@@ -85,3 +85,19 @@ headers, cookies, snippets, bodies, and free-form network errors.
 
 These fields remain snapshots only. The canonical condition/deadline/recurrence owner supplies
 their values; this module does not schedule, terminalize, persist or resume monitoring.
+
+
+### Safe identity and provenance boundary
+
+Every machine identity/reference rendered by this projection now uses one bounded safe-reference
+grammar. Whitespace, URL-shaped values, credential/header prefixes and assignment-shaped values
+fail closed rather than being copied into accessible text. This applies to monitor/check/source,
+snapshot/document/result-set/state references and provenance source identities.
+
+Each provenance item is also bound to the exact (source_kind, source_id) set declared by its
+MonitoringCheck, and observed_at must be timezone-aware before it can be rendered. Foreign
+source/kind provenance therefore cannot be laundered into a check. Change-title redaction consumes
+complete quoted credential assignments as well as bounded unquoted assignments.
+
+These are presentation-boundary integrity/privacy checks only. They do not add monitoring state,
+scheduling, recurrence, terminalization or persistence authority.
