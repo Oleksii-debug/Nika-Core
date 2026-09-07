@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -20,7 +21,10 @@ from nika_core.tools import (
 )
 
 
-class MCPBoundaryError(RuntimeError):
+_MCP_TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_.-]{1,128}\Z")
+
+
+class MCPBoundaryError(ValueError):
     """Safe normalized MCP discovery/boundary failure."""
 
 
@@ -47,13 +51,17 @@ class MCPServerConfig:
             ToolRisk.HIGH_IMPACT,
         }:
             raise ValueError("MCP risk downgrades require a trusted connector policy")
-        if (
-            isinstance(self.timeout_seconds, bool)
-            or not isinstance(self.timeout_seconds, (int, float))
-            or not math.isfinite(float(self.timeout_seconds))
-            or self.timeout_seconds <= 0
+        if isinstance(self.timeout_seconds, bool) or not isinstance(
+            self.timeout_seconds, (int, float)
         ):
             raise ValueError("timeout_seconds must be a finite positive number")
+        try:
+            normalized_timeout = float(self.timeout_seconds)
+        except (OverflowError, TypeError, ValueError):
+            raise ValueError("timeout_seconds must be a finite positive number") from None
+        if not math.isfinite(normalized_timeout) or normalized_timeout <= 0:
+            raise ValueError("timeout_seconds must be a finite positive number")
+        object.__setattr__(self, "timeout_seconds", normalized_timeout)
         for field_name in ("max_tool_pages", "max_tools"):
             value = getattr(self, field_name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
@@ -88,11 +96,12 @@ class MCPClientAdapter:
                 for _page_number in range(self._config.max_tool_pages):
                     result = await client.list_tools(cursor=cursor)
                     for tool in result.tools:
-                        tool_id = f"mcp:{self._config.server_id}:{tool.name}"
+                        tool_name = self._validated_tool_name(tool.name)
+                        tool_id = f"mcp:{self._config.server_id}:{tool_name}"
                         if tool_id in seen_tool_ids:
-                            raise ValueError("duplicate MCP tool id")
+                            raise MCPBoundaryError("duplicate MCP tool id")
                         if len(specs) >= self._config.max_tools:
-                            raise ValueError("MCP tool catalog exceeds max_tools")
+                            raise MCPBoundaryError("MCP tool catalog exceeds max_tools")
                         seen_tool_ids.add(tool_id)
                         specs.append(
                             ToolSpec(
@@ -107,19 +116,25 @@ class MCPClientAdapter:
                     if next_cursor is None:
                         return tuple(specs)
                     if next_cursor in seen_cursors:
-                        raise ValueError("MCP tool catalog repeated pagination cursor")
+                        raise MCPBoundaryError(
+                            "MCP tool catalog repeated pagination cursor"
+                        )
                     seen_cursors.add(next_cursor)
                     cursor = next_cursor
         except asyncio.CancelledError:
             raise
-        except ValueError:
+        except MCPBoundaryError:
             raise
-        except MCPError as exc:
-            raise MCPBoundaryError("MCP tool discovery failed") from exc
-        except Exception as exc:  # noqa: BLE001 - normalize transport failure details.
-            raise MCPBoundaryError("MCP tool discovery failed") from exc
+        except Exception:  # noqa: BLE001 - suppress untrusted transport/decode details.
+            raise MCPBoundaryError("MCP tool discovery failed") from None
 
-        raise ValueError("MCP tool catalog exceeds max_tool_pages")
+        raise MCPBoundaryError("MCP tool catalog exceeds max_tool_pages")
+
+    @staticmethod
+    def _validated_tool_name(value: object) -> str:
+        if not isinstance(value, str) or _MCP_TOOL_NAME_RE.fullmatch(value) is None:
+            raise MCPBoundaryError("invalid MCP tool name")
+        return value
 
     async def register_tools(self, executor: ToolExecutor) -> tuple[ToolSpec, ...]:
         """Discover once and register exact ToolSpecs into a caller-owned canonical executor."""
