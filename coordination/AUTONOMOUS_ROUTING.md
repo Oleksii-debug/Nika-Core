@@ -1,135 +1,101 @@
 # Nika Core — current autonomous routing
 
-EPOCH: EPOCH-0002
+EPOCH: EPOCH-CONTINUOUS-0001
 STATUS: ACTIVE
-LAST_GLOBAL_AUDIT: bootstrap-required
-NEXT_AUDIT_RULE: first available coordinator/worker performs immediate full audit; after that, first eligible worker after >=6h since last valid audit
+STRATEGY: ONE_CONTINUOUS_FULL_PRODUCT
+STARTING_MAIN: 7e8be7cb7ed3b62f55b1b9f5971bc45514427160
+SOURCE_OF_TRUTH: live GitHub main/exact candidate heads/reviews/Actions > this file > Issue #553 ownership stream > Drive mirror > prompt snapshots
 
-## Mandatory first-run bootstrap audit
+## Core strategy
+Nika Core is one continuously developed Full Product. V0.1, V0.2 and later labels are acceptance checkpoints, not separate projects. Passing a checkpoint never stops development and never authorizes reimplementation of working components.
 
-Before the coordinator establishes or changes worker directions, it MUST compare the newest durable project evidence and reconstruct the actual current Nika state. The first run is not allowed to assume that yesterday's worker prompts remain correct.
+Primary optimization question:
+**What most shortens the path to complete Full Nika while preserving the nearest acceptance checkpoint?**
 
-First-run audit must inspect, at minimum:
+Nearest checkpoint is V0.1. It remains binding so the project does not accumulate hundreds of unverified features.
 
-- current integrated product state;
-- newest completed and still-active development work;
-- current automated test/runtime evidence;
-- current Windows/NVDA/release readiness;
-- active ownership and collisions;
-- latest durable GitHub reports/control files;
-- relevant current Google Drive master reports when accessible;
-- work completed by recent Work/Codex Cloud runs that may have invalidated old scheduled-worker assignments.
+## Mandatory cycle bootstrap
+Every Worker, Work and Codex run must first read live main, AGENTS.md, MASTER_SPEC, ROADMAP, REUSE_CATALOG when present, ACCEPTANCE_GATES, PROJECT_STATUS, PARALLEL_EXECUTION_BOARD, this routing file, newest Issue #553 checkpoints, active owners/claims, open PRs/reviews, exact Actions and last exact green main.
 
-The coordinator classifies each worker assignment as:
+Then classify each relevant component/previous assignment:
+- DONE
+- IN_PROGRESS
+- STALE
+- BLOCKED
+- NEXT
+- DO_NOT_REPEAT
 
-- KEEP — still current and valuable;
-- CHANGE — same lane, but next target changed;
-- STOP_STALE — already completed, superseded or no longer useful;
-- COLLISION — another worker/Codex already owns it;
-- PROMOTE — newly critical because the product state changed.
+One production writer per semantic slice. Reuse incumbent lineage. Shared contract edit requires an explicit compatibility decision. REUSE -> ADAPT -> CUSTOM(thin). GitHub live truth overrides stale routing.
 
-Only after that comparison may the coordinator publish the new routing epoch.
+## Current exact truth
+At this routing publication base, live main is `7e8be7cb7ed3b62f55b1b9f5971bc45514427160`.
+Core CI and M12 Pre-Human Release Gate are green on that exact main.
+HUMAN_TESTED=false.
+NVDA_VERIFIED=false.
+PRODUCTION_RELEASE_READY=false.
 
-## Operating rule
+Integrated/do-not-repeat foundation includes packaged three-agent execution, source setup, local/API ModelGateway, checker handoffs, durable provider/model selection backend, offline/reconnect and uncertain-effect safety, semantic browser stale-DOM/frame protection, durable batch cursor, Windows autostart backend + visible settings, canonical per-user data/recovery foundations.
 
-All recurring workers, Codex Cloud runs and Work integrators must read this file plus live project state before substantive work. Live project evidence overrides stale text here.
+## Nearest V0.1 remaining gates
+1. Durable active Pause/Resume and restart/recovery truth. Incumbent #654 lineage remains owned by Worker1; current independent QA has identified a pause-confirmation crash-window defect that must be resolved or disproven on exact head.
+2. Recurrence/hibernate/missed-run lifecycle on current main.
+3. One complete current-main browser Scenario B.
+4. One complete current-main monitoring Scenario A.
+5. User-visible packaged provider/model selector over the already-integrated canonical backend.
+6. Exact package/install/update/legacy-data/recovery/SBOM/notices/provenance qualification.
+7. Binding repository governance; branch protection/required-status enforcement is currently disabled.
+8. One exact Windows release candidate.
+9. Human Windows/NVDA protocol after PRE_HUMAN_READY only.
 
-No worker may keep implementing an already-completed component merely because an old Scheduled Task prompt names it. Stable prompts define home lanes and startup procedure; this routing file defines the current target.
+Avoid cosmetic V0.1-only polish that final-product work will replace.
 
-## Default worker lanes
+## Parallel Full Product rule
+Safe independent Full Product work may proceed now only when:
+- current ownership is disjoint;
+- contracts are sufficiently stable;
+- no current V0.1 gate is delayed;
+- the work remains useful after the checkpoint;
+- no second framework/authority is created.
 
-- Worker 1: runtime/task continuity/offline-reconnect.
-- Worker 2: ModelGateway/local/API integration.
-- Worker 3: browser/batch/monitoring execution.
-- Worker 4: accessibility/Windows/package/QA.
-- Worker 5: integration/release/ownership; perform global routing audit only when >=6h has elapsed since the last valid audit, otherwise continue integration work.
+After V0.1 passes, immediately continue the same codebase without waiting for Oleksii and without launching a separate V0.2 project.
 
-These are stable home lanes, not permanent exact tasks. The coordinator may re-route when the V0.1 critical path changes.
+Dependency-priority graph:
+`runtime/durability -> AI/model layer -> browser/tools -> agent autonomy -> memory -> voice/perception -> resource governor -> background life -> learning/self-improvement integration -> phone/Telegram/multimodal surfaces -> full Windows/NVDA product journey -> final packaging/release`.
 
-## Current global priority
+This graph guides priority, not artificial sequential phases; independent nodes may proceed in parallel.
 
-Finish the first genuinely usable Windows/NVDA V0.1. Avoid large unrelated feature expansion until the remaining end-to-end runtime, reconnect, batch/monitoring, packaging and human accessibility gates are closed.
+## Worker 1 — Runtime + Audit
+Nearest checkpoint: runtime durability, Pause/Resume, restart/recovery, recurrence/hibernate, cancellation and reconciliation.
+Audit fail-safe: before new own source mutation, independently review the highest-value OTHER-lane exact-green production leaf waiting only same-head audit. Never self-audit Worker1-authored Stability source. Never merge.
+Parallel/future: resource governor and background-life/runtime durability contracts when disjoint.
 
-When a major V0.1 blocker closes, immediately recompute worker priorities. Workers must move toward the next user-visible missing capability rather than polishing already-terminal infrastructure.
+## Worker 2 — AI Layer
+Nearest checkpoint: keep one canonical ModelGateway path; complete only missing model-choice/runtime/restart seams and narrow backend compatibility requested by Windows lane. Do not rebuild local/API ModelGateway or fork UI/settings.
+Parallel/future: deterministic no-LLM, Foundry/Ollama/cloud parity, model identity/version/license/checksum/resource/cancellation contracts, experiment/benchmark hooks. No silent model download.
 
-## Six-hour meta-audit without losing a worker
+## Worker 3 — Browser + Tools
+Nearest checkpoint: compose Scenario B on one current head, then Scenario A monitoring, reusing current semantic browser, ToolExecutor/effect authority, cursor/batch/readiness/report lineages.
+Read-only JS/CDP/DOM diagnostics are allowed to understand unfamiliar sites but never become mutation authority or bypass approvals/security.
+Parallel/future: controlled tool registry/MCP/capability-gap and agent-autonomy contracts. Never create a second browser/retry/cursor/monitor/effect system.
 
-Do not dedicate one of five workers permanently to coordination.
+## Worker 4 — Windows Journey
+Nearest checkpoint: visible provider/model selector over canonical backend, truthful task/team lifecycle/recovery, clean package/install/restart, keyboard/UIA evidence and human protocol preparation.
+Parallel/future: integrate memory/voice/multimodal/resource/background status into the Windows journey when those engines are owned elsewhere and contracts are stable. Do not create duplicate backend truth.
 
-Normal rule:
+## Worker 5 — Coordinator + Integrator
+Own guarded integration, package/release/governance, current routing/control and Drive mirror. Merge one production candidate at a time only after exact unchanged head, current base/overlap, required exact-head checks, required independent audit and no authoritative RED. Never self-audit or merge QA_ONLY.
+After every merge or major Work/Codex finding, reread live state and reroute automatically.
 
-`if no valid full audit exists OR now - last_global_audit >= 6h OR major-change-trigger == true: perform audit + refresh routing; then continue productive project work`
+## Work
+Principal cross-system architect/auditor. Highest current use: independent audit of Worker1 Stability candidates and hard release/package/recovery cross-system defects not leased elsewhere. Major Work result triggers immediate routing refresh.
 
-Otherwise:
+## Codex
+Large coherent explicitly unleased implementation/reuse/dependency package. Before work, collision-check Worker1-5 and Work ownership. Persist major-phase checkpoints so another worker can resume after interruption.
 
-`continue normal lane work`
+## Governance
+Release readiness is false while binding branch protection/required checks remain disabled or unproven. Do not weaken acceptance gates to obtain green.
 
-Major-change triggers include:
-
-- a large Work or Codex Cloud package completes;
-- a major integration changes the V0.1 critical path;
-- Windows/NVDA/release readiness changes;
-- a worker finds its assignment already complete;
-- a collision or stale ownership is detected;
-- a major runtime/CI blocker appears or closes;
-- current routing contradicts live evidence.
-
-If the normal coordinator has not refreshed routing for ~8 hours, the first capable worker may perform a failover audit.
-
-## Coordination rule
-
-If a lane is already complete, stale or actively owned elsewhere, re-route to the highest-value unowned blocker instead of continuing yesterday's assignment. Every worker must leave durable progress another worker can recover.
-
-Before taking work, each worker checks current ownership. After taking work, it leaves/refreshes a current ownership marker/checkpoint. Ownership that stops producing evidence must eventually be treated as stale after verification.
-
-## Codex Cloud rule
-
-Codex Cloud must read this routing state and active worker ownership before substantive work.
-
-At start it should:
-
-1. reconstruct newest live Nika state;
-2. identify what the scheduled workers are already expected to do during the next several hours;
-3. choose a disjoint high-value package or intentional cross-lane integration package;
-4. avoid consuming work already delegated to live scheduled workers unless intentionally taking over stale work;
-5. leave durable checkpoints after major completed phases, not only at final shutdown.
-
-When Codex completes a major package, it should refresh routing or leave enough durable evidence for the next coordinator to do so immediately. If credits end abruptly, scheduled workers recover from durable project state rather than waiting for Oleksii.
-
-## Work / principal-auditor rule
-
-A strong Work run is a periodic principal architect/integrator.
-
-At beginning it reads this routing state and current product evidence. It may perform a deeper whole-project audit, correct architectural drift, update priorities, then take a difficult package that does not duplicate active workers.
-
-A major Work result is itself a routing refresh trigger. Scheduled workers waking after it must re-read current evidence and must not continue assignments invalidated by the Work result.
-
-## Coordinator output after every audit
-
-A successful coordination audit must leave a compact durable state containing:
-
-- new EPOCH;
-- audit time;
-- user-visible V0.1 status;
-- what changed since previous audit;
-- what is complete and must not be repeated;
-- top remaining blockers in priority order;
-- Worker 1–5 current targets;
-- Codex Cloud active/next package;
-- Work active/next package;
-- active ownership/collisions;
-- stale work to stop;
-- integration/release queue;
-- Windows/NVDA readiness;
-- next audit rule;
-- short owner-readable Ukrainian summary.
-
-## Failover
-
-If this file is older than the live project, reconstruct routing from current evidence and refresh it. If the normal coordinator misses its run, the first worker seeing routing older than ~8 hours may perform a minimal failover audit.
-
-If Google Drive is unavailable but GitHub is reachable, continue from GitHub. Drive is a cross-account/master mirror, not a single point of failure.
-
-## Core invariant
-
-Oleksii must not have to manually enter a chat merely to say “read the latest reports and update the workers.” The autonomous system itself is responsible for comparing newest evidence, detecting stale directions, refreshing assignments and continuously moving Nika toward the first genuinely usable release.
+## Human truth
+Automated Windows/UIA/package proof may reach PRE_HUMAN_READY only.
+HUMAN_TESTED=false until real human protocol.
+NVDA_VERIFIED=false until real NVDA protocol.
