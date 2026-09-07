@@ -1,4 +1,45 @@
-## AUTHORITATIVE CURRENT ROUTING — EPOCH-CONTINUOUS-0005 — 2026-09-07T22:14+02:00
+## AUTHORITATIVE CURRENT ROUTING — EPOCH-CONTINUOUS-0006 — 2026-09-07T22:14+02:00
+CURRENT_MAIN: `c71754f54e3643a56528f3f9158d8d2ddd45c2c6` (integrated #674 explicit intelligence modes after #675 resource-capacity telemetry).
+STRATEGY: ONE_CONTINUOUS_FULL_PRODUCT. V0.1 remains the nearest PRE_HUMAN_READY checkpoint; safe disjoint Full Product work may proceed without weakening it.
+LIVE_TRUTH: GitHub main/exact heads/Actions/independent audit > this routing > Issue #553 > Drive mirror. Branch protection remains disabled and cannot be activated through the current GitHub App administration permissions.
+
+DONE_DO_NOT_REPEAT:
+- #641 durable Scenario-B cursor; #656 checker handoffs; #659 Windows autostart/settings; #651 durable per-task model selection; #662 archive/manifest/secret safety; #675 resource telemetry; #674 intelligence-mode boundary.
+- Do not rebuild ModelGateway, scheduler/recovery authority, browser engine, effect ledger, release-manifest verifier, desktop shell or resource-capacity authority.
+
+CURRENT_V01_CRITICAL_PATH:
+1. Worker1: #654 durable Pause/Resume/Cancel + #638 recurrence/task authority. No Worker5 mutation.
+2. Worker4: #672 shared packaged UIA strict RuntimeId proof, then #663 packaged selector/startup-recovery compatibility. #660 legacy-data and other packaged M12 evidence wait on this shared gate.
+3. Worker3: #677 exact Scenario-B authority repair; Scenario-A requires #680 durable baseline + #681 detector + #685 safe report + recurrence/terminal authority.
+4. Worker2: #694 packaged selected-model determinism; #697 local-only Ollama boundary; #696 Foundry cache evidence privacy repair; #698 numeric model-contract safety. No model download/training credit.
+5. Worker5 release: #676 non-admin install/update/rollback; #695 exact package-bound CycloneDX SBOM/provenance; #665 read-only governance verifier. All require independent non-self audit and terminal exact gates.
+
+EXACT_CURRENT_FRONT:
+- #697@c868a2000778bc415ec3c8cce5a8dadbf060e47b: independent semantic CLEAR; Core/M12 pending.
+- #696 newer repaired head 44a5ae829901ac0c2213da5bc3695b640f6913cb: prior private-path traceback blocker repaired; re-audit + fresh Core/M12 required.
+- #698@91722666f2bcdd8e49ea8214c047623240cc0bff: provider-neutral numeric contract candidate; independent audit + Core/M12 pending.
+- #681@40dbd7aa67d6270be13e088b27835c989ec217fc and #685@d13f9b24286b6727e813004fb2dd40635f061f0b: exact-current monitoring detector/report leaves; gates pending, not full Scenario-A alone.
+- #683@40ad51fb1cb4e5eb9244d06c752e6a8db8f9002a: exact-current packaged checker projection; prior repaired semantics requalified, Core/M12 pending.
+- #676@ada5f97db78c15724d024310a234cbf8aaf61877 and #695@48075ab77de8ff5ea99e1e9c9b3585509c18f210: true current-main descendants behind=0. Worker5 authored; self-audit/self-merge forbidden. #695 cancelled gates were explicitly restarted.
+- #665@1b3de3940539a1ecdcca5cd76c3e91cfbfdd43c6: exact-current read-only governance verifier; fresh Core/M12 + non-self audit pending. It does not activate protection.
+
+STALE_OR_BLOCKED:
+- #660 legacy-data semantics had Core+M11 green; old M12 failed at shared #672 UIA. Freeze until #672 exact-green integration/requalification, then current-main successor/replay.
+- #677 current repair head still requires current-main convergence after semantic fixes and exact gates.
+- Actual repository protection/required checks is an external administrative release blocker; current connector supports reads only, not activation.
+- HUMAN_TESTED=false and NVDA_VERIFIED=false until a real human completes the final exact Windows protocol.
+
+INTEGRATION_RULE:
+Merge one production candidate at a time only with unchanged exact head, exact-current ancestry/compatible base, required same-head terminal gates, independent non-self clearance and no authoritative RED. QA_ONLY never merges. After each merge reread main and invalidate/requalify stale downstream evidence.
+
+NEXT_SINGLE_HIGHEST_VALUE_BATCH:
+Consume the first terminal exact-current independently-cleared leaf (priority #697 or a V0.1 release leaf). If none is terminal, repair only concrete owned REDs and continue disjoint package/control work; do not wait on queued CI.
+
+HUMAN_TESTED=false
+NVDA_VERIFIED=false
+PRODUCTION_RELEASE_READY=false
+
+## HISTORICAL SUPERSEDED SNAPSHOT — EPOCH-CONTINUOUS-0005 — 2026-09-07T22:14+02:00
 CURRENT_MAIN: `c71754f54e3643a56528f3f9158d8d2ddd45c2c6` (integrated #674 explicit intelligence mode boundary after #675 resource capacity telemetry).
 STRATEGY: ONE_CONTINUOUS_FULL_PRODUCT. V0.1 is the nearest PRE_HUMAN_READY evidence checkpoint, not a product/version wall.
 DO_NOT_REPEAT: integrated #641 cursor, #656 checker handoffs, #659 autostart/settings, #651 durable model selection, #662 archive/secret gate, #675 resource telemetry, #674 intelligence modes.
