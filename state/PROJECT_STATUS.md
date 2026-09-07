@@ -25,12 +25,13 @@ LAST_EXACT_GREEN_MAIN=`7e8be7cb7ed3b62f55b1b9f5971bc45514427160` for Core CI + M
 Do not rebuild these merely because a new checkpoint/version label appears.
 
 ### IN_PROGRESS / BLOCKED — nearest V0.1 checkpoint
-- durable active Pause/Resume across restart: incumbent #654 lineage; independent QA has identified a pause-confirmation crash-window concern that must be resolved before acceptance;
+- durable active Pause/Resume across restart: incumbent #654 lineage is actively repairing the independent pause-confirmation crash-window; no acceptance until its newest exact head is green and independently re-audited;
 - recurrence/hibernate/missed-run lifecycle: existing lineage must be current-main qualified, not duplicated;
 - full Scenario B: current-main one-head composition still missing even though several leaves exist;
 - monitoring Scenario A: full recurrent observation/change/report composition still missing;
-- packaged user-facing provider/model selector: Windows lane owns the visible UI over the integrated backend;
-- legacy-data/package proof: incumbent release lane #657 has Windows proof-cleanup failure and needs current-main successor/qualification;
+- packaged user-facing provider/model selector: Windows #663 owns the visible UI over the integrated backend; its latest observed failure is import-order lint only, so prior-head evidence is stale and a fresh exact-head rerun is required;
+- packaged startup recovery: fresh current-main QA #652 proves the Windows launcher does not yet run canonical RuntimeRecoveryService inventory/reconciliation before exposing the shell; production repair must coordinate with the #663 scripts/nika_windows.py ownership or its immediate successor, reusing existing recovery authority;
+- legacy-data/package proof: #657 is superseded by current-main successor #660; its cleanup root cause was an unclosed proof-side SQLite handle and the repaired exact head still needs fresh Core/M11/M12 plus independent audit;
 - final package/install/update/recovery/SBOM/notices/provenance seal;
 - repository governance: live `main` currently reports branch protection / required-status enforcement disabled;
 - exact final Windows release candidate;
@@ -38,11 +39,12 @@ Do not rebuild these merely because a new checkpoint/version label appears.
 
 ### NEXT
 1. Repair/qualify active Pause/Resume lineage without a second runtime/recovery authority.
-2. Complete Windows model-selector journey over the integrated model-selection backend.
-3. Compose Scenario B and Scenario A on current main, consuming existing leaves rather than stacking stale branches.
-4. Close package/legacy-data/provenance/governance gates.
-5. Produce one exact Windows candidate and run the human protocol.
-6. Immediately after V0.1 passes, route the same codebase to the next Full Product blockers; do not wait for a “V0.2 start”.
+2. Repair packaged startup recovery so canonical inventory/reconciliation occurs before shell exposure, coordinated with current Windows launcher ownership.
+3. Complete Windows model-selector journey over the integrated model-selection backend.
+4. Compose Scenario B and Scenario A on current main, consuming existing leaves rather than stacking stale branches.
+5. Close package/legacy-data/provenance/governance gates.
+6. Produce one exact Windows candidate and run the human protocol.
+7. Immediately after V0.1 passes, route the same codebase to the next Full Product blockers; do not wait for a “V0.2 start”.
 
 ### Parallel Full Product work allowed now
 Only disjoint work that survives checkpoints and does not delay V0.1: runtime/resource-governor/background-life contracts; AI/model-layer compatibility and model identity; browser/tool diagnostics and controlled autonomy contracts; presentation-neutral future surface contracts. Voice/mobile/self-improvement production expansion must respect ownership and safety and cannot bypass the nearest acceptance gate.
