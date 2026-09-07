@@ -74,16 +74,28 @@ def _run(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
-def test_install_rejects_canonical_user_data_root_before_mutation(
+@pytest.mark.parametrize("relationship", ("equal", "descendant", "ancestor"))
+def test_install_rejects_canonical_user_data_overlap_before_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    relationship: str,
 ) -> None:
     shell = _powershell()
     if shell is None:
         pytest.skip("PowerShell is unavailable")
 
-    local_app_data = tmp_path / "Користувач" / "Local AppData"
-    local_app_data.mkdir(parents=True)
+    if relationship == "ancestor":
+        destination = tmp_path / "Користувач" / "Shared App And Data Root"
+        local_app_data = destination / "Local AppData"
+    else:
+        local_app_data = tmp_path / "Користувач" / relationship / "Local AppData"
+        canonical_root = local_app_data / "NikaCore"
+        destination = (
+            canonical_root
+            if relationship == "equal"
+            else canonical_root / "Programs" / "Nika Core"
+        )
+
     monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
     monkeypatch.delenv("NIKA_DB_PATH", raising=False)
     monkeypatch.delenv("NIKA_DATABASE_PATH", raising=False)
@@ -91,34 +103,45 @@ def test_install_rejects_canonical_user_data_root_before_mutation(
     config = AppConfig()
     canonical_data_root = config.database_path.parent
     assert canonical_data_root == local_app_data / "NikaCore"
+    if relationship == "equal":
+        assert destination == canonical_data_root
+    elif relationship == "descendant":
+        assert canonical_data_root in destination.parents
+    else:
+        assert destination in canonical_data_root.parents
 
-    bundle = _bundle(tmp_path / "release", "v1")
+    bundle = _bundle(tmp_path / f"release-{relationship}", "v1")
     result = _run(
         shell,
         mode="Install",
-        destination=canonical_data_root,
+        destination=destination,
         bundle=bundle,
         env=os.environ.copy(),
     )
 
     assert result.returncode != 0
-    assert not canonical_data_root.exists()
+    assert not destination.exists()
     assert bundle.is_dir()
     assert (bundle / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
-def test_install_rejects_explicit_database_path_inside_destination(tmp_path: Path) -> None:
+@pytest.mark.parametrize("database_alias", ("NIKA_DB_PATH", "NIKA_DATABASE_PATH"))
+def test_install_rejects_explicit_database_path_inside_destination(
+    tmp_path: Path,
+    database_alias: str,
+) -> None:
     shell = _powershell()
     if shell is None:
         pytest.skip("PowerShell is unavailable")
 
-    bundle = _bundle(tmp_path / "release-explicit-db", "v1")
-    destination = tmp_path / "Custom Install" / "Nika Core"
+    bundle = _bundle(tmp_path / f"release-explicit-db-{database_alias}", "v1")
+    destination = tmp_path / "Custom Install" / database_alias / "Nika Core"
     explicit_database = destination / "durable" / "nika_core.db"
     env = os.environ.copy()
-    env["NIKA_DB_PATH"] = str(explicit_database)
+    env.pop("NIKA_DB_PATH", None)
     env.pop("NIKA_DATABASE_PATH", None)
+    env[database_alias] = str(explicit_database)
 
     result = _run(
         shell,
@@ -130,6 +153,41 @@ def test_install_rejects_explicit_database_path_inside_destination(tmp_path: Pat
 
     assert result.returncode != 0
     assert not destination.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
+def test_install_allows_normal_programs_destination_separate_from_canonical_data(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    local_app_data = tmp_path / "Користувач" / "Local AppData"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.delenv("NIKA_DB_PATH", raising=False)
+    monkeypatch.delenv("NIKA_DATABASE_PATH", raising=False)
+
+    config = AppConfig()
+    canonical_data_root = config.database_path.parent
+    destination = local_app_data / "Programs" / "NikaCore"
+    assert canonical_data_root == local_app_data / "NikaCore"
+    assert canonical_data_root not in destination.parents
+    assert destination not in canonical_data_root.parents
+
+    bundle = _bundle(tmp_path / "release-normal-programs", "v1")
+    result = _run(
+        shell,
+        mode="Install",
+        destination=destination,
+        bundle=bundle,
+        env=os.environ.copy(),
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    assert not canonical_data_root.exists()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
