@@ -80,6 +80,8 @@ class _PoisonSuccessProvider:
             return replace(valid, provider_id=_CANARY)
         if self.mode == "wrong-provider-kind":
             return replace(valid, provider_kind=ProviderKind.CLOUD)
+        if self.mode == "text-not-string":
+            return replace(valid, text=[_CANARY])  # type: ignore[arg-type]
         if self.mode == "model-not-text":
             return replace(valid, model=123)  # type: ignore[arg-type]
         if self.mode == "usage-not-dto":
@@ -93,6 +95,10 @@ class _PoisonSuccessProvider:
             return replace(valid, usage=ModelUsage(input_tokens=True))
         if self.mode == "usage-negative":
             return replace(valid, usage=ModelUsage(input_tokens=-1))
+        if self.mode == "usage-huge":
+            return replace(valid, usage=ModelUsage(input_tokens=10**10000))
+        if self.mode == "usage-max":
+            return replace(valid, usage=ModelUsage(input_tokens=(1 << 63) - 1))
         if self.mode == "latency-secret":
             return replace(valid, latency_ms=_CANARY)  # type: ignore[arg-type]
         if self.mode == "latency-nan":
@@ -124,11 +130,13 @@ def _request() -> ModelRequest:
         "wrong-request-id",
         "wrong-provider-id",
         "wrong-provider-kind",
+        "text-not-string",
         "model-not-text",
         "usage-not-dto",
         "usage-secret",
         "usage-bool",
         "usage-negative",
+        "usage-huge",
         "latency-secret",
         "latency-nan",
         "latency-infinity",
@@ -178,6 +186,34 @@ def test_invalid_success_response_fails_before_completed_audit_or_fallback(
     assert _CANARY not in durable
     assert '"failure_effect": "unknown"' in durable
     assert '"provider_id": "trusted"' in durable
+
+
+def test_signed_64_bit_token_metadata_is_still_accepted(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    audit = AuditLog(store)
+    primary = _PoisonSuccessProvider("usage-max")
+    gateway = ModelGateway(audit_log=audit)
+    gateway.register(primary)
+
+    response = asyncio.run(
+        gateway.complete(
+            replace(
+                _request(),
+                fallback_provider_ids=(),
+            )
+        )
+    )
+
+    assert response.usage.input_tokens == (1 << 63) - 1
+    events = audit.list_for(
+        entity_type="model_request",
+        entity_id="response-trust-request",
+    )
+    assert [event.event_type for event in events] == [
+        "model.requested",
+        "model.completed",
+    ]
 
 
 def test_valid_success_response_still_reaches_completed_audit(tmp_path: Path) -> None:
