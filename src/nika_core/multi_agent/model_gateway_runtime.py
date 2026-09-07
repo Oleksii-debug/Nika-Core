@@ -187,15 +187,28 @@ class ModelGatewayAgentRuntime:
         handoff = request.payload.get("handoff", {})
         if not isinstance(handoff, Mapping):
             raise TypeError("handoff must be a mapping")
+        inbound_raw = request.payload.get("inbound_handoffs", [])
+        if not isinstance(inbound_raw, list):
+            raise TypeError("inbound_handoffs must be a list")
+        inbound: list[dict[str, object]] = []
+        for item in inbound_raw:
+            if not isinstance(item, Mapping):
+                raise TypeError("each inbound handoff must be a mapping")
+            inbound.append(dict(item))
         system_text = (
             f"You are {definition.name}.\n"
             f"Goal: {definition.goal}\n"
             "Instructions:\n"
             f"{definition.instructions}"
         )
+        assignment = {
+            "handoff": dict(handoff),
+            "inbound_handoffs": inbound,
+        }
         user_text = (
-            "Complete the assigned handoff. Return the result text only.\n"
-            + json.dumps(dict(handoff), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            "Complete the assigned handoff using any inbound worker results. "
+            "Return the result text only.\n"
+            + json.dumps(assignment, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         )
         timeout = request.timeout_seconds or self._timeout_seconds
         return ModelRequest(
