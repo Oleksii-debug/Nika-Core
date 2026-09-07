@@ -82,6 +82,79 @@ def test_restart_after_three_of_five_preserves_exact_next_target(tmp_path: Path)
     assert restarted.state.next_scheduled_intent.target_id == "target-3"
 
 
+def test_ready_batch_allows_five_effect_reservations_without_releasing_next_batch(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    task_id = _task(store, "parallel-ready-batch")
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id=task_id,
+        cursor_id="cursor",
+        targets=_targets(10),
+        batch_size=5,
+    )
+
+    grants = [cursor.begin_effect(f"target-{index}") for index in range(5)]
+
+    assert all(grant.execute for grant in grants)
+    assert cursor.state.ready_batch_index == 0
+    assert [target.attempt_state for target in cursor.state.targets[:5]] == [
+        AttemptState.IN_FLIGHT,
+    ] * 5
+    assert len(ledger.list_for_task(task_id)) == 5
+
+    with pytest.raises(BatchCursorBlockedError, match="next executable"):
+        cursor.begin_effect("target-5")
+
+
+def test_parallel_batch_out_of_order_completion_preserves_one_durable_wait(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    task_id = _task(store, "parallel-complete")
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id=task_id,
+        cursor_id="cursor",
+        targets=_targets(10),
+        batch_size=5,
+    )
+    due = datetime(2030, 2, 3, 4, 5, 6, tzinfo=UTC)
+
+    for index in range(5):
+        assert cursor.begin_effect(f"target-{index}").execute is True
+    for index in (3, 1, 4, 0, 2):
+        cursor.confirm(
+            f"target-{index}",
+            {"confirmed": index},
+            next_batch_not_before=due,
+        )
+
+    state = cursor.state
+    assert state.confirmed_count == 5
+    assert state.next_scheduled_intent is not None
+    assert state.next_scheduled_intent.kind is IntentKind.INTER_BATCH_WAIT
+    assert state.next_scheduled_intent.target_id == "target-5"
+    assert state.next_scheduled_intent.not_before == due.isoformat()
+
+    restarted = BatchCursor.restore(
+        memory,
+        ledger,
+        task_id=task_id,
+        cursor_id="cursor",
+        targets=_targets(10),
+        batch_size=5,
+    )
+    intent = restarted.state.next_scheduled_intent
+    assert intent is not None
+    assert intent.kind is IntentKind.INTER_BATCH_WAIT
+    assert intent.not_before == due.isoformat()
+    with pytest.raises(BatchCursorBlockedError, match="next executable"):
+        restarted.begin_effect("target-5")
+
 def test_restart_exactly_between_batches_preserves_durable_next_intent(
     tmp_path: Path,
 ) -> None:
