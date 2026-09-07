@@ -52,3 +52,21 @@ Focused tests cover restart with an unchanged or changed source, missing baselin
 persisted evidence, wrong source identity, stale profile/source-set version, ambiguous duplicate
 latest observations, and cross-workspace result-set substitution. HUMAN_TESTED and NVDA_VERIFIED
 remain false; this backend slice does not claim human accessibility evidence.
+
+
+## Source-definition and canonical task authority
+
+The previous observation is accepted only when the durable run-history task is still a canonical
+completed `research.profile.run` TaskQueue record in the expected workspace and its task payload
+pins the exact profile/source-set IDs and versions named by history and the caller.
+
+Source identity is also validated beyond source ID/kind. Local-file evidence locator must equal the
+current canonical local source locator. HTTP evidence may carry a redirect/final URL, so it is not
+compared blindly to the current final URL; instead the loader requires existing durable
+`research_http_attempts` provenance proving that the evidence locator was a final URL reached from
+the *current declared URL* before the baseline result was created. Retargeting the same HTTP
+source_id to another declared URL therefore invalidates the old baseline, while legitimate
+historical redirects for an unchanged declared URL remain valid.
+
+These checks reuse TaskQueue and Research repositories/tables. They add no cache, source registry,
+scheduler, change detector, or monitoring state authority.
