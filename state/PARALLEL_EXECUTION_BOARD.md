@@ -1,5 +1,43 @@
 # PARALLEL EXECUTION BOARD — Nika Core
 
+## LIVE CONTINUOUS-PRODUCT BOARD — 2026-09-07
+
+Mode: **ONE CONTINUOUS FULL PRODUCT / V0.1 NEAREST ACCEPTANCE CHECKPOINT**.
+Starting main: `7e8be7cb7ed3b62f55b1b9f5971bc45514427160`.
+Evidence rule: exact SHA + required exact-head checks + required independent audit. QA_ONLY never merges. Human/NVDA flags are human-only.
+
+Every lane begins by classifying **DONE / IN_PROGRESS / STALE / BLOCKED / NEXT / DO_NOT_REPEAT** and checking current owner/collision. One production writer per semantic slice.
+
+| Lane | Current checkpoint responsibility | Safe parallel Full Product direction | Do not repeat |
+|---|---|---|---|
+| Worker 1 — Runtime + Audit | durable Pause/Resume, restart/recovery, recurrence/hibernate, cancellation/reconciliation; independent audit of OTHER lanes | resource governor, background-life/runtime durability when disjoint | second scheduler/state/recovery/effect ledger |
+| Worker 2 — AI Layer | end-to-end model choice -> canonical ModelGateway -> real team -> restart; backend compatibility for Windows selector | deterministic/Foundry/Ollama/cloud parity, model identity/resource/cancel contracts | second ModelGateway/provider/settings authority |
+| Worker 3 — Browser + Tools | full Scenario B then Scenario A on one current head | semantic diagnostics, tool registry/MCP/capability-gap and controlled autonomy contracts | second browser/cursor/retry/monitor/effect engine |
+| Worker 4 — Windows Journey | visible model selector, truthful lifecycle/recovery states, package/install/keyboard/UIA readiness | future memory/voice/multimodal presentation contracts when disjoint | second desktop UI/runtime/registry/autostart/model backend |
+| Worker 5 — Coordinator + Integrator | guarded integration, release/package/governance, routing/control sync | immediately route next dependency after each checkpoint | self-audit, QA_ONLY merge, stale-evidence promotion |
+| Work | independent audit of Stability-authored candidates; deep cross-system hard package | principal architecture/integration defects | duplicate leased production slice |
+| Codex | large coherent explicitly unleased implementation/reuse/dependency package | next disjoint Full Product dependency | parallel rewrite of active worker lane |
+
+### Current blocker front
+- #654 active durable Pause/Resume: incumbent production lineage, not accepted; QA crash-window finding is binding until repaired/cleared.
+- Scenario B leaves exist but current exact one-head composition is still missing.
+- Scenario A monitoring/recurrence remains incomplete.
+- Windows visible model-selector seam is active after backend #651 integration.
+- Package/legacy-data proof #657 remains unqualified.
+- Main branch protection / required checks are disabled and remain a release blocker.
+- HUMAN_TESTED=false; NVDA_VERIFIED=false; PRODUCTION_RELEASE_READY=false.
+
+### Integration policy
+Integrate one production candidate at a time. Immediately before merge re-read main, unchanged exact head, base/overlap, required Actions, independent review and known REDs. After merge, reread main and invalidate downstream evidence whose source identity moved.
+
+### Post-checkpoint policy
+After V0.1 seal, these lanes do not stop and do not become a separate V0.2 project. Recompute dependency graph and continue the same codebase toward:
+`runtime/durability -> AI/model -> browser/tools -> agent autonomy -> memory -> voice/perception -> resource governor -> background life -> learning/self-improvement -> phone/Telegram/multimodal -> full Windows/NVDA journey -> final package/release`.
+
+---
+
+## Historical execution board retained below
+
 Updated: 2026-08-20.
 Mode: **ACTIVE AUTONOMOUS PRODUCT FACTORY DEVELOPMENT**.
 Canonical technical evidence: live GitHub `main`, exact PR heads and current Actions. Drive owns automation routing/ownership/handoff truth.
