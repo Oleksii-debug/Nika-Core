@@ -98,6 +98,7 @@ class _SuccessfulSemanticTools:
 
     def reset_batch(self) -> None:
         self.gate = asyncio.Event()
+        self.started = asyncio.Queue()
 
     def readiness(self, target, *, task_id: str, tab_id: str, locator) -> PageReadinessResult:
         del target, task_id, tab_id, locator
