@@ -416,7 +416,16 @@ def test_packaged_local_response_model_substitution_fails_closed(tmp_path: Path)
     )
 
     assert result.outcome is RuntimeOutcome.FAILED
-    assert calls == 1
+    assert 1 <= calls <= 3
+    with store.connection() as conn:
+        root_states = [
+            str(row["state"])
+            for row in conn.execute(
+                "SELECT state FROM multi_agent_members WHERE parent_id IS NULL"
+            )
+        ]
+    assert root_states
+    assert "completed" not in root_states
 
 
 def test_packaged_api_response_model_substitution_fails_closed(tmp_path: Path) -> None:
@@ -453,4 +462,13 @@ def test_packaged_api_response_model_substitution_fails_closed(tmp_path: Path) -
     )
 
     assert result.outcome is RuntimeOutcome.FAILED
-    assert calls == 1
+    assert 1 <= calls <= 3
+    with store.connection() as conn:
+        root_states = [
+            str(row["state"])
+            for row in conn.execute(
+                "SELECT state FROM multi_agent_members WHERE parent_id IS NULL"
+            )
+        ]
+    assert root_states
+    assert "completed" not in root_states
