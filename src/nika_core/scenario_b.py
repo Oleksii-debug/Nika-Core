@@ -15,8 +15,6 @@ import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
-
 from nika_core.batch_cursor import (
     AttemptState,
     BatchCursor,
