@@ -566,10 +566,16 @@ class ScenarioBService:
         call: ToolCall,
     ) -> bool:
         try:
+            spec = _registered_spec(self.tool_executor, call.tool_id)
+            expected_intent = ToolEffectGuard.effect_intent_fingerprint(
+                spec=spec,
+                call=call,
+            )
             record = ToolEffectGuard.inspect_ledger(
                 self.idempotency,
                 task_id=self.task_id,
                 call_id=call.call_id,
+                expected_effect_intent_fingerprint=expected_intent,
             )
         except (ToolEffectConflictError, ValueError):
             self.cursor.mark_external_uncertain(
@@ -941,16 +947,23 @@ def _require_same_logical_page(
         )
 
 
+def _registered_spec(executor: ToolExecutor, tool_id: str) -> ToolSpec:
+    spec = next(
+        (item for item in executor.specs() if item.tool_id == tool_id),
+        None,
+    )
+    if spec is None:
+        raise ScenarioBAuthorityError("Scenario-B ToolSpec contract is unavailable")
+    return spec
+
+
 def _require_registered_risk(
     executor: ToolExecutor,
     tool_id: str,
     risk: ToolRisk,
 ) -> None:
-    spec = next(
-        (item for item in executor.specs() if item.tool_id == tool_id),
-        None,
-    )
-    if spec is None or spec.risk is not risk:
+    spec = _registered_spec(executor, tool_id)
+    if spec.risk is not risk:
         raise ScenarioBAuthorityError(
             "Scenario-B ToolSpec risk contract is unavailable"
         )
