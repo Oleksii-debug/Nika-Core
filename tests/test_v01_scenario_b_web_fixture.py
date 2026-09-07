@@ -6,7 +6,12 @@ import urllib.request
 from collections import Counter
 from html.parser import HTMLParser
 
-from test_support.v01_scenario_b_web_fixture import SCENARIO_B_TARGETS, FixtureFamily, ScenarioBFixtureServer, scenario_b_manifest
+from test_support.v01_scenario_b_web_fixture import (
+    SCENARIO_B_TARGETS,
+    FixtureFamily,
+    ScenarioBFixtureServer,
+    scenario_b_manifest,
+)
 
 class _SemanticParser(HTMLParser):
     def __init__(self) -> None: super().__init__(); self.tags: list[tuple[str, dict[str, str | None]]] = []
