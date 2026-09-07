@@ -5,8 +5,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.task_queue import TaskQueue
+from nika_core.kernel.task_state import TaskState
 from nika_core.research.models import ResearchResultSet, SourceKind
 from nika_core.research.network_repository import NetworkResearchRepository
+from nika_core.research.profile_jobs import ResearchProfileRunService
 from nika_core.research.profiles import (
     ResearchProfile,
     ResearchProfileRepository,
@@ -75,6 +78,7 @@ class DurablePreviousObservationLoader:
         self._store = store
         self._profiles = profiles
         self._network = network_repository
+        self._tasks = TaskQueue(store)
 
     def load(self, expected: PreviousObservationExpectation) -> DurablePreviousObservation:
         rows = self._latest_history_rows(expected.series_id)
@@ -92,9 +96,9 @@ class DurablePreviousObservationLoader:
             )
 
         self._validate_history_identity(latest, expected)
-        self._validate_task_binding(latest["task_id"], expected.series_id)
+        self._validate_task_binding(latest["task_id"], expected)
         profile, source_set = self._load_canonical_definitions(expected)
-        self._validate_live_source_bindings(source_set)
+        live_sources = self._validate_live_source_bindings(source_set)
         result_set = self._load_result_set(latest["result_set_id"])
         if result_set.workspace_id != expected.workspace_id:
             self._fail(
@@ -111,7 +115,7 @@ class DurablePreviousObservationLoader:
                 PreviousObservationErrorCode.IDENTITY_MISMATCH,
                 "durable previous result-set query does not match the versioned profile",
             )
-        self._validate_result_items(result_set, source_set)
+        self._validate_result_items(result_set, source_set, live_sources)
         return DurablePreviousObservation(
             task_id=latest["task_id"],
             series_id=latest["series_id"],
@@ -161,18 +165,73 @@ class DurablePreviousObservationLoader:
                 "durable previous observation uses a different profile/source-set version",
             )
 
-    def _validate_task_binding(self, task_id: str, series_id: str) -> None:
+    def _validate_task_binding(
+        self,
+        task_id: str,
+        expected: PreviousObservationExpectation,
+    ) -> None:
         with self._store.connection() as conn:
             binding = conn.execute(
                 """SELECT 1 FROM research_profile_series_tasks
                 WHERE series_id=? AND task_id=?""",
-                (series_id, task_id),
+                (expected.series_id, task_id),
             ).fetchone()
         if binding is None:
             self._fail(
                 PreviousObservationErrorCode.IDENTITY_MISMATCH,
                 "durable previous observation task is not bound to the requested series",
             )
+        try:
+            task = self._tasks.get(task_id)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            self._fail(
+                PreviousObservationErrorCode.CORRUPT_BASELINE,
+                "durable previous observation task record cannot be loaded",
+            )
+        if (
+            task.agent_id != ResearchProfileRunService.AGENT_ID
+            or task.workspace_id != expected.workspace_id
+            or task.state is not TaskState.COMPLETED
+        ):
+            self._fail(
+                PreviousObservationErrorCode.IDENTITY_MISMATCH,
+                "durable previous observation task authority does not match the monitor run",
+            )
+        payload = task.payload
+        if not isinstance(payload, dict):
+            self._fail(
+                PreviousObservationErrorCode.CORRUPT_BASELINE,
+                "durable previous observation task payload is malformed",
+            )
+        expected_payload = {
+            "profile_id": expected.profile_id,
+            "profile_version": expected.profile_version,
+            "source_set_id": expected.source_set_id,
+            "source_set_version": expected.source_set_version,
+        }
+        for key, expected_value in expected_payload.items():
+            if key not in payload:
+                self._fail(
+                    PreviousObservationErrorCode.CORRUPT_BASELINE,
+                    f"durable previous observation task payload is missing {key}",
+                )
+            value = payload[key]
+            if isinstance(expected_value, int):
+                if not isinstance(value, int) or isinstance(value, bool):
+                    self._fail(
+                        PreviousObservationErrorCode.CORRUPT_BASELINE,
+                        f"durable previous observation task payload has invalid {key}",
+                    )
+            elif not isinstance(value, str) or not value.strip():
+                self._fail(
+                    PreviousObservationErrorCode.CORRUPT_BASELINE,
+                    f"durable previous observation task payload has invalid {key}",
+                )
+            if value != expected_value:
+                self._fail(
+                    PreviousObservationErrorCode.IDENTITY_MISMATCH,
+                    f"durable previous observation task payload does not bind {key}",
+                )
 
     def _load_canonical_definitions(
         self,
@@ -216,15 +275,19 @@ class DurablePreviousObservationLoader:
                 f"durable previous result set cannot be loaded: {type(exc).__name__}",
             )
 
-    def _validate_live_source_bindings(self, source_set: ResearchSourceSet) -> None:
+    def _validate_live_source_bindings(
+        self,
+        source_set: ResearchSourceSet,
+    ) -> dict[tuple[SourceKind, str], str]:
+        locators: dict[tuple[SourceKind, str], str] = {}
         with self._store.connection() as conn:
             for source in source_set.sources:
                 local = conn.execute(
-                    "SELECT workspace_id FROM research_sources WHERE source_id=?",
+                    "SELECT workspace_id, locator FROM research_sources WHERE source_id=?",
                     (source.source_id,),
                 ).fetchone()
                 http = conn.execute(
-                    "SELECT workspace_id FROM research_http_sources WHERE source_id=?",
+                    "SELECT workspace_id, url FROM research_http_sources WHERE source_id=?",
                     (source.source_id,),
                 ).fetchone()
                 if local is not None and http is not None:
@@ -244,11 +307,24 @@ class DurablePreviousObservationLoader:
                         PreviousObservationErrorCode.IDENTITY_MISMATCH,
                         f"source moved across workspace boundary: {source.source_id!r}",
                     )
+                locator = (
+                    selected["locator"]
+                    if source.kind is SourceKind.LOCAL_FILE
+                    else selected["url"]
+                )
+                if not isinstance(locator, str) or not locator.strip():
+                    self._fail(
+                        PreviousObservationErrorCode.CORRUPT_BASELINE,
+                        f"source locator is malformed: {source.source_id!r}",
+                    )
+                locators[(source.kind, source.source_id)] = locator
+        return locators
 
     def _validate_result_items(
         self,
         result_set: ResearchResultSet,
         source_set: ResearchSourceSet,
+        live_sources: dict[tuple[SourceKind, str], str],
     ) -> None:
         expected_sources = {(source.kind, source.source_id) for source in source_set.sources}
         ordinals = tuple(item.ordinal for item in result_set.items)
@@ -264,12 +340,55 @@ class DurablePreviousObservationLoader:
                     f"durable previous result item {item.document_id!r} has no evidence",
                 )
             for evidence in item.evidence:
-                if (evidence.source_kind, evidence.source_id) not in expected_sources:
+                source_key = (evidence.source_kind, evidence.source_id)
+                if source_key not in expected_sources:
                     self._fail(
                         PreviousObservationErrorCode.IDENTITY_MISMATCH,
                         "durable previous result evidence is bound to an unexpected source: "
                         f"{evidence.source_id!r}",
                     )
+                declared_locator = live_sources[source_key]
+                if evidence.source_kind is SourceKind.LOCAL_FILE:
+                    if evidence.locator != declared_locator:
+                        self._fail(
+                            PreviousObservationErrorCode.IDENTITY_MISMATCH,
+                            "durable previous local evidence locator no longer matches "
+                            f"source identity: {evidence.source_id!r}",
+                        )
+                elif not self._http_evidence_belongs_to_declared_source(
+                    source_id=evidence.source_id,
+                    declared_url=declared_locator,
+                    evidence_locator=evidence.locator,
+                    result_created_at=result_set.created_at,
+                ):
+                    self._fail(
+                        PreviousObservationErrorCode.IDENTITY_MISMATCH,
+                        "durable previous HTTP evidence locator is not bound to the "
+                        f"current declared source: {evidence.source_id!r}",
+                    )
+
+    def _http_evidence_belongs_to_declared_source(
+        self,
+        *,
+        source_id: str,
+        declared_url: str,
+        evidence_locator: str,
+        result_created_at: str,
+    ) -> bool:
+        if not isinstance(evidence_locator, str) or not evidence_locator.strip():
+            return False
+        with self._store.connection() as conn:
+            row = conn.execute(
+                """SELECT 1
+                FROM research_http_attempts
+                WHERE source_id=?
+                  AND requested_url=?
+                  AND final_url=?
+                  AND observed_at<=?
+                LIMIT 1""",
+                (source_id, declared_url, evidence_locator, result_created_at),
+            ).fetchone()
+        return row is not None
 
     @staticmethod
     def _fail(code: PreviousObservationErrorCode, message: str) -> None:
