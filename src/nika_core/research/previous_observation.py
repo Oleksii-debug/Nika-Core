@@ -7,7 +7,7 @@ from enum import StrEnum
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.task_state import TaskState
-from nika_core.research.models import ResearchResultSet, SourceKind
+from nika_core.research.models import RefreshDisposition, ResearchResultSet, SourceKind
 from nika_core.research.network_repository import NetworkResearchRepository
 from nika_core.research.profile_jobs import ResearchProfileRunService
 from nika_core.research.profiles import (
@@ -115,7 +115,12 @@ class DurablePreviousObservationLoader:
                 PreviousObservationErrorCode.IDENTITY_MISMATCH,
                 "durable previous result-set query does not match the versioned profile",
             )
-        self._validate_result_items(result_set, source_set, live_sources)
+        self._validate_result_items(
+            result_set,
+            source_set,
+            live_sources,
+            baseline_task_id=latest["task_id"],
+        )
         return DurablePreviousObservation(
             task_id=latest["task_id"],
             series_id=latest["series_id"],
@@ -325,6 +330,8 @@ class DurablePreviousObservationLoader:
         result_set: ResearchResultSet,
         source_set: ResearchSourceSet,
         live_sources: dict[tuple[SourceKind, str], str],
+        *,
+        baseline_task_id: str,
     ) -> None:
         expected_sources = {(source.kind, source.source_id) for source in source_set.sources}
         ordinals = tuple(item.ordinal for item in result_set.items)
@@ -357,6 +364,7 @@ class DurablePreviousObservationLoader:
                         )
                 elif not self._http_evidence_belongs_to_declared_source(
                     source_id=evidence.source_id,
+                    baseline_task_id=baseline_task_id,
                     declared_url=declared_locator,
                     evidence_locator=evidence.locator,
                     result_created_at=result_set.created_at,
@@ -371,22 +379,38 @@ class DurablePreviousObservationLoader:
         self,
         *,
         source_id: str,
+        baseline_task_id: str,
         declared_url: str,
         evidence_locator: str,
         result_created_at: str,
     ) -> bool:
         if not isinstance(evidence_locator, str) or not evidence_locator.strip():
             return False
+        success_dispositions = (
+            RefreshDisposition.CHANGED.value,
+            RefreshDisposition.UNCHANGED.value,
+            RefreshDisposition.NOT_MODIFIED.value,
+            RefreshDisposition.DYNAMIC_REQUIRED.value,
+        )
         with self._store.connection() as conn:
             row = conn.execute(
                 """SELECT 1
                 FROM research_http_attempts
                 WHERE source_id=?
+                  AND task_id=?
+                  AND disposition IN (?, ?, ?, ?)
                   AND requested_url=?
                   AND final_url=?
                   AND observed_at<=?
                 LIMIT 1""",
-                (source_id, declared_url, evidence_locator, result_created_at),
+                (
+                    source_id,
+                    baseline_task_id,
+                    *success_dispositions,
+                    declared_url,
+                    evidence_locator,
+                    result_created_at,
+                ),
             ).fetchone()
         return row is not None
 
