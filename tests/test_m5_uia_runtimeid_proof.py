@@ -105,3 +105,26 @@ def test_read_only_text_evidence_allows_equivalent_uia_duplicates_without_action
     assert "Wait-DescendantName 'Запускати Nika разом із Windows'" in text
     assert "Wait-DescendantName 'Зберегти автозапуск'" in text
     assert "Wait-DescendantName 'Що має зробити Nika?'" in text
+
+
+def test_unaddressable_provider_artifacts_are_omitted_only_before_control_capture() -> None:
+    text = PROOF.read_text(encoding="utf-8")
+
+    add_start = text.index("function Add-AddressableBoundCandidate(")
+    add_end = text.index("\n    function Find-BoundDescendantName(", add_start)
+    add_body = text[add_start:add_end]
+    assert "Get-ElementRuntimeId $Candidate 1 10" in add_body
+    assert "catch [NikaUiaRuntimeIdUnavailableException]" in add_body
+    assert "Add-UniqueAutomationElement $Candidates $Candidate" in add_body
+
+    find_start = text.index("function Find-BoundDescendantName(")
+    find_end = text.index("\n    function New-BoundControlIdentity(", find_start)
+    find_body = text[find_start:find_end]
+    assert "Add-AddressableBoundCandidate $candidates $searchRoot" in find_body
+    assert "Add-AddressableBoundCandidate $candidates $matches.Item($index)" in find_body
+
+    resolve_start = text.index("function Resolve-BoundControlIdentity(")
+    resolve_end = text.index("\n    $window = $null", resolve_start)
+    resolve_body = text[resolve_start:resolve_end]
+    assert "Add-AddressableBoundCandidate" not in resolve_body
+    assert "$originalRuntimeId = Get-ElementRuntimeId $Identity.Element" in resolve_body
