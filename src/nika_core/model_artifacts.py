@@ -84,6 +84,10 @@ class ModelArtifactResources:
             raise ValueError(
                 "recommended_memory_bytes must not be below min_system_memory_bytes"
             )
+        if not isinstance(self.cpu_architectures, tuple) or not all(
+            isinstance(value, str) for value in self.cpu_architectures
+        ):
+            raise TypeError("cpu_architectures must be a tuple of text labels")
         architectures = tuple(sorted(set(self.cpu_architectures)))
         if any(_ARCH.fullmatch(value) is None for value in architectures):
             raise ValueError("cpu_architectures contains an invalid architecture label")
@@ -141,6 +145,10 @@ class ModelArtifactDescriptor:
             raise ValueError("provider_identity integrity must not claim a content SHA-256")
         if self.size_bytes is not None:
             _bounded_positive_int("size_bytes", self.size_bytes)
+        if not isinstance(self.capabilities, tuple) or not all(
+            isinstance(value, str) for value in self.capabilities
+        ):
+            raise TypeError("capabilities must be a tuple of text labels")
         capabilities = tuple(sorted(set(self.capabilities)))
         if any(_LABEL.fullmatch(value) is None for value in capabilities):
             raise ValueError("capabilities contains an invalid capability label")
@@ -391,6 +399,13 @@ def _public_reference(name: str, value: str) -> str:
     lowered = text.lower()
     if lowered.startswith(("env:", "credential:", "secret:")):
         raise ValueError(f"{name} must be public provenance, not a credential reference")
+    if (
+        text.startswith(("/", "\\"))
+        or re.match(r"^[A-Za-z]:[\\/]", text) is not None
+    ):
+        raise ValueError(f"{name} must not contain a local filesystem path")
+    if "://" in text and not lowered.startswith(("http://", "https://")):
+        raise ValueError(f"{name} uses an unsupported URL scheme")
     if lowered.startswith(("http://", "https://")):
         parsed = urlsplit(text)
         if (
