@@ -171,11 +171,17 @@ def test_update_restores_previous_release_after_post_activation_reparse_failure(
         "            [System.IO.Directory]::Move($stagePath, $destinationPath)\n"
         "            Assert-NikaNoReparsePathChain -Path $destinationPath\n"
     )
+    injection_marker = tmp_path / "junction-injected.marker"
     escaped_target = str(junction_target).replace("'", "''")
+    escaped_marker = str(injection_marker).replace("'", "''")
     injected = (
         "            [System.IO.Directory]::Move($stagePath, $destinationPath)\n"
         "            [System.IO.Directory]::Move($destinationPath, ($destinationPath + '.candidate'))\n"
         f"            New-Item -ItemType Junction -Path $destinationPath -Target '{escaped_target}' | Out-Null\n"
+        "            $injectedItem = Get-Item -LiteralPath $destinationPath -Force\n"
+        "            if (($injectedItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) { "
+        "throw 'test junction injection did not create a reparse point' }\n"
+        f"            Set-Content -LiteralPath '{escaped_marker}' -Value 'junction-ready' -NoNewline\n"
         "            Assert-NikaNoReparsePathChain -Path $destinationPath\n"
     )
     assert needle in payload
@@ -205,6 +211,7 @@ def test_update_restores_previous_release_after_post_activation_reparse_failure(
     )
 
     assert failed.returncode != 0
+    assert injection_marker.read_text(encoding="utf-8") == "junction-ready"
     assert destination.is_dir()
     assert not destination.is_symlink()
     assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
