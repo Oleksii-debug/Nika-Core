@@ -178,8 +178,8 @@ function Assert-NikaReleaseBundle {
     foreach ($item in Get-ChildItem -LiteralPath $BundleRoot -Recurse -Force) {
         if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw "Release bundle contains a reparse point."
-        if ($item.PSIsContainer) { continue }
         }
+        if ($item.PSIsContainer) { continue }
         $itemPath = Get-NikaFullPath $item.FullName
         if (-not (Test-NikaPathWithin -Path $itemPath -Root $BundleRoot)) {
             throw "Release bundle item escapes bundle root."
