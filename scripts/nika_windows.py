@@ -36,6 +36,10 @@ from nika_core.v01_source_settings import V01SourceSettings
 from nika_core.windows_autostart import WindowsAutostartService
 
 
+class _StartupRecoveryInventoryError(RuntimeError):
+    """Fail-closed packaged startup boundary; never exposes raw recovery diagnostics."""
+
+
 def _focus(focus_id: str, message: str) -> UIResult:
     return UIResult(
         request_id="desktop-handler",
@@ -59,14 +63,17 @@ def build_windows_bridge(
         source_bound = source_settings.prepare_task_payload(payload)
         return model_settings.prepare_task_payload(source_bound)
 
+    runtime = V01PackagedThreeAgentRuntime(
+        store=store,
+        config=config,
+        source_settings=source_settings,
+    )
     backend = DesktopBackend(
         queue=TaskQueue(store),
         agents=AgentRegistry(store),
         workspaces=WorkspaceRegistry(store),
         audit=AuditLog(store),
-        runtime=V01PackagedThreeAgentRuntime(
-            store=store, config=config, source_settings=source_settings
-        ),
+        runtime=runtime,
         prepare_task_payload=prepare_task_payload,
         autostart_service=(
             WindowsAutostartService(Path(sys.executable))
@@ -74,6 +81,14 @@ def build_windows_bridge(
             else None
         ),
     )
+    try:
+        backend.start_startup_recovery()
+    except Exception as exc:
+        backend.close()
+        raise _StartupRecoveryInventoryError(
+            "packaged startup recovery inventory failed"
+        ) from exc
+
     products = ProductProjectCommandService(ProductProjectRepository(store))
     product_router = PackagedProductCommandRouter(
         products=products,
@@ -296,7 +311,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             command=args.pf11_proof_command,
             output_path=args.pf11_proof_output,
         )
-    bridge, _products = build_windows_bridge(config)
+    try:
+        bridge, _products = build_windows_bridge(config)
+    except _StartupRecoveryInventoryError:
+        show_recovery_error(
+            "Nika не може безпечно перевірити незавершену роботу після перезапуску. "
+            "Запуск зупинено без автоматичного повторення дій."
+        )
+        return 1
     launch_windows_shell(bridge, title=f"Nika Core {config.app_version}")
     return 0
 
