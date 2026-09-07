@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Read-only proof for Nika Core repository governance.
 
 The verifier never changes GitHub settings. It reports whether the selected branch is
