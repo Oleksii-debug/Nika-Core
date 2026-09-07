@@ -14,6 +14,12 @@
   const sourceStatus = document.getElementById("source-setup-status");
   let sourceRevision = 0;
   let sourceDirty = false;
+  const autostartInput = document.getElementById("autostart-enabled");
+  const autostartSave = document.getElementById("autostart-save");
+  const autostartStatus = document.getElementById("autostart-status");
+  let autostartDirty = false;
+  let autostartPending = false;
+  let autostartGeneration = 0;
   const tasksList = document.getElementById("tasks-list");
   const agentsList = document.getElementById("agents-list");
   const workspacesList = document.getElementById("workspaces-list");
@@ -446,6 +452,62 @@
     return { ok: true, changed };
   }
 
+  function renderAutostart(snapshot) {
+    if (!autostartInput || !autostartSave || !autostartStatus || autostartPending) return;
+    const messages = {
+      enabled: "Автозапуск увімкнено для цього застосунку.",
+      disabled: "Автозапуск вимкнено.",
+      stale: "Збережено застарілий або інший запис автозапуску. Позначте прапорець і збережіть, щоб прив’язати поточний застосунок, або зніміть позначку і збережіть, щоб прибрати запис.",
+      unavailable: "Автозапуск доступний лише у зібраному застосунку Windows.",
+      error: "Не вдалося прочитати автозапуск. Перечитайте стан або перевірте доступ Windows.",
+    };
+    const valid = snapshot?.schema_version === 1
+      && Object.hasOwn(messages, snapshot.state)
+      && snapshot.can_change === ["enabled", "disabled", "stale"].includes(snapshot.state);
+    const current = valid ? snapshot.state : "error";
+    const canChange = valid && snapshot.can_change;
+    autostartInput.disabled = !canChange;
+    autostartSave.disabled = !canChange;
+    if (!canChange) autostartDirty = false;
+    if (!autostartDirty) autostartInput.checked = current === "enabled";
+    autostartStatus.textContent = messages[current]
+      + (autostartDirty ? " Позначку змінено, але ще не збережено." : "");
+  }
+
+  autostartInput?.addEventListener("change", () => {
+    autostartDirty = true;
+    autostartStatus.textContent = "Позначку змінено, але ще не збережено. Натисніть «Зберегти автозапуск».";
+  });
+
+  async function dispatchAutostart(actionId, trigger) {
+    if (autostartPending) return;
+    const save = actionId === "settings.autostart.configure";
+    if (save && (!autostartInput || autostartInput.disabled)) return;
+    const payload = save ? { enabled: autostartInput.checked } : {};
+    autostartPending = true;
+    autostartGeneration += 1;
+    autostartInput.disabled = true;
+    autostartSave.disabled = true;
+    try {
+      const result = await globalThis.pywebview.api.dispatch({ request_id: requestId(), action_id: actionId, payload });
+      if (!["completed", "failed", "rejected"].includes(result?.status)) throw new Error("Invalid acknowledgement");
+      const failed = result.status !== "completed";
+      if (!failed || !save) autostartDirty = false;
+      announce(result.message, failed);
+      appendLog(result.message);
+    } catch {
+      // The OS write may have completed before the bridge disconnected. No blind retry.
+      announce("Немає підтвердження зміни автозапуску. Перечитайте стан перед повтором.", true);
+    } finally {
+      autostartPending = false;
+      autostartGeneration += 1;
+      if (!await refreshState({ announceTeamTransitions: false })) renderAutostart(null);
+      if (!autostartInput.disabled) autostartInput.focus();
+      else if (trigger && !trigger.disabled) trigger.focus();
+      else focusElementById("autostart-heading");
+    }
+  }
+
   function renderSourceSetup(selection) {
     if (!sourceStatus || selection == null) return;
     if (!["ready", "missing"].includes(selection.status)
@@ -473,7 +535,9 @@
   });
 
   async function refreshState({ announceTeamTransitions = true } = {}) {
+    const autostartReadGeneration = autostartGeneration;
     if (!globalThis.pywebview?.api?.get_state) {
+      if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
       reportStateUnavailable();
       return false;
     }
@@ -481,14 +545,17 @@
     try {
       response = await globalThis.pywebview.api.get_state();
     } catch {
+      if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
       reportStateUnavailable();
       return false;
     }
     if (!response?.ok) {
+      if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
       reportStateUnavailable();
       return false;
     }
     const state = response.state || {};
+    if (autostartReadGeneration === autostartGeneration) renderAutostart(state.autostart ?? null);
     renderSourceSetup(state.v01_sources ?? null);
     renderItems(tasksList, tasksEmpty, state.tasks || [], (item) => `${item.command || "Без назви"} — ${item.state}`);
     renderItems(agentsList, agentsEmpty, state.agents || [], (item) => `${item.name} — ${item.goal}`);
@@ -509,6 +576,10 @@
   async function dispatch(actionId, trigger = null) {
     if (!globalThis.pywebview?.api?.dispatch) {
       announce("Міст Nika ще не готовий.", true);
+      return;
+    }
+    if (["settings.autostart.configure", "settings.autostart.refresh"].includes(actionId)) {
+      await dispatchAutostart(actionId, trigger);
       return;
     }
     const payload = {};
