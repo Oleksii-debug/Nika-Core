@@ -126,10 +126,13 @@ def _installed_distribution_evidence(name: str, version: str) -> dict[str, objec
     try:
         dist = metadata.distribution(name)
     except metadata.PackageNotFoundError as exc:
-        raise SupplyChainEvidenceError(f"Resolved runtime distribution is not installed: {name}") from exc
+        raise SupplyChainEvidenceError(
+            f"Resolved runtime distribution is not installed: {name}"
+        ) from exc
     if dist.version != version:
         raise SupplyChainEvidenceError(
-            f"Installed runtime version mismatch for {name}: report={version} installed={dist.version}"
+            "Installed runtime version mismatch for "
+            f"{name}: report={version} installed={dist.version}"
         )
     declared_license = _metadata_license(dist)
     license_files = _license_evidence(dist)
@@ -259,7 +262,10 @@ def _read_runtime_report(report_path: Path, *, application_name: str) -> dict[st
     return {
         "pip_version": pip_version,
         "application_version": application_version,
-        "components": sorted(components, key=lambda item: (str(item["name"]), str(item["version"]))),
+        "components": sorted(
+            components,
+            key=lambda item: (str(item["name"]), str(item["version"])),
+        ),
     }
 
 
@@ -290,7 +296,9 @@ def _runtime_requirement_names(
         with (project_root / "pyproject.toml").open("rb") as handle:
             project_data = tomllib.load(handle)
     except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise SupplyChainEvidenceError("Could not read pyproject.toml runtime declarations") from exc
+        raise SupplyChainEvidenceError(
+            "Could not read pyproject.toml runtime declarations"
+        ) from exc
 
     project = project_data.get("project")
     if not isinstance(project, dict):
@@ -316,7 +324,9 @@ def _runtime_requirement_names(
         try:
             requirement = Requirement(raw)
         except InvalidRequirement as exc:
-            raise SupplyChainEvidenceError(f"Invalid runtime dependency declaration: {raw}") from exc
+            raise SupplyChainEvidenceError(
+                f"Invalid runtime dependency declaration: {raw}"
+            ) from exc
         marker_environment = dict(environment)
         marker_environment["extra"] = extra or ""
         if requirement.marker is not None and not requirement.marker.evaluate(marker_environment):
@@ -341,7 +351,10 @@ def build_supply_chain_evidence(
         raise SupplyChainEvidenceError("Application version must be non-empty and normalized")
 
     project_name, project_version = _project_identity(project_root)
-    if project_name != canonicalize_name(application_name) or project_version != application_version:
+    if (
+        project_name != canonicalize_name(application_name)
+        or project_version != application_version
+    ):
         raise SupplyChainEvidenceError(
             "Application identity differs between pyproject.toml and release arguments"
         )
