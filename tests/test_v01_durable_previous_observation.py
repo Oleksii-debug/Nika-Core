@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,15 @@ import pytest
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.checkpoint import CheckpointService
 from nika_core.kernel.task_queue import TaskQueue
-from nika_core.research.models import ExtractedDocument, ResearchWorkspace, SourceKind, SourceSpec
+from nika_core.kernel.task_state import TaskState
+from nika_core.research.models import (
+    ExtractedDocument,
+    FreshnessState,
+    RefreshDisposition,
+    ResearchWorkspace,
+    SourceKind,
+    SourceSpec,
+)
 from nika_core.research.network_repository import NetworkResearchRepository
 from nika_core.research.previous_observation import (
     DurablePreviousObservationLoader,
@@ -286,6 +295,236 @@ def test_cross_workspace_result_set_substitution_is_rejected(tmp_path: Path) -> 
             "UPDATE research_result_sets SET workspace_id='other-ws' WHERE result_set_id=?",
             (first.run.result_set_id,),
         )
+
+    with pytest.raises(PreviousObservationError) as caught:
+        _loader(store).load(_expected())
+
+    assert caught.value.code is PreviousObservationErrorCode.IDENTITY_MISMATCH
+
+
+def test_same_local_source_id_cannot_retarget_baseline_locator(tmp_path: Path) -> None:
+    store, repository, _, _, scheduled = _stack(tmp_path / "nika.db")
+    _run_once(scheduled)
+    repository.upsert_source(
+        SourceSpec("local-a", "ws", SourceKind.LOCAL_FILE, "C:/Corpus/retargeted.txt")
+    )
+
+    with pytest.raises(PreviousObservationError) as caught:
+        _loader(store).load(_expected())
+
+    assert caught.value.code is PreviousObservationErrorCode.IDENTITY_MISMATCH
+
+
+def test_persisted_local_evidence_locator_substitution_fails_closed(tmp_path: Path) -> None:
+    store, _, _, _, scheduled = _stack(tmp_path / "nika.db")
+    first = _run_once(scheduled)
+    assert first.run.result_set_id is not None
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT ordinal, evidence_json FROM research_result_items "
+            "WHERE result_set_id=? ORDER BY ordinal LIMIT 1",
+            (first.run.result_set_id,),
+        ).fetchone()
+        assert row is not None
+        evidence = json.loads(row["evidence_json"])
+        evidence[0]["locator"] = "C:/Corpus/ATTACKER.txt"
+        conn.execute(
+            "UPDATE research_result_items SET evidence_json=? "
+            "WHERE result_set_id=? AND ordinal=?",
+            (json.dumps(evidence), first.run.result_set_id, row["ordinal"]),
+        )
+
+    with pytest.raises(PreviousObservationError) as caught:
+        _loader(store).load(_expected())
+
+    assert caught.value.code is PreviousObservationErrorCode.IDENTITY_MISMATCH
+
+
+@pytest.mark.parametrize(
+    ("column", "replacement"),
+    [
+        ("agent_id", "foreign.agent"),
+        ("workspace_id", "other-ws"),
+        ("state", TaskState.RUNNING.value),
+    ],
+)
+def test_previous_observation_requires_canonical_completed_research_task(
+    tmp_path: Path,
+    column: str,
+    replacement: str,
+) -> None:
+    store, _, _, _, scheduled = _stack(tmp_path / f"{column}.db")
+    first = _run_once(scheduled)
+    with store.connection() as conn:
+        conn.execute(
+            f"UPDATE tasks SET {column}=? WHERE task_id=?",
+            (replacement, first.run.task_id),
+        )
+
+    with pytest.raises(PreviousObservationError) as caught:
+        _loader(store).load(_expected())
+
+    assert caught.value.code is PreviousObservationErrorCode.IDENTITY_MISMATCH
+
+
+def test_previous_observation_task_payload_must_pin_exact_versions(tmp_path: Path) -> None:
+    store, _, _, _, scheduled = _stack(tmp_path / "payload.db")
+    first = _run_once(scheduled)
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM tasks WHERE task_id=?",
+            (first.run.task_id,),
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row["payload_json"])
+        payload["profile_version"] = 99
+        conn.execute(
+            "UPDATE tasks SET payload_json=? WHERE task_id=?",
+            (json.dumps(payload), first.run.task_id),
+        )
+
+    with pytest.raises(PreviousObservationError) as caught:
+        _loader(store).load(_expected())
+
+    assert caught.value.code is PreviousObservationErrorCode.IDENTITY_MISMATCH
+
+
+def _http_baseline(path: Path):
+    store = SQLiteStore(path)
+    store.initialize()
+    repository = ResearchRepository(store)
+    repository.upsert_workspace(ResearchWorkspace("ws", "Research"))
+    network = NetworkResearchRepository(store)
+    declared_url = "https://declared-a.test/source"
+    final_url = "https://cdn-a.test/final"
+    network.register_source(SourceSpec("web-a", "ws", SourceKind.HTTP, declared_url))
+
+    profiles = ResearchProfileRepository(store)
+    profiles.save_source_set(
+        ResearchSourceSet(
+            "sources",
+            "ws",
+            1,
+            "Sources",
+            (ResearchSourceRef("web-a", SourceKind.HTTP),),
+        )
+    )
+    profiles.save_profile(
+        ResearchProfile(
+            "monitor",
+            "ws",
+            1,
+            "Monitor",
+            "sources",
+            1,
+            "grant",
+        )
+    )
+
+    tasks = TaskQueue(store)
+    task = tasks.create(
+        workspace_id="ws",
+        agent_id=ResearchProfileRunService.AGENT_ID,
+        payload={
+            "profile_id": "monitor",
+            "profile_version": 1,
+            "source_set_id": "sources",
+            "source_set_version": 1,
+            "http_source_ids": ["web-a"],
+        },
+    )
+    tasks.transition(task.task_id, TaskState.READY)
+    tasks.transition(task.task_id, TaskState.RUNNING)
+
+    network.record_attempt(
+        source_id="web-a",
+        attempt_number=1,
+        disposition=RefreshDisposition.CHANGED,
+        requested_url=declared_url,
+        final_url=final_url,
+        status_code=200,
+        error_code=None,
+        error_message="",
+        retryable=False,
+        task_id=task.task_id,
+    )
+    created_at = datetime.now(UTC).isoformat()
+    result_set_id = "http-result"
+    evidence = [
+        {
+            "source_id": "web-a",
+            "source_kind": SourceKind.HTTP.value,
+            "locator": final_url,
+            "observed_at": created_at,
+            "freshness": FreshnessState.CURRENT.value,
+        }
+    ]
+    with store.connection() as conn:
+        conn.execute(
+            "INSERT INTO research_result_sets(result_set_id, workspace_id, query, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (result_set_id, "ws", "grant", created_at),
+        )
+        conn.execute(
+            """INSERT INTO research_result_items(
+                result_set_id, ordinal, document_id, title, snippet, rank,
+                why_matched, evidence_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                result_set_id,
+                0,
+                "doc-http",
+                "HTTP result",
+                "grant",
+                1.0,
+                "literal",
+                json.dumps(evidence),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO research_profile_series_tasks(series_id, task_id, created_at) "
+            "VALUES (?, ?, ?)",
+            ("series", task.task_id, created_at),
+        )
+        conn.execute(
+            """INSERT INTO research_profile_run_history(
+                task_id, series_id, profile_id, profile_version, source_set_id,
+                source_set_version, result_set_id, previous_result_set_id, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)""",
+            (
+                task.task_id,
+                "series",
+                "monitor",
+                1,
+                "sources",
+                1,
+                result_set_id,
+                created_at,
+            ),
+        )
+    tasks.transition(task.task_id, TaskState.COMPLETED)
+    return store, network, declared_url, final_url
+
+
+def test_http_baseline_accepts_historical_redirect_provenance(tmp_path: Path) -> None:
+    store, _, _, _ = _http_baseline(tmp_path / "http-ok.db")
+
+    loaded = _loader(store).load(_expected())
+
+    assert loaded.result_set.result_set_id == "http-result"
+    assert loaded.result_set.items[0].evidence[0].locator == "https://cdn-a.test/final"
+
+
+def test_same_http_source_id_retarget_requires_rebaseline(tmp_path: Path) -> None:
+    store, network, _, _ = _http_baseline(tmp_path / "http-retarget.db")
+    network.register_source(
+        SourceSpec(
+            "web-a",
+            "ws",
+            SourceKind.HTTP,
+            "https://declared-b.test/source",
+        )
+    )
 
     with pytest.raises(PreviousObservationError) as caught:
         _loader(store).load(_expected())
