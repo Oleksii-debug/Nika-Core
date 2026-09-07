@@ -37,6 +37,8 @@ _SAFE_FALLBACK_CODES = frozenset(
         ModelErrorCode.TIMEOUT,
     }
 )
+_MAX_DURABLE_TOKEN_COUNT = (1 << 63) - 1
+
 _SAFE_PROVIDER_MESSAGES = {
     ModelErrorCode.INVALID_REQUEST: "model provider rejected the request",
     ModelErrorCode.UNAVAILABLE: "model provider is unavailable",
@@ -258,6 +260,7 @@ class ModelGateway:
             response.request_id != request.request_id
             or response.provider_id != trusted_provider_id
             or response.provider_kind is not trusted_provider_kind
+            or not isinstance(response.text, str)
             or not isinstance(response.model, str)
             or not response.model
             or not isinstance(response.usage, ModelUsage)
@@ -272,6 +275,7 @@ class ModelGateway:
                     isinstance(value, bool)
                     or not isinstance(value, int)
                     or value < 0
+                    or value > _MAX_DURABLE_TOKEN_COUNT
                 ):
                     invalid = True
                     break
