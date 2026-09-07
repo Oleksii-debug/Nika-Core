@@ -232,7 +232,6 @@ def test_ruleset_without_visible_bypass_actors_cannot_prove_governance() -> None
         "id": 21,
         "name": "protect-main",
         "target": "branch",
-        "target": "branch",
         "enforcement": "active",
         # GitHub may omit bypass_actors unless the caller can view that sensitive field.
         "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
