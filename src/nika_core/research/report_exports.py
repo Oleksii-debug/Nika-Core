@@ -162,7 +162,10 @@ class ResearchReportExporter:
                             f"<dd>{_escape(evidence.source_kind.value)}</dd>"
                         ),
                         f"<dt{english_attr}>Freshness</dt><dd>{_escape(freshness)}</dd>",
-                        f"<dt{english_attr}>Location</dt><dd>{_escape(safe_evidence_location(evidence))}</dd>",
+                        (
+                            f"<dt{english_attr}>Location</dt><dd>"
+                            f"{_escape(safe_evidence_location(evidence))}</dd>"
+                        ),
                         f"<dt{english_attr}>Observed</dt><dd>{_escape(evidence.observed_at)}</dd>",
                         "</dl></li>",
                     ]
