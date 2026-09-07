@@ -182,11 +182,11 @@ class ModelArtifactDescriptor:
 
     @property
     def descriptor_digest(self) -> str:
-        return hashlib.sha256(self.canonical_json().encode("utf-8")).hexdigest()
+        return hashlib.sha256(self.canonical_json().encode()).hexdigest()
 
     @property
     def registry_key(self) -> str:
-        material = f"{self.provider_id}\x00{self.model_id}".encode("utf-8")
+        material = f"{self.provider_id}\x00{self.model_id}".encode()
         return hashlib.sha256(material).hexdigest()
 
     @classmethod
@@ -364,7 +364,7 @@ class ModelArtifactRegistry:
     def _validated_stored(body: object, digest: object) -> ModelArtifactDescriptor:
         if not isinstance(body, str) or not isinstance(digest, str):
             raise ModelArtifactRegistryError("stored model artifact row is invalid")
-        calculated = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        calculated = hashlib.sha256(body.encode()).hexdigest()
         if _SHA256.fullmatch(digest) is None or calculated != digest:
             raise ModelArtifactRegistryError("stored model artifact digest mismatch")
         descriptor = ModelArtifactDescriptor.from_json(body)
@@ -421,4 +421,4 @@ def _public_reference(name: str, value: str) -> str:
 
 
 def _fingerprint(value: str) -> str:
-    return f"sha256:{hashlib.sha256(value.encode('utf-8')).hexdigest()}"
+    return f"sha256:{hashlib.sha256(value.encode()).hexdigest()}"
