@@ -413,6 +413,38 @@ class BatchCursor:
             self._state.next_scheduled_intent = _reconcile_intent(target)
         self._persist()
 
+    def mark_external_pre_effect_denial(
+        self,
+        target_id: str,
+        *,
+        next_batch_not_before: datetime | None = None,
+    ) -> None:
+        """Persist a canonical ToolExecutor denial proven to occur before handler dispatch.
+
+        Scenario-B prepares durable workflow intent before consulting ToolExecutor.  When the
+        canonical tool boundary then rejects approval or reports a missing durable effect guard,
+        no external handler has run and the PREPARED cursor must not remain replayable forever.
+        This transition is intentionally narrower than generic terminal failure: only PREPARED
+        state with no batch-ledger effect evidence may become FAILED.
+        """
+        target = self._find(target_id)
+        if target.attempt_state is AttemptState.FAILED:
+            return
+        if target.attempt_state is not AttemptState.PREPARED:
+            raise BatchCursorBlockedError(
+                "pre-effect denial requires prepared external-authority state"
+            )
+        if self._ledger.get(target.operation_key) is not None:
+            raise BatchCursorBlockedError(
+                "pre-effect denial cannot override durable batch effect evidence"
+            )
+        target.attempt_state = AttemptState.FAILED
+        target.attempts += 1
+        target.confirmed_result = None
+        target.uncertain_result = None
+        self._advance(next_batch_not_before)
+        self._persist()
+
     def mark_terminal_failure(
         self,
         target_id: str,
