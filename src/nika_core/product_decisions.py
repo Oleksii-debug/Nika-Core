@@ -62,6 +62,10 @@ class ProductDecisionRepository:
             ).encode()
         ).hexdigest()
         with self.store.connection() as conn:
+            # Serialize the idempotency/project-version read with the mutation itself.
+            # This makes concurrent identical calls wait for the winner and then
+            # replay its canonical result instead of leaking SQLite "database is locked".
+            conn.execute("BEGIN IMMEDIATE")
             replay = conn.execute(
                 "SELECT project_id,operation_kind,entity_id,entity_version,input_fingerprint "
                 "FROM product_project_mutation_idempotency WHERE operation_key=?",
