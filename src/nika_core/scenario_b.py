@@ -26,6 +26,7 @@ from nika_core.batch_cursor import (
 from nika_core.batch_execution import (
     BatchExecutionReport,
     BatchStopReason,
+    BatchTargetResult,
     BatchTargetState,
     BoundedBatchExecutor,
 )
@@ -46,6 +47,8 @@ from nika_core.interaction import (
     resolve_strict,
     validate_snapshot,
 )
+from nika_core.kernel.task_queue import TaskQueue
+from nika_core.kernel.task_state import TaskState
 from nika_core.memory import MemoryScope, MemoryService
 from nika_core.page_readiness import (
     PageObservationSignal,
@@ -54,13 +57,21 @@ from nika_core.page_readiness import (
     classify_page_readiness,
     observe_page_readiness,
 )
-from nika_core.runtime.idempotency import IdempotencyLedger
+from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
 from nika_core.task_browser_tabs import (
     TaskBrowserTabError,
     TaskBrowserTabs,
     TaskTabReopenPolicy,
 )
-from nika_core.tools import ToolCall, ToolExecutor, ToolResult, ToolRisk, ToolSpec
+from nika_core.tools import (
+    ToolCall,
+    ToolEffectConflictError,
+    ToolEffectGuard,
+    ToolExecutor,
+    ToolResult,
+    ToolRisk,
+    ToolSpec,
+)
 
 _INPUT_TOOL_ID = "v01.scenario_b.semantic_set_value"
 _INVOKE_TOOL_ID = "v01.scenario_b.semantic_invoke"
@@ -91,6 +102,10 @@ class ScenarioBReadinessError(ScenarioBCompositionError):
 
 class ScenarioBAuthorityError(ScenarioBCompositionError):
     """Canonical ToolExecutor authority denied or could not safely complete the action."""
+
+
+class ScenarioBTaskAuthorityError(ScenarioBAuthorityError):
+    """Canonical TaskQueue state forbids starting the browser mutation."""
 
 
 class ScenarioBObservableResultError(ScenarioBCompositionError):
@@ -239,46 +254,36 @@ def register_scenario_b_semantic_tools(
     executor: ToolExecutor,
     semantic_tools: ScenarioBSemanticTools,
 ) -> None:
-    """Register the two V0.1 semantic actions with canonical risks.
+    """Own both reserved Scenario-B tool IDs or fail closed before registration."""
 
-    Existing registrations are never replaced. A caller therefore cannot downgrade the external
-    INVOKE path by supplying its own risk metadata.
-    """
-
-    existing = {spec.tool_id: spec for spec in executor.specs()}
-    expected = {
-        _INPUT_TOOL_ID: ToolRisk.LOCAL_WRITE,
-        _INVOKE_TOOL_ID: ToolRisk.EXTERNAL_SIDE_EFFECT,
-    }
-    for tool_id, risk in expected.items():
-        if tool_id in existing and existing[tool_id].risk is not risk:
-            raise ScenarioBAuthorityError(
-                "existing Scenario-B ToolSpec has incompatible risk"
-            )
-
-    if _INPUT_TOOL_ID not in existing:
-        executor.register(
-            ToolSpec(
-                tool_id=_INPUT_TOOL_ID,
-                description="Set declared text in one task-owned semantic browser control",
-                risk=ToolRisk.LOCAL_WRITE,
-                timeout_seconds=15.0,
-            ),
-            semantic_tools.set_value,
+    existing_ids = {spec.tool_id for spec in executor.specs()}
+    reserved = {_INPUT_TOOL_ID, _INVOKE_TOOL_ID}
+    if existing_ids & reserved:
+        raise ScenarioBAuthorityError(
+            "Scenario-B reserved tool id is already registered"
         )
-    if _INVOKE_TOOL_ID not in existing:
-        executor.register(
-            ToolSpec(
-                tool_id=_INVOKE_TOOL_ID,
-                description=(
-                    "Invoke one declared task-owned semantic action and require declared "
-                    "observable completion evidence"
-                ),
-                risk=ToolRisk.EXTERNAL_SIDE_EFFECT,
-                timeout_seconds=30.0,
+
+    executor.register(
+        ToolSpec(
+            tool_id=_INPUT_TOOL_ID,
+            description="Set declared text in one task-owned semantic browser control",
+            risk=ToolRisk.LOCAL_WRITE,
+            timeout_seconds=15.0,
+        ),
+        semantic_tools.set_value,
+    )
+    executor.register(
+        ToolSpec(
+            tool_id=_INVOKE_TOOL_ID,
+            description=(
+                "Invoke one declared task-owned semantic action and require declared "
+                "observable completion evidence"
             ),
-            semantic_tools.invoke,
-        )
+            risk=ToolRisk.EXTERNAL_SIDE_EFFECT,
+            timeout_seconds=30.0,
+        ),
+        semantic_tools.invoke,
+    )
 
 
 @dataclass(slots=True)
@@ -286,6 +291,7 @@ class ScenarioBService:
     """Run exactly the durable batch that BatchCursor currently admits."""
 
     task_id: str
+    task_queue: TaskQueue
     cursor: BatchCursor
     tabs: TaskBrowserTabs
     executor: BoundedBatchExecutor[ScenarioBTarget]
@@ -310,6 +316,10 @@ class ScenarioBService:
             raise ValueError("inter-batch delay must not be negative")
         if self.cursor.state.task_id != self.task_id:
             raise ValueError("Scenario-B cursor belongs to a different task")
+        try:
+            self.task_queue.get(self.task_id)
+        except KeyError as exc:
+            raise ValueError("Scenario-B task_id is absent from canonical TaskQueue") from exc
         self._restore_or_validate_tabs()
         target_ids = [target.target_id for target in self.targets]
         if len(target_ids) != len(set(target_ids)):
@@ -355,6 +365,27 @@ class ScenarioBService:
             and target.attempt_state
             not in {AttemptState.CONFIRMED, AttemptState.FAILED}
         )
+        task_stop = self._task_batch_stop_reason()
+        if task_stop is not None and ready:
+            execution = BatchExecutionReport(
+                stop_reason=task_stop,
+                results=tuple(
+                    BatchTargetResult(
+                        index=index,
+                        target_id=target.target_id,
+                        state=BatchTargetState.NOT_STARTED,
+                        reason=task_stop.value,
+                    )
+                    for index, target in enumerate(ready)
+                ),
+                peak_in_flight=0,
+            )
+            self._capture_batch_control_facts(execution)
+            return ScenarioBBatchResult(
+                execution=execution,
+                report=self._project_report(),
+                waiting_until=None,
+            )
         if not ready:
             return ScenarioBBatchResult(
                 execution=BatchExecutionReport(
@@ -399,6 +430,7 @@ class ScenarioBService:
                     tab_id=tab_id,
                     locator=target.input_locator,
                 )
+                self._require_task_action_authority(target)
                 assert target.input_value is not None
                 set_result = await self.tool_executor.execute(
                     ToolCall(
@@ -438,6 +470,8 @@ class ScenarioBService:
                 next_batch_not_before=due,
             )
             raise
+        except ScenarioBTaskAuthorityError:
+            raise
         except (ScenarioBReadinessError, ScenarioBAuthorityError):
             due = self.clock() + timedelta(seconds=self.inter_batch_delay_seconds)
             self.cursor.mark_terminal_failure(
@@ -446,38 +480,35 @@ class ScenarioBService:
             )
             raise
 
+        self._require_task_action_authority(target)
         grant = self.cursor.prepare_external_effect(target.target_id)
         if not grant.execute:
             return
 
-        result = await self.tool_executor.execute(
-            ToolCall(
-                call_id=grant.operation_key,
-                tool_id=_INVOKE_TOOL_ID,
-                arguments={
-                    "task_id": self.task_id,
-                    "tab_id": tab_id,
-                    "target_id": target.target_id,
-                    "action_locator": _locator_to_payload(target.action_locator),
-                    "success_locator": _locator_to_payload(target.success_locator),
-                },
-                task_id=self.task_id,
-            )
+        invoke_call = ToolCall(
+            call_id=grant.operation_key,
+            tool_id=_INVOKE_TOOL_ID,
+            arguments={
+                "task_id": self.task_id,
+                "tab_id": tab_id,
+                "target_id": target.target_id,
+                "action_locator": _locator_to_payload(target.action_locator),
+                "success_locator": _locator_to_payload(target.success_locator),
+            },
+            task_id=self.task_id,
         )
+        result = await self.tool_executor.execute(invoke_call)
         if not result.ok:
             error = result.error or "tool failed"
-            self._set_reason_fact(target, _safe_reason_code(error))
             if error in _PRE_EFFECT_DENIAL_ERRORS:
-                due = self.clock() + timedelta(seconds=self.inter_batch_delay_seconds)
-                self.cursor.mark_external_pre_effect_denial(
-                    target.target_id,
-                    next_batch_not_before=due,
-                )
+                if self._reconcile_pre_effect_denial(target, invoke_call):
+                    return
             elif error in _UNKNOWN_EFFECT_ERRORS:
                 self.cursor.mark_external_uncertain(
                     target.target_id,
                     {"reason": "canonical_tool_effect_unresolved"},
                 )
+            self._set_reason_fact(target, _safe_reason_code(error))
             raise ScenarioBAuthorityError(error)
 
         output = _verified_output(result, target_id=target.target_id)
@@ -487,6 +518,101 @@ class ScenarioBService:
             dict(output),
             next_batch_not_before=due,
         )
+
+    def _task_state(self) -> TaskState:
+        try:
+            return self.task_queue.get(self.task_id).state
+        except KeyError as exc:
+            raise ScenarioBAuthorityError(
+                "canonical TaskQueue record disappeared"
+            ) from exc
+
+    def _task_batch_stop_reason(self) -> BatchStopReason | None:
+        state = self._task_state()
+        if state is TaskState.CANCELLED:
+            return BatchStopReason.CANCELLED
+        if state is TaskState.PAUSED:
+            return BatchStopReason.PAUSED
+        if state in {
+            TaskState.BLOCKED,
+            TaskState.COMPLETED,
+            TaskState.FAILED,
+            TaskState.ARCHIVED,
+        }:
+            raise ScenarioBAuthorityError(
+                f"canonical task state forbids Scenario-B execution: {state.value}"
+            )
+        return None
+
+    def _require_task_action_authority(self, target: ScenarioBTarget) -> None:
+        state = self._task_state()
+        if state not in {
+            TaskState.PAUSED,
+            TaskState.BLOCKED,
+            TaskState.COMPLETED,
+            TaskState.FAILED,
+            TaskState.CANCELLED,
+            TaskState.ARCHIVED,
+        }:
+            return
+        self._set_task_authority_fact(target, state)
+        raise ScenarioBTaskAuthorityError(
+            f"canonical task state forbids browser mutation: {state.value}"
+        )
+
+    def _reconcile_pre_effect_denial(
+        self,
+        target: ScenarioBTarget,
+        call: ToolCall,
+    ) -> bool:
+        try:
+            record = ToolEffectGuard.inspect_ledger(
+                self.idempotency,
+                task_id=self.task_id,
+                call_id=call.call_id,
+            )
+        except (ToolEffectConflictError, ValueError):
+            self.cursor.mark_external_uncertain(
+                target.target_id,
+                {"reason": "canonical_tool_effect_identity_unresolved"},
+            )
+            return False
+        if record is None:
+            due = self.clock() + timedelta(seconds=self.inter_batch_delay_seconds)
+            self.cursor.mark_external_pre_effect_denial(
+                target.target_id,
+                next_batch_not_before=due,
+            )
+            return False
+        if record.status is not IdempotencyStatus.COMPLETED:
+            self.cursor.mark_external_uncertain(
+                target.target_id,
+                {"reason": "canonical_tool_effect_unresolved"},
+            )
+            return False
+        try:
+            durable_output = _completed_tool_effect_output(record.result)
+            output = _verified_output(
+                ToolResult(
+                    call_id=call.call_id,
+                    tool_id=call.tool_id,
+                    output=durable_output,
+                ),
+                target_id=target.target_id,
+            )
+        except (ScenarioBAuthorityError, ScenarioBObservableResultError):
+            self.cursor.mark_external_uncertain(
+                target.target_id,
+                {"reason": "canonical_tool_effect_completion_unreadable"},
+            )
+            return False
+        due = self.clock() + timedelta(seconds=self.inter_batch_delay_seconds)
+        self.cursor.confirm_external_effect(
+            target.target_id,
+            dict(output),
+            next_batch_not_before=due,
+        )
+        return True
 
     async def _require_ready(
         self,
@@ -595,6 +721,28 @@ class ScenarioBService:
                 opened=current.opened if current is not None else None,
                 attempted=True,
                 reason_code=reason,
+                updated_at=self.clock().isoformat(),
+            )
+
+    def _set_task_authority_fact(
+        self,
+        target: ScenarioBTarget,
+        state: TaskState,
+    ) -> None:
+        cursor_target = _cursor_target(self.cursor, target.target_id)
+        terminal = (
+            TargetReportStatus.CANCELLED
+            if state is TaskState.CANCELLED
+            else None
+        )
+        for input_order in cursor_target.input_positions:
+            current = self._facts.get((target.target_id, input_order))
+            self._facts[(target.target_id, input_order)] = TargetReportFacts(
+                target_id=target.target_id,
+                input_order=input_order,
+                opened=current.opened if current is not None else None,
+                terminal_status=terminal,
+                reason_code=f"task_{state.value.lower()}",
                 updated_at=self.clock().isoformat(),
             )
 
@@ -828,6 +976,20 @@ def _verified_output(
             "canonical action returned unsafe evidence reference"
         )
     return output
+
+
+def _completed_tool_effect_output(
+    result: Mapping[str, object] | None,
+) -> object:
+    if (
+        not isinstance(result, Mapping)
+        or result.get("completed") is not True
+        or "output" not in result
+    ):
+        raise ScenarioBAuthorityError(
+            "canonical completed tool effect has no durable output"
+        )
+    return result["output"]
 
 
 def _cursor_target(
