@@ -47,6 +47,11 @@ review state/note/update timestamp, ranking/match explanation, source identity/k
 and observation timestamp. Empty evidence is represented explicitly rather than silently inventing a
 source.
 
+XLSX export also enforces Excel's 32,767-character cell limit before serialization. The check runs
+after spreadsheet-formula neutralization, because the protective apostrophe can itself push a boundary
+value over the Excel limit. Oversized XLSX fields fail closed with the offending field name; they are
+never silently truncated by openpyxl. Other report formats remain independently available.
+
 ## Deterministic Office artifacts
 
 `python-docx` and `openpyxl` correctly own the Office document model, but ordinary saves can include
@@ -58,13 +63,18 @@ thin deterministic package canonicalization step:
 3. bind `docProps/core.xml` created/modified timestamps to the canonical report `created_at`;
 4. use a fixed ZIP member timestamp and deterministic compression settings.
 
-The canonical report timestamp must therefore be valid ISO-8601 for DOCX/XLSX output. Focused tests
-require byte-for-byte equality for repeated rendering of the same report.
+The canonical report timestamp must therefore be valid timezone-aware ISO-8601 for DOCX/XLSX output.
+Timezone-naive timestamps are rejected instead of being mislabeled as UTC. Focused tests require
+byte-for-byte equality for repeated rendering of the same report.
 
 ## Accessibility structure
 
 HTML uses a main landmark, heading hierarchy, labelled article sections, definition lists and ordered
-evidence lists. DOCX uses Heading 1 for the report, Heading 2 for results and Heading 3 for evidence;
+evidence lists. HTML export requires the caller to provide an explicit simple BCP47 language tag
+(for example `uk` or `en-US`) because the canonical Research report currently has no trustworthy
+language metadata. The exporter never guesses with an LLM and no longer emits `lang="und"`.
+Exporter-owned English labels are explicitly marked `lang="en"` when the report's default language is
+not English. DOCX uses Heading 1 for the report, Heading 2 for results and Heading 3 for evidence;
 field labels are explicit bold text rather than color or layout alone. XLSX uses separate `Metadata` and
 `Results` sheets, simple headers, no merged cells, freeze panes and auto-filters.
 
