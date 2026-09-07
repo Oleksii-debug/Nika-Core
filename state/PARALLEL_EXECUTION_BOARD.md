@@ -1,3 +1,16 @@
+## LIVE EXECUTION BOARD OVERRIDE — 2026-09-07T20:44+02:00
+| Lane | Current owner package | State / next |
+|---|---|---|
+| Worker1 Runtime | #654; #638 | #654 BLOCKED repair; #638 exact-green awaiting independent #664 replay |
+| Worker2 AI | #674; #670 frozen | continue exact AI compatibility; do not reconverge #670 before shared UIA stabilizes |
+| Worker3 Browser | #677 | exact-current Scenario-B restart-wait repair -> fresh gates -> independent audit |
+| Worker4 Windows | #672; #663 | clear shared RuntimeId/package proof first; then packaged selector/journey |
+| Worker5 Release | #676; #665; control #666 | fresh gates + non-self audits; guarded one-at-a-time integration |
+| Work | #638 replay / hard audits | independent QA only; no duplicate production mutation |
+| Codex | unleased coherent package only | collision-check before assignment |
+
+Current main `c0ed340c8ee6ddfab011f861f5e6f49017ff5286`; governance protection remains disabled; HUMAN_TESTED=false; NVDA_VERIFIED=false; PRODUCTION_RELEASE_READY=false.
+
 # PARALLEL EXECUTION BOARD — Nika Core
 
 ## LIVE BOARD REFRESH — 2026-09-07 — main c0ed340c
