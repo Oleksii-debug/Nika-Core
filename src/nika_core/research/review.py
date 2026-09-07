@@ -25,6 +25,19 @@ def _required(value: str, field_name: str) -> str:
     return normalized
 
 
+def safe_evidence_location(evidence: ResearchEvidence) -> str:
+    """Return the user-facing location projection without disclosing raw locators.
+
+    ResearchEvidence.locator remains canonical internal provenance and may contain
+    signed HTTP URLs, credentials, query secrets, or private local filesystem paths.
+    User-facing reports retain source identity/kind/freshness/time and deliberately
+    replace the raw locator with one deterministic privacy marker.
+    """
+    if not isinstance(evidence, ResearchEvidence):
+        raise TypeError("evidence must be a ResearchEvidence")
+    return "[location omitted for privacy]"
+
+
 def _entity_id(workspace_id: str, document_id: str) -> str:
     payload = f"{workspace_id}\0{document_id}".encode()
     return hashlib.sha256(payload).hexdigest()
@@ -221,7 +234,7 @@ class ResearchCardService:
                             f"  Source ID: {evidence.source_id}",
                             f"  Source kind: {evidence.source_kind.value}",
                             f"  Freshness: {freshness}",
-                            f"  Location: {evidence.locator}",
+                            f"  Location: {safe_evidence_location(evidence)}",
                             f"  Observed: {evidence.observed_at}",
                         ]
                     )
