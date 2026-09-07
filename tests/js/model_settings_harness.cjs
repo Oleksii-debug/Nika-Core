@@ -89,6 +89,16 @@ element("model-reload").dataset.errorFocusTarget = "model-settings-heading";
 element("autostart-save").dataset.actionId = "settings.autostart.configure";
 
 let currentModel = { status: "missing", revision: 0 };
+let currentRecovery = {
+  schema_version: 1,
+  status: "ready",
+  auto_resume_count: 0,
+  manual_resume_count: 0,
+  approval_count: 0,
+  uncertain_count: 0,
+  blocked_count: 0,
+  resume_failed_count: 0,
+};
 let dispatchMode = "success";
 let failRead = false;
 const calls = [];
@@ -116,6 +126,7 @@ function snapshot() {
       agents: [],
       workspaces: [],
       autostart: { schema_version: 1, state: "disabled", can_change: true, message: "ok" },
+      startup_recovery: currentRecovery,
       v01_sources: { status: "missing", revision: 0, root: "", source_a: "", source_b: "" },
       v01_model_settings: currentModel,
       product_project: null,
@@ -177,6 +188,42 @@ const status = element("model-settings-status");
   assert.equal(timeout.value, "60");
   assert.equal(privateData.checked, true);
   assert.match(status.textContent, /ще не вибрано/);
+  assert.match(element("recovery-status").textContent, /Перевірку відновлення завершено/);
+  assert.equal(element("recovery-summary").hidden, false);
+  assert.equal(element("recovery-auto-count").textContent, "0");
+  assert.equal(element("recovery-uncertain-count").textContent, "0");
+
+  model.focus();
+  const recoveryFocus = document.activeElement;
+  currentRecovery = {
+    ...currentRecovery,
+    status: "recovering",
+    auto_resume_count: 1,
+  };
+  await poll();
+  assert.equal(document.activeElement, recoveryFocus, "Recovery polling must not steal focus");
+  assert.match(element("recovery-status").textContent, /crash-left/);
+  assert.equal(element("recovery-auto-count").textContent, "1");
+
+  currentRecovery = {
+    ...currentRecovery,
+    status: "attention",
+    auto_resume_count: 0,
+    uncertain_count: 1,
+  };
+  await poll();
+  assert.equal(document.activeElement, recoveryFocus, "Attention state must not steal focus");
+  assert.match(element("recovery-status").textContent, /Невизначена або заблокована/);
+  assert.equal(element("recovery-uncertain-count").textContent, "1");
+  assert.match(element("app-status").textContent, /Невизначена або заблокована/);
+
+  currentRecovery = {
+    ...currentRecovery,
+    status: "ready",
+    uncertain_count: 0,
+  };
+  await poll();
+  assert.match(element("recovery-status").textContent, /Перевірку відновлення завершено/);
 
   model.focus();
   let prevented = false;
@@ -287,6 +334,33 @@ const status = element("model-settings-status");
 
   failRead = false;
   await poll();
+
+  currentRecovery = {
+    schema_version: 1,
+    status: "unknown",
+    auto_resume_count: 0,
+    manual_resume_count: 0,
+    approval_count: 0,
+    uncertain_count: 0,
+    blocked_count: 0,
+    resume_failed_count: 0,
+  };
+  const beforeInvalidRecovery = document.activeElement;
+  await poll();
+  assert.equal(document.activeElement, beforeInvalidRecovery, "Invalid recovery state must not steal focus");
+  assert.match(element("recovery-status").textContent, /недоступний або несумісний/);
+  currentRecovery = {
+    schema_version: 1,
+    status: "ready",
+    auto_resume_count: 0,
+    manual_resume_count: 0,
+    approval_count: 0,
+    uncertain_count: 0,
+    blocked_count: 0,
+    resume_failed_count: 0,
+  };
+  await poll();
+
   model.value = "no-blind-retry";
   fire(model, "input");
   dispatchMode = "disconnect";
@@ -297,5 +371,5 @@ const status = element("model-settings-status");
   assert.match(element("app-status").textContent, /Немає підтвердження зміни моделі/);
   assert.equal(JSON.stringify(Object.values(elements).map((e) => e.textContent)).includes("PRIVATE_MODEL_CANARY"), false);
 
-  console.log("PASS: model settings renderer, draft/race, keyboard focus, safe credential reference, no blind retry");
+  console.log("PASS: model settings + startup recovery renderer, draft/race, keyboard focus, safe credential reference, no blind retry");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
