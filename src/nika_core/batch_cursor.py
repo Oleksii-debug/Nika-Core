@@ -616,15 +616,19 @@ class BatchCursor:
                 raise BatchCursorStateError("idempotency evidence belongs to different input")
             if durable.status is IdempotencyStatus.COMPLETED:
                 result, durable_due = _decode_completion_result(durable.result)
-                prior_intent = self._state.next_scheduled_intent.model_copy(deep=True) if self._state.next_scheduled_intent is not None else None
-                if target.attempt_state is not AttemptState.CONFIRMED or (
-                    target.confirmed_result != result
-                ):
+                was_confirmed = target.attempt_state is AttemptState.CONFIRMED
+                if not was_confirmed or target.confirmed_result != result:
                     self._confirm_from_durable(target, result)
                     changed = True
-                self._advance(durable_due)
-                if self._state.next_scheduled_intent != prior_intent:
-                    changed = True
+                if not was_confirmed:
+                    prior_intent = (
+                        self._state.next_scheduled_intent.model_copy(deep=True)
+                        if self._state.next_scheduled_intent is not None
+                        else None
+                    )
+                    self._advance(durable_due)
+                    if self._state.next_scheduled_intent != prior_intent:
+                        changed = True
             elif durable.status is IdempotencyStatus.UNCERTAIN:
                 if target.attempt_state is not AttemptState.UNCERTAIN:
                     target.attempt_state = AttemptState.UNCERTAIN
