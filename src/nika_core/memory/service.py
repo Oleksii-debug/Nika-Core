@@ -96,11 +96,19 @@ class MemoryService:
             if expected is not _UNCONDITIONAL:
                 conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
-                "SELECT created_at, updated_at FROM memory_records "
+                "SELECT created_at, updated_at, expires_at FROM memory_records "
                 "WHERE scope = ? AND owner_id = ? AND namespace = ? AND memory_key = ?",
                 (scope.value, owner_id, namespace, key),
             ).fetchone()
             if expected is not _UNCONDITIONAL:
+                current = datetime.now(UTC)
+                if existing is not None and _is_expired(existing, current):
+                    conn.execute(
+                        "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
+                        "AND namespace = ? AND memory_key = ?",
+                        (scope.value, owner_id, namespace, key),
+                    )
+                    existing = None
                 _require_expected_revision(existing, expected)
             now = _next_revision(existing["updated_at"] if existing else None)
             created_at = existing["created_at"] if existing else now.isoformat()
@@ -274,6 +282,11 @@ def _as_utc(value: datetime) -> datetime:
 
 def _parse_optional(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
+
+
+def _is_expired(row: Any, now: datetime) -> bool:
+    expires_at = _parse_optional(row["expires_at"])
+    return expires_at is not None and expires_at <= now
 
 
 def _next_revision(existing: str | None) -> datetime:
