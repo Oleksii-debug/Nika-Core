@@ -321,6 +321,102 @@ def test_terminal_task_state_is_reread_after_batch_admission_before_effect(
     assert ledger.list_for_task(task_id) == ()
 
 
+def test_cancel_during_approval_blocks_handler_and_releases_reservation(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "cancel-during-approval.db")
+    store.initialize()
+    task_queue = TaskQueue(store)
+    task_id = task_queue.create(
+        workspace_id="scenario-b-cancel-during-approval",
+        agent_id="scenario-b",
+    ).task_id
+    memory = MemoryService(store)
+    ledger = IdempotencyLedger(store)
+    specs = [BatchTargetSpec(target_id="target-0", payload={"index": 0})]
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id=task_id,
+        cursor_id="cursor",
+        targets=specs,
+        batch_size=1,
+    )
+    resources = ResourceManager(store, _Observer())
+    resources.set_budget(
+        ResourceBudget(
+            scope="task",
+            owner_id="scenario-b",
+            max_concurrent=1,
+        )
+    )
+    semantic_tools = _ReadySemanticTools()
+    target = ScenarioBTarget(
+        target_id="target-0",
+        url="https://example.test/0",
+        action_locator=ControlLocator(role="button", name="Run"),
+        success_locator=ControlLocator(role="status", name="Done"),
+    )
+    cancelled = False
+
+    async def approve_then_cancel(
+        spec: ToolSpec,
+        call: ToolCall,
+    ) -> ToolAuthorization:
+        nonlocal cancelled
+        assert call.task_id == task_id
+        if not cancelled:
+            task_queue.transition(task_id, TaskState.CANCELLED)
+            cancelled = True
+        return ToolAuthorization(
+            tool_id=spec.tool_id,
+            task_id=task_id,
+            risk=spec.risk,
+            arguments_fingerprint=tool_arguments_fingerprint(call.arguments),
+            effect_fingerprint=f"effect:{call.call_id}",
+            approval_fingerprint=f"approval:{call.call_id}",
+        )
+
+    service = ScenarioBService(
+        task_id=task_id,
+        task_queue=task_queue,
+        cursor=cursor,
+        tabs=_Tabs(),  # type: ignore[arg-type]
+        executor=BoundedBatchExecutor(
+            resources=resources,
+            resource_scope="task",
+            resource_owner_id="scenario-b",
+            run_id="cancel-during-approval",
+            batch_size=1,
+        ),
+        tool_executor=ToolExecutor(
+            approval_policy=approve_then_cancel,
+            effect_guard=ToolEffectGuard(ledger),
+        ),
+        idempotency=ledger,
+        memory=memory,
+        targets=[target],
+        semantic_tools=semantic_tools,  # type: ignore[arg-type]
+        inter_batch_delay_seconds=0,
+    )
+
+    first = asyncio.run(service.run_ready_batch())
+    assert first.execution is not None
+    assert first.execution.failed_count == 1
+    assert semantic_tools.invoke_calls == 0
+    assert ledger.list_for_task(task_id) == ()
+    assert service.cursor.state.targets[0].attempt_state is AttemptState.PENDING
+    assert first.report[0].status is TargetReportStatus.CANCELLED
+    assert first.report[0].attempted is False
+
+    restarted = asyncio.run(service.run_ready_batch())
+    assert restarted.execution is not None
+    assert restarted.execution.stop_reason.value == "cancelled"
+    assert restarted.execution.not_started_count == 1
+    assert semantic_tools.invoke_calls == 0
+    assert ledger.list_for_task(task_id) == ()
+
+
 async def _approve_exact(spec: ToolSpec, call: ToolCall) -> ToolAuthorization:
     assert call.task_id is not None
     return ToolAuthorization(
