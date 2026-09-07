@@ -288,3 +288,15 @@ def test_removed_file_during_hashing_invalidates_inventory(
 
     with pytest.raises(ValueError, match="tree changed while hashing"):
         foundry_cache_tree_sha256(cache)
+
+
+def test_cache_failure_diagnostics_do_not_expose_absolute_path(tmp_path: Path) -> None:
+    cache = tmp_path / "PRIVATE_MODEL_CACHE_CANARY"
+    cache.mkdir()
+
+    with pytest.raises(ValueError) as exc_info:
+        foundry_cache_tree_sha256(cache)
+
+    rendered = str(exc_info.value)
+    assert "PRIVATE_MODEL_CACHE_CANARY" not in rendered
+    assert str(cache.resolve()) not in rendered
