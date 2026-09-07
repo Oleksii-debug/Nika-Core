@@ -313,7 +313,7 @@ class DesktopBackend:
         )
         try:
             candidates = recovery.inspect()
-        except Exception:
+        except Exception:  # noqa: BLE001 - startup recovery boundary records bounded state
             self._set_startup_recovery_state(
                 {
                     **self.startup_recovery_snapshot(),
@@ -342,7 +342,7 @@ class DesktopBackend:
                 future.result(timeout=startup_wait_seconds)
             except TimeoutError:
                 pass
-            except Exception:
+            except Exception:  # noqa: BLE001 - async runtime boundary is normalized below
                 # Completion callback converts background diagnostics to bounded state.
                 # A runtime resume failure is not retried and does not justify hiding the shell.
                 pass
@@ -477,7 +477,7 @@ class DesktopBackend:
             return
         try:
             executions = future.result()
-        except Exception:
+        except Exception:  # noqa: BLE001 - future may carry any runtime/provider failure
             self._set_startup_recovery_state(
                 {
                     **self.startup_recovery_snapshot(),
@@ -490,7 +490,7 @@ class DesktopBackend:
         failed_count = sum(not item.succeeded for item in executions)
         try:
             candidates = recovery.inspect()
-        except Exception:
+        except Exception:  # noqa: BLE001 - post-recovery inventory fails closed to attention
             self._set_startup_recovery_state(
                 {
                     **self.startup_recovery_snapshot(),
