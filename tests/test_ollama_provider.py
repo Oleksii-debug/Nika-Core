@@ -305,3 +305,32 @@ def test_ollama_accepts_explicit_loopback_roots(base_url: str) -> None:
 def test_ollama_rejects_surrounding_whitespace_in_model_identity() -> None:
     with pytest.raises(ValueError, match="surrounding whitespace"):
         OllamaProvider(default_model=" qwen3:8b ")
+
+
+def test_ollama_disables_environment_proxy_routing_for_private_local_calls() -> None:
+    client_kwargs: list[dict[str, object]] = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "qwen3:8b",
+                "message": {"role": "assistant", "content": "ok"},
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    def client_factory(**kwargs: Any) -> httpx.AsyncClient:
+        client_kwargs.append(dict(kwargs))
+        return httpx.AsyncClient(transport=transport, **kwargs)
+
+    provider = OllamaProvider(
+        default_model="qwen3:8b",
+        client_factory=client_factory,
+    )
+    response = asyncio.run(provider.complete(_request()))
+
+    assert response.text == "ok"
+    assert len(client_kwargs) == 1
+    assert client_kwargs[0]["trust_env"] is False
