@@ -26,6 +26,18 @@ def test_model_settings_form_is_semantic_and_action_registered() -> None:
     assert '"settings.model.refresh"' in actions
     assert html.count('aria-live="') == 1
     assert "API-ключ або пароль" in html
+    assert '<section aria-labelledby="recovery-heading">' in html
+    assert 'id="recovery-status"' in html
+    assert 'aria-label="Стан відновлення після перезапуску"' in html
+    for control_id in (
+        "recovery-auto-count",
+        "recovery-manual-count",
+        "recovery-approval-count",
+        "recovery-uncertain-count",
+        "recovery-blocked-count",
+        "recovery-failed-count",
+    ):
+        assert f'id="{control_id}"' in html
 
 
 def test_packaged_bridge_reuses_integrated_model_settings_and_freezes_task_choice() -> None:
@@ -38,6 +50,13 @@ def test_packaged_bridge_reuses_integrated_model_settings_and_freezes_task_choic
     assert '"settings.model.configure": model_settings.configure' in script
     assert '"settings.model.refresh": refresh_model_settings' in script
     assert "V01BoundModelRuntimeFactory" not in script
+    assert "backend.start_startup_recovery()" in script
+    assert script.index("backend.start_startup_recovery()") < script.index(
+        "products = ProductProjectCommandService"
+    )
+    assert script.index("backend.start_startup_recovery()") < script.index(
+        "launch_windows_shell(bridge"
+    )
 
 
 def test_actual_renderer_model_settings_accessibility_races_and_secret_boundary() -> None:
@@ -58,7 +77,7 @@ def test_actual_renderer_model_settings_accessibility_races_and_secret_boundary(
         timeout=20,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "PASS: model settings renderer" in result.stdout
+    assert "PASS: model settings + startup recovery renderer" in result.stdout
 
 
 def test_packaged_uia_proof_covers_model_controls_and_durable_task_selection() -> None:
