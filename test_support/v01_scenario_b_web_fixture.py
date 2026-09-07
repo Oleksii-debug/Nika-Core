@@ -205,6 +205,10 @@ class ScenarioBFixtureServer:
     @property
     def base_url(self) -> str:
         host,port=self._server.server_address[:2]; return f"http://{host}:{port}"
+    def url(self, path: str) -> str:
+        if not path.startswith("/"):
+            raise ValueError("fixture path must start with /")
+        return f"{self.base_url}{path}"
     def target_url(self,target_id:str)->str: _require_target(target_id); return f"{self.base_url}/targets/{target_id}"
     def state_url(self,target_id:str)->str: _require_target(target_id); return f"{self.base_url}/state/{target_id}"
     def reset(self,target_id:str|None=None)->None: self._state.reset(target_id)
