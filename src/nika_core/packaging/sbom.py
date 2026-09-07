@@ -19,8 +19,8 @@ SUPPLY_CHAIN_FILE = "THIRD_PARTY_SUPPLY_CHAIN.json"
 _CYCLONEDX_SCHEMA = "https://cyclonedx.org/schema/bom-1.6.schema.json"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-_VCS_COMMIT_RE = re.compile(r"^[0-9a-f]{40,64}$")
-_IMMUTABLE_HEX_VCS = frozenset({"git", "hg"})
+_VCS_COMMIT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+_IMMUTABLE_HEX_VCS = frozenset({"git"})
 
 
 class SupplyChainEvidenceError(RuntimeError):
