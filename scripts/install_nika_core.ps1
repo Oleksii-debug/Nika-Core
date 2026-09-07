@@ -160,7 +160,6 @@ function Assert-NikaReleaseBundle {
         $item = Get-Item -LiteralPath $candidate -Force
         if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw "Release bundle contains a reparse point."
-        if ($item.PSIsContainer) { continue }
         }
         if ($item.Length -ne [int64]$size) {
             throw "Release bundle file size does not match the manifest."
