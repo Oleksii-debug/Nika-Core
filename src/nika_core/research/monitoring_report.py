@@ -14,7 +14,7 @@ _SECRET_ASSIGNMENT = re.compile(
 _HEADER_SECRET = re.compile(
     r"(?i)\b(authorization|proxy-authorization|cookie|set-cookie)\s*[:=]\s*[^\r\n]*"
 )
-_SAFE_CODE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}\\Z")
+_SAFE_CODE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}\Z")
 
 
 def _required_line(value: str, field_name: str, *, max_length: int = 240) -> str:
