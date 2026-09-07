@@ -19,11 +19,12 @@ Every lane begins by classifying **DONE / IN_PROGRESS / STALE / BLOCKED / NEXT /
 | Codex | large coherent explicitly unleased implementation/reuse/dependency package | next disjoint Full Product dependency | parallel rewrite of active worker lane |
 
 ### Current blocker front
-- #654 active durable Pause/Resume: incumbent production lineage, not accepted; QA crash-window finding is binding until repaired/cleared.
+- #654 active durable Pause/Resume: incumbent production lineage, not accepted; Worker1 has a current repair for the independent return-boundary crash finding, but exact-head gates + non-self audit are still required.
 - Scenario B leaves exist but current exact one-head composition is still missing.
 - Scenario A monitoring/recurrence remains incomplete.
-- Windows visible model-selector seam is active after backend #651 integration.
-- Package/legacy-data proof #657 remains unqualified.
+- Windows visible model-selector seam is active in #663 after backend #651 integration; its latest observed RED is lint-only and must be rerun on the repaired exact head.
+- Packaged startup recovery is a real current blocker: QA #652 proves the Windows launcher exposes the shell without first composing canonical RuntimeRecoveryService inventory/reconciliation. Repair must be coordinated with #663 launcher ownership or its immediate successor.
+- Package/legacy-data proof #657 is superseded by current-main #660; repaired proof still requires exact Core/M11/M12 + independent audit.
 - Main branch protection / required checks are disabled and remain a release blocker.
 - HUMAN_TESTED=false; NVDA_VERIFIED=false; PRODUCTION_RELEASE_READY=false.
 
