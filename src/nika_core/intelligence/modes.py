@@ -83,7 +83,9 @@ class IntelligenceModePolicy:
             if len(provider_id) > 128 or any(ord(char) < 32 for char in provider_id):
                 raise ValueError(f"{name} is invalid")
             if "://" in provider_id or provider_id.casefold().startswith("env:"):
-                raise ValueError(f"{name} must be an opaque provider identity, not a URL or credential")
+                raise ValueError(
+                    f"{name} must be an opaque provider identity, not a URL or credential"
+                )
 
         if len(set(provider_ids.values())) != len(provider_ids):
             raise ValueError("intelligence mode provider IDs must be distinct")
