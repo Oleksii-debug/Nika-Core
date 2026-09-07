@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import tempfile
 import tomllib
@@ -19,6 +21,7 @@ from nika_core.packaging.windows import default_windows_plan
 
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _PF11_EVIDENCE_NAME = "pf11-packaged-product-journey.json"
+_DATA_ADOPTION_EVIDENCE_NAME = "packaged-data-adoption-proof.json"
 
 
 def project_version(project_root: Path) -> str:
@@ -153,6 +156,193 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
     return target
 
 
+def _hosted_windows_proof_enabled() -> bool:
+    """Keep destructive-looking migration fixtures off developer machines.
+
+    The proof intentionally starts a real frozen executable against temporary
+    profile directories.  It belongs to the isolated GitHub-hosted Windows
+    release gate, not to a normal local package build.
+    """
+    return (
+        os.name == "nt"
+        and os.environ.get("GITHUB_ACTIONS") == "true"
+        and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
+    )
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _create_legacy_database(path: Path) -> str:
+    """Create a minimal real legacy store using the canonical SQLite schema."""
+    from nika_core.data.sqlite import SQLiteStore
+    from nika_core.kernel.task_queue import TaskQueue
+
+    store = SQLiteStore(path)
+    store.initialize()
+    task = TaskQueue(store).create(
+        workspace_id="packaged-upgrade",
+        agent_id="migration-proof",
+        payload={"kind": "packaged_data_adoption"},
+    )
+    return task.task_id
+
+
+def _task_ids(path: Path) -> set[str]:
+    with sqlite3.connect(path) as connection:
+        return {str(row[0]) for row in connection.execute("SELECT task_id FROM tasks")}
+
+
+def _run_packaged_pf11(
+    executable: Path,
+    *,
+    output: Path,
+    environment: dict[str, str],
+    cwd: Path,
+) -> dict[str, object]:
+    completed = subprocess.run(
+        [str(executable), "--pf11-proof", "--pf11-proof-output", str(output)],
+        check=False,
+        env=environment,
+        cwd=cwd,
+        timeout=60,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("packaged data-adoption proof executable exited unsuccessfully")
+    try:
+        payload = json.loads(output.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("packaged data-adoption proof did not emit JSON") from exc
+    if not isinstance(payload, dict) or payload.get("route") != "product_project":
+        raise RuntimeError("packaged data-adoption proof returned invalid PF11 evidence")
+    return payload
+
+
+def prove_packaged_data_adoption(bundle_dir: Path, *, source_sha: str) -> Path | None:
+    """Exercise guarded legacy adoption through the real frozen Windows executable.
+
+    This complements unit recovery tests with an isolated release-gate proof of
+    the default-profile path.  It never scans real user directories and never
+    runs outside a GitHub-hosted Windows runner.
+    """
+    if not _hosted_windows_proof_enabled():
+        return None
+    executable = bundle_dir / "NikaCore.exe"
+    if not executable.is_file() or not _FULL_SHA_RE.fullmatch(source_sha):
+        raise RuntimeError("packaged data-adoption proof requires its exact executable and SHA")
+
+    from nika_core.data.sqlite import SQLiteStore
+    from nika_core.kernel.task_queue import TaskQueue
+    from nika_core.reliability.legacy_database import (
+        LegacyDatabaseConflict,
+        prepare_default_database,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="nika-packaged-data-upgrade-") as temporary:
+        root = Path(temporary)
+        profile = root / "profile"
+        first_cwd = root / "legacy-launch"
+        legacy = first_cwd / "data" / "nika_core.db"
+        legacy_task = _create_legacy_database(legacy)
+        source_digest = _sha256(legacy)
+        environment = dict(os.environ)
+        environment.pop("NIKA_DB_PATH", None)
+        environment.pop("NIKA_DATABASE_PATH", None)
+        environment["LOCALAPPDATA"] = str(profile)
+        # platformdirs gives this documented process-local override precedence
+        # over the runner's real user profile.  The packaged program still uses
+        # its ordinary default-path code; only the hosted fixture is isolated.
+        environment["WIN_PD_OVERRIDE_LOCAL_APPDATA"] = str(profile)
+        canonical = profile / "NikaCore" / "nika_core.db"
+
+        first = _run_packaged_pf11(
+            executable,
+            output=root / "first.json",
+            environment=environment,
+            cwd=first_cwd,
+        )
+        if not canonical.is_file() or _sha256(legacy) != source_digest:
+            raise RuntimeError("packaged legacy adoption did not preserve source/default target")
+        backups = canonical.parent / "legacy-adoption-backups"
+        if len(list(backups.glob("*.sqlite3"))) < 2:
+            raise RuntimeError("packaged legacy adoption did not retain verified backups")
+        if legacy_task not in _task_ids(canonical):
+            raise RuntimeError("packaged legacy adoption lost legacy task identity")
+        new_task = TaskQueue(SQLiteStore(canonical)).create(
+            workspace_id="packaged-upgrade",
+            agent_id="post-adoption",
+            payload={"kind": "new_work"},
+        ).task_id
+        different_cwd = root / "different-launch-directory"
+        different_cwd.mkdir()
+        second = _run_packaged_pf11(
+            executable,
+            output=root / "second.json",
+            environment=environment,
+            cwd=different_cwd,
+        )
+        if first != second or {legacy_task, new_task} - _task_ids(canonical):
+            raise RuntimeError("packaged restart did not preserve adopted and newer work")
+
+        override_root = root / "explicit-override"
+        override_legacy = override_root / "legacy" / "data" / "nika_core.db"
+        _create_legacy_database(override_legacy)
+        override_digest = _sha256(override_legacy)
+        override = override_root / "chosen" / "nika_core.db"
+        override_environment = dict(environment)
+        override_environment["LOCALAPPDATA"] = str(override_root / "profile")
+        override_environment["NIKA_DB_PATH"] = str(override)
+        _run_packaged_pf11(
+            executable,
+            output=override_root / "override.json",
+            environment=override_environment,
+            cwd=override_root / "legacy",
+        )
+        default_override_target = override_root / "profile" / "NikaCore" / "nika_core.db"
+        if not override.is_file() or default_override_target.exists() or _sha256(override_legacy) != override_digest:
+            raise RuntimeError("explicit database override did not bypass legacy adoption")
+
+        conflict_legacy = root / "conflict-launch" / "data" / "nika_core.db"
+        _create_legacy_database(conflict_legacy)
+        conflict_target = root / "conflict-profile" / "NikaCore" / "nika_core.db"
+        _create_legacy_database(conflict_target)
+        try:
+            prepare_default_database(conflict_target, [conflict_legacy])
+        except LegacyDatabaseConflict:
+            conflict_refused = True
+        else:
+            conflict_refused = False
+        if not conflict_refused:
+            raise RuntimeError("existing canonical profile was not refused")
+
+    target = bundle_dir / _DATA_ADOPTION_EVIDENCE_NAME
+    target.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source_sha": source_sha,
+                "packaged_executable_proven": True,
+                "legacy_cwd_adopted": True,
+                "legacy_source_preserved": True,
+                "verified_backups_retained": True,
+                "different_cwd_restart_preserved_new_work": True,
+                "explicit_database_override_bypassed_adoption": True,
+                "existing_canonical_profile_refused": True,
+                "human_tested": False,
+                "nvda_verified": False,
+                "production_release_ready": False,
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return target
+
+
 def build(
     project_root: Path,
     version: str | None,
@@ -166,6 +356,7 @@ def build(
     PyInstaller.__main__.run(list(plan.pyinstaller_args()))
 
     prove_packaged_product_journey(plan.bundle_dir, source_sha=exact_source_sha)
+    prove_packaged_data_adoption(plan.bundle_dir, source_sha=exact_source_sha)
     build_third_party_notices(plan.bundle_dir)
     notice_findings = verify_third_party_notices(plan.bundle_dir)
     if notice_findings:

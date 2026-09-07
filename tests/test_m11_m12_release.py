@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -13,7 +14,12 @@ from nika_core.packaging.release import (
 )
 from nika_core.packaging.windows import default_windows_plan
 from nika_core.qa.release_gate import ReleaseGateEvidence, evaluate_release_gate
-from scripts.m11_release import project_version, resolve_release_version, resolve_source_sha
+from scripts.m11_release import (
+    _hosted_windows_proof_enabled,
+    project_version,
+    resolve_release_version,
+    resolve_source_sha,
+)
 
 SOURCE_SHA = "0123456789abcdef0123456789abcdef01234567"
 
@@ -107,6 +113,15 @@ def test_release_source_sha_can_come_from_explicit_release_environment(
     monkeypatch.setenv("NIKA_SOURCE_SHA", SOURCE_SHA)
     monkeypatch.setenv("GITHUB_SHA", "f" * 40)
     assert resolve_source_sha(None) == SOURCE_SHA
+
+
+def test_packaged_data_adoption_proof_is_limited_to_hosted_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("RUNNER_ENVIRONMENT", "github-hosted")
+    # The Linux test process must never run a frozen Windows migration fixture.
+    assert _hosted_windows_proof_enabled() is (os.name == "nt")
 
 
 def test_third_party_notice_verification_fails_closed(tmp_path: Path) -> None:
