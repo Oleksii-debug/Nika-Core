@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from math import isfinite
 from dataclasses import replace
+from math import isfinite
 from typing import Protocol
 
 from .contracts import (
@@ -263,6 +263,7 @@ class ModelGateway:
             or not isinstance(response.text, str)
             or not isinstance(response.model, str)
             or not response.model
+            or (request.model is not None and response.model != request.model)
             or not isinstance(response.usage, ModelUsage)
         )
         if not invalid:
