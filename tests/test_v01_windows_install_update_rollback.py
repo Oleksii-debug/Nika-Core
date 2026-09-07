@@ -81,6 +81,12 @@ def test_installer_contract_reuses_manifest_and_never_elevates() -> None:
     assert "runas" not in payload.casefold()
     assert "[System.IO.Path]::GetRelativePath" not in payload
     assert "$item.PSIsContainer" in payload
+    assert "function Assert-NikaNoReparsePathChain" in payload
+    assert 'Assert-NikaNoReparsePathChain -Path $BundleRoot' in payload
+    assert 'Assert-NikaNoReparsePathChain -Path $destinationPath' in payload
+    assert 'Assert-NikaReleaseBundle -BundleRoot $destinationPath' in payload
+    assert 'Directory]::Move($destinationPath, $failedActivationPath)' in payload
+    assert 'Directory]::Move($rollbackPath, $destinationPath)' in payload
     assert (
         'throw "Release bundle contains a reparse point."\n'
         "        }\n"
@@ -137,3 +143,54 @@ def test_tampered_update_fails_before_installed_tree_mutates(tmp_path: Path) -> 
     assert rejected.returncode != 0
     assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
     assert not (destination.parent / f".{destination.name}.rollback").exists()
+
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
+def test_installer_rejects_destination_junction_ancestor_before_mutation(tmp_path: Path) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    bundle = _bundle(tmp_path / "bundle", "v1")
+    physical_parent = tmp_path / "physical-parent"
+    physical_parent.mkdir()
+    junction_parent = tmp_path / "junction-parent"
+    created = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction_parent), str(physical_parent)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if created.returncode != 0:
+        pytest.skip("Windows runner does not permit junction creation")
+
+    destination = junction_parent / "Nika Core"
+    rejected = _run(shell, mode="Install", destination=destination, bundle=bundle)
+    assert rejected.returncode != 0
+    assert not (physical_parent / "Nika Core").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
+def test_installer_rejects_bundle_root_junction_before_mutation(tmp_path: Path) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    real_bundle = _bundle(tmp_path / "real-bundle", "v1")
+    junction_bundle = tmp_path / "junction-bundle"
+    created = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction_bundle), str(real_bundle)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if created.returncode != 0:
+        pytest.skip("Windows runner does not permit junction creation")
+
+    destination = tmp_path / "install" / "Nika Core"
+    rejected = _run(shell, mode="Install", destination=destination, bundle=junction_bundle)
+    assert rejected.returncode != 0
+    assert not destination.exists()
