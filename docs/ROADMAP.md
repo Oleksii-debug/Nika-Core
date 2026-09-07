@@ -1,14 +1,23 @@
-## LIVE CURRENT-MAIN OVERRIDE — 2026-09-07T20:44+02:00
+## AUTHORITATIVE CURRENT ROADMAP SNAPSHOT — 2026-09-07T22:14+02:00
+CURRENT_MAIN=`c71754f54e3643a56528f3f9158d8d2ddd45c2c6`. #674 explicit deterministic/embedded-local/external-local/opt-in cloud intelligence modes are integrated after #675 resource telemetry.
+STRATEGY=ONE_CONTINUOUS_FULL_PRODUCT. V0.1 is the nearest evidence checkpoint only.
+NEAREST_GATES=durable Pause/Resume/restart/recovery; recurrence/hibernate with canonical task authority; one exact Scenario B; one exact monitoring Scenario A; packaged model-selection/runtime Windows journey; install/update/legacy-data/recovery; machine-readable SBOM/notices/provenance; live governance; exact Windows candidate; human keyboard/NVDA protocol.
+PARALLEL_FULL_PRODUCT=only disjoint work with stable contracts may advance without delaying the nearest gate.
+ACTIVE_DEPENDENCY_DIRECTION=`runtime/durability -> AI/model -> browser/tools -> agent autonomy -> memory -> voice/perception -> resource governor -> background life -> learning/self-improvement -> phone/multimodal surfaces -> full Windows/NVDA -> final packaging/release`.
+TELEGRAM_SCOPE=NOT_ACTIVE. Telegram may return only through a future explicit user-routed workspace/ProductProject.
+HUMAN_TESTED=false; NVDA_VERIFIED=false; PRODUCTION_RELEASE_READY=false.
+
+## HISTORICAL SUPERSEDED SNAPSHOT — CURRENT-MAIN OVERRIDE — 2026-09-07T20:44+02:00
 CURRENT_MAIN=`c42cb926b5d53ed1950ea598b0dc47c9a6b97e9a`. #675 resource capacity telemetry is integrated. #638 is BLOCKED by canonical task-authority binding; #654 by PAUSED-generation/Cancel race; #672 remains shared Windows UIA blocker. #676@b4f41548 and #665@9a1fe70b are exact-current Worker5 candidates under fresh qualification/non-self audit. Older c0ed exact evidence is lineage-only. HUMAN_TESTED=false; NVDA_VERIFIED=false; PRODUCTION_RELEASE_READY=false.
 
-## LIVE CONTINUOUS-PRODUCT CHECKPOINT — 2026-09-07T20:44+02:00
+## HISTORICAL SUPERSEDED SNAPSHOT — CONTINUOUS-PRODUCT CHECKPOINT — 2026-09-07T20:44+02:00
 Canonical main: `c0ed340c8ee6ddfab011f861f5e6f49017ff5286`.
 Nearest V0.1 path: #654 durable Pause/Resume/Cancel repair -> #638 recurrence independent replay/integration -> #672 shared Windows UIA -> #663/#660 dependent packaged journey -> #677 exact Scenario B -> Scenario A -> exact package/install/update/recovery/SBOM/provenance/governance -> PRE_HUMAN_READY -> human Windows/NVDA.
 Integrated this cycle family: #662 archive/manifest/secret-safety. Installer #676 security repairs and governance evaluator #665 are current exact-base candidates under fresh qualification. Continuous Full Product work continues in the same codebase after the checkpoint.
 
 # Nika Core — roadmap and progress truth
 
-## LIVE ROADMAP REFRESH — 2026-09-07 — after release-security integration
+## HISTORICAL SUPERSEDED SNAPSHOT — ROADMAP REFRESH — 2026-09-07 — after release-security integration
 Current production main: `c0ed340c8ee6ddfab011f861f5e6f49017ff5286`.
 Latest integrated qualified leaf: #662 archive/manifest/secret-safety. This does not make the product release-ready; downstream exact-head evidence is re-earned after integration.
 
@@ -29,7 +38,7 @@ Nearest checkpoint: **V0.1**. Close only the remaining real product gates needed
 After V0.1 passes, development **continues immediately in the same codebase**. No separate “start V0.2” project is created. Safe independent Full Product work may proceed in parallel before V0.1 when contracts and ownership are disjoint and the checkpoint is not delayed.
 
 Dependency-priority graph:
-`runtime/durability -> AI/model layer -> browser/tools -> agent autonomy -> memory -> voice/perception -> resource governor -> background life -> learning/self-improvement integration -> phone/Telegram/multimodal surfaces -> full Windows/NVDA product journey -> final packaging/release`.
+`runtime/durability -> AI/model layer -> browser/tools -> agent autonomy -> memory -> voice/perception -> resource governor -> background life -> learning/self-improvement integration -> phone/multimodal surfaces -> full Windows/NVDA product journey -> final packaging/release`.
 
 This is a dependency graph, not a set of artificial phase walls: independent nodes may advance in parallel when their contracts are stable.
 
