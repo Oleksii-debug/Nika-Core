@@ -159,7 +159,8 @@ function Assert-NikaReleaseBundle {
         }
         $item = Get-Item -LiteralPath $candidate -Force
         if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "Release bundle contains a reparse-point file."
+            throw "Release bundle contains a reparse point."
+        if ($item.PSIsContainer) { continue }
         }
         if ($item.Length -ne [int64]$size) {
             throw "Release bundle file size does not match the manifest."
@@ -174,9 +175,10 @@ function Assert-NikaReleaseBundle {
     }
     if (-not $exeBound) { throw "Release manifest does not bind NikaCore.exe." }
 
-    foreach ($item in Get-ChildItem -LiteralPath $BundleRoot -Recurse -Force -File) {
+    foreach ($item in Get-ChildItem -LiteralPath $BundleRoot -Recurse -Force) {
         if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "Release bundle contains a reparse-point file."
+            throw "Release bundle contains a reparse point."
+        if ($item.PSIsContainer) { continue }
         }
         $itemPath = Get-NikaFullPath $item.FullName
         if (-not (Test-NikaPathWithin -Path $itemPath -Root $BundleRoot)) {
