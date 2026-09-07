@@ -1,5 +1,19 @@
 # PROJECT STATUS — Nika Core
 
+## LIVE SUPERSEDING REFRESH — 2026-09-07 — after #662
+CURRENT_MAIN=`c0ed340c8ee6ddfab011f861f5e6f49017ff5286`.
+LAST_INTEGRATED_QUALIFIED_LEAF=#662@`7a0331b30957f483138eb758071fd5b7d977fa34` -> merge `c0ed340c8ee6ddfab011f861f5e6f49017ff5286`.
+GitHub live exact heads/reviews/Actions override every older snapshot below.
+
+DONE / DO_NOT_REPEAT: #641 cursor; #656 checker handoffs; #659 autostart/settings; #651 durable per-task model selection; #662 archive/manifest/secret-safety.
+IN_PROGRESS: #654 active Pause/Resume/Cancel repair; #638 recurrence/hibernate; #674 AI intelligence-mode/model routing; #677 one-head Scenario B; #663 packaged model/recovery journey; #672 shared UIA gate; #676 install/update/rollback; #665 governance proof.
+BLOCKED: #654 authoritative current-head RED until Worker1 fixes the confirmed-Pause generation race and unchanged #669 passes; repository protection/required checks remain disabled; final provenance/SBOM/notices and one exact Windows candidate remain open.
+NEXT: close #654 + #669; clear #672 shared Windows gate; qualify/audit #638/#677/#663/#674/#676/#665 as their exact heads become green; then Scenario A monitoring and final combined Windows/package provenance.
+HUMAN_TESTED=false.
+NVDA_VERIFIED=false.
+PRODUCTION_RELEASE_READY=false.
+
+
 ## LIVE SUPERSEDING SNAPSHOT — 2026-09-07
 
 Canonical repository: `Oleksii-debug/Nika-Core`.
