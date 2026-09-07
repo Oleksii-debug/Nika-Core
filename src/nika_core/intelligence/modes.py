@@ -197,7 +197,7 @@ class IntelligenceModeRouter:
         routed_request = replace(
             request,
             provider_id=route.provider_id,
-            provider_kind=None,
+            provider_kind=route.provider_kind,
             fallback_provider_ids=(),
         )
         response = await self._gateway.complete(routed_request)
