@@ -263,17 +263,18 @@ def test_ambiguous_post_action_state_is_explicitly_not_retry_safe() -> None:
             f"{fixture.base_url}/actions/{target_id}",
             method="POST",
         )
-        assert status == 202
+        assert status == 409
         html = payload.decode("utf-8")
         assert "data-state='ambiguous'" in html
         assert "data-retry-safe='false'" in html
+        assert "Ambiguous action outcome" in html
         assert "automatic retry forbidden" in html
         state = _json(fixture.state_url(target_id))
         assert state == {
             "target_id": target_id,
             "family": "ambiguous_action_no_retry",
             "attempt_count": 1,
-            "effect_count": 1,
+            "effect_count": 0,
             "retry_safe": False,
         }
 
