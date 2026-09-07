@@ -18,6 +18,8 @@ from nika_core.research.review import AccessibleResearchReport, ResearchCard
 _FORMULA_PREFIXES = ("=", "+", "-", "@")
 _OFFICE_ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 _OFFICE_CREATOR = "Nika Core"
+_XLSX_MAX_CELL_CHARACTERS = 32_767
+_LANGUAGE_TAG_PATTERN = re.compile(r"^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$")
 
 
 class ResearchReportFormat(StrEnum):
@@ -46,6 +48,8 @@ class ResearchReportExporter:
         self,
         report: AccessibleResearchReport,
         report_format: ResearchReportFormat,
+        *,
+        language_tag: str | None = None,
     ) -> RenderedResearchReport:
         if not isinstance(report, AccessibleResearchReport):
             raise TypeError("report must be an AccessibleResearchReport")
@@ -67,7 +71,7 @@ class ResearchReportExporter:
             return RenderedResearchReport(
                 filename,
                 "text/html; charset=utf-8",
-                self._html(report).encode(),
+                self._html(report, language_tag=_language_tag(language_tag)).encode(),
             )
         if report_format is ResearchReportFormat.DOCX:
             return RenderedResearchReport(
@@ -90,60 +94,78 @@ class ResearchReportExporter:
             writer.writerow({key: _spreadsheet_safe(value) for key, value in row.items()})
         return output.getvalue()
 
-    def _html(self, report: AccessibleResearchReport) -> str:
+    def _html(self, report: AccessibleResearchReport, *, language_tag: str) -> str:
+        english_attr = "" if language_tag.casefold().startswith("en") else ' lang="en"'
         parts = [
             "<!doctype html>",
-            '<html lang="und">',
+            f'<html lang="{_escape(language_tag)}">',
             "<head>",
             '<meta charset="utf-8">',
-            "<title>Research results</title>",
+            f"<title{english_attr}>Research results</title>",
             "</head>",
             "<body>",
             "<main>",
-            "<h1>Research results</h1>",
-            f"<p><strong>Query:</strong> {_escape(report.query)}</p>",
-            f"<p><strong>Created:</strong> {_escape(report.created_at)}</p>",
-            f"<p><strong>Results:</strong> {len(report.cards)}</p>",
+            f"<h1{english_attr}>Research results</h1>",
+            f"<p><strong{english_attr}>Query:</strong> {_escape(report.query)}</p>",
+            f"<p><strong{english_attr}>Created:</strong> {_escape(report.created_at)}</p>",
+            f"<p><strong{english_attr}>Results:</strong> {len(report.cards)}</p>",
         ]
         for position, card in enumerate(report.cards, start=1):
-            parts.extend(self._html_card(position, card))
+            parts.extend(self._html_card(position, card, language_tag=language_tag))
         parts.extend(["</main>", "</body>", "</html>", ""])
         return "\n".join(parts)
 
-    def _html_card(self, position: int, card: ResearchCard) -> list[str]:
+    def _html_card(
+        self,
+        position: int,
+        card: ResearchCard,
+        *,
+        language_tag: str,
+    ) -> list[str]:
         heading_id = f"result-{position}"
+        english_attr = "" if language_tag.casefold().startswith("en") else ' lang="en"'
         parts = [
             f'<article aria-labelledby="{heading_id}">',
-            f'<h2 id="{heading_id}">Result {position}: {_escape(card.title)}</h2>',
+            (
+                f'<h2 id="{heading_id}"><span{english_attr}>Result {position}: </span>'
+                f"{_escape(card.title)}</h2>"
+            ),
             "<dl>",
-            f"<dt>Review</dt><dd>{_escape(card.review.state.value)}</dd>",
-            f"<dt>Rank</dt><dd>{card.rank}</dd>",
-            f"<dt>Why matched</dt><dd>{_escape(card.why_matched)}</dd>",
-            f"<dt>Summary</dt><dd>{_escape(card.snippet)}</dd>",
+            f"<dt{english_attr}>Review</dt><dd>{_escape(card.review.state.value)}</dd>",
+            f"<dt{english_attr}>Rank</dt><dd>{card.rank}</dd>",
+            f"<dt{english_attr}>Why matched</dt><dd>{_escape(card.why_matched)}</dd>",
+            f"<dt{english_attr}>Summary</dt><dd>{_escape(card.snippet)}</dd>",
         ]
         if card.review.note:
-            parts.append(f"<dt>Review note</dt><dd>{_escape(card.review.note)}</dd>")
+            parts.append(
+                f"<dt{english_attr}>Review note</dt><dd>{_escape(card.review.note)}</dd>"
+            )
         if card.review.updated_at:
-            parts.append(f"<dt>Review updated</dt><dd>{_escape(card.review.updated_at)}</dd>")
+            parts.append(
+                f"<dt{english_attr}>Review updated</dt><dd>{_escape(card.review.updated_at)}</dd>"
+            )
         parts.append("</dl>")
         if card.evidence:
-            parts.extend(["<h3>Evidence</h3>", "<ol>"])
+            parts.extend([f"<h3{english_attr}>Evidence</h3>", "<ol>"])
             for evidence in card.evidence:
                 freshness = evidence.freshness.value if evidence.freshness is not None else "n/a"
                 parts.extend(
                     [
                         "<li><dl>",
-                        f"<dt>Source ID</dt><dd>{_escape(evidence.source_id)}</dd>",
-                        f"<dt>Source kind</dt><dd>{_escape(evidence.source_kind.value)}</dd>",
-                        f"<dt>Freshness</dt><dd>{_escape(freshness)}</dd>",
-                        f"<dt>Location</dt><dd>{_escape(evidence.locator)}</dd>",
-                        f"<dt>Observed</dt><dd>{_escape(evidence.observed_at)}</dd>",
+                        f"<dt{english_attr}>Source ID</dt><dd>{_escape(evidence.source_id)}</dd>",
+                        f"<dt{english_attr}>Source kind</dt><dd>{_escape(evidence.source_kind.value)}</dd>",
+                        f"<dt{english_attr}>Freshness</dt><dd>{_escape(freshness)}</dd>",
+                        f"<dt{english_attr}>Location</dt><dd>{_escape(evidence.locator)}</dd>",
+                        f"<dt{english_attr}>Observed</dt><dd>{_escape(evidence.observed_at)}</dd>",
                         "</dl></li>",
                     ]
                 )
             parts.append("</ol>")
         else:
-            parts.append("<p><strong>Evidence:</strong> none recorded</p>")
+            parts.append(
+                f"<p><strong{english_attr}>Evidence:</strong> "
+                f"<span{english_attr}>none recorded</span></p>"
+            )
         parts.append("</article>")
         return parts
 
@@ -205,10 +227,10 @@ class ResearchReportExporter:
         metadata = workbook.active
         metadata.title = "Metadata"
         metadata.append(("Field", "Value"))
-        metadata.append(("Result set ID", _spreadsheet_safe(report.result_set_id)))
-        metadata.append(("Workspace ID", _spreadsheet_safe(report.workspace_id)))
-        metadata.append(("Query", _spreadsheet_safe(report.query)))
-        metadata.append(("Created", _spreadsheet_safe(report.created_at)))
+        metadata.append(("Result set ID", _xlsx_cell(report.result_set_id, "result_set_id")))
+        metadata.append(("Workspace ID", _xlsx_cell(report.workspace_id, "workspace_id")))
+        metadata.append(("Query", _xlsx_cell(report.query, "query")))
+        metadata.append(("Created", _xlsx_cell(report.created_at, "created_at")))
         metadata.append(("Results", len(report.cards)))
         metadata.freeze_panes = "A2"
         metadata.auto_filter.ref = metadata.dimensions
@@ -217,7 +239,7 @@ class ResearchReportExporter:
         fieldnames = _fieldnames()
         results.append(tuple(fieldnames))
         for row in _rows(report):
-            results.append(tuple(_spreadsheet_safe(row[key]) for key in fieldnames))
+            results.append(tuple(_xlsx_cell(row[key], key) for key in fieldnames))
         results.freeze_panes = "A2"
         results.auto_filter.ref = results.dimensions
 
@@ -307,6 +329,25 @@ def _spreadsheet_safe(value: object) -> object:
     return value
 
 
+def _xlsx_cell(value: object, field_name: str) -> object:
+    safe = _spreadsheet_safe(value)
+    if isinstance(safe, str) and len(safe) > _XLSX_MAX_CELL_CHARACTERS:
+        raise ValueError(
+            f"XLSX field {field_name} exceeds {_XLSX_MAX_CELL_CHARACTERS} characters "
+            "after formula neutralization"
+        )
+    return safe
+
+
+def _language_tag(value: str | None) -> str:
+    if value is None:
+        raise ValueError("HTML export requires an explicit BCP47 language_tag")
+    normalized = value.strip()
+    if not _LANGUAGE_TAG_PATTERN.fullmatch(normalized):
+        raise ValueError("language_tag must be a simple BCP47 language tag such as 'uk' or 'en-US'")
+    return normalized
+
+
 def _escape(value: object) -> str:
     return html.escape(str(value), quote=True)
 
@@ -329,8 +370,11 @@ def _office_timestamp(value: str) -> datetime:
         raise ValueError(
             "report.created_at must be an ISO-8601 timestamp for Office export"
         ) from exc
-    if parsed.tzinfo is not None:
-        parsed = parsed.astimezone(UTC).replace(tzinfo=None)
+    if parsed.tzinfo is None:
+        raise ValueError(
+            "report.created_at must include an explicit timezone for Office export"
+        )
+    parsed = parsed.astimezone(UTC).replace(tzinfo=None)
     return parsed.replace(microsecond=0)
 
 
