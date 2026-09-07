@@ -300,3 +300,17 @@ def test_cache_failure_diagnostics_do_not_expose_absolute_path(tmp_path: Path) -
     rendered = str(exc_info.value)
     assert "PRIVATE_MODEL_CACHE_CANARY" not in rendered
     assert str(cache.resolve()) not in rendered
+
+
+def test_v2_digest_supports_unicode_and_spaced_cache_paths(tmp_path: Path) -> None:
+    cache = tmp_path / "Кеш моделей з пробілами"
+    nested = cache / "варіант №1"
+    nested.mkdir(parents=True)
+    weights = nested / "ваги моделі.bin"
+    weights.write_bytes("українські bytes".encode("utf-8"))
+
+    evidence = foundry_cache_tree_sha256(cache)
+
+    assert evidence["algorithm"] == "sha256-tree-v2"
+    assert evidence["file_count"] == 1
+    assert evidence["total_bytes"] == len(weights.read_bytes())
