@@ -55,6 +55,7 @@ from nika_core.page_readiness import (
 )
 from nika_core.runtime.idempotency import IdempotencyLedger
 from nika_core.task_browser_tabs import (
+    TaskBrowserTabError,
     TaskBrowserTabs,
     TaskTabReopenDeniedError,
     TaskTabReopenPolicy,
@@ -341,7 +342,8 @@ class ScenarioBService:
             by_id[target.target_id]
             for target in state.targets
             if target.batch_index == state.ready_batch_index
-            and target.attempt_state is not AttemptState.CONFIRMED
+            and target.attempt_state
+            not in {AttemptState.CONFIRMED, AttemptState.FAILED}
         )
         if not ready:
             return ScenarioBBatchResult(
@@ -377,46 +379,63 @@ class ScenarioBService:
         self.cursor.release_inter_batch_wait(now=now)
 
     async def _execute_target(self, target: ScenarioBTarget) -> None:
-        tab_id = self._ensure_tab(target)
-        self._set_open_fact(target, opened=True)
+        try:
+            tab_id = self._ensure_tab(target)
+            self._set_open_fact(target, opened=True)
 
-        if target.input_locator is not None:
+            if target.input_locator is not None:
+                await self._require_ready(
+                    target,
+                    tab_id=tab_id,
+                    locator=target.input_locator,
+                )
+                assert target.input_value is not None
+                set_result = await self.tool_executor.execute(
+                    ToolCall(
+                        call_id=_phase_call_id(
+                            self.task_id,
+                            self.cursor.state.cursor_id,
+                            target.target_id,
+                            "input",
+                        ),
+                        tool_id=_INPUT_TOOL_ID,
+                        arguments={
+                            "task_id": self.task_id,
+                            "tab_id": tab_id,
+                            "target_id": target.target_id,
+                            "input_locator": _locator_to_payload(target.input_locator),
+                            "value": target.input_value,
+                        },
+                        task_id=self.task_id,
+                    )
+                )
+                if not set_result.ok:
+                    self._set_reason_fact(target, "semantic_input_failed")
+                    raise ScenarioBAuthorityError(
+                        set_result.error or "semantic input failed"
+                    )
+
             await self._require_ready(
                 target,
                 tab_id=tab_id,
-                locator=target.input_locator,
+                locator=target.action_locator,
             )
-            assert target.input_value is not None
-            set_result = await self.tool_executor.execute(
-                ToolCall(
-                    call_id=_phase_call_id(
-                        self.task_id,
-                        self.cursor.state.cursor_id,
-                        target.target_id,
-                        "input",
-                    ),
-                    tool_id=_INPUT_TOOL_ID,
-                    arguments={
-                        "task_id": self.task_id,
-                        "tab_id": tab_id,
-                        "target_id": target.target_id,
-                        "input_locator": _locator_to_payload(target.input_locator),
-                        "value": target.input_value,
-                    },
-                    task_id=self.task_id,
-                )
+        except TaskBrowserTabError:
+            self._set_reason_fact(target, "tab_navigation_failed")
+            due = self.clock() + timedelta(seconds=self.inter_batch_delay_seconds)
+            self.cursor.mark_terminal_failure(
+                target.target_id,
+                next_batch_not_before=due,
             )
-            if not set_result.ok:
-                self._set_reason_fact(target, "semantic_input_failed")
-                raise ScenarioBAuthorityError(
-                    set_result.error or "semantic input failed"
-                )
+            raise
+        except (ScenarioBReadinessError, ScenarioBAuthorityError):
+            due = self.clock() + timedelta(seconds=self.inter_batch_delay_seconds)
+            self.cursor.mark_terminal_failure(
+                target.target_id,
+                next_batch_not_before=due,
+            )
+            raise
 
-        await self._require_ready(
-            target,
-            tab_id=tab_id,
-            locator=target.action_locator,
-        )
         grant = self.cursor.prepare_external_effect(target.target_id)
         if not grant.execute:
             return
@@ -528,6 +547,7 @@ class ScenarioBService:
                 target_id=target.target_id,
                 input_order=input_order,
                 opened=current.opened if current is not None else None,
+                attempted=True,
                 reason_code=reason,
                 updated_at=self.clock().isoformat(),
             )
