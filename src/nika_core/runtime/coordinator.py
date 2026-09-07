@@ -60,6 +60,7 @@ _RESUMABLE_OUTCOMES = frozenset(
 
 _CANCEL_OPERATION_TYPE = "runtime.cancel"
 _PAUSE_OPERATION_TYPE = "runtime.pause"
+_PAUSE_OUTCOME_OPERATION_TYPE = "runtime.pause.outcome"
 _RECOVERY_SESSION_EPOCH_SCHEMA = "nika-runtime-recovery-session-epoch-v1"
 _TERMINAL_TASK_STATES = frozenset(
     {TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELLED, TaskState.ARCHIVED}
@@ -1029,7 +1030,7 @@ class TaskRuntimeCoordinator:
         unresolved = tuple(
             item.operation_key
             for item in self._idempotency.list_for_task(task_id)
-            if item.operation_type == _PAUSE_OPERATION_TYPE
+            if item.operation_type in {_PAUSE_OPERATION_TYPE, _PAUSE_OUTCOME_OPERATION_TYPE}
             and item.status in {IdempotencyStatus.PENDING, IdempotencyStatus.UNCERTAIN}
         )
         if unresolved:
@@ -1072,6 +1073,31 @@ class TaskRuntimeCoordinator:
             separators=(",", ":"),
         ).encode("utf-8")
         return hashlib.sha256(material).hexdigest()
+
+    @staticmethod
+    def _pause_outcome_identity(
+        *,
+        record: RuntimeSessionRecord,
+        task_epoch: str,
+        reported_outcome: RuntimeOutcome,
+    ) -> tuple[str, str]:
+        material = json.dumps(
+            {
+                "operation": _PAUSE_OUTCOME_OPERATION_TYPE,
+                "task_id": record.task_id,
+                "runtime_id": record.runtime_id,
+                "thread_id": record.thread_id,
+                "resume_token": record.resume_token,
+                "session_updated_at": record.updated_at,
+                "task_epoch": task_epoch,
+                "runtime_outcome": reported_outcome.value,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        fingerprint = hashlib.sha256(material).hexdigest()
+        return f"runtime.pause.outcome:{fingerprint}", fingerprint
 
     @staticmethod
     def _idempotency_status_with_connection(conn, operation_key: str) -> IdempotencyStatus | None:
@@ -1186,7 +1212,6 @@ class TaskRuntimeCoordinator:
                 )
                 or (
                     not cancellation_won
-                    and reported_outcome is RuntimeOutcome.CANCELLED
                     and current is TaskState.PAUSED
                     and current_record is not None
                     and current_record.runtime_id == runtime_id
@@ -1274,6 +1299,26 @@ class TaskRuntimeCoordinator:
                             conn,
                             pause_operation_key,
                         )
+                elif (
+                    reported_outcome is not RuntimeOutcome.CANCELLED
+                    and pause_operation_key is None
+                    and current_record is not None
+                ):
+                    outcome_key, outcome_fingerprint = self._pause_outcome_identity(
+                        record=current_record,
+                        task_epoch=task_epoch,
+                        reported_outcome=reported_outcome,
+                    )
+                    outcome_record, created = self._idempotency.reserve_with_connection(
+                        conn,
+                        operation_key=outcome_key,
+                        task_id=task_id,
+                        operation_type=_PAUSE_OUTCOME_OPERATION_TYPE,
+                        input_fingerprint=outcome_fingerprint,
+                    )
+                    if created or outcome_record.status is IdempotencyStatus.PENDING:
+                        self._idempotency.mark_uncertain_with_connection(conn, outcome_key)
+                    pause_operation_key = outcome_key
                 self._audit.append_with_connection(
                     conn,
                     event_type=(

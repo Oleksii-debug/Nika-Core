@@ -24,6 +24,8 @@ from nika_core.runtime.idempotency import (
     IdempotencyLedger,
     IdempotencyStatus,
 )
+from nika_core.runtime.recovery import RecoveryDisposition, RuntimeRecoveryService
+from nika_core.runtime.registry import RuntimeRegistry
 
 
 class BlockingDurableRuntime:
@@ -90,6 +92,33 @@ class BlockingDurableRuntime:
         )
 
 
+class AckedExternalPauseRuntime(BlockingDurableRuntime):
+    async def run(self, request: RuntimeRequest) -> RuntimeResult:
+        raise AssertionError(f"fresh run is not part of this scenario: {request.task_id}")
+
+    async def cancel(self, *, task_id: str, thread_id: str) -> bool:
+        del task_id, thread_id
+        self.cancel_calls += 1
+        return True
+
+
+class LateCompletionAfterPauseRuntime(BlockingDurableRuntime):
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+
+    async def run(self, request: RuntimeRequest) -> RuntimeResult:
+        del request
+        self.started.set()
+        await self.release.wait()
+        return RuntimeResult(outcome=RuntimeOutcome.COMPLETED)
+
+    async def cancel(self, *, task_id: str, thread_id: str) -> bool:
+        del task_id, thread_id
+        self.cancel_calls += 1
+        return True
+
+
 class UncertainPauseRuntime(BlockingDurableRuntime):
     async def cancel(self, *, task_id: str, thread_id: str) -> bool:
         del task_id, thread_id
@@ -142,6 +171,84 @@ def test_active_pause_survives_restart_until_explicit_resume(tmp_path) -> None:
         assert completed.outcome is RuntimeOutcome.COMPLETED
         assert recreated_runtime.resume_calls == 1
         assert TaskQueue(store).get(task_id).state is TaskState.COMPLETED
+
+    asyncio.run(scenario())
+
+
+def test_confirmed_pause_return_boundary_is_restart_stable(tmp_path) -> None:
+    async def scenario() -> None:
+        store = SQLiteStore(tmp_path / "Ніка confirmed pause restart.db")
+        store.initialize()
+        queue, task_id = ready_task(store)
+        queue.transition(task_id, TaskState.RUNNING)
+        runtime = AckedExternalPauseRuntime()
+        thread_id = "thread-confirmed-pause"
+        coordinator = TaskRuntimeCoordinator(queue, AuditLog(store))
+        coordinator.sessions.record_active(
+            task_id=task_id,
+            runtime_id=runtime.runtime_id,
+            thread_id=thread_id,
+            resume_token=thread_id,
+        )
+
+        assert await coordinator.pause(runtime, task_id=task_id, thread_id=thread_id)
+        pause_records = tuple(
+            record
+            for record in IdempotencyLedger(store).list_for_task(task_id)
+            if record.operation_type == "runtime.pause"
+        )
+        assert len(pause_records) == 1
+        assert pause_records[0].status is IdempotencyStatus.COMPLETED
+
+        restarted_runtime = AckedExternalPauseRuntime()
+        registry = RuntimeRegistry()
+        registry.register(restarted_runtime)
+        recovery = RuntimeRecoveryService(
+            queue=TaskQueue(store),
+            audit=AuditLog(store),
+            runtimes=registry,
+        )
+        candidate = next(item for item in recovery.inspect() if item.task_id == task_id)
+        assert candidate.disposition is RecoveryDisposition.MANUAL_RESUME
+        assert candidate.unresolved_operation_keys == ()
+
+    asyncio.run(scenario())
+
+
+def test_late_non_cancelled_runtime_outcome_keeps_pause_uncertain(tmp_path) -> None:
+    async def scenario() -> None:
+        store = SQLiteStore(tmp_path / "Ніка late pause outcome.db")
+        store.initialize()
+        queue, task_id = ready_task(store)
+        runtime = LateCompletionAfterPauseRuntime()
+        coordinator = TaskRuntimeCoordinator(queue, AuditLog(store))
+        thread_id = "thread-late-pause-outcome"
+
+        running = asyncio.create_task(
+            coordinator.start(
+                runtime,
+                RuntimeRequest(task_id=task_id, thread_id=thread_id),
+            )
+        )
+        await asyncio.wait_for(runtime.started.wait(), timeout=2)
+        assert await coordinator.pause(runtime, task_id=task_id, thread_id=thread_id)
+        assert queue.get(task_id).state is TaskState.PAUSED
+
+        runtime.release.set()
+        result = await asyncio.wait_for(running, timeout=2)
+        assert result.outcome is RuntimeOutcome.PAUSED
+        assert queue.get(task_id).state is TaskState.PAUSED
+
+        outcome_records = tuple(
+            record
+            for record in IdempotencyLedger(store).list_for_task(task_id)
+            if record.operation_type == "runtime.pause.outcome"
+        )
+        assert len(outcome_records) == 1
+        assert outcome_records[0].status is IdempotencyStatus.UNCERTAIN
+        with pytest.raises(IdempotencyConflictError, match="pause is pending or uncertain"):
+            await coordinator.resume_saved(runtime, task_id=task_id)
+        assert runtime.resume_calls == 0
 
     asyncio.run(scenario())
 
