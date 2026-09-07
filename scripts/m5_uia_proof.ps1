@@ -668,7 +668,11 @@ try {
 
     if ($AutostartPhase -ne 'None') {
         $autostartControl = Wait-DescendantName 'Запускати Nika разом із Windows' ([System.Windows.Automation.ControlType]::CheckBox)
-        $autostartSaveControl = Wait-DescendantName 'Зберегти автозапуск' ([System.Windows.Automation.ControlType]::Button)
+        $autostartSaveControl = if ($AutostartPhase -eq 'Observe') {
+            $null
+        } else {
+            Wait-DescendantName 'Зберегти автозапуск' ([System.Windows.Automation.ControlType]::Button)
+        }
         $initialToggle = if ($AutostartPhase -eq 'Enable') { [System.Windows.Automation.ToggleState]::Off } else { [System.Windows.Automation.ToggleState]::On }
         # Observe is read-only persistence evidence after a fresh process restart.
         # It never receives mutation authority: use the freshly and uniquely resolved
