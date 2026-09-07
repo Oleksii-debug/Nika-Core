@@ -399,6 +399,35 @@ class V01PackagedTeamStateProvider:
             if len(assignments) != 2:
                 return invalid
 
+            # Reproducible checker bytes are not enough: the checker must compare the
+            # two canonical worker assignments that actually drove this durable team.
+            expected_worker_ids = {
+                member_id for member_id, role in roles.items() if role == "worker"
+            }
+            assignment_by_member = {item.member_id: item for item in assignments}
+            if (
+                len(expected_worker_ids) != 2
+                or set(assignment_by_member) != expected_worker_ids
+            ):
+                return invalid
+            for worker_id in expected_worker_ids:
+                worker_task = task_payload_by_member.get(worker_id)
+                if (
+                    not isinstance(worker_task, Mapping)
+                    or worker_task.get("stage") != "source_worker"
+                ):
+                    return invalid
+                raw_worker_assignment = worker_task.get("source_assignment")
+                if not isinstance(raw_worker_assignment, Mapping):
+                    return invalid
+                worker_assignment = SourceInspectionAssignment.from_payload(
+                    raw_worker_assignment
+                )
+                if worker_assignment.to_payload() != assignment_by_member[
+                    worker_id
+                ].to_payload():
+                    return invalid
+
             handoff_rows = conn.execute(
                 "SELECT handoff_id, team_id, sender_id, recipient_id, kind, correlation_id, "
                 "payload_json FROM multi_agent_handoffs "
@@ -437,7 +466,7 @@ class V01PackagedTeamStateProvider:
             if checker_row["outcome"] != "completed" or checker_row["error"] is not None:
                 return invalid
             persisted = json.loads(checker_row["payload_json"])
-            if not isinstance(persisted, dict) or persisted.get("checker_summary") != expected:
+            if persisted != {"checker_summary": expected}:
                 return invalid
 
             sources = expected.get("sources")
@@ -469,9 +498,13 @@ class V01PackagedTeamStateProvider:
                 if state not in {"valid", "missing", "worker_error", "evidence_invalid"}:
                     return invalid
                 source_states.append(str(state))
+            evidence_valid = (
+                status in {"agree", "disagree", "partial"}
+                and all(state == "valid" for state in source_states)
+            )
             return {
                 "status": str(status),
-                "validated": True,
+                "validated": evidence_valid,
                 "source_states": source_states,
                 "agreement_count": len(agreements),
                 "difference_count": len(differences),
