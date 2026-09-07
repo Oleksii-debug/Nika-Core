@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 import shutil
 import subprocess
@@ -9,35 +7,20 @@ from pathlib import Path
 
 import pytest
 
+from nika_core.packaging.release import build_release_manifest, write_release_manifest
+
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "install_nika_core.ps1"
 SOURCE_SHA = "0123456789abcdef0123456789abcdef01234567"
 
 
 def _manifest(bundle: Path) -> None:
-    files = []
-    for path in sorted(bundle.rglob("*")):
-        if path.is_file() and path.name != "release-manifest.json":
-            payload = path.read_bytes()
-            files.append(
-                {
-                    "path": path.relative_to(bundle).as_posix(),
-                    "size": len(payload),
-                    "sha256": hashlib.sha256(payload).hexdigest(),
-                }
-            )
-    (bundle / "release-manifest.json").write_text(
-        json.dumps(
-            {
-                "manifest_version": 2,
-                "product": "NikaCore",
-                "version": "0.0.2",
-                "source_sha": SOURCE_SHA,
-                "files": files,
-            },
-            sort_keys=True,
-        ),
-        encoding="utf-8",
+    manifest = build_release_manifest(
+        bundle,
+        product="NikaCore",
+        version="0.0.2",
+        source_sha=SOURCE_SHA,
     )
+    write_release_manifest(bundle, manifest)
 
 
 def _bundle(root: Path, marker: str) -> Path:
