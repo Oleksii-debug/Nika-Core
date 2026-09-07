@@ -87,19 +87,25 @@ def test_csv_preserves_review_provenance_and_blocks_formula_injection() -> None:
 
 
 def test_html_is_semantic_and_escapes_untrusted_text() -> None:
-    rendered = ResearchReportExporter().render(_report(), ResearchReportFormat.HTML)
+    rendered = ResearchReportExporter().render(
+        _report(),
+        ResearchReportFormat.HTML,
+        language_tag="uk",
+    )
     text = rendered.content.decode()
 
-    assert '<html lang="und">' in text
+    assert '<html lang="uk">' in text
+    assert '<h1 lang="en">Research results</h1>' in text
     assert "<main>" in text
     assert "<h1>Research results</h1>" in text
     assert '<article aria-labelledby="result-1">' in text
     assert (
-        '<h2 id="result-1">Result 1: =1+1 Українська &lt;можливість&gt;</h2>'
+        '<h2 id="result-1"><span lang="en">Result 1: </span>'
+        '=1+1 Українська &lt;можливість&gt;</h2>'
         in text
     )
     assert "Грант &amp; навчання &lt;script&gt;alert(1)&lt;/script&gt;" in text
-    assert "<dt>Review updated</dt><dd>2026-08-20T07:10:00+00:00</dd>" in text
+    assert '<dt lang="en">Review updated</dt><dd>2026-08-20T07:10:00+00:00</dd>' in text
     assert "https://example.org/?a=1&amp;b=2" in text
     assert "<script>alert(1)</script>" not in text
 
@@ -152,8 +158,9 @@ def test_all_formats_are_byte_deterministic_for_same_report() -> None:
     report = _report()
 
     for report_format in ResearchReportFormat:
-        first = exporter.render(report, report_format)
-        second = exporter.render(report, report_format)
+        kwargs = {"language_tag": "uk"} if report_format is ResearchReportFormat.HTML else {}
+        first = exporter.render(report, report_format, **kwargs)
+        second = exporter.render(report, report_format, **kwargs)
         assert first.content == second.content
         assert first.sha256 == second.sha256
 
@@ -177,3 +184,71 @@ def test_office_export_rejects_non_iso_created_at() -> None:
 def test_exporter_rejects_untyped_format() -> None:
     with pytest.raises(TypeError, match="ResearchReportFormat"):
         ResearchReportExporter().render(_report(), "txt")  # type: ignore[arg-type]
+
+
+
+def test_html_requires_explicit_valid_language_tag() -> None:
+    exporter = ResearchReportExporter()
+    with pytest.raises(ValueError, match="explicit BCP47"):
+        exporter.render(_report(), ResearchReportFormat.HTML)
+    for invalid in ("", "uk_UA", "not a tag", "1"):
+        with pytest.raises(ValueError, match="BCP47"):
+            exporter.render(_report(), ResearchReportFormat.HTML, language_tag=invalid)
+
+
+def test_xlsx_rejects_values_that_excel_would_silently_truncate() -> None:
+    report = _report()
+    card = report.cards[0]
+    long_card = ResearchCard(
+        ordinal=card.ordinal,
+        document_id=card.document_id,
+        title="x" * 32_768,
+        snippet=card.snippet,
+        rank=card.rank,
+        why_matched=card.why_matched,
+        evidence=card.evidence,
+        review=card.review,
+    )
+    oversized = AccessibleResearchReport(
+        result_set_id=report.result_set_id,
+        workspace_id=report.workspace_id,
+        query=report.query,
+        created_at=report.created_at,
+        cards=(long_card,),
+        text=report.text,
+    )
+
+    with pytest.raises(ValueError, match="title exceeds 32767"):
+        ResearchReportExporter().render(oversized, ResearchReportFormat.XLSX)
+
+
+def test_xlsx_limit_is_checked_after_formula_neutralization() -> None:
+    report = _report()
+    formula_query = "=" + ("x" * 32_766)
+    boundary = AccessibleResearchReport(
+        result_set_id=report.result_set_id,
+        workspace_id=report.workspace_id,
+        query=formula_query,
+        created_at=report.created_at,
+        cards=report.cards,
+        text=report.text,
+    )
+
+    with pytest.raises(ValueError, match="query exceeds 32767"):
+        ResearchReportExporter().render(boundary, ResearchReportFormat.XLSX)
+
+
+def test_office_export_rejects_timezone_naive_created_at() -> None:
+    report = _report()
+    naive = AccessibleResearchReport(
+        result_set_id=report.result_set_id,
+        workspace_id=report.workspace_id,
+        query=report.query,
+        created_at="2026-08-20T07:00:00",
+        cards=report.cards,
+        text=report.text,
+    )
+
+    for report_format in (ResearchReportFormat.DOCX, ResearchReportFormat.XLSX):
+        with pytest.raises(ValueError, match="explicit timezone"):
+            ResearchReportExporter().render(naive, report_format)
