@@ -1,6 +1,18 @@
+## AUTHORITATIVE CURRENT ROUTING — EPOCH-CONTINUOUS-0005 — 2026-09-07T22:14+02:00
+CURRENT_MAIN: `c71754f54e3643a56528f3f9158d8d2ddd45c2c6` (integrated #674 explicit intelligence mode boundary after #675 resource capacity telemetry).
+STRATEGY: ONE_CONTINUOUS_FULL_PRODUCT. V0.1 is the nearest PRE_HUMAN_READY evidence checkpoint, not a product/version wall.
+DO_NOT_REPEAT: integrated #641 cursor, #656 checker handoffs, #659 autostart/settings, #651 durable model selection, #662 archive/secret gate, #675 resource telemetry, #674 intelligence modes.
+CURRENT_OWNERS: Worker1=#654 Pause/Resume + #638 recurrence; Worker2=post-#674 model-runtime continuity; Worker3=#677 Scenario-B + Scenario-A monitoring; Worker4=#672 shared UIA then #663 packaged selector/recovery; Worker5=#695 SBOM + #676 installer + #665 governance verifier + this control plane.
+CURRENT_BLOCKERS: #654 lifecycle/generation repair; #638 canonical task-authority binding; #672 shared RuntimeId test/current-main convergence; #677 authority repairs; exact package/install/recovery/SBOM/governance; live branch protection/required checks disabled; human Windows/NVDA separate.
+CURRENT_RELEASE_FRONT: #695, #676 and #665 are exact-current Worker5 candidates under fresh hosted qualification and independent non-self audit. Software governance proof does not substitute for actual administrative protection.
+SCOPE_TRUTH: Telegram is removed from active roadmap scope by AGENTS.md and MASTER_SPEC. Future Telegram support requires a new explicit user-routed workspace/ProductProject and is not an active dependency node.
+HUMAN_TESTED=false
+NVDA_VERIFIED=false
+PRODUCTION_RELEASE_READY=false
+
 # Nika Core — current autonomous routing
 
-## LIVE REFRESH — EPOCH-CONTINUOUS-0004 — 2026-09-07T20:44+02:00
+## HISTORICAL SUPERSEDED SNAPSHOT — REFRESH — EPOCH-CONTINUOUS-0004 — 2026-09-07T20:44+02:00
 CURRENT_MAIN: `c42cb926b5d53ed1950ea598b0dc47c9a6b97e9a` (integrated #675 read-only resource capacity telemetry after #662 archive/secret-safety).
 STRATEGY: ONE_CONTINUOUS_FULL_PRODUCT. V0.1 remains the nearest acceptance checkpoint.
 SOURCE_TRUTH: live GitHub exact head/base/Actions/reviews > this snapshot > Issue/Drive mirrors.
@@ -39,7 +51,7 @@ NVDA_VERIFIED=false.
 PRODUCTION_RELEASE_READY=false.
 
 
-## LIVE REFRESH — EPOCH-CONTINUOUS-0003 — 2026-09-07T20:44+02:00
+## HISTORICAL SUPERSEDED SNAPSHOT — REFRESH — EPOCH-CONTINUOUS-0003 — 2026-09-07T20:44+02:00
 CURRENT_MAIN: `c0ed340c8ee6ddfab011f861f5e6f49017ff5286` (guarded merge #662 release archive/manifest/secret-safety).
 STRATEGY: ONE_CONTINUOUS_FULL_PRODUCT; V0.1 is the nearest acceptance checkpoint, not a separate product.
 LIVE_OVERRIDES_OLDER_SNAPSHOT: true.
@@ -74,7 +86,7 @@ PRODUCTION_RELEASE_READY=false.
 5. After every merge reread main and invalidate stale exact-base evidence.
 
 
-## LIVE REFRESH — EPOCH-CONTINUOUS-0002 — 2026-09-07
+## HISTORICAL SUPERSEDED SNAPSHOT — REFRESH — EPOCH-CONTINUOUS-0002 — 2026-09-07
 CURRENT_MAIN: `c0ed340c8ee6ddfab011f861f5e6f49017ff5286` (merged independently audited #662 release archive/manifest/secret-safety).
 LIVE_OVERRIDES_OLDER_SNAPSHOT: true.
 BRANCH_PROTECTION: disabled; required-status enforcement off; release blocker.
@@ -149,7 +161,7 @@ Safe independent Full Product work may proceed now only when:
 After V0.1 passes, immediately continue the same codebase without waiting for Oleksii and without launching a separate V0.2 project.
 
 Dependency-priority graph:
-`runtime/durability -> AI/model layer -> browser/tools -> agent autonomy -> memory -> voice/perception -> resource governor -> background life -> learning/self-improvement integration -> phone/Telegram/multimodal surfaces -> full Windows/NVDA product journey -> final packaging/release`.
+`runtime/durability -> AI/model layer -> browser/tools -> agent autonomy -> memory -> voice/perception -> resource governor -> background life -> learning/self-improvement integration -> phone/multimodal surfaces -> full Windows/NVDA product journey -> final packaging/release`.
 
 This graph guides priority, not artificial sequential phases; independent nodes may proceed in parallel.
 
