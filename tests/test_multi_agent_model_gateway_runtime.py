@@ -22,10 +22,10 @@ from nika_core.model_gateway.contracts import (
 )
 from nika_core.model_gateway.gateway import ModelGateway
 from nika_core.model_gateway.providers import OllamaProvider
-from nika_core.multi_agent.contracts import ChildRequest, TeamQuota
+from nika_core.multi_agent.contracts import AgentHandoff, ChildRequest, HandoffKind, TeamQuota
 from nika_core.multi_agent.model_gateway_runtime import ModelGatewayAgentRuntime
 from nika_core.multi_agent.store import MultiAgentStore
-from nika_core.multi_agent.supervisor import MultiAgentSupervisor
+from nika_core.multi_agent.supervisor import ChildExecution, MultiAgentSupervisor
 from nika_core.runtime.contracts import (
     RuntimeCapability,
     RuntimeErrorCode,
@@ -369,3 +369,161 @@ def test_adapter_does_not_claim_durable_resume(tmp_path: Path) -> None:
     assert result.outcome is RuntimeOutcome.FAILED
     assert result.error_code is RuntimeErrorCode.INVALID_RESUME
     assert result.output["recoverable"] is True
+
+
+def test_checker_model_receives_both_worker_result_handoffs(tmp_path: Path) -> None:
+    sqlite, definitions = _definitions(tmp_path)
+    user_messages: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        user_message = str(payload["messages"][-1]["content"])
+        user_messages.append(user_message)
+        if '"target":"one"' in user_message:
+            answer = "worker-one-result"
+        elif '"target":"two"' in user_message:
+            answer = "worker-two-result"
+        else:
+            assert "worker-one-result" in user_message
+            assert "worker-two-result" in user_message
+            answer = "checker-saw-both"
+        return httpx.Response(
+            200,
+            json={
+                "model": "qwen3:8b",
+                "message": {"role": "assistant", "content": answer},
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    def client_factory(**kwargs: object) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=transport, **kwargs)
+
+    gateway = ModelGateway()
+    gateway.register(
+        OllamaProvider(default_model="qwen3:8b", client_factory=client_factory),
+        default=True,
+    )
+    runtime = ModelGatewayAgentRuntime(
+        gateway=gateway,
+        definitions=definitions,
+        provider_id="ollama",
+        provider_kind=ProviderKind.LOCAL,
+        model="qwen3:8b",
+        timeout_seconds=2,
+    )
+    team_id = "team-checker-context"
+    team_store = MultiAgentStore(sqlite)
+    team_store.create_team(
+        team_id=team_id,
+        root_member_id="root",
+        root_agent_id="supervisor",
+        root_agent_version=1,
+        root_thread_id="thread-checker-root",
+        root_grants=(),
+        quota=TeamQuota(
+            max_depth=2,
+            max_children_per_parent=2,
+            max_total_agents=3,
+            max_parallel=2,
+        ),
+        root_task_handoff=AgentHandoff(
+            team_id=team_id,
+            sender_id="root",
+            recipient_id="root",
+            kind=HandoffKind.TASK,
+            payload={"stage": "checker", "work": "compare both worker results"},
+            handoff_id="task:checker-root",
+            correlation_id="team:checker-context",
+        ),
+    )
+    supervisor = MultiAgentSupervisor(
+        runtime=runtime,
+        store=team_store,
+        definitions=definitions,
+    )
+
+    async def scenario() -> ChildExecution:
+        workers = await supervisor.fan_out(
+            team_id=team_id,
+            parent_id="root",
+            requests=(
+                ChildRequest(
+                    member_id="worker-1",
+                    agent_id="worker",
+                    agent_version=1,
+                    thread_id="thread-checker-worker-1",
+                    payload={"target": "one"},
+                ),
+                ChildRequest(
+                    member_id="worker-2",
+                    agent_id="worker",
+                    agent_version=1,
+                    thread_id="thread-checker-worker-2",
+                    payload={"target": "two"},
+                ),
+            ),
+        )
+        assert len(workers) == 2
+        return await supervisor.run_root_member(team_id=team_id, member_id="root")
+
+    root = asyncio.run(scenario())
+
+    assert len(user_messages) == 3
+    assert root.result is not None
+    assert root.result.outcome is RuntimeOutcome.COMPLETED
+    assert root.result.output["text"] == "checker-saw-both"
+    assert "worker-one-result" in user_messages[-1]
+    assert "worker-two-result" in user_messages[-1]
+
+
+def test_malformed_inbound_handoffs_fail_before_provider_call(tmp_path: Path) -> None:
+    _, definitions = _definitions(tmp_path)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={
+                "model": "qwen3:8b",
+                "message": {"role": "assistant", "content": "unexpected"},
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    def client_factory(**kwargs: object) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=transport, **kwargs)
+
+    gateway = ModelGateway()
+    gateway.register(
+        OllamaProvider(default_model="qwen3:8b", client_factory=client_factory),
+        default=True,
+    )
+    runtime = ModelGatewayAgentRuntime(
+        gateway=gateway,
+        definitions=definitions,
+        provider_id="ollama",
+        provider_kind=ProviderKind.LOCAL,
+        model="qwen3:8b",
+    )
+
+    request = RuntimeRequest(
+        task_id="task-malformed-inbound",
+        thread_id="thread-malformed-inbound",
+        payload={
+            "agent_id": "worker",
+            "agent_version": 1,
+            "handoff": {"work": "test"},
+            "inbound_handoffs": {"not": "a list"},
+        },
+    )
+    result = asyncio.run(runtime.run(request))
+
+    assert calls == 0
+    assert result.outcome is RuntimeOutcome.FAILED
+    assert result.output["recoverable"] is False
+    assert result.output["reason"] == "TypeError"
