@@ -208,6 +208,20 @@ class TaskBrowserTabs:
         _validate_identity("task_id", task_id)
         return tuple(tab for tab in self._tabs.values() if tab.task_id == task_id)
 
+    def runtime_page_id(self, *, task_id: str, tab_id: str) -> str:
+        """Return the current process-local page binding for an owned logical tab.
+
+        The value is intentionally unavailable from durable snapshots and becomes stale
+        after browser/session reconstruction. It exists only so higher-level composition
+        can construct the canonical semantic adapter for a task-owned page.
+        """
+        record = self._require_owned(task_id, tab_id)
+        self._bound_page(record)
+        binding = self._bindings.get((task_id, tab_id))
+        if binding is None or binding.session_id != self.session.session_id:
+            raise StaleTaskTabError("task-owned browser tab has no current runtime binding")
+        return binding.page_id
+
     def snapshot(self) -> dict[str, object]:
         """Return JSON-safe durable state without Playwright page/session handles."""
 
