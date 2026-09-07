@@ -218,7 +218,10 @@ class OllamaProvider:
 
         started = time.perf_counter()
         try:
-            async with self._client_factory(timeout=request.timeout_seconds) as client:
+            async with self._client_factory(
+                timeout=request.timeout_seconds,
+                trust_env=False,
+            ) as client:
                 response = await client.post(f"{self._base_url}/api/chat", json=payload)
                 response.raise_for_status()
                 body = response.json()
