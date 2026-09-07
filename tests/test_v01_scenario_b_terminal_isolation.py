@@ -106,6 +106,7 @@ def _build(tmp_path: Path):
         executor=executor,
         tool_executor=ToolExecutor(),
         idempotency=ledger,
+        memory=memory,
         targets=targets,
         semantic_tools=_MissingSemanticTools(),  # type: ignore[arg-type]
         inter_batch_delay_seconds=0,
