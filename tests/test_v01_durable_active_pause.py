@@ -175,6 +175,55 @@ def test_active_pause_survives_restart_until_explicit_resume(tmp_path) -> None:
     asyncio.run(scenario())
 
 
+def test_explicit_cancel_of_confirmed_paused_task_is_terminal_without_second_runtime_stop(
+    tmp_path,
+) -> None:
+    async def scenario() -> None:
+        store = SQLiteStore(tmp_path / "Ніка pause then cancel.db")
+        store.initialize()
+        queue, task_id = ready_task(store)
+        runtime = BlockingDurableRuntime()
+        coordinator = TaskRuntimeCoordinator(queue, AuditLog(store))
+        thread_id = "thread-pause-then-cancel"
+
+        running = asyncio.create_task(
+            coordinator.start(
+                runtime,
+                RuntimeRequest(task_id=task_id, thread_id=thread_id),
+            )
+        )
+        await asyncio.wait_for(runtime.started.wait(), timeout=2)
+        assert await coordinator.pause(runtime, task_id=task_id, thread_id=thread_id)
+        paused_result = await asyncio.wait_for(running, timeout=2)
+        assert paused_result.outcome is RuntimeOutcome.PAUSED
+        assert queue.get(task_id).state is TaskState.PAUSED
+        assert runtime.cancel_calls == 1
+
+        assert await coordinator.cancel(runtime, task_id=task_id, thread_id=thread_id)
+        assert runtime.cancel_calls == 1
+        assert runtime.resume_calls == 0
+        assert queue.get(task_id).state is TaskState.CANCELLED
+        assert coordinator.sessions.get(task_id) is None
+
+        cancel_records = tuple(
+            record
+            for record in IdempotencyLedger(store).list_for_task(task_id)
+            if record.operation_type == "runtime.cancel"
+        )
+        assert len(cancel_records) == 1
+        assert cancel_records[0].status is IdempotencyStatus.COMPLETED
+        assert cancel_records[0].result == {
+            "accepted": True,
+            "runtime_call_skipped": True,
+            "task_state": TaskState.CANCELLED.value,
+        }
+
+        restarted_queue = TaskQueue(SQLiteStore(store.path))
+        assert restarted_queue.get(task_id).state is TaskState.CANCELLED
+
+    asyncio.run(scenario())
+
+
 def test_confirmed_pause_return_boundary_is_restart_stable(tmp_path) -> None:
     async def scenario() -> None:
         store = SQLiteStore(tmp_path / "Ніка confirmed pause restart.db")
