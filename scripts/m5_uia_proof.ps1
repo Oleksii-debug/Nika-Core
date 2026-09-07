@@ -65,6 +65,11 @@ $boundWindowRuntimeId = $null
 $script:nextControlGeneration = 1
 $sourceProofRoot = $null
 $previousProofEnvironment = @{}
+
+class NikaUiaRuntimeIdUnavailableException : System.Exception {
+    NikaUiaRuntimeIdUnavailableException([string]$message) : base($message) {}
+}
+
 foreach ($name in @('NIKA_DB_PATH', 'NIKA_V01_SOURCE_ROOT', 'NIKA_V01_SOURCE_A', 'NIKA_V01_SOURCE_B')) {
     $previousProofEnvironment[$name] = [System.Environment]::GetEnvironmentVariable($name, 'Process')
 }
@@ -100,7 +105,7 @@ function Get-ElementRuntimeId(
     } catch [System.Windows.Automation.ElementNotAvailableException] {
         throw
     }
-    throw (
+    throw [NikaUiaRuntimeIdUnavailableException]::new(
         "UI Automation element did not expose a RuntimeId after bounded retry. " +
         "Name='$safeName', ControlType='$safeControlType', Attempts=$Attempts."
     )
@@ -516,7 +521,15 @@ try {
             try {
                 $element = Find-BoundDescendantName $currentWindow $Expected $ExpectedControlType
                 if ($null -ne $element) {
-                    return New-BoundControlIdentity $element $Expected $ExpectedControlType
+                    try {
+                        return New-BoundControlIdentity $element $Expected $ExpectedControlType
+                    } catch [NikaUiaRuntimeIdUnavailableException] {
+                        # Authority has not been issued yet. Discard this unbound provider
+                        # observation and retry the whole semantic lookup from fresh roots.
+                        # Once New-BoundControlIdentity succeeds, Resolve-BoundControlIdentity
+                        # never catches this exception and RuntimeId loss remains fail-closed.
+                        continue
+                    }
                 }
             } catch [System.Windows.Automation.ElementNotAvailableException] {
                 # An incomplete enumeration is never accepted. Retry from fresh roots.
