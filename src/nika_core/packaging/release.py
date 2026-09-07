@@ -24,6 +24,46 @@ _SECRET_CONTENT_SUFFIXES = frozenset(
 )
 _SECRET_SCAN_CHUNK_BYTES = 64 * 1024
 _SECRET_SCAN_OVERLAP_BYTES = 8 * 1024
+_PREHUMAN_EVIDENCE_SCHEMA_VERSION = 3
+_PREHUMAN_REQUIRED_TRUE_FIELDS = (
+    "release_manifest_source_sha_bound",
+    "exact_checkout_sha_verified",
+    "core_ci_equivalent",
+    "full_test_suite",
+    "runtime_restart_recovery",
+    "memory_scheduler_resource_regressions",
+    "model_mock_nollm_regressions",
+    "deterministic_brain_regressions",
+    "foundry_local_adapter_regressions",
+    "plugin_workspace_regressions",
+    "security_sandbox_regressions",
+    "integrated_ubuntu",
+    "integrated_windows",
+    "browser_semantic_proof",
+    "windows_uia_semantic_proof",
+    "windows_package_built",
+    "manifest_verified",
+    "third_party_notices_verified",
+    "packaged_uia_keyboard_focus",
+)
+_PREHUMAN_REQUIRED_FALSE_FIELDS = (
+    "physical_windows_foundry_inference_proven",
+    "human_tested",
+    "nvda_verified",
+    "production_release_ready",
+)
+_PREHUMAN_EVIDENCE_KEYS = frozenset(
+    {
+        "schema_version",
+        "product_version",
+        "commit_sha",
+        "distributable_zip_path",
+        "distributable_zip_sha256",
+        "distributable_zip_size",
+        *_PREHUMAN_REQUIRED_TRUE_FIELDS,
+        *_PREHUMAN_REQUIRED_FALSE_FIELDS,
+    }
+)
 _SECRET_ASSIGNMENT_RE = re.compile(
     rb"""
     [\r\n{,\[]
@@ -546,6 +586,31 @@ def verify_distributable_evidence(
     payload = _read_evidence_object(evidence_path)
     if payload is None:
         return ("distributable:invalid-evidence",)
+
+    if frozenset(payload) != _PREHUMAN_EVIDENCE_KEYS:
+        findings.append("distributable:evidence-keys")
+    schema_version = payload.get("schema_version")
+    if (
+        type(schema_version) is not int
+        or schema_version != _PREHUMAN_EVIDENCE_SCHEMA_VERSION
+    ):
+        findings.append("distributable:schema-version")
+
+    product_version = payload.get("product_version")
+    if (
+        not isinstance(product_version, str)
+        or not product_version
+        or product_version != product_version.strip()
+        or any(ord(character) < 32 for character in product_version)
+    ):
+        findings.append("distributable:product-version")
+
+    for field in _PREHUMAN_REQUIRED_TRUE_FIELDS:
+        if payload.get(field) is not True:
+            findings.append(f"distributable:required-true:{field}")
+    for field in _PREHUMAN_REQUIRED_FALSE_FIELDS:
+        if payload.get(field) is not False:
+            findings.append(f"distributable:required-false:{field}")
 
     if payload.get("commit_sha") != normalized_source_sha:
         findings.append("distributable:source-sha")
