@@ -1,3 +1,6 @@
+## LIVE CURRENT-MAIN OVERRIDE — 2026-09-07T20:44+02:00
+CURRENT_MAIN=`c42cb926b5d53ed1950ea598b0dc47c9a6b97e9a`. #675 resource capacity telemetry is integrated. #638 is BLOCKED by canonical task-authority binding; #654 by PAUSED-generation/Cancel race; #672 remains shared Windows UIA blocker. #676@b4f41548 and #665@9a1fe70b are exact-current Worker5 candidates under fresh qualification/non-self audit. Older c0ed exact evidence is lineage-only. HUMAN_TESTED=false; NVDA_VERIFIED=false; PRODUCTION_RELEASE_READY=false.
+
 ## LIVE STATUS OVERRIDE — 2026-09-07T20:44+02:00
 CURRENT_MAIN=`c0ed340c8ee6ddfab011f861f5e6f49017ff5286`.
 DONE=#641,#656,#659,#651,#662 integrated.
