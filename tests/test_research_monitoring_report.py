@@ -280,6 +280,57 @@ def test_error_and_terminal_codes_reject_free_form_or_assignment_material(unsafe
         MonitoringReport(monitor_id="monitor-1", checks=(), terminal_reason=unsafe)
 
 
+@pytest.mark.parametrize(
+    "unsafe_kind",
+    (
+        "token=REPORT_CANARY",
+        "Authorization:BearerCANARY",
+        "cookie:SESSIONCANARY",
+        "C:/Users/Alice/private/cache",
+        "two words",
+    ),
+)
+def test_change_kind_rejects_free_form_or_private_path_material(unsafe_kind: str) -> None:
+    with pytest.raises(ValueError, match="bounded safe code"):
+        MonitoringChange(
+            kind=unsafe_kind,
+            document_id="doc-1",
+            title="safe title",
+        )
+
+
+def test_report_requires_exact_latest_snapshot_even_when_global_value_is_none() -> None:
+    scheduled = MonitoringCheck(
+        check_id="check-scheduled",
+        checked_at="2026-08-27T15:00:00+00:00",
+        sources=(_source(),),
+        changes=(),
+        condition_matched=False,
+        next_scheduled_check="2026-08-27T16:00:00+00:00",
+    )
+    with pytest.raises(ValueError, match="next scheduled check contradicts"):
+        MonitoringReport(
+            monitor_id="monitor-1",
+            checks=(scheduled,),
+            next_scheduled_check=None,
+        )
+
+    terminal = MonitoringCheck(
+        check_id="check-terminal",
+        checked_at="2026-08-27T16:00:00+00:00",
+        sources=(_source(),),
+        changes=(),
+        condition_matched=False,
+        terminal_reason="deadline_reached",
+    )
+    with pytest.raises(ValueError, match="terminal reason contradicts"):
+        MonitoringReport(
+            monitor_id="monitor-1",
+            checks=(terminal,),
+            terminal_reason=None,
+        )
+
+
 def test_authorization_and_cookie_canaries_are_fully_redacted_from_change_titles() -> None:
     change = MonitoringChange(
         kind="changed",
@@ -351,6 +402,8 @@ def test_terminal_check_snapshot_cannot_advertise_future_schedule() -> None:
         "Authorization:BearerCANARY",
         "cookie:SESSIONCANARY",
         "https://example.test/path",
+        "C:/Users/Alice/private/cache",
+        "file:/C:/Users/Alice/private/cache",
         "two words",
     ),
 )
