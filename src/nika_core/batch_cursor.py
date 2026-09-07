@@ -365,6 +365,7 @@ class BatchCursor:
             record.result,
             fallback_result=clean_result,
         )
+        target.attempts = max(target.attempts, 1)
         self._confirm_from_durable(target, durable_result)
         self._advance(durable_due)
         self._persist()
@@ -389,6 +390,7 @@ class BatchCursor:
         else:
             if record.status is IdempotencyStatus.PENDING:
                 self._ledger.mark_uncertain(target.operation_key)
+            target.attempts = max(target.attempts, 1)
             target.attempt_state = AttemptState.UNCERTAIN
             target.confirmed_result = None
             target.uncertain_result = _json_copy(evidence)
