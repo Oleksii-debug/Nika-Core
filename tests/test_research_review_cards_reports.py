@@ -177,8 +177,62 @@ def test_cards_and_plain_text_report_preserve_review_and_provenance(tmp_path: Pa
     assert "Source ID: source-1" in report.text
     assert "Source kind: http" in report.text
     assert "Freshness: current" in report.text
-    assert "Location: https://example.org/opportunity" in report.text
+    assert "Location: http-source" in report.text
     assert "Observed: 2026-08-20T00:30:00+00:00" in report.text
+
+
+def test_plain_text_report_redacts_http_and_local_raw_locators(tmp_path: Path) -> None:
+    base = _result_set()
+    item = base.items[0]
+    hostile_item = ResearchResultItem(
+        ordinal=item.ordinal,
+        document_id=item.document_id,
+        title=item.title,
+        snippet=item.snippet,
+        rank=item.rank,
+        why_matched=item.why_matched,
+        evidence=(
+            ResearchEvidence(
+                source_id="http-source-id",
+                source_kind=SourceKind.HTTP,
+                locator=(
+                    "https://resolver-user:resolver-pass@example.org/private/HTTP_PATH_CANARY"
+                    "?access_token=HTTP_QUERY_CANARY#HTTP_FRAGMENT_CANARY"
+                ),
+                observed_at="2026-08-20T00:30:00+00:00",
+                freshness=FreshnessState.CURRENT,
+            ),
+            ResearchEvidence(
+                source_id="local-source-id",
+                source_kind=SourceKind.LOCAL_FILE,
+                locator=r"C:\Users\Private User\Secrets\LOCAL_PATH_CANARY.txt",
+                observed_at="2026-08-20T00:31:00+00:00",
+                freshness=FreshnessState.CURRENT,
+            ),
+        ),
+    )
+    hostile = ResearchResultSet(
+        result_set_id=base.result_set_id,
+        workspace_id=base.workspace_id,
+        query=base.query,
+        items=(hostile_item,),
+        created_at=base.created_at,
+    )
+
+    report = ResearchCardService(ResearchReviewRepository(_store(tmp_path))).accessible_report(hostile)
+
+    assert "Location: http-source" in report.text
+    assert "Location: local-file" in report.text
+    for canary in (
+        "resolver-user",
+        "resolver-pass",
+        "HTTP_PATH_CANARY",
+        "HTTP_QUERY_CANARY",
+        "HTTP_FRAGMENT_CANARY",
+        "Private User",
+        "LOCAL_PATH_CANARY",
+    ):
+        assert canary not in report.text
 
 
 def test_report_order_is_result_order_not_review_update_order(tmp_path: Path) -> None:
