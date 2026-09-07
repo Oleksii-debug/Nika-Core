@@ -14,6 +14,7 @@ from nika_core.kernel.audit import AuditLog
 from nika_core.runtime.idempotency import (
     IdempotencyConflictError,
     IdempotencyLedger,
+    IdempotencyRecord,
     IdempotencyStatus,
 )
 
@@ -217,6 +218,30 @@ class ToolEffectGuard:
         raise ToolEffectConflictError(
             f"tool effect is unresolved: {record.status.value}"
         )
+
+    @classmethod
+    def inspect_ledger(
+        cls,
+        ledger: IdempotencyLedger,
+        *,
+        task_id: str,
+        call_id: str,
+    ) -> IdempotencyRecord | None:
+        """Read exact durable tool-effect truth without granting execution authority.
+
+        This probe deliberately bypasses approval only for observation.  It cannot reserve,
+        replay, complete, or mutate an effect, and it validates the canonical task/call
+        operation identity before returning evidence to a recovery composition.
+        """
+        if not task_id.strip() or not call_id.strip():
+            raise ValueError("tool effect observation requires task_id and call_id")
+        operation_key = cls._operation_key(task_id=task_id, call_id=call_id)
+        record = ledger.get(operation_key)
+        if record is None:
+            return None
+        if record.task_id != task_id or record.operation_type != cls._OPERATION_TYPE:
+            raise ToolEffectConflictError("tool effect observation identity mismatch")
+        return record
 
     def complete(self, reservation: ToolEffectReservation, output: object) -> None:
         try:
