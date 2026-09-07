@@ -537,8 +537,18 @@ class BatchCursor:
         )
 
     def _is_next_target(self, target: TargetCursor) -> bool:
-        next_target = self._first_nonconfirmed()
-        return next_target is not None and next_target.target_id == target.target_id
+        """Return whether the target belongs to the currently admitted batch.
+
+        BatchCursor owns durable effect identity/order between batches, while the bounded
+        executor owns concurrency inside one admitted batch. Requiring only the first
+        non-confirmed target here silently serialized a declared max-five batch to one
+        external effect at a time. A future batch remains fail-closed until its durable
+        inter-batch wait is released.
+        """
+        return (
+            target.attempt_state is not AttemptState.CONFIRMED
+            and target.batch_index == self._state.ready_batch_index
+        )
 
     def _find(self, target_id: str) -> TargetCursor:
         target = next(
