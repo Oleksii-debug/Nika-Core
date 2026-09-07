@@ -324,7 +324,10 @@ def test_vcs_commit_is_accepted_as_immutable_provenance(
         ("git", "v1.2.3"),
         ("git", "deadbee"),
         ("svn", "0123456789abcdef0123456789abcdef01234567"),
+        ("hg", "0123456789abcdef0123456789abcdef01234567"),
         ("git ", "0123456789abcdef0123456789abcdef01234567"),
+        ("git", "a" * 41),
+        ("git", "a" * 63),
     ],
 )
 def test_vcs_ref_shaped_identity_is_not_immutable_provenance(
