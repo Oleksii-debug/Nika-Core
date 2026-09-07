@@ -1,7 +1,17 @@
-## LIVE CURRENT-MAIN OVERRIDE — 2026-09-07T20:44+02:00
+## AUTHORITATIVE CURRENT EXECUTION BOARD — 2026-09-07T22:14+02:00
+CURRENT_MAIN=`c71754f54e3643a56528f3f9158d8d2ddd45c2c6`.
+DONE/DO_NOT_REPEAT=#674 intelligence modes; #675 resource telemetry; #662 archive/secret gate; #651 model selection; #659 Windows autostart/settings; #656 checker handoffs; #641 durable cursor.
+IN_PROGRESS=Worker1 #654/#638; Worker3 #677/Scenario-A; Worker4 #672 then #663; Worker5 #695 SBOM, #676 installer, #665 governance proof.
+BLOCKED=old exact-head evidence after moved main; governance activation because branch protection/required checks are disabled; human Windows/NVDA remains human-only.
+NEXT=consume exact-current green + independent same-head audits one production leaf at a time; after each merge reread main and requalify downstream.
+ACTIVE_GRAPH=`runtime/durability -> AI/model -> browser/tools -> autonomy -> memory -> voice/perception -> resource governor -> background life -> learning/self-improvement -> phone/multimodal surfaces -> Windows/NVDA -> release`.
+TELEGRAM=OUT_OF_ACTIVE_SCOPE unless explicitly reintroduced by the user as a new workspace/ProductProject.
+HUMAN_TESTED=false; NVDA_VERIFIED=false; PRODUCTION_RELEASE_READY=false.
+
+## HISTORICAL SUPERSEDED SNAPSHOT — CURRENT-MAIN OVERRIDE — 2026-09-07T20:44+02:00
 CURRENT_MAIN=`c42cb926b5d53ed1950ea598b0dc47c9a6b97e9a`. #675 resource capacity telemetry is integrated. #638 is BLOCKED by canonical task-authority binding; #654 by PAUSED-generation/Cancel race; #672 remains shared Windows UIA blocker. #676@b4f41548 and #665@9a1fe70b are exact-current Worker5 candidates under fresh qualification/non-self audit. Older c0ed exact evidence is lineage-only. HUMAN_TESTED=false; NVDA_VERIFIED=false; PRODUCTION_RELEASE_READY=false.
 
-## LIVE EXECUTION BOARD OVERRIDE — 2026-09-07T20:44+02:00
+## HISTORICAL SUPERSEDED SNAPSHOT — EXECUTION BOARD OVERRIDE — 2026-09-07T20:44+02:00
 | Lane | Current owner package | State / next |
 |---|---|---|
 | Worker1 Runtime | #654; #638 | #654 BLOCKED repair; #638 exact-green awaiting independent #664 replay |
@@ -16,7 +26,7 @@ Current main `c0ed340c8ee6ddfab011f861f5e6f49017ff5286`; governance protection r
 
 # PARALLEL EXECUTION BOARD — Nika Core
 
-## LIVE BOARD REFRESH — 2026-09-07 — main c0ed340c
+## HISTORICAL SUPERSEDED SNAPSHOT — BOARD REFRESH — 2026-09-07 — main c0ed340c
 Evidence is exact-head only; live GitHub overrides older rows below.
 
 | Lane | NOW | BLOCK/NEXT |
@@ -33,7 +43,7 @@ Governance: branch protection and required checks are disabled.
 HUMAN_TESTED=false; NVDA_VERIFIED=false; PRODUCTION_RELEASE_READY=false.
 
 
-## LIVE CONTINUOUS-PRODUCT BOARD — 2026-09-07
+## HISTORICAL SUPERSEDED SNAPSHOT — CONTINUOUS-PRODUCT BOARD — 2026-09-07
 
 Mode: **ONE CONTINUOUS FULL PRODUCT / V0.1 NEAREST ACCEPTANCE CHECKPOINT**.
 Starting main: `7e8be7cb7ed3b62f55b1b9f5971bc45514427160`.
@@ -66,7 +76,7 @@ Integrate one production candidate at a time. Immediately before merge re-read m
 
 ### Post-checkpoint policy
 After V0.1 seal, these lanes do not stop and do not become a separate V0.2 project. Recompute dependency graph and continue the same codebase toward:
-`runtime/durability -> AI/model -> browser/tools -> agent autonomy -> memory -> voice/perception -> resource governor -> background life -> learning/self-improvement -> phone/Telegram/multimodal -> full Windows/NVDA journey -> final package/release`.
+`runtime/durability -> AI/model -> browser/tools -> agent autonomy -> memory -> voice/perception -> resource governor -> background life -> learning/self-improvement -> phone/multimodal -> full Windows/NVDA journey -> final package/release`.
 
 ---
 
