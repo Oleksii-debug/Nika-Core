@@ -11,7 +11,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass
-from fnmatch import fnmatchcase
+import re
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -25,6 +25,7 @@ DEFAULT_REQUIRED_CHECKS = (
 )
 API_VERSION = "2026-03-10"
 USER_AGENT = "Nika-Core-PF4-Governance-Proof/1"
+GITHUB_ACTIONS_APP_SLUG = "github-actions"
 
 
 class ApiFailure(RuntimeError):
@@ -116,25 +117,107 @@ def _actor_allowance_count(value: Any) -> int:
     return count
 
 
-def _classic_required_checks(protection: dict[str, Any]) -> set[str]:
+def _github_actions_check_app_ids(
+    client: JsonClient,
+    *,
+    owner: str,
+    repo: str,
+    head: str,
+    required_checks: tuple[str, ...],
+) -> tuple[dict[str, set[int]], list[str]]:
+    path = f"/repos/{owner}/{repo}/commits/{head}/check-runs?filter=latest&per_page=100"
+    try:
+        payload = client.get_json(path)
+    except ApiFailure as exc:
+        return {}, [f"check_runs:{exc.message}"]
+    if not isinstance(payload, dict):
+        return {}, ["check_runs:response_not_object"]
+    check_runs = payload.get("check_runs")
+    if not isinstance(check_runs, list):
+        return {}, ["check_runs:list_not_visible"]
+
+    wanted = set(required_checks)
+    app_ids: dict[str, set[int]] = {name: set() for name in required_checks}
+    for run in check_runs:
+        if not isinstance(run, dict):
+            continue
+        name = run.get("name")
+        app = run.get("app")
+        if name not in wanted or not isinstance(app, dict):
+            continue
+        if app.get("slug") != GITHUB_ACTIONS_APP_SLUG:
+            continue
+        app_id = app.get("id")
+        if isinstance(app_id, int) and app_id > 0:
+            app_ids[name].add(app_id)
+
+    errors = [
+        f"check_source:{name}:github_actions_app_not_observed"
+        for name, ids in app_ids.items()
+        if not ids
+    ]
+    return app_ids, errors
+
+
+def _classic_required_checks(
+    protection: dict[str, Any],
+    trusted_app_ids: dict[str, set[int]],
+) -> tuple[set[str], set[str]]:
     status_checks = protection.get("required_status_checks")
     if not isinstance(status_checks, dict):
-        return set()
-    names: set[str] = set()
+        return set(), set()
+
+    proven: set[str] = set()
+    unproven_source: set[str] = set()
     contexts = status_checks.get("contexts", [])
     if isinstance(contexts, list):
-        names.update(item for item in contexts if isinstance(item, str))
+        unproven_source.update(item for item in contexts if isinstance(item, str))
+
     checks = status_checks.get("checks", [])
     if isinstance(checks, list):
         for item in checks:
-            if isinstance(item, dict) and isinstance(item.get("context"), str):
-                names.add(item["context"])
-    return names
+            if not isinstance(item, dict):
+                continue
+            context = item.get("context")
+            if not isinstance(context, str):
+                continue
+            app_id = item.get("app_id")
+            trusted = trusted_app_ids.get(context, set())
+            if isinstance(app_id, int) and app_id > 0 and app_id in trusted:
+                proven.add(context)
+                unproven_source.discard(context)
+            else:
+                unproven_source.add(context)
+    return proven, unproven_source
+
+
+def _github_fnmatch_pathname(value: str, pattern: str) -> bool:
+    """Conservative GitHub File.fnmatch/FNM_PATHNAME subset for ref rules."""
+    if "\\" in pattern or "[" in pattern or "]" in pattern:
+        return False
+    pieces: list[str] = []
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "*":
+            if index + 1 < len(pattern) and pattern[index + 1] == "*":
+                pieces.append(".*")
+                index += 2
+                continue
+            pieces.append("[^/]*")
+        elif char == "?":
+            pieces.append("[^/]")
+        else:
+            pieces.append(re.escape(char))
+        index += 1
+    return re.fullmatch("".join(pieces), value) is not None
 
 
 def _ruleset_targets_branch(
     ruleset: dict[str, Any], *, branch: str, default_branch: str
 ) -> bool:
+    if ruleset.get("target") != "branch":
+        return False
     conditions = ruleset.get("conditions")
     if not isinstance(conditions, dict):
         return False
@@ -155,14 +238,17 @@ def _ruleset_targets_branch(
             return True
         if pattern == "~DEFAULT_BRANCH":
             return branch == default_branch
-        return fnmatchcase(ref, pattern)
+        return _github_fnmatch_pathname(ref, pattern)
 
     if any(matches(pattern) for pattern in excludes):
         return False
     return any(matches(pattern) for pattern in includes)
 
 
-def _ruleset_controls(ruleset: dict[str, Any]) -> dict[str, Any]:
+def _ruleset_controls(
+    ruleset: dict[str, Any],
+    trusted_app_ids: dict[str, set[int]],
+) -> dict[str, Any]:
     rule_types: set[str] = set()
     required_checks: set[str] = set()
     rules = ruleset.get("rules", [])
@@ -183,8 +269,19 @@ def _ruleset_controls(ruleset: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(checks, list):
                 continue
             for check in checks:
-                if isinstance(check, dict) and isinstance(check.get("context"), str):
-                    required_checks.add(check["context"])
+                if not isinstance(check, dict):
+                    continue
+                context = check.get("context")
+                integration_id = check.get("integration_id")
+                if not isinstance(context, str):
+                    continue
+                trusted = trusted_app_ids.get(context, set())
+                if (
+                    isinstance(integration_id, int)
+                    and integration_id > 0
+                    and integration_id in trusted
+                ):
+                    required_checks.add(context)
     bypass_actors_visible = "bypass_actors" in ruleset and isinstance(
         ruleset.get("bypass_actors"), list
     )
@@ -301,15 +398,44 @@ def inspect_repository_governance(
         classic["no_delete"] = not _bool_enabled(
             protection.get("allow_deletions"), default=True
         )
-        classic["required_checks"] = _classic_required_checks(protection)
-
-    active_rulesets: list[dict[str, Any]] = []
+    active_branch_ruleset_details: list[dict[str, Any]] = []
+    rulesets_with_unknown_target: list[dict[str, Any]] = []
     for ruleset in rulesets:
         if ruleset.get("enforcement") != "active":
             continue
+        target = ruleset.get("target")
+        if target is None:
+            rulesets_with_unknown_target.append(ruleset)
+            continue
+        if target != "branch":
+            continue
         if not _ruleset_targets_branch(ruleset, branch=branch, default_branch=default_branch):
             continue
-        controls = _ruleset_controls(ruleset)
+        active_branch_ruleset_details.append(ruleset)
+
+    needs_check_source = protection is not None or bool(active_branch_ruleset_details)
+    trusted_check_app_ids: dict[str, set[int]] = {}
+    if needs_check_source and isinstance(observed_head, str):
+        trusted_check_app_ids, check_source_errors = _github_actions_check_app_ids(
+            client,
+            owner=owner,
+            repo=repo,
+            head=observed_head,
+            required_checks=policy.required_checks,
+        )
+        evidence_errors.extend(check_source_errors)
+
+    classic_proven_checks: set[str] = set()
+    classic_unproven_check_sources: set[str] = set()
+    if protection is not None:
+        classic_proven_checks, classic_unproven_check_sources = _classic_required_checks(
+            protection, trusted_check_app_ids
+        )
+        classic["required_checks"] = classic_proven_checks
+
+    active_rulesets: list[dict[str, Any]] = []
+    for ruleset in active_branch_ruleset_details:
+        controls = _ruleset_controls(ruleset, trusted_check_app_ids)
         active_rulesets.append(
             {
                 "id": ruleset.get("id"),
@@ -388,6 +514,18 @@ def inspect_repository_governance(
     missing_checks = sorted(set(policy.required_checks) - combined_checks)
     if missing_checks:
         blockers.append("REQUIRED_STATUS_CHECKS_MISSING")
+    if classic_unproven_check_sources & set(policy.required_checks):
+        blockers.append("REQUIRED_STATUS_CHECK_SOURCE_NOT_PROVEN")
+    if policy.forbid_ruleset_bypass and observed_ruleset_bypass_actor_count:
+        blockers.append("RULESET_BYPASS_NOT_CLOSED")
+    if policy.forbid_ruleset_bypass and rulesets_without_bypass_evidence:
+        blockers.append("RULESET_BYPASS_EVIDENCE_NOT_PROVEN")
+    if rulesets_with_unknown_target:
+        blockers.append("RULESET_TARGET_NOT_PROVEN")
+        evidence_errors.extend(
+            f"ruleset_{item.get('id')}:target_not_visible"
+            for item in rulesets_with_unknown_target
+        )
 
     if rulesets_without_bypass_evidence:
         evidence_errors.extend(
@@ -416,6 +554,12 @@ def inspect_repository_governance(
         "controls": controls,
         "required_checks": list(policy.required_checks),
         "observed_required_checks": sorted(combined_checks),
+        "required_check_source_unproven": sorted(
+            classic_unproven_check_sources & set(policy.required_checks)
+        ),
+        "github_actions_check_app_ids": {
+            name: sorted(ids) for name, ids in trusted_check_app_ids.items()
+        },
         "missing_required_checks": missing_checks,
         "active_rulesets": [
             {
