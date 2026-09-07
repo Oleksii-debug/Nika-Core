@@ -515,6 +515,49 @@ def test_http_baseline_accepts_historical_redirect_provenance(tmp_path: Path) ->
     assert loaded.result_set.items[0].evidence[0].locator == "https://cdn-a.test/final"
 
 
+def test_http_baseline_rejects_attempt_from_different_task(tmp_path: Path) -> None:
+    store, _, _, _ = _http_baseline(tmp_path / "http-cross-task.db")
+    tasks = TaskQueue(store)
+    other = tasks.create(
+        workspace_id="ws",
+        agent_id=ResearchProfileRunService.AGENT_ID,
+        payload={
+            "profile_id": "monitor",
+            "profile_version": 1,
+            "source_set_id": "sources",
+            "source_set_version": 1,
+            "http_source_ids": ["web-a"],
+        },
+    )
+    tasks.transition(other.task_id, TaskState.READY)
+    tasks.transition(other.task_id, TaskState.RUNNING)
+    tasks.transition(other.task_id, TaskState.COMPLETED)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE research_http_attempts SET task_id=? WHERE source_id=?",
+            (other.task_id, "web-a"),
+        )
+
+    with pytest.raises(PreviousObservationError) as caught:
+        _loader(store).load(_expected())
+
+    assert caught.value.code is PreviousObservationErrorCode.IDENTITY_MISMATCH
+
+
+def test_http_baseline_rejects_failed_attempt_provenance(tmp_path: Path) -> None:
+    store, _, _, _ = _http_baseline(tmp_path / "http-failed-attempt.db")
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE research_http_attempts SET disposition=? WHERE source_id=?",
+            (RefreshDisposition.FAILED.value, "web-a"),
+        )
+
+    with pytest.raises(PreviousObservationError) as caught:
+        _loader(store).load(_expected())
+
+    assert caught.value.code is PreviousObservationErrorCode.IDENTITY_MISMATCH
+
+
 def test_same_http_source_id_retarget_requires_rebaseline(tmp_path: Path) -> None:
     store, network, _, _ = _http_baseline(tmp_path / "http-retarget.db")
     network.register_source(
