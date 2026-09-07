@@ -58,7 +58,8 @@ class _MissingSemanticTools:
 def _build(tmp_path: Path):
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
-    task_id = TaskQueue(store).create(
+    task_queue = TaskQueue(store)
+    task_id = task_queue.create(
         workspace_id="scenario-b-terminal-isolation",
         agent_id="scenario-b",
     ).task_id
@@ -105,6 +106,7 @@ def _build(tmp_path: Path):
     fixed_now = datetime(2032, 1, 2, 3, 4, 5, tzinfo=UTC)
     service = ScenarioBService(
         task_id=task_id,
+        task_queue=task_queue,
         cursor=cursor,
         tabs=tabs,  # type: ignore[arg-type]
         executor=executor,
