@@ -336,7 +336,7 @@ def test_v2_digest_supports_unicode_and_spaced_cache_paths(tmp_path: Path) -> No
     nested = cache / "варіант №1"
     nested.mkdir(parents=True)
     weights = nested / "ваги моделі.bin"
-    weights.write_bytes("українські bytes".encode("utf-8"))
+    weights.write_bytes("українські bytes".encode())
 
     evidence = foundry_cache_tree_sha256(cache)
 
