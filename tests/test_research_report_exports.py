@@ -97,7 +97,6 @@ def test_html_is_semantic_and_escapes_untrusted_text() -> None:
     assert '<html lang="uk">' in text
     assert '<h1 lang="en">Research results</h1>' in text
     assert "<main>" in text
-    assert "<h1>Research results</h1>" in text
     assert '<article aria-labelledby="result-1">' in text
     assert (
         '<h2 id="result-1"><span lang="en">Result 1: </span>'
@@ -184,7 +183,6 @@ def test_office_export_rejects_non_iso_created_at() -> None:
 def test_exporter_rejects_untyped_format() -> None:
     with pytest.raises(TypeError, match="ResearchReportFormat"):
         ResearchReportExporter().render(_report(), "txt")  # type: ignore[arg-type]
-
 
 
 def test_html_requires_explicit_valid_language_tag() -> None:
