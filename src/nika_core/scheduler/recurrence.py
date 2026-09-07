@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -8,7 +9,7 @@ from enum import StrEnum
 from typing import Any
 
 from nika_core.scheduler.contracts import ScheduledJob, SchedulerPort, TriggerKind
-from nika_core.scheduler.store import ScheduledJobStore
+from nika_core.scheduler.store import IMMUTABLE_JOB_BINDING_KEY, ScheduledJobStore
 
 _RECURRENCE_PAYLOAD_KEY = "_nika_recurrence_v1"
 _TARGET_PAYLOAD_KEY = "target_payload"
@@ -350,6 +351,14 @@ class DurableRecurrenceService:
             trigger={"run_date": _iso(run_date)},
             payload={
                 "recurrence_id": state.recurrence_id,
+                IMMUTABLE_JOB_BINDING_KEY: _definition_fingerprint(
+                    recurrence_id=state.recurrence_id,
+                    action_id=state.action_id,
+                    interval_seconds=state.interval_seconds,
+                    anchor_at=state.anchor_at,
+                    deadline_at=state.deadline_at,
+                    target_payload=target_payload,
+                ),
                 _RECURRENCE_PAYLOAD_KEY: _encode_state(state),
                 _TARGET_PAYLOAD_KEY: dict(target_payload),
             },
@@ -358,7 +367,14 @@ class DurableRecurrenceService:
             max_instances=1,
             misfire_grace_seconds=None,
         )
-        self._scheduler.upsert(job)
+        try:
+            self._scheduler.upsert(job)
+        except ValueError as exc:
+            if "immutable binding conflict" in str(exc):
+                raise ValueError(
+                    "recurrence_id is already bound to a different recurrence"
+                ) from exc
+            raise
 
     def _now(self) -> datetime:
         return _require_aware_utc(self._clock(), "clock value")
@@ -439,23 +455,57 @@ def _decode_job(
         raise ValueError("terminal recurrence cannot retain a next durable intent")
     if bool(job.enabled) != (status is RecurrenceStatus.ACTIVE and next_due is not None):
         raise ValueError("durable recurrence enabled state does not match lifecycle state")
-    return (
-        RecurrenceState(
-            recurrence_id=recurrence_id,
-            action_id=_required_text(metadata.get("action_id"), "persisted action_id"),
-            interval_seconds=interval,
-            anchor_at=anchor,
-            deadline_at=deadline,
-            status=status,
-            missed_run_policy=policy,
-            next_due_at=next_due,
-            next_occurrence_id=next_id,
-            last_completed_due_at=last_due,
-            last_completed_occurrence_id=last_id,
-            terminal_reason=terminal_reason,
-        ),
-        dict(target_payload),
+    state = RecurrenceState(
+        recurrence_id=recurrence_id,
+        action_id=_required_text(metadata.get("action_id"), "persisted action_id"),
+        interval_seconds=interval,
+        anchor_at=anchor,
+        deadline_at=deadline,
+        status=status,
+        missed_run_policy=policy,
+        next_due_at=next_due,
+        next_occurrence_id=next_id,
+        last_completed_due_at=last_due,
+        last_completed_occurrence_id=last_id,
+        terminal_reason=terminal_reason,
     )
+    persisted_binding = job.payload.get(IMMUTABLE_JOB_BINDING_KEY)
+    expected_binding = _definition_fingerprint(
+        recurrence_id=state.recurrence_id,
+        action_id=state.action_id,
+        interval_seconds=state.interval_seconds,
+        anchor_at=state.anchor_at,
+        deadline_at=state.deadline_at,
+        target_payload=target_payload,
+    )
+    if persisted_binding != expected_binding:
+        raise ValueError("durable recurrence immutable binding is missing or corrupt")
+    return state, dict(target_payload)
+
+
+def _definition_fingerprint(
+    *,
+    recurrence_id: str,
+    action_id: str,
+    interval_seconds: int,
+    anchor_at: datetime,
+    deadline_at: datetime | None,
+    target_payload: dict[str, Any],
+) -> str:
+    material = json.dumps(
+        {
+            "recurrence_id": recurrence_id,
+            "action_id": action_id,
+            "interval_seconds": interval_seconds,
+            "anchor_at": _iso(anchor_at),
+            "deadline_at": _iso(deadline_at) if deadline_at is not None else None,
+            "target_payload": target_payload,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(material).hexdigest()
 
 
 def _first_future_slot(
