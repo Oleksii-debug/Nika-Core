@@ -5,14 +5,11 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import sqlite3
 import subprocess
 import tempfile
-import time
 import tomllib
-from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import closing
 from pathlib import Path
 
 from nika_core.packaging.notices import build_third_party_notices, verify_third_party_notices
@@ -178,24 +175,6 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-@contextmanager
-def _temporary_data_adoption_workspace() -> Iterator[Path]:
-    """Clean a hosted proof workspace despite short-lived Windows file locks."""
-    root = Path(tempfile.mkdtemp(prefix="nika-packaged-data-upgrade-"))
-    try:
-        yield root
-    finally:
-        for attempt in range(25):
-            try:
-                shutil.rmtree(root)
-                break
-            except FileNotFoundError:
-                break
-            except PermissionError:
-                if attempt == 24:
-                    raise
-                time.sleep(0.2)
-
 
 def _create_legacy_database(path: Path) -> str:
     """Create a minimal real legacy store using the canonical SQLite schema."""
@@ -213,7 +192,7 @@ def _create_legacy_database(path: Path) -> str:
 
 
 def _task_ids(path: Path) -> set[str]:
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection:
         return {str(row[0]) for row in connection.execute("SELECT task_id FROM tasks")}
 
 
@@ -262,7 +241,8 @@ def prove_packaged_data_adoption(bundle_dir: Path, *, source_sha: str) -> Path |
         prepare_default_database,
     )
 
-    with _temporary_data_adoption_workspace() as root:
+    with tempfile.TemporaryDirectory(prefix="nika-packaged-data-upgrade-") as temporary:
+        root = Path(temporary)
         profile = root / "profile"
         first_cwd = root / "legacy-launch"
         legacy = first_cwd / "data" / "nika_core.db"
