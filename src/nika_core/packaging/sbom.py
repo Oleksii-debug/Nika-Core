@@ -79,11 +79,22 @@ def _atomic_write_json(path: Path, value: object) -> Path:
     return path
 
 
+def _bounded_license_label(value: str) -> str | None:
+    normalized = value.strip()
+    if (
+        not normalized
+        or len(normalized) > 512
+        or any(ord(character) < 32 for character in normalized)
+    ):
+        return None
+    return normalized
+
+
 def _metadata_license(dist: metadata.Distribution) -> str | None:
-    expression = (dist.metadata.get("License-Expression") or "").strip()
+    expression = _bounded_license_label(dist.metadata.get("License-Expression") or "")
     if expression:
         return expression
-    legacy = (dist.metadata.get("License") or "").strip()
+    legacy = _bounded_license_label(dist.metadata.get("License") or "")
     if legacy and legacy.upper() != "UNKNOWN":
         return legacy
     classifiers = [
@@ -91,7 +102,7 @@ def _metadata_license(dist: metadata.Distribution) -> str | None:
         for item in dist.metadata.get_all("Classifier", [])
         if item.startswith("License ::")
     ]
-    return "; ".join(classifiers) or None
+    return _bounded_license_label("; ".join(classifiers))
 
 
 def _license_evidence(dist: metadata.Distribution) -> tuple[dict[str, str], ...]:
@@ -252,6 +263,24 @@ def _read_runtime_report(report_path: Path, *, application_name: str) -> dict[st
     }
 
 
+def _project_identity(project_root: Path) -> tuple[str, str]:
+    try:
+        with (project_root / "pyproject.toml").open("rb") as handle:
+            project_data = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise SupplyChainEvidenceError("Could not read pyproject.toml project identity") from exc
+    project = project_data.get("project")
+    if not isinstance(project, dict):
+        raise SupplyChainEvidenceError("pyproject.toml is missing [project]")
+    raw_name = project.get("name")
+    raw_version = project.get("version")
+    if not isinstance(raw_name, str) or not raw_name.strip():
+        raise SupplyChainEvidenceError("pyproject.toml project name is missing")
+    if not isinstance(raw_version, str) or not raw_version.strip():
+        raise SupplyChainEvidenceError("pyproject.toml project version is missing")
+    return canonicalize_name(raw_name), raw_version.strip()
+
+
 def _runtime_requirement_names(
     project_root: Path,
     *,
@@ -311,6 +340,12 @@ def build_supply_chain_evidence(
     if not application_version or application_version != application_version.strip():
         raise SupplyChainEvidenceError("Application version must be non-empty and normalized")
 
+    project_name, project_version = _project_identity(project_root)
+    if project_name != canonicalize_name(application_name) or project_version != application_version:
+        raise SupplyChainEvidenceError(
+            "Application identity differs between pyproject.toml and release arguments"
+        )
+
     report = _read_runtime_report(report_path, application_name=application_name)
     if report["application_version"] != application_version:
         raise SupplyChainEvidenceError(
@@ -318,7 +353,8 @@ def build_supply_chain_evidence(
         )
 
     components = report["components"]
-    assert isinstance(components, list)
+    if not isinstance(components, list):
+        raise SupplyChainEvidenceError("Resolved runtime inventory is structurally invalid")
     component_names = {str(item["name"]) for item in components if isinstance(item, dict)}
     required_names = _runtime_requirement_names(project_root, extras=extras)
     missing = sorted(set(required_names) - component_names)
