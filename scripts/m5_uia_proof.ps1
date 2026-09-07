@@ -69,12 +69,41 @@ foreach ($name in @('NIKA_DB_PATH', 'NIKA_V01_SOURCE_ROOT', 'NIKA_V01_SOURCE_A',
     $previousProofEnvironment[$name] = [System.Environment]::GetEnvironmentVariable($name, 'Process')
 }
 
-function Get-ElementRuntimeId([System.Windows.Automation.AutomationElement]$Element) {
-    $runtimeId = $Element.GetRuntimeId()
-    if ($null -eq $runtimeId -or $runtimeId.Length -eq 0) {
-        throw 'UI Automation element did not expose a RuntimeId.'
+function Get-ElementRuntimeId(
+    [System.Windows.Automation.AutomationElement]$Element,
+    [ValidateRange(1, 40)][int]$Attempts = 20,
+    [ValidateRange(10, 500)][int]$DelayMilliseconds = 100
+) {
+    # WebView2 can transiently surface a semantic AutomationElement before its
+    # provider exposes RuntimeId. RuntimeId remains mandatory authority: retry
+    # only the same captured element for a short bounded interval and never
+    # fall back to Name, ControlType, HWND or coordinates.
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        $runtimeId = $Element.GetRuntimeId()
+        if ($null -ne $runtimeId -and $runtimeId.Length -gt 0) {
+            return [int[]]$runtimeId
+        }
+        if ($attempt -lt $Attempts) {
+            Start-Sleep -Milliseconds $DelayMilliseconds
+        }
     }
-    return [int[]]$runtimeId
+
+    $safeName = '<unavailable>'
+    $safeControlType = '<unavailable>'
+    try {
+        if (-not [string]::IsNullOrWhiteSpace($Element.Current.Name)) {
+            $safeName = $Element.Current.Name
+        }
+        if ($null -ne $Element.Current.ControlType) {
+            $safeControlType = $Element.Current.ControlType.ProgrammaticName
+        }
+    } catch [System.Windows.Automation.ElementNotAvailableException] {
+        throw
+    }
+    throw (
+        "UI Automation element did not expose a RuntimeId after bounded retry. " +
+        "Name='$safeName', ControlType='$safeControlType', Attempts=$Attempts."
+    )
 }
 
 function Test-SameAutomationElement(
