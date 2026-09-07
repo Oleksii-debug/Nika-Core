@@ -20,12 +20,12 @@ def _lstat_plain(path: Path) -> os.stat_result:
     try:
         info = os.lstat(path)
     except OSError as exc:
-        raise ValueError(f"model cache path cannot be inspected: {path}") from exc
+        raise ValueError("model cache path cannot be inspected") from exc
 
     attributes = int(getattr(info, "st_file_attributes", 0))
     reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
     if stat.S_ISLNK(info.st_mode) or (reparse_flag and attributes & reparse_flag):
-        raise ValueError(f"model cache contains filesystem indirection: {path}")
+        raise ValueError("model cache contains filesystem indirection")
     return info
 
 
@@ -33,9 +33,9 @@ def _relative_path(root: Path, path: Path) -> Path:
     try:
         relative = path.relative_to(root)
     except ValueError as exc:
-        raise ValueError(f"model cache path escapes selected root: {path}") from exc
+        raise ValueError("model cache path escapes selected root") from exc
     if relative.is_absolute() or ".." in relative.parts:
-        raise ValueError(f"model cache path escapes selected root: {path}")
+        raise ValueError("model cache path escapes selected root")
     return relative
 
 
@@ -45,7 +45,7 @@ def _resolved_within_root(root: Path, path: Path) -> Path:
         resolved_path = path.resolve(strict=True)
         resolved_path.relative_to(resolved_root)
     except (OSError, RuntimeError, ValueError) as exc:
-        raise ValueError(f"model cache path escapes selected root: {path}") from exc
+        raise ValueError("model cache path escapes selected root") from exc
     return resolved_path
 
 
@@ -53,11 +53,11 @@ def _cache_files(root: Path) -> list[tuple[Path, os.stat_result]]:
     root = root.absolute()
     root_info = _lstat_plain(root)
     if not stat.S_ISDIR(root_info.st_mode):
-        raise ValueError(f"model cache path is not a directory: {root}")
+        raise ValueError("model cache path is not a directory")
     _resolved_within_root(root, root)
 
     def fail_walk(error: OSError) -> None:
-        raise ValueError(f"model cache tree cannot be enumerated: {root}") from error
+        raise ValueError("model cache tree cannot be enumerated") from error
 
     files: list[tuple[Path, os.stat_result]] = []
     try:
@@ -72,14 +72,14 @@ def _cache_files(root: Path) -> list[tuple[Path, os.stat_result]]:
             _resolved_within_root(root, base)
             base_info = _lstat_plain(base)
             if not stat.S_ISDIR(base_info.st_mode):
-                raise ValueError(f"model cache entry is not a directory: {base}")
+                raise ValueError("model cache entry is not a directory")
 
             for name in directory_names:
                 child = base / name
                 _relative_path(root, child)
                 child_info = _lstat_plain(child)
                 if not stat.S_ISDIR(child_info.st_mode):
-                    raise ValueError(f"model cache entry is not a directory: {child}")
+                    raise ValueError("model cache entry is not a directory")
                 _resolved_within_root(root, child)
 
             for name in file_names:
@@ -87,15 +87,15 @@ def _cache_files(root: Path) -> list[tuple[Path, os.stat_result]]:
                 _relative_path(root, child)
                 child_info = _lstat_plain(child)
                 if not stat.S_ISREG(child_info.st_mode):
-                    raise ValueError(f"model cache entry is not a regular file: {child}")
+                    raise ValueError("model cache entry is not a regular file")
                 _resolved_within_root(root, child)
                 files.append((child, child_info))
     except OSError as exc:
-        raise ValueError(f"model cache tree cannot be enumerated: {root}") from exc
+        raise ValueError("model cache tree cannot be enumerated") from exc
 
     files.sort(key=lambda item: _relative_path(root, item[0]).as_posix())
     if not files:
-        raise ValueError(f"model cache path contains no regular files: {root}")
+        raise ValueError("model cache path contains no regular files")
     return files
 
 
@@ -131,13 +131,13 @@ def _hash_file(
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
-        raise ValueError(f"model cache file cannot be opened: {path}") from exc
+        raise ValueError("model cache file cannot be opened") from exc
 
     observed_size = 0
     try:
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode):
-            raise ValueError(f"model cache file changed before hashing: {path}")
+            raise ValueError("model cache file changed before hashing")
 
         # Compare pathname snapshots with pathname snapshots and descriptor snapshots
         # with descriptor snapshots. Python's Windows path-stat implementation may
@@ -151,7 +151,7 @@ def _hash_file(
             _file_identity(after_open) != _file_identity(before)
             or int(opened.st_size) != int(before.st_size)
         ):
-            raise ValueError(f"model cache file changed before hashing: {path}")
+            raise ValueError("model cache file changed before hashing")
 
         opened_identity = _file_identity(opened)
         while True:
@@ -162,16 +162,16 @@ def _hash_file(
             observed_size += len(chunk)
         opened_after = os.fstat(descriptor)
         if _file_identity(opened_after) != opened_identity:
-            raise ValueError(f"model cache file changed while hashing: {path}")
+            raise ValueError("model cache file changed while hashing")
     except OSError as exc:
-        raise ValueError(f"model cache file cannot be read: {path}") from exc
+        raise ValueError("model cache file cannot be read") from exc
     finally:
         os.close(descriptor)
 
     after = _lstat_plain(path)
     _resolved_within_root(root, path)
     if observed_size != int(before.st_size) or _file_identity(after) != _file_identity(before):
-        raise ValueError(f"model cache file changed while hashing: {path}")
+        raise ValueError("model cache file changed while hashing")
     return observed_size
 
 
