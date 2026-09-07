@@ -1,7 +1,18 @@
-## LIVE CURRENT-MAIN OVERRIDE — 2026-09-07T20:44+02:00
+## AUTHORITATIVE CURRENT PROJECT STATUS — 2026-09-07T22:14+02:00
+CURRENT_MAIN=`c71754f54e3643a56528f3f9158d8d2ddd45c2c6`.
+LAST_INTEGRATED_CHANGE=#674 explicit intelligence mode boundary; previous #675 resource-capacity telemetry remains integrated.
+PRODUCT_STRATEGY=ONE_CONTINUOUS_FULL_PRODUCT; V0.1 is the nearest acceptance checkpoint.
+DONE=integrated cursor/checker handoffs/Windows autostart/durable model selection/archive-secret gate/resource telemetry/intelligence modes.
+IN_PROGRESS=#654 Pause/Resume; #638 recurrence; #677 Scenario-B; Scenario-A monitoring; #672/#663 Windows UIA/model-selection journey; #695 SBOM; #676 installer/update/rollback; #665 governance verifier.
+BLOCKED=remaining runtime/browser/Windows/package gates; actual repository protection/required checks disabled; human Windows/NVDA pending.
+DO_NOT_REPEAT=old pre-main-movement greens and QA_ONLY branches never become production acceptance.
+TELEGRAM_SCOPE=not active under AGENTS.md/MASTER_SPEC.
+HUMAN_TESTED=false; NVDA_VERIFIED=false; PRODUCTION_RELEASE_READY=false.
+
+## HISTORICAL SUPERSEDED SNAPSHOT — CURRENT-MAIN OVERRIDE — 2026-09-07T20:44+02:00
 CURRENT_MAIN=`c42cb926b5d53ed1950ea598b0dc47c9a6b97e9a`. #675 resource capacity telemetry is integrated. #638 is BLOCKED by canonical task-authority binding; #654 by PAUSED-generation/Cancel race; #672 remains shared Windows UIA blocker. #676@b4f41548 and #665@9a1fe70b are exact-current Worker5 candidates under fresh qualification/non-self audit. Older c0ed exact evidence is lineage-only. HUMAN_TESTED=false; NVDA_VERIFIED=false; PRODUCTION_RELEASE_READY=false.
 
-## LIVE STATUS OVERRIDE — 2026-09-07T20:44+02:00
+## HISTORICAL SUPERSEDED SNAPSHOT — STATUS OVERRIDE — 2026-09-07T20:44+02:00
 CURRENT_MAIN=`c0ed340c8ee6ddfab011f861f5e6f49017ff5286`.
 DONE=#641,#656,#659,#651,#662 integrated.
 IN_PROGRESS=#654 Pause/Resume/Cancel; #638 recurrence audit; #677 Scenario-B; #672 shared UIA; #663 Windows model UI; #676 installer; #665 governance evaluator; Worker2 AI/model lane.
@@ -12,7 +23,7 @@ HUMAN_TESTED=false; NVDA_VERIFIED=false; PRODUCTION_RELEASE_READY=false.
 
 # PROJECT STATUS — Nika Core
 
-## LIVE SUPERSEDING REFRESH — 2026-09-07 — after #662
+## HISTORICAL SUPERSEDED SNAPSHOT — SUPERSEDING REFRESH — 2026-09-07 — after #662
 CURRENT_MAIN=`c0ed340c8ee6ddfab011f861f5e6f49017ff5286`.
 LAST_INTEGRATED_QUALIFIED_LEAF=#662@`7a0331b30957f483138eb758071fd5b7d977fa34` -> merge `c0ed340c8ee6ddfab011f861f5e6f49017ff5286`.
 GitHub live exact heads/reviews/Actions override every older snapshot below.
@@ -26,7 +37,7 @@ NVDA_VERIFIED=false.
 PRODUCTION_RELEASE_READY=false.
 
 
-## LIVE SUPERSEDING SNAPSHOT — 2026-09-07
+## HISTORICAL SUPERSEDED SNAPSHOT — SUPERSEDING SNAPSHOT — 2026-09-07
 
 Canonical repository: `Oleksii-debug/Nika-Core`.
 Canonical technical truth: live GitHub `main`, exact production candidate heads, reviews and current Actions. Drive is a coordination/mirror surface and never overrides GitHub code/SHA/CI truth.
