@@ -20,6 +20,7 @@ _CYCLONEDX_SCHEMA = "https://cyclonedx.org/schema/bom-1.6.schema.json"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _VCS_COMMIT_RE = re.compile(r"^[0-9a-f]{40,64}$")
+_IMMUTABLE_HEX_VCS = frozenset({"git", "hg"})
 
 
 class SupplyChainEvidenceError(RuntimeError):
@@ -164,13 +165,21 @@ def _source_identity(item: dict[str, Any], name: str) -> dict[str, str]:
     if isinstance(vcs_info, dict):
         vcs = vcs_info.get("vcs")
         commit_id = vcs_info.get("commit_id")
-        normalized_commit = commit_id.strip().casefold() if isinstance(commit_id, str) else ""
+        normalized_vcs = vcs.casefold() if isinstance(vcs, str) else ""
+        normalized_commit = commit_id.casefold() if isinstance(commit_id, str) else ""
         if (
             isinstance(vcs, str)
-            and vcs
+            and vcs == vcs.strip()
+            and normalized_vcs in _IMMUTABLE_HEX_VCS
+            and isinstance(commit_id, str)
+            and commit_id == commit_id.strip()
             and _VCS_COMMIT_RE.fullmatch(normalized_commit)
         ):
-            return {"kind": "vcs", "vcs": vcs, "commit_id": normalized_commit}
+            return {
+                "kind": "vcs",
+                "vcs": normalized_vcs,
+                "commit_id": normalized_commit,
+            }
 
     raise SupplyChainEvidenceError(
         f"Runtime component lacks immutable source artifact identity: {name}"
@@ -195,17 +204,19 @@ def _safe_source_host(item: dict[str, Any]) -> str | None:
 
 
 def _report_environment(report: dict[str, Any]) -> dict[str, str]:
-    environment = default_environment()
     raw_environment = report.get("environment")
-    if raw_environment is None:
-        return environment
     if not isinstance(raw_environment, dict) or any(
         not isinstance(key, str) or not isinstance(value, str)
         for key, value in raw_environment.items()
     ):
         raise SupplyChainEvidenceError("pip installation report environment is invalid")
-    environment.update(raw_environment)
-    return environment
+    required_keys = set(default_environment())
+    missing = sorted(required_keys - set(raw_environment))
+    if missing:
+        raise SupplyChainEvidenceError(
+            f"pip installation report environment is incomplete: {missing}"
+        )
+    return dict(raw_environment)
 
 
 def _read_runtime_report(report_path: Path, *, application_name: str) -> dict[str, object]:
