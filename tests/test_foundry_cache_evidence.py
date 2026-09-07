@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import traceback
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -300,6 +301,34 @@ def test_cache_failure_diagnostics_do_not_expose_absolute_path(tmp_path: Path) -
     rendered = str(exc_info.value)
     assert "PRIVATE_MODEL_CACHE_CANARY" not in rendered
     assert str(cache.resolve()) not in rendered
+
+
+def test_cache_failure_traceback_does_not_expose_absolute_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = tmp_path / "PRIVATE_MODEL_CACHE_TRACEBACK_CANARY"
+    cache.mkdir()
+    private_path = str(cache.resolve())
+
+    def denied_lstat(path: object):
+        raise PermissionError(f"denied private cache path: {path}")
+
+    monkeypatch.setattr(foundry_cache_evidence.os, "lstat", denied_lstat)
+
+    with pytest.raises(ValueError) as exc_info:
+        foundry_cache_tree_sha256(cache)
+
+    rendered = "".join(
+        traceback.format_exception(
+            type(exc_info.value),
+            exc_info.value,
+            exc_info.value.__traceback__,
+        )
+    )
+    assert "PRIVATE_MODEL_CACHE_TRACEBACK_CANARY" not in rendered
+    assert private_path not in rendered
+    assert "denied private cache path" not in rendered
 
 
 def test_v2_digest_supports_unicode_and_spaced_cache_paths(tmp_path: Path) -> None:
