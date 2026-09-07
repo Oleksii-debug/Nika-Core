@@ -26,12 +26,13 @@ from nika_core.research.scheduled_profiles import (
 
 def _source(
     *,
+    source_id: str = "source-news",
     disposition: RefreshDisposition = RefreshDisposition.UNCHANGED,
     attempts: int = 1,
     error_code: str | None = None,
 ) -> MonitoringSourceCheck:
     return MonitoringSourceCheck(
-        source_id="source-news",
+        source_id=source_id,
         source_kind=SourceKind.HTTP,
         disposition=disposition,
         attempts=attempts,
@@ -341,3 +342,153 @@ def test_terminal_check_snapshot_cannot_advertise_future_schedule() -> None:
             next_scheduled_check="2026-08-27T16:00:00+00:00",
             terminal_reason="deadline_reached",
         )
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    (
+        "token=REPORT_CANARY",
+        "Authorization:BearerCANARY",
+        "cookie:SESSIONCANARY",
+        "https://example.test/path",
+        "two words",
+    ),
+)
+def test_rendered_machine_references_reject_secret_or_url_shapes(unsafe: str) -> None:
+    with pytest.raises(ValueError, match="safe reference"):
+        MonitoringSourceCheck(
+            source_id=unsafe,
+            source_kind=SourceKind.HTTP,
+            disposition=RefreshDisposition.UNCHANGED,
+            attempts=1,
+        )
+    with pytest.raises(ValueError, match="safe reference"):
+        MonitoringSourceCheck(
+            source_id="source-news",
+            source_kind=SourceKind.HTTP,
+            disposition=RefreshDisposition.CHANGED,
+            attempts=1,
+            snapshot_id=unsafe,
+        )
+    with pytest.raises(ValueError, match="safe reference"):
+        MonitoringChange(kind="changed", document_id=unsafe, title="safe title")
+    with pytest.raises(ValueError, match="safe reference"):
+        MonitoringCheck(
+            check_id=unsafe,
+            checked_at="2026-08-27T15:00:00+00:00",
+            sources=(_source(),),
+            changes=(),
+            condition_matched=False,
+        )
+    with pytest.raises(ValueError, match="safe reference"):
+        MonitoringCheck(
+            check_id="check-1",
+            checked_at="2026-08-27T15:00:00+00:00",
+            sources=(_source(),),
+            changes=(),
+            condition_matched=False,
+            result_set_id=unsafe,
+        )
+    with pytest.raises(ValueError, match="safe reference"):
+        MonitoringReport(monitor_id=unsafe, checks=())
+    with pytest.raises(ValueError, match="safe reference"):
+        MonitoringReport(
+            monitor_id="monitor-1",
+            checks=(),
+            state_reference=unsafe,
+        )
+
+
+def test_change_provenance_must_belong_to_check_source_identity() -> None:
+    foreign_source = MonitoringChange(
+        kind="changed",
+        document_id="doc-1",
+        title="foreign source",
+        evidence=(
+            ResearchEvidence(
+                source_id="source-other",
+                source_kind=SourceKind.HTTP,
+                locator="https://example.test/other",
+                observed_at="2026-08-27T15:00:00+00:00",
+                freshness=FreshnessState.CURRENT,
+            ),
+        ),
+    )
+    foreign_kind = MonitoringChange(
+        kind="changed",
+        document_id="doc-2",
+        title="foreign kind",
+        evidence=(
+            ResearchEvidence(
+                source_id="source-news",
+                source_kind=SourceKind.LOCAL_FILE,
+                locator="C:/Corpus/source-news.txt",
+                observed_at="2026-08-27T15:00:00+00:00",
+                freshness=FreshnessState.CURRENT,
+            ),
+        ),
+    )
+
+    for change in (foreign_source, foreign_kind):
+        with pytest.raises(ValueError, match="not part of this monitoring check"):
+            MonitoringCheck(
+                check_id="check-1",
+                checked_at="2026-08-27T15:00:00+00:00",
+                sources=(_source(),),
+                changes=(change,),
+                condition_matched=False,
+            )
+
+
+def test_evidence_reference_and_timestamp_are_safe_before_rendering() -> None:
+    with pytest.raises(ValueError, match="safe reference"):
+        MonitoringChange(
+            kind="changed",
+            document_id="doc-1",
+            title="safe",
+            evidence=(
+                ResearchEvidence(
+                    source_id="token=EVIDENCE_CANARY",
+                    source_kind=SourceKind.HTTP,
+                    locator="https://example.test/safe",
+                    observed_at="2026-08-27T15:00:00+00:00",
+                    freshness=FreshnessState.CURRENT,
+                ),
+            ),
+        )
+
+    with pytest.raises(ValueError):
+        MonitoringChange(
+            kind="changed",
+            document_id="doc-1",
+            title="safe",
+            evidence=(
+                ResearchEvidence(
+                    source_id="source-news",
+                    source_kind=SourceKind.HTTP,
+                    locator="https://example.test/safe",
+                    observed_at="2026-08-27T15:00:00",
+                    freshness=FreshnessState.CURRENT,
+                ),
+            ),
+        )
+
+
+def test_quoted_secret_assignments_are_fully_redacted_from_titles() -> None:
+    change = MonitoringChange(
+        kind="changed",
+        document_id="doc-1",
+        title='token="SECRET PART TWO" client_secret=\'SECOND SECRET VALUE\'',
+    )
+    check = MonitoringCheck(
+        check_id="check-1",
+        checked_at="2026-08-27T15:00:00+00:00",
+        sources=(_source(),),
+        changes=(change,),
+        condition_matched=False,
+    )
+    rendered = render_monitoring_report_text(MonitoringReport("monitor-1", (check,)))
+
+    assert "SECRET PART TWO" not in rendered
+    assert "SECOND SECRET VALUE" not in rendered
+    assert rendered.count("[redacted]") >= 2
