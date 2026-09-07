@@ -147,6 +147,74 @@ def test_tampered_update_fails_before_installed_tree_mutates(tmp_path: Path) -> 
 
 
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
+def test_update_restores_previous_release_after_post_activation_reparse_failure(
+    tmp_path: Path,
+) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    bundle_v1 = _bundle(tmp_path / "version-1", "v1")
+    bundle_v2 = _bundle(tmp_path / "version-2", "v2")
+    destination = tmp_path / "install" / "Nika Core"
+    installed = _run(shell, mode="Install", destination=destination, bundle=bundle_v1)
+    assert installed.returncode == 0, installed.stderr or installed.stdout
+
+    junction_target = tmp_path / "external-target"
+    junction_target.mkdir()
+    sentinel = junction_target / "sentinel.txt"
+    sentinel.write_text("must-not-change", encoding="utf-8")
+
+    instrumented = tmp_path / "install_nika_core_fault.ps1"
+    payload = SCRIPT.read_text(encoding="utf-8")
+    needle = (
+        "            [System.IO.Directory]::Move($stagePath, $destinationPath)\n"
+        "            Assert-NikaNoReparsePathChain -Path $destinationPath\n"
+    )
+    escaped_target = str(junction_target).replace("'", "''")
+    injected = (
+        "            [System.IO.Directory]::Move($stagePath, $destinationPath)\n"
+        "            [System.IO.Directory]::Move($destinationPath, ($destinationPath + '.candidate'))\n"
+        f"            cmd /c mklink /J \"$destinationPath\" '{escaped_target}' | Out-Null\n"
+        "            if ($LASTEXITCODE -ne 0) { throw 'test junction injection failed' }\n"
+        "            Assert-NikaNoReparsePathChain -Path $destinationPath\n"
+    )
+    assert needle in payload
+    instrumented.write_text(payload.replace(needle, injected, 1), encoding="utf-8")
+
+    command = [
+        shell,
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(instrumented),
+        "-Mode",
+        "Update",
+        "-Destination",
+        str(destination),
+        "-BundlePath",
+        str(bundle_v2),
+    ]
+    failed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert failed.returncode != 0
+    assert destination.is_dir()
+    assert not destination.is_symlink()
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    assert sentinel.read_text(encoding="utf-8") == "must-not-change"
+    rollback = destination.parent / f".{destination.name}.rollback"
+    assert not rollback.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
 def test_installer_rejects_destination_junction_ancestor_before_mutation(tmp_path: Path) -> None:
     shell = _powershell()
     if shell is None:
