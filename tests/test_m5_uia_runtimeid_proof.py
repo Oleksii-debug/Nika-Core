@@ -68,6 +68,8 @@ def test_autostart_observe_is_read_only_but_mutations_remain_generation_bound() 
     assert "if ($AutostartPhase -ne 'Observe') {" in text
     assert "$target = if ($AutostartPhase -eq 'Observe')" in text
     assert "$autostartControl.Element" in text
+    assert "$autostartSaveControl = if ($AutostartPhase -eq 'Observe')" in text
+    assert "$null" in text
     assert "Resolve-BoundControlIdentity $autostartControl" in text
     assert "$freshReadOnlyControl = Wait-DescendantName 'Запускати Nika разом із Windows'" in text
     assert "$target = $freshReadOnlyControl.Element" in text
