@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.research.models import ResearchEvidence, ResearchResultSet
+from nika_core.research.models import ResearchEvidence, ResearchResultSet, SourceKind
 
 _MAX_NOTE_LENGTH = 4000
 _EVENT_TYPE = "research.review.changed"
@@ -65,6 +65,81 @@ class AccessibleResearchReport:
     created_at: str
     cards: tuple[ResearchCard, ...]
     text: str
+
+
+def safe_evidence_locator(evidence: ResearchEvidence) -> str:
+    """Return a public provenance label without exposing the raw source locator.
+
+    Exact provenance remains available through the stable source_id on the same
+    evidence record. Public reports deliberately avoid reproducing URLs, signed
+    paths, credentials, query strings, fragments, or private local filesystem
+    paths from locator.
+    """
+
+    if not isinstance(evidence, ResearchEvidence):
+        raise TypeError("evidence must be a ResearchEvidence")
+    if evidence.source_kind is SourceKind.HTTP:
+        return "http-source"
+    if evidence.source_kind is SourceKind.LOCAL_FILE:
+        return "local-file"
+    raise ValueError("unsupported research evidence source kind")
+
+
+def _render_accessible_report_text(
+    *,
+    query: str,
+    created_at: str,
+    cards: tuple[ResearchCard, ...],
+) -> str:
+    lines = [
+        "Research results",
+        f"Query: {query}",
+        f"Created: {created_at}",
+        f"Results: {len(cards)}",
+        "",
+    ]
+    for position, card in enumerate(cards, start=1):
+        lines.extend(
+            [
+                f"Result {position}: {card.title}",
+                f"Review: {card.review.state.value}",
+                f"Rank: {card.rank}",
+                f"Why matched: {card.why_matched}",
+                f"Summary: {card.snippet}",
+            ]
+        )
+        if card.review.note:
+            lines.append(f"Review note: {card.review.note}")
+        if card.evidence:
+            lines.append("Evidence:")
+            for evidence_index, evidence in enumerate(card.evidence, start=1):
+                freshness = evidence.freshness.value if evidence.freshness is not None else "n/a"
+                lines.extend(
+                    [
+                        f"  Evidence {evidence_index}",
+                        f"  Source ID: {evidence.source_id}",
+                        f"  Source kind: {evidence.source_kind.value}",
+                        f"  Freshness: {freshness}",
+                        f"  Location: {safe_evidence_locator(evidence)}",
+                        f"  Observed: {evidence.observed_at}",
+                    ]
+                )
+        else:
+            lines.append("Evidence: none recorded")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_accessible_report_text(report: AccessibleResearchReport) -> str:
+    """Render the canonical public plain-text representation from structured cards."""
+
+    if not isinstance(report, AccessibleResearchReport):
+        raise TypeError("report must be an AccessibleResearchReport")
+    return _render_accessible_report_text(
+        query=report.query,
+        created_at=report.created_at,
+        cards=report.cards,
+    )
 
 
 class ResearchReviewRepository:
@@ -192,48 +267,15 @@ class ResearchCardService:
 
     def accessible_report(self, result_set: ResearchResultSet) -> AccessibleResearchReport:
         cards = self.cards_for(result_set)
-        lines = [
-            "Research results",
-            f"Query: {result_set.query}",
-            f"Created: {result_set.created_at}",
-            f"Results: {len(cards)}",
-            "",
-        ]
-        for position, card in enumerate(cards, start=1):
-            lines.extend(
-                [
-                    f"Result {position}: {card.title}",
-                    f"Review: {card.review.state.value}",
-                    f"Rank: {card.rank}",
-                    f"Why matched: {card.why_matched}",
-                    f"Summary: {card.snippet}",
-                ]
-            )
-            if card.review.note:
-                lines.append(f"Review note: {card.review.note}")
-            if card.evidence:
-                lines.append("Evidence:")
-                for evidence_index, evidence in enumerate(card.evidence, start=1):
-                    freshness = evidence.freshness.value if evidence.freshness is not None else "n/a"
-                    lines.extend(
-                        [
-                            f"  Evidence {evidence_index}",
-                            f"  Source ID: {evidence.source_id}",
-                            f"  Source kind: {evidence.source_kind.value}",
-                            f"  Freshness: {freshness}",
-                            f"  Location: {evidence.locator}",
-                            f"  Observed: {evidence.observed_at}",
-                        ]
-                    )
-            else:
-                lines.append("Evidence: none recorded")
-            lines.append("")
-
         return AccessibleResearchReport(
             result_set_id=result_set.result_set_id,
             workspace_id=result_set.workspace_id,
             query=result_set.query,
             created_at=result_set.created_at,
             cards=cards,
-            text="\n".join(lines).rstrip() + "\n",
+            text=_render_accessible_report_text(
+                query=result_set.query,
+                created_at=result_set.created_at,
+                cards=cards,
+            ),
         )
