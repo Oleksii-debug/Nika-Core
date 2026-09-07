@@ -45,6 +45,8 @@ def test_packaged_bridge_reuses_integrated_model_settings_and_freezes_task_choic
     assert "from nika_core.v01_model_settings import V01ModelSettings" in script
     assert "model_settings = V01ModelSettings(store)" in script
     assert "source_bound = source_settings.prepare_task_payload(payload)" in script
+    assert 'if model_snapshot.get("status") == "missing":' in script
+    assert "return dict(source_bound)" in script
     assert "return model_settings.prepare_task_payload(source_bound)" in script
     assert '"v01_model_settings": model_settings.snapshot()' in script
     assert '"settings.model.configure": model_settings.configure' in script
