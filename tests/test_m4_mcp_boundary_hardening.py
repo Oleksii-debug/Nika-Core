@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import traceback
 from types import SimpleNamespace
 
 import pytest
@@ -34,7 +35,16 @@ def test_untrusted_mcp_config_rejects_risk_downgrade(risk: ToolRisk) -> None:
 
 @pytest.mark.parametrize(
     "timeout_seconds",
-    [0.0, -1.0, float("nan"), float("inf"), float("-inf"), True, "1"],
+    [
+        0.0,
+        -1.0,
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        True,
+        "1",
+        10**10000,
+    ],
 )
 def test_mcp_config_rejects_invalid_deadline(timeout_seconds: object) -> None:
     with pytest.raises(ValueError, match="timeout_seconds"):
@@ -119,6 +129,81 @@ def test_discovered_mcp_tool_inherits_exact_boundary_contract() -> None:
     assert specs[0].timeout_seconds == 1.25
     assert specs[0].input_schema["type"] == "object"
     assert "value" in specs[0].input_schema["properties"]
+
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        "",
+        "white space",
+        "colon:name",
+        "slash/name",
+        "line\nbreak",
+        "control\x01name",
+        "a" * 129,
+    ],
+)
+def test_mcp_discovery_rejects_untrusted_tool_name_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+) -> None:
+    class FakeClient:
+        def __init__(self, _target: object, *, read_timeout_seconds: float) -> None:
+            del read_timeout_seconds
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def list_tools(self, *, cursor: str | None) -> object:
+            del cursor
+            return SimpleNamespace(
+                tools=[_fake_tool(tool_name)],
+                next_cursor=None,
+            )
+
+    monkeypatch.setattr(mcp_boundary, "Client", FakeClient)
+    adapter = MCPClientAdapter(
+        MCPServerConfig(server_id="tool-name", target=object())
+    )
+
+    with pytest.raises(MCPBoundaryError, match="invalid MCP tool name"):
+        asyncio.run(adapter.list_tools())
+
+
+@pytest.mark.parametrize("tool_name", ["alpha", "Alpha_2", "group.tool-v1"])
+def test_mcp_discovery_accepts_protocol_compatible_tool_names(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+) -> None:
+    class FakeClient:
+        def __init__(self, _target: object, *, read_timeout_seconds: float) -> None:
+            del read_timeout_seconds
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def list_tools(self, *, cursor: str | None) -> object:
+            del cursor
+            return SimpleNamespace(
+                tools=[_fake_tool(tool_name)],
+                next_cursor=None,
+            )
+
+    monkeypatch.setattr(mcp_boundary, "Client", FakeClient)
+    adapter = MCPClientAdapter(
+        MCPServerConfig(server_id="tool-name", target=object())
+    )
+
+    specs = asyncio.run(adapter.list_tools())
+
+    assert [spec.tool_id for spec in specs] == [f"mcp:tool-name:{tool_name}"]
 
 
 def test_mcp_discovery_collects_all_paginated_tools(
@@ -500,7 +585,7 @@ def test_discovery_transport_failure_is_normalized_without_raw_secret(
             del read_timeout_seconds
 
         async def __aenter__(self) -> BrokenClient:
-            raise RuntimeError(secret)
+            raise ValueError(secret)
 
         async def __aexit__(self, *_args: object) -> None:
             return None
@@ -514,7 +599,15 @@ def test_discovery_transport_failure_is_normalized_without_raw_secret(
         asyncio.run(adapter.list_tools())
 
     assert str(caught.value) == "MCP tool discovery failed"
-    assert secret not in str(caught.value)
+    rendered_traceback = "".join(
+        traceback.format_exception(
+            type(caught.value),
+            caught.value,
+            caught.value.__traceback__,
+        )
+    )
+    assert secret not in rendered_traceback
+    assert caught.value.__suppress_context__ is True
 
     result = asyncio.run(
         adapter.call(
