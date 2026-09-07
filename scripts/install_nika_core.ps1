@@ -178,7 +178,11 @@ function Assert-NikaReleaseBundle {
         if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw "Release bundle contains a reparse-point file."
         }
-        $relative = [System.IO.Path]::GetRelativePath($BundleRoot, $item.FullName).Replace("\", "/")
+        $itemPath = Get-NikaFullPath $item.FullName
+        if (-not (Test-NikaPathWithin -Path $itemPath -Root $BundleRoot)) {
+            throw "Release bundle item escapes bundle root."
+        }
+        $relative = $itemPath.Substring($BundleRoot.Length).TrimStart([System.IO.Path]::DirectorySeparatorChar).Replace("\", "/")
         if ($relative -eq "release-manifest.json") { continue }
         if (-not $expected.Contains($relative)) {
             throw "Release bundle contains a file not bound by the manifest."
