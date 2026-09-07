@@ -1,5 +1,22 @@
 # PARALLEL EXECUTION BOARD — Nika Core
 
+## LIVE BOARD REFRESH — 2026-09-07 — main c0ed340c
+Evidence is exact-head only; live GitHub overrides older rows below.
+
+| Lane | NOW | BLOCK/NEXT |
+|---|---|---|
+| Worker1 Runtime + Audit | #654 Pause/Resume/Cancel; #638 recurrence | fix #654 confirmed-Pause generation race + unchanged #669; finish #638 M12/#664 |
+| Worker2 AI Layer | #674 current-main intelligence/model routing | exact Core/M12 then independent audit; no second ModelGateway |
+| Worker3 Browser + Tools | #677 one-head Scenario B | exact Core/M12/browser proof then independent audit; Scenario A after recurrence authority |
+| Worker4 Windows Journey | #672 shared UIA; #663 model/recovery UI | clear shared packaged UIA first; then exact packaged journey |
+| Worker5 Coordinator + Release | #676 installer; #665 governance evaluator; #666 control plane | fresh gates, non-self audits, guarded integration one leaf at a time |
+| Work/Codex | independent hard audit / unleased package only | collision-check before mutation |
+
+Integrated / do not repeat: #641, #656, #659, #651, #662.
+Governance: branch protection and required checks are disabled.
+HUMAN_TESTED=false; NVDA_VERIFIED=false; PRODUCTION_RELEASE_READY=false.
+
+
 ## LIVE CONTINUOUS-PRODUCT BOARD — 2026-09-07
 
 Mode: **ONE CONTINUOUS FULL PRODUCT / V0.1 NEAREST ACCEPTANCE CHECKPOINT**.
