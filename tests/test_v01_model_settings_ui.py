@@ -48,7 +48,7 @@ def test_packaged_bridge_reuses_integrated_model_settings_and_freezes_task_choic
     assert 'if model_snapshot.get("status") == "missing":' in script
     assert "return dict(source_bound)" in script
     assert "return model_settings.prepare_task_payload(source_bound)" in script
-    assert '"v01_model_settings": model_settings.snapshot()' in script
+    assert 'state["v01_model_settings"] = model_settings.snapshot()' in script
     assert '"settings.model.configure": model_settings.configure' in script
     assert '"settings.model.refresh": refresh_model_settings' in script
     assert "V01BoundModelRuntimeFactory" not in script
