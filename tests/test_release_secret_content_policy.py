@@ -67,6 +67,8 @@ def test_release_manifest_fails_closed_on_secret_content_under_benign_filename(
         ("app.yaml", f"access_token: {CANARY}\n".encode()),
         ("nika.ini", f"password={CANARY}\n".encode()),
         ("bom.properties", b"\xef\xbb\xbfapi_key=" + CANARY.encode() + b"\n"),
+        ("debug.txt", f'api_key = "{CANARY}"\n'.encode()),
+        ("diagnostics.log", f"access_token={CANARY}\n".encode()),
     ],
 )
 def test_release_manifest_rejects_high_confidence_secret_assignments(
@@ -78,6 +80,18 @@ def test_release_manifest_rejects_high_confidence_secret_assignments(
     assert verify_release_manifest(bundle, _manifest(bundle)) == (
         f"secret-content:{relative_path}",
     )
+
+
+def test_release_archive_rejects_secret_assignment_in_plain_text_file(tmp_path: Path) -> None:
+    bundle = _bundle(
+        tmp_path,
+        "debug.txt",
+        f'api_key = "{CANARY}"\n'.encode(),
+    )
+    artifact = _archive_bundle(tmp_path, bundle)
+    findings = verify_release_archive(artifact, source_sha=SOURCE_SHA)
+    assert findings == ("archive:secret-content:debug.txt",)
+    assert CANARY not in "\n".join(findings)
 
 
 def test_release_archive_rejects_secret_content_after_manifest_hash_binding(tmp_path: Path) -> None:
