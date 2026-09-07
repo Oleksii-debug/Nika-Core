@@ -406,15 +406,15 @@ def _handler(state: _ScenarioBState) -> type[BaseHTTPRequestHandler]:
                 return
 
             if family is FixtureFamily.AMBIGUOUS_ACTION_NO_RETRY:
-                attempt, effect_count = state.record(target_id, effect=True)
+                attempt, _ = state.record(target_id, effect=False)
                 self._send(
-                    202,
+                    409,
                     _state_page(
                         target,
                         state="ambiguous",
                         text=(
-                            "Action was accepted by the fixture but completion is unproven; "
-                            f"attempt={attempt}; effect_count={effect_count}; automatic retry forbidden"
+                            f"Ambiguous action outcome after attempt {attempt}; "
+                            "automatic retry forbidden"
                         ),
                     ),
                 )
