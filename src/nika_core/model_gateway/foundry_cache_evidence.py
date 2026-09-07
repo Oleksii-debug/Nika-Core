@@ -19,7 +19,7 @@ def _length_prefix(value: int) -> bytes:
 def _lstat_plain(path: Path) -> os.stat_result:
     try:
         info = os.lstat(path)
-    except OSError as exc:
+    except OSError:
         raise ValueError("model cache path cannot be inspected") from None
 
     attributes = int(getattr(info, "st_file_attributes", 0))
@@ -32,7 +32,7 @@ def _lstat_plain(path: Path) -> os.stat_result:
 def _relative_path(root: Path, path: Path) -> Path:
     try:
         relative = path.relative_to(root)
-    except ValueError as exc:
+    except ValueError:
         raise ValueError("model cache path escapes selected root") from None
     if relative.is_absolute() or ".." in relative.parts:
         raise ValueError("model cache path escapes selected root")
@@ -44,7 +44,7 @@ def _resolved_within_root(root: Path, path: Path) -> Path:
         resolved_root = root.resolve(strict=True)
         resolved_path = path.resolve(strict=True)
         resolved_path.relative_to(resolved_root)
-    except (OSError, RuntimeError, ValueError) as exc:
+    except (OSError, RuntimeError, ValueError):
         raise ValueError("model cache path escapes selected root") from None
     return resolved_path
 
@@ -56,7 +56,7 @@ def _cache_files(root: Path) -> list[tuple[Path, os.stat_result]]:
         raise ValueError("model cache path is not a directory")
     _resolved_within_root(root, root)
 
-    def fail_walk(error: OSError) -> None:
+    def fail_walk(_error: OSError) -> None:
         raise ValueError("model cache tree cannot be enumerated") from None
 
     files: list[tuple[Path, os.stat_result]] = []
@@ -90,7 +90,7 @@ def _cache_files(root: Path) -> list[tuple[Path, os.stat_result]]:
                     raise ValueError("model cache entry is not a regular file")
                 _resolved_within_root(root, child)
                 files.append((child, child_info))
-    except OSError as exc:
+    except OSError:
         raise ValueError("model cache tree cannot be enumerated") from None
 
     files.sort(key=lambda item: _relative_path(root, item[0]).as_posix())
@@ -130,7 +130,7 @@ def _hash_file(
     flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0)) | int(getattr(os, "O_NOFOLLOW", 0))
     try:
         descriptor = os.open(path, flags)
-    except OSError as exc:
+    except OSError:
         raise ValueError("model cache file cannot be opened") from None
 
     observed_size = 0
@@ -163,7 +163,7 @@ def _hash_file(
         opened_after = os.fstat(descriptor)
         if _file_identity(opened_after) != opened_identity:
             raise ValueError("model cache file changed while hashing")
-    except OSError as exc:
+    except OSError:
         raise ValueError("model cache file cannot be read") from None
     finally:
         os.close(descriptor)
