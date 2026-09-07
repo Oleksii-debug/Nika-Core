@@ -206,6 +206,72 @@ def test_restart_exactly_between_batches_preserves_durable_next_intent(
     assert restarted.state.next_scheduled_intent.kind is IntentKind.TARGET
 
 
+def test_external_authority_prepare_survives_restart_without_claiming_effect(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    task_id = _task(store, "external-prepare")
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id=task_id,
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=2,
+    )
+
+    grant = cursor.prepare_external_effect("target-0")
+    assert grant.execute is True
+    assert grant.reason == "external_authority_prepared"
+    assert ledger.list_for_task(task_id) == ()
+    assert cursor.state.targets[0].attempt_state is AttemptState.PREPARED
+
+    restarted = BatchCursor.restore(
+        memory,
+        ledger,
+        task_id=task_id,
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=2,
+    )
+    assert restarted.state.targets[0].attempt_state is AttemptState.PREPARED
+    assert ledger.list_for_task(task_id) == ()
+
+    restarted.confirm_external_effect("target-0", {"verified": True})
+    record = ledger.require(grant.operation_key)
+    assert record.status.value == "completed"
+    assert restarted.state.targets[0].attempt_state is AttemptState.CONFIRMED
+
+
+def test_external_authority_unknown_outcome_becomes_restart_stable_uncertain(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    task_id = _task(store, "external-uncertain")
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id=task_id,
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=2,
+    )
+    cursor.prepare_external_effect("target-0")
+    cursor.mark_external_uncertain("target-0", {"reason": "tool_effect_unknown"})
+
+    restarted = BatchCursor.restore(
+        memory,
+        ledger,
+        task_id=task_id,
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=2,
+    )
+    assert restarted.state.targets[0].attempt_state is AttemptState.UNCERTAIN
+    assert restarted.state.targets[0].uncertain_result == {"reason": "tool_effect_unknown"}
+    with pytest.raises(BatchCursorBlockedError, match="uncertain"):
+        restarted.prepare_external_effect("target-1")
+
 def test_completed_target_never_executes_twice_after_restart(tmp_path: Path) -> None:
     memory, ledger, store = _services(tmp_path)
     task_id = _task(store, "replay")
