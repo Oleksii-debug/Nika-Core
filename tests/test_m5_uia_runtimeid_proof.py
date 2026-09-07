@@ -40,3 +40,24 @@ def test_runtime_id_retry_does_not_swallow_stale_element_identity() -> None:
     # it is not converted into a name-only rebind.
     assert "catch [System.Windows.Automation.ElementNotAvailableException]" in helper
     assert "throw" in helper
+
+
+
+def test_runtime_id_unavailable_retries_fresh_lookup_only_before_authority_capture() -> None:
+    text = PROOF.read_text(encoding="utf-8")
+
+    assert "class NikaUiaRuntimeIdUnavailableException" in text
+    assert "throw [NikaUiaRuntimeIdUnavailableException]::new(" in text
+
+    wait_start = text.index("function Wait-DescendantName(")
+    wait_end = text.index("\n    function Wait-FocusName(", wait_start)
+    wait_body = text[wait_start:wait_end]
+    assert "catch [NikaUiaRuntimeIdUnavailableException]" in wait_body
+    assert "retry the whole semantic lookup from fresh roots" in wait_body
+
+    resolve_start = text.index("function Resolve-BoundControlIdentity(")
+    resolve_end = text.index("\n    $window = $null", resolve_start)
+    resolve_body = text[resolve_start:resolve_end]
+    assert "catch [NikaUiaRuntimeIdUnavailableException]" not in resolve_body
+    assert "$originalRuntimeId = Get-ElementRuntimeId $Identity.Element" in resolve_body
+    assert "$resolvedRuntimeId = Get-ElementRuntimeId $resolved" in resolve_body
