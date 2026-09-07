@@ -248,6 +248,13 @@ def test_confirmed_pause_return_boundary_is_restart_stable(tmp_path) -> None:
         )
         assert len(pause_records) == 1
         assert pause_records[0].status is IdempotencyStatus.COMPLETED
+        assert pause_records[0].result is not None
+        paused_session = coordinator.sessions.get(task_id)
+        assert paused_session is not None
+        assert (
+            pause_records[0].result["paused_session_updated_at"]
+            == paused_session.updated_at
+        )
 
         restarted_runtime = AckedExternalPauseRuntime()
         registry = RuntimeRegistry()

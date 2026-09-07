@@ -548,6 +548,7 @@ class TaskRuntimeCoordinator:
                                 "accepted": True,
                                 "applied": True,
                                 "task_state": TaskState.PAUSED.value,
+                                "paused_session_updated_at": current_record.updated_at,
                             },
                         )
                     applied = True
@@ -563,17 +564,26 @@ class TaskRuntimeCoordinator:
                         resume_token=record.resume_token,
                     ),
                 )
-                if operation_status is IdempotencyStatus.PENDING:
-                    self._idempotency.complete_with_connection(
-                        conn,
-                        operation_key,
-                        {
-                            "accepted": True,
-                            "applied": True,
-                            "task_state": TaskState.PAUSED.value,
-                        },
+                paused_record = self._sessions.get_with_connection(conn, task_id)
+                if paused_record is None or paused_record.outcome is not RuntimeOutcome.PAUSED:
+                    if operation_status is IdempotencyStatus.PENDING:
+                        self._idempotency.mark_uncertain_with_connection(conn, operation_key)
+                    reconcile_error = ValueError(
+                        "Accepted runtime pause did not persist a paused session generation"
                     )
-                applied = True
+                else:
+                    if operation_status is IdempotencyStatus.PENDING:
+                        self._idempotency.complete_with_connection(
+                            conn,
+                            operation_key,
+                            {
+                                "accepted": True,
+                                "applied": True,
+                                "task_state": TaskState.PAUSED.value,
+                                "paused_session_updated_at": paused_record.updated_at,
+                            },
+                        )
+                    applied = True
             else:
                 if operation_status is IdempotencyStatus.PENDING:
                     self._idempotency.mark_uncertain_with_connection(conn, operation_key)
@@ -662,6 +672,11 @@ class TaskRuntimeCoordinator:
                 and current_record.runtime_id == runtime.runtime_id
                 and current_record.thread_id == thread_id
                 and current_record.outcome is RuntimeOutcome.PAUSED
+                and self._completed_pause_matches_session_with_connection(
+                    conn,
+                    task_id=task_id,
+                    record=current_record,
+                )
             ):
                 self._queue.transition_with_connection(conn, task_id, TaskState.CANCELLED)
                 self._sessions.delete_with_connection(conn, task_id)
@@ -1143,6 +1158,41 @@ class TaskRuntimeCoordinator:
             (operation_key,),
         ).fetchone()
         return None if row is None else IdempotencyStatus(row["status"])
+
+    @staticmethod
+    def _completed_pause_matches_session_with_connection(
+        conn,
+        *,
+        task_id: str,
+        record: RuntimeSessionRecord,
+    ) -> bool:
+        rows = conn.execute(
+            """
+            SELECT result_json
+            FROM idempotency_records
+            WHERE task_id = ? AND operation_type = ? AND status = ?
+            ORDER BY updated_at DESC, operation_key DESC
+            """,
+            (task_id, _PAUSE_OPERATION_TYPE, IdempotencyStatus.COMPLETED.value),
+        ).fetchall()
+        for row in rows:
+            raw_result = row["result_json"]
+            if not isinstance(raw_result, str):
+                continue
+            try:
+                result = json.loads(raw_result)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(result, dict):
+                continue
+            if (
+                result.get("accepted") is True
+                and result.get("applied") is True
+                and result.get("task_state") == TaskState.PAUSED.value
+                and result.get("paused_session_updated_at") == record.updated_at
+            ):
+                return True
+        return False
 
     @staticmethod
     def _pending_pause_operation_with_connection(conn, task_id: str) -> str | None:
