@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from contextlib import nullcontext
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
+
+import nika_core.data.sqlite as sqlite_store_module
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_decisions import ProductDecisionRepository
@@ -242,3 +248,138 @@ def test_product_project_schema_v1_upgrades_without_data_loss(tmp_path) -> None:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     assert version == PRODUCT_PROJECT_SCHEMA_VERSION
     assert {"product_decisions", "product_project_mutation_idempotency"} <= tables
+
+
+
+def test_concurrent_identical_decision_write_replays_one_canonical_result(tmp_path) -> None:
+    store, projects, _ = _repos(tmp_path)
+    _handoff(projects)
+    barrier = Barrier(2)
+
+    def write() -> tuple[int, str, tuple[str, ...]]:
+        repository = ProductDecisionRepository(store)
+        barrier.wait()
+        stored = repository.record(
+            "p1",
+            _decision(),
+            expected_row_version=0,
+            idempotency_key="decision:concurrent:identical",
+        )
+        return (
+            stored.decision_version,
+            stored.created_at,
+            stored.evidence_package_ids,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = tuple(pool.map(lambda _index: write(), range(2)))
+
+    assert results[0] == results[1]
+    assert results[0][0] == 1
+    assert results[0][2] == ("research-1",)
+    assert projects.get("p1").row_version == 1
+    assert len(ProductDecisionRepository(store).history("p1", "decision-1")) == 1
+
+
+def test_concurrent_conflicting_reuse_of_idempotency_key_fails_closed(tmp_path) -> None:
+    store, projects, _ = _repos(tmp_path)
+    _handoff(projects)
+    barrier = Barrier(2)
+
+    def write(rationale: str) -> str:
+        repository = ProductDecisionRepository(store)
+        barrier.wait()
+        try:
+            repository.record(
+                "p1",
+                _decision(rationale=rationale),
+                expected_row_version=0,
+                idempotency_key="decision:concurrent:conflict",
+            )
+        except ProductProjectError as exc:
+            assert "different mutation input" in str(exc)
+            return "conflict"
+        return "recorded"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = tuple(pool.map(write, ("candidate-a", "candidate-b")))
+
+    assert sorted(results) == ["conflict", "recorded"]
+    assert projects.get("p1").row_version == 1
+    assert len(ProductDecisionRepository(store).history("p1", "decision-1")) == 1
+
+def test_writer_lock_contention_is_normalized_without_partial_mutation(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, projects, _ = _repos(tmp_path)
+    _handoff(projects)
+    original_connect = sqlite3.connect
+    holder = original_connect(store.path)
+    holder.execute("BEGIN IMMEDIATE")
+
+    def short_timeout_connect(*args, **kwargs):
+        kwargs["timeout"] = 0.01
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite_store_module.sqlite3, "connect", short_timeout_connect)
+    try:
+        with pytest.raises(ProductProjectError, match="temporarily busy"):
+            ProductDecisionRepository(store).record(
+                "p1",
+                _decision(),
+                expected_row_version=0,
+                idempotency_key="decision:busy",
+            )
+    finally:
+        holder.rollback()
+        holder.close()
+
+    assert projects.get("p1").row_version == 0
+    with store.connection() as conn:
+        decision_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM product_decisions WHERE project_id=?",
+            ("p1",),
+        ).fetchone()
+        idempotency_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM product_project_mutation_idempotency "
+            "WHERE operation_key=?",
+            ("decision:busy",),
+        ).fetchone()
+        audit_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM audit_events "
+            "WHERE event_type='product_project.decision_recorded' AND entity_id=?",
+            ("p1",),
+        ).fetchone()
+
+    assert int(decision_count["count"]) == 0
+    assert int(idempotency_count["count"]) == 0
+    assert int(audit_count["count"]) == 0
+
+
+def test_non_lock_operational_error_is_not_reclassified_as_contention(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _, decisions = _repos(tmp_path)
+
+    class NonLockFailureConnection:
+        @staticmethod
+        def execute(statement: str, *_args: object) -> None:
+            assert statement == "BEGIN IMMEDIATE"
+            raise sqlite3.OperationalError("synthetic non-lock failure")
+
+    monkeypatch.setattr(
+        store,
+        "connection",
+        lambda: nullcontext(NonLockFailureConnection()),
+    )
+
+    with pytest.raises(sqlite3.OperationalError, match="synthetic non-lock failure"):
+        decisions.record(
+            "p1",
+            _decision(),
+            expected_row_version=0,
+            idempotency_key="decision:non-lock",
+        )
+
