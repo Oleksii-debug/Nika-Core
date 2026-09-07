@@ -14,7 +14,9 @@ from nika_core.packaging.release import (
 )
 from nika_core.packaging.windows import default_windows_plan
 from nika_core.qa.release_gate import ReleaseGateEvidence, evaluate_release_gate
+from scripts import m11_release
 from scripts.m11_release import (
+    _task_ids,
     _hosted_windows_proof_enabled,
     project_version,
     resolve_release_version,
@@ -122,6 +124,25 @@ def test_packaged_data_adoption_proof_is_limited_to_hosted_windows(
     monkeypatch.setenv("RUNNER_ENVIRONMENT", "github-hosted")
     # The Linux test process must never run a frozen Windows migration fixture.
     assert _hosted_windows_proof_enabled() is (os.name == "nt")
+
+
+def test_packaged_data_adoption_task_reader_closes_sqlite_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeConnection:
+        closed = False
+
+        def execute(self, _sql: str) -> list[tuple[str]]:
+            return [("task-a",), ("task-b",)]
+
+        def close(self) -> None:
+            self.closed = True
+
+    connection = FakeConnection()
+    monkeypatch.setattr(m11_release.sqlite3, "connect", lambda _path: connection)
+
+    assert _task_ids(Path("synthetic.db")) == {"task-a", "task-b"}
+    assert connection.closed is True
 
 
 def test_third_party_notice_verification_fails_closed(tmp_path: Path) -> None:
