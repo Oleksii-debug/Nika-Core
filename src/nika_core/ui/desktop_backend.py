@@ -313,7 +313,7 @@ class DesktopBackend:
         )
         try:
             candidates = recovery.inspect()
-        except Exception:  # noqa: BLE001 - startup recovery boundary records bounded state
+        except Exception:
             self._set_startup_recovery_state(
                 {
                     **self.startup_recovery_snapshot(),
@@ -342,10 +342,14 @@ class DesktopBackend:
                 future.result(timeout=startup_wait_seconds)
             except TimeoutError:
                 pass
-            except Exception:  # noqa: BLE001 - async runtime boundary is normalized below
+            except Exception as exc:  # noqa: BLE001 - runtime/provider boundary
                 # Completion callback converts background diagnostics to bounded state.
-                # A runtime resume failure is not retried and does not justify hiding the shell.
-                pass
+                # Log only the exception type; provider/runtime text may contain private data.
+                _LOGGER.warning(
+                    "Startup recovery did not settle before first shell paint; "
+                    "exception_type=%s",
+                    type(exc).__name__,
+                )
         return self.startup_recovery_snapshot()
 
     def startup_recovery_snapshot(self) -> dict[str, Any]:
