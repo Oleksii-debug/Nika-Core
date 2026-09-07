@@ -17,6 +17,7 @@ class ScheduledJobStore:
 
     def upsert(self, job: ScheduledJob) -> None:
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             self.upsert_with_connection(conn, job)
 
     def upsert_with_connection(self, conn: sqlite3.Connection, job: ScheduledJob) -> None:
