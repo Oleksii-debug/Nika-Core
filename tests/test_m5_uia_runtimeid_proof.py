@@ -78,3 +78,28 @@ def test_autostart_observe_is_read_only_but_mutations_remain_generation_bound() 
     assert "Set-BoundControlFocus $autostartControl" in mutation_body
     assert "Set-BoundControlFocus $autostartSaveControl" in mutation_body
     assert "[System.Windows.Forms.SendKeys]::SendWait(' ')" in mutation_body
+
+
+def test_read_only_text_evidence_allows_equivalent_uia_duplicates_without_action_authority() -> None:
+    text = PROOF.read_text(encoding="utf-8")
+
+    start = text.index("function Wait-BoundTextEvidence(")
+    end = text.index("\n    function Wait-DescendantName(", start)
+    helper = text[start:end]
+
+    assert "ControlType]::Text" in helper
+    assert "$matches.Count -gt 0" in helper
+    assert "Get-BoundSearchRoots $currentWindow" in helper
+    assert "New-BoundControlIdentity" not in helper
+    assert "Resolve-BoundControlIdentity" not in helper
+    assert "SetFocus" not in helper
+    assert "SendKeys" not in helper
+
+    assert "Wait-BoundTextEvidence $expectedStateText" in text
+    assert "Wait-BoundTextEvidence 'Джерела збережено." in text
+    assert "Wait-BoundTextEvidence 'Командне завдання завершено;" in text
+
+    # Interactive and focusable controls still use unique bound identities.
+    assert "Wait-DescendantName 'Запускати Nika разом із Windows'" in text
+    assert "Wait-DescendantName 'Зберегти автозапуск'" in text
+    assert "Wait-DescendantName 'Що має зробити Nika?'" in text
