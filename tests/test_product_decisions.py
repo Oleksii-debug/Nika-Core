@@ -308,6 +308,7 @@ def test_concurrent_conflicting_reuse_of_idempotency_key_fails_closed(tmp_path) 
     assert projects.get("p1").row_version == 1
     assert len(ProductDecisionRepository(store).history("p1", "decision-1")) == 1
 
+
 def test_writer_lock_contention_is_normalized_without_partial_mutation(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
