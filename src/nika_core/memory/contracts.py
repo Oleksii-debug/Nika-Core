@@ -13,6 +13,10 @@ class MemoryScope(StrEnum):
     USER = "user"
 
 
+class MemoryConflictError(RuntimeError):
+    """Raised when a conditional memory mutation no longer matches durable state."""
+
+
 @dataclass(frozen=True, slots=True)
 class MemoryRecord:
     scope: MemoryScope
