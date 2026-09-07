@@ -61,6 +61,9 @@ def build_windows_bridge(
 
     def prepare_task_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         source_bound = source_settings.prepare_task_payload(payload)
+        model_snapshot = model_settings.snapshot()
+        if model_snapshot.get("status") == "missing":
+            return dict(source_bound)
         return model_settings.prepare_task_payload(source_bound)
 
     runtime = V01PackagedThreeAgentRuntime(
@@ -107,11 +110,9 @@ def build_windows_bridge(
     )
 
     def source_state() -> Mapping[str, Any]:
-        return {
-            **packaged_state(),
-            "v01_sources": source_settings.snapshot(),
-            "v01_model_settings": model_settings.snapshot(),
-        }
+        state = {**packaged_state(), "v01_sources": source_settings.snapshot()}
+        state["v01_model_settings"] = model_settings.snapshot()
+        return state
 
     def refresh_model_settings(payload: Mapping[str, Any]) -> UIResult:
         if payload:
