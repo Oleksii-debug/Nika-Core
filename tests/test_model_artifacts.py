@@ -96,6 +96,8 @@ def test_sha256_integrity_requires_exact_lowercase_digest() -> None:
         ("source_reference", "https://models.example.test/model?variant=x"),
         ("source_reference", "https://models.example.test/model#fragment"),
         ("license_reference", "https://licenses.example.test/model?edition=one"),
+        ("source_reference", "env:MODEL_SOURCE_REFERENCE"),
+        ("license_reference", "credential:MODEL_LICENSE_REFERENCE"),
     ),
 )
 def test_public_references_reject_ambiguous_url_surfaces(field: str, value: str) -> None:
@@ -215,10 +217,11 @@ def test_concurrent_identical_writers_collapse_to_one_durable_record(tmp_path: P
         return registry.register(descriptor)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        results = [
-            executor.submit(register, registry).result(timeout=10)
-            for registry in (left, right)
-        ]
+        futures = (
+            executor.submit(register, left),
+            executor.submit(register, right),
+        )
+        results = [future.result(timeout=10) for future in futures]
 
     assert results == [descriptor.descriptor_digest, descriptor.descriptor_digest]
     assert left.list() == (descriptor,)
@@ -287,3 +290,17 @@ def test_unknown_artifact_is_not_synthesized(tmp_path: Path) -> None:
 
     with pytest.raises(KeyError):
         registry.get("ollama", "not-installed")
+
+
+def test_direct_deserialization_rejects_non_list_set_like_fields() -> None:
+    raw = _descriptor().as_dict()
+    raw["capabilities"] = "text.chat"
+    with pytest.raises(ModelArtifactRegistryError, match="capabilities"):
+        ModelArtifactDescriptor.from_json(json.dumps(raw))
+
+    raw = _descriptor().as_dict()
+    resources = dict(raw["resources"])  # type: ignore[arg-type]
+    resources["cpu_architectures"] = "amd64"
+    raw["resources"] = resources
+    with pytest.raises(ModelArtifactRegistryError, match="cpu architectures"):
+        ModelArtifactDescriptor.from_json(json.dumps(raw))
