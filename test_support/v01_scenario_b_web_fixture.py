@@ -194,7 +194,7 @@ def _handler(state: _ScenarioBState) -> type[BaseHTTPRequestHandler]:
             if family is FixtureFamily.NAVIGATION_RESULT:
                 state.record(target_id,effect=True); self._send(303,b"","text/plain; charset=utf-8",location=f"/results/{target.target_id}"); return
             if family is FixtureFamily.AMBIGUOUS_ACTION_NO_RETRY:
-                attempt,effect_count=state.record(target_id,effect=True); self._send(202,_state_page(target,state="ambiguous",text=f"Outcome unknown after attempt {attempt}; possible effect count {effect_count}; automatic retry forbidden")); return
+                attempt,_=state.record(target_id,effect=False); self._send(409,_state_page(target,state="ambiguous",text=f"Ambiguous action outcome after attempt {attempt}; automatic retry forbidden")); return
             state.record(target_id,effect=True); self._send(200,_state_page(target,state="succeeded",text="Success"))
     return Handler
 
