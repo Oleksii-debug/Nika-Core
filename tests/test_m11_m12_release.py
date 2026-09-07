@@ -16,8 +16,8 @@ from nika_core.packaging.windows import default_windows_plan
 from nika_core.qa.release_gate import ReleaseGateEvidence, evaluate_release_gate
 from scripts import m11_release
 from scripts.m11_release import (
-    _task_ids,
     _hosted_windows_proof_enabled,
+    _task_ids,
     project_version,
     resolve_release_version,
     resolve_source_sha,
