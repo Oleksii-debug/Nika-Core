@@ -655,7 +655,14 @@ class TaskRuntimeCoordinator:
                 },
             )
             current = self._task_state_with_connection(conn, task_id)
-            if current is TaskState.PAUSED:
+            current_record = self._sessions.get_with_connection(conn, task_id)
+            if (
+                current is TaskState.PAUSED
+                and current_record is not None
+                and current_record.runtime_id == runtime.runtime_id
+                and current_record.thread_id == thread_id
+                and current_record.outcome is RuntimeOutcome.PAUSED
+            ):
                 self._queue.transition_with_connection(conn, task_id, TaskState.CANCELLED)
                 self._sessions.delete_with_connection(conn, task_id)
                 self._idempotency.complete_with_connection(
