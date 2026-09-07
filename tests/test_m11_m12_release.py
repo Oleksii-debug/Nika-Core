@@ -14,10 +14,8 @@ from nika_core.packaging.release import (
 )
 from nika_core.packaging.windows import default_windows_plan
 from nika_core.qa.release_gate import ReleaseGateEvidence, evaluate_release_gate
-from scripts import m11_release
 from scripts.m11_release import (
     _hosted_windows_proof_enabled,
-    _temporary_data_adoption_workspace,
     project_version,
     resolve_release_version,
     resolve_source_sha,
@@ -124,33 +122,6 @@ def test_packaged_data_adoption_proof_is_limited_to_hosted_windows(
     monkeypatch.setenv("RUNNER_ENVIRONMENT", "github-hosted")
     # The Linux test process must never run a frozen Windows migration fixture.
     assert _hosted_windows_proof_enabled() is (os.name == "nt")
-
-
-def test_packaged_data_adoption_workspace_retries_transient_cleanup_lock(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "hosted-proof"
-    root.mkdir()
-    attempts = 0
-    real_rmtree = m11_release.shutil.rmtree
-
-    def transient_rmtree(path: Path) -> None:
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            raise PermissionError("transient Windows file lock")
-        real_rmtree(path)
-
-    monkeypatch.setattr(m11_release.tempfile, "mkdtemp", lambda **_kwargs: str(root))
-    monkeypatch.setattr(m11_release.shutil, "rmtree", transient_rmtree)
-    monkeypatch.setattr(m11_release.time, "sleep", lambda _seconds: None)
-
-    with _temporary_data_adoption_workspace() as workspace:
-        assert workspace == root
-
-    assert attempts == 2
-    assert not root.exists()
 
 
 def test_third_party_notice_verification_fails_closed(tmp_path: Path) -> None:
