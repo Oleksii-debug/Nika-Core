@@ -33,9 +33,10 @@ def test_model_request_timeout_rejects_non_numeric_or_boolean(value: object) -> 
         math.nan,
         math.inf,
         -math.inf,
+        10**10000,
     ),
 )
-def test_model_request_timeout_rejects_non_finite_or_non_positive(value: float) -> None:
+def test_model_request_timeout_rejects_non_finite_or_non_positive(value: float | int) -> None:
     with pytest.raises(ValueError, match="finite and greater than zero"):
         _request(timeout_seconds=value)
 
@@ -67,11 +68,12 @@ def test_resource_percentages_reject_non_numeric_or_boolean(
         math.nan,
         math.inf,
         -math.inf,
+        10**10000,
     ),
 )
 def test_resource_percentages_reject_non_finite_or_out_of_range(
     field: str,
-    value: float,
+    value: float | int,
 ) -> None:
     with pytest.raises(ValueError, match="finite and in the range"):
         ModelResourcePolicy(**{field: value})
