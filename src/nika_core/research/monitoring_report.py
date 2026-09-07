@@ -8,13 +8,18 @@ from nika_core.research.models import RefreshDisposition, ResearchEvidence, Sour
 from nika_core.research.scheduled_profiles import ResearchProfileDelta
 
 _SECRET_ASSIGNMENT = re.compile(
-    r"(?i)\b(password|api[_-]?key|access[_-]?token|refresh[_-]?token|token)"
-    r"\s*[:=]\s*[^\s,;]+"
+    r"(?i)\\b(password|passwd|client[_-]?secret|secret|api[_-]?key|access[_-]?token|"
+    r"refresh[_-]?token|token)\\s*[:=]\\s*(?:\"[^\"\\r\\n]*\"|'[^'\\r\\n]*'|[^\\s,;]+)"
 )
 _HEADER_SECRET = re.compile(
-    r"(?i)\b(authorization|proxy-authorization|cookie|set-cookie)\s*[:=]\s*[^\r\n]*"
+    r"(?i)\\b(authorization|proxy-authorization|cookie|set-cookie)\\s*[:=]\\s*[^\\r\\n]*"
 )
-_SAFE_CODE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}\Z")
+_SAFE_CODE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}\\Z")
+_SAFE_REFERENCE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+~-]{0,159}\\Z")
+_SENSITIVE_REFERENCE_RE = re.compile(
+    r"(?i)^(?:authorization|proxy-authorization|cookie|set-cookie|password|passwd|"
+    r"client[_-]?secret|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|token):"
+)
 
 
 def _required_line(value: str, field_name: str, *, max_length: int = 240) -> str:
@@ -35,6 +40,25 @@ def _optional_code(value: str | None, field_name: str) -> str | None:
     if _SAFE_CODE_RE.fullmatch(normalized) is None:
         raise ValueError(f"{field_name} must be a bounded safe code")
     return normalized
+
+
+def _safe_reference(
+    value: str,
+    field_name: str,
+    *,
+    max_length: int = 160,
+) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string")
+    if not value or len(value) > max_length or any(character.isspace() for character in value):
+        raise ValueError(f"{field_name} must be a bounded safe reference")
+    if (
+        _SAFE_REFERENCE_RE.fullmatch(value) is None
+        or "://" in value
+        or _SENSITIVE_REFERENCE_RE.search(value) is not None
+    ):
+        raise ValueError(f"{field_name} must be a bounded safe reference")
+    return value
 
 
 def _timestamp(value: str, field_name: str) -> str:
@@ -72,7 +96,7 @@ class MonitoringSourceCheck:
     snapshot_id: str | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "source_id", _required_line(self.source_id, "source_id"))
+        object.__setattr__(self, "source_id", _safe_reference(self.source_id, "source_id"))
         if not isinstance(self.source_kind, SourceKind):
             raise TypeError("source_kind must be a SourceKind")
         if not isinstance(self.disposition, RefreshDisposition):
@@ -88,7 +112,7 @@ class MonitoringSourceCheck:
             object.__setattr__(
                 self,
                 "snapshot_id",
-                _required_line(self.snapshot_id, "snapshot_id", max_length=160),
+                _safe_reference(self.snapshot_id, "snapshot_id"),
             )
 
     @property
@@ -110,13 +134,16 @@ class MonitoringChange:
         object.__setattr__(
             self,
             "document_id",
-            _required_line(self.document_id, "document_id", max_length=160),
+            _safe_reference(self.document_id, "document_id"),
         )
         object.__setattr__(self, "title", _safe_label(_required_line(self.title, "title")))
         if not isinstance(self.evidence, tuple) or not all(
             isinstance(item, ResearchEvidence) for item in self.evidence
         ):
             raise TypeError("evidence must be a tuple of ResearchEvidence")
+        for evidence in self.evidence:
+            _safe_reference(evidence.source_id, "evidence.source_id")
+            _timestamp(evidence.observed_at, "evidence.observed_at")
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,7 +161,7 @@ class MonitoringCheck:
     terminal_reason: str | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "check_id", _required_line(self.check_id, "check_id"))
+        object.__setattr__(self, "check_id", _safe_reference(self.check_id, "check_id"))
         object.__setattr__(self, "checked_at", _timestamp(self.checked_at, "checked_at"))
         if not isinstance(self.sources, tuple) or not self.sources:
             raise ValueError("sources must contain at least one MonitoringSourceCheck")
@@ -152,22 +179,28 @@ class MonitoringCheck:
             isinstance(item, MonitoringChange) for item in self.changes
         ):
             raise TypeError("changes must be a tuple of MonitoringChange")
+        allowed_source_keys = set(source_keys)
+        for change in self.changes:
+            for evidence in change.evidence:
+                if (evidence.source_kind.value, evidence.source_id) not in allowed_source_keys:
+                    raise ValueError(
+                        "change evidence source identity is not part of this monitoring check"
+                    )
         if not isinstance(self.condition_matched, bool):
             raise TypeError("condition_matched must be a bool")
         if self.result_set_id is not None:
             object.__setattr__(
                 self,
                 "result_set_id",
-                _required_line(self.result_set_id, "result_set_id", max_length=160),
+                _safe_reference(self.result_set_id, "result_set_id"),
             )
         if self.previous_result_set_id is not None:
             object.__setattr__(
                 self,
                 "previous_result_set_id",
-                _required_line(
+                _safe_reference(
                     self.previous_result_set_id,
                     "previous_result_set_id",
-                    max_length=160,
                 ),
             )
         if self.next_scheduled_check is not None:
@@ -212,7 +245,7 @@ class MonitoringReport:
     state_reference: str | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "monitor_id", _required_line(self.monitor_id, "monitor_id"))
+        object.__setattr__(self, "monitor_id", _safe_reference(self.monitor_id, "monitor_id"))
         if not isinstance(self.checks, tuple) or not all(
             isinstance(item, MonitoringCheck) for item in self.checks
         ):
@@ -232,7 +265,7 @@ class MonitoringReport:
             object.__setattr__(
                 self,
                 "state_reference",
-                _required_line(self.state_reference, "state_reference", max_length=160),
+                _safe_reference(self.state_reference, "state_reference"),
             )
         if self.terminal_reason is not None and self.next_scheduled_check is not None:
             raise ValueError("terminal monitoring report cannot have a next scheduled check")
