@@ -1,3 +1,12 @@
+## LIVE STATUS OVERRIDE — 2026-09-07T20:44+02:00
+CURRENT_MAIN=`c0ed340c8ee6ddfab011f861f5e6f49017ff5286`.
+DONE=#641,#656,#659,#651,#662 integrated.
+IN_PROGRESS=#654 Pause/Resume/Cancel; #638 recurrence audit; #677 Scenario-B; #672 shared UIA; #663 Windows model UI; #676 installer; #665 governance evaluator; Worker2 AI/model lane.
+BLOCKED=#654 confirmed-Pause generation race; #672 packaged RuntimeId/restart proof until owner terminal-green; branch protection/required checks disabled.
+STALE=#660 exact-base evidence until #672 integration/reconvergence; older package/governance predecessors #648/#649/#657; old heads for any moving PR.
+NEXT=first independently audited exact-current green production leaf, currently #638 if unchanged replay passes.
+HUMAN_TESTED=false; NVDA_VERIFIED=false; PRODUCTION_RELEASE_READY=false.
+
 # PROJECT STATUS — Nika Core
 
 ## LIVE SUPERSEDING REFRESH — 2026-09-07 — after #662
