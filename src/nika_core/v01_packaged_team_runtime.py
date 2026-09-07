@@ -158,7 +158,6 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         return await self._run_outer(task_id=request.task_id, command=command)
 
     async def cancel(self, *, task_id: str, thread_id: str) -> bool:
-        del task_id
         if self._is_member_thread(thread_id):
             identity = self._member_identity(thread_id)
             if identity is None:
@@ -177,10 +176,7 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
                 )
             return True
 
-        outer_task_id = self._outer_task_id_from_thread(thread_id)
-        if outer_task_id is None:
-            return True
-        team_id = self._team_id(outer_task_id)
+        team_id = self._team_id(task_id)
         try:
             state = self._multi_store.team_state(team_id)
         except KeyError:
@@ -448,7 +444,7 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
                 (task_id,),
             ).fetchone()
         if row is None:
-            raise KeyError(f"unknown task: {task_id}")
+            return False
         payload = json.loads(row["payload_json"])
         if not isinstance(payload, dict):
             raise TypeError("task payload must be an object")
@@ -592,10 +588,6 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
     @staticmethod
     def _is_member_thread(thread_id: str) -> bool:
         return thread_id.startswith("v01:")
-
-    @staticmethod
-    def _outer_task_id_from_thread(thread_id: str) -> str | None:
-        return None if V01PackagedThreeAgentRuntime._is_member_thread(thread_id) else thread_id
 
     @staticmethod
     def _member_identity(thread_id: str) -> tuple[str, str] | None:
