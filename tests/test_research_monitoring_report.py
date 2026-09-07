@@ -45,6 +45,8 @@ def _check(
     *,
     condition_matched: bool = False,
     sources: tuple[MonitoringSourceCheck, ...] | None = None,
+    next_scheduled_check: str | None = None,
+    terminal_reason: str | None = None,
 ) -> MonitoringCheck:
     return MonitoringCheck(
         check_id=f"check-{checked_at}",
@@ -52,6 +54,8 @@ def _check(
         sources=sources or (_source(),),
         changes=(),
         condition_matched=condition_matched,
+        next_scheduled_check=next_scheduled_check,
+        terminal_reason=terminal_reason,
     )
 
 
@@ -69,7 +73,10 @@ def test_monitoring_report_renders_required_accessible_timeline_fields() -> None
                     ),
                 ),
             ),
-            _check("2026-08-27T15:05:00+00:00"),
+            _check(
+                "2026-08-27T15:05:00+00:00",
+                next_scheduled_check="2026-08-27T15:10:00+00:00",
+            ),
         ),
         next_scheduled_check="2026-08-27T15:10:00+00:00",
         state_reference="checkpoint-7",
@@ -125,6 +132,7 @@ def test_profile_delta_projection_keeps_provenance_but_not_raw_locator_or_snippe
                 condition_matched=True,
                 result_set_id="result-2",
                 previous_result_set_id="result-1",
+                terminal_reason="condition_matched",
             ),
         ),
         terminal_reason="condition_matched",
@@ -150,6 +158,7 @@ def test_matched_condition_cannot_report_future_schedule() -> None:
                 _check(
                     "2026-08-27T15:00:00+00:00",
                     condition_matched=True,
+                    next_scheduled_check="2026-08-27T15:05:00+00:00",
                 ),
             ),
             next_scheduled_check="2026-08-27T15:05:00+00:00",
