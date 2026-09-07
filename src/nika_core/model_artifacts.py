@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from urllib.parse import urlsplit
@@ -122,7 +122,7 @@ class ModelArtifactDescriptor:
     sha256: str | None = None
     size_bytes: int | None = None
     capabilities: tuple[str, ...] = ()
-    resources: ModelArtifactResources = ModelArtifactResources()
+    resources: ModelArtifactResources = field(default_factory=ModelArtifactResources)
     schema_version: int = _SCHEMA_VERSION
 
     def __post_init__(self) -> None:
