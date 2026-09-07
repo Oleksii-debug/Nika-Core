@@ -90,9 +90,9 @@ def test_resource_status_reports_headroom_without_mutating_admission_state(tmp_p
 def test_resource_status_reports_all_current_budget_pressure(tmp_path) -> None:
     observer = FakeObserver(
         ResourceSnapshot(
-            cpu_percent=91.5,
-            memory_percent=88.0,
-            available_memory_bytes=1_000_000_000,
+            cpu_percent=10.0,
+            memory_percent=20.0,
+            available_memory_bytes=8_000_000_000,
         )
     )
     manager = ResourceManager(_store(tmp_path), observer)
@@ -105,15 +105,12 @@ def test_resource_status_reports_all_current_budget_pressure(tmp_path) -> None:
             max_memory_percent=75.0,
         )
     )
-    assert manager.request(scope="agent", owner_id="heavy", request_id="first").reason == (
-        "cpu_limit"
-    )
+    assert manager.request(scope="agent", owner_id="heavy", request_id="first").granted
     observer.value = ResourceSnapshot(
         cpu_percent=91.5,
         memory_percent=88.0,
         available_memory_bytes=1_000_000_000,
     )
-    manager._active[("agent", "heavy")] = {"already-running"}
 
     status = manager.status(scope="agent", owner_id="heavy")
 

@@ -25,7 +25,7 @@ class PsutilResourceObserver(ResourceObserverPort):
         power_plugged: bool | None = None
         try:
             battery = psutil.sensors_battery()
-        except (AttributeError, NotImplementedError, OSError):
+        except (AttributeError, NotImplementedError, OSError, psutil.Error):
             battery = None
         if battery is not None:
             battery_percent = float(battery.percent)
