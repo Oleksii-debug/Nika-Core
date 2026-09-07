@@ -30,7 +30,7 @@ The verifier requires all of the following before returning `PASS`:
 4. force pushes are blocked;
 5. branch deletion is blocked;
 6. the stable Core CI contexts `Verify (ubuntu-latest)` and `Verify (windows-latest)` are required;
-7. active rulesets used as evidence have no bypass actors;
+7. active rulesets used as evidence have an explicitly visible `bypass_actors` field and no bypass actors; a missing/hidden field is unknown evidence, never equivalent to an empty list;
 8. when `--expected-head` is supplied, the observed branch head is exactly that SHA.
 
 Path-conditional or routinely skipped workflows are deliberately not made universal required checks. M11/M12 remain release/acceptance evidence and can be added to repository protection only after their exact stable check surfaces are proven suitable for every protected-branch change.
@@ -41,7 +41,7 @@ The public branch summary may show whether a branch is protected, but complete c
 
 Pass a token only through an environment variable, never a command-line value or repository file. The default is `GITHUB_TOKEN`; use `--token-env NAME` to select another environment variable. The verifier pins requests to `https://api.github.com`; there is no command-line API-host override that could redirect a token. Do not commit `.env`, tokens, browser credentials, or GitHub sessions.
 
-If the token cannot read detailed protection state, the verifier reports `BLOCKED` rather than guessing that the branch is safe.
+If the token cannot read detailed protection state, the verifier reports `BLOCKED` rather than guessing that the branch is safe. GitHub may omit a ruleset's `bypass_actors` field unless the caller is allowed to see that sensitive ruleset detail; the verifier therefore refuses to use such a ruleset as proof when the field is absent.
 
 ## Safe activation boundary
 
