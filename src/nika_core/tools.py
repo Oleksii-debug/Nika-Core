@@ -146,6 +146,7 @@ ApprovalPolicy = Callable[
     [ToolSpec, ToolCall],
     Awaitable[ToolAuthorization | bool | None],
 ]
+PreHandlerAuthority = Callable[[], bool]
 
 
 class ToolEffectConflictError(RuntimeError):
@@ -289,6 +290,17 @@ class ToolEffectGuard:
         if record.status is IdempotencyStatus.PENDING:
             self._ledger.mark_uncertain(reservation.operation_key)
 
+    def release_pending(self, reservation: ToolEffectReservation) -> None:
+        """Release a proven-unexecuted reservation before handler dispatch."""
+        if reservation.completed_result is not None:
+            raise ToolEffectConflictError("completed tool effect cannot be released")
+        try:
+            self._ledger.release_pending(reservation.operation_key)
+        except (IdempotencyConflictError, KeyError, sqlite3.Error) as exc:
+            raise ToolEffectConflictError(
+                "pending tool effect release failed closed"
+            ) from exc
+
     @staticmethod
     def _operation_key(*, task_id: str, call_id: str) -> str:
         identity = json.dumps(
@@ -367,7 +379,12 @@ class ToolExecutor:
     def specs(self) -> tuple[ToolSpec, ...]:
         return tuple(spec for spec, _handler in self._tools.values())
 
-    async def execute(self, call: ToolCall) -> ToolResult:
+    async def execute(
+        self,
+        call: ToolCall,
+        *,
+        pre_handler_authority: PreHandlerAuthority | None = None,
+    ) -> ToolResult:
         registered = self._tools.get(call.tool_id)
         if registered is None:
             return ToolResult(call_id=call.call_id, tool_id=call.tool_id, error="unknown tool")
@@ -446,6 +463,59 @@ class ToolExecutor:
                     tool_id=call.tool_id,
                     output=reservation.completed_result.get("output"),
                 )
+            if pre_handler_authority is not None:
+                denial_reason = "pre_handler_authority_denied"
+                try:
+                    allowed = pre_handler_authority()
+                except asyncio.CancelledError:
+                    try:
+                        self._effect_guard.release_pending(reservation)
+                    except ToolEffectConflictError:
+                        self._audit(
+                            "tool.denied",
+                            call,
+                            spec,
+                            {
+                                "reason": "pending_release_failed",
+                                "phase": "pre_handler_authority",
+                            },
+                        )
+                    raise
+                except Exception as exc:  # noqa: BLE001 - trusted authority fails closed.
+                    allowed = False
+                    denial_reason = type(exc).__name__
+                if allowed is not True:
+                    try:
+                        self._effect_guard.release_pending(reservation)
+                    except ToolEffectConflictError as exc:
+                        self._audit(
+                            "tool.denied",
+                            call,
+                            spec,
+                            {
+                                "reason": type(exc).__name__,
+                                "phase": "pre_handler_authority_release",
+                            },
+                        )
+                        return ToolResult(
+                            call_id=call.call_id,
+                            tool_id=call.tool_id,
+                            error="tool effect not safe to execute",
+                        )
+                    self._audit(
+                        "tool.denied",
+                        call,
+                        spec,
+                        {
+                            "reason": denial_reason,
+                            "phase": "pre_handler_authority",
+                        },
+                    )
+                    return ToolResult(
+                        call_id=call.call_id,
+                        tool_id=call.tool_id,
+                        error="pre-handler authority denied",
+                    )
         else:
             reservation = None
 
