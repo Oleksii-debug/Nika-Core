@@ -213,9 +213,9 @@ const status = element("model-settings-status");
   };
   await poll();
   assert.equal(document.activeElement, recoveryFocus, "Attention state must not steal focus");
-  assert.match(element("recovery-status").textContent, /Невизначена або заблокована/);
+  assert.match(element("recovery-status").textContent, /невизначена або заблокована/i);
   assert.equal(element("recovery-uncertain-count").textContent, "1");
-  assert.match(element("app-status").textContent, /Невизначена або заблокована/);
+  assert.match(element("app-status").textContent, /невизначена або заблокована/i);
 
   currentRecovery = {
     ...currentRecovery,
