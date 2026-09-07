@@ -21,6 +21,7 @@ HEAD = "a" * 40
 REPO = "Oleksii-debug/Nika-Core"
 BRANCH = "main"
 CHECKS = ["Verify (ubuntu-latest)", "Verify (windows-latest)"]
+GITHUB_ACTIONS_APP_ID = 15368
 
 
 class FakeClient:
@@ -40,11 +41,17 @@ def branch_response(*, protected: bool = True, head: str = HEAD) -> dict[str, An
     return {"protected": protected, "commit": {"sha": head}}
 
 
-def classic_protection(*, checks: list[str] | None = None) -> dict[str, Any]:
+def classic_protection(
+    *,
+    checks: list[str] | None = None,
+    app_id: int = GITHUB_ACTIONS_APP_ID,
+) -> dict[str, Any]:
+    required = checks or CHECKS
     return {
         "required_status_checks": {
             "strict": True,
-            "contexts": checks or CHECKS,
+            "contexts": [],
+            "checks": [{"context": check, "app_id": app_id} for check in required],
         },
         "required_pull_request_reviews": {"required_approving_review_count": 0},
         "enforce_admins": {"enabled": True},
@@ -60,6 +67,15 @@ def base_responses(*, protected: bool = True) -> dict[str, Any]:
         ),
         "/repos/Oleksii-debug/Nika-Core": {"default_branch": "main"},
         "/repos/Oleksii-debug/Nika-Core/rulesets?includes_parents=true": [],
+        f"/repos/Oleksii-debug/Nika-Core/commits/{HEAD}/check-runs?filter=latest&per_page=100": {
+            "check_runs": [
+                {
+                    "name": check,
+                    "app": {"id": GITHUB_ACTIONS_APP_ID, "slug": "github-actions"},
+                }
+                for check in CHECKS
+            ]
+        },
     }
 
 
@@ -146,6 +162,7 @@ def test_active_ruleset_without_bypass_can_prove_pf4_controls() -> None:
     responses["/repos/Oleksii-debug/Nika-Core/rulesets/17"] = {
         "id": 17,
         "name": "protect-main",
+        "target": "branch",
         "enforcement": "active",
         "bypass_actors": [],
         "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
@@ -156,7 +173,7 @@ def test_active_ruleset_without_bypass_can_prove_pf4_controls() -> None:
             {
                 "type": "required_status_checks",
                 "parameters": {
-                    "required_status_checks": [{"context": check} for check in CHECKS]
+                    "required_status_checks": [{"context": check, "integration_id": GITHUB_ACTIONS_APP_ID} for check in CHECKS]
                 },
             },
         ],
@@ -174,7 +191,7 @@ def test_active_ruleset_without_bypass_can_prove_pf4_controls() -> None:
     assert report["blockers"] == []
 
 
-def test_bypass_ruleset_is_not_used_when_classic_protection_is_complete() -> None:
+def test_bypass_ruleset_blocks_even_when_classic_protection_is_complete() -> None:
     responses = base_responses()
     responses[f"/repos/Oleksii-debug/Nika-Core/branches/{BRANCH}/protection"] = (
         classic_protection()
@@ -185,6 +202,7 @@ def test_bypass_ruleset_is_not_used_when_classic_protection_is_complete() -> Non
     responses["/repos/Oleksii-debug/Nika-Core/rulesets/18"] = {
         "id": 18,
         "name": "extra-policy",
+        "target": "branch",
         "enforcement": "active",
         "bypass_actors": [
             {"actor_id": 123, "actor_type": "Integration", "bypass_mode": "always"}
@@ -196,8 +214,8 @@ def test_bypass_ruleset_is_not_used_when_classic_protection_is_complete() -> Non
 
     report = inspect(client)
 
-    assert report["status"] == "PASS"
-    assert report["blockers"] == []
+    assert report["status"] == "BLOCKED"
+    assert "RULESET_BYPASS_NOT_CLOSED" in report["blockers"]
     assert report["controls"]["ruleset_bypass_actor_count"] == 1
     assert report["controls"]["proof_eligible_ruleset_count"] == 0
 
@@ -214,6 +232,7 @@ def test_ruleset_without_visible_bypass_actors_cannot_prove_governance() -> None
         "id": 21,
         "name": "protect-main",
         "target": "branch",
+        "target": "branch",
         "enforcement": "active",
         # GitHub may omit bypass_actors unless the caller can view that sensitive field.
         "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
@@ -224,7 +243,7 @@ def test_ruleset_without_visible_bypass_actors_cannot_prove_governance() -> None
             {
                 "type": "required_status_checks",
                 "parameters": {
-                    "required_status_checks": [{"context": check} for check in CHECKS]
+                    "required_status_checks": [{"context": check, "integration_id": GITHUB_ACTIONS_APP_ID} for check in CHECKS]
                 },
             },
         ],
@@ -251,6 +270,7 @@ def test_ruleset_bypass_actor_blocks_when_ruleset_is_needed_for_proof() -> None:
     responses["/repos/Oleksii-debug/Nika-Core/rulesets/19"] = {
         "id": 19,
         "name": "protect-main",
+        "target": "branch",
         "enforcement": "active",
         "bypass_actors": [
             {"actor_id": 123, "actor_type": "Integration", "bypass_mode": "always"}
@@ -263,7 +283,7 @@ def test_ruleset_bypass_actor_blocks_when_ruleset_is_needed_for_proof() -> None:
             {
                 "type": "required_status_checks",
                 "parameters": {
-                    "required_status_checks": [{"context": check} for check in CHECKS]
+                    "required_status_checks": [{"context": check, "integration_id": GITHUB_ACTIONS_APP_ID} for check in CHECKS]
                 },
             },
         ],
@@ -289,6 +309,7 @@ def test_unrelated_ruleset_cannot_close_classic_admin_bypass() -> None:
     responses["/repos/Oleksii-debug/Nika-Core/rulesets/20"] = {
         "id": 20,
         "name": "metadata-only",
+        "target": "branch",
         "enforcement": "active",
         "bypass_actors": [],
         "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
@@ -328,6 +349,89 @@ def test_expected_head_mismatch_blocks_stale_governance_evidence() -> None:
 
     assert report["status"] == "BLOCKED"
     assert report["blockers"] == ["HEAD_MISMATCH"]
+
+
+def test_classic_required_check_from_any_app_is_not_proven() -> None:
+    responses = base_responses()
+    responses[f"/repos/Oleksii-debug/Nika-Core/branches/{BRANCH}/protection"] = (
+        classic_protection(app_id=-1)
+    )
+    client = FakeClient(responses)
+
+    report = inspect(client)
+
+    assert report["status"] == "BLOCKED"
+    assert "REQUIRED_STATUS_CHECK_SOURCE_NOT_PROVEN" in report["blockers"]
+    assert report["required_check_source_unproven"] == CHECKS
+
+
+def test_classic_required_check_from_wrong_app_is_not_proven() -> None:
+    responses = base_responses()
+    responses[f"/repos/Oleksii-debug/Nika-Core/branches/{BRANCH}/protection"] = (
+        classic_protection(app_id=999999)
+    )
+    client = FakeClient(responses)
+
+    report = inspect(client)
+
+    assert report["status"] == "BLOCKED"
+    assert "REQUIRED_STATUS_CHECK_SOURCE_NOT_PROVEN" in report["blockers"]
+
+
+def test_tag_ruleset_with_branch_looking_ref_cannot_prove_branch_governance() -> None:
+    responses = base_responses()
+    responses[f"/repos/Oleksii-debug/Nika-Core/branches/{BRANCH}/protection"] = ApiFailure(
+        status=403, message="http_403:forbidden"
+    )
+    responses["/repos/Oleksii-debug/Nika-Core/rulesets?includes_parents=true"] = [
+        {"id": 30, "name": "tag-policy"}
+    ]
+    responses["/repos/Oleksii-debug/Nika-Core/rulesets/30"] = {
+        "id": 30,
+        "name": "tag-policy",
+        "target": "tag",
+        "enforcement": "active",
+        "bypass_actors": [],
+        "conditions": {"ref_name": {"include": ["refs/heads/main"], "exclude": []}},
+        "rules": [
+            {"type": "deletion"},
+            {"type": "non_fast_forward"},
+            {"type": "pull_request"},
+        ],
+    }
+    client = FakeClient(responses)
+
+    report = inspect(client)
+
+    assert report["status"] == "BLOCKED"
+    assert report["controls"]["proof_eligible_ruleset_count"] == 0
+    assert "PULL_REQUEST_NOT_REQUIRED" in report["blockers"]
+
+
+def test_ruleset_star_does_not_cross_ref_path_separator() -> None:
+    responses = base_responses()
+    responses[f"/repos/Oleksii-debug/Nika-Core/branches/{BRANCH}/protection"] = ApiFailure(
+        status=403, message="http_403:forbidden"
+    )
+    responses["/repos/Oleksii-debug/Nika-Core/rulesets?includes_parents=true"] = [
+        {"id": 31, "name": "single-segment"}
+    ]
+    responses["/repos/Oleksii-debug/Nika-Core/rulesets/31"] = {
+        "id": 31,
+        "name": "single-segment",
+        "target": "branch",
+        "enforcement": "active",
+        "bypass_actors": [],
+        "conditions": {"ref_name": {"include": ["refs/*"], "exclude": []}},
+        "rules": [{"type": "pull_request"}],
+    }
+    client = FakeClient(responses)
+
+    report = inspect(client)
+
+    assert report["status"] == "BLOCKED"
+    assert report["controls"]["proof_eligible_ruleset_count"] == 0
+    assert "PULL_REQUEST_NOT_REQUIRED" in report["blockers"]
 
 
 def test_rest_client_pins_github_api_host() -> None:
