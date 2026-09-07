@@ -20,6 +20,7 @@ _SENSITIVE_REFERENCE_RE = re.compile(
     r"(?i)^(?:authorization|proxy-authorization|cookie|set-cookie|password|passwd|"
     r"client[_-]?secret|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|token):"
 )
+_PRIVATE_ABSOLUTE_REFERENCE_RE = re.compile(r"(?i)^(?:[a-z]:/|file:/)")
 
 
 def _required_line(value: str, field_name: str, *, max_length: int = 240) -> str:
@@ -55,6 +56,7 @@ def _safe_reference(
     if (
         _SAFE_REFERENCE_RE.fullmatch(value) is None
         or "://" in value
+        or _PRIVATE_ABSOLUTE_REFERENCE_RE.search(value) is not None
         or _SENSITIVE_REFERENCE_RE.search(value) is not None
     ):
         raise ValueError(f"{field_name} must be a bounded safe reference")
@@ -130,7 +132,10 @@ class MonitoringChange:
     evidence: tuple[ResearchEvidence, ...] = ()
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "kind", _required_line(self.kind, "kind", max_length=40))
+        kind = _required_line(self.kind, "kind", max_length=40)
+        if _SAFE_CODE_RE.fullmatch(kind) is None:
+            raise ValueError("kind must be a bounded safe code")
+        object.__setattr__(self, "kind", kind)
         object.__setattr__(
             self,
             "document_id",
@@ -271,12 +276,9 @@ class MonitoringReport:
             raise ValueError("terminal monitoring report cannot have a next scheduled check")
         if self.checks:
             latest = self.checks[-1]
-            if (
-                self.next_scheduled_check is not None
-                and self.next_scheduled_check != latest.next_scheduled_check
-            ):
+            if self.next_scheduled_check != latest.next_scheduled_check:
                 raise ValueError("report next scheduled check contradicts latest check snapshot")
-            if self.terminal_reason is not None and self.terminal_reason != latest.terminal_reason:
+            if self.terminal_reason != latest.terminal_reason:
                 raise ValueError("report terminal reason contradicts latest check snapshot")
             if latest.condition_matched and self.next_scheduled_check is not None:
                 raise ValueError("matched condition cannot have a future scheduled check")
