@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -171,8 +172,21 @@ class OllamaProvider:
     ) -> None:
         if not default_model.strip():
             raise ValueError("default_model must not be empty")
+        if default_model != default_model.strip():
+            raise ValueError("default_model must not contain surrounding whitespace")
         if not base_url.strip():
             raise ValueError("base_url must not be empty")
+        if base_url != base_url.strip():
+            raise ValueError("base_url must not contain surrounding whitespace")
+        parsed = urlsplit(base_url)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("Ollama base_url requires an HTTP(S) loopback host")
+        if parsed.hostname.lower() not in {"localhost", "127.0.0.1", "::1"}:
+            raise ValueError("Ollama local route must use a loopback host")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("Ollama base_url must not contain userinfo")
+        if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+            raise ValueError("Ollama base_url must not contain path, query, or fragment")
         self._capabilities = ProviderCapabilities(
             provider_id="ollama",
             kind=ProviderKind.LOCAL,
