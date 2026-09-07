@@ -11,6 +11,12 @@ def build_default_action_registry() -> ActionRegistry:
         ActionDefinition("task.resume", "Resume task", "Tasks", "Ctrl+R"),
         ActionDefinition("agent.stop", "Stop agent", "Agents", "Ctrl+Shift+S"),
         ActionDefinition("team.sources.configure", "Зберегти джерела команди", "Джерела", None),
+        ActionDefinition(
+            "settings.autostart.configure", "Зберегти автозапуск", "Налаштування", None
+        ),
+        ActionDefinition(
+            "settings.autostart.refresh", "Перечитати автозапуск", "Налаштування", None
+        ),
         ActionDefinition("nav.tasks", "Open tasks", "Navigation", "Alt+1"),
         ActionDefinition("nav.agents", "Open agents", "Navigation", "Alt+2"),
         ActionDefinition("nav.logs", "Open logs", "Navigation", "Alt+3"),
