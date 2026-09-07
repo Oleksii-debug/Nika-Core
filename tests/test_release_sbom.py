@@ -86,7 +86,14 @@ def _report(
     if include_pywebview:
         install.append(_archive_item("pywebview", "6.2.1", "2" * 64, requested=True))
     path.write_text(
-        json.dumps({"version": "1", "pip_version": "26.0", "install": install}),
+        json.dumps(
+            {
+                "version": "1",
+                "pip_version": "26.0",
+                "install": install,
+                "environment": sbom.default_environment(),
+            }
+        ),
         encoding="utf-8",
     )
     return path
@@ -107,6 +114,29 @@ def installed_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
         }
 
     monkeypatch.setattr(sbom, "_installed_distribution_evidence", fake_installed)
+
+
+def test_supply_chain_rejects_missing_resolver_environment(
+    tmp_path: Path,
+    installed_metadata: None,
+) -> None:
+    project_root = _project(tmp_path / "project")
+    report = _report(tmp_path / "report.json")
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    payload.pop("environment")
+    report.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        SupplyChainEvidenceError,
+        match="pip installation report environment is invalid",
+    ):
+        sbom.build_supply_chain_evidence(
+            report,
+            project_root=project_root,
+            application_name="nika-core",
+            application_version="0.0.2",
+            source_sha=SOURCE_SHA,
+        )
 
 
 def test_supply_chain_requires_every_declared_runtime_dependency(
@@ -287,12 +317,20 @@ def test_vcs_commit_is_accepted_as_immutable_provenance(
 
 
 @pytest.mark.parametrize(
-    "commit_id",
-    ["main", "refs/heads/main", "v1.2.3", "deadbee"],
+    ("vcs", "commit_id"),
+    [
+        ("git", "main"),
+        ("git", "refs/heads/main"),
+        ("git", "v1.2.3"),
+        ("git", "deadbee"),
+        ("svn", "0123456789abcdef0123456789abcdef01234567"),
+        ("git ", "0123456789abcdef0123456789abcdef01234567"),
+    ],
 )
 def test_vcs_ref_shaped_identity_is_not_immutable_provenance(
     tmp_path: Path,
     installed_metadata: None,
+    vcs: str,
     commit_id: str,
 ) -> None:
     project_root = _project(tmp_path / "project")
@@ -300,7 +338,7 @@ def test_vcs_ref_shaped_identity_is_not_immutable_provenance(
     payload = json.loads(report.read_text(encoding="utf-8"))
     payload["install"][1]["download_info"] = {
         "url": "git+https://example.invalid/runtime.git",
-        "vcs_info": {"vcs": "git", "commit_id": commit_id},
+        "vcs_info": {"vcs": vcs, "commit_id": commit_id},
     }
     report.write_text(json.dumps(payload), encoding="utf-8")
 
