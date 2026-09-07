@@ -301,6 +301,100 @@ class BatchCursor:
             return None
         return self._find(intent.target_id).model_copy(deep=True)
 
+    def prepare_external_effect(self, target_id: str) -> EffectGrant:
+        """Persist workflow intent before a canonical external ToolExecutor effect.
+
+        This mode is for compositions where ToolEffectGuard is the primary external-effect
+        authority. No batch idempotency reservation is created yet, avoiding a second
+        pre-approval effect owner. After ToolExecutor durably succeeds,
+        confirm_external_effect() mirrors that completed truth into the batch cursor.
+        """
+        target = self._find(target_id)
+        if target.attempt_state is AttemptState.CONFIRMED:
+            return EffectGrant(
+                execute=False,
+                operation_key=target.operation_key,
+                reason="already_confirmed",
+            )
+        if self._first_uncertain() is not None:
+            raise BatchCursorBlockedError("cursor is blocked by uncertain external-effect state")
+        if not self._is_next_target(target):
+            raise BatchCursorBlockedError("target is not the next executable cursor position")
+        if target.batch_index > self._state.ready_batch_index:
+            raise BatchCursorBlockedError("target batch is waiting for scheduled release")
+        if target.attempt_state is AttemptState.IN_FLIGHT:
+            raise BatchCursorBlockedError("target already uses cursor-owned effect authority")
+        if target.attempt_state is AttemptState.PENDING:
+            target.attempt_state = AttemptState.PREPARED
+            self._state.next_scheduled_intent = _target_intent(target)
+            self._persist()
+        return EffectGrant(
+            execute=True,
+            operation_key=target.operation_key,
+            reason="external_authority_prepared",
+        )
+
+    def confirm_external_effect(
+        self,
+        target_id: str,
+        result: dict[str, Any],
+        *,
+        next_batch_not_before: datetime | None = None,
+    ) -> None:
+        """Mirror an already-durable canonical external-tool completion into the cursor."""
+        target = self._find(target_id)
+        if target.attempt_state is AttemptState.CONFIRMED:
+            return
+        if target.attempt_state is not AttemptState.PREPARED:
+            raise BatchCursorBlockedError("external completion requires prepared target state")
+        clean_result = _json_copy(result)
+        record, _created = self._ledger.reserve_once(
+            operation_key=target.operation_key,
+            task_id=self._state.task_id,
+            operation_type=_OPERATION_TYPE,
+            input_fingerprint=target.input_fingerprint,
+        )
+        if record.status is IdempotencyStatus.UNCERTAIN:
+            raise BatchCursorBlockedError("uncertain batch evidence requires reconciliation")
+        if record.status is IdempotencyStatus.PENDING:
+            record = self._ledger.complete(
+                target.operation_key,
+                _completion_envelope(clean_result, next_batch_not_before),
+            )
+        durable_result, durable_due = _decode_completion_result(
+            record.result,
+            fallback_result=clean_result,
+        )
+        self._confirm_from_durable(target, durable_result)
+        self._advance(durable_due)
+        self._persist()
+
+    def mark_external_uncertain(self, target_id: str, evidence: dict[str, Any]) -> None:
+        """Mirror an unresolved canonical external-tool outcome into batch durability."""
+        target = self._find(target_id)
+        if target.attempt_state is AttemptState.CONFIRMED:
+            return
+        if target.attempt_state not in {AttemptState.PENDING, AttemptState.PREPARED}:
+            raise BatchCursorBlockedError("external uncertainty requires pending/prepared target")
+        record, _created = self._ledger.reserve_once(
+            operation_key=target.operation_key,
+            task_id=self._state.task_id,
+            operation_type=_OPERATION_TYPE,
+            input_fingerprint=target.input_fingerprint,
+        )
+        if record.status is IdempotencyStatus.COMPLETED:
+            durable_result, durable_due = _decode_completion_result(record.result)
+            self._confirm_from_durable(target, durable_result)
+            self._advance(durable_due)
+        else:
+            if record.status is IdempotencyStatus.PENDING:
+                self._ledger.mark_uncertain(target.operation_key)
+            target.attempt_state = AttemptState.UNCERTAIN
+            target.confirmed_result = None
+            target.uncertain_result = _json_copy(evidence)
+            self._state.next_scheduled_intent = _reconcile_intent(target)
+        self._persist()
+
     def begin_effect(self, target_id: str) -> EffectGrant:
         target = self._find(target_id)
         if target.attempt_state is AttemptState.CONFIRMED:
