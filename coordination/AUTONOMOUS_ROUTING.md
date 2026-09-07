@@ -1,5 +1,44 @@
 # Nika Core — current autonomous routing
 
+## LIVE REFRESH — EPOCH-CONTINUOUS-0004 — 2026-09-07T20:44+02:00
+CURRENT_MAIN: `c42cb926b5d53ed1950ea598b0dc47c9a6b97e9a` (integrated #675 read-only resource capacity telemetry after #662 archive/secret-safety).
+STRATEGY: ONE_CONTINUOUS_FULL_PRODUCT. V0.1 remains the nearest acceptance checkpoint.
+SOURCE_TRUTH: live GitHub exact head/base/Actions/reviews > this snapshot > Issue/Drive mirrors.
+BRANCH_PROTECTION: disabled / required checks not enforced; release readiness remains false.
+
+DONE_DO_NOT_REPEAT: #641 cursor; #656 checker handoffs; #659 Windows autostart/settings; #651 durable model selection backend; #662 archive/manifest/secret safety; #675 ResourceManager capacity telemetry.
+
+BLOCKED:
+- #654 active Pause/Resume/Cancel: confirmed PAUSED generation is rewritten by later _finish(PAUSED), breaking explicit terminal Cancel; Worker1 owns narrow repair + unchanged #669 replay.
+- #638 recurrence: historical concurrency race was repaired, but independent audit found missing canonical top-level task_id binding to ScheduledJob authority; Worker1 must bind terminal/missing task truth before recurrence dispatch. Old aacfa252 green is stale after main movement and semantic BLOCK.
+- #672 shared packaged UIA RuntimeId/restart identity remains the Windows package dependency; do not weaken RuntimeId or use Name/HWND/coordinate fallback.
+- live repository governance is administratively disabled regardless of evaluator correctness.
+
+IN_PROGRESS:
+- Worker2 #674 current-main AI/intelligence mode convergence @ `545b4d64468739a799454b837b6c0c920cdcdb37`, fresh Core/M12 queued.
+- Worker3 #677 Scenario-B repair lineage; c0ed-based evidence requires reconvergence after #675. Scenario-A change-detector work is separately claimed on current main.
+- Worker4 #672/#663 Windows/UI/model journey.
+- Worker5 #676 installer exact-current @ `b4f41548221f0af41df85fa64faa4a79f81604fe`: reparse/root/ancestor and guarded rollback defects repaired; fresh Core/M12 queued, non-self audit required.
+- Worker5 #665 governance evaluator exact-current @ `9a1fe70b65a74c20520c64366757cc8f2534c0a3`: active-ruleset bypass, target semantics, slash-safe pattern matching and required-check GitHub-App provenance repaired; fresh Core/M12 queued, non-self audit required.
+- Work #683 final-result projection remains independently owned and exact-current; consume only its current head/gates.
+
+STALE_FROZEN:
+- #660 legacy-data proof waits for #672 shared UIA stabilization; its own old M11 was green and old M12 failed at the shared UIA gate, not legacy-data logic.
+- #670 packaged selected-model runtime waits for shared #672; avoid repeated reconvergence.
+- Any c0ed-based exact-green evidence after main moved to c42 is lineage-only.
+
+NEXT:
+1. Consume first terminal exact-current external candidate with independent audit; guarded merge one at a time.
+2. Repair only concrete #665/#676 CI failures if any; do not self-audit.
+3. Worker1 closes #654/#638; Worker4 closes #672; Worker3 reconverges #677.
+4. After each merge reread main and invalidate stale downstream evidence.
+5. Final V0.1 still needs Scenario A/B, packaged model/recovery, legacy-data/install/update/SBOM/notices/provenance, live governance, one exact Windows candidate, then human Windows/NVDA.
+
+HUMAN_TESTED=false.
+NVDA_VERIFIED=false.
+PRODUCTION_RELEASE_READY=false.
+
+
 ## LIVE REFRESH — EPOCH-CONTINUOUS-0003 — 2026-09-07T20:44+02:00
 CURRENT_MAIN: `c0ed340c8ee6ddfab011f861f5e6f49017ff5286` (guarded merge #662 release archive/manifest/secret-safety).
 STRATEGY: ONE_CONTINUOUS_FULL_PRODUCT; V0.1 is the nearest acceptance checkpoint, not a separate product.
