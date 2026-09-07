@@ -96,6 +96,7 @@ def test_installer_contract_reuses_manifest_and_never_elevates() -> None:
     assert "System directory install is forbidden" in payload
     assert "Start-Process -Verb RunAs" not in payload
     assert "runas" not in payload.casefold()
+    assert "[System.IO.Path]::GetRelativePath" not in payload
 
 
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
