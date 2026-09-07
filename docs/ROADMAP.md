@@ -1,5 +1,15 @@
 # Nika Core — roadmap and progress truth
 
+## LIVE ROADMAP REFRESH — 2026-09-07 — after release-security integration
+Current production main: `c0ed340c8ee6ddfab011f861f5e6f49017ff5286`.
+Latest integrated qualified leaf: #662 archive/manifest/secret-safety. This does not make the product release-ready; downstream exact-head evidence is re-earned after integration.
+
+Nearest V0.1 critical path now remains: repair #654 Pause/Resume/Cancel generation race and replay #669; close #638 recurrence/hibernate; clear #672 shared packaged UIA; integrate #663 packaged model/recovery journey; qualify #674 AI routing; qualify #677 exact Scenario B; complete Scenario A monitoring; integrate #676 install/update/rollback; close legacy-data + SBOM/notices/provenance + #665 governance proof and actual repository protection; produce one exact Windows candidate; then human Windows/NVDA acceptance.
+The Full Product continues in this same codebase after the checkpoint.
+
+HUMAN_TESTED=false. NVDA_VERIFIED=false. PRODUCTION_RELEASE_READY=false.
+
+
 ## Binding continuous-product strategy — 2026-09-07
 
 Nika Core is **one continuously developed Full Product**, not a sequence of mostly separate products. Labels such as V0.1, V0.2 and later versions are **acceptance checkpoints** inside one production lineage. They provide exact evidence, rollback and release slices; they do not reset architecture, duplicate completed components or require a new product-development cycle.
