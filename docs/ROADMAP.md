@@ -1,3 +1,8 @@
+## LIVE CONTINUOUS-PRODUCT CHECKPOINT — 2026-09-07T20:44+02:00
+Canonical main: `c0ed340c8ee6ddfab011f861f5e6f49017ff5286`.
+Nearest V0.1 path: #654 durable Pause/Resume/Cancel repair -> #638 recurrence independent replay/integration -> #672 shared Windows UIA -> #663/#660 dependent packaged journey -> #677 exact Scenario B -> Scenario A -> exact package/install/update/recovery/SBOM/provenance/governance -> PRE_HUMAN_READY -> human Windows/NVDA.
+Integrated this cycle family: #662 archive/manifest/secret-safety. Installer #676 security repairs and governance evaluator #665 are current exact-base candidates under fresh qualification. Continuous Full Product work continues in the same codebase after the checkpoint.
+
 # Nika Core — roadmap and progress truth
 
 ## LIVE ROADMAP REFRESH — 2026-09-07 — after release-security integration
