@@ -202,7 +202,8 @@ def test_twenty_target_success_path_is_max_five_restart_safe_and_exactly_once(
 ) -> None:
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
-    task_id = TaskQueue(store).create(
+    task_queue = TaskQueue(store)
+    task_id = task_queue.create(
         workspace_id="scenario-b-one-head",
         agent_id="scenario-b",
     ).task_id
@@ -234,6 +235,7 @@ def test_twenty_target_success_path_is_max_five_restart_safe_and_exactly_once(
 
     service = ScenarioBService(
         task_id=task_id,
+        task_queue=task_queue,
         cursor=cursor,
         tabs=TaskBrowserTabs(session=_FakeSession("session-a")),  # type: ignore[arg-type]
         executor=_executor(resources=resources, run_id="scenario-b-a"),
@@ -267,6 +269,7 @@ def test_twenty_target_success_path_is_max_five_restart_safe_and_exactly_once(
     )
     restarted = ScenarioBService(
         task_id=task_id,
+        task_queue=task_queue,
         cursor=restarted_cursor,
         tabs=TaskBrowserTabs(session=_FakeSession("session-b")),  # type: ignore[arg-type]
         executor=_executor(resources=resources, run_id="scenario-b-b"),
@@ -332,6 +335,7 @@ def test_twenty_target_success_path_is_max_five_restart_safe_and_exactly_once(
     )
     final_service = ScenarioBService(
         task_id=task_id,
+        task_queue=task_queue,
         cursor=final_restart,
         tabs=TaskBrowserTabs(session=_FakeSession("session-c")),  # type: ignore[arg-type]
         executor=_executor(resources=resources, run_id="scenario-b-c"),
