@@ -8,11 +8,11 @@ from nika_core.research.models import RefreshDisposition, ResearchEvidence, Sour
 from nika_core.research.scheduled_profiles import ResearchProfileDelta
 
 _SECRET_ASSIGNMENT = re.compile(
-    r"(?i)\\b(password|passwd|client[_-]?secret|secret|api[_-]?key|access[_-]?token|"
-    r"refresh[_-]?token|token)\\s*[:=]\\s*(?:\"[^\"\\r\\n]*\"|'[^'\\r\\n]*'|[^\\s,;]+)"
+    r"(?i)\b(password|passwd|client[_-]?secret|secret|api[_-]?key|access[_-]?token|"
+    r"refresh[_-]?token|token)\s*[:=]\s*(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;]+)"
 )
 _HEADER_SECRET = re.compile(
-    r"(?i)\\b(authorization|proxy-authorization|cookie|set-cookie)\\s*[:=]\\s*[^\\r\\n]*"
+    r"(?i)\b(authorization|proxy-authorization|cookie|set-cookie)\s*[:=]\s*[^\r\n]*"
 )
 _SAFE_CODE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}\\Z")
 _SAFE_REFERENCE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+~-]{0,159}\\Z")
@@ -65,7 +65,10 @@ def _safe_reference(
 
 def _timestamp(value: str, field_name: str) -> str:
     normalized = _required_line(value, field_name, max_length=80)
-    parsed = datetime.fromisoformat(normalized)
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        raise ValueError(f"{field_name} must be a valid ISO timestamp") from None
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"{field_name} must include a timezone offset")
     return normalized
