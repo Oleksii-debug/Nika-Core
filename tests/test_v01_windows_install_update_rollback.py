@@ -175,8 +175,7 @@ def test_update_restores_previous_release_after_post_activation_reparse_failure(
     injected = (
         "            [System.IO.Directory]::Move($stagePath, $destinationPath)\n"
         "            [System.IO.Directory]::Move($destinationPath, ($destinationPath + '.candidate'))\n"
-        f"            cmd /c mklink /J \"$destinationPath\" '{escaped_target}' | Out-Null\n"
-        "            if ($LASTEXITCODE -ne 0) { throw 'test junction injection failed' }\n"
+        f"            New-Item -ItemType Junction -Path $destinationPath -Target '{escaped_target}' | Out-Null\n"
         "            Assert-NikaNoReparsePathChain -Path $destinationPath\n"
     )
     assert needle in payload
