@@ -508,6 +508,48 @@ try {
     $semanticElapsed = [Math]::Round($startupWatch.Elapsed.TotalSeconds, 1)
     Write-Host "Required packaged WebView2 UIA semantics became discoverable after ${semanticElapsed}s."
 
+    function Wait-BoundTextEvidence(
+        [string]$Expected,
+        [int]$Attempts = 80
+    ) {
+        # Read-only text is evidence, not action authority. Chromium/WebView2 may
+        # expose the same semantic text through overlapping accessibility nodes.
+        # Require exact Name + Text under the already bound process/window, but do
+        # not reject equivalent duplicates and do not turn them into a control identity.
+        $nameCondition = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::NameProperty,
+            $Expected
+        )
+        $typeCondition = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::Text
+        )
+        $condition = [System.Windows.Automation.AndCondition]::new(
+            [System.Windows.Automation.Condition[]]@($nameCondition, $typeCondition)
+        )
+        for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+            Start-Sleep -Milliseconds 250
+            Assert-BoundProcessGeneration
+            $currentWindow = Find-ExactWindow
+            if ($null -eq $currentWindow) { continue }
+            try {
+                foreach ($searchRoot in (Get-BoundSearchRoots $currentWindow)) {
+                    if (Test-ElementMatchesSemanticLocator $searchRoot $Expected ([System.Windows.Automation.ControlType]::Text)) {
+                        return
+                    }
+                    $matches = $searchRoot.FindAll(
+                        [System.Windows.Automation.TreeScope]::Descendants,
+                        $condition
+                    )
+                    if ($matches.Count -gt 0) { return }
+                }
+            } catch [System.Windows.Automation.ElementNotAvailableException] {
+                continue
+            }
+        }
+        throw "Expected bound read-only UI Automation text '$Expected' did not appear."
+    }
+
     function Wait-DescendantName(
         [string]$Expected,
         [System.Windows.Automation.ControlType]$ExpectedControlType = $null,
@@ -607,7 +649,7 @@ try {
     # The DOM can be visible in UIA before the asynchronous pywebview JS API call
     # has returned the Action Registry/keymap. Wait for the application's explicit
     # ready status so this gate tests keyboard behavior rather than an initialization race.
-    Wait-DescendantName 'Nika Core готова до роботи.' | Out-Null
+    Wait-BoundTextEvidence 'Nika Core готова до роботи.'
 
     $startControl = $null
     $tasksControl = $null
@@ -652,7 +694,7 @@ try {
             Wait-FocusName $autostartControl
         }
         $expectedStateText = if ($AutostartPhase -eq 'Disable') { 'Автозапуск вимкнено.' } else { 'Автозапуск увімкнено для цього застосунку.' }
-        Wait-DescendantName $expectedStateText ([System.Windows.Automation.ControlType]::Text) | Out-Null
+        Wait-BoundTextEvidence $expectedStateText
         if ($AutostartPhase -eq 'Observe') {
             $freshReadOnlyControl = Wait-DescendantName 'Запускати Nika разом із Windows' ([System.Windows.Automation.ControlType]::CheckBox)
             $target = $freshReadOnlyControl.Element
@@ -681,7 +723,7 @@ try {
         Set-BoundControlValue $sourceBControl 'Джерело Б.txt'
         Set-BoundControlFocus $saveSourcesControl
         [System.Windows.Forms.SendKeys]::SendWait(' ')
-        Wait-DescendantName 'Джерела збережено. Можна створити нове командне завдання.' ([System.Windows.Automation.ControlType]::Text) | Out-Null
+        Wait-BoundTextEvidence 'Джерела збережено. Можна створити нове командне завдання.'
         Wait-FocusName $commandControl
         Set-BoundControlValue $commandControl 'Порівняй два контрольовані джерела.'
         Set-BoundControlFocus $startControl
@@ -691,7 +733,7 @@ try {
             # acknowledgement before waiting for the actual terminal result.
             [System.Windows.Forms.SendKeys]::SendWait('^n')
             Wait-FocusName $tasksControl
-            Wait-DescendantName 'Командне завдання завершено; збережені результати учасників доступні.' ([System.Windows.Automation.ControlType]::Text) | Out-Null
+            Wait-BoundTextEvidence 'Командне завдання завершено; збережені результати учасників доступні.'
         } catch {
             # Diagnostics are restricted to this proof's clean, controlled database
             # and the exact bound Nika window. No source contents or stored payloads.
