@@ -96,28 +96,6 @@ class FailingProvider:
         )
 
 
-class RecordingDeterministic:
-    def __init__(
-        self,
-        *,
-        response_kind: ProviderKind = ProviderKind.NO_LLM,
-        response_request_id: str | None = None,
-    ) -> None:
-        self._response_kind = response_kind
-        self._response_request_id = response_request_id
-        self.requests: list[ModelRequest] = []
-
-    async def complete(self, request: ModelRequest) -> ModelResponse:
-        self.requests.append(request)
-        return ModelResponse(
-            request_id=self._response_request_id or request.request_id,
-            text="deterministic result",
-            provider_id="nika-deterministic",
-            provider_kind=self._response_kind,
-            model="deterministic",
-        )
-
-
 def _request(*, privacy: PrivacyClass = PrivacyClass.PRIVATE) -> ModelRequest:
     return ModelRequest(
         request_id="request-1",
@@ -130,26 +108,32 @@ def _request(*, privacy: PrivacyClass = PrivacyClass.PRIVATE) -> ModelRequest:
     )
 
 
-def test_deterministic_mode_bypasses_gateway_and_strips_model_routes() -> None:
+def test_deterministic_mode_resolves_to_real_non_gateway_boundary() -> None:
+    gateway = RecordingGateway()
+    router = IntelligenceModeRouter(gateway=gateway)
+
+    route = router.resolve(IntelligenceMode.DETERMINISTIC)
+
+    assert route.mode is IntelligenceMode.DETERMINISTIC
+    assert route.provider_id is None
+    assert route.provider_kind is ProviderKind.NO_LLM
+    assert route.uses_model_gateway is False
+    assert route.enabled is True
+    assert gateway.requests == []
+
+
+def test_deterministic_mode_cannot_be_used_as_model_completion() -> None:
     gateway = RecordingGateway()
     unexpected = RecordingProvider(provider_id="untrusted-route", kind=ProviderKind.CLOUD)
     gateway.register(unexpected, default=True)
-    deterministic = RecordingDeterministic()
-    router = IntelligenceModeRouter(gateway=gateway, deterministic=deterministic)
-    original = _request()
+    router = IntelligenceModeRouter(gateway=gateway)
 
-    response = asyncio.run(router.complete(IntelligenceMode.DETERMINISTIC, original))
+    with pytest.raises(IntelligenceModeError) as caught:
+        asyncio.run(router.complete_model(IntelligenceMode.DETERMINISTIC, _request()))
 
-    assert response.provider_kind is ProviderKind.NO_LLM
+    assert caught.value.code is IntelligenceModeErrorCode.DETERMINISTIC_PATH_REQUIRED
     assert gateway.requests == []
     assert unexpected.requests == []
-    assert len(deterministic.requests) == 1
-    routed = deterministic.requests[0]
-    assert routed.provider_id is None
-    assert routed.provider_kind is ProviderKind.NO_LLM
-    assert routed.fallback_provider_ids == ()
-    assert original.provider_id == "untrusted-route"
-    assert original.fallback_provider_ids == ("untrusted-fallback",)
 
 
 def test_embedded_local_mode_pins_foundry_and_strips_fallbacks() -> None:
@@ -158,9 +142,11 @@ def test_embedded_local_mode_pins_foundry_and_strips_fallbacks() -> None:
     other = RecordingProvider(provider_id="untrusted-fallback", kind=ProviderKind.CLOUD)
     gateway.register(foundry)
     gateway.register(other)
-    router = IntelligenceModeRouter(gateway=gateway, deterministic=RecordingDeterministic())
+    router = IntelligenceModeRouter(gateway=gateway)
 
-    response = asyncio.run(router.complete(IntelligenceMode.EMBEDDED_LOCAL, _request()))
+    response = asyncio.run(
+        router.complete_model(IntelligenceMode.EMBEDDED_LOCAL, _request())
+    )
 
     assert response.provider_id == "foundry-local"
     assert len(foundry.requests) == 1
@@ -177,9 +163,11 @@ def test_local_ollama_mode_pins_ollama_and_strips_fallbacks() -> None:
     other = RecordingProvider(provider_id="untrusted-fallback", kind=ProviderKind.CLOUD)
     gateway.register(ollama)
     gateway.register(other)
-    router = IntelligenceModeRouter(gateway=gateway, deterministic=RecordingDeterministic())
+    router = IntelligenceModeRouter(gateway=gateway)
 
-    response = asyncio.run(router.complete(IntelligenceMode.LOCAL_OLLAMA, _request()))
+    response = asyncio.run(
+        router.complete_model(IntelligenceMode.LOCAL_OLLAMA, _request())
+    )
 
     assert response.provider_id == "ollama"
     assert len(ollama.requests) == 1
@@ -193,10 +181,12 @@ def test_selected_mode_never_uses_incoming_fallback_after_safe_provider_failure(
     fallback = RecordingProvider(provider_id="untrusted-fallback", kind=ProviderKind.CLOUD)
     gateway.register(foundry)
     gateway.register(fallback)
-    router = IntelligenceModeRouter(gateway=gateway, deterministic=RecordingDeterministic())
+    router = IntelligenceModeRouter(gateway=gateway)
 
     with pytest.raises(ModelGatewayError) as caught:
-        asyncio.run(router.complete(IntelligenceMode.EMBEDDED_LOCAL, _request()))
+        asyncio.run(
+            router.complete_model(IntelligenceMode.EMBEDDED_LOCAL, _request())
+        )
 
     assert caught.value.code is ModelErrorCode.UNAVAILABLE
     assert len(foundry.requests) == 1
@@ -208,10 +198,10 @@ def test_external_api_mode_is_disabled_by_default() -> None:
     gateway = RecordingGateway()
     cloud = RecordingProvider(provider_id="approved-cloud", kind=ProviderKind.CLOUD)
     gateway.register(cloud, default=True)
-    router = IntelligenceModeRouter(gateway=gateway, deterministic=RecordingDeterministic())
+    router = IntelligenceModeRouter(gateway=gateway)
 
     with pytest.raises(IntelligenceModeError) as caught:
-        asyncio.run(router.complete(IntelligenceMode.EXTERNAL_API, _request()))
+        asyncio.run(router.complete_model(IntelligenceMode.EXTERNAL_API, _request()))
 
     assert caught.value.code is IntelligenceModeErrorCode.MODE_DISABLED
     assert gateway.requests == []
@@ -226,14 +216,15 @@ def test_approved_external_mode_pins_exact_provider_not_gateway_default() -> Non
     gateway.register(other_default, default=True)
     router = IntelligenceModeRouter(
         gateway=gateway,
-        deterministic=RecordingDeterministic(),
         policy=IntelligenceModePolicy(
             external_api_enabled=True,
             external_provider_id="approved-cloud",
         ),
     )
 
-    response = asyncio.run(router.complete(IntelligenceMode.EXTERNAL_API, _request()))
+    response = asyncio.run(
+        router.complete_model(IntelligenceMode.EXTERNAL_API, _request())
+    )
 
     assert response.provider_id == "approved-cloud"
     assert len(approved.requests) == 1
@@ -252,7 +243,6 @@ def test_external_private_route_is_blocked_before_provider_call() -> None:
     gateway.register(cloud)
     router = IntelligenceModeRouter(
         gateway=gateway,
-        deterministic=RecordingDeterministic(),
         policy=IntelligenceModePolicy(
             external_api_enabled=True,
             external_provider_id="approved-cloud",
@@ -260,7 +250,7 @@ def test_external_private_route_is_blocked_before_provider_call() -> None:
     )
 
     with pytest.raises(ModelGatewayError) as caught:
-        asyncio.run(router.complete(IntelligenceMode.EXTERNAL_API, _request()))
+        asyncio.run(router.complete_model(IntelligenceMode.EXTERNAL_API, _request()))
 
     assert caught.value.code is ModelErrorCode.INVALID_REQUEST
     assert len(gateway.requests) == 1
@@ -285,14 +275,10 @@ def test_disabled_local_modes_fail_before_gateway(
     policy: IntelligenceModePolicy,
 ) -> None:
     gateway = RecordingGateway()
-    router = IntelligenceModeRouter(
-        gateway=gateway,
-        deterministic=RecordingDeterministic(),
-        policy=policy,
-    )
+    router = IntelligenceModeRouter(gateway=gateway, policy=policy)
 
     with pytest.raises(IntelligenceModeError) as caught:
-        asyncio.run(router.complete(mode, _request()))
+        asyncio.run(router.complete_model(mode, _request()))
 
     assert caught.value.code is IntelligenceModeErrorCode.MODE_DISABLED
     assert gateway.requests == []
@@ -306,10 +292,12 @@ def test_provider_kind_substitution_fails_closed() -> None:
         response_kind=ProviderKind.CLOUD,
     )
     gateway.register(compromised)
-    router = IntelligenceModeRouter(gateway=gateway, deterministic=RecordingDeterministic())
+    router = IntelligenceModeRouter(gateway=gateway)
 
     with pytest.raises(IntelligenceModeError) as caught:
-        asyncio.run(router.complete(IntelligenceMode.EMBEDDED_LOCAL, _request()))
+        asyncio.run(
+            router.complete_model(IntelligenceMode.EMBEDDED_LOCAL, _request())
+        )
 
     assert caught.value.code is IntelligenceModeErrorCode.RESPONSE_MISMATCH
 
@@ -324,7 +312,6 @@ def test_provider_identity_substitution_fails_closed() -> None:
     gateway.register(compromised)
     router = IntelligenceModeRouter(
         gateway=gateway,
-        deterministic=RecordingDeterministic(),
         policy=IntelligenceModePolicy(
             external_api_enabled=True,
             external_provider_id="approved-cloud",
@@ -332,7 +319,7 @@ def test_provider_identity_substitution_fails_closed() -> None:
     )
 
     with pytest.raises(IntelligenceModeError) as caught:
-        asyncio.run(router.complete(IntelligenceMode.EXTERNAL_API, _request()))
+        asyncio.run(router.complete_model(IntelligenceMode.EXTERNAL_API, _request()))
 
     assert caught.value.code is IntelligenceModeErrorCode.RESPONSE_MISMATCH
 
@@ -345,35 +332,22 @@ def test_response_request_identity_substitution_fails_closed() -> None:
         response_request_id="other-request",
     )
     gateway.register(ollama)
-    router = IntelligenceModeRouter(gateway=gateway, deterministic=RecordingDeterministic())
+    router = IntelligenceModeRouter(gateway=gateway)
 
     with pytest.raises(IntelligenceModeError) as caught:
-        asyncio.run(router.complete(IntelligenceMode.LOCAL_OLLAMA, _request()))
-
-    assert caught.value.code is IntelligenceModeErrorCode.RESPONSE_MISMATCH
-
-
-def test_deterministic_response_cannot_claim_model_provider_kind() -> None:
-    router = IntelligenceModeRouter(
-        gateway=RecordingGateway(),
-        deterministic=RecordingDeterministic(response_kind=ProviderKind.LOCAL),
-    )
-
-    with pytest.raises(IntelligenceModeError) as caught:
-        asyncio.run(router.complete(IntelligenceMode.DETERMINISTIC, _request()))
+        asyncio.run(router.complete_model(IntelligenceMode.LOCAL_OLLAMA, _request()))
 
     assert caught.value.code is IntelligenceModeErrorCode.RESPONSE_MISMATCH
 
 
 def test_statuses_are_secret_free_and_external_is_opt_in() -> None:
-    router = IntelligenceModeRouter(
-        gateway=RecordingGateway(),
-        deterministic=RecordingDeterministic(),
-    )
+    router = IntelligenceModeRouter(gateway=RecordingGateway())
 
     statuses = router.statuses()
 
     assert tuple(status.mode for status in statuses) == tuple(IntelligenceMode)
+    deterministic = statuses[0]
+    assert deterministic.uses_model_gateway is False
     external = statuses[-1]
     assert external.enabled is False
     assert external.provider_id is None
@@ -410,11 +384,24 @@ def test_external_enable_requires_provider_and_boolean_flags_are_strict() -> Non
 
 def test_invalid_mode_type_fails_before_any_execution() -> None:
     gateway = RecordingGateway()
-    deterministic = RecordingDeterministic()
-    router = IntelligenceModeRouter(gateway=gateway, deterministic=deterministic)
+    router = IntelligenceModeRouter(gateway=gateway)
 
     with pytest.raises(TypeError, match="IntelligenceMode"):
-        asyncio.run(router.complete("local_ollama", _request()))  # type: ignore[arg-type]
+        router.resolve("local_ollama")  # type: ignore[arg-type]
 
     assert gateway.requests == []
-    assert deterministic.requests == []
+
+
+def test_invalid_request_type_fails_before_gateway() -> None:
+    gateway = RecordingGateway()
+    router = IntelligenceModeRouter(gateway=gateway)
+
+    with pytest.raises(TypeError, match="ModelRequest"):
+        asyncio.run(
+            router.complete_model(
+                IntelligenceMode.LOCAL_OLLAMA,
+                "request",  # type: ignore[arg-type]
+            )
+        )
+
+    assert gateway.requests == []
