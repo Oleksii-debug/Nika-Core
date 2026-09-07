@@ -287,7 +287,8 @@ def test_state_survives_browser_client_restart_and_reset_is_deterministic() -> N
         first_client_state = _json(fixture.state_url(target_id))
         second_client_state = _json(fixture.state_url(target_id))
         assert second_client_state == first_client_state
-        assert second_client_state["effect_count"] == 1
+        assert second_client_state["attempt_count"] == 1
+        assert second_client_state["effect_count"] == 0
 
         fixture.reset(target_id)
         assert _json(fixture.state_url(target_id))["attempt_count"] == 0
