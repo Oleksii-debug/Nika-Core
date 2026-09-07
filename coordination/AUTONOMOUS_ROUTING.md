@@ -1,5 +1,40 @@
 # Nika Core — current autonomous routing
 
+## LIVE REFRESH — EPOCH-CONTINUOUS-0003 — 2026-09-07T20:44+02:00
+CURRENT_MAIN: `c0ed340c8ee6ddfab011f861f5e6f49017ff5286` (guarded merge #662 release archive/manifest/secret-safety).
+STRATEGY: ONE_CONTINUOUS_FULL_PRODUCT; V0.1 is the nearest acceptance checkpoint, not a separate product.
+LIVE_OVERRIDES_OLDER_SNAPSHOT: true.
+BRANCH_PROTECTION: disabled; required-status enforcement off; this remains a binding release blocker.
+
+### DONE / DO_NOT_REPEAT
+- Integrated: #641 durable batch cursor, #656 checker handoffs, #659 Windows autostart/settings, #651 durable model-selection backend, #662 release archive/manifest/secret-safety.
+- Do not rebuild canonical ModelGateway, scheduler, recovery authority, browser engine, cursor, effect ledger, desktop shell or package manifest verifier.
+
+### IN_PROGRESS / BLOCKED / NEXT
+- Worker1 #654 @ `636b13523f604825f5c7b362bee812a5e114689c`: exact-current but BLOCKED by confirmed PAUSED -> explicit Cancel race; independent Work diagnosis is authoritative. Repair incumbent coordinator only, replay unchanged #669, then fresh Core/M12 + non-self audit.
+- Worker1 #638 @ `aacfa252e3c43a5e48ffceda54abb64755f29880`: exact-current, mergeable, Core 34154413451 SUCCESS + M12 34154413449 SUCCESS. Independent unchanged #664 recurrence-concurrency replay is actively claimed on QA branch; no merge until PASS_CURRENT.
+- Worker3 #677 @ `80a34f22d48a79c909ec73e7016825b0ec2f784e`: exact-current Scenario-B composition; latest restart-wait repair is in fresh qualification; no acceptance credit until terminal gates + independent audit.
+- Worker4 #672: shared packaged UIA RuntimeId resilience remains the Windows package dependency; head is moving under owner repair, so freeze downstream package/UI integration evidence until an exact terminal-green audited head exists.
+- Worker4 #663: accessible packaged provider/model selector remains incumbent UI lineage; exact current head may move while compatibility repairs run.
+- Worker5 #676 @ `4068ca1a1011fdff10d332eb6770ea4532b2d3f2`: installer/update/rollback security blockers repaired (reparse ancestor authority + post-activation rollback); fresh Core/M12 required, then non-self audit.
+- Worker5 #665 @ `e80c9c8118c11ec7177c912cba119c0adc239e48`: exact-current governance evaluator; missing ruleset bypass_actors visibility now fails closed; fresh Core/M12 + non-self audit required. Evaluator does not enable protection.
+- #660 legacy-data package proof is FROZEN_STALE until shared #672 UIA gate integrates; own M11 proof is good but old M12 failed only shared UIA.
+- Worker2 #674 AI/model routing continues in owner lane; current integration credit is blocked until exact current-main compatibility and fresh gates are re-established.
+
+### RELEASE / HUMAN TRUTH
+CURRENT_V01_REMAINING_GATES: durable Pause/Resume/restart/cancel; recurrence/hibernate; exact Scenario B; exact monitoring Scenario A; packaged model UI/runtime composition; startup recovery; legacy-data/install/update/rollback/SBOM/notices/provenance; live governance; one exact Windows candidate; human Windows/NVDA protocol.
+HUMAN_TESTED=false.
+NVDA_VERIFIED=false.
+PRODUCTION_RELEASE_READY=false.
+
+### NEXT ROUTING
+1. Consume independent #638 recurrence replay. PASS -> final exact reread and one guarded merge; BLOCK -> route exact defect to Worker1.
+2. Consume fresh #676/#665 qualification while #638 audit runs; never self-audit Worker5-authored candidates.
+3. Consume #672 exact terminal Windows package evidence before reconverging UI/package dependents.
+4. Keep #654 as earliest runtime blocker and #677 as browser composition blocker; do not duplicate owners.
+5. After every merge reread main and invalidate stale exact-base evidence.
+
+
 ## LIVE REFRESH — EPOCH-CONTINUOUS-0002 — 2026-09-07
 CURRENT_MAIN: `c0ed340c8ee6ddfab011f861f5e6f49017ff5286` (merged independently audited #662 release archive/manifest/secret-safety).
 LIVE_OVERRIDES_OLDER_SNAPSHOT: true.
