@@ -29,6 +29,7 @@ class _Observer:
 
 class _Tabs:
     def __init__(self) -> None:
+        self.session = object()
         self.opened: list[str] = []
 
     def owned_tabs(self, _task_id: str) -> tuple[object, ...]:
@@ -37,6 +38,9 @@ class _Tabs:
     def open_tab(self, *, task_id: str, target_url: str, tab_id: str, reopen_policy) -> None:
         del task_id, target_url, reopen_policy
         self.opened.append(tab_id)
+
+    def snapshot(self) -> dict[str, object]:
+        return {"schema_version": 1, "tabs": []}
 
 
 class _MissingSemanticTools:
