@@ -13,6 +13,7 @@ from nika_core.intelligence.modes import (
 )
 from nika_core.model_gateway.contracts import (
     ModelErrorCode,
+    ModelFailureEffect,
     ModelGatewayError,
     ModelMessage,
     ModelRequest,
@@ -67,6 +68,31 @@ class RecordingProvider:
             provider_id=self._response_provider_id or self.capabilities.provider_id,
             provider_kind=self._response_kind or self.capabilities.kind,
             model=request.model or "test-model",
+        )
+
+
+class FailingProvider:
+    def __init__(self, *, provider_id: str, kind: ProviderKind) -> None:
+        self._capabilities = ProviderCapabilities(
+            provider_id=provider_id,
+            kind=kind,
+            supports_private_data=True,
+            supports_hard_cancellation=True,
+        )
+        self.requests: list[ModelRequest] = []
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return self._capabilities
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        self.requests.append(request)
+        raise ModelGatewayError(
+            ModelErrorCode.UNAVAILABLE,
+            "fixture unavailable",
+            provider_id=self.capabilities.provider_id,
+            retryable=True,
+            failure_effect=ModelFailureEffect.NO_EFFECT,
         )
 
 
@@ -158,6 +184,23 @@ def test_local_ollama_mode_pins_ollama_and_strips_fallbacks() -> None:
     assert response.provider_id == "ollama"
     assert len(ollama.requests) == 1
     assert other.requests == []
+    assert gateway.requests[0].fallback_provider_ids == ()
+
+
+def test_selected_mode_never_uses_incoming_fallback_after_safe_provider_failure() -> None:
+    gateway = RecordingGateway()
+    foundry = FailingProvider(provider_id="foundry-local", kind=ProviderKind.LOCAL)
+    fallback = RecordingProvider(provider_id="untrusted-fallback", kind=ProviderKind.CLOUD)
+    gateway.register(foundry)
+    gateway.register(fallback)
+    router = IntelligenceModeRouter(gateway=gateway, deterministic=RecordingDeterministic())
+
+    with pytest.raises(ModelGatewayError) as caught:
+        asyncio.run(router.complete(IntelligenceMode.EMBEDDED_LOCAL, _request()))
+
+    assert caught.value.code is ModelErrorCode.UNAVAILABLE
+    assert len(foundry.requests) == 1
+    assert fallback.requests == []
     assert gateway.requests[0].fallback_provider_ids == ()
 
 
@@ -349,6 +392,8 @@ def test_statuses_are_secret_free_and_external_is_opt_in() -> None:
         {"ollama_provider_id": " ollama"},
         {"external_provider_id": "ollama"},
         {"embedded_provider_id": "bad\nprovider"},
+        {"external_provider_id": "https://api.example.test"},
+        {"external_provider_id": "env:NIKA_PROVIDER_REFERENCE"},
     ),
 )
 def test_policy_rejects_ambiguous_provider_identity(kwargs: dict[str, object]) -> None:
