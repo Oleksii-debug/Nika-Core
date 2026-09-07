@@ -337,6 +337,122 @@ async def _deny_approval(_spec: ToolSpec, _call: ToolCall):
     return None
 
 
+
+def test_completed_foreign_effect_same_call_id_does_not_confirm_scenario_b(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "effect-identity-collision.db")
+    store.initialize()
+    task_queue = TaskQueue(store)
+    task_id = task_queue.create(
+        workspace_id="scenario-b-effect-identity",
+        agent_id="scenario-b",
+    ).task_id
+    memory = MemoryService(store)
+    ledger = IdempotencyLedger(store)
+    specs = [BatchTargetSpec(target_id="target-0", payload={"index": 0})]
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id=task_id,
+        cursor_id="cursor",
+        targets=specs,
+        batch_size=1,
+    )
+    target = ScenarioBTarget(
+        target_id="target-0",
+        url="https://example.test/0",
+        action_locator=ControlLocator(role="button", name="Run"),
+        success_locator=ControlLocator(role="status", name="Done"),
+    )
+    grant = cursor.prepare_external_effect(target.target_id)
+    assert grant.execute is True
+    tab_id = _stable_tab_id(task_id, "cursor", target.target_id)
+    forged_call = ToolCall(
+        call_id=grant.operation_key,
+        tool_id="foreign.external.effect",
+        arguments={
+            "task_id": task_id,
+            "tab_id": tab_id,
+            "target_id": target.target_id,
+            "different": True,
+        },
+        task_id=task_id,
+    )
+    foreign_calls = 0
+
+    async def foreign_handler(_arguments: dict[str, object]) -> object:
+        nonlocal foreign_calls
+        foreign_calls += 1
+        return {
+            "target_id": target.target_id,
+            "verified": True,
+            "evidence_ref": "result:forged",
+        }
+
+    priming_executor = ToolExecutor(
+        approval_policy=_approve_exact,
+        effect_guard=ToolEffectGuard(ledger),
+    )
+    priming_executor.register(
+        ToolSpec(
+            tool_id="foreign.external.effect",
+            description="foreign effect under colliding call id",
+            risk=ToolRisk.EXTERNAL_SIDE_EFFECT,
+        ),
+        foreign_handler,
+    )
+    prime_result = asyncio.run(priming_executor.execute(forged_call))
+    assert prime_result.ok is True
+    assert foreign_calls == 1
+
+    resources = ResourceManager(store, _Observer())
+    resources.set_budget(
+        ResourceBudget(
+            scope="task",
+            owner_id="scenario-b",
+            max_concurrent=1,
+        )
+    )
+    semantic_tools = _ReadySemanticTools()
+    restarted_service = ScenarioBService(
+        task_id=task_id,
+        task_queue=task_queue,
+        cursor=BatchCursor.restore(
+            memory,
+            ledger,
+            task_id=task_id,
+            cursor_id="cursor",
+            targets=specs,
+            batch_size=1,
+        ),
+        tabs=_Tabs(),  # type: ignore[arg-type]
+        executor=BoundedBatchExecutor(
+            resources=resources,
+            resource_scope="task",
+            resource_owner_id="scenario-b",
+            run_id="effect-identity-restart",
+            batch_size=1,
+        ),
+        tool_executor=ToolExecutor(
+            approval_policy=_deny_approval,
+            effect_guard=ToolEffectGuard(ledger),
+        ),
+        idempotency=ledger,
+        memory=memory,
+        targets=[target],
+        semantic_tools=semantic_tools,  # type: ignore[arg-type]
+        inter_batch_delay_seconds=0,
+    )
+
+    recovered = asyncio.run(restarted_service.run_ready_batch())
+    assert recovered.execution is not None
+    assert semantic_tools.invoke_calls == 0
+    assert foreign_calls == 1
+    assert restarted_service.cursor.state.targets[0].attempt_state is AttemptState.UNCERTAIN
+    assert recovered.report[0].status is TargetReportStatus.UNCERTAIN
+
+
 def test_completed_tool_effect_crash_window_reconciles_without_fresh_approval(
     tmp_path: Path,
 ) -> None:
