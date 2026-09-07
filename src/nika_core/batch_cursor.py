@@ -350,6 +350,25 @@ class BatchCursor:
             reason="external_authority_prepared",
         )
 
+    def reset_external_prepared(self, target_id: str) -> None:
+        """Return a proven-unexecuted external-authority intent to PENDING."""
+        target = self._find(target_id)
+        if target.attempt_state is AttemptState.PENDING:
+            return
+        if target.attempt_state is not AttemptState.PREPARED:
+            raise BatchCursorBlockedError(
+                "external prepared reset requires prepared target state"
+            )
+        if self._ledger.get(target.operation_key) is not None:
+            raise BatchCursorBlockedError(
+                "external prepared reset cannot override durable batch effect evidence"
+            )
+        target.attempt_state = AttemptState.PENDING
+        target.confirmed_result = None
+        target.uncertain_result = None
+        self._state.next_scheduled_intent = _derive_intent(self._state)
+        self._persist()
+
     def confirm_external_effect(
         self,
         target_id: str,
