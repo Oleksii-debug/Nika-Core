@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import traceback
+
 import pytest
 
 from nika_core.research.models import (
@@ -190,6 +192,36 @@ def test_checks_must_be_chronological() -> None:
 def test_timestamps_must_be_timezone_aware() -> None:
     with pytest.raises(ValueError, match="timezone offset"):
         _check("2026-08-27T15:00:00")
+
+
+def test_malformed_timestamp_error_does_not_expose_raw_input() -> None:
+    canary = "token=TIMESTAMP_CANARY"
+    with pytest.raises(ValueError, match="valid ISO timestamp") as caught:
+        MonitoringChange(
+            kind="changed",
+            document_id="doc-1",
+            title="safe",
+            evidence=(
+                ResearchEvidence(
+                    source_id="source-news",
+                    source_kind=SourceKind.HTTP,
+                    locator="https://example.test/safe",
+                    observed_at=canary,
+                    freshness=FreshnessState.CURRENT,
+                ),
+            ),
+        )
+
+    assert canary not in str(caught.value)
+    rendered = "".join(
+        traceback.format_exception(
+            type(caught.value),
+            caught.value,
+            caught.value.__traceback__,
+        )
+    )
+    assert canary not in rendered
+    assert caught.value.__suppress_context__ is True
 
 
 def test_renderer_bounds_spoken_history_but_reports_omitted_count() -> None:
