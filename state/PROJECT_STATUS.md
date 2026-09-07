@@ -1,5 +1,60 @@
 # PROJECT STATUS — Nika Core
 
+## LIVE SUPERSEDING SNAPSHOT — 2026-09-07
+
+Canonical repository: `Oleksii-debug/Nika-Core`.
+Canonical technical truth: live GitHub `main`, exact production candidate heads, reviews and current Actions. Drive is a coordination/mirror surface and never overrides GitHub code/SHA/CI truth.
+
+Strategy: **ONE_CONTINUOUS_FULL_PRODUCT**. V0.1/V0.2/etc. are acceptance checkpoints, not separate products.
+
+STARTING_MAIN_FOR_THIS_COORDINATION_UPDATE=`7e8be7cb7ed3b62f55b1b9f5971bc45514427160`
+LAST_EXACT_GREEN_MAIN=`7e8be7cb7ed3b62f55b1b9f5971bc45514427160` for Core CI + M12 Pre-Human Release Gate.
+
+### DONE / DO_NOT_REPEAT
+- real packaged three-agent execution foundation is integrated;
+- durable source setup is integrated;
+- local Ollama + configured API ModelGateway paths are integrated;
+- real checker handoff composition is integrated;
+- durable per-task provider/model selection backend is integrated;
+- offline/reconnect pre-effect continuation and fail-closed uncertain-effect semantics are integrated;
+- semantic browser stale-DOM/frame/document safety is integrated;
+- durable Scenario-B cursor foundation is integrated;
+- Windows autostart backend and user-visible autostart/settings UX are integrated;
+- canonical per-user data/recovery foundations are integrated.
+
+Do not rebuild these merely because a new checkpoint/version label appears.
+
+### IN_PROGRESS / BLOCKED — nearest V0.1 checkpoint
+- durable active Pause/Resume across restart: incumbent #654 lineage; independent QA has identified a pause-confirmation crash-window concern that must be resolved before acceptance;
+- recurrence/hibernate/missed-run lifecycle: existing lineage must be current-main qualified, not duplicated;
+- full Scenario B: current-main one-head composition still missing even though several leaves exist;
+- monitoring Scenario A: full recurrent observation/change/report composition still missing;
+- packaged user-facing provider/model selector: Windows lane owns the visible UI over the integrated backend;
+- legacy-data/package proof: incumbent release lane #657 has Windows proof-cleanup failure and needs current-main successor/qualification;
+- final package/install/update/recovery/SBOM/notices/provenance seal;
+- repository governance: live `main` currently reports branch protection / required-status enforcement disabled;
+- exact final Windows release candidate;
+- human Windows/NVDA acceptance.
+
+### NEXT
+1. Repair/qualify active Pause/Resume lineage without a second runtime/recovery authority.
+2. Complete Windows model-selector journey over the integrated model-selection backend.
+3. Compose Scenario B and Scenario A on current main, consuming existing leaves rather than stacking stale branches.
+4. Close package/legacy-data/provenance/governance gates.
+5. Produce one exact Windows candidate and run the human protocol.
+6. Immediately after V0.1 passes, route the same codebase to the next Full Product blockers; do not wait for a “V0.2 start”.
+
+### Parallel Full Product work allowed now
+Only disjoint work that survives checkpoints and does not delay V0.1: runtime/resource-governor/background-life contracts; AI/model-layer compatibility and model identity; browser/tool diagnostics and controlled autonomy contracts; presentation-neutral future surface contracts. Voice/mobile/self-improvement production expansion must respect ownership and safety and cannot bypass the nearest acceptance gate.
+
+HUMAN_TESTED=false
+NVDA_VERIFIED=false
+PRODUCTION_RELEASE_READY=false
+
+---
+
+## Historical snapshot retained below
+
 Updated: 2026-08-20.
 Canonical repository: `Oleksii-debug/Nika-Core`.
 Canonical technical truth: live GitHub `main`, exact PR heads and current Actions. Drive is routing/ownership/handoff truth.
