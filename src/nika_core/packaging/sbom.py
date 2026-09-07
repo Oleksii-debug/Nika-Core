@@ -19,7 +19,7 @@ SUPPLY_CHAIN_FILE = "THIRD_PARTY_SUPPLY_CHAIN.json"
 _CYCLONEDX_SCHEMA = "https://cyclonedx.org/schema/bom-1.6.schema.json"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-_SAFE_VCS_TOKEN_RE = re.compile(r"^[A-Za-z0-9._:+/@-]{7,256}$")
+_VCS_COMMIT_RE = re.compile(r"^[0-9a-f]{40,64}$")
 
 
 class SupplyChainEvidenceError(RuntimeError):
@@ -164,13 +164,13 @@ def _source_identity(item: dict[str, Any], name: str) -> dict[str, str]:
     if isinstance(vcs_info, dict):
         vcs = vcs_info.get("vcs")
         commit_id = vcs_info.get("commit_id")
+        normalized_commit = commit_id.strip().casefold() if isinstance(commit_id, str) else ""
         if (
             isinstance(vcs, str)
             and vcs
-            and isinstance(commit_id, str)
-            and _SAFE_VCS_TOKEN_RE.fullmatch(commit_id)
+            and _VCS_COMMIT_RE.fullmatch(normalized_commit)
         ):
-            return {"kind": "vcs", "vcs": vcs, "commit_id": commit_id}
+            return {"kind": "vcs", "vcs": vcs, "commit_id": normalized_commit}
 
     raise SupplyChainEvidenceError(
         f"Runtime component lacks immutable source artifact identity: {name}"
@@ -194,6 +194,20 @@ def _safe_source_host(item: dict[str, Any]) -> str | None:
     return host.casefold()
 
 
+def _report_environment(report: dict[str, Any]) -> dict[str, str]:
+    environment = default_environment()
+    raw_environment = report.get("environment")
+    if raw_environment is None:
+        return environment
+    if not isinstance(raw_environment, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in raw_environment.items()
+    ):
+        raise SupplyChainEvidenceError("pip installation report environment is invalid")
+    environment.update(raw_environment)
+    return environment
+
+
 def _read_runtime_report(report_path: Path, *, application_name: str) -> dict[str, object]:
     report = _load_json_object(report_path)
     if report.get("version") != "1":
@@ -205,9 +219,11 @@ def _read_runtime_report(report_path: Path, *, application_name: str) -> dict[st
     if not isinstance(raw_install, list):
         raise SupplyChainEvidenceError("pip installation report is missing install inventory")
 
+    environment = _report_environment(report)
     application_identity = canonicalize_name(application_name)
     application_version: str | None = None
     components: list[dict[str, object]] = []
+    requirements_by_name: dict[str, object] = {}
     seen: set[str] = set()
 
     for raw_item in raw_install:
@@ -254,6 +270,7 @@ def _read_runtime_report(report_path: Path, *, application_name: str) -> dict[st
         if source_host:
             component["source_host"] = source_host
         components.append(component)
+        requirements_by_name[name] = raw_metadata.get("requires_dist")
 
     if application_version is None:
         raise SupplyChainEvidenceError(
@@ -262,12 +279,13 @@ def _read_runtime_report(report_path: Path, *, application_name: str) -> dict[st
     return {
         "pip_version": pip_version,
         "application_version": application_version,
+        "environment": environment,
         "components": sorted(
             components,
             key=lambda item: (str(item["name"]), str(item["version"])),
         ),
+        "requirements_by_name": requirements_by_name,
     }
-
 
 def _project_identity(project_root: Path) -> tuple[str, str]:
     try:
@@ -287,11 +305,12 @@ def _project_identity(project_root: Path) -> tuple[str, str]:
     return canonicalize_name(raw_name), raw_version.strip()
 
 
-def _runtime_requirement_names(
+def _runtime_requirements(
     project_root: Path,
     *,
     extras: tuple[str, ...],
-) -> tuple[str, ...]:
+    environment: dict[str, str],
+) -> dict[str, tuple[str, ...]]:
     try:
         with (project_root / "pyproject.toml").open("rb") as handle:
             project_data = tomllib.load(handle)
@@ -316,9 +335,8 @@ def _runtime_requirement_names(
             raise SupplyChainEvidenceError(f"Required runtime extra is missing: {extra}")
         entries.extend((extra, raw) for raw in requirements)
 
-    environment = default_environment()
-    names: set[str] = set()
-    for extra, raw in entries:
+    dependencies: dict[str, set[str]] = {}
+    for active_extra, raw in entries:
         if not isinstance(raw, str):
             raise SupplyChainEvidenceError("Runtime dependency declaration must be a string")
         try:
@@ -328,12 +346,103 @@ def _runtime_requirement_names(
                 f"Invalid runtime dependency declaration: {raw}"
             ) from exc
         marker_environment = dict(environment)
-        marker_environment["extra"] = extra or ""
+        marker_environment["extra"] = active_extra or ""
         if requirement.marker is not None and not requirement.marker.evaluate(marker_environment):
             continue
-        names.add(canonicalize_name(requirement.name))
-    return tuple(sorted(names))
+        name = canonicalize_name(requirement.name)
+        dependencies.setdefault(name, set()).update(requirement.extras)
+    return {
+        name: tuple(sorted(selected_extras))
+        for name, selected_extras in sorted(dependencies.items())
+    }
 
+
+def _metadata_requirement_edges(
+    raw_requirements: object,
+    *,
+    environment: dict[str, str],
+    active_extras: set[str],
+    component_name: str,
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    if raw_requirements is None:
+        return ()
+    if not isinstance(raw_requirements, list):
+        raise SupplyChainEvidenceError(
+            f"Runtime component dependency metadata is invalid: {component_name}"
+        )
+
+    dependencies: dict[str, set[str]] = {}
+    marker_extras = ("", *sorted(active_extras))
+    for raw in raw_requirements:
+        if not isinstance(raw, str):
+            raise SupplyChainEvidenceError(
+                f"Runtime component dependency declaration is invalid: {component_name}"
+            )
+        try:
+            requirement = Requirement(raw)
+        except InvalidRequirement as exc:
+            raise SupplyChainEvidenceError(
+                f"Invalid resolved runtime dependency declaration: {component_name}"
+            ) from exc
+
+        enabled = requirement.marker is None
+        if requirement.marker is not None:
+            enabled = any(
+                requirement.marker.evaluate({**environment, "extra": extra})
+                for extra in marker_extras
+            )
+        if not enabled:
+            continue
+        name = canonicalize_name(requirement.name)
+        dependencies.setdefault(name, set()).update(requirement.extras)
+    return tuple(
+        (name, tuple(sorted(selected_extras)))
+        for name, selected_extras in sorted(dependencies.items())
+    )
+
+
+def _resolved_dependency_graph(
+    components: list[dict[str, object]],
+    *,
+    requirements_by_name: dict[str, object],
+    application_requirements: dict[str, tuple[str, ...]],
+    environment: dict[str, str],
+) -> dict[str, tuple[str, ...]]:
+    component_names = {
+        str(component["name"]) for component in components if isinstance(component, dict)
+    }
+    selected_extras: dict[str, set[str]] = {
+        name: set(extras) for name, extras in application_requirements.items()
+    }
+    graph: dict[str, set[str]] = {name: set() for name in component_names}
+
+    changed = True
+    while changed:
+        changed = False
+        for name in sorted(component_names):
+            edges = _metadata_requirement_edges(
+                requirements_by_name.get(name),
+                environment=environment,
+                active_extras=selected_extras.get(name, set()),
+                component_name=name,
+            )
+            for dependency_name, dependency_extras in edges:
+                if dependency_name not in component_names:
+                    raise SupplyChainEvidenceError(
+                        "Resolved runtime dependency is missing from inventory: "
+                        f"{name}->{dependency_name}"
+                    )
+                graph[name].add(dependency_name)
+                target_extras = selected_extras.setdefault(dependency_name, set())
+                before = len(target_extras)
+                target_extras.update(dependency_extras)
+                if len(target_extras) != before:
+                    changed = True
+
+    return {
+        name: tuple(sorted(dependencies))
+        for name, dependencies in sorted(graph.items())
+    }
 
 def build_supply_chain_evidence(
     report_path: Path,
@@ -366,18 +475,48 @@ def build_supply_chain_evidence(
         )
 
     components = report["components"]
-    if not isinstance(components, list):
+    environment = report["environment"]
+    requirements_by_name = report["requirements_by_name"]
+    if (
+        not isinstance(components, list)
+        or not isinstance(environment, dict)
+        or not isinstance(requirements_by_name, dict)
+    ):
         raise SupplyChainEvidenceError("Resolved runtime inventory is structurally invalid")
-    component_names = {str(item["name"]) for item in components if isinstance(item, dict)}
-    required_names = _runtime_requirement_names(project_root, extras=extras)
-    missing = sorted(set(required_names) - component_names)
+
+    application_requirements = _runtime_requirements(
+        project_root,
+        extras=extras,
+        environment=environment,
+    )
+    component_names = {
+        str(item["name"]) for item in components if isinstance(item, dict)
+    }
+    missing = sorted(set(application_requirements) - component_names)
     if missing:
         raise SupplyChainEvidenceError(
             f"Declared runtime dependencies are missing from resolved inventory: {missing}"
         )
 
+    graph = _resolved_dependency_graph(
+        components,
+        requirements_by_name=requirements_by_name,
+        application_requirements=application_requirements,
+        environment=environment,
+    )
+    persistent_components: list[dict[str, object]] = []
+    for component in components:
+        if not isinstance(component, dict):
+            raise SupplyChainEvidenceError("Resolved runtime component must be an object")
+        name = component.get("name")
+        if not isinstance(name, str):
+            raise SupplyChainEvidenceError("Resolved runtime component name is invalid")
+        persistent = dict(component)
+        persistent["dependencies"] = list(graph[name])
+        persistent_components.append(persistent)
+
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "application": {
             "name": canonicalize_name(application_name),
             "version": application_version,
@@ -390,8 +529,8 @@ def build_supply_chain_evidence(
             "raw_report_persisted": False,
         },
         "runtime_extras": list(extras),
-        "declared_runtime_dependencies": list(required_names),
-        "components": components,
+        "declared_runtime_dependencies": list(application_requirements),
+        "components": persistent_components,
         "policy": {
             "immutable_source_identity_required": True,
             "yanked_components_forbidden": True,
@@ -400,21 +539,30 @@ def build_supply_chain_evidence(
         },
     }
 
-
 def build_cyclonedx_sbom(supply_chain: dict[str, object]) -> dict[str, object]:
     application = supply_chain.get("application")
     raw_components = supply_chain.get("components")
-    if not isinstance(application, dict) or not isinstance(raw_components, list):
+    direct_dependencies = supply_chain.get("declared_runtime_dependencies")
+    if (
+        not isinstance(application, dict)
+        or not isinstance(raw_components, list)
+        or not isinstance(direct_dependencies, list)
+    ):
         raise SupplyChainEvidenceError("Supply-chain evidence is structurally incomplete")
     app_name = application.get("name")
     app_version = application.get("version")
     source_sha = application.get("source_sha")
-    if not all(isinstance(value, str) and value for value in (app_name, app_version, source_sha)):
+    if not all(
+        isinstance(value, str) and value
+        for value in (app_name, app_version, source_sha)
+    ):
         raise SupplyChainEvidenceError("Application identity is structurally incomplete")
 
     app_ref = f"pkg:generic/{app_name}@{app_version}"
     components: list[dict[str, object]] = []
-    dependency_refs: list[str] = []
+    purl_by_name: dict[str, str] = {}
+    dependency_names_by_ref: dict[str, tuple[str, ...]] = {}
+
     for raw in raw_components:
         if not isinstance(raw, dict):
             raise SupplyChainEvidenceError("Runtime component must be an object")
@@ -422,13 +570,21 @@ def build_cyclonedx_sbom(supply_chain: dict[str, object]) -> dict[str, object]:
         version = raw.get("version")
         purl = raw.get("purl")
         source = raw.get("source")
+        raw_dependencies = raw.get("dependencies")
         if (
             not isinstance(name, str)
             or not isinstance(version, str)
             or not isinstance(purl, str)
             or not isinstance(source, dict)
+            or not isinstance(raw_dependencies, list)
+            or any(not isinstance(item, str) for item in raw_dependencies)
         ):
             raise SupplyChainEvidenceError("Runtime component identity is incomplete")
+        if name in purl_by_name:
+            raise SupplyChainEvidenceError(f"Duplicate SBOM component identity: {name}")
+        purl_by_name[name] = purl
+        dependency_names_by_ref[purl] = tuple(sorted(raw_dependencies))
+
         component: dict[str, object] = {
             "type": "library",
             "bom-ref": purl,
@@ -450,7 +606,11 @@ def build_cyclonedx_sbom(supply_chain: dict[str, object]) -> dict[str, object]:
         elif source.get("kind") == "vcs":
             vcs = source.get("vcs")
             commit_id = source.get("commit_id")
-            if not isinstance(vcs, str) or not isinstance(commit_id, str):
+            if (
+                not isinstance(vcs, str)
+                or not isinstance(commit_id, str)
+                or not _VCS_COMMIT_RE.fullmatch(commit_id)
+            ):
                 raise SupplyChainEvidenceError(f"Invalid VCS provenance for {name}")
             properties.extend(
                 [
@@ -467,7 +627,9 @@ def build_cyclonedx_sbom(supply_chain: dict[str, object]) -> dict[str, object]:
             properties.append({"name": "nika:source-host", "value": source_host})
         record_sha256 = raw.get("installed_record_sha256")
         if isinstance(record_sha256, str) and _SHA256_RE.fullmatch(record_sha256):
-            properties.append({"name": "nika:installed-record-sha256", "value": record_sha256})
+            properties.append(
+                {"name": "nika:installed-record-sha256", "value": record_sha256}
+            )
         for item in raw.get("license_evidence", []):
             if (
                 isinstance(item, dict)
@@ -485,7 +647,33 @@ def build_cyclonedx_sbom(supply_chain: dict[str, object]) -> dict[str, object]:
                 properties, key=lambda item: (item["name"], item["value"])
             )
         components.append(component)
-        dependency_refs.append(purl)
+
+    if any(
+        not isinstance(name, str) or name not in purl_by_name
+        for name in direct_dependencies
+    ):
+        raise SupplyChainEvidenceError(
+            "Application dependency graph references an unknown component"
+        )
+
+    dependencies: list[dict[str, object]] = [
+        {
+            "ref": app_ref,
+            "dependsOn": sorted(purl_by_name[name] for name in direct_dependencies),
+        }
+    ]
+    for ref, dependency_names in sorted(dependency_names_by_ref.items()):
+        unknown = sorted(set(dependency_names) - set(purl_by_name))
+        if unknown:
+            raise SupplyChainEvidenceError(
+                f"SBOM dependency graph references unknown components: {unknown}"
+            )
+        dependencies.append(
+            {
+                "ref": ref,
+                "dependsOn": sorted(purl_by_name[name] for name in dependency_names),
+            }
+        )
 
     metadata_component = {
         "type": "application",
@@ -504,12 +692,8 @@ def build_cyclonedx_sbom(supply_chain: dict[str, object]) -> dict[str, object]:
         "components": sorted(
             components, key=lambda item: (str(item["name"]), str(item["version"]))
         ),
-        "dependencies": [
-            {"ref": app_ref, "dependsOn": sorted(dependency_refs)},
-            *[{"ref": ref, "dependsOn": []} for ref in sorted(dependency_refs)],
-        ],
+        "dependencies": dependencies,
     }
-
 
 def write_supply_chain_evidence(
     bundle_dir: Path,
