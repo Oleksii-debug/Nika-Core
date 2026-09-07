@@ -80,6 +80,54 @@ class AccessibleResearchReport:
     text: str
 
 
+def render_accessible_research_text(
+    *,
+    query: str,
+    created_at: str,
+    cards: tuple[ResearchCard, ...],
+) -> str:
+    """Render the canonical shareable text projection for research cards."""
+    lines = [
+        "Research results",
+        f"Query: {query}",
+        f"Created: {created_at}",
+        f"Results: {len(cards)}",
+        "",
+    ]
+    for position, card in enumerate(cards, start=1):
+        lines.extend(
+            [
+                f"Result {position}: {card.title}",
+                f"Review: {card.review.state.value}",
+                f"Rank: {card.rank}",
+                f"Why matched: {card.why_matched}",
+                f"Summary: {card.snippet}",
+            ]
+        )
+        if card.review.note:
+            lines.append(f"Review note: {card.review.note}")
+        if card.evidence:
+            lines.append("Evidence:")
+            for evidence_index, evidence in enumerate(card.evidence, start=1):
+                freshness = (
+                    evidence.freshness.value if evidence.freshness is not None else "n/a"
+                )
+                lines.extend(
+                    [
+                        f"  Evidence {evidence_index}",
+                        f"  Source ID: {evidence.source_id}",
+                        f"  Source kind: {evidence.source_kind.value}",
+                        f"  Freshness: {freshness}",
+                        f"  Location: {safe_evidence_location(evidence)}",
+                        f"  Observed: {evidence.observed_at}",
+                    ]
+                )
+        else:
+            lines.append("Evidence: none recorded")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 class ResearchReviewRepository:
     """Durable review state recorded in Nika's existing authoritative audit log.
 
@@ -205,48 +253,15 @@ class ResearchCardService:
 
     def accessible_report(self, result_set: ResearchResultSet) -> AccessibleResearchReport:
         cards = self.cards_for(result_set)
-        lines = [
-            "Research results",
-            f"Query: {result_set.query}",
-            f"Created: {result_set.created_at}",
-            f"Results: {len(cards)}",
-            "",
-        ]
-        for position, card in enumerate(cards, start=1):
-            lines.extend(
-                [
-                    f"Result {position}: {card.title}",
-                    f"Review: {card.review.state.value}",
-                    f"Rank: {card.rank}",
-                    f"Why matched: {card.why_matched}",
-                    f"Summary: {card.snippet}",
-                ]
-            )
-            if card.review.note:
-                lines.append(f"Review note: {card.review.note}")
-            if card.evidence:
-                lines.append("Evidence:")
-                for evidence_index, evidence in enumerate(card.evidence, start=1):
-                    freshness = evidence.freshness.value if evidence.freshness is not None else "n/a"
-                    lines.extend(
-                        [
-                            f"  Evidence {evidence_index}",
-                            f"  Source ID: {evidence.source_id}",
-                            f"  Source kind: {evidence.source_kind.value}",
-                            f"  Freshness: {freshness}",
-                            f"  Location: {safe_evidence_location(evidence)}",
-                            f"  Observed: {evidence.observed_at}",
-                        ]
-                    )
-            else:
-                lines.append("Evidence: none recorded")
-            lines.append("")
-
         return AccessibleResearchReport(
             result_set_id=result_set.result_set_id,
             workspace_id=result_set.workspace_id,
             query=result_set.query,
             created_at=result_set.created_at,
             cards=cards,
-            text="\n".join(lines).rstrip() + "\n",
+            text=render_accessible_research_text(
+                query=result_set.query,
+                created_at=result_set.created_at,
+                cards=cards,
+            ),
         )
