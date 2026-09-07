@@ -36,7 +36,11 @@ def _archive_item(
     *,
     requested: bool = False,
     url: str | None = None,
+    requires_dist: list[str] | None = None,
 ) -> dict[str, object]:
+    metadata: dict[str, object] = {"name": name, "version": version}
+    if requires_dist is not None:
+        metadata["requires_dist"] = requires_dist
     return {
         "download_info": {
             "url": url or f"https://packages.example.invalid/{name}-{version}.whl",
@@ -45,7 +49,7 @@ def _archive_item(
         "is_direct": False,
         "is_yanked": False,
         "requested": requested,
-        "metadata": {"name": name, "version": version},
+        "metadata": metadata,
     }
 
 
@@ -75,8 +79,10 @@ def _report(
                     "https://resolver-user:resolver-secret@packages.example.invalid/"
                     "httpx.whl?token=resolver-canary"
                 ),
+                requires_dist=["httpcore>=1"],
             )
         )
+        install.append(_archive_item("httpcore", "1.0.9", "5" * 64))
     if include_pywebview:
         install.append(_archive_item("pywebview", "6.2.1", "2" * 64, requested=True))
     path.write_text(
@@ -236,6 +242,17 @@ def test_cyclonedx_is_deterministic_and_binds_source_identity(
     httpx = next(item for item in first["components"] if item["name"] == "httpx")
     assert httpx["hashes"] == [{"alg": "SHA-256", "content": "1" * 64}]
 
+    dependency_map = {
+        item["ref"]: item["dependsOn"] for item in first["dependencies"]
+    }
+    app_ref = "pkg:generic/nika-core@0.0.2"
+    httpx_ref = "pkg:pypi/httpx@0.28.1"
+    httpcore_ref = "pkg:pypi/httpcore@1.0.9"
+    pywebview_ref = "pkg:pypi/pywebview@6.2.1"
+    assert dependency_map[app_ref] == [httpx_ref, pywebview_ref]
+    assert dependency_map[httpx_ref] == [httpcore_ref]
+    assert dependency_map[httpcore_ref] == []
+
 
 def test_vcs_commit_is_accepted_as_immutable_provenance(
     tmp_path: Path,
@@ -267,6 +284,64 @@ def test_vcs_commit_is_accepted_as_immutable_provenance(
         "vcs": "git",
         "commit_id": "0123456789abcdef0123456789abcdef01234567",
     }
+
+
+@pytest.mark.parametrize(
+    "commit_id",
+    ["main", "refs/heads/main", "v1.2.3", "deadbee"],
+)
+def test_vcs_ref_shaped_identity_is_not_immutable_provenance(
+    tmp_path: Path,
+    installed_metadata: None,
+    commit_id: str,
+) -> None:
+    project_root = _project(tmp_path / "project")
+    report = _report(tmp_path / "report.json")
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    payload["install"][1]["download_info"] = {
+        "url": "git+https://example.invalid/runtime.git",
+        "vcs_info": {"vcs": "git", "commit_id": commit_id},
+    }
+    report.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        SupplyChainEvidenceError,
+        match="immutable source artifact identity",
+    ):
+        sbom.build_supply_chain_evidence(
+            report,
+            project_root=project_root,
+            application_name="nika-core",
+            application_version="0.0.2",
+            source_sha=SOURCE_SHA,
+        )
+
+
+def test_supply_chain_rejects_missing_active_transitive_dependency(
+    tmp_path: Path,
+    installed_metadata: None,
+) -> None:
+    project_root = _project(tmp_path / "project")
+    report = _report(tmp_path / "report.json")
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    payload["install"] = [
+        item
+        for item in payload["install"]
+        if item["metadata"]["name"] != "httpcore"
+    ]
+    report.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        SupplyChainEvidenceError,
+        match="Resolved runtime dependency is missing from inventory: httpx->httpcore",
+    ):
+        sbom.build_supply_chain_evidence(
+            report,
+            project_root=project_root,
+            application_name="nika-core",
+            application_version="0.0.2",
+            source_sha=SOURCE_SHA,
+        )
 
 
 def test_write_verify_and_tamper_detection(
