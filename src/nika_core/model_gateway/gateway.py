@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from math import isfinite
 from dataclasses import replace
 from typing import Protocol
 
@@ -12,6 +13,7 @@ from .contracts import (
     ModelProvider,
     ModelRequest,
     ModelResponse,
+    ModelUsage,
     PrivacyClass,
     ProviderKind,
 )
@@ -164,6 +166,20 @@ class ModelGateway:
                 self._audit_failure(request, capabilities.provider_id, error)
                 raise error
 
+            response_error = self._validate_success_response(
+                response=response,
+                request=request,
+                trusted_provider_id=capabilities.provider_id,
+                trusted_provider_kind=capabilities.kind,
+            )
+            if response_error is not None:
+                self._audit_failure(
+                    request,
+                    capabilities.provider_id,
+                    response_error,
+                )
+                raise response_error
+
             self._audit(
                 event_type="model.completed",
                 request=request,
@@ -220,6 +236,58 @@ class ModelGateway:
                     "private data cannot be routed to this provider",
                     provider_id=capabilities.provider_id,
                 )
+
+    @staticmethod
+    def _validate_success_response(
+        *,
+        response: ModelResponse,
+        request: ModelRequest,
+        trusted_provider_id: str,
+        trusted_provider_kind: ProviderKind,
+    ) -> ModelGatewayError | None:
+        invalid = (
+            response.request_id != request.request_id
+            or response.provider_id != trusted_provider_id
+            or response.provider_kind is not trusted_provider_kind
+            or not isinstance(response.model, str)
+            or not response.model
+            or not isinstance(response.usage, ModelUsage)
+        )
+        if not invalid:
+            for value in (
+                response.usage.input_tokens,
+                response.usage.output_tokens,
+                response.usage.total_tokens,
+            ):
+                if value is not None and (
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value < 0
+                ):
+                    invalid = True
+                    break
+
+        if not invalid and response.latency_ms is not None:
+            latency = response.latency_ms
+            if isinstance(latency, bool) or not isinstance(latency, (int, float)):
+                invalid = True
+            else:
+                try:
+                    finite_latency = isfinite(float(latency))
+                except OverflowError:
+                    finite_latency = False
+                if not finite_latency or latency < 0:
+                    invalid = True
+
+        if not invalid:
+            return None
+        return ModelGatewayError(
+            ModelErrorCode.PROVIDER_ERROR,
+            "model provider returned an invalid success response",
+            provider_id=trusted_provider_id,
+            retryable=False,
+            failure_effect=ModelFailureEffect.UNKNOWN,
+        )
 
     @staticmethod
     def _normalize_provider_error(
