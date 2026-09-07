@@ -202,6 +202,44 @@ def test_bypass_ruleset_is_not_used_when_classic_protection_is_complete() -> Non
     assert report["controls"]["proof_eligible_ruleset_count"] == 0
 
 
+def test_ruleset_without_visible_bypass_actors_cannot_prove_governance() -> None:
+    responses = base_responses()
+    responses[f"/repos/Oleksii-debug/Nika-Core/branches/{BRANCH}/protection"] = ApiFailure(
+        status=403, message="http_403:forbidden"
+    )
+    responses["/repos/Oleksii-debug/Nika-Core/rulesets?includes_parents=true"] = [
+        {"id": 21, "name": "protect-main"}
+    ]
+    responses["/repos/Oleksii-debug/Nika-Core/rulesets/21"] = {
+        "id": 21,
+        "name": "protect-main",
+        "target": "branch",
+        "enforcement": "active",
+        # GitHub may omit bypass_actors unless the caller can view that sensitive field.
+        "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+        "rules": [
+            {"type": "deletion"},
+            {"type": "non_fast_forward"},
+            {"type": "pull_request"},
+            {
+                "type": "required_status_checks",
+                "parameters": {
+                    "required_status_checks": [{"context": check} for check in CHECKS]
+                },
+            },
+        ],
+    }
+    client = FakeClient(responses)
+
+    report = inspect(client)
+
+    assert report["status"] == "BLOCKED"
+    assert report["controls"]["proof_eligible_ruleset_count"] == 0
+    assert report["controls"]["ruleset_bypass_evidence_missing_count"] == 1
+    assert "PROTECTION_DETAILS_NOT_PROVEN" in report["blockers"]
+    assert report["evidence_errors"] == ["ruleset_21:bypass_actors_not_visible"]
+
+
 def test_ruleset_bypass_actor_blocks_when_ruleset_is_needed_for_proof() -> None:
     responses = base_responses()
     responses[f"/repos/Oleksii-debug/Nika-Core/branches/{BRANCH}/protection"] = ApiFailure(
