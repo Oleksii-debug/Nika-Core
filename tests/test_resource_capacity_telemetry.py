@@ -10,8 +10,8 @@ from nika_core.resources import (
     ResourceBudget,
     ResourceManager,
     ResourceSnapshot,
+    psutil_adapter,
 )
-from nika_core.resources import psutil_adapter
 
 
 class FakeObserver:
