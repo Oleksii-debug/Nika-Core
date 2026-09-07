@@ -325,6 +325,17 @@ class ModelGateway:
                     f"unknown model provider: {request.provider_id}",
                     provider_id=request.provider_id,
                 )
+            if (
+                request.provider_kind is not None
+                and provider.capabilities.kind is not request.provider_kind
+            ):
+                raise ModelGatewayError(
+                    ModelErrorCode.INVALID_REQUEST,
+                    "selected model provider kind does not match the requested boundary",
+                    provider_id=request.provider_id,
+                    retryable=False,
+                    failure_effect=ModelFailureEffect.NO_EFFECT,
+                )
             return provider
         if request.provider_kind:
             provider_id = self._defaults.get(request.provider_kind)

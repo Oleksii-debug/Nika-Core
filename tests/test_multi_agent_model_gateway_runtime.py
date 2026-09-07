@@ -308,6 +308,9 @@ def test_configured_api_credential_failure_is_secret_safe_and_no_effect(
 
 
 class _WrongKindProvider:
+    def __init__(self) -> None:
+        self.complete_calls = 0
+
     @property
     def capabilities(self) -> ProviderCapabilities:
         return ProviderCapabilities(
@@ -317,6 +320,7 @@ class _WrongKindProvider:
         )
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
+        self.complete_calls += 1
         return ModelResponse(
             request_id=request.request_id,
             text="wrong-kind",
@@ -329,7 +333,8 @@ class _WrongKindProvider:
 def test_runtime_fails_closed_on_provider_kind_substitution(tmp_path: Path) -> None:
     _, definitions = _definitions(tmp_path)
     gateway = ModelGateway()
-    gateway.register(_WrongKindProvider())
+    provider = _WrongKindProvider()
+    gateway.register(provider)
     runtime = ModelGatewayAgentRuntime(
         gateway=gateway,
         definitions=definitions,
@@ -343,8 +348,15 @@ def test_runtime_fails_closed_on_provider_kind_substitution(tmp_path: Path) -> N
     assert result.outcome is RuntimeOutcome.FAILED
     assert result.error_code is RuntimeErrorCode.INTERNAL
     assert result.output["provider_id"] == "route"
-    assert result.output["provider_kind"] == "cloud"
-    assert result.error == "The model response did not match the configured provider route."
+    assert result.output["model_error_code"] == "invalid_request"
+    assert result.output["recoverable"] is False
+    assert result.output["provider_retryable"] is False
+    assert result.output["failure_effect"] == "no_effect"
+    assert "provider_kind" not in result.output
+    assert provider.complete_calls == 0
+    assert result.error == (
+        "The configured model route rejected this request. Check the model configuration."
+    )
 
 
 def test_adapter_does_not_claim_durable_resume(tmp_path: Path) -> None:
