@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
@@ -62,6 +63,21 @@ class ProductDecisionRepository:
             ).encode()
         ).hexdigest()
         with self.store.connection() as conn:
+            # Serialize the idempotency/project-version read with the mutation itself.
+            # This makes concurrent identical calls wait for the winner and then
+            # replay its canonical result instead of racing stale authority reads.
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as exc:
+                error_code = getattr(exc, "sqlite_errorcode", None)
+                if isinstance(error_code, int) and (error_code & 0xFF) in {
+                    sqlite3.SQLITE_BUSY,
+                    sqlite3.SQLITE_LOCKED,
+                }:
+                    raise ProductProjectError(
+                        "product decision write is temporarily busy"
+                    ) from exc
+                raise
             replay = conn.execute(
                 "SELECT project_id,operation_kind,entity_id,entity_version,input_fingerprint "
                 "FROM product_project_mutation_idempotency WHERE operation_key=?",
