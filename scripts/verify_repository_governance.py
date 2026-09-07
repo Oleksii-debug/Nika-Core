@@ -9,9 +9,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
-import re
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
