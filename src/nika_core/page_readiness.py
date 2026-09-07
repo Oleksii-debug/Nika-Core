@@ -173,6 +173,18 @@ async def observe_page_readiness(
         if cancellation_event is not None and cancellation_event.is_set():
             raise asyncio.CancelledError
 
+        if observation_number > 1:
+            pre_sample_now = clock()
+            if (
+                not isinstance(pre_sample_now, (int, float))
+                or isinstance(pre_sample_now, bool)
+                or not isfinite(float(pre_sample_now))
+            ):
+                raise ValueError("clock must return a finite monotonic value")
+            if float(pre_sample_now) > deadline:
+                assert last_result is not None
+                return replace(last_result, observation_window_exhausted=True)
+
         result = sample()
         if not isinstance(result, PageReadinessResult):
             return PageReadinessResult(
