@@ -84,6 +84,8 @@ class _PoisonSuccessProvider:
             return replace(valid, text=[_CANARY])  # type: ignore[arg-type]
         if self.mode == "model-not-text":
             return replace(valid, model=123)  # type: ignore[arg-type]
+        if self.mode == "wrong-model":
+            return replace(valid, model="substituted-model")
         if self.mode == "usage-not-dto":
             return replace(valid, usage=_CANARY)  # type: ignore[arg-type]
         if self.mode == "usage-secret":
@@ -132,6 +134,7 @@ def _request() -> ModelRequest:
         "wrong-provider-kind",
         "text-not-string",
         "model-not-text",
+        "wrong-model",
         "usage-not-dto",
         "usage-secret",
         "usage-bool",
@@ -233,6 +236,37 @@ def test_valid_success_response_still_reaches_completed_audit(tmp_path: Path) ->
     assert response.model == "fixture-model"
     assert primary.complete_calls == 1
     assert fallback.complete_calls == 0
+    events = audit.list_for(
+        entity_type="model_request",
+        entity_id="response-trust-request",
+    )
+    assert [event.event_type for event in events] == [
+        "model.requested",
+        "model.completed",
+    ]
+
+
+def test_provider_default_model_identity_is_allowed_when_request_is_unpinned(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    audit = AuditLog(store)
+    primary = _PoisonSuccessProvider("valid")
+    gateway = ModelGateway(audit_log=audit)
+    gateway.register(primary)
+
+    response = asyncio.run(
+        gateway.complete(
+            replace(
+                _request(),
+                model=None,
+                fallback_provider_ids=(),
+            )
+        )
+    )
+
+    assert response.model == "fixture-model"
     events = audit.list_for(
         entity_type="model_request",
         entity_id="response-trust-request",
