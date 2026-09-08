@@ -147,7 +147,10 @@ def _next_action(
 ) -> str:
     if _first_incomplete(blocker_entries) is not None:
         return "resolve_blocker"
-    if detail.summary.current_decision is not None:
+    if (
+        detail.summary.current_decision is not None
+        and detail.summary.current_decision.state == "pending"
+    ):
         return f"owner_decision:{detail.summary.current_decision.decision_id}"
     active = _first_incomplete(component_entries)
     if active is not None:
