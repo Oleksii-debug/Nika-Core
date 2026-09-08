@@ -150,6 +150,8 @@ class ScriptRetryIntent:
     def __post_init__(self) -> None:
         if not isinstance(self.operation_id, str) or not self.operation_id.strip():
             raise ValueError("operation_id must not be empty")
+        if self.operation_id != self.operation_id.strip():
+            raise ValueError("operation_id must not contain leading or trailing whitespace")
         if not isinstance(self.condition, ScriptRetryCondition):
             raise TypeError("condition must be a ScriptRetryCondition")
         _validate_retry_count(self.retry_number, field_name="retry_number", minimum=1)
