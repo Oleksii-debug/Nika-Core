@@ -18,6 +18,7 @@ _TERMINAL_SUCCESS_STATES = {
     "pass",
     "passed",
     "released",
+    "resolved",
     "succeeded",
     "success",
 }
