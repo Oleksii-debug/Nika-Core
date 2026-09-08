@@ -89,6 +89,8 @@ class ReviewVerdict:
     def __post_init__(self) -> None:
         _validate_sha(self.candidate_sha)
         _validate_canonical_identity(self.reviewer_id, field="reviewer")
+        if type(self.accepted) is not bool:
+            raise ReviewPipelineError("review verdict accepted must be boolean")
         if not self.reason.strip():
             raise ReviewPipelineError("review verdict reason must not be empty")
         if self.reason != self.reason.strip():
@@ -113,7 +115,12 @@ class CandidateReviewRecord:
         return json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
 
     @classmethod
-    def restore(cls, payload: str) -> CandidateReviewRecord:
+    def restore(
+        cls,
+        payload: str,
+        *,
+        verification: ExactHeadMergeClearance | None = None,
+    ) -> CandidateReviewRecord:
         try:
             raw = json.loads(payload)
             identity = CandidateReviewIdentity(**raw["identity"])
@@ -138,6 +145,12 @@ class CandidateReviewRecord:
         except (KeyError, TypeError, ValueError) as exc:
             raise ReviewPipelineError("review snapshot is invalid") from exc
         record._validate()
+        if record.state is ReviewState.MERGE_READY:
+            if verification is None:
+                raise ReviewPipelineError(
+                    "MERGE_READY restore requires exact-head verification clearance"
+                )
+            record._validate_merge_clearance(verification)
         return record
 
     def require_review(self) -> CandidateReviewRecord:
@@ -193,15 +206,7 @@ class CandidateReviewRecord:
     ) -> CandidateReviewRecord:
         self._require_state(ReviewState.PASS)
         self._require_candidate(candidate_sha)
-        _validate_sha(verification.candidate_sha)
-        if verification.candidate_sha != self.identity.candidate_sha:
-            raise StaleCandidateReviewError(
-                "verification clearance does not match exact current candidate SHA"
-            )
-        if not verification.merge_clearance:
-            raise ReviewPipelineError(
-                "exact-head verification clearance is required for merge ready"
-            )
+        self._validate_merge_clearance(verification)
         return CandidateReviewRecord(
             self.identity,
             ReviewState.MERGE_READY,
@@ -285,6 +290,17 @@ class CandidateReviewRecord:
             authority.authority_ref,
             independent_review_authorized=True,
         )
+
+    def _validate_merge_clearance(self, verification: ExactHeadMergeClearance) -> None:
+        _validate_sha(verification.candidate_sha)
+        if verification.candidate_sha != self.identity.candidate_sha:
+            raise StaleCandidateReviewError(
+                "verification clearance does not match exact current candidate SHA"
+            )
+        if verification.merge_clearance is not True:
+            raise ReviewPipelineError(
+                "exact-head verification clearance is required for merge ready"
+            )
 
     def _require_state(self, expected: ReviewState) -> None:
         self._validate()
