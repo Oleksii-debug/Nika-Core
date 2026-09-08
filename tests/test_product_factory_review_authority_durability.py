@@ -22,6 +22,12 @@ class _Authority:
     independent_review_authorized: bool = True
 
 
+@dataclass(frozen=True)
+class _Clearance:
+    candidate_sha: str = SHA_A
+    merge_clearance: bool = True
+
+
 def _pending_review() -> CandidateReviewRecord:
     candidate = CandidateReviewRecord(
         CandidateReviewIdentity(
@@ -31,6 +37,16 @@ def _pending_review() -> CandidateReviewRecord:
         )
     )
     return candidate.require_review().queue_qa(authority=_Authority())
+
+
+def _passed_review() -> CandidateReviewRecord:
+    return _pending_review().start_qa(reviewer_id="qa-1").record_verdict(
+        candidate_sha=SHA_A,
+        reviewer_id="qa-1",
+        accepted=True,
+        reason="independent exact-head review passed",
+        evidence_refs=("review:1",),
+    )
 
 
 def test_snapshot_persists_explicit_independent_review_authorization() -> None:
@@ -63,3 +79,33 @@ def test_restore_accepts_legacy_authorized_snapshot_without_decision_field() -> 
 
     assert restored.reviewer_authority is not None
     assert restored.reviewer_authority.independent_review_authorized is True
+
+
+def test_restore_rejects_forged_merge_ready_without_exact_head_clearance() -> None:
+    raw = json.loads(_passed_review().snapshot())
+    raw["state"] = "merge_ready"
+
+    with pytest.raises(ReviewPipelineError, match="requires exact-head verification clearance"):
+        CandidateReviewRecord.restore(json.dumps(raw))
+
+
+def test_verified_merge_ready_is_restart_safe_with_same_head_clearance() -> None:
+    merge_ready = _passed_review().mark_merge_ready(
+        candidate_sha=SHA_A,
+        verification=_Clearance(),
+    )
+
+    restored = CandidateReviewRecord.restore(
+        merge_ready.snapshot(),
+        verification=_Clearance(),
+    )
+
+    assert restored.state.value == "merge_ready"
+
+
+def test_restore_rejects_truthy_non_boolean_verdict_acceptance() -> None:
+    raw = json.loads(_passed_review().snapshot())
+    raw["verdict"]["accepted"] = "false"
+
+    with pytest.raises(ReviewPipelineError, match="review snapshot is invalid"):
+        CandidateReviewRecord.restore(json.dumps(raw))
