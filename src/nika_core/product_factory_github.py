@@ -178,8 +178,7 @@ def _normalize_full_name(locator: str) -> str:
         if value.casefold().startswith(prefix.casefold()):
             value = value[len(prefix) :]
             break
-    if value.endswith(".git"):
-        value = value[:-4]
+    value = value.removesuffix(".git")
     parts = value.split("/")
     if len(parts) != 2 or not all(part.strip() for part in parts):
         raise GitHubFactoryError("GitHub repository locator must identify owner/repository")
