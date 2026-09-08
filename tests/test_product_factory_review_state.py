@@ -69,6 +69,31 @@ def test_candidate_implementer_cannot_self_review() -> None:
         _candidate().require_review().queue_qa(reviewer_id="dev-1")
 
 
+@pytest.mark.parametrize("implementer_id", [" dev-1", "dev-1 ", "\tdev-1"])
+def test_candidate_implementer_identity_must_be_canonical(implementer_id: str) -> None:
+    with pytest.raises(ReviewPipelineError, match="implementer identity must be canonical"):
+        CandidateReviewIdentity(
+            work_id="work-1",
+            candidate_sha=SHA_A,
+            implementer_id=implementer_id,
+        )
+
+
+@pytest.mark.parametrize("reviewer_id", [" dev-1", "dev-1 ", "\tdev-1"])
+def test_edge_whitespace_cannot_bypass_self_review_identity(reviewer_id: str) -> None:
+    with pytest.raises(ReviewPipelineError, match="reviewer identity must be canonical"):
+        _candidate().require_review().queue_qa(reviewer_id=reviewer_id)
+
+
+def test_work_identity_must_be_canonical() -> None:
+    with pytest.raises(ReviewPipelineError, match="candidate work identity must be canonical"):
+        CandidateReviewIdentity(
+            work_id="work-1 ",
+            candidate_sha=SHA_A,
+            implementer_id="dev-1",
+        )
+
+
 def test_stale_candidate_sha_cannot_receive_verdict() -> None:
     with pytest.raises(StaleCandidateReviewError, match="exact current candidate SHA"):
         _running_review().record_verdict(
