@@ -73,7 +73,11 @@ def project_operator_status(detail: ProductProjectDetail) -> FactoryOperatorProj
         STATE=detail.summary.state,
         BLOCKER=_render_statuses(blocker_entries, empty="none"),
         CANDIDATE=_render_candidate(candidate_refs),
-        TEST=_render_statuses(build_entries, empty="unknown"),
+        TEST=(
+            _render_statuses(build_entries, empty="unknown")
+            if build_entries
+            else _render_test_state(qa_entries)
+        ),
         QA=_render_statuses(qa_entries, empty="unknown"),
         INTEGRATION=_render_statuses(integration_entries, empty="not_started"),
         NEXT=_next_action(
@@ -118,6 +122,13 @@ def _render_candidate(candidate_refs: tuple[str, ...]) -> str:
     if len(candidate_refs) > 1:
         return "ambiguous_multiple_candidates"
     return candidate_refs[0]
+
+
+def _render_test_state(entries: tuple[ProductStatusEntry, ...]) -> str:
+    if not entries:
+        return "unknown"
+    states = tuple(dict.fromkeys(entry.state for entry in entries))
+    return _render_values(states, empty="unknown")
 
 
 def _first_incomplete(
