@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import pytest
 
 from nika_core.qa.review_state import (
@@ -12,6 +14,12 @@ from nika_core.qa.review_state import (
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
+
+
+@dataclass(frozen=True)
+class _Clearance:
+    candidate_sha: str
+    merge_clearance: bool
 
 
 def _candidate() -> CandidateReviewRecord:
@@ -33,6 +41,16 @@ def _running_review() -> CandidateReviewRecord:
     )
 
 
+def _passed_review() -> CandidateReviewRecord:
+    return _running_review().record_verdict(
+        candidate_sha=SHA_A,
+        reviewer_id="qa-1",
+        accepted=True,
+        reason="independent exact-head review passed",
+        evidence_refs=("ci:run-123", "review:evidence-456"),
+    )
+
+
 def test_pass_journey_is_exact_sha_and_restart_safe() -> None:
     pending = _candidate().require_review().queue_qa(reviewer_id="qa-1")
     pending = CandidateReviewRecord.restore(pending.snapshot())
@@ -48,7 +66,26 @@ def test_pass_journey_is_exact_sha_and_restart_safe() -> None:
     restored = CandidateReviewRecord.restore(passed.snapshot())
 
     assert restored.state is ReviewState.PASS
-    assert restored.mark_merge_ready(candidate_sha=SHA_A).state is ReviewState.MERGE_READY
+    assert restored.mark_merge_ready(
+        candidate_sha=SHA_A,
+        verification=_Clearance(SHA_A, True),
+    ).state is ReviewState.MERGE_READY
+
+
+def test_merge_ready_rejects_failed_exact_head_verification() -> None:
+    with pytest.raises(ReviewPipelineError, match="verification clearance is required"):
+        _passed_review().mark_merge_ready(
+            candidate_sha=SHA_A,
+            verification=_Clearance(SHA_A, False),
+        )
+
+
+def test_merge_ready_rejects_stale_verification_clearance() -> None:
+    with pytest.raises(StaleCandidateReviewError, match="exact current candidate SHA"):
+        _passed_review().mark_merge_ready(
+            candidate_sha=SHA_A,
+            verification=_Clearance(SHA_B, True),
+        )
 
 
 def test_failed_review_must_transition_to_fix_required() -> None:
@@ -116,13 +153,10 @@ def test_stale_candidate_sha_cannot_receive_verdict() -> None:
 
 
 def test_successor_head_invalidates_prior_clearance() -> None:
-    merge_ready = _running_review().record_verdict(
+    merge_ready = _passed_review().mark_merge_ready(
         candidate_sha=SHA_A,
-        reviewer_id="qa-1",
-        accepted=True,
-        reason="pass",
-        evidence_refs=("ci:1",),
-    ).mark_merge_ready(candidate_sha=SHA_A)
+        verification=_Clearance(SHA_A, True),
+    )
 
     successor = merge_ready.successor(candidate_sha=SHA_B, implementer_id="dev-2")
 
