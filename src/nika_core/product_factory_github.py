@@ -1,0 +1,191 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+
+from nika_core.product_factory_orchestration import RepositoryRef
+
+
+class GitHubFactoryError(ValueError):
+    """Raised when GitHub Factory evidence is incomplete or inconsistent."""
+
+
+class PullRequestState(StrEnum):
+    OPEN = "open"
+    CLOSED = "closed"
+    MERGED = "merged"
+
+
+class CheckState(StrEnum):
+    PENDING = "pending"
+    PASS = "pass"
+    FAIL = "fail"
+
+
+@dataclass(frozen=True, slots=True)
+class GitHubIssueRef:
+    number: int
+    state: str
+
+    def __post_init__(self) -> None:
+        if isinstance(self.number, bool) or self.number < 1:
+            raise GitHubFactoryError("issue number must be a positive integer")
+        if self.state not in {"open", "closed"}:
+            raise GitHubFactoryError("issue state must be open or closed")
+
+
+@dataclass(frozen=True, slots=True)
+class GitHubCheck:
+    name: str
+    head_sha: str
+    state: CheckState
+
+    def __post_init__(self) -> None:
+        if not self.name.strip():
+            raise GitHubFactoryError("check name must not be empty")
+        _validate_sha(self.head_sha, "check head_sha")
+
+
+@dataclass(frozen=True, slots=True)
+class GitHubPullRequest:
+    number: int
+    head_branch: str
+    head_sha: str
+    base_branch: str
+    state: PullRequestState
+    merge_sha: str | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.number, bool) or self.number < 1:
+            raise GitHubFactoryError("pull request number must be a positive integer")
+        if not self.head_branch.strip() or not self.base_branch.strip():
+            raise GitHubFactoryError("pull request branches must not be empty")
+        _validate_sha(self.head_sha, "pull request head_sha")
+        if self.state is PullRequestState.MERGED:
+            if self.merge_sha is None:
+                raise GitHubFactoryError("merged pull request requires merge_sha")
+            _validate_sha(self.merge_sha, "pull request merge_sha")
+        elif self.merge_sha is not None:
+            raise GitHubFactoryError("unmerged pull request must not carry merge_sha")
+
+
+@dataclass(frozen=True, slots=True)
+class GitHubRepositoryObservation:
+    owner: str
+    name: str
+    default_branch: str
+    default_branch_sha: str
+    issue: GitHubIssueRef | None = None
+    candidate_branch: str | None = None
+    candidate_sha: str | None = None
+    pull_request: GitHubPullRequest | None = None
+    checks: tuple[GitHubCheck, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.owner.strip() or not self.name.strip() or not self.default_branch.strip():
+            raise GitHubFactoryError("repository identity must not be empty")
+        _validate_sha(self.default_branch_sha, "default branch sha")
+        if (self.candidate_branch is None) != (self.candidate_sha is None):
+            raise GitHubFactoryError("candidate branch and sha must be present together")
+        if self.candidate_branch is not None:
+            if not self.candidate_branch.strip():
+                raise GitHubFactoryError("candidate branch must not be empty")
+            _validate_sha(self.candidate_sha or "", "candidate sha")
+        names = [check.name for check in self.checks]
+        if len(names) != len(set(names)):
+            raise GitHubFactoryError("check names must be unique")
+
+
+@dataclass(frozen=True, slots=True)
+class GitHubFactoryBinding:
+    repository_id: str
+    repository_full_name: str
+    default_branch: str
+    default_branch_sha: str
+    issue_number: int | None
+    candidate_branch: str | None
+    candidate_sha: str | None
+    pull_request_number: int | None
+    pull_request_state: PullRequestState | None
+    checks_state: CheckState | None
+    integrated: bool
+    integration_sha: str | None
+
+
+class GitHubFactoryAdapter:
+    """Bind live GitHub observations to an existing ProductRepositoryGraph reference."""
+
+    def bind(
+        self,
+        repository: RepositoryRef,
+        observation: GitHubRepositoryObservation,
+    ) -> GitHubFactoryBinding:
+        if repository.provider.strip().casefold() != "github":
+            raise GitHubFactoryError("repository provider must be github")
+        expected = _normalize_full_name(repository.locator)
+        observed = _normalize_full_name(f"{observation.owner}/{observation.name}")
+        if expected != observed:
+            raise GitHubFactoryError("GitHub observation does not match repository locator")
+        if repository.default_branch != observation.default_branch:
+            raise GitHubFactoryError("GitHub observation does not match default branch")
+
+        pr = observation.pull_request
+        candidate_sha = observation.candidate_sha
+        candidate_branch = observation.candidate_branch
+        if pr is not None:
+            if candidate_sha is None or candidate_branch is None:
+                raise GitHubFactoryError("pull request requires explicit candidate identity")
+            if pr.head_sha != candidate_sha or pr.head_branch != candidate_branch:
+                raise GitHubFactoryError("pull request head does not match candidate identity")
+            if pr.base_branch != observation.default_branch:
+                raise GitHubFactoryError("pull request base does not match default branch")
+
+        checks_state: CheckState | None = None
+        if observation.checks:
+            if candidate_sha is None:
+                raise GitHubFactoryError("checks require explicit candidate identity")
+            if any(check.head_sha != candidate_sha for check in observation.checks):
+                raise GitHubFactoryError("checks are not bound to exact candidate sha")
+            states = {check.state for check in observation.checks}
+            if CheckState.FAIL in states:
+                checks_state = CheckState.FAIL
+            elif CheckState.PENDING in states:
+                checks_state = CheckState.PENDING
+            else:
+                checks_state = CheckState.PASS
+
+        integrated = pr is not None and pr.state is PullRequestState.MERGED
+        integration_sha = pr.merge_sha if integrated else None
+        return GitHubFactoryBinding(
+            repository_id=repository.repository_id,
+            repository_full_name=observed,
+            default_branch=observation.default_branch,
+            default_branch_sha=observation.default_branch_sha,
+            issue_number=observation.issue.number if observation.issue is not None else None,
+            candidate_branch=candidate_branch,
+            candidate_sha=candidate_sha,
+            pull_request_number=pr.number if pr is not None else None,
+            pull_request_state=pr.state if pr is not None else None,
+            checks_state=checks_state,
+            integrated=integrated,
+            integration_sha=integration_sha,
+        )
+
+
+def _normalize_full_name(locator: str) -> str:
+    value = locator.strip().rstrip("/")
+    for prefix in ("https://github.com/", "http://github.com/", "git@github.com:"):
+        if value.casefold().startswith(prefix.casefold()):
+            value = value[len(prefix) :]
+            break
+    if value.endswith(".git"):
+        value = value[:-4]
+    parts = value.split("/")
+    if len(parts) != 2 or not all(part.strip() for part in parts):
+        raise GitHubFactoryError("GitHub repository locator must identify owner/repository")
+    return f"{parts[0].casefold()}/{parts[1].casefold()}"
+
+
+def _validate_sha(value: str, label: str) -> None:
+    if len(value) != 40 or any(char not in "0123456789abcdef" for char in value):
+        raise GitHubFactoryError(f"{label} must be an exact lowercase 40-character git sha")
