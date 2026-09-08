@@ -140,6 +140,47 @@ def test_operator_projection_surfaces_pending_owner_decision_before_next_work() 
     assert projection.owner == "unassigned"
 
 
+def test_operator_projection_terminal_owner_decision_does_not_mask_qa() -> None:
+    for state in ("approved", "rejected", "superseded"):
+        decision = ProductUserDecision(
+            decision_id=f"decision-{state}",
+            title="Scope decision",
+            question="Proceed?",
+            risk_level=2,
+            state=state,
+        )
+        detail = ProductProjectDetail(
+            summary=ProductProjectSummary(
+                project_id="nika-core",
+                version=3,
+                title="Nika Core",
+                goal="Ship Development Factory MVP",
+                state="active",
+                updated_at=datetime(2026, 9, 8, tzinfo=UTC),
+                current_decision=decision,
+            ),
+            statuses=(
+                ProductStatusEntry(
+                    kind=ProductStatusKind.COMPONENT,
+                    item_id="work-654",
+                    label="Issue 654",
+                    state="completed",
+                ),
+                ProductStatusEntry(
+                    kind=ProductStatusKind.QA,
+                    item_id="work-654:qa",
+                    label="QA",
+                    state="running",
+                ),
+            ),
+            decisions=(decision,),
+        )
+
+        projection = project_operator_status(detail)
+
+        assert projection.next == "qa:work-654:qa=running"
+
+
 def test_operator_projection_fails_closed_on_multiple_candidate_shas() -> None:
     detail = _detail(
         ProductStatusEntry(
