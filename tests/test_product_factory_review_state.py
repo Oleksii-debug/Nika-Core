@@ -22,6 +22,14 @@ class _Clearance:
     merge_clearance: bool
 
 
+@dataclass(frozen=True)
+class _Authority:
+    candidate_sha: str = SHA_A
+    reviewer_id: str = "qa-1"
+    authority_ref: str = "authority:qa-assignment-1"
+    independent_review_authorized: bool = True
+
+
 def _candidate() -> CandidateReviewRecord:
     return CandidateReviewRecord(
         CandidateReviewIdentity(
@@ -32,13 +40,12 @@ def _candidate() -> CandidateReviewRecord:
     )
 
 
+def _pending_review(*, authority: _Authority | None = None) -> CandidateReviewRecord:
+    return _candidate().require_review().queue_qa(authority=authority or _Authority())
+
+
 def _running_review() -> CandidateReviewRecord:
-    return (
-        _candidate()
-        .require_review()
-        .queue_qa(reviewer_id="qa-1")
-        .start_qa(reviewer_id="qa-1")
-    )
+    return _pending_review().start_qa(reviewer_id="qa-1")
 
 
 def _passed_review() -> CandidateReviewRecord:
@@ -52,9 +59,10 @@ def _passed_review() -> CandidateReviewRecord:
 
 
 def test_pass_journey_is_exact_sha_and_restart_safe() -> None:
-    pending = _candidate().require_review().queue_qa(reviewer_id="qa-1")
-    pending = CandidateReviewRecord.restore(pending.snapshot())
+    pending = CandidateReviewRecord.restore(_pending_review().snapshot())
     assert pending.state is ReviewState.QA_PENDING
+    assert pending.reviewer_authority is not None
+    assert pending.reviewer_authority.authority_ref == "authority:qa-assignment-1"
 
     passed = pending.start_qa(reviewer_id="qa-1").record_verdict(
         candidate_sha=SHA_A,
@@ -70,6 +78,35 @@ def test_pass_journey_is_exact_sha_and_restart_safe() -> None:
         candidate_sha=SHA_A,
         verification=_Clearance(SHA_A, True),
     ).state is ReviewState.MERGE_READY
+
+
+def test_untrusted_reviewer_string_cannot_queue_qa_without_authority() -> None:
+    with pytest.raises(TypeError):
+        _candidate().require_review().queue_qa(reviewer_id="qa-1")  # type: ignore[call-arg]
+
+
+def test_reviewer_authority_must_explicitly_authorize_independent_review() -> None:
+    with pytest.raises(ReviewPipelineError, match="did not authorize independent review"):
+        _candidate().require_review().queue_qa(
+            authority=_Authority(independent_review_authorized=False)
+        )
+
+
+def test_reviewer_authority_is_bound_to_exact_candidate() -> None:
+    with pytest.raises(StaleCandidateReviewError, match="exact current candidate SHA"):
+        _candidate().require_review().queue_qa(authority=_Authority(candidate_sha=SHA_B))
+
+
+def test_reviewer_authority_cannot_authorize_implementer() -> None:
+    with pytest.raises(ReviewPipelineError, match="cannot independently review own work"):
+        _candidate().require_review().queue_qa(authority=_Authority(reviewer_id="dev-1"))
+
+
+def test_tampered_restored_reviewer_authority_is_rejected() -> None:
+    payload = _pending_review().snapshot().replace(SHA_A, SHA_B, 1)
+
+    with pytest.raises(ReviewPipelineError):
+        CandidateReviewRecord.restore(payload)
 
 
 def test_merge_ready_rejects_failed_exact_head_verification() -> None:
@@ -103,7 +140,7 @@ def test_failed_review_must_transition_to_fix_required() -> None:
 
 def test_candidate_implementer_cannot_self_review() -> None:
     with pytest.raises(ReviewPipelineError, match="cannot independently review own work"):
-        _candidate().require_review().queue_qa(reviewer_id="dev-1")
+        _candidate().require_review().queue_qa(authority=_Authority(reviewer_id="dev-1"))
 
 
 @pytest.mark.parametrize("implementer_id", [" dev-1", "dev-1 ", "\tdev-1"])
@@ -119,7 +156,7 @@ def test_candidate_implementer_identity_must_be_canonical(implementer_id: str) -
 @pytest.mark.parametrize("reviewer_id", [" dev-1", "dev-1 ", "\tdev-1"])
 def test_edge_whitespace_cannot_bypass_self_review_identity(reviewer_id: str) -> None:
     with pytest.raises(ReviewPipelineError, match="reviewer identity must be canonical"):
-        _candidate().require_review().queue_qa(reviewer_id=reviewer_id)
+        _candidate().require_review().queue_qa(authority=_Authority(reviewer_id=reviewer_id))
 
 
 def test_work_identity_must_be_canonical() -> None:
@@ -152,7 +189,7 @@ def test_stale_candidate_sha_cannot_receive_verdict() -> None:
         )
 
 
-def test_successor_head_invalidates_prior_clearance() -> None:
+def test_successor_head_invalidates_prior_clearance_and_reviewer_authority() -> None:
     merge_ready = _passed_review().mark_merge_ready(
         candidate_sha=SHA_A,
         verification=_Clearance(SHA_A, True),
@@ -163,6 +200,7 @@ def test_successor_head_invalidates_prior_clearance() -> None:
     assert successor.identity.candidate_sha == SHA_B
     assert successor.state is ReviewState.IMPLEMENTED
     assert successor.reviewer_id is None
+    assert successor.reviewer_authority is None
     assert successor.verdict is None
 
 

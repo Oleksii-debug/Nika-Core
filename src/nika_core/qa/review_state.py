@@ -27,6 +27,17 @@ class ExactHeadMergeClearance(Protocol):
     def merge_clearance(self) -> bool: ...
 
 
+class TrustedReviewerAuthority(Protocol):
+    """Trusted application-layer attestation authorizing an independent reviewer."""
+
+    candidate_sha: str
+    reviewer_id: str
+    authority_ref: str
+
+    @property
+    def independent_review_authorized(self) -> bool: ...
+
+
 class ReviewState(StrEnum):
     IMPLEMENTED = "implemented"
     REVIEW_REQUIRED = "review_required"
@@ -48,6 +59,18 @@ class CandidateReviewIdentity:
         _validate_canonical_identity(self.work_id, field="candidate work")
         _validate_canonical_identity(self.implementer_id, field="implementer")
         _validate_sha(self.candidate_sha)
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewerAuthorityEvidence:
+    candidate_sha: str
+    reviewer_id: str
+    authority_ref: str
+
+    def __post_init__(self) -> None:
+        _validate_sha(self.candidate_sha)
+        _validate_canonical_identity(self.reviewer_id, field="reviewer")
+        _validate_evidence_ref(self.authority_ref, field="reviewer authority")
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +100,7 @@ class CandidateReviewRecord:
     identity: CandidateReviewIdentity
     state: ReviewState = ReviewState.IMPLEMENTED
     reviewer_id: str | None = None
+    reviewer_authority: ReviewerAuthorityEvidence | None = None
     verdict: ReviewVerdict | None = None
 
     def snapshot(self) -> str:
@@ -88,6 +112,12 @@ class CandidateReviewRecord:
         try:
             raw = json.loads(payload)
             identity = CandidateReviewIdentity(**raw["identity"])
+            authority_raw = raw.get("reviewer_authority")
+            authority = (
+                ReviewerAuthorityEvidence(**authority_raw)
+                if authority_raw is not None
+                else None
+            )
             verdict_raw = raw.get("verdict")
             verdict = None
             if verdict_raw is not None:
@@ -97,6 +127,7 @@ class CandidateReviewRecord:
                 identity=identity,
                 state=ReviewState(raw["state"]),
                 reviewer_id=raw.get("reviewer_id"),
+                reviewer_authority=authority,
                 verdict=verdict,
             )
         except (KeyError, TypeError, ValueError) as exc:
@@ -108,15 +139,25 @@ class CandidateReviewRecord:
         self._require_state(ReviewState.IMPLEMENTED)
         return CandidateReviewRecord(self.identity, ReviewState.REVIEW_REQUIRED)
 
-    def queue_qa(self, *, reviewer_id: str) -> CandidateReviewRecord:
+    def queue_qa(self, *, authority: TrustedReviewerAuthority) -> CandidateReviewRecord:
         self._require_state(ReviewState.REVIEW_REQUIRED)
-        self._validate_reviewer(reviewer_id)
-        return CandidateReviewRecord(self.identity, ReviewState.QA_PENDING, reviewer_id=reviewer_id)
+        evidence = self._validate_authority(authority)
+        return CandidateReviewRecord(
+            self.identity,
+            ReviewState.QA_PENDING,
+            reviewer_id=evidence.reviewer_id,
+            reviewer_authority=evidence,
+        )
 
     def start_qa(self, *, reviewer_id: str) -> CandidateReviewRecord:
         self._require_state(ReviewState.QA_PENDING)
         self._require_assigned_reviewer(reviewer_id)
-        return CandidateReviewRecord(self.identity, ReviewState.QA_RUNNING, reviewer_id=reviewer_id)
+        return CandidateReviewRecord(
+            self.identity,
+            ReviewState.QA_RUNNING,
+            reviewer_id=self.reviewer_id,
+            reviewer_authority=self.reviewer_authority,
+        )
 
     def record_verdict(
         self,
@@ -135,6 +176,7 @@ class CandidateReviewRecord:
             self.identity,
             ReviewState.PASS if accepted else ReviewState.FAIL,
             reviewer_id=reviewer_id,
+            reviewer_authority=self.reviewer_authority,
             verdict=verdict,
         )
 
@@ -159,6 +201,7 @@ class CandidateReviewRecord:
             self.identity,
             ReviewState.MERGE_READY,
             reviewer_id=self.reviewer_id,
+            reviewer_authority=self.reviewer_authority,
             verdict=self.verdict,
         )
 
@@ -169,6 +212,7 @@ class CandidateReviewRecord:
             self.identity,
             ReviewState.FIX_REQUIRED,
             reviewer_id=self.reviewer_id,
+            reviewer_authority=self.reviewer_authority,
             verdict=self.verdict,
         )
 
@@ -184,6 +228,17 @@ class CandidateReviewRecord:
     def _validate(self) -> None:
         if self.reviewer_id is not None:
             self._validate_reviewer(self.reviewer_id)
+        pre_assignment = {ReviewState.IMPLEMENTED, ReviewState.REVIEW_REQUIRED}
+        if self.state in pre_assignment:
+            if self.reviewer_id is not None or self.reviewer_authority is not None:
+                raise ReviewPipelineError("reviewer authority cannot be bound before QA is queued")
+        else:
+            if self.reviewer_id is None or self.reviewer_authority is None:
+                raise ReviewPipelineError(
+                    "QA state requires trusted independent reviewer authority"
+                )
+            self._require_candidate(self.reviewer_authority.candidate_sha)
+            self._require_assigned_reviewer(self.reviewer_authority.reviewer_id)
         pre_verdict = {
             ReviewState.IMPLEMENTED,
             ReviewState.REVIEW_REQUIRED,
@@ -192,11 +247,6 @@ class CandidateReviewRecord:
         }
         if self.state in pre_verdict and self.verdict is not None:
             raise ReviewPipelineError("pre-verdict review state cannot contain a verdict")
-        if self.state in {ReviewState.IMPLEMENTED, ReviewState.REVIEW_REQUIRED}:
-            if self.reviewer_id is not None:
-                raise ReviewPipelineError("reviewer cannot be bound before QA is queued")
-        elif self.reviewer_id is None:
-            raise ReviewPipelineError("QA state requires an independent reviewer")
         terminal = {
             ReviewState.PASS,
             ReviewState.FAIL,
@@ -212,6 +262,23 @@ class CandidateReviewRecord:
                 raise ReviewPipelineError("passing review state requires accepted verdict")
             if self.state in {ReviewState.FAIL, ReviewState.FIX_REQUIRED} and self.verdict.accepted:
                 raise ReviewPipelineError("failing review state requires rejected verdict")
+
+    def _validate_authority(
+        self, authority: TrustedReviewerAuthority
+    ) -> ReviewerAuthorityEvidence:
+        _validate_sha(authority.candidate_sha)
+        self._require_candidate(authority.candidate_sha)
+        self._validate_reviewer(authority.reviewer_id)
+        _validate_evidence_ref(authority.authority_ref, field="reviewer authority")
+        if not authority.independent_review_authorized:
+            raise ReviewPipelineError(
+                "trusted reviewer authority did not authorize independent review"
+            )
+        return ReviewerAuthorityEvidence(
+            authority.candidate_sha,
+            authority.reviewer_id,
+            authority.authority_ref,
+        )
 
     def _require_state(self, expected: ReviewState) -> None:
         self._validate()
@@ -249,6 +316,15 @@ def _validate_sha(value: str) -> None:
     if len(value) != 40 or any(char not in "0123456789abcdef" for char in value):
         raise ReviewPipelineError(
             "candidate SHA must be a canonical lowercase 40-character hexadecimal SHA"
+        )
+
+
+def _validate_evidence_ref(value: str, *, field: str) -> None:
+    if not value.strip() or len(value) > _MAX_EVIDENCE_REF_CHARS:
+        raise ReviewPipelineError(f"{field} reference exceeds bounded evidence limit")
+    if value != value.strip():
+        raise ReviewPipelineError(
+            f"{field} reference must be canonical without edge whitespace"
         )
 
 
