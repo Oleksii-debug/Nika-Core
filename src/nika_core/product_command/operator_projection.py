@@ -9,6 +9,18 @@ from nika_core.product_command.contracts import (
 )
 
 _MAX_FIELD = 4000
+_TERMINAL_SUCCESS_STATES = {
+    "accepted",
+    "completed",
+    "deployed",
+    "done",
+    "merged",
+    "pass",
+    "passed",
+    "released",
+    "succeeded",
+    "success",
+}
 
 
 class FactoryOperatorProjection(BaseModel):
@@ -62,7 +74,13 @@ def project_operator_status(detail: ProductProjectDetail) -> FactoryOperatorProj
         TEST=_render_test_state(qa_entries),
         QA=_render_statuses(qa_entries, empty="unknown"),
         INTEGRATION=_render_statuses(integration_entries, empty="not_started"),
-        NEXT=_next_action(detail, component_entries, blocker_entries),
+        NEXT=_next_action(
+            detail,
+            component_entries,
+            blocker_entries,
+            qa_entries,
+            integration_entries,
+        ),
     )
 
 
@@ -106,22 +124,39 @@ def _render_test_state(entries: tuple[ProductStatusEntry, ...]) -> str:
     return _render_values(states, empty="unknown")
 
 
+def _first_incomplete(
+    entries: tuple[ProductStatusEntry, ...],
+) -> ProductStatusEntry | None:
+    return next(
+        (
+            entry
+            for entry in entries
+            if entry.state.casefold() not in _TERMINAL_SUCCESS_STATES
+        ),
+        None,
+    )
+
+
 def _next_action(
     detail: ProductProjectDetail,
     component_entries: tuple[ProductStatusEntry, ...],
     blocker_entries: tuple[ProductStatusEntry, ...],
+    qa_entries: tuple[ProductStatusEntry, ...],
+    integration_entries: tuple[ProductStatusEntry, ...],
 ) -> str:
     if blocker_entries:
         return "resolve_blocker"
     if detail.summary.current_decision is not None:
         return f"owner_decision:{detail.summary.current_decision.decision_id}"
-    active = tuple(
-        entry
-        for entry in component_entries
-        if entry.state not in {"accepted", "done", "completed", "succeeded"}
-    )
-    if active:
-        return f"continue_work:{active[0].item_id}"
+    active = _first_incomplete(component_entries)
+    if active is not None:
+        return f"continue_work:{active.item_id}"
+    qa = _first_incomplete(qa_entries)
+    if qa is not None:
+        return f"qa:{qa.item_id}={qa.state}"
+    integration = _first_incomplete(integration_entries)
+    if integration is not None:
+        return f"integration:{integration.item_id}={integration.state}"
     if component_entries:
         return "next_work"
     return "inspect_project"
