@@ -46,6 +46,7 @@ def project_operator_status(detail: ProductProjectDetail) -> FactoryOperatorProj
 
     component_entries = _statuses(detail, ProductStatusKind.COMPONENT)
     blocker_entries = _statuses(detail, ProductStatusKind.BLOCKER)
+    build_entries = _statuses(detail, ProductStatusKind.BUILD)
     qa_entries = _statuses(detail, ProductStatusKind.QA)
     integration_entries = tuple(
         entry
@@ -72,13 +73,14 @@ def project_operator_status(detail: ProductProjectDetail) -> FactoryOperatorProj
         STATE=detail.summary.state,
         BLOCKER=_render_statuses(blocker_entries, empty="none"),
         CANDIDATE=_render_candidate(candidate_refs),
-        TEST=_render_test_state(qa_entries),
+        TEST=_render_statuses(build_entries, empty="unknown"),
         QA=_render_statuses(qa_entries, empty="unknown"),
         INTEGRATION=_render_statuses(integration_entries, empty="not_started"),
         NEXT=_next_action(
             detail,
             component_entries,
             blocker_entries,
+            build_entries,
             qa_entries,
             integration_entries,
         ),
@@ -118,13 +120,6 @@ def _render_candidate(candidate_refs: tuple[str, ...]) -> str:
     return candidate_refs[0]
 
 
-def _render_test_state(entries: tuple[ProductStatusEntry, ...]) -> str:
-    if not entries:
-        return "unknown"
-    states = tuple(dict.fromkeys(entry.state for entry in entries))
-    return _render_values(states, empty="unknown")
-
-
 def _first_incomplete(
     entries: tuple[ProductStatusEntry, ...],
 ) -> ProductStatusEntry | None:
@@ -142,6 +137,7 @@ def _next_action(
     detail: ProductProjectDetail,
     component_entries: tuple[ProductStatusEntry, ...],
     blocker_entries: tuple[ProductStatusEntry, ...],
+    build_entries: tuple[ProductStatusEntry, ...],
     qa_entries: tuple[ProductStatusEntry, ...],
     integration_entries: tuple[ProductStatusEntry, ...],
 ) -> str:
@@ -155,6 +151,9 @@ def _next_action(
     active = _first_incomplete(component_entries)
     if active is not None:
         return f"continue_work:{active.item_id}"
+    build = _first_incomplete(build_entries)
+    if build is not None:
+        return f"test:{build.item_id}={build.state}"
     qa = _first_incomplete(qa_entries)
     if qa is not None:
         return f"qa:{qa.item_id}={qa.state}"
