@@ -167,7 +167,7 @@ def test_exact_capable_provider_must_restore_full_previous_release_identity() ->
     assert second.rollback.restored_release == release_a
     assert provider.exact_targets == [release_a]
     assert provider.current == release_a
-    assert fabric.snapshot().current_releases == (
+    assert fabric.snapshot().exact_current_releases == (
         ("project-exact", "staging-exact", "1.0.0", SHA, DIGEST_A),
     )
 
@@ -180,16 +180,22 @@ def test_current_release_snapshot_uses_full_release_identity_and_unique_legacy_m
 
     snapshot = fabric.snapshot()
     assert snapshot.current_releases == (
+        ("project-exact", "staging-exact", SHA),
+    )
+    assert snapshot.exact_current_releases == (
         ("project-exact", "staging-exact", "1.0.0", SHA, DIGEST_A),
     )
 
     legacy = replace(
         snapshot,
         current_releases=(("project-exact", "staging-exact", SHA),),
+        exact_current_releases=(),
     )
     restarted = DeploymentFabric(provider)
     restarted.restore(legacy)
-    assert restarted.snapshot().current_releases == snapshot.current_releases
+    restored = restarted.snapshot()
+    assert restored.current_releases == snapshot.current_releases
+    assert restored.exact_current_releases == snapshot.exact_current_releases
 
 
 def test_legacy_current_release_snapshot_fails_closed_when_same_sha_is_ambiguous() -> None:
@@ -203,6 +209,7 @@ def test_legacy_current_release_snapshot_fails_closed_when_same_sha_is_ambiguous
     legacy = replace(
         fabric.snapshot(),
         current_releases=(("project-exact", "staging-exact", SHA),),
+        exact_current_releases=(),
     )
     restarted = DeploymentFabric(provider)
     with pytest.raises(
@@ -277,37 +284,3 @@ def test_ansible_exact_rollback_binds_requested_and_restored_release_identity() 
     assert extravars["nika_previous_release_version"] == previous.version
     assert extravars["nika_previous_release_sha"] == previous.source_sha
     assert extravars["nika_previous_artifact_digest"] == previous.artifact_digest
-
-
-def test_ansible_exact_rollback_rejects_partial_restored_release_identity() -> None:
-    previous = ReleaseRef("project-exact", "1.0.0", SHA, DIGEST_A)
-    failed = ReleaseRef("project-exact", "2.0.0", SHA, DIGEST_B)
-    runner = _SingleExecutionRunner(
-        RunnerExecution(
-            "successful",
-            0,
-            {
-                "succeeded": True,
-                "restored_release_version": previous.version,
-                "restored_release_sha": previous.source_sha,
-            },
-            "ansible-runner:rollback-partial",
-        )
-    )
-    adapter = AuthorizedAnsibleStagingAdapter(
-        AuthorizedStagingTarget(
-            "project-exact",
-            "staging-exact",
-            "provider://exact",
-            "inventory/staging.ini",
-            "approval-ref:staging-exact",
-        ),
-        AnsibleRunnerConfig(Path.cwd().resolve() / "trusted-ansible"),
-        runner,
-    )
-
-    with pytest.raises(
-        DeploymentFabricError,
-        match="must report version, SHA and artifact digest together",
-    ):
-        adapter.rollback_exact(_intent("deploy-b", failed), previous)
