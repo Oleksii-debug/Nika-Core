@@ -5,10 +5,10 @@ import pytest
 from nika_core.product_factory_verification import (
     CandidateVerification,
     CheckState,
-    classify_candidate_verification,
     ExactShaCheckEvidence,
     VerificationError,
     VerificationState,
+    classify_candidate_verification,
 )
 
 
