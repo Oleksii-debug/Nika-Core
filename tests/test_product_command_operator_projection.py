@@ -290,7 +290,7 @@ def test_operator_projection_completed_blocker_does_not_mask_downstream_qa() -> 
 
     projection = project_operator_status(detail)
 
-    assert projection.blocker == "work-654:blocker=completed"
+    assert projection.blocker == "none"
     assert projection.next == "qa:work-654:qa=running"
 
 
@@ -318,5 +318,5 @@ def test_operator_projection_resolved_blocker_does_not_mask_downstream_qa() -> N
 
     projection = project_operator_status(detail)
 
-    assert projection.blocker == "work-654:blocker=resolved"
+    assert projection.blocker == "none"
     assert projection.next == "qa:work-654:qa=running"

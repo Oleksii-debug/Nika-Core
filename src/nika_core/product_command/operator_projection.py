@@ -46,6 +46,7 @@ def project_operator_status(detail: ProductProjectDetail) -> FactoryOperatorProj
 
     component_entries = _statuses(detail, ProductStatusKind.COMPONENT)
     blocker_entries = _statuses(detail, ProductStatusKind.BLOCKER)
+    active_blocker_entries = _incomplete(blocker_entries)
     build_entries = _statuses(detail, ProductStatusKind.BUILD)
     qa_entries = _statuses(detail, ProductStatusKind.QA)
     integration_entries = tuple(
@@ -75,7 +76,7 @@ def project_operator_status(detail: ProductProjectDetail) -> FactoryOperatorProj
         WORK=_render_statuses(component_entries, empty="none"),
         OWNER=_render_values(owners, empty="unassigned"),
         STATE=detail.summary.state,
-        BLOCKER=_render_statuses(blocker_entries, empty="none"),
+        BLOCKER=_render_statuses(active_blocker_entries, empty="none"),
         CANDIDATE=_render_candidate(candidate_refs),
         TEST=(
             _render_statuses(build_entries, empty="unknown")
@@ -135,17 +136,20 @@ def _render_test_state(entries: tuple[ProductStatusEntry, ...]) -> str:
     return _render_values(states, empty="unknown")
 
 
+def _incomplete(
+    entries: tuple[ProductStatusEntry, ...],
+) -> tuple[ProductStatusEntry, ...]:
+    return tuple(
+        entry
+        for entry in entries
+        if entry.state.casefold() not in _TERMINAL_SUCCESS_STATES
+    )
+
+
 def _first_incomplete(
     entries: tuple[ProductStatusEntry, ...],
 ) -> ProductStatusEntry | None:
-    return next(
-        (
-            entry
-            for entry in entries
-            if entry.state.casefold() not in _TERMINAL_SUCCESS_STATES
-        ),
-        None,
-    )
+    return next(iter(_incomplete(entries)), None)
 
 
 def _next_action(
