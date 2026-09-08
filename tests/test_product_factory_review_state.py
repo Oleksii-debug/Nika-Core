@@ -94,6 +94,16 @@ def test_work_identity_must_be_canonical() -> None:
         )
 
 
+@pytest.mark.parametrize("candidate_sha", ["A" * 40, "a" * 39 + "B"])
+def test_candidate_sha_must_use_canonical_lowercase_hex(candidate_sha: str) -> None:
+    with pytest.raises(ReviewPipelineError, match="canonical lowercase"):
+        CandidateReviewIdentity(
+            work_id="work-1",
+            candidate_sha=candidate_sha,
+            implementer_id="dev-1",
+        )
+
+
 def test_stale_candidate_sha_cannot_receive_verdict() -> None:
     with pytest.raises(StaleCandidateReviewError, match="exact current candidate SHA"):
         _running_review().record_verdict(
