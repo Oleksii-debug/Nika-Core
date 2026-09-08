@@ -143,6 +143,18 @@ def test_review_evidence_is_bounded() -> None:
         )
 
 
+@pytest.mark.parametrize("reason", [" pass", "pass ", "\tpass"])
+def test_review_verdict_reason_must_be_canonical(reason: str) -> None:
+    with pytest.raises(ReviewPipelineError, match="reason must be canonical"):
+        _running_review().record_verdict(
+            candidate_sha=SHA_A,
+            reviewer_id="qa-1",
+            accepted=True,
+            reason=reason,
+            evidence_refs=("ci:run-1",),
+        )
+
+
 @pytest.mark.parametrize("evidence_ref", [" ci:run-1", "ci:run-1 ", "\tci:run-1"])
 def test_review_evidence_reference_must_be_canonical(evidence_ref: str) -> None:
     with pytest.raises(ReviewPipelineError, match="canonical without edge whitespace"):
