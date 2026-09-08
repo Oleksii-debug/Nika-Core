@@ -144,7 +144,7 @@ def _next_action(
     qa_entries: tuple[ProductStatusEntry, ...],
     integration_entries: tuple[ProductStatusEntry, ...],
 ) -> str:
-    if blocker_entries:
+    if _first_incomplete(blocker_entries) is not None:
         return "resolve_blocker"
     if detail.summary.current_decision is not None:
         return f"owner_decision:{detail.summary.current_decision.decision_id}"
