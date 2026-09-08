@@ -251,3 +251,31 @@ def test_operator_projection_completed_blocker_does_not_mask_downstream_qa() -> 
 
     assert projection.blocker == "work-654:blocker=completed"
     assert projection.next == "qa:work-654:qa=running"
+
+
+def test_operator_projection_resolved_blocker_does_not_mask_downstream_qa() -> None:
+    detail = _detail(
+        ProductStatusEntry(
+            kind=ProductStatusKind.COMPONENT,
+            item_id="work-654",
+            label="Issue 654",
+            state="completed",
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.BLOCKER,
+            item_id="work-654:blocker",
+            label="Credential blocker",
+            state="resolved",
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.QA,
+            item_id="work-654:qa",
+            label="QA",
+            state="running",
+        ),
+    )
+
+    projection = project_operator_status(detail)
+
+    assert projection.blocker == "work-654:blocker=resolved"
+    assert projection.next == "qa:work-654:qa=running"
