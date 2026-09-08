@@ -157,6 +157,12 @@ class ConnectivityWaitService:
             now=current_time,
             replay_safe=replay_safe,
         )
+        if initial.disposition is ScriptRetryDisposition.WAITING:
+            return ConnectivityWaitDecision(
+                ScriptRetryDisposition.WAITING,
+                False,
+                outer_binding.intent,
+            )
         if initial.disposition in _TERMINAL_RETRY_DISPOSITIONS:
             return self._disable_terminal(
                 job_id=job_id,
@@ -165,10 +171,7 @@ class ConnectivityWaitService:
                 reason="retry_authority_terminal",
                 block_waiting_task=True,
             )
-        if initial.disposition not in {
-            ScriptRetryDisposition.WAITING,
-            ScriptRetryDisposition.READY,
-        }:
+        if initial.disposition is not ScriptRetryDisposition.READY:
             return self._disable_terminal(
                 job_id=job_id,
                 binding=outer_binding,
@@ -176,17 +179,9 @@ class ConnectivityWaitService:
                 reason="retry_authority_not_ready",
             )
 
-        # A durable network wait may be woken by a positive reconnect observation before
-        # its timer boundary. This does not grant the continuation by itself: the SQLite
-        # task/job transaction below remains the sole authority and serializes contenders.
+        # Observe before the SQLite write claim so simultaneous wake callers contend on
+        # canonical durable authority rather than an in-process ownership flag.
         initially_available = self._probe.is_available()
-        if initial.disposition is ScriptRetryDisposition.WAITING and not initially_available:
-            return ConnectivityWaitDecision(
-                ScriptRetryDisposition.WAITING,
-                False,
-                outer_binding.intent,
-            )
-
         runtime_job: ScheduledJob | None = None
         with self._queue.store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -246,6 +241,12 @@ class ConnectivityWaitService:
                 now=current_time,
                 replay_safe=replay_safe,
             )
+            if fresh.disposition is ScriptRetryDisposition.WAITING:
+                return ConnectivityWaitDecision(
+                    ScriptRetryDisposition.WAITING,
+                    False,
+                    binding.intent,
+                )
             if fresh.disposition in _TERMINAL_RETRY_DISPOSITIONS:
                 self._queue.transition_with_connection(conn, binding.task_id, TaskState.BLOCKED)
                 self._jobs.set_enabled_with_connection(conn, job_id, False)
@@ -260,21 +261,12 @@ class ConnectivityWaitService:
                     },
                 )
                 return ConnectivityWaitDecision(fresh.disposition, False, binding.intent)
-            if fresh.disposition not in {
-                ScriptRetryDisposition.WAITING,
-                ScriptRetryDisposition.READY,
-            }:
+            if fresh.disposition is not ScriptRetryDisposition.READY:
                 self._jobs.set_enabled_with_connection(conn, job_id, False)
                 self._audit_rejected_with_connection(conn, job_id, reason="retry_not_ready")
                 return ConnectivityWaitDecision(fresh.disposition, False, binding.intent)
 
             available_now = initially_available and self._probe.is_available()
-            if fresh.disposition is ScriptRetryDisposition.WAITING and not available_now:
-                return ConnectivityWaitDecision(
-                    ScriptRetryDisposition.WAITING,
-                    False,
-                    binding.intent,
-                )
             if available_now:
                 self._queue.transition_with_connection(conn, binding.task_id, TaskState.RETRYING)
                 self._jobs.set_enabled_with_connection(conn, job_id, False)
