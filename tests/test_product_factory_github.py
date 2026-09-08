@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pytest
 
-from nika_core.product_factory_orchestration import RepositoryRef
 from nika_core.product_factory_github import (
     CheckState,
     GitHubCheck,
@@ -13,6 +12,7 @@ from nika_core.product_factory_github import (
     GitHubRepositoryObservation,
     PullRequestState,
 )
+from nika_core.product_factory_orchestration import RepositoryRef
 
 
 MAIN_SHA = "1" * 40
