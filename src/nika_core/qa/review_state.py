@@ -35,8 +35,8 @@ class CandidateReviewIdentity:
     implementer_id: str
 
     def __post_init__(self) -> None:
-        if not self.work_id.strip() or not self.implementer_id.strip():
-            raise ReviewPipelineError("candidate work and implementer identity must not be empty")
+        _validate_canonical_identity(self.work_id, field="candidate work")
+        _validate_canonical_identity(self.implementer_id, field="implementer")
         _validate_sha(self.candidate_sha)
 
 
@@ -50,8 +50,9 @@ class ReviewVerdict:
 
     def __post_init__(self) -> None:
         _validate_sha(self.candidate_sha)
-        if not self.reviewer_id.strip() or not self.reason.strip():
-            raise ReviewPipelineError("reviewer identity and verdict reason must not be empty")
+        _validate_canonical_identity(self.reviewer_id, field="reviewer")
+        if not self.reason.strip():
+            raise ReviewPipelineError("review verdict reason must not be empty")
         if len(self.reason) > _MAX_REASON_CHARS:
             raise ReviewPipelineError("review verdict reason exceeds bounded evidence limit")
         _validate_evidence_refs(self.evidence_refs)
@@ -199,8 +200,7 @@ class CandidateReviewRecord:
             )
 
     def _validate_reviewer(self, reviewer_id: str) -> None:
-        if not reviewer_id.strip():
-            raise ReviewPipelineError("reviewer identity must not be empty")
+        _validate_canonical_identity(reviewer_id, field="reviewer")
         if reviewer_id == self.identity.implementer_id:
             raise ReviewPipelineError("candidate implementer cannot independently review own work")
 
@@ -208,6 +208,13 @@ class CandidateReviewRecord:
         self._validate_reviewer(reviewer_id)
         if reviewer_id != self.reviewer_id:
             raise ReviewPipelineError("reviewer identity does not match queued independent reviewer")
+
+
+def _validate_canonical_identity(value: str, *, field: str) -> None:
+    if not value.strip():
+        raise ReviewPipelineError(f"{field} identity must not be empty")
+    if value != value.strip():
+        raise ReviewPipelineError(f"{field} identity must be canonical without edge whitespace")
 
 
 def _validate_sha(value: str) -> None:
