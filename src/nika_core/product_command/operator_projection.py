@@ -58,7 +58,7 @@ def project_operator_status(detail: ProductProjectDetail) -> FactoryOperatorProj
         OWNER=_render_values(owners, empty="unassigned"),
         STATE=detail.summary.state,
         BLOCKER=_render_statuses(blocker_entries, empty="none"),
-        CANDIDATE=_render_values(candidate_refs, empty="unknown"),
+        CANDIDATE=_render_candidate(candidate_refs),
         TEST=_render_test_state(qa_entries),
         QA=_render_statuses(qa_entries, empty="unknown"),
         INTEGRATION=_render_statuses(integration_entries, empty="not_started"),
@@ -89,6 +89,14 @@ def _render_values(values: tuple[str, ...], *, empty: str) -> str:
     if len(rendered) <= _MAX_FIELD:
         return rendered
     return rendered[: _MAX_FIELD - 3].rstrip() + "..."
+
+
+def _render_candidate(candidate_refs: tuple[str, ...]) -> str:
+    if not candidate_refs:
+        return "unknown"
+    if len(candidate_refs) > 1:
+        return "ambiguous_multiple_candidates"
+    return candidate_refs[0]
 
 
 def _render_test_state(entries: tuple[ProductStatusEntry, ...]) -> str:
