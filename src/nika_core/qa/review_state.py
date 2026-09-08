@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from enum import StrEnum
+from typing import Protocol
 
 _MAX_EVIDENCE_REFS = 16
 _MAX_EVIDENCE_REF_CHARS = 256
@@ -15,6 +16,15 @@ class ReviewPipelineError(ValueError):
 
 class StaleCandidateReviewError(ReviewPipelineError):
     """Raised when review evidence targets a different candidate SHA."""
+
+
+class ExactHeadMergeClearance(Protocol):
+    """Structural DEV08 compatibility surface without duplicating verification state."""
+
+    candidate_sha: str
+
+    @property
+    def merge_clearance(self) -> bool: ...
 
 
 class ReviewState(StrEnum):
@@ -128,9 +138,23 @@ class CandidateReviewRecord:
             verdict=verdict,
         )
 
-    def mark_merge_ready(self, *, candidate_sha: str) -> CandidateReviewRecord:
+    def mark_merge_ready(
+        self,
+        *,
+        candidate_sha: str,
+        verification: ExactHeadMergeClearance,
+    ) -> CandidateReviewRecord:
         self._require_state(ReviewState.PASS)
         self._require_candidate(candidate_sha)
+        _validate_sha(verification.candidate_sha)
+        if verification.candidate_sha != self.identity.candidate_sha:
+            raise StaleCandidateReviewError(
+                "verification clearance does not match exact current candidate SHA"
+            )
+        if not verification.merge_clearance:
+            raise ReviewPipelineError(
+                "exact-head verification clearance is required for merge ready"
+            )
         return CandidateReviewRecord(
             self.identity,
             ReviewState.MERGE_READY,
