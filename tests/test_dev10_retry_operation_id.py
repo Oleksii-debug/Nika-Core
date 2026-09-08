@@ -3,9 +3,7 @@ from __future__ import annotations
 import datetime as dt
 
 import pytest
-
 from nika_core.runtime.retry import ScriptRetryCondition, ScriptRetryIntent
-
 
 NOW = dt.datetime(2026, 9, 8, 13, 0, tzinfo=dt.UTC)
 
