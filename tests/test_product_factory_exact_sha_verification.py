@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import pytest
-
-from nika_core import product_factory_verification as verification
+import nika_core.product_factory_verification as verification
 
 
 SHA_A = "a" * 40
