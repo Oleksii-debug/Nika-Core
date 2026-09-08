@@ -484,6 +484,11 @@ class DeploymentFabric:
             raise DeploymentFabricError(
                 "provider reports a different release for uncertain deployment"
             )
+        if inspection.release is None:
+            self._mark_uncertain(record, inspection.evidence_refs)
+            raise DeploymentFabricError(
+                "provider inspection requires exact release identity"
+            )
         if inspection.release is not None and inspection.release != record.intent.release:
             self._mark_uncertain(record, inspection.evidence_refs)
             raise DeploymentFabricError(
