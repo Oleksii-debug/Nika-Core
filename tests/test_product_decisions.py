@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from threading import Barrier
 
 import pytest
 
 import nika_core.data.sqlite as sqlite_store_module
-
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_decisions import ProductDecisionRepository
 from nika_core.product_project import (
@@ -250,7 +249,6 @@ def test_product_project_schema_v1_upgrades_without_data_loss(tmp_path) -> None:
     assert {"product_decisions", "product_project_mutation_idempotency"} <= tables
 
 
-
 def test_concurrent_identical_decision_write_replays_one_canonical_result(tmp_path) -> None:
     store, projects, _ = _repos(tmp_path)
     _handoff(projects)
@@ -383,4 +381,3 @@ def test_non_lock_operational_error_is_not_reclassified_as_contention(
             expected_row_version=0,
             idempotency_key="decision:non-lock",
         )
-
