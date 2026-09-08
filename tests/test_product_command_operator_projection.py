@@ -138,3 +138,40 @@ def test_operator_projection_surfaces_pending_owner_decision_before_next_work() 
     assert projection.next == "owner_decision:decision-1"
     assert projection.work == "none"
     assert projection.owner == "unassigned"
+
+
+def test_operator_projection_fails_closed_on_multiple_candidate_shas() -> None:
+    detail = _detail(
+        ProductStatusEntry(
+            kind=ProductStatusKind.COMPONENT,
+            item_id="work-654",
+            label="Issue 654",
+            state="review_required",
+            evidence=(
+                EvidenceReference(
+                    kind="git_commit",
+                    reference="a" * 40,
+                    label="Previous candidate SHA",
+                ),
+            ),
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.QA,
+            item_id="work-654:qa",
+            label="Tests",
+            state="running",
+            evidence=(
+                EvidenceReference(
+                    kind="git_commit",
+                    reference="b" * 40,
+                    label="Current candidate SHA",
+                ),
+            ),
+        ),
+    )
+
+    projection = project_operator_status(detail)
+
+    assert projection.candidate == "ambiguous_multiple_candidates"
+    assert ("a" * 40) not in projection.candidate
+    assert ("b" * 40) not in projection.candidate
