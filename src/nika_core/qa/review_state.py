@@ -66,11 +66,16 @@ class ReviewerAuthorityEvidence:
     candidate_sha: str
     reviewer_id: str
     authority_ref: str
+    independent_review_authorized: bool = True
 
     def __post_init__(self) -> None:
         _validate_sha(self.candidate_sha)
         _validate_canonical_identity(self.reviewer_id, field="reviewer")
         _validate_evidence_ref(self.authority_ref, field="reviewer authority")
+        if self.independent_review_authorized is not True:
+            raise ReviewPipelineError(
+                "reviewer authority evidence must preserve explicit independent authorization"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,6 +283,7 @@ class CandidateReviewRecord:
             authority.candidate_sha,
             authority.reviewer_id,
             authority.authority_ref,
+            independent_review_authorized=True,
         )
 
     def _require_state(self, expected: ReviewState) -> None:
