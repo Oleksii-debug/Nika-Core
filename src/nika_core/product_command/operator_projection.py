@@ -55,7 +55,11 @@ def project_operator_status(detail: ProductProjectDetail) -> FactoryOperatorProj
     )
 
     owners = tuple(
-        dict.fromkeys(entry.owner for entry in detail.statuses if entry.owner is not None)
+        dict.fromkeys(
+            entry.owner.strip()
+            for entry in detail.statuses
+            if entry.owner is not None and entry.owner.strip()
+        )
     )
     candidate_refs = tuple(
         dict.fromkeys(
