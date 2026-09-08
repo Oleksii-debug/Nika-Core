@@ -143,6 +143,46 @@ def test_review_evidence_is_bounded() -> None:
         )
 
 
+@pytest.mark.parametrize("evidence_ref", [" ci:run-1", "ci:run-1 ", "\tci:run-1"])
+def test_review_evidence_reference_must_be_canonical(evidence_ref: str) -> None:
+    with pytest.raises(ReviewPipelineError, match="canonical without edge whitespace"):
+        _running_review().record_verdict(
+            candidate_sha=SHA_A,
+            reviewer_id="qa-1",
+            accepted=True,
+            reason="pass",
+            evidence_refs=(evidence_ref,),
+        )
+
+
+def test_review_evidence_references_must_be_unique() -> None:
+    with pytest.raises(ReviewPipelineError, match="must be unique"):
+        _running_review().record_verdict(
+            candidate_sha=SHA_A,
+            reviewer_id="qa-1",
+            accepted=True,
+            reason="pass",
+            evidence_refs=("ci:run-1", "ci:run-1"),
+        )
+
+
+def test_restored_duplicate_review_evidence_is_rejected() -> None:
+    passed = _running_review().record_verdict(
+        candidate_sha=SHA_A,
+        reviewer_id="qa-1",
+        accepted=True,
+        reason="pass",
+        evidence_refs=("ci:1",),
+    )
+    payload = passed.snapshot().replace(
+        '"evidence_refs":["ci:1"]',
+        '"evidence_refs":["ci:1","ci:1"]',
+    )
+
+    with pytest.raises(ReviewPipelineError, match="must be unique"):
+        CandidateReviewRecord.restore(payload)
+
+
 def test_restored_tampered_verdict_is_rejected() -> None:
     passed = _running_review().record_verdict(
         candidate_sha=SHA_A,
