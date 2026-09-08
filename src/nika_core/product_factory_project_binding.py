@@ -16,6 +16,7 @@ from nika_core.product_factory_coordinator import (
     CoordinatorSnapshot,
     ProductFactoryCoordinator,
     WorkRecord,
+    _commands_equivalent,
 )
 from nika_core.product_factory_coordinator import (
     trusted_plan_fingerprint as compute_trusted_plan_fingerprint,
@@ -260,7 +261,14 @@ def _minimize_durable_work_record(record: WorkRecord) -> WorkRecord:
     safe_test_evidence = tuple(
         evidence
         for evidence in coding_result.test_evidence
-        if evidence.command in record.request.acceptance_commands
+        if any(
+            _commands_equivalent(
+                evidence.command,
+                declared,
+                component_id=record.request.component_id,
+            )
+            for declared in record.request.acceptance_commands
+        )
     )
     safe_recovery = (
         None if recovery is None else replace(recovery, opaque_token=None)

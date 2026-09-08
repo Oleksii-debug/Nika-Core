@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+import pytest
+
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.product_factory_checkpoint_host import ProductFactoryCheckpointHost
@@ -144,6 +146,35 @@ def test_extra_worker_test_evidence_is_not_durable_authority(tmp_path: Path) -> 
     assert tuple(
         item.command for item in restored_record.result.coding_result.test_evidence
     ) == (_ACCEPTANCE_COMMAND,)
+
+
+@pytest.mark.parametrize(
+    "observed_command",
+    [("pytest",), ("pytest", "tests/core"), ("python.exe", "-m", "pytest", "tests\\core")],
+)
+def test_equivalent_passing_command_survives_checkpoint_and_restart(tmp_path, observed_command):
+    store, binding, coordinator, task_id = _setup(tmp_path)
+    request = coordinator.start("core")
+    evidence = TestEvidence(observed_command, 0, _TEST_DIGEST)
+    canary = "NIKA_UNRELATED_ARGV_CANARY"
+    extra = TestEvidence(("python", "diagnose.py", "--private", canary), 0, _TEST_DIGEST)
+    coordinator.record_result(
+        WorkerResultEnvelope(
+            work_id=request.work_id,
+            component_id=request.component_id,
+            repository_id=request.repository_id,
+            base_sha=request.base_sha,
+            result_sha=_RESULT_SHA,
+            diff_digest=_DIFF_DIGEST,
+            coding_result=CodingResult(job_id=request.work_id, test_evidence=(evidence, extra)),
+        )
+    )
+    host = ProductFactoryCheckpointHost(store)
+    saved = host.save(host_task_id=task_id, checkpoint=binding.checkpoint(coordinator))
+    assert canary not in _raw_checkpoint(store, saved.checkpoint_id)
+    restarted = ProductFactoryCheckpointHost(SQLiteStore(store.path))
+    restored = restarted.restore_latest(host_task_id=task_id, binding=binding)
+    assert restored.snapshot().records[0].result.coding_result.test_evidence == (evidence,)
 
 
 def test_nested_and_aws_review_credentials_are_minimized_without_safe_ref_loss(
