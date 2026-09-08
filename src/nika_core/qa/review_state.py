@@ -280,7 +280,7 @@ class CandidateReviewRecord:
         self._require_candidate(authority.candidate_sha)
         self._validate_reviewer(authority.reviewer_id)
         _validate_evidence_ref(authority.authority_ref, field="reviewer authority")
-        if not authority.independent_review_authorized:
+        if authority.independent_review_authorized is not True:
             raise ReviewPipelineError(
                 "trusted reviewer authority did not authorize independent review"
             )
