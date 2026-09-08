@@ -79,6 +79,7 @@ _SAFE_SCRIPT_RETRY_CONDITIONS = frozenset(
     }
 )
 _SCRIPT_RETRY_INTENT_VERSION = 1
+_MIN_AUTOMATIC_RETRY_DELAY_SECONDS = 1.0
 
 
 class ScriptRetryDisposition(StrEnum):
@@ -285,6 +286,13 @@ def plan_script_retry(
                 condition,
             )
         delay = max(delay, retry_after)
+    if delay < _MIN_AUTOMATIC_RETRY_DELAY_SECONDS:
+        if policy.max_delay_seconds < _MIN_AUTOMATIC_RETRY_DELAY_SECONDS:
+            return ScriptRetryDecision(
+                ScriptRetryDisposition.BACKOFF_LIMIT_EXCEEDED,
+                condition,
+            )
+        delay = _MIN_AUTOMATIC_RETRY_DELAY_SECONDS
     not_before = current + timedelta(seconds=delay)
     if deadline_utc is not None and not_before >= deadline_utc:
         return ScriptRetryDecision(ScriptRetryDisposition.DEADLINE_EXCEEDED, condition)
