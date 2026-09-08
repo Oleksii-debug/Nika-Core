@@ -65,7 +65,7 @@ def test_restore_rejects_tampered_independent_review_authorization() -> None:
         '"independent_review_authorized":false',
     )
 
-    with pytest.raises(ReviewPipelineError, match="explicit independent authorization"):
+    with pytest.raises(ReviewPipelineError, match="review snapshot is invalid"):
         CandidateReviewRecord.restore(payload)
 
 
