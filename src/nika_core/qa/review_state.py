@@ -218,8 +218,10 @@ def _validate_canonical_identity(value: str, *, field: str) -> None:
 
 
 def _validate_sha(value: str) -> None:
-    if len(value) != 40 or any(char not in "0123456789abcdef" for char in value.casefold()):
-        raise ReviewPipelineError("candidate SHA must be a 40-character hexadecimal SHA")
+    if len(value) != 40 or any(char not in "0123456789abcdef" for char in value):
+        raise ReviewPipelineError(
+            "candidate SHA must be a canonical lowercase 40-character hexadecimal SHA"
+        )
 
 
 def _validate_evidence_refs(values: tuple[str, ...]) -> None:
