@@ -175,3 +175,51 @@ def test_operator_projection_fails_closed_on_multiple_candidate_shas() -> None:
     assert projection.candidate == "ambiguous_multiple_candidates"
     assert ("a" * 40) not in projection.candidate
     assert ("b" * 40) not in projection.candidate
+
+
+def test_operator_projection_does_not_advance_past_pending_qa() -> None:
+    detail = _detail(
+        ProductStatusEntry(
+            kind=ProductStatusKind.COMPONENT,
+            item_id="work-654",
+            label="Issue 654",
+            state="completed",
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.QA,
+            item_id="work-654:qa",
+            label="QA",
+            state="running",
+        ),
+    )
+
+    projection = project_operator_status(detail)
+
+    assert projection.next == "qa:work-654:qa=running"
+
+
+def test_operator_projection_does_not_advance_past_pending_integration() -> None:
+    detail = _detail(
+        ProductStatusEntry(
+            kind=ProductStatusKind.COMPONENT,
+            item_id="work-654",
+            label="Issue 654",
+            state="completed",
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.QA,
+            item_id="work-654:qa",
+            label="QA",
+            state="passed",
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.DEPLOYMENT,
+            item_id="integration-654",
+            label="Integration",
+            state="pending",
+        ),
+    )
+
+    projection = project_operator_status(detail)
+
+    assert projection.next == "integration:integration-654=pending"
