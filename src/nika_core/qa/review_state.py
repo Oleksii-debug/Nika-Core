@@ -53,6 +53,10 @@ class ReviewVerdict:
         _validate_canonical_identity(self.reviewer_id, field="reviewer")
         if not self.reason.strip():
             raise ReviewPipelineError("review verdict reason must not be empty")
+        if self.reason != self.reason.strip():
+            raise ReviewPipelineError(
+                "review verdict reason must be canonical without edge whitespace"
+            )
         if len(self.reason) > _MAX_REASON_CHARS:
             raise ReviewPipelineError("review verdict reason exceeds bounded evidence limit")
         _validate_evidence_refs(self.evidence_refs)
