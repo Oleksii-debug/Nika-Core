@@ -223,3 +223,31 @@ def test_operator_projection_does_not_advance_past_pending_integration() -> None
     projection = project_operator_status(detail)
 
     assert projection.next == "integration:integration-654=pending"
+
+
+def test_operator_projection_completed_blocker_does_not_mask_downstream_qa() -> None:
+    detail = _detail(
+        ProductStatusEntry(
+            kind=ProductStatusKind.COMPONENT,
+            item_id="work-654",
+            label="Issue 654",
+            state="completed",
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.BLOCKER,
+            item_id="work-654:blocker",
+            label="Credential blocker",
+            state="completed",
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.QA,
+            item_id="work-654:qa",
+            label="QA",
+            state="running",
+        ),
+    )
+
+    projection = project_operator_status(detail)
+
+    assert projection.blocker == "work-654:blocker=completed"
+    assert projection.next == "qa:work-654:qa=running"
