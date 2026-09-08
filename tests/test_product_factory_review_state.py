@@ -179,7 +179,7 @@ def test_restored_duplicate_review_evidence_is_rejected() -> None:
         '"evidence_refs":["ci:1","ci:1"]',
     )
 
-    with pytest.raises(ReviewPipelineError, match="must be unique"):
+    with pytest.raises(ReviewPipelineError, match="review snapshot is invalid"):
         CandidateReviewRecord.restore(payload)
 
 
