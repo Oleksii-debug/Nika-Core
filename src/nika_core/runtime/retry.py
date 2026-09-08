@@ -286,7 +286,7 @@ def plan_script_retry(
                 condition,
             )
         delay = max(delay, retry_after)
-    if delay < _MIN_AUTOMATIC_RETRY_DELAY_SECONDS:
+    if delay == 0.0:
         if policy.max_delay_seconds < _MIN_AUTOMATIC_RETRY_DELAY_SECONDS:
             return ScriptRetryDecision(
                 ScriptRetryDisposition.BACKOFF_LIMIT_EXCEEDED,
