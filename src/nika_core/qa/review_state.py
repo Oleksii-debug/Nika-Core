@@ -229,3 +229,9 @@ def _validate_evidence_refs(values: tuple[str, ...]) -> None:
         raise ReviewPipelineError("review verdict requires bounded evidence references")
     if any(not value.strip() or len(value) > _MAX_EVIDENCE_REF_CHARS for value in values):
         raise ReviewPipelineError("review evidence reference exceeds bounded evidence limit")
+    if any(value != value.strip() for value in values):
+        raise ReviewPipelineError(
+            "review evidence reference must be canonical without edge whitespace"
+        )
+    if len(set(values)) != len(values):
+        raise ReviewPipelineError("review evidence references must be unique")
