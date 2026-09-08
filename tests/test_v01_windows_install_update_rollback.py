@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -65,6 +66,8 @@ def _run(
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="backslashreplace",
         timeout=30,
     )
 
@@ -147,8 +150,9 @@ def test_tampered_update_fails_before_installed_tree_mutates(tmp_path: Path) -> 
 
 
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
-def test_update_restores_previous_release_after_post_activation_reparse_failure(
-    tmp_path: Path,
+@pytest.mark.parametrize("mode", ["Install", "Update"])
+def test_post_activation_reparse_failure_cleans_or_restores_destination(
+    tmp_path: Path, mode: str,
 ) -> None:
     shell = _powershell()
     if shell is None:
@@ -157,8 +161,9 @@ def test_update_restores_previous_release_after_post_activation_reparse_failure(
     bundle_v1 = _bundle(tmp_path / "version-1", "v1")
     bundle_v2 = _bundle(tmp_path / "version-2", "v2")
     destination = tmp_path / "install" / "Nika Core"
-    installed = _run(shell, mode="Install", destination=destination, bundle=bundle_v1)
-    assert installed.returncode == 0, installed.stderr or installed.stdout
+    if mode == "Update":
+        installed = _run(shell, mode="Install", destination=destination, bundle=bundle_v1)
+        assert installed.returncode == 0, installed.stderr or installed.stdout
 
     junction_target = tmp_path / "external-target"
     junction_target.mkdir()
@@ -167,24 +172,26 @@ def test_update_restores_previous_release_after_post_activation_reparse_failure(
 
     instrumented = tmp_path / "install_nika_core_fault.ps1"
     payload = SCRIPT.read_text(encoding="utf-8")
-    needle = (
-        "            [System.IO.Directory]::Move($stagePath, $destinationPath)\n"
-        "            Assert-NikaNoReparsePathChain -Path $destinationPath\n"
+    # Both phases activate the same way. Bind the injection to the selected
+    # branch so a new Install try/catch cannot silently steal Update's fault.
+    prefix = (
+        "        try {\n"
+        if mode == "Install"
+        else "            Assert-NikaNoReparsePathChain -Path $rollbackPath\n"
     )
+    needle = prefix + "            [System.IO.Directory]::Move($stagePath, $destinationPath)\n"
     injection_marker = tmp_path / "junction-injected.marker"
     escaped_target = str(junction_target).replace("'", "''")
     escaped_marker = str(injection_marker).replace("'", "''")
-    injected = (
-        "            [System.IO.Directory]::Move($stagePath, $destinationPath)\n"
+    injected = needle + (
         "            [System.IO.Directory]::Move($destinationPath, ($destinationPath + '.candidate'))\n"
         f"            New-Item -ItemType Junction -Path $destinationPath -Target '{escaped_target}' | Out-Null\n"
         "            $injectedItem = Get-Item -LiteralPath $destinationPath -Force\n"
         "            if (($injectedItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) { "
         "throw 'test junction injection did not create a reparse point' }\n"
         f"            Set-Content -LiteralPath '{escaped_marker}' -Value 'junction-ready' -NoNewline\n"
-        "            Assert-NikaNoReparsePathChain -Path $destinationPath\n"
     )
-    assert needle in payload
+    assert payload.count(needle) == 1, "fault injection must bind exactly one activation phase"
     instrumented.write_text(payload.replace(needle, injected, 1), encoding="utf-8")
 
     command = [
@@ -196,7 +203,7 @@ def test_update_restores_previous_release_after_post_activation_reparse_failure(
         "-File",
         str(instrumented),
         "-Mode",
-        "Update",
+        mode,
         "-Destination",
         str(destination),
         "-BundlePath",
@@ -207,17 +214,50 @@ def test_update_restores_previous_release_after_post_activation_reparse_failure(
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="backslashreplace",
         timeout=30,
     )
 
-    assert failed.returncode != 0
+    assert failed.returncode != 0, failed.stdout or failed.stderr
     assert injection_marker.read_text(encoding="utf-8") == "junction-ready"
-    assert destination.is_dir()
-    assert not destination.is_symlink()
-    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    assert "Reparse points are forbidden" in failed.stderr
+    if mode == "Update":
+        assert destination.is_dir()
+        assert not destination.is_symlink()
+        assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    else:
+        assert not destination.exists()
     assert sentinel.read_text(encoding="utf-8") == "must-not-change"
     rollback = destination.parent / f".{destination.name}.rollback"
     assert not rollback.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
+@pytest.mark.parametrize(
+    "relative",
+    ["_internal/runtime.dat.", "_internal/runtime.dat ",
+     "_internal./runtime.dat", "_internal /runtime.dat"],
+)
+def test_manifest_rejects_trailing_dot_or_space_before_filesystem_mutation(
+    tmp_path: Path, relative: str,
+) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    bundle = _bundle(tmp_path / "bundle", "v1")
+    manifest_path = bundle / "release-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    entry = next(item for item in manifest["files"] if item["path"] == "_internal/runtime.dat")
+    entry["path"] = relative
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    destination = tmp_path / "new-install-root" / "Nika Core"
+
+    rejected = _run(shell, mode="Install", destination=destination, bundle=bundle)
+    assert rejected.returncode != 0, rejected.stdout or rejected.stderr
+    assert "Release manifest contains an unsafe path" in rejected.stderr
+    assert not destination.parent.exists()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
@@ -235,6 +275,8 @@ def test_installer_rejects_destination_junction_ancestor_before_mutation(tmp_pat
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="backslashreplace",
         timeout=10,
     )
     if created.returncode != 0:
@@ -259,6 +301,8 @@ def test_installer_rejects_bundle_root_junction_before_mutation(tmp_path: Path) 
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="backslashreplace",
         timeout=10,
     )
     if created.returncode != 0:

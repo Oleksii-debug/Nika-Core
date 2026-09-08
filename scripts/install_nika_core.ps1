@@ -140,6 +140,10 @@ function Test-NikaSafeRelativePath {
         if ([string]::IsNullOrWhiteSpace($part) -or $part -eq "." -or $part -eq "..") {
             return $false
         }
+        # Match the canonical release-manifest path policy before Win32 lookup.
+        if ($part.EndsWith(".") -or $part.EndsWith(" ")) {
+            return $false
+        }
         $stem = $part.Split(".")[0].TrimEnd(" ", ".").ToUpperInvariant()
         if (
             $stem -in @("CON", "PRN", "AUX", "NUL") -or
