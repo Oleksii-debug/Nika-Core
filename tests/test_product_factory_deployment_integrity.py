@@ -119,6 +119,7 @@ class FakeProvider:
                 intent.release.source_sha,
                 True,
                 (f"inspect:{intent.intent_id}",),
+                release=intent.release,
             ),
         )
 
