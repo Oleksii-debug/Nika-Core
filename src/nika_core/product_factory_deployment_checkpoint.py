@@ -206,22 +206,27 @@ class DurableDeploymentFabric(DeploymentFabric):
             raise ProductFactoryDeploymentCheckpointError(
                 "deployment record project does not match durable host project"
             )
-        if record.state is DeploymentState.UNCERTAIN:
-            self._current_releases.pop(
-                (
-                    record.intent.project_id,
-                    record.intent.environment.environment_id,
-                ),
-                None,
+        previous_snapshot = self.snapshot()
+        try:
+            if record.state is DeploymentState.UNCERTAIN:
+                self._current_releases.pop(
+                    (
+                        record.intent.project_id,
+                        record.intent.environment.environment_id,
+                    ),
+                    None,
+                )
+                if record.intent.environment.tier is EnvironmentTier.STAGING:
+                    self._healthy_staging.pop(record.intent.project_id, None)
+            saved = super()._save(record)
+            self._deployment_checkpoint_host.save(
+                host_task_id=self._deployment_host_task_id,
+                project_id=self._deployment_project_id,
+                snapshot=self.snapshot(),
             )
-            if record.intent.environment.tier is EnvironmentTier.STAGING:
-                self._healthy_staging.pop(record.intent.project_id, None)
-        saved = super()._save(record)
-        self._deployment_checkpoint_host.save(
-            host_task_id=self._deployment_host_task_id,
-            project_id=self._deployment_project_id,
-            snapshot=self.snapshot(),
-        )
+        except BaseException:
+            self.restore(previous_snapshot)
+            raise
         return saved
 
     @classmethod
