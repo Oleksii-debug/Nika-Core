@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+
 from nika_core.runtime.retry import ScriptRetryCondition, ScriptRetryIntent
 
 
