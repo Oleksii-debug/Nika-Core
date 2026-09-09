@@ -81,6 +81,7 @@ class FakeProvider:
             True,
             (f"provider:health:{intent.intent_id}",),
             NOW,
+            release=intent.release,
         )
 
     def rollback(
