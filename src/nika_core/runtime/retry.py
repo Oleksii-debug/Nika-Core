@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from math import isfinite
+from math import isfinite, ldexp
 
 from nika_core.runtime.contracts import RuntimeErrorCode, RuntimeOutcome, RuntimeResult
 
@@ -43,14 +43,14 @@ class RetryPolicy:
     def delay_seconds(self, *, retry_number: int) -> float:
         """Return deterministic exponential backoff for a 1-based retry number."""
 
-        if retry_number < 1:
-            raise ValueError("retry_number must be positive")
+        _validate_retry_count(retry_number, field_name="retry_number", minimum=1)
         if self.base_delay_seconds == 0:
             return 0.0
-        return min(
-            self.base_delay_seconds * (2 ** (retry_number - 1)),
-            self.max_delay_seconds,
-        )
+        try:
+            delay = ldexp(float(self.base_delay_seconds), retry_number - 1)
+        except OverflowError:
+            return self.max_delay_seconds
+        return min(delay, self.max_delay_seconds)
 
 
 class ScriptRetryCondition(StrEnum):
