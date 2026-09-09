@@ -8,7 +8,7 @@ import pytest
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.product_factory_checkpoint_host import ProductFactoryCheckpointHost
-from nika_core.product_factory_coordinator import ReviewDecision, WorkerResultEnvelope
+from nika_core.product_factory_coordinator import ReviewDecision, WorkerResultEnvelope, WorkState
 from nika_core.product_factory_orchestration import (
     ProductComponent,
     ProductRepositoryGraph,
@@ -30,6 +30,7 @@ _LOCATOR = "org/pf12-evidence"
 _ACCEPTANCE_COMMAND = ("python", "-m", "pytest", "tests/core")
 _PERMISSIONS = frozenset({"read_source", "write_source", "run_tests"})
 _REVIEW_OMITTED = "review rationale omitted from durable checkpoint"
+_BLOCKER_OMITTED = "blocker rationale omitted from durable checkpoint"
 
 
 def _setup(tmp_path: Path):
@@ -227,3 +228,71 @@ def test_nested_and_aws_review_credentials_are_minimized_without_safe_ref_loss(
 
     restored = host.restore_latest(host_task_id=task_id, binding=binding)
     assert restored.snapshot().records[0].review == durable.review
+
+
+@pytest.mark.parametrize(
+    ("reason", "canary"),
+    (
+        ("blocked; api_key=NIKA_BLOCKER_API_KEY_CANARY", "NIKA_BLOCKER_API_KEY_CANARY"),
+        (
+            "blocked; Authorization: Bearer NIKA_BLOCKER_AUTH_CANARY",
+            "NIKA_BLOCKER_AUTH_CANARY",
+        ),
+        ("blocked; cookie=NIKA_BLOCKER_COOKIE_CANARY", "NIKA_BLOCKER_COOKIE_CANARY"),
+        (
+            "blocked; session_token=NIKA_BLOCKER_SESSION_CANARY",
+            "NIKA_BLOCKER_SESSION_CANARY",
+        ),
+        (
+            "https://reviewer:NIKA_BLOCKER_URL_CANARY@example.invalid/blocker",
+            "NIKA_BLOCKER_URL_CANARY",
+        ),
+    ),
+)
+def test_no_result_blocker_secret_is_minimized_before_checkpoint_and_restart(
+    tmp_path: Path,
+    reason: str,
+    canary: str,
+) -> None:
+    store, binding, coordinator, task_id = _setup(tmp_path)
+    runtime = coordinator.block("core", reason)
+    assert runtime.state is WorkState.BLOCKED
+    assert runtime.result is None
+    assert runtime.blocker == reason
+
+    checkpoint = binding.checkpoint(coordinator)
+    durable = checkpoint.coordinator.records[0]
+    assert durable.state is WorkState.BLOCKED
+    assert durable.result is None
+    assert durable.blocker == _BLOCKER_OMITTED
+
+    host = ProductFactoryCheckpointHost(store)
+    saved = host.save(host_task_id=task_id, checkpoint=checkpoint)
+    assert canary not in _raw_checkpoint(store, saved.checkpoint_id)
+
+    restarted = ProductFactoryCheckpointHost(SQLiteStore(store.path))
+    restored = restarted.restore_latest(host_task_id=task_id, binding=binding)
+    restored_record = restored.snapshot().records[0]
+    assert restored_record.state is WorkState.BLOCKED
+    assert restored_record.result is None
+    assert restored_record.blocker == _BLOCKER_OMITTED
+
+
+def test_safe_no_result_blocker_survives_checkpoint_and_restart(tmp_path: Path) -> None:
+    reason = "blocked pending exact independent compatibility evidence"
+    store, binding, coordinator, task_id = _setup(tmp_path)
+    coordinator.block("core", reason)
+
+    checkpoint = binding.checkpoint(coordinator)
+    durable = checkpoint.coordinator.records[0]
+    assert durable.blocker == reason
+
+    host = ProductFactoryCheckpointHost(store)
+    saved = host.save(host_task_id=task_id, checkpoint=checkpoint)
+    assert reason in _raw_checkpoint(store, saved.checkpoint_id)
+
+    restarted = ProductFactoryCheckpointHost(SQLiteStore(store.path))
+    restored = restarted.restore_latest(host_task_id=task_id, binding=binding)
+    restored_record = restored.snapshot().records[0]
+    assert restored_record.state is WorkState.BLOCKED
+    assert restored_record.blocker == reason
