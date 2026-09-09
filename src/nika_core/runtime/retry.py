@@ -300,7 +300,13 @@ def plan_script_retry(
                 condition,
             )
         delay = _MIN_AUTOMATIC_RETRY_DELAY_SECONDS
-    not_before = current + timedelta(seconds=delay)
+    try:
+        not_before = current + timedelta(seconds=delay)
+    except OverflowError:
+        return ScriptRetryDecision(
+            ScriptRetryDisposition.BACKOFF_LIMIT_EXCEEDED,
+            condition,
+        )
     if deadline_utc is not None and not_before >= deadline_utc:
         return ScriptRetryDecision(ScriptRetryDisposition.DEADLINE_EXCEEDED, condition)
 
