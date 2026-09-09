@@ -133,7 +133,7 @@ class PartiallyBrokenRecoveryWorker:
     async def recover(self, request, state):
         self.recover_calls.append(request.work_id)
         assert request.work_id == self.recoverable_work_id
-        assert state.resume_token == "resume-sibling"
+        assert state.opaque_token == "resume-sibling"
         return WorkerResultEnvelope(
             work_id=request.work_id,
             component_id=request.component_id,
