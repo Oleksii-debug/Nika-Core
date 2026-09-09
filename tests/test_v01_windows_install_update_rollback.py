@@ -45,6 +45,7 @@ def _run(
     mode: str,
     destination: Path,
     bundle: Path | None = None,
+    env_overrides: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = [
         shell,
@@ -61,6 +62,9 @@ def _run(
     ]
     if bundle is not None:
         command.extend(["-BundlePath", str(bundle)])
+    environment = os.environ.copy()
+    if env_overrides:
+        environment.update(env_overrides)
     return subprocess.run(
         command,
         check=False,
@@ -69,6 +73,7 @@ def _run(
         encoding="utf-8",
         errors="backslashreplace",
         timeout=30,
+        env=environment,
     )
 
 
@@ -85,6 +90,9 @@ def test_installer_contract_reuses_manifest_and_never_elevates() -> None:
     assert "[System.IO.Path]::GetRelativePath" not in payload
     assert "$item.PSIsContainer" in payload
     assert "function Assert-NikaNoReparsePathChain" in payload
+    assert "function Assert-NikaDataMutationSeparation" in payload
+    assert 'Assert-NikaNoReparsePathChain -Path $canonicalDataRoot' in payload
+    assert 'MutationPaths @($destinationPath, $rollbackPath)' in payload
     assert 'Assert-NikaNoReparsePathChain -Path $BundleRoot' in payload
     assert 'Assert-NikaNoReparsePathChain -Path $destinationPath' in payload
     assert 'Assert-NikaReleaseBundle -BundleRoot $destinationPath' in payload
@@ -312,3 +320,77 @@ def test_installer_rejects_bundle_root_junction_before_mutation(tmp_path: Path) 
     rejected = _run(shell, mode="Install", destination=destination, bundle=junction_bundle)
     assert rejected.returncode != 0
     assert not destination.exists()
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
+def test_update_rejects_canonical_data_inside_rollback_sibling_before_mutation(
+    tmp_path: Path,
+) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    bundle_v1 = _bundle(tmp_path / "bundle-v1", "v1")
+    bundle_v2 = _bundle(tmp_path / "bundle-v2", "v2")
+    destination = tmp_path / "install" / "Nika Core"
+
+    installed = _run(shell, mode="Install", destination=destination, bundle=bundle_v1)
+    assert installed.returncode == 0, installed.stderr or installed.stdout
+
+    rollback = destination.parent / f".{destination.name}.rollback"
+    rollback.mkdir()
+    sentinel = rollback / "user-data-sentinel.txt"
+    sentinel.write_text("preserve-me", encoding="utf-8")
+    configured_db = rollback / "nika_core.db"
+
+    rejected = _run(
+        shell,
+        mode="Update",
+        destination=destination,
+        bundle=bundle_v2,
+        env_overrides={"NIKA_DB_PATH": str(configured_db)},
+    )
+
+    assert rejected.returncode != 0, rejected.stdout or rejected.stderr
+    assert "must not overlap the canonical Nika Core data root" in rejected.stderr
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    assert sentinel.read_text(encoding="utf-8") == "preserve-me"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
+def test_installer_rejects_canonical_data_root_junction_alias_before_mutation(
+    tmp_path: Path,
+) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    bundle = _bundle(tmp_path / "bundle", "v1")
+    physical_parent = tmp_path / "physical-parent"
+    physical_parent.mkdir()
+    data_alias = tmp_path / "data-alias"
+    created = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(data_alias), str(physical_parent)],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="backslashreplace",
+        timeout=10,
+    )
+    if created.returncode != 0:
+        pytest.skip("Windows runner does not permit junction creation")
+
+    destination = physical_parent / "Nika Core"
+    configured_db = data_alias / "Nika Core" / "nika_core.db"
+    rejected = _run(
+        shell,
+        mode="Install",
+        destination=destination,
+        bundle=bundle,
+        env_overrides={"NIKA_DB_PATH": str(configured_db)},
+    )
+
+    assert rejected.returncode != 0, rejected.stdout or rejected.stderr
+    assert "Reparse points are forbidden in installer path authority" in rejected.stderr
+    assert not destination.exists()
+

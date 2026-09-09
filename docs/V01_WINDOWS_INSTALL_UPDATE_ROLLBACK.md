@@ -20,6 +20,8 @@ No WiX, Inno Setup, NSIS, MSIX or other installer dependency is introduced.
 - Update verifies the current installed image, stages and verifies the new image, retains one sibling rollback image, and restores the old image if activation fails.
 - Rollback swaps the installed image with the verified rollback image, allowing the superseded version to remain available as the next rollback target.
 - The installer never requests elevation and never mutates the canonical Nika user-data directory. User data remains outside the application installation tree.
+- The canonical data root is resolved once per invocation and its existing ancestor chain must contain no reparse point/junction; lexical aliases are not trusted as separation authority.
+- Before destructive filesystem changes, the data root is checked for two-way non-overlap with the application destination, deterministic rollback sibling, and any currently allocated installer staging/recovery sibling paths; the boundary is rechecked immediately before rename/removal operations.
 
 ## Evidence boundary
 

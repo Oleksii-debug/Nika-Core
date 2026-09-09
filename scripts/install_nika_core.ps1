@@ -56,15 +56,22 @@ function Get-NikaCanonicalDataRoot {
     return Get-NikaFullPath $dataRoot
 }
 
-function Assert-NikaDestinationDataSeparation {
-    param([Parameter(Mandatory=$true)][string]$DestinationPath)
+function Assert-NikaDataMutationSeparation {
+    param(
+        [Parameter(Mandatory=$true)][string]$DataRoot,
+        [Parameter(Mandatory=$true)][string[]]$MutationPaths
+    )
 
-    $dataRoot = Get-NikaCanonicalDataRoot
-    if (
-        (Test-NikaPathWithin -Path $DestinationPath -Root $dataRoot) -or
-        (Test-NikaPathWithin -Path $dataRoot -Root $DestinationPath)
-    ) {
-        throw "Application destination must not overlap the canonical Nika Core data root."
+    $canonicalDataRoot = Get-NikaFullPath $DataRoot
+    Assert-NikaNoReparsePathChain -Path $canonicalDataRoot
+    foreach ($mutationPath in $MutationPaths) {
+        $canonicalMutationPath = Get-NikaFullPath $mutationPath
+        if (
+            (Test-NikaPathWithin -Path $canonicalMutationPath -Root $canonicalDataRoot) -or
+            (Test-NikaPathWithin -Path $canonicalDataRoot -Root $canonicalMutationPath)
+        ) {
+            throw "Installer mutation path must not overlap the canonical Nika Core data root."
+        }
     }
 }
 
@@ -289,9 +296,10 @@ if ([string]::IsNullOrWhiteSpace($parent) -or [string]::IsNullOrWhiteSpace($leaf
 }
 Assert-NikaNoReparsePathChain -Path $destinationPath
 Assert-NikaSafeDestination -DestinationPath $destinationPath
-Assert-NikaDestinationDataSeparation -DestinationPath $destinationPath
 
 $rollbackPath = Join-Path $parent (".$leaf.rollback")
+$dataRoot = Get-NikaCanonicalDataRoot
+Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath)
 
 if ($Mode -eq "Rollback") {
     if (-not (Test-Path -LiteralPath $rollbackPath -PathType Container)) {
@@ -303,7 +311,9 @@ if ($Mode -eq "Rollback") {
     New-Item -ItemType Directory -Path $parent -Force | Out-Null
     Assert-NikaNoReparsePathChain -Path $destinationPath
     Assert-NikaNoReparsePathChain -Path $rollbackPath
+    Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath)
     if (-not (Test-Path -LiteralPath $destinationPath -PathType Container)) {
+        Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath)
         [System.IO.Directory]::Move($rollbackPath, $destinationPath)
         Write-Output $destinationPath
         exit 0
@@ -311,8 +321,10 @@ if ($Mode -eq "Rollback") {
 
     Assert-NikaReleaseBundle -BundleRoot $destinationPath
     $swapPath = Join-Path $parent (".$leaf.swap-$([Guid]::NewGuid().ToString('N'))")
+    Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $swapPath)
     $rollbackPhase = "start"
     try {
+        Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $swapPath)
         [System.IO.Directory]::Move($destinationPath, $swapPath)
         $rollbackPhase = "active-staged"
         [System.IO.Directory]::Move($rollbackPath, $destinationPath)
@@ -323,6 +335,7 @@ if ($Mode -eq "Rollback") {
     catch {
         $rollbackError = $_
         try {
+            Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $swapPath)
             if ($rollbackPhase -eq "active-staged") {
                 if (
                     -not (Test-Path -LiteralPath $destinationPath) -and
@@ -379,18 +392,23 @@ if ($Mode -eq "Update") {
 
 Assert-NikaNoReparsePathChain -Path $destinationPath
 Assert-NikaNoReparsePathChain -Path $bundleRoot
+Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath)
 New-Item -ItemType Directory -Path $parent -Force | Out-Null
 Assert-NikaNoReparsePathChain -Path $destinationPath
 $stagePath = Join-Path $parent (".$leaf.staging-$([Guid]::NewGuid().ToString('N'))")
+Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $stagePath)
 try {
     Copy-NikaBundleToStage -BundleRoot $bundleRoot -StagePath $stagePath
 
     Assert-NikaNoReparsePathChain -Path $stagePath
     Assert-NikaNoReparsePathChain -Path $destinationPath
+    Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $stagePath)
 
     if ($Mode -eq "Install") {
         $failedInstallPath = Join-Path $parent (".$leaf.failed-$([Guid]::NewGuid().ToString('N'))")
+        Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $stagePath, $failedInstallPath)
         try {
+            Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $stagePath, $failedInstallPath)
             [System.IO.Directory]::Move($stagePath, $destinationPath)
             Assert-NikaNoReparsePathChain -Path $destinationPath
             Assert-NikaReleaseBundle -BundleRoot $destinationPath
@@ -407,16 +425,21 @@ try {
         }
     }
     else {
+        Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $stagePath)
         if (Test-Path -LiteralPath $rollbackPath) {
             Assert-NikaNoReparsePathChain -Path $rollbackPath
+            Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $stagePath)
             Remove-Item -LiteralPath $rollbackPath -Recurse -Force
         }
         Assert-NikaNoReparsePathChain -Path $destinationPath
+        Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $stagePath)
         [System.IO.Directory]::Move($destinationPath, $rollbackPath)
         $failedActivationPath = Join-Path $parent (".$leaf.failed-$([Guid]::NewGuid().ToString('N'))")
+        Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $stagePath, $failedActivationPath)
         try {
             Assert-NikaNoReparsePathChain -Path $stagePath
             Assert-NikaNoReparsePathChain -Path $rollbackPath
+            Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $stagePath, $failedActivationPath)
             [System.IO.Directory]::Move($stagePath, $destinationPath)
             Assert-NikaNoReparsePathChain -Path $destinationPath
             Assert-NikaReleaseBundle -BundleRoot $destinationPath
