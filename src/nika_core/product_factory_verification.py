@@ -89,6 +89,8 @@ def classify_candidate_verification(
     """
 
     _validate_sha(candidate_sha)
+    if not isinstance(evidence, tuple):
+        raise VerificationError("verification evidence must be a tuple")
     _validate_required_check_ids(required_check_ids)
 
     if any(not isinstance(item, ExactShaCheckEvidence) for item in evidence):
@@ -147,6 +149,8 @@ def _validate_candidate_verification(
     _validate_sha(candidate_sha)
     if not isinstance(state, VerificationState):
         raise VerificationError("verification state must be a VerificationState")
+    if not isinstance(evidence_refs, tuple):
+        raise VerificationError("verification evidence refs must be a tuple")
     if any(not isinstance(ref, str) or not ref.strip() for ref in evidence_refs):
         raise VerificationError("verification evidence refs must be non-empty text")
     for ref in evidence_refs:
@@ -156,6 +160,8 @@ def _validate_candidate_verification(
 
 
 def _validate_required_check_ids(required_check_ids: tuple[str, ...]) -> None:
+    if not isinstance(required_check_ids, tuple):
+        raise VerificationError("required check ids must be a tuple")
     if not required_check_ids:
         raise VerificationError("required check ids must not be empty")
     if any(not isinstance(check_id, str) or not check_id.strip() for check_id in required_check_ids):
