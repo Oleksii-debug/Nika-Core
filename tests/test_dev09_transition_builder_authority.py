@@ -55,7 +55,7 @@ def test_public_transition_builder_cannot_forge_merge_ready() -> None:
 
 def test_mangled_transition_builder_requires_exact_head_clearance_for_merge_ready() -> None:
     identity, authority, verdict = _merge_ready_inputs()
-    builder = getattr(CandidateReviewRecord, "_CandidateReviewRecord__from_transition")
+    builder = CandidateReviewRecord._CandidateReviewRecord__from_transition
 
     with pytest.raises(
         ReviewPipelineError,
