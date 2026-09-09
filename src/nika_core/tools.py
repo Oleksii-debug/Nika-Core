@@ -518,6 +518,34 @@ class ToolExecutor:
                     )
         else:
             reservation = None
+            # Some caller-declared local mutations also require a last-moment durable
+            # authority check (for example Scenario-B browser SET_VALUE after task pause
+            # or cancellation). This guard grants no approval/effect authority; it only
+            # vetoes handler dispatch. External replay semantics remain above and unchanged.
+            if pre_handler_authority is not None:
+                denial_reason = "pre_handler_authority_denied"
+                try:
+                    allowed = pre_handler_authority()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - trusted authority fails closed.
+                    allowed = False
+                    denial_reason = type(exc).__name__
+                if allowed is not True:
+                    self._audit(
+                        "tool.denied",
+                        call,
+                        spec,
+                        {
+                            "reason": denial_reason,
+                            "phase": "pre_handler_authority",
+                        },
+                    )
+                    return ToolResult(
+                        call_id=call.call_id,
+                        tool_id=call.tool_id,
+                        error="pre-handler authority denied",
+                    )
 
         self._audit("tool.started", call, spec, {})
         try:
