@@ -12,6 +12,8 @@ from nika_core.product_command.routing import route_command
         "develop issue #654 in repository Oleksii-debug/Nika-Core",
         "implement PR 711 in repo Oleksii-debug/Nika-Core",
         "repository Oleksii-debug/Nika-Core issue 654 fix",
+        "Please fix issue #654 in repository Oleksii-debug/Nika-Core",
+        "Could you develop issue #654 in repository Oleksii-debug/Nika-Core?",
         "розроби issue #654 у repository Oleksii-debug/Nika-Core",
     ),
 )
@@ -31,6 +33,10 @@ def test_repository_development_intent_routes_to_product_factory(command: str) -
         "develop repository Oleksii-debug/Nika-Core",
         "explain issue #654 in repository Oleksii-debug/Nika-Core",
         "fix issue someday in repo Oleksii-debug/Nika-Core",
+        "How should I develop issue #654 in repository Oleksii-debug/Nika-Core?",
+        "Should I fix issue #654 in repository Oleksii-debug/Nika-Core?",
+        "Explain how to implement PR 711 in repo Oleksii-debug/Nika-Core",
+        'What does "develop issue #654 in repository Oleksii-debug/Nika-Core" mean?',
     ),
 )
 def test_incomplete_or_read_only_repository_intent_stays_agent_task(command: str) -> None:
@@ -45,6 +51,8 @@ def test_incomplete_or_read_only_repository_intent_stays_agent_task(command: str
         "do not develop issue #654 in repository Oleksii-debug/Nika-Core",
         "don't implement PR 711 in repo Oleksii-debug/Nika-Core",
         "never fix issue 654 in repository Oleksii-debug/Nika-Core",
+        "I don't want you to develop issue #654 in repository Oleksii-debug/Nika-Core; just explain it",
+        "Please do not automatically develop issue #654 in repository Oleksii-debug/Nika-Core",
         "не розроби issue #654 у repository Oleksii-debug/Nika-Core",
     ),
 )
