@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Protocol
 
+from nika_core.product_command.reference_safety import safe_evidence_reference
+
 _MAX_EVIDENCE_REFS = 16
 _MAX_EVIDENCE_REF_CHARS = 256
 _MAX_REASON_CHARS = 2048
@@ -72,6 +74,11 @@ class ReviewerAuthorityEvidence:
         _validate_sha(self.candidate_sha)
         _validate_canonical_identity(self.reviewer_id, field="reviewer")
         _validate_evidence_ref(self.authority_ref, field="reviewer authority")
+        object.__setattr__(
+            self,
+            "authority_ref",
+            safe_evidence_reference(self.authority_ref),
+        )
         if self.independent_review_authorized is not True:
             raise ReviewPipelineError(
                 "reviewer authority evidence must preserve explicit independent authorization"
@@ -91,6 +98,8 @@ class ReviewVerdict:
         _validate_canonical_identity(self.reviewer_id, field="reviewer")
         if type(self.accepted) is not bool:
             raise ReviewPipelineError("review verdict accepted must be boolean")
+        if not isinstance(self.reason, str):
+            raise ReviewPipelineError("review verdict reason must be a string")
         if not self.reason.strip():
             raise ReviewPipelineError("review verdict reason must not be empty")
         if self.reason != self.reason.strip():
@@ -100,6 +109,12 @@ class ReviewVerdict:
         if len(self.reason) > _MAX_REASON_CHARS:
             raise ReviewPipelineError("review verdict reason exceeds bounded evidence limit")
         _validate_evidence_refs(self.evidence_refs)
+        object.__setattr__(self, "reason", safe_evidence_reference(self.reason))
+        object.__setattr__(
+            self,
+            "evidence_refs",
+            tuple(safe_evidence_reference(value) for value in self.evidence_refs),
+        )
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -201,7 +216,7 @@ class CandidateReviewRecord:
                 verdict=verdict,
                 verification=verification,
             )
-        except (KeyError, TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
             raise ReviewPipelineError("review snapshot is invalid") from exc
         return record
 
@@ -395,6 +410,8 @@ class CandidateReviewRecord:
 
 
 def _validate_canonical_identity(value: str, *, field: str) -> None:
+    if not isinstance(value, str):
+        raise ReviewPipelineError(f"{field} identity must be a string")
     if not value.strip():
         raise ReviewPipelineError(f"{field} identity must not be empty")
     if value != value.strip():
@@ -402,13 +419,17 @@ def _validate_canonical_identity(value: str, *, field: str) -> None:
 
 
 def _validate_sha(value: str) -> None:
-    if len(value) != 40 or any(char not in "0123456789abcdef" for char in value):
+    if not isinstance(value, str) or len(value) != 40 or any(
+        char not in "0123456789abcdef" for char in value
+    ):
         raise ReviewPipelineError(
             "candidate SHA must be a canonical lowercase 40-character hexadecimal SHA"
         )
 
 
 def _validate_evidence_ref(value: str, *, field: str) -> None:
+    if not isinstance(value, str):
+        raise ReviewPipelineError(f"{field} reference must be a string")
     if not value.strip() or len(value) > _MAX_EVIDENCE_REF_CHARS:
         raise ReviewPipelineError(f"{field} reference exceeds bounded evidence limit")
     if value != value.strip():
@@ -418,8 +439,10 @@ def _validate_evidence_ref(value: str, *, field: str) -> None:
 
 
 def _validate_evidence_refs(values: tuple[str, ...]) -> None:
-    if not values or len(values) > _MAX_EVIDENCE_REFS:
+    if not isinstance(values, tuple) or not values or len(values) > _MAX_EVIDENCE_REFS:
         raise ReviewPipelineError("review verdict requires bounded evidence references")
+    if any(not isinstance(value, str) for value in values):
+        raise ReviewPipelineError("review evidence reference must be a string")
     if any(not value.strip() or len(value) > _MAX_EVIDENCE_REF_CHARS for value in values):
         raise ReviewPipelineError("review evidence reference exceeds bounded evidence limit")
     if any(value != value.strip() for value in values):
