@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from threading import Barrier
 
 import pytest
@@ -354,6 +354,108 @@ def test_writer_lock_contention_is_normalized_without_partial_mutation(
     assert int(decision_count["count"]) == 0
     assert int(idempotency_count["count"]) == 0
     assert int(audit_count["count"]) == 0
+
+
+def test_reader_lock_commit_contention_is_normalized_without_partial_mutation(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, projects, _ = _repos(tmp_path)
+    _handoff(projects)
+    original_connect = sqlite3.connect
+    reader = original_connect(store.path)
+    reader.row_factory = sqlite3.Row
+    reader.execute("BEGIN")
+    reader.execute(
+        "SELECT row_version FROM product_projects WHERE project_id=?",
+        ("p1",),
+    ).fetchone()
+
+    def short_timeout_connect(*args, **kwargs):
+        kwargs["timeout"] = 0.01
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite_store_module.sqlite3, "connect", short_timeout_connect)
+    try:
+        with pytest.raises(ProductProjectError, match="temporarily busy"):
+            ProductDecisionRepository(store).record(
+                "p1",
+                _decision(),
+                expected_row_version=0,
+                idempotency_key="decision:commit-busy",
+            )
+    finally:
+        reader.rollback()
+        reader.close()
+
+    assert projects.get("p1").row_version == 0
+    with store.connection() as conn:
+        decision_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM product_decisions WHERE project_id=?",
+            ("p1",),
+        ).fetchone()
+        idempotency_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM product_project_mutation_idempotency "
+            "WHERE operation_key=?",
+            ("decision:commit-busy",),
+        ).fetchone()
+        audit_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM audit_events "
+            "WHERE event_type='product_project.decision_recorded' AND entity_id=?",
+            ("p1",),
+        ).fetchone()
+
+    assert int(decision_count["count"]) == 0
+    assert int(idempotency_count["count"]) == 0
+    assert int(audit_count["count"]) == 0
+
+
+def test_non_lock_commit_operational_error_is_not_reclassified(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, projects, _ = _repos(tmp_path)
+    _handoff(projects)
+    original_connect = sqlite3.connect
+
+    class CommitFailureConnection:
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self._conn = conn
+
+        def execute(self, *args, **kwargs):
+            return self._conn.execute(*args, **kwargs)
+
+        def commit(self) -> None:
+            raise sqlite3.OperationalError("synthetic non-lock commit failure")
+
+        def rollback(self) -> None:
+            self._conn.rollback()
+
+    @contextmanager
+    def failing_connection():
+        conn = original_connect(store.path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        wrapped = CommitFailureConnection(conn)
+        try:
+            yield wrapped
+            wrapped.commit()
+        except Exception:
+            wrapped.rollback()
+            raise
+        finally:
+            conn.close()
+
+    monkeypatch.setattr(store, "connection", failing_connection)
+    with pytest.raises(sqlite3.OperationalError, match="synthetic non-lock commit failure"):
+        ProductDecisionRepository(store).record(
+            "p1",
+            _decision(),
+            expected_row_version=0,
+            idempotency_key="decision:non-lock-commit",
+        )
+
+    assert projects.get("p1").row_version == 0
 
 
 def test_non_lock_operational_error_is_not_reclassified_as_contention(
