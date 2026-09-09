@@ -28,6 +28,14 @@ _CANDIDATE_STATUS_KINDS = frozenset(
         ProductStatusKind.RELEASE,
     }
 )
+_TERMINAL_CANDIDATE_STATUS_KINDS = frozenset(
+    {
+        ProductStatusKind.BUILD,
+        ProductStatusKind.QA,
+        ProductStatusKind.DEPLOYMENT,
+        ProductStatusKind.RELEASE,
+    }
+)
 
 
 class FactoryOperatorProjection(BaseModel):
@@ -177,10 +185,17 @@ def _incomplete(
 
 
 def _active_candidate_entries(detail: ProductProjectDetail) -> tuple[ProductStatusEntry, ...]:
+    candidate_entries = tuple(
+        entry for entry in detail.statuses if entry.kind in _CANDIDATE_STATUS_KINDS
+    )
+    active_entries = _incomplete(candidate_entries)
+    if active_entries:
+        return active_entries
     return tuple(
         entry
-        for entry in detail.statuses
-        if entry.kind in _CANDIDATE_STATUS_KINDS and not _is_terminal_success(entry)
+        for entry in candidate_entries
+        if entry.kind in _TERMINAL_CANDIDATE_STATUS_KINDS
+        and _is_terminal_success(entry)
     )
 
 
