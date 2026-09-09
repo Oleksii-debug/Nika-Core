@@ -93,3 +93,22 @@ def test_cancel_is_idempotent_and_done_cannot_be_cancelled() -> None:
     coordinator.mark_done("core")
     with pytest.raises(CoordinatorError, match="done"):
         coordinator.cancel("core", reason="too late")
+
+
+def test_accepted_work_cannot_be_cancelled_after_unlocking_dependents() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    coordinator.record_result(_success(request))
+    coordinator.review("core", ReviewDecision("qa-1", True, "verified", ("ci:1",)))
+    assert "ui" in {item.component_id for item in coordinator.ready_requests()}
+
+    with pytest.raises(CoordinatorError, match="accepted"):
+        coordinator.cancel("core", reason="too late")
+
+    snapshot = coordinator.snapshot()
+    restored = ProductFactoryCoordinator(_graph())
+    restored.restore(snapshot, trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint)
+    assert next(
+        record.state for record in restored.snapshot().records if record.request.component_id == "core"
+    ) is WorkState.ACCEPTED
+    assert "ui" in {item.component_id for item in restored.ready_requests()}
