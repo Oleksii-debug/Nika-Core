@@ -32,6 +32,7 @@ class RetryPolicy:
             raise ValueError("base_delay_seconds must not exceed max_delay_seconds")
 
     def should_retry(self, result: RuntimeResult, *, retries_used: int) -> bool:
+        _validate_retry_count(retries_used, field_name="retries_used", minimum=0)
         if retries_used >= self.max_retries:
             return False
         if result.outcome != RuntimeOutcome.FAILED or result.error_code is None:
