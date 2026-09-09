@@ -26,6 +26,8 @@ class WorkState(StrEnum):
     ACCEPTED = "accepted"
     REPAIR_REQUIRED = "repair_required"
     BLOCKED = "blocked"
+    DONE = "done"
+    CANCELLED = "cancelled"
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,11 +116,7 @@ class ProductFactoryCoordinator:
     graph: ProductRepositoryGraph
     _records: dict[str, WorkRecord] = field(default_factory=dict, init=False, repr=False)
     _revision: int = field(default=0, init=False, repr=False)
-    _trusted_plan: tuple[ComponentWorkRequest, ...] | None = field(
-        default=None,
-        init=False,
-        repr=False,
-    )
+    _trusted_plan: tuple[ComponentWorkRequest, ...] | None = field(default=None, init=False, repr=False)
     _trusted_plan_fingerprint: str | None = field(default=None, init=False, repr=False)
 
     @property
@@ -127,13 +125,7 @@ class ProductFactoryCoordinator:
             raise CoordinatorError("coordinator has no established trusted plan authority")
         return self._trusted_plan_fingerprint
 
-    def plan(
-        self,
-        *,
-        base_shas: dict[str, str],
-        goals: dict[str, str],
-        permission_ceiling: frozenset[str],
-    ) -> CoordinatorSnapshot:
+    def plan(self, *, base_shas: dict[str, str], goals: dict[str, str], permission_ceiling: frozenset[str]) -> CoordinatorSnapshot:
         if self._records or self._trusted_plan is not None:
             raise CoordinatorError("coordinator is already planned")
         if not permission_ceiling:
@@ -148,40 +140,19 @@ class ProductFactoryCoordinator:
             if base_sha is None or not goal:
                 raise CoordinatorError(f"missing base SHA or goal for component {component_id}")
             request = ComponentWorkRequest(
-                work_id=_work_id(
-                    project_id=self.graph.project_id,
-                    component_id=component_id,
-                    repository_id=repository.repository_id,
-                    goal=goal,
-                    base_sha=base_sha,
-                    allowed_paths=component.paths,
-                    permission_ceiling=permission_ceiling,
-                    acceptance_commands=component.test_commands,
-                    attempt=1,
-                ),
-                project_id=self.graph.project_id,
-                component_id=component_id,
-                repository_id=repository.repository_id,
-                goal=goal,
-                base_sha=base_sha,
-                allowed_paths=component.paths,
-                permission_ceiling=permission_ceiling,
+                work_id=_work_id(project_id=self.graph.project_id, component_id=component_id, repository_id=repository.repository_id, goal=goal, base_sha=base_sha, allowed_paths=component.paths, permission_ceiling=permission_ceiling, acceptance_commands=component.test_commands, attempt=1),
+                project_id=self.graph.project_id, component_id=component_id, repository_id=repository.repository_id,
+                goal=goal, base_sha=base_sha, allowed_paths=component.paths, permission_ceiling=permission_ceiling,
                 acceptance_commands=component.test_commands,
             )
             self._records[component_id] = WorkRecord(request=request, state=WorkState.PLANNED)
-        self._trusted_plan = tuple(
-            self._records[component_id].request for component_id in sorted(self._records)
-        )
+        self._trusted_plan = tuple(self._records[c].request for c in sorted(self._records))
         self._trusted_plan_fingerprint = trusted_plan_fingerprint(self._trusted_plan)
         self._advance_ready()
         return self.snapshot()
 
     def ready_requests(self) -> tuple[ComponentWorkRequest, ...]:
-        return tuple(
-            record.request
-            for _, record in sorted(self._records.items())
-            if record.state is WorkState.READY
-        )
+        return tuple(record.request for _, record in sorted(self._records.items()) if record.state is WorkState.READY)
 
     def start(self, component_id: str) -> ComponentWorkRequest:
         record = self._record(component_id)
@@ -212,16 +183,38 @@ class ProductFactoryCoordinator:
         if record.state is not WorkState.REVIEW_REQUIRED or record.result is None:
             raise CoordinatorError("component is not awaiting independent review")
         state = WorkState.ACCEPTED if decision.accepted else WorkState.REPAIR_REQUIRED
-        updated = WorkRecord(
-            record.request,
-            state,
-            record.result,
-            review=decision,
-            blocker=None if decision.accepted else decision.reason,
-        )
+        updated = WorkRecord(record.request, state, record.result, review=decision, blocker=None if decision.accepted else decision.reason)
         self._records[component_id] = updated
         self._touch()
         self._advance_ready()
+        return updated
+
+    def mark_done(self, component_id: str) -> WorkRecord:
+        record = self._record(component_id)
+        if record.state is WorkState.DONE:
+            return record
+        if record.state is not WorkState.ACCEPTED:
+            raise CoordinatorError(f"component {component_id} cannot be marked done from {record.state.value}")
+        updated = WorkRecord(record.request, WorkState.DONE, record.result, record.review)
+        self._records[component_id] = updated
+        self._touch()
+        self._advance_ready()
+        return updated
+
+    def cancel(self, component_id: str, *, reason: str) -> WorkRecord:
+        reason = reason.strip()
+        if not reason:
+            raise CoordinatorError("cancellation reason must not be empty")
+        record = self._record(component_id)
+        if record.state is WorkState.DONE:
+            raise CoordinatorError("done component cannot be cancelled")
+        if record.state is WorkState.CANCELLED:
+            if record.blocker != reason:
+                raise CoordinatorError("cancelled component reason cannot be rebound")
+            return record
+        updated = WorkRecord(record.request, WorkState.CANCELLED, blocker=reason)
+        self._records[component_id] = updated
+        self._touch()
         return updated
 
     def prepare_repair(self, component_id: str, *, base_sha: str, reason: str) -> ComponentWorkRequest:
@@ -233,26 +226,10 @@ class ProductFactoryCoordinator:
         attempt = record.request.attempt + 1
         goal = f"{record.request.goal}\nRepair: {reason}"
         request = ComponentWorkRequest(
-            work_id=_work_id(
-                project_id=self.graph.project_id,
-                component_id=component_id,
-                repository_id=record.request.repository_id,
-                goal=goal,
-                base_sha=base_sha,
-                allowed_paths=record.request.allowed_paths,
-                permission_ceiling=record.request.permission_ceiling,
-                acceptance_commands=record.request.acceptance_commands,
-                attempt=attempt,
-            ),
-            project_id=record.request.project_id,
-            component_id=component_id,
-            repository_id=record.request.repository_id,
-            goal=goal,
-            base_sha=base_sha,
-            allowed_paths=record.request.allowed_paths,
-            permission_ceiling=record.request.permission_ceiling,
-            acceptance_commands=record.request.acceptance_commands,
-            attempt=attempt,
+            work_id=_work_id(project_id=self.graph.project_id, component_id=component_id, repository_id=record.request.repository_id, goal=goal, base_sha=base_sha, allowed_paths=record.request.allowed_paths, permission_ceiling=record.request.permission_ceiling, acceptance_commands=record.request.acceptance_commands, attempt=attempt),
+            project_id=record.request.project_id, component_id=component_id, repository_id=record.request.repository_id,
+            goal=goal, base_sha=base_sha, allowed_paths=record.request.allowed_paths,
+            permission_ceiling=record.request.permission_ceiling, acceptance_commands=record.request.acceptance_commands, attempt=attempt,
         )
         self._records[component_id] = WorkRecord(request, WorkState.READY)
         self._touch()
@@ -262,33 +239,22 @@ class ProductFactoryCoordinator:
         if not reason.strip():
             raise CoordinatorError("blocker reason must not be empty")
         record = self._record(component_id)
-        if record.state is WorkState.ACCEPTED:
-            raise CoordinatorError("accepted component cannot be blocked")
+        if record.state in {WorkState.ACCEPTED, WorkState.DONE, WorkState.CANCELLED}:
+            raise CoordinatorError(f"{record.state.value} component cannot be blocked")
         updated = WorkRecord(record.request, WorkState.BLOCKED, blocker=reason)
         self._records[component_id] = updated
         self._touch()
         return updated
 
     def snapshot(self) -> CoordinatorSnapshot:
-        return CoordinatorSnapshot(
-            self.graph.project_id,
-            self._revision,
-            tuple(self._records[key] for key in sorted(self._records)),
-            self._trusted_plan,
-        )
+        return CoordinatorSnapshot(self.graph.project_id, self._revision, tuple(self._records[key] for key in sorted(self._records)), self._trusted_plan)
 
-    def restore(
-        self,
-        snapshot: CoordinatorSnapshot,
-        *,
-        trusted_plan_fingerprint: str | None = None,
-    ) -> None:
+    def restore(self, snapshot: CoordinatorSnapshot, *, trusted_plan_fingerprint: str | None = None) -> None:
         authority = trusted_plan_fingerprint or self._trusted_plan_fingerprint
         if authority is None:
             raise CoordinatorError("fresh coordinator restore requires external trusted plan authority")
         _validate_digest(authority, "trusted_plan_fingerprint")
         validate_trusted_plan_snapshot(snapshot, authority)
-
         if snapshot.project_id != self.graph.project_id:
             raise CoordinatorError("snapshot project does not match repository graph")
         if snapshot.revision < 0:
@@ -299,7 +265,6 @@ class ProductFactoryCoordinator:
         actual = [record.request.component_id for record in snapshot.records]
         if set(actual) != expected or len(actual) != len(set(actual)):
             raise CoordinatorError("snapshot component set does not match repository graph")
-
         plan = snapshot.trusted_plan
         if plan is None:
             raise CoordinatorError("snapshot is missing immutable trusted plan descriptor")
@@ -317,14 +282,10 @@ class ProductFactoryCoordinator:
                 raise CoordinatorError("trusted plan path scope drifted")
             if initial.acceptance_commands != component.test_commands:
                 raise CoordinatorError("trusted plan acceptance command scope drifted")
-
         if snapshot.records:
             permission_ceilings = {record.request.permission_ceiling for record in snapshot.records}
             if len(permission_ceilings) != 1:
-                raise CoordinatorError(
-                    "snapshot work requests disagree on project permission ceiling"
-                )
-
+                raise CoordinatorError("snapshot work requests disagree on project permission ceiling")
         for record in snapshot.records:
             request = record.request
             component = components[request.component_id]
@@ -338,7 +299,6 @@ class ProductFactoryCoordinator:
             if request.acceptance_commands != component.test_commands:
                 raise CoordinatorError("snapshot acceptance command scope drifted")
             self._validate_restored_record(record)
-
         self._validate_restored_dependencies(snapshot.records)
         self._records = {record.request.component_id: record for record in snapshot.records}
         self._revision = snapshot.revision
@@ -347,100 +307,56 @@ class ProductFactoryCoordinator:
         self._advance_ready()
 
     def _validate_restored_record(self, record: WorkRecord) -> None:
-        request = record.request
-        result = record.result
-        review = record.review
-        blocker = record.blocker
-
+        request, result, review, blocker = record.request, record.result, record.review, record.blocker
         if result is not None:
             self._validate_result_identity(request, result)
-
         if record.state in {WorkState.PLANNED, WorkState.READY, WorkState.RUNNING}:
             if result is not None or review is not None or blocker is not None:
                 raise CoordinatorError("pre-result snapshot work contains terminal evidence")
             return
-
         if record.state is WorkState.REVIEW_REQUIRED:
-            if (
-                result is None
-                or not result.coding_result.succeeded
-                or review is not None
-                or blocker is not None
-            ):
-                raise CoordinatorError(
-                    "review_required snapshot work requires one successful result only"
-                )
+            if result is None or not result.coding_result.succeeded or review is not None or blocker is not None:
+                raise CoordinatorError("review_required snapshot work requires one successful result only")
             self._validate_success_evidence(request, result.coding_result.test_evidence)
             return
-
-        if record.state is WorkState.ACCEPTED:
-            if (
-                result is None
-                or not result.coding_result.succeeded
-                or review is None
-                or not review.accepted
-                or blocker is not None
-            ):
-                raise CoordinatorError(
-                    "accepted snapshot work requires successful result and accepted review"
-                )
+        if record.state in {WorkState.ACCEPTED, WorkState.DONE}:
+            if result is None or not result.coding_result.succeeded or review is None or not review.accepted or blocker is not None:
+                raise CoordinatorError(f"{record.state.value} snapshot work requires successful result and accepted review")
             self._validate_success_evidence(request, result.coding_result.test_evidence)
             return
-
+        if record.state is WorkState.CANCELLED:
+            if result is not None or review is not None or not blocker:
+                raise CoordinatorError("cancelled snapshot work requires cancellation reason without terminal evidence")
+            return
         if record.state is WorkState.REPAIR_REQUIRED:
             if result is None or not blocker:
-                raise CoordinatorError(
-                    "repair_required snapshot work requires result evidence and blocker"
-                )
+                raise CoordinatorError("repair_required snapshot work requires result evidence and blocker")
             if result.coding_result.succeeded:
                 if review is None or review.accepted or blocker != review.reason:
-                    raise CoordinatorError(
-                        "review-rejected repair snapshot is internally inconsistent"
-                    )
+                    raise CoordinatorError("review-rejected repair snapshot is internally inconsistent")
                 self._validate_success_evidence(request, result.coding_result.test_evidence)
             elif review is not None:
-                raise CoordinatorError(
-                    "worker-failed repair snapshot cannot contain review evidence"
-                )
+                raise CoordinatorError("worker-failed repair snapshot cannot contain review evidence")
             return
-
         if record.state is WorkState.BLOCKED:
             if result is not None or review is not None or not blocker:
-                raise CoordinatorError(
-                    "blocked snapshot work requires blocker without terminal evidence"
-                )
+                raise CoordinatorError("blocked snapshot work requires blocker without terminal evidence")
             return
-
         raise CoordinatorError("snapshot contains unknown work state")
 
     def _validate_restored_dependencies(self, records: tuple[WorkRecord, ...]) -> None:
-        accepted = {
-            record.request.component_id
-            for record in records
-            if record.state is WorkState.ACCEPTED
-        }
+        satisfied = {record.request.component_id for record in records if record.state in {WorkState.ACCEPTED, WorkState.DONE}}
         components = self._components()
-        states_requiring_accepted_dependencies = {
-            WorkState.READY,
-            WorkState.RUNNING,
-            WorkState.REVIEW_REQUIRED,
-            WorkState.ACCEPTED,
-            WorkState.REPAIR_REQUIRED,
-        }
+        states_requiring_dependencies = {WorkState.READY, WorkState.RUNNING, WorkState.REVIEW_REQUIRED, WorkState.ACCEPTED, WorkState.DONE, WorkState.REPAIR_REQUIRED}
         for record in records:
-            if record.state not in states_requiring_accepted_dependencies:
+            if record.state not in states_requiring_dependencies:
                 continue
             dependencies = set(components[record.request.component_id].dependencies)
-            if not dependencies <= accepted:
-                raise CoordinatorError(
-                    "snapshot component state bypasses dependency acceptance"
-                )
+            if not dependencies <= satisfied:
+                raise CoordinatorError("snapshot component state bypasses dependency acceptance")
 
     @staticmethod
-    def _validate_result_identity(
-        request: ComponentWorkRequest,
-        envelope: WorkerResultEnvelope,
-    ) -> None:
+    def _validate_result_identity(request: ComponentWorkRequest, envelope: WorkerResultEnvelope) -> None:
         if envelope.component_id != request.component_id:
             raise CoordinatorError("worker result component does not match active request")
         if envelope.work_id != request.work_id or envelope.repository_id != request.repository_id:
@@ -451,39 +367,22 @@ class ProductFactoryCoordinator:
             raise CoordinatorError("coding result job id does not match Product Factory work id")
 
     @staticmethod
-    def _validate_success_evidence(
-        request: ComponentWorkRequest,
-        evidence: tuple[TestEvidence, ...],
-    ) -> None:
+    def _validate_success_evidence(request: ComponentWorkRequest, evidence: tuple[TestEvidence, ...]) -> None:
         if not evidence or any(item.exit_code != 0 for item in evidence):
             raise CoordinatorError("successful worker result requires passing test evidence")
-
         remaining = list(evidence)
         for declared in request.acceptance_commands:
-            match_index = next(
-                (
-                    index
-                    for index, item in enumerate(remaining)
-                    if _commands_equivalent(
-                        item.command,
-                        declared,
-                        component_id=request.component_id,
-                    )
-                ),
-                None,
-            )
+            match_index = next((index for index, item in enumerate(remaining) if _commands_equivalent(item.command, declared, component_id=request.component_id)), None)
             if match_index is None:
-                raise CoordinatorError(
-                    "successful worker result must prove every declared acceptance command"
-                )
+                raise CoordinatorError("successful worker result must prove every declared acceptance command")
             remaining.pop(match_index)
 
     def _advance_ready(self) -> None:
-        accepted = {key for key, item in self._records.items() if item.state is WorkState.ACCEPTED}
+        satisfied = {key for key, item in self._records.items() if item.state in {WorkState.ACCEPTED, WorkState.DONE}}
         components = self._components()
         changed = False
         for component_id, record in tuple(self._records.items()):
-            if record.state is WorkState.PLANNED and set(components[component_id].dependencies) <= accepted:
+            if record.state is WorkState.PLANNED and set(components[component_id].dependencies) <= satisfied:
                 self._records[component_id] = WorkRecord(record.request, WorkState.READY)
                 changed = True
         if changed:
@@ -508,34 +407,18 @@ class ProductFactoryCoordinator:
 def trusted_plan_fingerprint(plan: tuple[ComponentWorkRequest, ...]) -> str:
     if not plan:
         raise CoordinatorError("trusted plan descriptor must not be empty")
-    payload = tuple(
-        (
-            request.project_id,
-            request.component_id,
-            request.repository_id,
-            request.goal,
-            request.base_sha,
-            request.allowed_paths,
-            tuple(sorted(request.permission_ceiling)),
-            request.acceptance_commands,
-        )
-        for request in sorted(plan, key=lambda item: item.component_id)
-    )
+    payload = tuple((request.project_id, request.component_id, request.repository_id, request.goal, request.base_sha, request.allowed_paths, tuple(sorted(request.permission_ceiling)), request.acceptance_commands) for request in sorted(plan, key=lambda item: item.component_id))
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def validate_trusted_plan_snapshot(
-    snapshot: CoordinatorSnapshot,
-    authority_fingerprint: str,
-) -> None:
+def validate_trusted_plan_snapshot(snapshot: CoordinatorSnapshot, authority_fingerprint: str) -> None:
     _validate_digest(authority_fingerprint, "trusted_plan_fingerprint")
     plan = snapshot.trusted_plan
     if plan is None or not plan:
         raise CoordinatorError("snapshot is missing immutable trusted plan descriptor")
     if trusted_plan_fingerprint(plan) != authority_fingerprint:
         raise CoordinatorError("snapshot trusted plan does not match external authority")
-
     plan_ids = [request.component_id for request in plan]
     if len(plan_ids) != len(set(plan_ids)):
         raise CoordinatorError("trusted plan repeats component identity")
@@ -543,26 +426,14 @@ def validate_trusted_plan_snapshot(
     record_ids = [record.request.component_id for record in snapshot.records]
     if set(record_ids) != set(plan_by_component) or len(record_ids) != len(set(record_ids)):
         raise CoordinatorError("snapshot work set does not match trusted plan descriptor")
-
     for initial in plan:
         if initial.project_id != snapshot.project_id:
             raise CoordinatorError("trusted plan project identity does not match snapshot")
         if initial.attempt != 1:
             raise CoordinatorError("trusted plan descriptor must contain attempt-one requests")
-        expected_initial_work_id = _work_id(
-            project_id=initial.project_id,
-            component_id=initial.component_id,
-            repository_id=initial.repository_id,
-            goal=initial.goal,
-            base_sha=initial.base_sha,
-            allowed_paths=initial.allowed_paths,
-            permission_ceiling=initial.permission_ceiling,
-            acceptance_commands=initial.acceptance_commands,
-            attempt=1,
-        )
+        expected_initial_work_id = _work_id(project_id=initial.project_id, component_id=initial.component_id, repository_id=initial.repository_id, goal=initial.goal, base_sha=initial.base_sha, allowed_paths=initial.allowed_paths, permission_ceiling=initial.permission_ceiling, acceptance_commands=initial.acceptance_commands, attempt=1)
         if initial.work_id != expected_initial_work_id:
             raise CoordinatorError("trusted plan contains invalid attempt-one work identity")
-
     for record in snapshot.records:
         request = record.request
         initial = plan_by_component[request.component_id]
@@ -583,18 +454,7 @@ def validate_trusted_plan_snapshot(
                 raise CoordinatorError("attempt-one base SHA drifted from trusted plan")
         elif not _valid_repair_goal(initial.goal, request.goal, request.attempt):
             raise CoordinatorError("repair work goal is not derived from trusted attempt-one plan")
-
-        expected_work_id = _work_id(
-            project_id=request.project_id,
-            component_id=request.component_id,
-            repository_id=request.repository_id,
-            goal=request.goal,
-            base_sha=request.base_sha,
-            allowed_paths=request.allowed_paths,
-            permission_ceiling=request.permission_ceiling,
-            acceptance_commands=request.acceptance_commands,
-            attempt=request.attempt,
-        )
+        expected_work_id = _work_id(project_id=request.project_id, component_id=request.component_id, repository_id=request.repository_id, goal=request.goal, base_sha=request.base_sha, allowed_paths=request.allowed_paths, permission_ceiling=request.permission_ceiling, acceptance_commands=request.acceptance_commands, attempt=request.attempt)
         if request.work_id != expected_work_id:
             raise CoordinatorError("snapshot work id does not match durable request identity")
 
@@ -602,7 +462,7 @@ def validate_trusted_plan_snapshot(
 def _valid_repair_goal(initial_goal: str, current_goal: str, attempt: int) -> bool:
     if attempt <= 1 or not current_goal.startswith(initial_goal):
         return False
-    suffix = current_goal[len(initial_goal) :]
+    suffix = current_goal[len(initial_goal):]
     marker = "\nRepair: "
     if not suffix.startswith(marker):
         return False
@@ -610,15 +470,9 @@ def _valid_repair_goal(initial_goal: str, current_goal: str, attempt: int) -> bo
     return len(reasons) == attempt - 1 and all(reason.strip() for reason in reasons)
 
 
-def _commands_equivalent(
-    observed: tuple[str, ...],
-    declared: tuple[str, ...],
-    *,
-    component_id: str,
-) -> bool:
+def _commands_equivalent(observed: tuple[str, ...], declared: tuple[str, ...], *, component_id: str) -> bool:
     if observed == declared:
         return True
-
     observed_pytest = _pytest_args(observed)
     declared_pytest = _pytest_args(declared)
     if observed_pytest is None or declared_pytest is None:
@@ -629,10 +483,7 @@ def _commands_equivalent(
         return True
     if len(observed_pytest) != 1 or len(declared_pytest) != 1:
         return False
-
-    observed_target = _normalize_pytest_target(observed_pytest[0])
-    declared_target = _normalize_pytest_target(declared_pytest[0])
-    return observed_target == declared_target
+    return _normalize_pytest_target(observed_pytest[0]) == _normalize_pytest_target(declared_pytest[0])
 
 
 def _normalize_pytest_target(target: str) -> str:
@@ -645,40 +496,13 @@ def _pytest_args(command: tuple[str, ...]) -> tuple[str, ...] | None:
     executable = command[0].casefold()
     if executable in {"pytest", "pytest.exe"}:
         return command[1:]
-    if (
-        len(command) >= 3
-        and executable in {"py", "py.exe", "python", "python.exe", "python3", "python3.exe"}
-        and command[1] == "-m"
-        and command[2].casefold() == "pytest"
-    ):
+    if len(command) >= 3 and executable in {"py", "py.exe", "python", "python.exe", "python3", "python3.exe"} and command[1] == "-m" and command[2].casefold() == "pytest":
         return command[3:]
     return None
 
 
-def _work_id(
-    *,
-    project_id: str,
-    component_id: str,
-    repository_id: str,
-    goal: str,
-    base_sha: str,
-    allowed_paths: tuple[str, ...],
-    permission_ceiling: frozenset[str],
-    acceptance_commands: tuple[tuple[str, ...], ...],
-    attempt: int,
-) -> str:
-    return _stable_id(
-        "work",
-        project_id,
-        component_id,
-        repository_id,
-        goal,
-        base_sha,
-        allowed_paths,
-        tuple(sorted(permission_ceiling)),
-        acceptance_commands,
-        attempt,
-    )
+def _work_id(*, project_id: str, component_id: str, repository_id: str, goal: str, base_sha: str, allowed_paths: tuple[str, ...], permission_ceiling: frozenset[str], acceptance_commands: tuple[tuple[str, ...], ...], attempt: int) -> str:
+    return _stable_id("work", project_id, component_id, repository_id, goal, base_sha, allowed_paths, tuple(sorted(permission_ceiling)), acceptance_commands, attempt)
 
 
 def _stable_id(prefix: str, *parts: object) -> str:
