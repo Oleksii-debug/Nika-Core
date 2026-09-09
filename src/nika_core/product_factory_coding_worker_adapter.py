@@ -55,11 +55,10 @@ class RepositoryPathIdentity(StrEnum):
 class CodingWorkerDispatchContext:
     """Trusted host-provided execution context for one bounded component job.
 
-    ``path_identity`` is intentionally owned by the Product Factory host boundary rather
-    than inferred from the machine running Nika. A remote or containerized worker may
-    use different repository semantics from the coordinator host. ``None`` remains
-    backward-compatible for results without case-variant ambiguity, but case-variant
-    evidence fails closed until the host declares the authoritative semantic.
+    ``path_identity`` and ``producer_actor_id`` are host-owned facts rather than worker
+    claims. ``producer_actor_id`` is optional only for backward-compatible legacy callers;
+    when supplied it is copied into exact candidate evidence and activates fail-closed PF4
+    independent-review authority.
     """
 
     repository_tree_digest: str
@@ -68,14 +67,19 @@ class CodingWorkerDispatchContext:
     network_policy: NetworkPolicy
     resource_budget: ResourceBudget
     path_identity: RepositoryPathIdentity | None = None
+    producer_actor_id: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.repository_tree_digest.strip():
+        if not isinstance(self.repository_tree_digest, str) or not self.repository_tree_digest.strip():
             raise CodingWorkerAdapterError("repository tree digest must not be empty")
         if self.path_identity is not None and not isinstance(
             self.path_identity, RepositoryPathIdentity
         ):
             raise CodingWorkerAdapterError("repository path identity semantics are invalid")
+        if self.producer_actor_id is not None and (
+            not isinstance(self.producer_actor_id, str) or not self.producer_actor_id.strip()
+        ):
+            raise CodingWorkerAdapterError("producer actor identity must be non-empty text")
 
 
 @dataclass(frozen=True, slots=True)
@@ -352,6 +356,7 @@ class CodingWorkerComponentAdapter:
             result_sha=exact.result_sha,
             diff_digest=exact.diff_digest,
             coding_result=result,
+            producer_actor_id=context.producer_actor_id,
         )
 
 
