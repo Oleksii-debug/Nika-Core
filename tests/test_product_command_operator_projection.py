@@ -348,3 +348,30 @@ def test_operator_projection_trims_terminal_state_for_progression() -> None:
 
     assert projection.blocker == "none"
     assert projection.next == "qa:work-654:qa=running"
+
+
+def test_operator_projection_fails_closed_on_unrepresented_summary_blockers() -> None:
+    detail = ProductProjectDetail(
+        summary=ProductProjectSummary(
+            project_id="nika-core",
+            version=3,
+            title="Nika Core",
+            goal="Ship Development Factory MVP",
+            state="active",
+            updated_at=datetime(2026, 9, 8, tzinfo=UTC),
+            blocker_count=2,
+        ),
+        statuses=(
+            ProductStatusEntry(
+                kind=ProductStatusKind.COMPONENT,
+                item_id="work-654",
+                label="Issue 654",
+                state="completed",
+            ),
+        ),
+    )
+
+    projection = project_operator_status(detail)
+
+    assert projection.blocker == "unrepresented_blockers=2"
+    assert projection.next == "resolve_blocker"
