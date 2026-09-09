@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass
 
 import pytest
@@ -55,3 +56,33 @@ def test_malformed_exact_head_clearance_fails_closed() -> None:
             candidate_sha=SHA_A,
             verification=object(),  # type: ignore[arg-type]
         )
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value"),
+    (
+        ("identity", "implementer_id", None),
+        ("identity", "work_id", 42),
+        ("reviewer_authority", "authority_ref", None),
+        ("verdict", "reason", None),
+        ("verdict", "evidence_refs", [None]),
+    ),
+)
+def test_restore_normalizes_non_string_persisted_fields(
+    section: str,
+    field: str,
+    value: object,
+) -> None:
+    raw = json.loads(_passed_review().snapshot())
+    raw[section][field] = value
+
+    with pytest.raises(ReviewPipelineError, match="review snapshot is invalid"):
+        CandidateReviewRecord.restore(json.dumps(raw))
+
+
+def test_restore_normalizes_non_string_assigned_reviewer() -> None:
+    raw = json.loads(_passed_review().snapshot())
+    raw["reviewer_id"] = 42
+
+    with pytest.raises(ReviewPipelineError, match="review snapshot is invalid"):
+        CandidateReviewRecord.restore(json.dumps(raw))
