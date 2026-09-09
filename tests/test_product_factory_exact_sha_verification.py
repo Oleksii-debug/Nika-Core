@@ -123,6 +123,16 @@ def test_duplicate_evidence_refs_are_rejected() -> None:
         verification.classify_candidate_verification(SHA_A, (first, duplicate))
 
 
+def test_malformed_required_check_state_is_rejected_fail_closed() -> None:
+    with pytest.raises(verification.VerificationError, match="check state"):
+        verification.ExactShaCheckEvidence(
+            check_id="core",
+            candidate_sha=SHA_A,
+            state="garbage",  # type: ignore[arg-type]
+            evidence_ref="actions://core/malformed",
+        )
+
+
 def test_invalid_candidate_identity_is_rejected() -> None:
     with pytest.raises(verification.VerificationError, match="candidate SHA"):
         verification.classify_candidate_verification("not-a-sha", ())
