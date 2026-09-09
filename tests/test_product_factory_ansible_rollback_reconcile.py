@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
+import pytest
+
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.product_factory_ansible_staging import (
@@ -12,6 +14,7 @@ from nika_core.product_factory_ansible_staging import (
     RunnerExecution,
 )
 from nika_core.product_factory_deployment import (
+    DeploymentFabricError,
     DeploymentIntent,
     DeploymentState,
     EnvironmentIdentity,
@@ -183,7 +186,6 @@ def test_restart_reconcile_accepts_exact_previous_release_after_rollback_ack_los
 
 
 def test_unexpected_exact_release_remains_fail_closed_in_fabric(tmp_path) -> None:
-    release_a = _release(1, "1.0.0")
     release_b = _release(2, "2.0.0")
     unexpected = _release(3, "3.0.0")
     runner = SequencedRunner(
@@ -203,12 +205,7 @@ def test_unexpected_exact_release_remains_fail_closed_in_fabric(tmp_path) -> Non
     intent = _intent("deploy-b", release_b)
     assert fabric.deploy(intent).state is DeploymentState.UNCERTAIN
 
-    try:
+    with pytest.raises(DeploymentFabricError, match="different release"):
         fabric.reconcile(intent.intent_id)
-    except Exception as exc:  # canonical fabric owns mismatch classification
-        assert "different release" in str(exc)
-    else:  # pragma: no cover - fail closed assertion
-        raise AssertionError("unexpected exact release must not reconcile successfully")
 
     assert runner.operations == ["deploy", "inspect"]
-    assert release_a != unexpected
