@@ -455,7 +455,27 @@ def test_non_lock_commit_operational_error_is_not_reclassified(
             idempotency_key="decision:non-lock-commit",
         )
 
+    monkeypatch.undo()
     assert projects.get("p1").row_version == 0
+    with store.connection() as conn:
+        decision_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM product_decisions WHERE project_id=?",
+            ("p1",),
+        ).fetchone()
+        idempotency_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM product_project_mutation_idempotency "
+            "WHERE operation_key=?",
+            ("decision:non-lock-commit",),
+        ).fetchone()
+        audit_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM audit_events "
+            "WHERE event_type='product_project.decision_recorded' AND entity_id=?",
+            ("p1",),
+        ).fetchone()
+
+    assert int(decision_count["count"]) == 0
+    assert int(idempotency_count["count"]) == 0
+    assert int(audit_count["count"]) == 0
 
 
 def test_non_lock_operational_error_is_not_reclassified_as_contention(
