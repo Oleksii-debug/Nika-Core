@@ -273,7 +273,12 @@ def test_uncertain_deployment_reconciles_to_healthy() -> None:
         ProviderDeploymentResult(
             applied=False, uncertain=True, evidence_refs=("deploy://timeout",)
         ),
-        inspection=ProviderInspection(SHA_A, True, ("inspect://healthy",)),
+        inspection=ProviderInspection(
+            SHA_A,
+            True,
+            ("inspect://healthy",),
+            release=_release(),
+        ),
     )
     fabric = DeploymentFabric(provider)
     intent = _intent(EnvironmentTier.STAGING, intent_id="stage-uncertain")
