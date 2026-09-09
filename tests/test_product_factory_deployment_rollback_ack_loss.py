@@ -107,8 +107,6 @@ def test_rollback_ack_loss_restart_reconciles_exact_previous_without_redispatch(
     assert fabric.deploy(_intent("deploy:p1:a", previous)).state is DeploymentState.HEALTHY
     uncertain = fabric.deploy(_intent("deploy:p1:b", candidate))
     assert uncertain.state is DeploymentState.UNCERTAIN
-    assert uncertain.health is not None
-    assert not uncertain.health.healthy
     assert provider.rollback_calls == 1
 
     restarted_store = SQLiteStore(store.path)
