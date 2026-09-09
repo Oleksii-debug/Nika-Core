@@ -76,7 +76,7 @@ def project_operator_status(detail: ProductProjectDetail) -> FactoryOperatorProj
     return FactoryOperatorProjection(
         PROJECT=detail.summary.project_id,
         WORK=_render_work(detail, component_entries),
-        OWNER=_render_values(owners, empty="unassigned"),
+        OWNER=_render_owner(owners),
         STATE=detail.summary.state,
         BLOCKER=_render_blockers(active_blocker_entries, detail.summary.blocker_count),
         CANDIDATE=_render_candidate(candidate_refs),
@@ -137,6 +137,14 @@ def _render_values(values: tuple[str, ...], *, empty: str) -> str:
     if len(rendered) <= _MAX_FIELD:
         return rendered
     return rendered[: _MAX_FIELD - 3].rstrip() + "..."
+
+
+def _render_owner(owners: tuple[str, ...]) -> str:
+    if not owners:
+        return "unassigned"
+    if len(owners) > 1:
+        return "ambiguous_multiple_owners"
+    return owners[0]
 
 
 def _render_candidate(candidate_refs: tuple[str, ...]) -> str:
