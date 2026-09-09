@@ -50,7 +50,7 @@ class ExactShaCheckEvidence:
             raise VerificationError("verification required flag must be a bool")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class CandidateVerification:
     """Machine-readable verification classification for one exact candidate head."""
 
@@ -58,16 +58,29 @@ class CandidateVerification:
     state: VerificationState
     evidence_refs: tuple[str, ...]
 
-    def __post_init__(self) -> None:
-        _validate_sha(self.candidate_sha)
-        if not isinstance(self.state, VerificationState):
-            raise VerificationError("verification state must be a VerificationState")
-        if any(not isinstance(ref, str) or not ref.strip() for ref in self.evidence_refs):
-            raise VerificationError("verification evidence refs must be non-empty text")
-        for ref in self.evidence_refs:
-            _validate_evidence_ref(ref)
-        if len(self.evidence_refs) != len(set(self.evidence_refs)):
-            raise VerificationError("verification evidence refs must be unique")
+    def __init__(
+        self,
+        candidate_sha: str,
+        state: VerificationState,
+        evidence_refs: tuple[str, ...],
+    ) -> None:
+        _validate_candidate_verification(candidate_sha, state, evidence_refs)
+        if state is VerificationState.PASS:
+            raise VerificationError("PASS verification is classifier-owned")
+        object.__setattr__(self, "candidate_sha", candidate_sha)
+        object.__setattr__(self, "state", state)
+        object.__setattr__(self, "evidence_refs", evidence_refs)
+
+    @classmethod
+    def _classified_pass(
+        cls, candidate_sha: str, evidence_refs: tuple[str, ...]
+    ) -> CandidateVerification:
+        _validate_candidate_verification(candidate_sha, VerificationState.PASS, evidence_refs)
+        result = object.__new__(cls)
+        object.__setattr__(result, "candidate_sha", candidate_sha)
+        object.__setattr__(result, "state", VerificationState.PASS)
+        object.__setattr__(result, "evidence_refs", evidence_refs)
+        return result
 
     @property
     def merge_clearance(self) -> bool:
@@ -129,7 +142,23 @@ def classify_candidate_verification(
         return CandidateVerification(candidate_sha, VerificationState.RUNNING, refs)
     if any(item.state is CheckState.UNKNOWN for item in required):
         return CandidateVerification(candidate_sha, VerificationState.UNKNOWN, refs)
-    return CandidateVerification(candidate_sha, VerificationState.PASS, refs)
+    return CandidateVerification._classified_pass(candidate_sha, refs)
+
+
+def _validate_candidate_verification(
+    candidate_sha: str,
+    state: VerificationState,
+    evidence_refs: tuple[str, ...],
+) -> None:
+    _validate_sha(candidate_sha)
+    if not isinstance(state, VerificationState):
+        raise VerificationError("verification state must be a VerificationState")
+    if any(not isinstance(ref, str) or not ref.strip() for ref in evidence_refs):
+        raise VerificationError("verification evidence refs must be non-empty text")
+    for ref in evidence_refs:
+        _validate_evidence_ref(ref)
+    if len(evidence_refs) != len(set(evidence_refs)):
+        raise VerificationError("verification evidence refs must be unique")
 
 
 def _validate_required_check_ids(required_check_ids: tuple[str, ...]) -> None:
