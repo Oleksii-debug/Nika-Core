@@ -7,6 +7,7 @@ import nika_core.product_factory_verification as verification
 SHA_A = "a" * 40
 SHA_B = "b" * 40
 SHA_C = "c" * 40
+REQUIRED = ("core", "factory")
 
 
 def evidence(
@@ -26,11 +27,22 @@ def evidence(
 
 
 def test_no_evidence_is_unknown_and_never_merge_clearance() -> None:
-    result = verification.classify_candidate_verification(SHA_A, ())
+    result = verification.classify_candidate_verification(SHA_A, (), REQUIRED)
 
     assert result == verification.CandidateVerification(
         SHA_A, verification.VerificationState.UNKNOWN, ()
     )
+    assert result.merge_clearance is False
+
+
+def test_missing_required_check_is_unknown_and_never_merge_clearance() -> None:
+    result = verification.classify_candidate_verification(
+        SHA_A,
+        (evidence("core", SHA_A, verification.CheckState.PASS),),
+        REQUIRED,
+    )
+
+    assert result.state is verification.VerificationState.UNKNOWN
     assert result.merge_clearance is False
 
 
@@ -42,6 +54,7 @@ def test_all_required_exact_head_checks_must_pass_for_clearance() -> None:
             evidence("factory", SHA_A, verification.CheckState.PASS),
             evidence("optional", SHA_A, verification.CheckState.FAIL, required=False),
         ),
+        REQUIRED,
     )
 
     assert result.state is verification.VerificationState.PASS
@@ -64,11 +77,26 @@ def test_nonpassing_required_check_cannot_become_merge_clearance(
         SHA_A,
         (
             evidence("core", SHA_A, verification.CheckState.PASS),
-            evidence("required", SHA_A, check_state),
+            evidence("factory", SHA_A, check_state),
         ),
+        REQUIRED,
     )
 
     assert result.state is expected
+    assert result.merge_clearance is False
+
+
+def test_authoritative_required_set_overrides_optional_evidence_flag() -> None:
+    result = verification.classify_candidate_verification(
+        SHA_A,
+        (
+            evidence("core", SHA_A, verification.CheckState.PASS),
+            evidence("factory", SHA_A, verification.CheckState.FAIL, required=False),
+        ),
+        REQUIRED,
+    )
+
+    assert result.state is verification.VerificationState.FAIL
     assert result.merge_clearance is False
 
 
@@ -78,7 +106,7 @@ def test_prior_head_green_is_stale_after_candidate_changes() -> None:
         evidence("factory", SHA_A, verification.CheckState.PASS),
     )
 
-    result = verification.classify_candidate_verification(SHA_B, old_green)
+    result = verification.classify_candidate_verification(SHA_B, old_green, REQUIRED)
 
     assert result.state is verification.VerificationState.STALE
     assert result.merge_clearance is False
@@ -88,9 +116,10 @@ def test_mixed_sha_evidence_is_mismatch_even_when_current_head_passes() -> None:
     result = verification.classify_candidate_verification(
         SHA_B,
         (
-            evidence("core-current", SHA_B, verification.CheckState.PASS),
-            evidence("factory-old", SHA_A, verification.CheckState.PASS),
+            evidence("core", SHA_B, verification.CheckState.PASS),
+            evidence("factory", SHA_A, verification.CheckState.PASS),
         ),
+        REQUIRED,
     )
 
     assert result.state is verification.VerificationState.MISMATCH
@@ -101,9 +130,10 @@ def test_multiple_foreign_heads_are_mismatch_not_stale() -> None:
     result = verification.classify_candidate_verification(
         SHA_C,
         (
-            evidence("core-a", SHA_A, verification.CheckState.PASS),
-            evidence("core-b", SHA_B, verification.CheckState.PASS),
+            evidence("core", SHA_A, verification.CheckState.PASS),
+            evidence("factory", SHA_B, verification.CheckState.PASS),
         ),
+        REQUIRED,
     )
 
     assert result.state is verification.VerificationState.MISMATCH
@@ -119,7 +149,32 @@ def test_duplicate_evidence_refs_are_rejected() -> None:
     )
 
     with pytest.raises(verification.VerificationError, match="refs must be unique"):
-        verification.classify_candidate_verification(SHA_A, (first, duplicate))
+        verification.classify_candidate_verification(SHA_A, (first, duplicate), REQUIRED)
+
+
+def test_duplicate_check_ids_are_rejected() -> None:
+    with pytest.raises(verification.VerificationError, match="check ids must be unique"):
+        verification.classify_candidate_verification(
+            SHA_A,
+            (
+                evidence("core", SHA_A, verification.CheckState.PASS),
+                verification.ExactShaCheckEvidence(
+                    check_id="core",
+                    candidate_sha=SHA_A,
+                    state=verification.CheckState.PASS,
+                    evidence_ref="actions://core/duplicate",
+                ),
+            ),
+            ("core",),
+        )
+
+
+@pytest.mark.parametrize("required_check_ids", ((), ("core", "core"), ("core", "")))
+def test_required_check_identity_set_is_validated(
+    required_check_ids: tuple[str, ...],
+) -> None:
+    with pytest.raises(verification.VerificationError, match="required check ids"):
+        verification.classify_candidate_verification(SHA_A, (), required_check_ids)
 
 
 def test_malformed_required_check_state_is_rejected_fail_closed() -> None:
@@ -134,4 +189,4 @@ def test_malformed_required_check_state_is_rejected_fail_closed() -> None:
 
 def test_invalid_candidate_identity_is_rejected() -> None:
     with pytest.raises(verification.VerificationError, match="candidate SHA"):
-        verification.classify_candidate_verification("not-a-sha", ())
+        verification.classify_candidate_verification("not-a-sha", (), REQUIRED)
