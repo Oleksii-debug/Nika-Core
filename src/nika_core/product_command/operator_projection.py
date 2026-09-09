@@ -78,7 +78,7 @@ def project_operator_status(detail: ProductProjectDetail) -> FactoryOperatorProj
         WORK=_render_statuses(component_entries, empty="none"),
         OWNER=_render_values(owners, empty="unassigned"),
         STATE=detail.summary.state,
-        BLOCKER=_render_statuses(active_blocker_entries, empty="none"),
+        BLOCKER=_render_blockers(active_blocker_entries, detail.summary.blocker_count),
         CANDIDATE=_render_candidate(candidate_refs),
         TEST=(
             _render_statuses(build_entries, empty="unknown")
@@ -112,6 +112,17 @@ def _render_statuses(
 ) -> str:
     values = tuple(f"{entry.item_id}={entry.state}" for entry in entries)
     return _render_values(values, empty=empty)
+
+
+def _render_blockers(
+    active_entries: tuple[ProductStatusEntry, ...],
+    reported_count: int,
+) -> str:
+    values = [f"{entry.item_id}={entry.state}" for entry in active_entries]
+    unrepresented = max(0, reported_count - len(active_entries))
+    if unrepresented:
+        values.append(f"unrepresented_blockers={unrepresented}")
+    return _render_values(tuple(values), empty="none")
 
 
 def _render_values(values: tuple[str, ...], *, empty: str) -> str:
@@ -164,7 +175,7 @@ def _next_action(
     qa_entries: tuple[ProductStatusEntry, ...],
     integration_entries: tuple[ProductStatusEntry, ...],
 ) -> str:
-    if _first_incomplete(blocker_entries) is not None:
+    if _first_incomplete(blocker_entries) is not None or detail.summary.blocker_count > 0:
         return "resolve_blocker"
     if (
         detail.summary.current_decision is not None
