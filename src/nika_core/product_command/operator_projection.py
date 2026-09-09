@@ -11,19 +11,23 @@ from nika_core.product_command.contracts import (
 )
 
 _MAX_FIELD = 4000
-_TERMINAL_SUCCESS_STATES = {
-    "accepted",
-    "completed",
-    "deployed",
-    "done",
-    "merged",
-    "pass",
-    "passed",
-    "released",
-    "resolved",
-    "succeeded",
-    "success",
+_TERMINAL_SUCCESS_STATES_BY_KIND: dict[ProductStatusKind, frozenset[str]] = {
+    ProductStatusKind.BLOCKER: frozenset({"completed", "done", "resolved"}),
+    ProductStatusKind.COMPONENT: frozenset({"accepted", "completed", "done"}),
+    ProductStatusKind.BUILD: frozenset({"pass", "passed", "succeeded", "success"}),
+    ProductStatusKind.QA: frozenset({"pass", "passed"}),
+    ProductStatusKind.DEPLOYMENT: frozenset({"deployed"}),
+    ProductStatusKind.RELEASE: frozenset({"released"}),
 }
+_CANDIDATE_STATUS_KINDS = frozenset(
+    {
+        ProductStatusKind.COMPONENT,
+        ProductStatusKind.BUILD,
+        ProductStatusKind.QA,
+        ProductStatusKind.DEPLOYMENT,
+        ProductStatusKind.RELEASE,
+    }
+)
 
 
 class FactoryOperatorProjection(BaseModel):
@@ -67,7 +71,7 @@ def project_operator_status(detail: ProductProjectDetail) -> FactoryOperatorProj
     candidate_refs = tuple(
         dict.fromkeys(
             evidence.reference
-            for entry in detail.statuses
+            for entry in _active_candidate_entries(detail)
             for evidence in entry.evidence
             if evidence.kind == "git_commit"
         )
@@ -157,13 +161,26 @@ def _render_candidate(candidate_refs: tuple[str, ...]) -> str:
     return candidate_refs[0]
 
 
+def _normalized_state(entry: ProductStatusEntry) -> str:
+    return entry.state.strip().casefold()
+
+
+def _is_terminal_success(entry: ProductStatusEntry) -> bool:
+    allowed = _TERMINAL_SUCCESS_STATES_BY_KIND.get(entry.kind)
+    return allowed is not None and _normalized_state(entry) in allowed
+
+
 def _incomplete(
     entries: tuple[ProductStatusEntry, ...],
 ) -> tuple[ProductStatusEntry, ...]:
+    return tuple(entry for entry in entries if not _is_terminal_success(entry))
+
+
+def _active_candidate_entries(detail: ProductProjectDetail) -> tuple[ProductStatusEntry, ...]:
     return tuple(
         entry
-        for entry in entries
-        if entry.state.strip().casefold() not in _TERMINAL_SUCCESS_STATES
+        for entry in detail.statuses
+        if entry.kind in _CANDIDATE_STATUS_KINDS and not _is_terminal_success(entry)
     )
 
 
