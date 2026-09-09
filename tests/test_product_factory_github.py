@@ -45,6 +45,7 @@ def _observation(**overrides: object) -> GitHubRepositoryObservation:
             head_branch="automation/dev04",
             head_sha=CANDIDATE_SHA,
             base_branch="main",
+            base_sha=MAIN_SHA,
             state=PullRequestState.OPEN,
         ),
         "checks": (
@@ -81,9 +82,23 @@ def test_rejects_stale_pr_head() -> None:
         head_branch="automation/dev04",
         head_sha="4" * 40,
         base_branch="main",
+        base_sha=MAIN_SHA,
         state=PullRequestState.OPEN,
     )
     with pytest.raises(GitHubFactoryError, match="head does not match"):
+        GitHubFactoryAdapter().bind(_repository(), _observation(pull_request=stale_pr))
+
+
+def test_rejects_stale_pr_base_sha_even_when_branch_name_matches() -> None:
+    stale_pr = GitHubPullRequest(
+        number=720,
+        head_branch="automation/dev04",
+        head_sha=CANDIDATE_SHA,
+        base_branch="main",
+        base_sha="4" * 40,
+        state=PullRequestState.OPEN,
+    )
+    with pytest.raises(GitHubFactoryError, match="base sha"):
         GitHubFactoryAdapter().bind(_repository(), _observation(pull_request=stale_pr))
 
 
@@ -94,6 +109,15 @@ def test_rejects_mixed_sha_checks() -> None:
     )
     with pytest.raises(GitHubFactoryError, match="exact candidate sha"):
         GitHubFactoryAdapter().bind(_repository(), _observation(checks=checks))
+
+
+def test_unknown_check_state_fails_closed() -> None:
+    with pytest.raises(GitHubFactoryError, match="recognized CheckState"):
+        GitHubCheck(
+            name="Core Ubuntu",
+            head_sha=CANDIDATE_SHA,
+            state="unknown",  # type: ignore[arg-type]
+        )
 
 
 def test_failed_check_prevents_green_projection() -> None:
@@ -120,6 +144,7 @@ def test_merged_pr_projects_exact_integration_identity() -> None:
         head_branch="automation/dev04",
         head_sha=CANDIDATE_SHA,
         base_branch="main",
+        base_sha=MAIN_SHA,
         state=PullRequestState.MERGED,
         merge_sha=MERGE_SHA,
     )
