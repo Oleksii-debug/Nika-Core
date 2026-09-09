@@ -210,8 +210,8 @@ class ProductFactoryCoordinator:
         if not reason:
             raise CoordinatorError("cancellation reason must not be empty")
         record = self._record(component_id)
-        if record.state is WorkState.DONE:
-            raise CoordinatorError("done component cannot be cancelled")
+        if record.state in {WorkState.ACCEPTED, WorkState.DONE}:
+            raise CoordinatorError(f"{record.state.value} component cannot be cancelled")
         if record.state is WorkState.CANCELLED:
             if record.blocker != reason:
                 raise CoordinatorError("cancelled component reason cannot be rebound")
