@@ -111,9 +111,7 @@ def _render_work(
 ) -> str:
     if component_entries:
         return _render_statuses(component_entries, empty="none")
-    if detail.summary.current_decision is None:
-        return detail.summary.goal
-    return "none"
+    return detail.summary.goal
 
 
 def _render_statuses(
