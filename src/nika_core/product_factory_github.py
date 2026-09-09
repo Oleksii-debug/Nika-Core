@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from nika_core.product_factory_orchestration import RepositoryRef
+from nika_core.product_factory_verification import CheckState as VerificationCheckState
+from nika_core.product_factory_verification import ExactShaCheckEvidence
 
 
 class GitHubFactoryError(ValueError):
@@ -36,16 +38,35 @@ class GitHubIssueRef:
 
 @dataclass(frozen=True, slots=True)
 class GitHubCheck:
+    check_id: str
     name: str
     head_sha: str
     state: CheckState
+    evidence_ref: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not self.name.strip():
-            raise GitHubFactoryError("check name must not be empty")
+        if (
+            not isinstance(self.check_id, str)
+            or not self.check_id.strip()
+            or not isinstance(self.name, str)
+            or not self.name.strip()
+            or not isinstance(self.evidence_ref, str)
+            or not self.evidence_ref.strip()
+        ):
+            raise GitHubFactoryError("check identity and evidence reference must not be empty")
         _validate_sha(self.head_sha, "check head_sha")
         if not isinstance(self.state, CheckState):
             raise GitHubFactoryError("check state must be a recognized CheckState")
+        try:
+            ExactShaCheckEvidence(
+                check_id=self.check_id,
+                candidate_sha=self.head_sha,
+                state=_verification_check_state(self.state),
+                evidence_ref=self.evidence_ref,
+                required=False,
+            )
+        except ValueError as exc:
+            raise GitHubFactoryError(f"invalid check evidence: {exc}") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,9 +134,12 @@ class GitHubRepositoryObservation:
             not isinstance(check, GitHubCheck) for check in self.checks
         ):
             raise GitHubFactoryError("checks must contain GitHubCheck evidence")
-        names = [check.name for check in self.checks]
-        if len(names) != len(set(names)):
-            raise GitHubFactoryError("check names must be unique")
+        check_ids = [check.check_id for check in self.checks]
+        if len(check_ids) != len(set(check_ids)):
+            raise GitHubFactoryError("check ids must be unique")
+        evidence_refs = [check.evidence_ref for check in self.checks]
+        if len(evidence_refs) != len(set(evidence_refs)):
+            raise GitHubFactoryError("check evidence refs must be unique")
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +153,7 @@ class GitHubFactoryBinding:
     candidate_sha: str | None
     pull_request_number: int | None
     pull_request_state: PullRequestState | None
+    check_evidence: tuple[ExactShaCheckEvidence, ...]
     checks_state: CheckState | None
     integrated: bool
     integration_sha: str | None
@@ -165,6 +190,7 @@ class GitHubFactoryAdapter:
                 raise GitHubFactoryError("pull request base sha does not match default branch sha")
 
         checks_state: CheckState | None = None
+        check_evidence: tuple[ExactShaCheckEvidence, ...] = ()
         if observation.checks:
             if candidate_sha is None:
                 raise GitHubFactoryError("checks require explicit candidate identity")
@@ -179,6 +205,16 @@ class GitHubFactoryAdapter:
                 checks_state = CheckState.PASS
             else:
                 raise GitHubFactoryError("checks contain an unrecognized state")
+            check_evidence = tuple(
+                ExactShaCheckEvidence(
+                    check_id=check.check_id,
+                    candidate_sha=check.head_sha,
+                    state=_verification_check_state(check.state),
+                    evidence_ref=check.evidence_ref,
+                    required=False,
+                )
+                for check in observation.checks
+            )
 
         integrated = pr is not None and pr.state is PullRequestState.MERGED
         integration_sha = pr.merge_sha if integrated else None
@@ -192,10 +228,19 @@ class GitHubFactoryAdapter:
             candidate_sha=candidate_sha,
             pull_request_number=pr.number if pr is not None else None,
             pull_request_state=pr.state if pr is not None else None,
+            check_evidence=check_evidence,
             checks_state=checks_state,
             integrated=integrated,
             integration_sha=integration_sha,
         )
+
+
+def _verification_check_state(state: CheckState) -> VerificationCheckState:
+    return {
+        CheckState.PENDING: VerificationCheckState.RUNNING,
+        CheckState.PASS: VerificationCheckState.PASS,
+        CheckState.FAIL: VerificationCheckState.FAIL,
+    }[state]
 
 
 def _normalize_full_name(locator: str) -> str:

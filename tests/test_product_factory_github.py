@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
+
 import pytest
 
 from nika_core.product_factory_github import (
@@ -13,6 +16,10 @@ from nika_core.product_factory_github import (
     PullRequestState,
 )
 from nika_core.product_factory_orchestration import RepositoryRef
+from nika_core.product_factory_verification import (
+    VerificationState,
+    classify_candidate_verification,
+)
 
 MAIN_SHA = "1" * 40
 CANDIDATE_SHA = "2" * 40
@@ -49,8 +56,20 @@ def _observation(**overrides: object) -> GitHubRepositoryObservation:
             state=PullRequestState.OPEN,
         ),
         "checks": (
-            GitHubCheck(name="Core Ubuntu", head_sha=CANDIDATE_SHA, state=CheckState.PASS),
-            GitHubCheck(name="Core Windows", head_sha=CANDIDATE_SHA, state=CheckState.PASS),
+            GitHubCheck(
+                check_id="core-ubuntu",
+                name="Core Ubuntu",
+                head_sha=CANDIDATE_SHA,
+                state=CheckState.PASS,
+                evidence_ref="actions:run/core-ubuntu",
+            ),
+            GitHubCheck(
+                check_id="core-windows",
+                name="Core Windows",
+                head_sha=CANDIDATE_SHA,
+                state=CheckState.PASS,
+                evidence_ref="actions:run/core-windows",
+            ),
         ),
     }
     values.update(overrides)
@@ -67,6 +86,15 @@ def test_binds_exact_repository_candidate_pr_and_checks() -> None:
     assert binding.candidate_sha == CANDIDATE_SHA
     assert binding.pull_request_number == 720
     assert binding.checks_state is CheckState.PASS
+    assert tuple(item.check_id for item in binding.check_evidence) == (
+        "core-ubuntu",
+        "core-windows",
+    )
+    assert tuple(item.evidence_ref for item in binding.check_evidence) == (
+        "actions:run/core-ubuntu",
+        "actions:run/core-windows",
+    )
+    assert all(item.required is False for item in binding.check_evidence)
     assert binding.integrated is False
     assert binding.integration_sha is None
 
@@ -104,8 +132,20 @@ def test_rejects_stale_pr_base_sha_even_when_branch_name_matches() -> None:
 
 def test_rejects_mixed_sha_checks() -> None:
     checks = (
-        GitHubCheck(name="Core Ubuntu", head_sha=CANDIDATE_SHA, state=CheckState.PASS),
-        GitHubCheck(name="Core Windows", head_sha="5" * 40, state=CheckState.PASS),
+        GitHubCheck(
+            check_id="core-ubuntu",
+            name="Core Ubuntu",
+            head_sha=CANDIDATE_SHA,
+            state=CheckState.PASS,
+            evidence_ref="actions:run/core-ubuntu",
+        ),
+        GitHubCheck(
+            check_id="core-windows",
+            name="Core Windows",
+            head_sha="5" * 40,
+            state=CheckState.PASS,
+            evidence_ref="actions:run/core-windows",
+        ),
     )
     with pytest.raises(GitHubFactoryError, match="exact candidate sha"):
         GitHubFactoryAdapter().bind(_repository(), _observation(checks=checks))
@@ -114,16 +154,30 @@ def test_rejects_mixed_sha_checks() -> None:
 def test_unknown_check_state_fails_closed() -> None:
     with pytest.raises(GitHubFactoryError, match="recognized CheckState"):
         GitHubCheck(
+            check_id="core-ubuntu",
             name="Core Ubuntu",
             head_sha=CANDIDATE_SHA,
             state="unknown",  # type: ignore[arg-type]
+            evidence_ref="actions:run/core-ubuntu",
         )
 
 
 def test_failed_check_prevents_green_projection() -> None:
     checks = (
-        GitHubCheck(name="Core Ubuntu", head_sha=CANDIDATE_SHA, state=CheckState.PASS),
-        GitHubCheck(name="Core Windows", head_sha=CANDIDATE_SHA, state=CheckState.FAIL),
+        GitHubCheck(
+            check_id="core-ubuntu",
+            name="Core Ubuntu",
+            head_sha=CANDIDATE_SHA,
+            state=CheckState.PASS,
+            evidence_ref="actions:run/core-ubuntu",
+        ),
+        GitHubCheck(
+            check_id="core-windows",
+            name="Core Windows",
+            head_sha=CANDIDATE_SHA,
+            state=CheckState.FAIL,
+            evidence_ref="actions:run/core-windows",
+        ),
     )
     binding = GitHubFactoryAdapter().bind(_repository(), _observation(checks=checks))
     assert binding.checks_state is CheckState.FAIL
@@ -131,8 +185,20 @@ def test_failed_check_prevents_green_projection() -> None:
 
 def test_pending_check_prevents_green_projection() -> None:
     checks = (
-        GitHubCheck(name="Core Ubuntu", head_sha=CANDIDATE_SHA, state=CheckState.PASS),
-        GitHubCheck(name="Core Windows", head_sha=CANDIDATE_SHA, state=CheckState.PENDING),
+        GitHubCheck(
+            check_id="core-ubuntu",
+            name="Core Ubuntu",
+            head_sha=CANDIDATE_SHA,
+            state=CheckState.PASS,
+            evidence_ref="actions:run/core-ubuntu",
+        ),
+        GitHubCheck(
+            check_id="core-windows",
+            name="Core Windows",
+            head_sha=CANDIDATE_SHA,
+            state=CheckState.PENDING,
+            evidence_ref="actions:run/core-windows",
+        ),
     )
     binding = GitHubFactoryAdapter().bind(_repository(), _observation(checks=checks))
     assert binding.checks_state is CheckState.PENDING
@@ -165,3 +231,49 @@ def test_credentials_remain_opaque_repository_metadata() -> None:
 def test_non_github_repository_is_rejected() -> None:
     with pytest.raises(GitHubFactoryError, match="provider must be github"):
         GitHubFactoryAdapter().bind(_repository(provider="gitlab"), _observation())
+
+
+@pytest.mark.parametrize("duplicate_field", ["check_id", "evidence_ref"])
+def test_duplicate_check_provenance_fails_closed(duplicate_field: str) -> None:
+    first, second = _observation().checks
+    values = asdict(second)
+    values[duplicate_field] = getattr(first, duplicate_field)
+    values["state"] = CheckState(values["state"])
+
+    with pytest.raises(GitHubFactoryError, match="must be unique"):
+        _observation(checks=(first, GitHubCheck(**values)))
+
+
+def test_restart_replay_preserves_distinct_check_identity_and_provenance() -> None:
+    saved = json.dumps([asdict(check) for check in _observation().checks])
+    restored = tuple(
+        GitHubCheck(**{**item, "state": CheckState(item["state"])})
+        for item in json.loads(saved)
+    )
+
+    binding = GitHubFactoryAdapter().bind(_repository(), _observation(checks=restored))
+
+    assert tuple(item.check_id for item in binding.check_evidence) == (
+        "core-ubuntu",
+        "core-windows",
+    )
+    assert tuple(item.evidence_ref for item in binding.check_evidence) == (
+        "actions:run/core-ubuntu",
+        "actions:run/core-windows",
+    )
+
+
+def test_missing_or_substituted_required_check_cannot_project_pass() -> None:
+    binding = GitHubFactoryAdapter().bind(
+        _repository(),
+        _observation(checks=(_observation().checks[0],)),
+    )
+
+    result = classify_candidate_verification(
+        CANDIDATE_SHA,
+        binding.check_evidence,
+        required_check_ids=("core-ubuntu", "core-windows"),
+    )
+
+    assert result.state is VerificationState.UNKNOWN
+    assert result.merge_clearance is False
