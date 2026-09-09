@@ -28,6 +28,7 @@ _LIVE_AUTHORITY_SCHEMA = "nika-product-factory-live-plan-authority-v2"
 _LIVE_AUTHORITY_KEY = secrets.token_bytes(32)
 _DURABLE_WORKER_DIAGNOSTIC_OMITTED = "worker diagnostic omitted from durable checkpoint"
 _DURABLE_REVIEW_REASON_OMITTED = "review rationale omitted from durable checkpoint"
+_DURABLE_BLOCKER_REASON_OMITTED = "blocker rationale omitted from durable checkpoint"
 _DURABLE_REVIEW_CREDENTIAL_ASSIGNMENT = re.compile(
     r"(?:^|[\s?&#;,{\[(])['\"]?"
     r"(?:"
@@ -252,7 +253,10 @@ def _minimize_durable_worker_diagnostics(
 def _minimize_durable_work_record(record: WorkRecord) -> WorkRecord:
     result = record.result
     if result is None:
-        return record
+        if record.blocker is None:
+            return record
+        safe_blocker = _durable_blocker_reason(record.blocker)
+        return record if safe_blocker == record.blocker else replace(record, blocker=safe_blocker)
 
     coding_result = result.coding_result
     recovery = coding_result.recovery_state
@@ -319,12 +323,26 @@ def _minimize_durable_work_record(record: WorkRecord) -> WorkRecord:
 
 
 def _durable_review_reason(value: str) -> str:
+    return _durable_free_text_reason(
+        value,
+        omitted=_DURABLE_REVIEW_REASON_OMITTED,
+    )
+
+
+def _durable_blocker_reason(value: str) -> str:
+    return _durable_free_text_reason(
+        value,
+        omitted=_DURABLE_BLOCKER_REASON_OMITTED,
+    )
+
+
+def _durable_free_text_reason(value: str, *, omitted: str) -> str:
     if (
         safe_evidence_reference(value) != value
         or _reference_has_credential_assignment(value)
         or _reference_has_url_userinfo(value)
     ):
-        return _DURABLE_REVIEW_REASON_OMITTED
+        return omitted
     return value
 
 
