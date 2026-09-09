@@ -45,13 +45,35 @@ _DEVELOPMENT_REQUEST_PATTERNS = (
         re.IGNORECASE,
     ),
 )
-_NEGATED_DEVELOPMENT_PATTERNS = (
+_DEVELOPMENT_ACTION_AUTHORITY_PATTERNS = (
+    re.compile(r"^(?:please\s+)?(?:develop|implement|fix)\b", re.IGNORECASE),
     re.compile(
-        r"\b(?:do\s+not|don't|never)\s+(?:ever\s+)?(?:develop|implement|fix)\b",
+        r"^(?:please\s+)?(?:can|could|would|will)\s+you\s+(?:please\s+)?"
+        r"(?:develop|implement|fix)\b",
         re.IGNORECASE,
     ),
     re.compile(
-        r"\bне\s+(?:розробляй|розроби|розробити|реалізуй|реалізувати|виправляй|виправ|виправити)\b",
+        r"^(?:repository|repo)\s+(?:https?://github\.com/)?[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\b"
+        r".*\b(?:issue|pr|pull request)\s*#?\d+\b.*\b(?:develop|implement|fix)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:будь\s+ласка,?\s+)?(?:розроби|реалізуй|виправ)\b",
+        re.IGNORECASE,
+    ),
+)
+_NEGATED_DEVELOPMENT_PATTERNS = (
+    re.compile(
+        r"\b(?:do\s+not|don't|never)\b.{0,80}\b(?:develop|implement|fix)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:not|don't)\s+(?:want|need|ask|tell|allow)\b.{0,80}\b"
+        r"(?:develop|implement|fix)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bне\b.{0,80}\b(?:розробляй|розроби|розробити|реалізуй|реалізувати|виправляй|виправ|виправити)\b",
         re.IGNORECASE,
     ),
 )
@@ -66,6 +88,16 @@ _TOOLSMITH_PATTERNS = (
         re.IGNORECASE,
     ),
 )
+
+
+def _is_authoritative_development_request(normalized: str) -> bool:
+    if not any(pattern.search(normalized) for pattern in _DEVELOPMENT_REQUEST_PATTERNS):
+        return False
+    if any(pattern.search(normalized) for pattern in _NEGATED_DEVELOPMENT_PATTERNS):
+        return False
+    return any(
+        pattern.search(normalized) for pattern in _DEVELOPMENT_ACTION_AUTHORITY_PATTERNS
+    )
 
 
 def route_command(text: str, *, active_project_id: str | None = None) -> CommandRouteDecision:
@@ -83,13 +115,7 @@ def route_command(text: str, *, active_project_id: str | None = None) -> Command
         raise ValueError("command exceeds 4000 characters")
 
     product = any(pattern.search(normalized) for pattern in _PRODUCT_PATTERNS)
-    development_request = any(
-        pattern.search(normalized) for pattern in _DEVELOPMENT_REQUEST_PATTERNS
-    )
-    if development_request and any(
-        pattern.search(normalized) for pattern in _NEGATED_DEVELOPMENT_PATTERNS
-    ):
-        development_request = False
+    development_request = _is_authoritative_development_request(normalized)
     toolsmith = any(pattern.search(normalized) for pattern in _TOOLSMITH_PATTERNS)
     if (product or development_request) and toolsmith:
         return CommandRouteDecision(
