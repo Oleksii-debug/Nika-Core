@@ -38,6 +38,8 @@ class ExactShaCheckEvidence:
         if not self.check_id.strip() or not self.evidence_ref.strip():
             raise VerificationError("verification evidence identity must not be empty")
         _validate_sha(self.candidate_sha)
+        if not isinstance(self.state, CheckState):
+            raise VerificationError("verification check state must be a CheckState")
 
 
 @dataclass(frozen=True, slots=True)
