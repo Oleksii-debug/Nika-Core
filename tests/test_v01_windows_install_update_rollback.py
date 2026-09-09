@@ -321,6 +321,7 @@ def test_installer_rejects_bundle_root_junction_before_mutation(tmp_path: Path) 
     assert rejected.returncode != 0
     assert not destination.exists()
 
+
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
 def test_update_rejects_canonical_data_inside_rollback_sibling_before_mutation(
     tmp_path: Path,

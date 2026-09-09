@@ -327,8 +327,10 @@ if ($Mode -eq "Rollback") {
         Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $swapPath)
         [System.IO.Directory]::Move($destinationPath, $swapPath)
         $rollbackPhase = "active-staged"
+        Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $swapPath)
         [System.IO.Directory]::Move($rollbackPath, $destinationPath)
         $rollbackPhase = "rollback-activated"
+        Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $swapPath)
         [System.IO.Directory]::Move($swapPath, $rollbackPath)
         $rollbackPhase = "complete"
     }
@@ -341,6 +343,7 @@ if ($Mode -eq "Rollback") {
                     -not (Test-Path -LiteralPath $destinationPath) -and
                     (Test-Path -LiteralPath $swapPath -PathType Container)
                 ) {
+                    Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $swapPath)
                     [System.IO.Directory]::Move($swapPath, $destinationPath)
                 }
             }
@@ -349,6 +352,7 @@ if ($Mode -eq "Rollback") {
                     (Test-Path -LiteralPath $destinationPath -PathType Container) -and
                     -not (Test-Path -LiteralPath $rollbackPath)
                 ) {
+                    Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $swapPath)
                     [System.IO.Directory]::Move($destinationPath, $rollbackPath)
                 }
                 if (
@@ -416,6 +420,7 @@ try {
         catch {
             $activationError = $_
             if (Test-Path -LiteralPath $destinationPath -PathType Container) {
+                Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $stagePath, $failedInstallPath)
                 [System.IO.Directory]::Move($destinationPath, $failedInstallPath)
             }
             if (Test-Path -LiteralPath $destinationPath) {
@@ -447,6 +452,7 @@ try {
         catch {
             $activationError = $_
             if (Test-Path -LiteralPath $destinationPath -PathType Container) {
+                Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $stagePath, $failedActivationPath)
                 [System.IO.Directory]::Move($destinationPath, $failedActivationPath)
             }
             if (
@@ -454,6 +460,7 @@ try {
                 (Test-Path -LiteralPath $rollbackPath -PathType Container)
             ) {
                 Assert-NikaNoReparsePathChain -Path $rollbackPath
+                Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $stagePath, $failedActivationPath)
                 [System.IO.Directory]::Move($rollbackPath, $destinationPath)
                 Assert-NikaNoReparsePathChain -Path $destinationPath
                 Assert-NikaReleaseBundle -BundleRoot $destinationPath
@@ -465,6 +472,7 @@ try {
 finally {
     if (Test-Path -LiteralPath $stagePath) {
         Assert-NikaNoReparsePathChain -Path $stagePath
+        Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $stagePath)
         Remove-Item -LiteralPath $stagePath -Recurse -Force
     }
 }
