@@ -298,6 +298,10 @@ def test_direct_pass_cannot_forge_merge_clearance() -> None:
         )
 
 
+def test_candidate_type_exposes_no_pass_minting_classmethod() -> None:
+    assert not hasattr(verification.CandidateVerification, "_classified_pass")
+
+
 def test_authoritative_classifier_can_create_pass_clearance() -> None:
     result = verification.classify_candidate_verification(
         SHA_A,
