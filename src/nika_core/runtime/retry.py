@@ -25,8 +25,7 @@ class RetryPolicy:
     allow_fresh_retry: bool = False
 
     def __post_init__(self) -> None:
-        if self.max_retries < 0:
-            raise ValueError("max_retries must not be negative")
+        _validate_retry_count(self.max_retries, field_name="max_retries", minimum=0)
         if self.base_delay_seconds < 0:
             raise ValueError("base_delay_seconds must not be negative")
         if self.max_delay_seconds < 0:
