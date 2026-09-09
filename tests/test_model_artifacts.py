@@ -27,6 +27,48 @@ def _store(tmp_path: Path) -> SQLiteStore:
     return store
 
 
+def test_registry_constructor_is_side_effect_free(tmp_path: Path) -> None:
+    path = tmp_path / "Не ініціалізовано" / "ніка.db"
+    store = SQLiteStore(path)
+
+    registry = ModelArtifactRegistry(store)
+
+    assert not path.exists()
+    store.initialize()
+    assert registry.list() == ()
+
+
+def test_store_initialize_owns_model_artifact_schema(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "Схема" / "ніка.db")
+
+    store.initialize()
+
+    with store.connection() as conn:
+        table = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'model_artifacts'"
+        ).fetchone()
+        version = conn.execute(
+            "SELECT MAX(version) AS version "
+            "FROM model_artifact_schema_migrations"
+        ).fetchone()
+    assert table is not None
+    assert version["version"] == 1
+
+
+def test_store_initialize_rejects_newer_model_artifact_schema(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    with store.connection() as conn:
+        conn.execute(
+            "INSERT INTO model_artifact_schema_migrations(version, applied_at) "
+            "VALUES (?, ?)",
+            (2, "future"),
+        )
+
+    with pytest.raises(RuntimeError, match="model artifact database schema"):
+        store.initialize()
+
+
 def _descriptor(
     *,
     model_id: str = "foundry-public-model:7",
