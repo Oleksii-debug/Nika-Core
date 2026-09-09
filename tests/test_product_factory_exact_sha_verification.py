@@ -287,3 +287,26 @@ def test_direct_candidate_verification_cannot_bypass_evidence_ref_bound() -> Non
             verification.VerificationState.UNKNOWN,
             (ref,),
         )
+
+
+def test_direct_pass_cannot_forge_merge_clearance() -> None:
+    with pytest.raises(verification.VerificationError, match="classifier-owned"):
+        verification.CandidateVerification(
+            SHA_A,
+            verification.VerificationState.PASS,
+            (),
+        )
+
+
+def test_authoritative_classifier_can_create_pass_clearance() -> None:
+    result = verification.classify_candidate_verification(
+        SHA_A,
+        (
+            evidence("core", SHA_A, verification.CheckState.PASS),
+            evidence("factory", SHA_A, verification.CheckState.PASS),
+        ),
+        REQUIRED,
+    )
+
+    assert result.state is verification.VerificationState.PASS
+    assert result.merge_clearance is True
