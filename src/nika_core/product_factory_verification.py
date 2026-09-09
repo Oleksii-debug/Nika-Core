@@ -65,15 +65,17 @@ class CandidateVerification:
 def classify_candidate_verification(
     candidate_sha: str,
     evidence: tuple[ExactShaCheckEvidence, ...],
+    required_check_ids: tuple[str, ...],
 ) -> CandidateVerification:
     """Classify bounded CI/test evidence without transferring clearance across SHAs.
 
-    Evidence exclusively for a different single SHA is STALE. Mixed evidence identities are
-    MISMATCH, even if the current candidate has passing observations, because a machine consumer
-    must not silently combine evidence from different candidate heads.
+    The caller supplies the authoritative required-check identity set. Missing required evidence
+    remains UNKNOWN, so a partial observation set can never become merge clearance.
     """
 
     _validate_sha(candidate_sha)
+    _validate_required_check_ids(required_check_ids)
+
     refs = tuple(item.evidence_ref for item in evidence)
     if len(refs) != len(set(refs)):
         raise VerificationError("verification evidence refs must be unique")
@@ -87,9 +89,15 @@ def classify_candidate_verification(
     if observed_shas != {candidate_sha}:
         return CandidateVerification(candidate_sha, VerificationState.MISMATCH, refs)
 
-    required = tuple(item for item in evidence if item.required)
-    if not required:
+    evidence_by_check = {item.check_id: item for item in evidence}
+    if len(evidence_by_check) != len(evidence):
+        raise VerificationError("verification check ids must be unique")
+
+    missing_required = set(required_check_ids) - evidence_by_check.keys()
+    if missing_required:
         return CandidateVerification(candidate_sha, VerificationState.UNKNOWN, refs)
+
+    required = tuple(evidence_by_check[check_id] for check_id in required_check_ids)
     if any(item.state is CheckState.FAIL for item in required):
         return CandidateVerification(candidate_sha, VerificationState.FAIL, refs)
     if any(item.state is CheckState.RUNNING for item in required):
@@ -97,6 +105,15 @@ def classify_candidate_verification(
     if any(item.state is CheckState.UNKNOWN for item in required):
         return CandidateVerification(candidate_sha, VerificationState.UNKNOWN, refs)
     return CandidateVerification(candidate_sha, VerificationState.PASS, refs)
+
+
+def _validate_required_check_ids(required_check_ids: tuple[str, ...]) -> None:
+    if not required_check_ids:
+        raise VerificationError("required check ids must not be empty")
+    if any(not check_id.strip() for check_id in required_check_ids):
+        raise VerificationError("required check ids must not be empty")
+    if len(required_check_ids) != len(set(required_check_ids)):
+        raise VerificationError("required check ids must be unique")
 
 
 def _validate_sha(value: str) -> None:
