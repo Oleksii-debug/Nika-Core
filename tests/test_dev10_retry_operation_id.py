@@ -40,6 +40,13 @@ def test_script_retry_intent_keeps_internal_spaces_valid() -> None:
     assert intent.operation_id == "retry target one"
 
 
+def test_retry_policy_rejects_boolean_max_retries() -> None:
+    """Malformed boolean config must not silently authorize one retry."""
+
+    with pytest.raises(ValueError, match="max_retries"):
+        RetryPolicy(max_retries=True)
+
+
 def test_zero_delay_automatic_retry_waits_across_restart() -> None:
     policy = RetryPolicy(max_retries=1, base_delay_seconds=0.0, max_delay_seconds=30.0)
 
