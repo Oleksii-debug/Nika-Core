@@ -95,15 +95,51 @@ class DialogBroker:
 
 
 @dataclass(slots=True)
+class _DownloadRecord:
+    download: Any
+    page: Any
+    saved: bool = False
+    failed: bool = False
+
+
+@dataclass(slots=True)
 class DownloadBroker:
     """Persist browser downloads only beneath an explicitly approved artifact root."""
 
     approved_root: Path
     saved: list[Path] = field(default_factory=list)
+    _captured: list[_DownloadRecord] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.approved_root = self.approved_root.expanduser().resolve()
         self.approved_root.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def checkpoint(self) -> int:
+        return len(self._captured)
+
+    def capture(self, download: Any) -> None:
+        # Playwright emits download at its start. A blocking save_as inside the event callback
+        # forks the synchronous caller's flow, letting verification/teardown race the save.
+        self._captured.append(_DownloadRecord(download=download, page=download.page))
+
+    def complete_since(self, page: Any, checkpoint: int) -> bool:
+        """Join only downloads observed for the invoking page after its action boundary."""
+        completed = False
+        for record in self._captured[checkpoint:]:
+            if record.page is not page:
+                continue
+            if record.failed:
+                raise UnsupportedInteractionError("download could not be saved")
+            if not record.saved:
+                try:
+                    self.handle(record.download)
+                except Exception as exc:
+                    record.failed = True
+                    raise UnsupportedInteractionError("download could not be saved") from exc
+                record.saved = True
+            completed = True
+        return completed
 
     def handle(self, download: Any) -> None:
         filename = Path(str(download.suggested_filename)).name
@@ -263,7 +299,7 @@ class BrowserSession:
         self.context.set_default_timeout(self.timeout_ms)
         # See PageRegistry: wrappers avoid Playwright mutating bound methods of slotted owners.
         self.context.on("dialog", lambda dialog: self.dialogs.handle(dialog))
-        self.context.on("download", lambda download: self.downloads.handle(download))
+        self.context.on("download", lambda download: self.downloads.capture(download))
         self.registry = PageRegistry(self.context)
         return self
 
@@ -313,7 +349,8 @@ class PlaywrightInteractionAdapter:
     _node_descriptors: dict[str, _SemanticDescriptor] = field(default_factory=dict, init=False)
     _last_focus: str | None = field(default=None, init=False)
     _pre_action_pages: frozenset[str] = field(default_factory=frozenset, init=False)
-    _pre_action_download_count: int = field(default=0, init=False)
+    _pre_action_download_checkpoint: int = field(default=0, init=False)
+    _pre_action_download_page: Any = field(default=None, init=False, repr=False)
 
     def _record(self) -> _PageRecord:
         if self.session.registry is None:
@@ -763,7 +800,8 @@ class PlaywrightInteractionAdapter:
             return
         if action is InteractionAction.INVOKE:
             self._pre_action_pages = frozenset(self.session.page_ids())
-            self._pre_action_download_count = len(self.session.downloads.saved)
+            self._pre_action_download_checkpoint = self.session.downloads.checkpoint
+            self._pre_action_download_page = self._record().page
             locator.click()
             return
         if action is InteractionAction.SET_VALUE:
@@ -823,6 +861,13 @@ class PlaywrightInteractionAdapter:
         action: InteractionAction,
         value: str | None,
     ) -> bool:
+        completed_download = False
+        if action is InteractionAction.INVOKE and self._pre_action_download_page is not None:
+            # Join before *any* success path, including DOM changes and navigation. Failed or
+            # canceled saves remain failures even if another visible side effect occurred.
+            completed_download = self.session.downloads.complete_since(
+                self._pre_action_download_page, self._pre_action_download_checkpoint
+            )
         if (
             before.target.browser is not None
             and after.target.browser is not None
@@ -839,7 +884,7 @@ class PlaywrightInteractionAdapter:
             return (
                 after.revision != before.revision
                 or frozenset(self.session.page_ids()) != self._pre_action_pages
-                or len(self.session.downloads.saved) > self._pre_action_download_count
+                or completed_download
             )
         descriptor = self._node_descriptors.get(node.node_id)
         if descriptor is None:
