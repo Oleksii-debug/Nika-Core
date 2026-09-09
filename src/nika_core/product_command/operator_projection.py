@@ -16,7 +16,7 @@ _TERMINAL_SUCCESS_STATES_BY_KIND: dict[ProductStatusKind, frozenset[str]] = {
     ProductStatusKind.COMPONENT: frozenset({"accepted", "completed", "done"}),
     ProductStatusKind.BUILD: frozenset({"pass", "passed", "succeeded", "success"}),
     ProductStatusKind.QA: frozenset({"pass", "passed"}),
-    ProductStatusKind.DEPLOYMENT: frozenset({"deployed"}),
+    ProductStatusKind.DEPLOYMENT: frozenset({"deployed", "healthy", "succeeded"}),
     ProductStatusKind.RELEASE: frozenset({"released"}),
 }
 _CANDIDATE_STATUS_KINDS = frozenset(
