@@ -641,7 +641,9 @@ class DeploymentFabric:
             raise DeploymentFabricError("health evidence environment mismatch")
         if health.release_sha != intent.release.source_sha:
             raise DeploymentFabricError("health evidence release mismatch")
-        if health.release is not None and health.release != intent.release:
+        if health.release is None:
+            raise DeploymentFabricError("health evidence requires exact release identity")
+        if health.release != intent.release:
             raise DeploymentFabricError("health evidence exact release mismatch")
         if health.healthy:
             updated = DeploymentRecord(
@@ -981,7 +983,9 @@ def _validate_record(record: DeploymentRecord) -> None:
             raise DeploymentFabricError("snapshot health evidence environment mismatch")
         if record.health.release_sha != intent.release.source_sha:
             raise DeploymentFabricError("snapshot health evidence release mismatch")
-        if record.health.release is not None and record.health.release != intent.release:
+        if record.health.release is None:
+            raise DeploymentFabricError("snapshot health evidence requires exact release identity")
+        if record.health.release != intent.release:
             raise DeploymentFabricError("snapshot health exact release mismatch")
     if record.rollback is not None:
         if record.rollback.environment_id != intent.environment.environment_id:
