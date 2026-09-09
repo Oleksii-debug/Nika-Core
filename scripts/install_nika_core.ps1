@@ -359,6 +359,7 @@ if ($Mode -eq "Rollback") {
                     -not (Test-Path -LiteralPath $destinationPath) -and
                     (Test-Path -LiteralPath $swapPath -PathType Container)
                 ) {
+                    Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $swapPath)
                     [System.IO.Directory]::Move($swapPath, $destinationPath)
                 }
             }
