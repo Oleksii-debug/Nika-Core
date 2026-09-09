@@ -589,6 +589,15 @@ class TaskRuntimeCoordinator:
     ) -> RuntimeResumeMode:
         if record.is_active:
             current = self._task_state(task_id)
+            if current == TaskState.RETRYING:
+                self._queue.transition(task_id, TaskState.RUNNING)
+                self._audit.append(
+                    event_type="runtime.crash_recovery_started",
+                    entity_type="task",
+                    entity_id=task_id,
+                    payload={"runtime_id": record.runtime_id, "thread_id": record.thread_id},
+                )
+                return RuntimeResumeMode.CONTINUE
             if current == TaskState.RUNNING:
                 self._queue.transition(task_id, TaskState.PAUSED)
             elif current not in {TaskState.PAUSED, TaskState.FAILED}:
