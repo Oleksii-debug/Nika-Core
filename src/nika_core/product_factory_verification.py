@@ -56,6 +56,10 @@ class CandidateVerification:
 
     def __post_init__(self) -> None:
         _validate_sha(self.candidate_sha)
+        if not isinstance(self.state, VerificationState):
+            raise VerificationError("verification state must be a VerificationState")
+        if any(not isinstance(ref, str) or not ref.strip() for ref in self.evidence_refs):
+            raise VerificationError("verification evidence refs must be non-empty text")
         if len(self.evidence_refs) != len(set(self.evidence_refs)):
             raise VerificationError("verification evidence refs must be unique")
 
@@ -125,8 +129,8 @@ def classify_candidate_verification(
 def _validate_required_check_ids(required_check_ids: tuple[str, ...]) -> None:
     if not required_check_ids:
         raise VerificationError("required check ids must not be empty")
-    if any(not check_id.strip() for check_id in required_check_ids):
-        raise VerificationError("required check ids must not be empty")
+    if any(not isinstance(check_id, str) or not check_id.strip() for check_id in required_check_ids):
+        raise VerificationError("required check ids must be non-empty text")
     if len(required_check_ids) != len(set(required_check_ids)):
         raise VerificationError("required check ids must be unique")
 
