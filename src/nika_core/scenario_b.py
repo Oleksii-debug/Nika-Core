@@ -449,13 +449,15 @@ class ScenarioBService:
                             "value": target.input_value,
                         },
                         task_id=self.task_id,
-                    )
+                    ),
+                    pre_handler_authority=lambda: self._pre_handler_task_authority(target),
                 )
                 if not set_result.ok:
+                    error = set_result.error or "semantic input failed"
+                    if error == "pre-handler authority denied":
+                        raise ScenarioBTaskAuthorityError(error)
                     self._set_reason_fact(target, "semantic_input_failed")
-                    raise ScenarioBAuthorityError(
-                        set_result.error or "semantic input failed"
-                    )
+                    raise ScenarioBAuthorityError(error)
 
             await self._require_ready(
                 target,
