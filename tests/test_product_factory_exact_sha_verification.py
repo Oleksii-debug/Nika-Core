@@ -314,3 +314,34 @@ def test_authoritative_classifier_can_create_pass_clearance() -> None:
 
     assert result.state is verification.VerificationState.PASS
     assert result.merge_clearance is True
+
+
+def test_required_check_profile_scalar_string_is_rejected_fail_closed() -> None:
+    items = tuple(
+        evidence(check_id, SHA_A, verification.CheckState.PASS) for check_id in "core"
+    )
+
+    with pytest.raises(verification.VerificationError, match="required check ids must be a tuple"):
+        verification.classify_candidate_verification(
+            SHA_A,
+            items,
+            "core",  # type: ignore[arg-type]
+        )
+
+
+def test_evidence_outer_container_must_be_tuple() -> None:
+    with pytest.raises(verification.VerificationError, match="evidence must be a tuple"):
+        verification.classify_candidate_verification(
+            SHA_A,
+            "core",  # type: ignore[arg-type]
+            REQUIRED,
+        )
+
+
+def test_direct_evidence_refs_outer_container_must_be_tuple() -> None:
+    with pytest.raises(verification.VerificationError, match="evidence refs must be a tuple"):
+        verification.CandidateVerification(
+            SHA_A,
+            verification.VerificationState.UNKNOWN,
+            "actions://core/example",  # type: ignore[arg-type]
+        )
