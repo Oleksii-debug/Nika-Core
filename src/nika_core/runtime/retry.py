@@ -343,6 +343,12 @@ def evaluate_script_retry_intent(
         )
     if intent.deadline_utc is not None and current >= intent.deadline_utc:
         return ScriptRetryDecision(ScriptRetryDisposition.DEADLINE_EXCEEDED, intent.condition)
+    remaining_delay_seconds = (intent.not_before_utc - current).total_seconds()
+    if remaining_delay_seconds > policy.max_delay_seconds:
+        return ScriptRetryDecision(
+            ScriptRetryDisposition.BACKOFF_LIMIT_EXCEEDED,
+            intent.condition,
+        )
     if paused:
         return ScriptRetryDecision(ScriptRetryDisposition.PAUSED, intent.condition, intent)
     if current < intent.not_before_utc:
