@@ -86,6 +86,19 @@ def test_nonpassing_required_check_cannot_become_merge_clearance(
     assert result.merge_clearance is False
 
 
+def test_unknown_self_declared_required_gate_is_rejected() -> None:
+    with pytest.raises(verification.VerificationError, match="not authoritative"):
+        verification.classify_candidate_verification(
+            SHA_A,
+            (
+                evidence("core", SHA_A, verification.CheckState.PASS),
+                evidence("factory", SHA_A, verification.CheckState.PASS),
+                evidence("surprise", SHA_A, verification.CheckState.PASS),
+            ),
+            REQUIRED,
+        )
+
+
 def test_authoritative_required_set_overrides_optional_evidence_flag() -> None:
     result = verification.classify_candidate_verification(
         SHA_A,
@@ -175,6 +188,36 @@ def test_required_check_identity_set_is_validated(
 ) -> None:
     with pytest.raises(verification.VerificationError, match="required check ids"):
         verification.classify_candidate_verification(SHA_A, (), required_check_ids)
+
+
+def test_required_flag_must_be_a_real_bool() -> None:
+    with pytest.raises(verification.VerificationError, match="required flag"):
+        verification.ExactShaCheckEvidence(
+            check_id="core",
+            candidate_sha=SHA_A,
+            state=verification.CheckState.PASS,
+            evidence_ref="actions://core/required",
+            required=1,  # type: ignore[arg-type]
+        )
+
+
+def test_malformed_evidence_object_is_rejected_fail_closed() -> None:
+    with pytest.raises(verification.VerificationError, match="ExactShaCheckEvidence"):
+        verification.classify_candidate_verification(
+            SHA_A,
+            (object(),),  # type: ignore[arg-type]
+            REQUIRED,
+        )
+
+
+def test_malformed_evidence_identity_is_rejected_fail_closed() -> None:
+    with pytest.raises(verification.VerificationError, match="identity must be text"):
+        verification.ExactShaCheckEvidence(
+            check_id=1,  # type: ignore[arg-type]
+            candidate_sha=SHA_A,
+            state=verification.CheckState.PASS,
+            evidence_ref="actions://core/malformed",
+        )
 
 
 def test_malformed_required_check_state_is_rejected_fail_closed() -> None:
