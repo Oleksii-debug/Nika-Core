@@ -47,6 +47,26 @@ def test_retry_policy_rejects_boolean_max_retries() -> None:
         RetryPolicy(max_retries=True)
 
 
+@pytest.mark.parametrize(
+    ("field_name", "value", "expected_exception"),
+    [
+        pytest.param("base_delay_seconds", True, TypeError, id="boolean-base-delay"),
+        pytest.param("max_delay_seconds", False, TypeError, id="boolean-max-delay"),
+        pytest.param("base_delay_seconds", float("nan"), ValueError, id="nan-base-delay"),
+        pytest.param("max_delay_seconds", float("inf"), ValueError, id="infinite-max-delay"),
+    ],
+)
+def test_retry_policy_rejects_malformed_delay_configuration(
+    field_name: str,
+    value: object,
+    expected_exception: type[Exception],
+) -> None:
+    """Malformed retry delay configuration must fail closed before retry planning."""
+
+    with pytest.raises(expected_exception, match=field_name):
+        RetryPolicy(**{field_name: value})
+
+
 def test_zero_delay_automatic_retry_waits_across_restart() -> None:
     policy = RetryPolicy(max_retries=1, base_delay_seconds=0.0, max_delay_seconds=30.0)
 
