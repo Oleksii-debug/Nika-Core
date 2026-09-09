@@ -119,10 +119,17 @@ def _validate_retry_count(value: int, *, field_name: str, minimum: int) -> int:
     return value
 
 
+def _normalize_retry_number(value: int | float, *, field_name: str) -> float:
+    try:
+        return float(value)
+    except OverflowError as exc:
+        raise ValueError(f"{field_name} must be a finite non-negative number") from exc
+
+
 def _validate_retry_delay(value: float, *, field_name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError(f"{field_name} must be a finite non-negative number")
-    normalized = float(value)
+    normalized = _normalize_retry_number(value, field_name=field_name)
     if not isfinite(normalized) or normalized < 0:
         raise ValueError(f"{field_name} must be a finite non-negative number")
     return normalized
@@ -139,7 +146,7 @@ def _validate_retry_after(value: float | None) -> float | None:
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError("retry_after_seconds must be a finite non-negative number")
-    normalized = float(value)
+    normalized = _normalize_retry_number(value, field_name="retry_after_seconds")
     if not isfinite(normalized) or normalized < 0:
         raise ValueError("retry_after_seconds must be a finite non-negative number")
     return normalized
