@@ -68,7 +68,14 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force ./build/m11 | Out-Null
-          python -m pip install --dry-run --ignore-installed --quiet --report ./build/m11/pip-runtime-report.json ".[gui]"
+          $constraints = "./build/m11/pip-installed-constraints.txt"
+          python -m pip list --format=freeze --exclude nika-core |
+            Set-Content -Encoding utf8NoBOM $constraints
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip install --dry-run --ignore-installed --quiet --constraint $constraints --report ./build/m11/pip-runtime-report.json ".[gui]"
+          $resolverExit = $LASTEXITCODE
+          Remove-Item $constraints -Force -ErrorAction SilentlyContinue
+          if ($resolverExit -ne 0) { exit $resolverExit }
       - name: Resolve canonical project version
         id: release
         shell: pwsh
