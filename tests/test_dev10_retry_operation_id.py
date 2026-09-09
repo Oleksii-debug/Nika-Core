@@ -121,6 +121,46 @@ def test_zero_delay_automatic_retry_waits_across_restart() -> None:
     assert ready.disposition == ScriptRetryDisposition.READY
 
 
+def test_restored_retry_wait_cannot_exceed_active_policy_cap() -> None:
+    """Restart must not preserve retry authority beyond the active bounded backoff cap."""
+
+    policy = RetryPolicy(max_retries=1, base_delay_seconds=1.0, max_delay_seconds=30.0)
+    restored = ScriptRetryIntent.from_payload(
+        {
+            "version": 1,
+            "operation_id": "network-fetch",
+            "condition": ScriptRetryCondition.RECOVERABLE_NETWORK_FAILURE.value,
+            "retry_number": 1,
+            "not_before_utc": (NOW + dt.timedelta(seconds=31)).isoformat(),
+            "deadline_utc": None,
+        }
+    )
+
+    rejected = evaluate_script_retry_intent(
+        restored,
+        policy,
+        now=NOW,
+        replay_safe=True,
+    )
+    assert rejected.disposition == ScriptRetryDisposition.BACKOFF_LIMIT_EXCEEDED
+    assert rejected.intent is None
+
+    boundary = ScriptRetryIntent(
+        operation_id="network-fetch",
+        condition=ScriptRetryCondition.RECOVERABLE_NETWORK_FAILURE,
+        retry_number=1,
+        not_before_utc=NOW + dt.timedelta(seconds=30),
+    )
+    waiting = evaluate_script_retry_intent(
+        boundary,
+        policy,
+        now=NOW,
+        replay_safe=True,
+    )
+    assert waiting.disposition == ScriptRetryDisposition.WAITING
+    assert waiting.intent == boundary
+
+
 def test_automatic_retry_fails_closed_when_policy_cap_is_below_minimum_delay() -> None:
     policy = RetryPolicy(max_retries=1, base_delay_seconds=0.0, max_delay_seconds=0.5)
 
