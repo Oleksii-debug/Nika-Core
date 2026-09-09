@@ -4,6 +4,7 @@ import datetime as dt
 
 import pytest
 
+from nika_core.runtime.contracts import RuntimeErrorCode, RuntimeOutcome, RuntimeResult
 from nika_core.runtime.retry import (
     RetryPolicy,
     ScriptRetryCondition,
@@ -45,6 +46,25 @@ def test_retry_policy_rejects_boolean_max_retries() -> None:
 
     with pytest.raises(ValueError, match="max_retries"):
         RetryPolicy(max_retries=True)
+
+
+@pytest.mark.parametrize("retries_used", [-1, True])
+def test_retry_policy_should_retry_rejects_malformed_attempt_count(retries_used: object) -> None:
+    """Generic retry admission must share durable fail-closed attempt accounting."""
+
+    policy = RetryPolicy(
+        max_retries=1,
+        retryable_error_codes=frozenset({RuntimeErrorCode.TRANSIENT}),
+        allow_fresh_retry=True,
+    )
+    failure = RuntimeResult(
+        outcome=RuntimeOutcome.FAILED,
+        error="temporary provider failure",
+        error_code=RuntimeErrorCode.TRANSIENT,
+    )
+
+    with pytest.raises(ValueError, match="retries_used"):
+        policy.should_retry(failure, retries_used=retries_used)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
