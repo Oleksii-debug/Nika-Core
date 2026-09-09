@@ -9,6 +9,14 @@ from math import isfinite, ldexp
 from nika_core.runtime.contracts import RuntimeErrorCode, RuntimeOutcome, RuntimeResult
 
 
+def usable_resume_token(value: object) -> str | None:
+    """Return the exact resume token only when it is usable durable text authority."""
+
+    if isinstance(value, str) and value.strip():
+        return value
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class RetryPolicy:
     """Explicit, fail-closed retry policy for runtime failures.
@@ -44,9 +52,7 @@ class RetryPolicy:
             return False
         if result.error_code not in self.retryable_error_codes:
             return False
-        resume_token = result.resume_token
-        has_resume_authority = isinstance(resume_token, str) and bool(resume_token.strip())
-        return has_resume_authority or self.allow_fresh_retry
+        return usable_resume_token(result.resume_token) is not None or self.allow_fresh_retry
 
     def delay_seconds(self, *, retry_number: int) -> float:
         """Return deterministic exponential backoff for a 1-based retry number."""
