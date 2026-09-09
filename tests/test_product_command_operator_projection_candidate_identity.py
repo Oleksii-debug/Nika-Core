@@ -121,3 +121,77 @@ def test_operator_projection_uses_candidate_evidence_only_from_active_status() -
 
     assert projection.candidate == current_sha
     assert historical_sha not in projection.candidate
+
+
+def test_operator_projection_preserves_candidate_after_terminal_qa_success() -> None:
+    historical_sha = "a" * 40
+    current_sha = "b" * 40
+    detail = ProductProjectDetail(
+        summary=_summary(),
+        statuses=(
+            ProductStatusEntry(
+                kind=ProductStatusKind.COMPONENT,
+                item_id="work-previous",
+                label="Previous issue",
+                state="completed",
+                evidence=(
+                    EvidenceReference(
+                        kind="git_commit",
+                        reference=historical_sha,
+                        label="Historical candidate SHA",
+                    ),
+                ),
+            ),
+            ProductStatusEntry(
+                kind=ProductStatusKind.QA,
+                item_id="qa-current",
+                label="Current QA",
+                state="passed",
+                evidence=(
+                    EvidenceReference(
+                        kind="git_commit",
+                        reference=current_sha,
+                        label="Current candidate SHA",
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    projection = project_operator_status(detail)
+
+    assert projection.candidate == current_sha
+    assert historical_sha not in projection.candidate
+
+
+def test_operator_projection_active_status_without_candidate_suppresses_terminal_history() -> None:
+    historical_sha = "a" * 40
+    detail = ProductProjectDetail(
+        summary=_summary(),
+        statuses=(
+            ProductStatusEntry(
+                kind=ProductStatusKind.QA,
+                item_id="qa-previous",
+                label="Previous QA",
+                state="passed",
+                evidence=(
+                    EvidenceReference(
+                        kind="git_commit",
+                        reference=historical_sha,
+                        label="Historical candidate SHA",
+                    ),
+                ),
+            ),
+            ProductStatusEntry(
+                kind=ProductStatusKind.COMPONENT,
+                item_id="work-current",
+                label="Current issue",
+                state="ready",
+            ),
+        ),
+    )
+
+    projection = project_operator_status(detail)
+
+    assert projection.candidate == "unknown"
+    assert historical_sha not in projection.candidate
