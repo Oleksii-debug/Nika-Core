@@ -43,3 +43,38 @@ def test_retry_policy_returns_real_boolean_for_fresh_retry_decision() -> None:
 
     assert decision is True
     assert type(decision) is bool
+
+
+@pytest.mark.parametrize("resume_token", ["", "   ", 7])
+def test_retry_policy_rejects_malformed_resume_authority(resume_token: object) -> None:
+    policy = RetryPolicy(
+        max_retries=1,
+        retryable_error_codes=frozenset({RuntimeErrorCode.TRANSIENT}),
+    )
+    result = RuntimeResult(
+        outcome=RuntimeOutcome.FAILED,
+        error="temporary provider failure",
+        error_code=RuntimeErrorCode.TRANSIENT,
+        resume_token=resume_token,  # type: ignore[arg-type]
+    )
+
+    assert policy.should_retry(result, retries_used=0) is False
+
+
+@pytest.mark.parametrize("resume_token", ["", "   ", 7])
+def test_retry_policy_preserves_explicit_fresh_retry_for_malformed_resume_token(
+    resume_token: object,
+) -> None:
+    policy = RetryPolicy(
+        max_retries=1,
+        retryable_error_codes=frozenset({RuntimeErrorCode.TRANSIENT}),
+        allow_fresh_retry=True,
+    )
+    result = RuntimeResult(
+        outcome=RuntimeOutcome.FAILED,
+        error="temporary provider failure",
+        error_code=RuntimeErrorCode.TRANSIENT,
+        resume_token=resume_token,  # type: ignore[arg-type]
+    )
+
+    assert policy.should_retry(result, retries_used=0) is True
