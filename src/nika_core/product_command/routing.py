@@ -45,6 +45,16 @@ _DEVELOPMENT_REQUEST_PATTERNS = (
         re.IGNORECASE,
     ),
 )
+_NEGATED_DEVELOPMENT_PATTERNS = (
+    re.compile(
+        r"\b(?:do\s+not|don't|never)\s+(?:ever\s+)?(?:develop|implement|fix)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bне\s+(?:розробляй|розроби|розробити|реалізуй|реалізувати|виправляй|виправ|виправити)\b",
+        re.IGNORECASE,
+    ),
+)
 _TOOLSMITH_PATTERNS = (
     re.compile(
         r"\b(missing|need|add|build)\b.*\b(tool|capability|plugin|connector)\b",
@@ -76,6 +86,10 @@ def route_command(text: str, *, active_project_id: str | None = None) -> Command
     development_request = any(
         pattern.search(normalized) for pattern in _DEVELOPMENT_REQUEST_PATTERNS
     )
+    if development_request and any(
+        pattern.search(normalized) for pattern in _NEGATED_DEVELOPMENT_PATTERNS
+    ):
+        development_request = False
     toolsmith = any(pattern.search(normalized) for pattern in _TOOLSMITH_PATTERNS)
     if (product or development_request) and toolsmith:
         return CommandRouteDecision(
