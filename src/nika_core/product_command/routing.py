@@ -54,7 +54,8 @@ _DEVELOPMENT_ACTION_AUTHORITY_PATTERNS = (
     ),
     re.compile(
         r"^(?:repository|repo)\s+(?:https?://github\.com/)?[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\b"
-        r".*\b(?:issue|pr|pull request)\s*#?\d+\b.*\b(?:develop|implement|fix)\b",
+        r".*\b(?:issue|pr|pull request)\s*#?\d+\b"
+        r"\s*(?::|;|,|—|-)\s*(?:please\s+)?(?:develop|implement|fix)\b",
         re.IGNORECASE,
     ),
     re.compile(
