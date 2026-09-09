@@ -36,6 +36,13 @@ _TERMINAL_CANDIDATE_STATUS_KINDS = frozenset(
         ProductStatusKind.RELEASE,
     }
 )
+_CANDIDATE_STAGE_ORDER = {
+    ProductStatusKind.COMPONENT: 0,
+    ProductStatusKind.BUILD: 1,
+    ProductStatusKind.QA: 2,
+    ProductStatusKind.DEPLOYMENT: 3,
+    ProductStatusKind.RELEASE: 4,
+}
 
 
 class FactoryOperatorProjection(BaseModel):
@@ -184,18 +191,66 @@ def _incomplete(
     return tuple(entry for entry in entries if not _is_terminal_success(entry))
 
 
+def _has_candidate_evidence(entry: ProductStatusEntry) -> bool:
+    return any(evidence.kind == "git_commit" for evidence in entry.evidence)
+
+
+def _current_candidate_window(
+    detail: ProductProjectDetail,
+) -> tuple[ProductStatusEntry, ...]:
+    last_component_index = next(
+        (
+            index
+            for index in range(len(detail.statuses) - 1, -1, -1)
+            if detail.statuses[index].kind is ProductStatusKind.COMPONENT
+        ),
+        None,
+    )
+    statuses = (
+        detail.statuses
+        if last_component_index is None
+        else detail.statuses[last_component_index:]
+    )
+    return tuple(entry for entry in statuses if entry.kind in _CANDIDATE_STATUS_KINDS)
+
+
 def _active_candidate_entries(detail: ProductProjectDetail) -> tuple[ProductStatusEntry, ...]:
     candidate_entries = tuple(
         entry for entry in detail.statuses if entry.kind in _CANDIDATE_STATUS_KINDS
     )
     active_entries = _incomplete(candidate_entries)
-    if active_entries:
-        return active_entries
+
+    active_with_candidate = tuple(
+        entry for entry in active_entries if _has_candidate_evidence(entry)
+    )
+    if active_with_candidate:
+        return active_with_candidate
+
+    # A current component without an exact candidate is a hard epoch boundary:
+    # never inherit terminal evidence from older work and call it current.
+    if any(entry.kind is ProductStatusKind.COMPONENT for entry in active_entries):
+        return ()
+
+    current_window = _current_candidate_window(detail)
+    current_active = _incomplete(current_window)
+    if current_active:
+        earliest_active_stage = min(
+            _CANDIDATE_STAGE_ORDER[entry.kind] for entry in current_active
+        )
+        return tuple(
+            entry
+            for entry in current_window
+            if _is_terminal_success(entry)
+            and _CANDIDATE_STAGE_ORDER[entry.kind] < earliest_active_stage
+            and _has_candidate_evidence(entry)
+        )
+
     return tuple(
         entry
-        for entry in candidate_entries
+        for entry in current_window
         if entry.kind in _TERMINAL_CANDIDATE_STATUS_KINDS
         and _is_terminal_success(entry)
+        and _has_candidate_evidence(entry)
     )
 
 
@@ -231,6 +286,10 @@ def _next_action(
     qa = _first_incomplete(qa_entries)
     if qa is not None:
         return f"qa:{qa.item_id}={qa.state}"
+    if not build_entries and qa_entries:
+        integration = _first_incomplete(integration_entries)
+        if not integration_entries or integration is None:
+            return "test:not_started"
     if build_entries and not qa_entries:
         return "qa:not_started"
     integration = _first_incomplete(integration_entries)
