@@ -251,3 +251,39 @@ def test_malformed_required_check_state_is_rejected_fail_closed() -> None:
 def test_invalid_candidate_identity_is_rejected() -> None:
     with pytest.raises(verification.VerificationError, match="candidate SHA"):
         verification.classify_candidate_verification("not-a-sha", (), REQUIRED)
+
+
+def test_evidence_ref_accepts_exact_maximum_boundary() -> None:
+    ref = "x" * verification.MAX_EVIDENCE_REF_LENGTH
+
+    observed = verification.ExactShaCheckEvidence(
+        check_id="core",
+        candidate_sha=SHA_A,
+        state=verification.CheckState.PASS,
+        evidence_ref=ref,
+    )
+
+    assert observed.evidence_ref == ref
+
+
+def test_evidence_ref_rejects_over_maximum_boundary() -> None:
+    ref = "x" * (verification.MAX_EVIDENCE_REF_LENGTH + 1)
+
+    with pytest.raises(verification.VerificationError, match="exceeds maximum length"):
+        verification.ExactShaCheckEvidence(
+            check_id="core",
+            candidate_sha=SHA_A,
+            state=verification.CheckState.PASS,
+            evidence_ref=ref,
+        )
+
+
+def test_direct_candidate_verification_cannot_bypass_evidence_ref_bound() -> None:
+    ref = "x" * (verification.MAX_EVIDENCE_REF_LENGTH + 1)
+
+    with pytest.raises(verification.VerificationError, match="exceeds maximum length"):
+        verification.CandidateVerification(
+            SHA_A,
+            verification.VerificationState.UNKNOWN,
+            (ref,),
+        )
