@@ -11,7 +11,7 @@ from nika_core.product_command.routing import route_command
     (
         "develop issue #654 in repository Oleksii-debug/Nika-Core",
         "implement PR 711 in repo Oleksii-debug/Nika-Core",
-        "repository Oleksii-debug/Nika-Core issue 654 fix",
+        "repository Oleksii-debug/Nika-Core issue 654: fix",
         "Please fix issue #654 in repository Oleksii-debug/Nika-Core",
         "Could you develop issue #654 in repository Oleksii-debug/Nika-Core?",
         "розроби issue #654 у repository Oleksii-debug/Nika-Core",
@@ -35,6 +35,7 @@ def test_repository_development_intent_routes_to_product_factory(command: str) -
         "fix issue someday in repo Oleksii-debug/Nika-Core",
         "How should I develop issue #654 in repository Oleksii-debug/Nika-Core?",
         "Should I fix issue #654 in repository Oleksii-debug/Nika-Core?",
+        "Repository Oleksii-debug/Nika-Core issue 654: should I fix it?",
         "Explain how to implement PR 711 in repo Oleksii-debug/Nika-Core",
         'What does "develop issue #654 in repository Oleksii-debug/Nika-Core" mean?',
     ),
