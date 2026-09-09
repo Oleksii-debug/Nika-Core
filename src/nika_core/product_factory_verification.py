@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 
+MAX_EVIDENCE_REF_LENGTH = 512
+
+
 class VerificationError(ValueError):
     """Raised when Product Factory verification evidence is structurally invalid."""
 
@@ -39,6 +42,7 @@ class ExactShaCheckEvidence:
             raise VerificationError("verification evidence identity must be text")
         if not self.check_id.strip() or not self.evidence_ref.strip():
             raise VerificationError("verification evidence identity must not be empty")
+        _validate_evidence_ref(self.evidence_ref)
         _validate_sha(self.candidate_sha)
         if not isinstance(self.state, CheckState):
             raise VerificationError("verification check state must be a CheckState")
@@ -60,6 +64,8 @@ class CandidateVerification:
             raise VerificationError("verification state must be a VerificationState")
         if any(not isinstance(ref, str) or not ref.strip() for ref in self.evidence_refs):
             raise VerificationError("verification evidence refs must be non-empty text")
+        for ref in self.evidence_refs:
+            _validate_evidence_ref(ref)
         if len(self.evidence_refs) != len(set(self.evidence_refs)):
             raise VerificationError("verification evidence refs must be unique")
 
@@ -133,6 +139,11 @@ def _validate_required_check_ids(required_check_ids: tuple[str, ...]) -> None:
         raise VerificationError("required check ids must be non-empty text")
     if len(required_check_ids) != len(set(required_check_ids)):
         raise VerificationError("required check ids must be unique")
+
+
+def _validate_evidence_ref(value: str) -> None:
+    if len(value) > MAX_EVIDENCE_REF_LENGTH:
+        raise VerificationError("verification evidence ref exceeds maximum length")
 
 
 def _validate_sha(value: str) -> None:
