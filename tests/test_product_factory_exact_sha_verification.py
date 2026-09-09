@@ -4,7 +4,6 @@ import pytest
 
 import nika_core.product_factory_verification as verification
 
-
 SHA_A = "a" * 40
 SHA_B = "b" * 40
 SHA_C = "c" * 40
