@@ -190,6 +190,24 @@ def test_required_check_identity_set_is_validated(
         verification.classify_candidate_verification(SHA_A, (), required_check_ids)
 
 
+def test_candidate_verification_state_is_closed() -> None:
+    with pytest.raises(verification.VerificationError, match="verification state"):
+        verification.CandidateVerification(
+            SHA_A,
+            "pass",  # type: ignore[arg-type]
+            (),
+        )
+
+
+def test_required_check_identity_type_is_bounded() -> None:
+    with pytest.raises(verification.VerificationError, match="required check ids"):
+        verification.classify_candidate_verification(
+            SHA_A,
+            (),
+            ("core", 1),  # type: ignore[arg-type]
+        )
+
+
 def test_required_flag_must_be_a_real_bool() -> None:
     with pytest.raises(verification.VerificationError, match="required flag"):
         verification.ExactShaCheckEvidence(
