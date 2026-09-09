@@ -21,7 +21,7 @@ from nika_core.runtime.contracts import (
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
 from nika_core.runtime.recovery import RecoveryDisposition, RuntimeRecoveryService
 from nika_core.runtime.registry import RuntimeRegistry
-from nika_core.runtime.retry import RetryPolicy, usable_resume_token
+from nika_core.runtime.retry import RetryPolicy
 from nika_core.runtime.session_store import RuntimeSessionStore
 
 
@@ -185,7 +185,7 @@ def test_retry_dispatch_uses_one_usable_token_decision(
 
     final = events[-1]
     assert final.event_type == "runtime.finished"
-    assert final.payload["resume_token"] == usable_resume_token(resume_token)
+    assert final.payload["resume_token"] is None
     assert TaskRuntimeCoordinator(queue, audit).sessions.get(task_id) is None
 
 
