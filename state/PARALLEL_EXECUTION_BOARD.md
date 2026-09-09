@@ -1,4 +1,86 @@
+## AUTHORITATIVE CURRENT EXECUTION BOARD — 2026-09-07T22:14+02:00
+CURRENT_MAIN=`c71754f54e3643a56528f3f9158d8d2ddd45c2c6`.
+DONE/DO_NOT_REPEAT=#674 intelligence modes; #675 resource telemetry; #662 archive/secret gate; #651 model selection; #659 Windows autostart/settings; #656 checker handoffs; #641 durable cursor.
+IN_PROGRESS=Worker1 #654/#638; Worker3 #677/Scenario-A; Worker4 #672 then #663; Worker5 #695 SBOM, #676 installer, #665 governance proof.
+BLOCKED=old exact-head evidence after moved main; governance activation because branch protection/required checks are disabled; human Windows/NVDA remains human-only.
+NEXT=consume exact-current green + independent same-head audits one production leaf at a time; after each merge reread main and requalify downstream.
+ACTIVE_GRAPH=`runtime/durability -> AI/model -> browser/tools -> autonomy -> memory -> voice/perception -> resource governor -> background life -> learning/self-improvement -> phone/multimodal surfaces -> Windows/NVDA -> release`.
+TELEGRAM=OUT_OF_ACTIVE_SCOPE unless explicitly reintroduced by the user as a new workspace/ProductProject.
+HUMAN_TESTED=false; NVDA_VERIFIED=false; PRODUCTION_RELEASE_READY=false.
+
+## HISTORICAL SUPERSEDED SNAPSHOT — CURRENT-MAIN OVERRIDE — 2026-09-07T20:44+02:00
+CURRENT_MAIN=`c42cb926b5d53ed1950ea598b0dc47c9a6b97e9a`. #675 resource capacity telemetry is integrated. #638 is BLOCKED by canonical task-authority binding; #654 by PAUSED-generation/Cancel race; #672 remains shared Windows UIA blocker. #676@b4f41548 and #665@9a1fe70b are exact-current Worker5 candidates under fresh qualification/non-self audit. Older c0ed exact evidence is lineage-only. HUMAN_TESTED=false; NVDA_VERIFIED=false; PRODUCTION_RELEASE_READY=false.
+
+## HISTORICAL SUPERSEDED SNAPSHOT — EXECUTION BOARD OVERRIDE — 2026-09-07T20:44+02:00
+| Lane | Current owner package | State / next |
+|---|---|---|
+| Worker1 Runtime | #654; #638 | #654 BLOCKED repair; #638 exact-green awaiting independent #664 replay |
+| Worker2 AI | #674; #670 frozen | continue exact AI compatibility; do not reconverge #670 before shared UIA stabilizes |
+| Worker3 Browser | #677 | exact-current Scenario-B restart-wait repair -> fresh gates -> independent audit |
+| Worker4 Windows | #672; #663 | clear shared RuntimeId/package proof first; then packaged selector/journey |
+| Worker5 Release | #676; #665; control #666 | fresh gates + non-self audits; guarded one-at-a-time integration |
+| Work | #638 replay / hard audits | independent QA only; no duplicate production mutation |
+| Codex | unleased coherent package only | collision-check before assignment |
+
+Current main `c0ed340c8ee6ddfab011f861f5e6f49017ff5286`; governance protection remains disabled; HUMAN_TESTED=false; NVDA_VERIFIED=false; PRODUCTION_RELEASE_READY=false.
+
 # PARALLEL EXECUTION BOARD — Nika Core
+
+## HISTORICAL SUPERSEDED SNAPSHOT — BOARD REFRESH — 2026-09-07 — main c0ed340c
+Evidence is exact-head only; live GitHub overrides older rows below.
+
+| Lane | NOW | BLOCK/NEXT |
+|---|---|---|
+| Worker1 Runtime + Audit | #654 Pause/Resume/Cancel; #638 recurrence | fix #654 confirmed-Pause generation race + unchanged #669; finish #638 M12/#664 |
+| Worker2 AI Layer | #674 current-main intelligence/model routing | exact Core/M12 then independent audit; no second ModelGateway |
+| Worker3 Browser + Tools | #677 one-head Scenario B | exact Core/M12/browser proof then independent audit; Scenario A after recurrence authority |
+| Worker4 Windows Journey | #672 shared UIA; #663 model/recovery UI | clear shared packaged UIA first; then exact packaged journey |
+| Worker5 Coordinator + Release | #676 installer; #665 governance evaluator; #666 control plane | fresh gates, non-self audits, guarded integration one leaf at a time |
+| Work/Codex | independent hard audit / unleased package only | collision-check before mutation |
+
+Integrated / do not repeat: #641, #656, #659, #651, #662.
+Governance: branch protection and required checks are disabled.
+HUMAN_TESTED=false; NVDA_VERIFIED=false; PRODUCTION_RELEASE_READY=false.
+
+
+## HISTORICAL SUPERSEDED SNAPSHOT — CONTINUOUS-PRODUCT BOARD — 2026-09-07
+
+Mode: **ONE CONTINUOUS FULL PRODUCT / V0.1 NEAREST ACCEPTANCE CHECKPOINT**.
+Starting main: `7e8be7cb7ed3b62f55b1b9f5971bc45514427160`.
+Evidence rule: exact SHA + required exact-head checks + required independent audit. QA_ONLY never merges. Human/NVDA flags are human-only.
+
+Every lane begins by classifying **DONE / IN_PROGRESS / STALE / BLOCKED / NEXT / DO_NOT_REPEAT** and checking current owner/collision. One production writer per semantic slice.
+
+| Lane | Current checkpoint responsibility | Safe parallel Full Product direction | Do not repeat |
+|---|---|---|---|
+| Worker 1 — Runtime + Audit | durable Pause/Resume, restart/recovery, recurrence/hibernate, cancellation/reconciliation; independent audit of OTHER lanes | resource governor, background-life/runtime durability when disjoint | second scheduler/state/recovery/effect ledger |
+| Worker 2 — AI Layer | end-to-end model choice -> canonical ModelGateway -> real team -> restart; backend compatibility for Windows selector | deterministic/Foundry/Ollama/cloud parity, model identity/resource/cancel contracts | second ModelGateway/provider/settings authority |
+| Worker 3 — Browser + Tools | full Scenario B then Scenario A on one current head | semantic diagnostics, tool registry/MCP/capability-gap and controlled autonomy contracts | second browser/cursor/retry/monitor/effect engine |
+| Worker 4 — Windows Journey | visible model selector, truthful lifecycle/recovery states, package/install/keyboard/UIA readiness | future memory/voice/multimodal presentation contracts when disjoint | second desktop UI/runtime/registry/autostart/model backend |
+| Worker 5 — Coordinator + Integrator | guarded integration, release/package/governance, routing/control sync | immediately route next dependency after each checkpoint | self-audit, QA_ONLY merge, stale-evidence promotion |
+| Work | independent audit of Stability-authored candidates; deep cross-system hard package | principal architecture/integration defects | duplicate leased production slice |
+| Codex | large coherent explicitly unleased implementation/reuse/dependency package | next disjoint Full Product dependency | parallel rewrite of active worker lane |
+
+### Current blocker front
+- #654 active durable Pause/Resume: incumbent production lineage, not accepted; Worker1 has a current repair for the independent return-boundary crash finding, but exact-head gates + non-self audit are still required.
+- Scenario B leaves exist but current exact one-head composition is still missing.
+- Scenario A monitoring/recurrence remains incomplete.
+- Windows visible model-selector seam is active in #663 after backend #651 integration; its latest observed RED is lint-only and must be rerun on the repaired exact head.
+- Packaged startup recovery is a real current blocker: QA #652 proves the Windows launcher exposes the shell without first composing canonical RuntimeRecoveryService inventory/reconciliation. Repair must be coordinated with #663 launcher ownership or its immediate successor.
+- Package/legacy-data proof #657 is superseded by current-main #660; repaired proof still requires exact Core/M11/M12 + independent audit.
+- Main branch protection / required checks are disabled and remain a release blocker.
+- HUMAN_TESTED=false; NVDA_VERIFIED=false; PRODUCTION_RELEASE_READY=false.
+
+### Integration policy
+Integrate one production candidate at a time. Immediately before merge re-read main, unchanged exact head, base/overlap, required Actions, independent review and known REDs. After merge, reread main and invalidate downstream evidence whose source identity moved.
+
+### Post-checkpoint policy
+After V0.1 seal, these lanes do not stop and do not become a separate V0.2 project. Recompute dependency graph and continue the same codebase toward:
+`runtime/durability -> AI/model -> browser/tools -> agent autonomy -> memory -> voice/perception -> resource governor -> background life -> learning/self-improvement -> phone/multimodal -> full Windows/NVDA journey -> final package/release`.
+
+---
+
+## Historical execution board retained below
 
 Updated: 2026-08-20.
 Mode: **ACTIVE AUTONOMOUS PRODUCT FACTORY DEVELOPMENT**.

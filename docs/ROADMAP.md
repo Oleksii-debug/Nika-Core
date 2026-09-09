@@ -1,4 +1,52 @@
+## AUTHORITATIVE CURRENT ROADMAP SNAPSHOT — 2026-09-07T22:14+02:00
+CURRENT_MAIN=`c71754f54e3643a56528f3f9158d8d2ddd45c2c6`. #674 explicit deterministic/embedded-local/external-local/opt-in cloud intelligence modes are integrated after #675 resource telemetry.
+STRATEGY=ONE_CONTINUOUS_FULL_PRODUCT. V0.1 is the nearest evidence checkpoint only.
+NEAREST_GATES=durable Pause/Resume/restart/recovery; recurrence/hibernate with canonical task authority; one exact Scenario B; one exact monitoring Scenario A; packaged model-selection/runtime Windows journey; install/update/legacy-data/recovery; machine-readable SBOM/notices/provenance; live governance; exact Windows candidate; human keyboard/NVDA protocol.
+PARALLEL_FULL_PRODUCT=only disjoint work with stable contracts may advance without delaying the nearest gate.
+ACTIVE_DEPENDENCY_DIRECTION=`runtime/durability -> AI/model -> browser/tools -> agent autonomy -> memory -> voice/perception -> resource governor -> background life -> learning/self-improvement -> phone/multimodal surfaces -> full Windows/NVDA -> final packaging/release`.
+TELEGRAM_SCOPE=NOT_ACTIVE. Telegram may return only through a future explicit user-routed workspace/ProductProject.
+HUMAN_TESTED=false; NVDA_VERIFIED=false; PRODUCTION_RELEASE_READY=false.
+
+## HISTORICAL SUPERSEDED SNAPSHOT — CURRENT-MAIN OVERRIDE — 2026-09-07T20:44+02:00
+CURRENT_MAIN=`c42cb926b5d53ed1950ea598b0dc47c9a6b97e9a`. #675 resource capacity telemetry is integrated. #638 is BLOCKED by canonical task-authority binding; #654 by PAUSED-generation/Cancel race; #672 remains shared Windows UIA blocker. #676@b4f41548 and #665@9a1fe70b are exact-current Worker5 candidates under fresh qualification/non-self audit. Older c0ed exact evidence is lineage-only. HUMAN_TESTED=false; NVDA_VERIFIED=false; PRODUCTION_RELEASE_READY=false.
+
+## HISTORICAL SUPERSEDED SNAPSHOT — CONTINUOUS-PRODUCT CHECKPOINT — 2026-09-07T20:44+02:00
+Canonical main: `c0ed340c8ee6ddfab011f861f5e6f49017ff5286`.
+Nearest V0.1 path: #654 durable Pause/Resume/Cancel repair -> #638 recurrence independent replay/integration -> #672 shared Windows UIA -> #663/#660 dependent packaged journey -> #677 exact Scenario B -> Scenario A -> exact package/install/update/recovery/SBOM/provenance/governance -> PRE_HUMAN_READY -> human Windows/NVDA.
+Integrated this cycle family: #662 archive/manifest/secret-safety. Installer #676 security repairs and governance evaluator #665 are current exact-base candidates under fresh qualification. Continuous Full Product work continues in the same codebase after the checkpoint.
+
 # Nika Core — roadmap and progress truth
+
+## HISTORICAL SUPERSEDED SNAPSHOT — ROADMAP REFRESH — 2026-09-07 — after release-security integration
+Current production main: `c0ed340c8ee6ddfab011f861f5e6f49017ff5286`.
+Latest integrated qualified leaf: #662 archive/manifest/secret-safety. This does not make the product release-ready; downstream exact-head evidence is re-earned after integration.
+
+Nearest V0.1 critical path now remains: repair #654 Pause/Resume/Cancel generation race and replay #669; close #638 recurrence/hibernate; clear #672 shared packaged UIA; integrate #663 packaged model/recovery journey; qualify #674 AI routing; qualify #677 exact Scenario B; complete Scenario A monitoring; integrate #676 install/update/rollback; close legacy-data + SBOM/notices/provenance + #665 governance proof and actual repository protection; produce one exact Windows candidate; then human Windows/NVDA acceptance.
+The Full Product continues in this same codebase after the checkpoint.
+
+HUMAN_TESTED=false. NVDA_VERIFIED=false. PRODUCTION_RELEASE_READY=false.
+
+
+## Binding continuous-product strategy — 2026-09-07
+
+Nika Core is **one continuously developed Full Product**, not a sequence of mostly separate products. Labels such as V0.1, V0.2 and later versions are **acceptance checkpoints** inside one production lineage. They provide exact evidence, rollback and release slices; they do not reset architecture, duplicate completed components or require a new product-development cycle.
+
+Current routing principle: optimize for **what most shortens the path to complete Full Nika while preserving the nearest acceptance checkpoint**.
+
+Nearest checkpoint: **V0.1**. Close only the remaining real product gates needed for an honest Windows candidate: durable active Pause/Resume and restart/recovery; recurrence/hibernate; one complete browser Scenario B; one complete monitoring Scenario A; packaged user model-selection journey; package/install/update/legacy-data/recovery/SBOM/notices/provenance/governance; exact Windows candidate; then human Windows/NVDA acceptance. Avoid checkpoint-only cosmetic work that a Full Product capability will replace.
+
+After V0.1 passes, development **continues immediately in the same codebase**. No separate “start V0.2” project is created. Safe independent Full Product work may proceed in parallel before V0.1 when contracts and ownership are disjoint and the checkpoint is not delayed.
+
+Dependency-priority graph:
+`runtime/durability -> AI/model layer -> browser/tools -> agent autonomy -> memory -> voice/perception -> resource governor -> background life -> learning/self-improvement integration -> phone/multimodal surfaces -> full Windows/NVDA product journey -> final packaging/release`.
+
+This is a dependency graph, not a set of artificial phase walls: independent nodes may advance in parallel when their contracts are stable.
+
+Every worker/Codex/Work cycle classifies its relevant surface as **DONE / IN_PROGRESS / STALE / BLOCKED / NEXT / DO_NOT_REPEAT**, reuses the incumbent production lineage, and follows **REUSE -> ADAPT -> CUSTOM (thin)**. Exact green/audit credit stays bound to the exact source SHA.
+
+Live technical truth always comes from GitHub main, exact candidate heads, reviews and Actions. At this coordination snapshot the starting main is `7e8be7cb7ed3b62f55b1b9f5971bc45514427160`; current-main Core CI and M12 are green. HUMAN_TESTED=false. NVDA_VERIFIED=false. PRODUCTION_RELEASE_READY=false.
+
+---
 
 Baseline created: 2026-08-17. Scope reconciled: 2026-08-19. Product-factory scope expanded: 2026-08-20. Web/Cloud product direction bound: 2026-09-04.
 

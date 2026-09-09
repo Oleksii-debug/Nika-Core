@@ -1,4 +1,98 @@
+## AUTHORITATIVE CURRENT PROJECT STATUS — 2026-09-07T22:14+02:00
+CURRENT_MAIN=`c71754f54e3643a56528f3f9158d8d2ddd45c2c6`.
+LAST_INTEGRATED_CHANGE=#674 explicit intelligence mode boundary; previous #675 resource-capacity telemetry remains integrated.
+PRODUCT_STRATEGY=ONE_CONTINUOUS_FULL_PRODUCT; V0.1 is the nearest acceptance checkpoint.
+DONE=integrated cursor/checker handoffs/Windows autostart/durable model selection/archive-secret gate/resource telemetry/intelligence modes.
+IN_PROGRESS=#654 Pause/Resume; #638 recurrence; #677 Scenario-B; Scenario-A monitoring; #672/#663 Windows UIA/model-selection journey; #695 SBOM; #676 installer/update/rollback; #665 governance verifier.
+BLOCKED=remaining runtime/browser/Windows/package gates; actual repository protection/required checks disabled; human Windows/NVDA pending.
+DO_NOT_REPEAT=old pre-main-movement greens and QA_ONLY branches never become production acceptance.
+TELEGRAM_SCOPE=not active under AGENTS.md/MASTER_SPEC.
+HUMAN_TESTED=false; NVDA_VERIFIED=false; PRODUCTION_RELEASE_READY=false.
+
+## HISTORICAL SUPERSEDED SNAPSHOT — CURRENT-MAIN OVERRIDE — 2026-09-07T20:44+02:00
+CURRENT_MAIN=`c42cb926b5d53ed1950ea598b0dc47c9a6b97e9a`. #675 resource capacity telemetry is integrated. #638 is BLOCKED by canonical task-authority binding; #654 by PAUSED-generation/Cancel race; #672 remains shared Windows UIA blocker. #676@b4f41548 and #665@9a1fe70b are exact-current Worker5 candidates under fresh qualification/non-self audit. Older c0ed exact evidence is lineage-only. HUMAN_TESTED=false; NVDA_VERIFIED=false; PRODUCTION_RELEASE_READY=false.
+
+## HISTORICAL SUPERSEDED SNAPSHOT — STATUS OVERRIDE — 2026-09-07T20:44+02:00
+CURRENT_MAIN=`c0ed340c8ee6ddfab011f861f5e6f49017ff5286`.
+DONE=#641,#656,#659,#651,#662 integrated.
+IN_PROGRESS=#654 Pause/Resume/Cancel; #638 recurrence audit; #677 Scenario-B; #672 shared UIA; #663 Windows model UI; #676 installer; #665 governance evaluator; Worker2 AI/model lane.
+BLOCKED=#654 confirmed-Pause generation race; #672 packaged RuntimeId/restart proof until owner terminal-green; branch protection/required checks disabled.
+STALE=#660 exact-base evidence until #672 integration/reconvergence; older package/governance predecessors #648/#649/#657; old heads for any moving PR.
+NEXT=first independently audited exact-current green production leaf, currently #638 if unchanged replay passes.
+HUMAN_TESTED=false; NVDA_VERIFIED=false; PRODUCTION_RELEASE_READY=false.
+
 # PROJECT STATUS — Nika Core
+
+## HISTORICAL SUPERSEDED SNAPSHOT — SUPERSEDING REFRESH — 2026-09-07 — after #662
+CURRENT_MAIN=`c0ed340c8ee6ddfab011f861f5e6f49017ff5286`.
+LAST_INTEGRATED_QUALIFIED_LEAF=#662@`7a0331b30957f483138eb758071fd5b7d977fa34` -> merge `c0ed340c8ee6ddfab011f861f5e6f49017ff5286`.
+GitHub live exact heads/reviews/Actions override every older snapshot below.
+
+DONE / DO_NOT_REPEAT: #641 cursor; #656 checker handoffs; #659 autostart/settings; #651 durable per-task model selection; #662 archive/manifest/secret-safety.
+IN_PROGRESS: #654 active Pause/Resume/Cancel repair; #638 recurrence/hibernate; #674 AI intelligence-mode/model routing; #677 one-head Scenario B; #663 packaged model/recovery journey; #672 shared UIA gate; #676 install/update/rollback; #665 governance proof.
+BLOCKED: #654 authoritative current-head RED until Worker1 fixes the confirmed-Pause generation race and unchanged #669 passes; repository protection/required checks remain disabled; final provenance/SBOM/notices and one exact Windows candidate remain open.
+NEXT: close #654 + #669; clear #672 shared Windows gate; qualify/audit #638/#677/#663/#674/#676/#665 as their exact heads become green; then Scenario A monitoring and final combined Windows/package provenance.
+HUMAN_TESTED=false.
+NVDA_VERIFIED=false.
+PRODUCTION_RELEASE_READY=false.
+
+
+## HISTORICAL SUPERSEDED SNAPSHOT — SUPERSEDING SNAPSHOT — 2026-09-07
+
+Canonical repository: `Oleksii-debug/Nika-Core`.
+Canonical technical truth: live GitHub `main`, exact production candidate heads, reviews and current Actions. Drive is a coordination/mirror surface and never overrides GitHub code/SHA/CI truth.
+
+Strategy: **ONE_CONTINUOUS_FULL_PRODUCT**. V0.1/V0.2/etc. are acceptance checkpoints, not separate products.
+
+STARTING_MAIN_FOR_THIS_COORDINATION_UPDATE=`7e8be7cb7ed3b62f55b1b9f5971bc45514427160`
+LAST_EXACT_GREEN_MAIN=`7e8be7cb7ed3b62f55b1b9f5971bc45514427160` for Core CI + M12 Pre-Human Release Gate.
+
+### DONE / DO_NOT_REPEAT
+- real packaged three-agent execution foundation is integrated;
+- durable source setup is integrated;
+- local Ollama + configured API ModelGateway paths are integrated;
+- real checker handoff composition is integrated;
+- durable per-task provider/model selection backend is integrated;
+- offline/reconnect pre-effect continuation and fail-closed uncertain-effect semantics are integrated;
+- semantic browser stale-DOM/frame/document safety is integrated;
+- durable Scenario-B cursor foundation is integrated;
+- Windows autostart backend and user-visible autostart/settings UX are integrated;
+- canonical per-user data/recovery foundations are integrated.
+
+Do not rebuild these merely because a new checkpoint/version label appears.
+
+### IN_PROGRESS / BLOCKED — nearest V0.1 checkpoint
+- durable active Pause/Resume across restart: incumbent #654 lineage is actively repairing the independent pause-confirmation crash-window; no acceptance until its newest exact head is green and independently re-audited;
+- recurrence/hibernate/missed-run lifecycle: existing lineage must be current-main qualified, not duplicated;
+- full Scenario B: current-main one-head composition still missing even though several leaves exist;
+- monitoring Scenario A: full recurrent observation/change/report composition still missing;
+- packaged user-facing provider/model selector: Windows #663 owns the visible UI over the integrated backend; its latest observed failure is import-order lint only, so prior-head evidence is stale and a fresh exact-head rerun is required;
+- packaged startup recovery: fresh current-main QA #652 proves the Windows launcher does not yet run canonical RuntimeRecoveryService inventory/reconciliation before exposing the shell; production repair must coordinate with the #663 scripts/nika_windows.py ownership or its immediate successor, reusing existing recovery authority;
+- legacy-data/package proof: #657 is superseded by current-main successor #660; its cleanup root cause was an unclosed proof-side SQLite handle and the repaired exact head still needs fresh Core/M11/M12 plus independent audit;
+- final package/install/update/recovery/SBOM/notices/provenance seal;
+- repository governance: live `main` currently reports branch protection / required-status enforcement disabled;
+- exact final Windows release candidate;
+- human Windows/NVDA acceptance.
+
+### NEXT
+1. Repair/qualify active Pause/Resume lineage without a second runtime/recovery authority.
+2. Repair packaged startup recovery so canonical inventory/reconciliation occurs before shell exposure, coordinated with current Windows launcher ownership.
+3. Complete Windows model-selector journey over the integrated model-selection backend.
+4. Compose Scenario B and Scenario A on current main, consuming existing leaves rather than stacking stale branches.
+5. Close package/legacy-data/provenance/governance gates.
+6. Produce one exact Windows candidate and run the human protocol.
+7. Immediately after V0.1 passes, route the same codebase to the next Full Product blockers; do not wait for a “V0.2 start”.
+
+### Parallel Full Product work allowed now
+Only disjoint work that survives checkpoints and does not delay V0.1: runtime/resource-governor/background-life contracts; AI/model-layer compatibility and model identity; browser/tool diagnostics and controlled autonomy contracts; presentation-neutral future surface contracts. Voice/mobile/self-improvement production expansion must respect ownership and safety and cannot bypass the nearest acceptance gate.
+
+HUMAN_TESTED=false
+NVDA_VERIFIED=false
+PRODUCTION_RELEASE_READY=false
+
+---
+
+## Historical snapshot retained below
 
 Updated: 2026-08-20.
 Canonical repository: `Oleksii-debug/Nika-Core`.

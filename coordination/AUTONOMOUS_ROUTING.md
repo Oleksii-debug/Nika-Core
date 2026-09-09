@@ -1,135 +1,243 @@
+## AUTHORITATIVE CURRENT ROUTING — EPOCH-CONTINUOUS-0006 — 2026-09-07T22:14+02:00
+CURRENT_MAIN: `c71754f54e3643a56528f3f9158d8d2ddd45c2c6` (integrated #674 explicit intelligence modes after #675 resource-capacity telemetry).
+STRATEGY: ONE_CONTINUOUS_FULL_PRODUCT. V0.1 remains the nearest PRE_HUMAN_READY checkpoint; safe disjoint Full Product work may proceed without weakening it.
+LIVE_TRUTH: GitHub main/exact heads/Actions/independent audit > this routing > Issue #553 > Drive mirror. Branch protection remains disabled and cannot be activated through the current GitHub App administration permissions.
+
+DONE_DO_NOT_REPEAT:
+- #641 durable Scenario-B cursor; #656 checker handoffs; #659 Windows autostart/settings; #651 durable per-task model selection; #662 archive/manifest/secret safety; #675 resource telemetry; #674 intelligence-mode boundary.
+- Do not rebuild ModelGateway, scheduler/recovery authority, browser engine, effect ledger, release-manifest verifier, desktop shell or resource-capacity authority.
+
+CURRENT_V01_CRITICAL_PATH:
+1. Worker1: #654 durable Pause/Resume/Cancel + #638 recurrence/task authority. No Worker5 mutation.
+2. Worker4: #672 shared packaged UIA strict RuntimeId proof, then #663 packaged selector/startup-recovery compatibility. #660 legacy-data and other packaged M12 evidence wait on this shared gate.
+3. Worker3: #677 exact Scenario-B authority repair; Scenario-A requires #680 durable baseline + #681 detector + #685 safe report + recurrence/terminal authority.
+4. Worker2: #694 packaged selected-model determinism; #697 local-only Ollama boundary; #696 Foundry cache evidence privacy repair; #698 numeric model-contract safety. No model download/training credit.
+5. Worker5 release: #676 non-admin install/update/rollback; #695 exact package-bound CycloneDX SBOM/provenance; #665 read-only governance verifier. All require independent non-self audit and terminal exact gates.
+
+EXACT_CURRENT_FRONT:
+- #697@c868a2000778bc415ec3c8cce5a8dadbf060e47b: independent semantic CLEAR; Core/M12 pending.
+- #696 newer repaired head 44a5ae829901ac0c2213da5bc3695b640f6913cb: prior private-path traceback blocker repaired; re-audit + fresh Core/M12 required.
+- #698@91722666f2bcdd8e49ea8214c047623240cc0bff: provider-neutral numeric contract candidate; independent audit + Core/M12 pending.
+- #681@40dbd7aa67d6270be13e088b27835c989ec217fc and #685@d13f9b24286b6727e813004fb2dd40635f061f0b: exact-current monitoring detector/report leaves; gates pending, not full Scenario-A alone.
+- #683@40ad51fb1cb4e5eb9244d06c752e6a8db8f9002a: exact-current packaged checker projection; prior repaired semantics requalified, Core/M12 pending.
+- #676@ada5f97db78c15724d024310a234cbf8aaf61877 and #695@48075ab77de8ff5ea99e1e9c9b3585509c18f210: true current-main descendants behind=0. Worker5 authored; self-audit/self-merge forbidden. #695 cancelled gates were explicitly restarted.
+- #665@1b3de3940539a1ecdcca5cd76c3e91cfbfdd43c6: exact-current read-only governance verifier; fresh Core/M12 + non-self audit pending. It does not activate protection.
+
+STALE_OR_BLOCKED:
+- #660 legacy-data semantics had Core+M11 green; old M12 failed at shared #672 UIA. Freeze until #672 exact-green integration/requalification, then current-main successor/replay.
+- #677 current repair head still requires current-main convergence after semantic fixes and exact gates.
+- Actual repository protection/required checks is an external administrative release blocker; current connector supports reads only, not activation.
+- HUMAN_TESTED=false and NVDA_VERIFIED=false until a real human completes the final exact Windows protocol.
+
+INTEGRATION_RULE:
+Merge one production candidate at a time only with unchanged exact head, exact-current ancestry/compatible base, required same-head terminal gates, independent non-self clearance and no authoritative RED. QA_ONLY never merges. After each merge reread main and invalidate/requalify stale downstream evidence.
+
+NEXT_SINGLE_HIGHEST_VALUE_BATCH:
+Consume the first terminal exact-current independently-cleared leaf (priority #697 or a V0.1 release leaf). If none is terminal, repair only concrete owned REDs and continue disjoint package/control work; do not wait on queued CI.
+
+HUMAN_TESTED=false
+NVDA_VERIFIED=false
+PRODUCTION_RELEASE_READY=false
+
+## HISTORICAL SUPERSEDED SNAPSHOT — EPOCH-CONTINUOUS-0005 — 2026-09-07T22:14+02:00
+CURRENT_MAIN: `c71754f54e3643a56528f3f9158d8d2ddd45c2c6` (integrated #674 explicit intelligence mode boundary after #675 resource capacity telemetry).
+STRATEGY: ONE_CONTINUOUS_FULL_PRODUCT. V0.1 is the nearest PRE_HUMAN_READY evidence checkpoint, not a product/version wall.
+DO_NOT_REPEAT: integrated #641 cursor, #656 checker handoffs, #659 autostart/settings, #651 durable model selection, #662 archive/secret gate, #675 resource telemetry, #674 intelligence modes.
+CURRENT_OWNERS: Worker1=#654 Pause/Resume + #638 recurrence; Worker2=post-#674 model-runtime continuity; Worker3=#677 Scenario-B + Scenario-A monitoring; Worker4=#672 shared UIA then #663 packaged selector/recovery; Worker5=#695 SBOM + #676 installer + #665 governance verifier + this control plane.
+CURRENT_BLOCKERS: #654 lifecycle/generation repair; #638 canonical task-authority binding; #672 shared RuntimeId test/current-main convergence; #677 authority repairs; exact package/install/recovery/SBOM/governance; live branch protection/required checks disabled; human Windows/NVDA separate.
+CURRENT_RELEASE_FRONT: #695, #676 and #665 are exact-current Worker5 candidates under fresh hosted qualification and independent non-self audit. Software governance proof does not substitute for actual administrative protection.
+SCOPE_TRUTH: Telegram is removed from active roadmap scope by AGENTS.md and MASTER_SPEC. Future Telegram support requires a new explicit user-routed workspace/ProductProject and is not an active dependency node.
+HUMAN_TESTED=false
+NVDA_VERIFIED=false
+PRODUCTION_RELEASE_READY=false
+
 # Nika Core — current autonomous routing
 
-EPOCH: EPOCH-0002
+## HISTORICAL SUPERSEDED SNAPSHOT — REFRESH — EPOCH-CONTINUOUS-0004 — 2026-09-07T20:44+02:00
+CURRENT_MAIN: `c42cb926b5d53ed1950ea598b0dc47c9a6b97e9a` (integrated #675 read-only resource capacity telemetry after #662 archive/secret-safety).
+STRATEGY: ONE_CONTINUOUS_FULL_PRODUCT. V0.1 remains the nearest acceptance checkpoint.
+SOURCE_TRUTH: live GitHub exact head/base/Actions/reviews > this snapshot > Issue/Drive mirrors.
+BRANCH_PROTECTION: disabled / required checks not enforced; release readiness remains false.
+
+DONE_DO_NOT_REPEAT: #641 cursor; #656 checker handoffs; #659 Windows autostart/settings; #651 durable model selection backend; #662 archive/manifest/secret safety; #675 ResourceManager capacity telemetry.
+
+BLOCKED:
+- #654 active Pause/Resume/Cancel: confirmed PAUSED generation is rewritten by later _finish(PAUSED), breaking explicit terminal Cancel; Worker1 owns narrow repair + unchanged #669 replay.
+- #638 recurrence: historical concurrency race was repaired, but independent audit found missing canonical top-level task_id binding to ScheduledJob authority; Worker1 must bind terminal/missing task truth before recurrence dispatch. Old aacfa252 green is stale after main movement and semantic BLOCK.
+- #672 shared packaged UIA RuntimeId/restart identity remains the Windows package dependency; do not weaken RuntimeId or use Name/HWND/coordinate fallback.
+- live repository governance is administratively disabled regardless of evaluator correctness.
+
+IN_PROGRESS:
+- Worker2 #674 current-main AI/intelligence mode convergence @ `545b4d64468739a799454b837b6c0c920cdcdb37`, fresh Core/M12 queued.
+- Worker3 #677 Scenario-B repair lineage; c0ed-based evidence requires reconvergence after #675. Scenario-A change-detector work is separately claimed on current main.
+- Worker4 #672/#663 Windows/UI/model journey.
+- Worker5 #676 installer exact-current @ `b4f41548221f0af41df85fa64faa4a79f81604fe`: reparse/root/ancestor and guarded rollback defects repaired; fresh Core/M12 queued, non-self audit required.
+- Worker5 #665 governance evaluator exact-current @ `9a1fe70b65a74c20520c64366757cc8f2534c0a3`: active-ruleset bypass, target semantics, slash-safe pattern matching and required-check GitHub-App provenance repaired; fresh Core/M12 queued, non-self audit required.
+- Work #683 final-result projection remains independently owned and exact-current; consume only its current head/gates.
+
+STALE_FROZEN:
+- #660 legacy-data proof waits for #672 shared UIA stabilization; its own old M11 was green and old M12 failed at the shared UIA gate, not legacy-data logic.
+- #670 packaged selected-model runtime waits for shared #672; avoid repeated reconvergence.
+- Any c0ed-based exact-green evidence after main moved to c42 is lineage-only.
+
+NEXT:
+1. Consume first terminal exact-current external candidate with independent audit; guarded merge one at a time.
+2. Repair only concrete #665/#676 CI failures if any; do not self-audit.
+3. Worker1 closes #654/#638; Worker4 closes #672; Worker3 reconverges #677.
+4. After each merge reread main and invalidate stale downstream evidence.
+5. Final V0.1 still needs Scenario A/B, packaged model/recovery, legacy-data/install/update/SBOM/notices/provenance, live governance, one exact Windows candidate, then human Windows/NVDA.
+
+HUMAN_TESTED=false.
+NVDA_VERIFIED=false.
+PRODUCTION_RELEASE_READY=false.
+
+
+## HISTORICAL SUPERSEDED SNAPSHOT — REFRESH — EPOCH-CONTINUOUS-0003 — 2026-09-07T20:44+02:00
+CURRENT_MAIN: `c0ed340c8ee6ddfab011f861f5e6f49017ff5286` (guarded merge #662 release archive/manifest/secret-safety).
+STRATEGY: ONE_CONTINUOUS_FULL_PRODUCT; V0.1 is the nearest acceptance checkpoint, not a separate product.
+LIVE_OVERRIDES_OLDER_SNAPSHOT: true.
+BRANCH_PROTECTION: disabled; required-status enforcement off; this remains a binding release blocker.
+
+### DONE / DO_NOT_REPEAT
+- Integrated: #641 durable batch cursor, #656 checker handoffs, #659 Windows autostart/settings, #651 durable model-selection backend, #662 release archive/manifest/secret-safety.
+- Do not rebuild canonical ModelGateway, scheduler, recovery authority, browser engine, cursor, effect ledger, desktop shell or package manifest verifier.
+
+### IN_PROGRESS / BLOCKED / NEXT
+- Worker1 #654 @ `636b13523f604825f5c7b362bee812a5e114689c`: exact-current but BLOCKED by confirmed PAUSED -> explicit Cancel race; independent Work diagnosis is authoritative. Repair incumbent coordinator only, replay unchanged #669, then fresh Core/M12 + non-self audit.
+- Worker1 #638 @ `aacfa252e3c43a5e48ffceda54abb64755f29880`: exact-current, mergeable, Core 34154413451 SUCCESS + M12 34154413449 SUCCESS. Independent unchanged #664 recurrence-concurrency replay is actively claimed on QA branch; no merge until PASS_CURRENT.
+- Worker3 #677 @ `80a34f22d48a79c909ec73e7016825b0ec2f784e`: exact-current Scenario-B composition; latest restart-wait repair is in fresh qualification; no acceptance credit until terminal gates + independent audit.
+- Worker4 #672: shared packaged UIA RuntimeId resilience remains the Windows package dependency; head is moving under owner repair, so freeze downstream package/UI integration evidence until an exact terminal-green audited head exists.
+- Worker4 #663: accessible packaged provider/model selector remains incumbent UI lineage; exact current head may move while compatibility repairs run.
+- Worker5 #676 @ `4068ca1a1011fdff10d332eb6770ea4532b2d3f2`: installer/update/rollback security blockers repaired (reparse ancestor authority + post-activation rollback); fresh Core/M12 required, then non-self audit.
+- Worker5 #665 @ `e80c9c8118c11ec7177c912cba119c0adc239e48`: exact-current governance evaluator; missing ruleset bypass_actors visibility now fails closed; fresh Core/M12 + non-self audit required. Evaluator does not enable protection.
+- #660 legacy-data package proof is FROZEN_STALE until shared #672 UIA gate integrates; own M11 proof is good but old M12 failed only shared UIA.
+- Worker2 #674 AI/model routing continues in owner lane; current integration credit is blocked until exact current-main compatibility and fresh gates are re-established.
+
+### RELEASE / HUMAN TRUTH
+CURRENT_V01_REMAINING_GATES: durable Pause/Resume/restart/cancel; recurrence/hibernate; exact Scenario B; exact monitoring Scenario A; packaged model UI/runtime composition; startup recovery; legacy-data/install/update/rollback/SBOM/notices/provenance; live governance; one exact Windows candidate; human Windows/NVDA protocol.
+HUMAN_TESTED=false.
+NVDA_VERIFIED=false.
+PRODUCTION_RELEASE_READY=false.
+
+### NEXT ROUTING
+1. Consume independent #638 recurrence replay. PASS -> final exact reread and one guarded merge; BLOCK -> route exact defect to Worker1.
+2. Consume fresh #676/#665 qualification while #638 audit runs; never self-audit Worker5-authored candidates.
+3. Consume #672 exact terminal Windows package evidence before reconverging UI/package dependents.
+4. Keep #654 as earliest runtime blocker and #677 as browser composition blocker; do not duplicate owners.
+5. After every merge reread main and invalidate stale exact-base evidence.
+
+
+## HISTORICAL SUPERSEDED SNAPSHOT — REFRESH — EPOCH-CONTINUOUS-0002 — 2026-09-07
+CURRENT_MAIN: `c0ed340c8ee6ddfab011f861f5e6f49017ff5286` (merged independently audited #662 release archive/manifest/secret-safety).
+LIVE_OVERRIDES_OLDER_SNAPSHOT: true.
+BRANCH_PROTECTION: disabled; required-status enforcement off; release blocker.
+DONE_DO_NOT_REPEAT: #641 durable batch cursor; #656 checker handoffs; #659 Windows autostart/settings; #651 durable model selection backend; #662 archive/manifest/secret-safety.
+IN_PROGRESS: #654 Worker1 Pause/Resume/Cancel; #638 Worker1 recurrence; #674 Worker2 intelligence/model routing; #677 Worker3 exact Scenario-B composition; #663/#672 Worker4 Windows journey/shared UIA; #676 Worker5 install/update/rollback; #665 Worker5 governance evaluator.
+BLOCKED: #654 current-main head `636b13523f604825f5c7b362bee812a5e114689c` has authoritative Core RED on confirmed user-Pause generation vs later _finish(PAUSED) rewrite; Worker1 owns repair and unchanged #669 replay. #672 shared packaged UIA is requalifying a read-only Observe/fresh semantic identity repair. Live governance is still administratively disabled.
+NEXT_INTEGRATION_RULE: merge one unchanged exact-current production head only after all binding gates and independent same-head audit; QA_ONLY never merges; after merge reread main and invalidate stale evidence.
+PACKAGE_FRONT: #676 exact head `0482f59ce1b15ddc25288bf5069c4972da37d00d` repairs installer directory/reparse control flow and is in fresh Core/M12; #665 Core green/M12 pending; #660 and SBOM/provenance lineages remain separate ownership/collision checks.
+HUMAN_TESTED=false.
+NVDA_VERIFIED=false.
+PRODUCTION_RELEASE_READY=false.
+
+
+EPOCH: EPOCH-CONTINUOUS-0001
 STATUS: ACTIVE
-LAST_GLOBAL_AUDIT: bootstrap-required
-NEXT_AUDIT_RULE: first available coordinator/worker performs immediate full audit; after that, first eligible worker after >=6h since last valid audit
+STRATEGY: ONE_CONTINUOUS_FULL_PRODUCT
+STARTING_MAIN: 7e8be7cb7ed3b62f55b1b9f5971bc45514427160
+SOURCE_OF_TRUTH: live GitHub main/exact candidate heads/reviews/Actions > this file > Issue #553 ownership stream > Drive mirror > prompt snapshots
 
-## Mandatory first-run bootstrap audit
+## Core strategy
+Nika Core is one continuously developed Full Product. V0.1, V0.2 and later labels are acceptance checkpoints, not separate projects. Passing a checkpoint never stops development and never authorizes reimplementation of working components.
 
-Before the coordinator establishes or changes worker directions, it MUST compare the newest durable project evidence and reconstruct the actual current Nika state. The first run is not allowed to assume that yesterday's worker prompts remain correct.
+Primary optimization question:
+**What most shortens the path to complete Full Nika while preserving the nearest acceptance checkpoint?**
 
-First-run audit must inspect, at minimum:
+Nearest checkpoint is V0.1. It remains binding so the project does not accumulate hundreds of unverified features.
 
-- current integrated product state;
-- newest completed and still-active development work;
-- current automated test/runtime evidence;
-- current Windows/NVDA/release readiness;
-- active ownership and collisions;
-- latest durable GitHub reports/control files;
-- relevant current Google Drive master reports when accessible;
-- work completed by recent Work/Codex Cloud runs that may have invalidated old scheduled-worker assignments.
+## Mandatory cycle bootstrap
+Every Worker, Work and Codex run must first read live main, AGENTS.md, MASTER_SPEC, ROADMAP, REUSE_CATALOG when present, ACCEPTANCE_GATES, PROJECT_STATUS, PARALLEL_EXECUTION_BOARD, this routing file, newest Issue #553 checkpoints, active owners/claims, open PRs/reviews, exact Actions and last exact green main.
 
-The coordinator classifies each worker assignment as:
+Then classify each relevant component/previous assignment:
+- DONE
+- IN_PROGRESS
+- STALE
+- BLOCKED
+- NEXT
+- DO_NOT_REPEAT
 
-- KEEP — still current and valuable;
-- CHANGE — same lane, but next target changed;
-- STOP_STALE — already completed, superseded or no longer useful;
-- COLLISION — another worker/Codex already owns it;
-- PROMOTE — newly critical because the product state changed.
+One production writer per semantic slice. Reuse incumbent lineage. Shared contract edit requires an explicit compatibility decision. REUSE -> ADAPT -> CUSTOM(thin). GitHub live truth overrides stale routing.
 
-Only after that comparison may the coordinator publish the new routing epoch.
+## Current exact truth
+At this routing publication base, live main is `7e8be7cb7ed3b62f55b1b9f5971bc45514427160`.
+Core CI and M12 Pre-Human Release Gate are green on that exact main.
+HUMAN_TESTED=false.
+NVDA_VERIFIED=false.
+PRODUCTION_RELEASE_READY=false.
 
-## Operating rule
+Integrated/do-not-repeat foundation includes packaged three-agent execution, source setup, local/API ModelGateway, checker handoffs, durable provider/model selection backend, offline/reconnect and uncertain-effect safety, semantic browser stale-DOM/frame protection, durable batch cursor, Windows autostart backend + visible settings, canonical per-user data/recovery foundations.
 
-All recurring workers, Codex Cloud runs and Work integrators must read this file plus live project state before substantive work. Live project evidence overrides stale text here.
+## Nearest V0.1 remaining gates
+1. Durable active Pause/Resume and restart/recovery truth. Incumbent #654 remains Worker1-owned; its newest repair addresses the independent successful-Pause return-boundary crash finding, but acceptance still requires fresh exact-head gates and non-self same-head audit.
+2. Packaged startup recovery before shell exposure. Fresh current-main QA #652 proves scripts/nika_windows.py currently launches the shell without composing canonical RuntimeRecoveryService inventory/reconciliation. Repair must REUSE existing recovery authority and coordinate with current #663 launcher ownership or its immediate successor.
+3. Recurrence/hibernate/missed-run lifecycle on current main.
+4. One complete current-main browser Scenario B.
+5. One complete current-main monitoring Scenario A.
+6. User-visible packaged provider/model selector over the already-integrated canonical backend; #663 is the incumbent Windows lineage and prior-head evidence is stale after each repair.
+7. Exact package/install/update/legacy-data/recovery/SBOM/notices/provenance qualification. #657 is superseded by current-main #660.
+8. Binding repository governance; branch protection/required-status enforcement is currently disabled.
+9. One exact Windows release candidate.
+10. Human Windows/NVDA protocol after PRE_HUMAN_READY only.
 
-No worker may keep implementing an already-completed component merely because an old Scheduled Task prompt names it. Stable prompts define home lanes and startup procedure; this routing file defines the current target.
+Avoid cosmetic V0.1-only polish that final-product work will replace.
 
-## Default worker lanes
+## Parallel Full Product rule
+Safe independent Full Product work may proceed now only when:
+- current ownership is disjoint;
+- contracts are sufficiently stable;
+- no current V0.1 gate is delayed;
+- the work remains useful after the checkpoint;
+- no second framework/authority is created.
 
-- Worker 1: runtime/task continuity/offline-reconnect.
-- Worker 2: ModelGateway/local/API integration.
-- Worker 3: browser/batch/monitoring execution.
-- Worker 4: accessibility/Windows/package/QA.
-- Worker 5: integration/release/ownership; perform global routing audit only when >=6h has elapsed since the last valid audit, otherwise continue integration work.
+After V0.1 passes, immediately continue the same codebase without waiting for Oleksii and without launching a separate V0.2 project.
 
-These are stable home lanes, not permanent exact tasks. The coordinator may re-route when the V0.1 critical path changes.
+Dependency-priority graph:
+`runtime/durability -> AI/model layer -> browser/tools -> agent autonomy -> memory -> voice/perception -> resource governor -> background life -> learning/self-improvement integration -> phone/multimodal surfaces -> full Windows/NVDA product journey -> final packaging/release`.
 
-## Current global priority
+This graph guides priority, not artificial sequential phases; independent nodes may proceed in parallel.
 
-Finish the first genuinely usable Windows/NVDA V0.1. Avoid large unrelated feature expansion until the remaining end-to-end runtime, reconnect, batch/monitoring, packaging and human accessibility gates are closed.
+## Worker 1 — Runtime + Audit
+Nearest checkpoint: runtime durability, Pause/Resume, restart/recovery, recurrence/hibernate, cancellation and reconciliation.
+Audit fail-safe: before new own source mutation, independently review the highest-value OTHER-lane exact-green production leaf waiting only same-head audit. Never self-audit Worker1-authored Stability source. Never merge.
+Parallel/future: resource governor and background-life/runtime durability contracts when disjoint.
 
-When a major V0.1 blocker closes, immediately recompute worker priorities. Workers must move toward the next user-visible missing capability rather than polishing already-terminal infrastructure.
+## Worker 2 — AI Layer
+Nearest checkpoint: keep one canonical ModelGateway path; complete only missing model-choice/runtime/restart seams and narrow backend compatibility requested by Windows lane. Do not rebuild local/API ModelGateway or fork UI/settings.
+Parallel/future: deterministic no-LLM, Foundry/Ollama/cloud parity, model identity/version/license/checksum/resource/cancellation contracts, experiment/benchmark hooks. No silent model download.
 
-## Six-hour meta-audit without losing a worker
+## Worker 3 — Browser + Tools
+Nearest checkpoint: compose Scenario B on one current head, then Scenario A monitoring, reusing current semantic browser, ToolExecutor/effect authority, cursor/batch/readiness/report lineages.
+Read-only JS/CDP/DOM diagnostics are allowed to understand unfamiliar sites but never become mutation authority or bypass approvals/security.
+Parallel/future: controlled tool registry/MCP/capability-gap and agent-autonomy contracts. Never create a second browser/retry/cursor/monitor/effect system.
 
-Do not dedicate one of five workers permanently to coordination.
+## Worker 4 — Windows Journey
+Nearest checkpoint: visible provider/model selector over canonical backend, and canonical startup recovery inventory/reconciliation BEFORE shell exposure, plus truthful task/team lifecycle/recovery, clean package/install/restart, keyboard/UIA evidence and human protocol preparation. Current #663 owns the Windows launcher/UI slice; any startup-recovery repair on scripts/nika_windows.py must be coordinated into that lineage or an immediate successor.
+Parallel/future: integrate memory/voice/multimodal/resource/background status into the Windows journey when those engines are owned elsewhere and contracts are stable. Do not create duplicate backend truth.
 
-Normal rule:
+## Worker 5 — Coordinator + Integrator
+Own guarded integration, package/release/governance, current routing/control and Drive mirror. Merge one production candidate at a time only after exact unchanged head, current base/overlap, required exact-head checks, required independent audit and no authoritative RED. Never self-audit or merge QA_ONLY.
+After every merge or major Work/Codex finding, reread live state and reroute automatically.
 
-`if no valid full audit exists OR now - last_global_audit >= 6h OR major-change-trigger == true: perform audit + refresh routing; then continue productive project work`
+## Work
+Principal cross-system architect/auditor. Highest current use: independent audit of Worker1 Stability candidates and hard release/package/recovery cross-system defects not leased elsewhere. Major Work result triggers immediate routing refresh.
 
-Otherwise:
+## Codex
+Large coherent explicitly unleased implementation/reuse/dependency package. Before work, collision-check Worker1-5 and Work ownership. Persist major-phase checkpoints so another worker can resume after interruption.
 
-`continue normal lane work`
+## Governance
+Release readiness is false while binding branch protection/required checks remain disabled or unproven. Do not weaken acceptance gates to obtain green.
 
-Major-change triggers include:
-
-- a large Work or Codex Cloud package completes;
-- a major integration changes the V0.1 critical path;
-- Windows/NVDA/release readiness changes;
-- a worker finds its assignment already complete;
-- a collision or stale ownership is detected;
-- a major runtime/CI blocker appears or closes;
-- current routing contradicts live evidence.
-
-If the normal coordinator has not refreshed routing for ~8 hours, the first capable worker may perform a failover audit.
-
-## Coordination rule
-
-If a lane is already complete, stale or actively owned elsewhere, re-route to the highest-value unowned blocker instead of continuing yesterday's assignment. Every worker must leave durable progress another worker can recover.
-
-Before taking work, each worker checks current ownership. After taking work, it leaves/refreshes a current ownership marker/checkpoint. Ownership that stops producing evidence must eventually be treated as stale after verification.
-
-## Codex Cloud rule
-
-Codex Cloud must read this routing state and active worker ownership before substantive work.
-
-At start it should:
-
-1. reconstruct newest live Nika state;
-2. identify what the scheduled workers are already expected to do during the next several hours;
-3. choose a disjoint high-value package or intentional cross-lane integration package;
-4. avoid consuming work already delegated to live scheduled workers unless intentionally taking over stale work;
-5. leave durable checkpoints after major completed phases, not only at final shutdown.
-
-When Codex completes a major package, it should refresh routing or leave enough durable evidence for the next coordinator to do so immediately. If credits end abruptly, scheduled workers recover from durable project state rather than waiting for Oleksii.
-
-## Work / principal-auditor rule
-
-A strong Work run is a periodic principal architect/integrator.
-
-At beginning it reads this routing state and current product evidence. It may perform a deeper whole-project audit, correct architectural drift, update priorities, then take a difficult package that does not duplicate active workers.
-
-A major Work result is itself a routing refresh trigger. Scheduled workers waking after it must re-read current evidence and must not continue assignments invalidated by the Work result.
-
-## Coordinator output after every audit
-
-A successful coordination audit must leave a compact durable state containing:
-
-- new EPOCH;
-- audit time;
-- user-visible V0.1 status;
-- what changed since previous audit;
-- what is complete and must not be repeated;
-- top remaining blockers in priority order;
-- Worker 1–5 current targets;
-- Codex Cloud active/next package;
-- Work active/next package;
-- active ownership/collisions;
-- stale work to stop;
-- integration/release queue;
-- Windows/NVDA readiness;
-- next audit rule;
-- short owner-readable Ukrainian summary.
-
-## Failover
-
-If this file is older than the live project, reconstruct routing from current evidence and refresh it. If the normal coordinator misses its run, the first worker seeing routing older than ~8 hours may perform a minimal failover audit.
-
-If Google Drive is unavailable but GitHub is reachable, continue from GitHub. Drive is a cross-account/master mirror, not a single point of failure.
-
-## Core invariant
-
-Oleksii must not have to manually enter a chat merely to say “read the latest reports and update the workers.” The autonomous system itself is responsible for comparing newest evidence, detecting stale directions, refreshing assignments and continuously moving Nika toward the first genuinely usable release.
+## Human truth
+Automated Windows/UIA/package proof may reach PRE_HUMAN_READY only.
+HUMAN_TESTED=false until real human protocol.
+NVDA_VERIFIED=false until real NVDA protocol.
