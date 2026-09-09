@@ -118,6 +118,9 @@ class FileEvidence:
     sha256: str
     size_bytes: int
 
+    def __post_init__(self) -> None:
+        _require_canonical_evidence_path(self.path)
+
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class TreeEvidence:
@@ -135,7 +138,7 @@ class TreeChangeEvidence:
     after_size_bytes: int | None
 
     def __post_init__(self) -> None:
-        normalize_job_relative_path(self.path)
+        _require_canonical_evidence_path(self.path)
         if self.kind not in {"added", "modified", "deleted"}:
             raise WorkspaceSecurityError("tree change kind is invalid")
         if self.kind == "added" and self.before_sha256 is not None:
@@ -244,6 +247,15 @@ def normalize_job_relative_path(value: str) -> pathlib.PurePosixPath:
         raise WorkspaceSecurityError("Windows reserved or trailing-dot/space path is forbidden")
 
     return pathlib.PurePosixPath(*parts)
+
+
+def _require_canonical_evidence_path(value: str) -> pathlib.PurePosixPath:
+    normalized = normalize_job_relative_path(value)
+    if normalized.as_posix() != value:
+        raise WorkspaceSecurityError(
+            "tree evidence path must use canonical POSIX repository spelling"
+        )
+    return normalized
 
 
 def ensure_worker_mutation_path(
@@ -442,7 +454,7 @@ def collect_tree_evidence(
     total_bytes = 0
     for path in sorted(root.rglob("*"), key=lambda item: item.as_posix().casefold()):
         relative = path.relative_to(root).as_posix()
-        normalize_job_relative_path(relative)
+        _require_canonical_evidence_path(relative)
         file_stat = path.lstat()
         if stat.S_ISLNK(file_stat.st_mode) or _is_reparse_point(file_stat):
             raise WorkspaceSecurityError("tree evidence refuses symlinks and reparse points")
@@ -479,6 +491,8 @@ def collect_tree_delta_evidence(
 ) -> TreeDeltaEvidence:
     if max_changed_files <= 0:
         raise WorkspaceSecurityError("changed-file budget must be positive")
+    for item in (*before.files, *after.files):
+        _require_canonical_evidence_path(item.path)
     before_files = {item.path: item for item in before.files}
     after_files = {item.path: item for item in after.files}
     changes: list[TreeChangeEvidence] = []
@@ -487,6 +501,7 @@ def collect_tree_delta_evidence(
         new = after_files.get(path)
         if old == new:
             continue
+        _require_canonical_evidence_path(path)
         ensure_worker_mutation_path(path, allow_control_plane=allow_control_plane)
         if not path_policy.allows(path):
             raise WorkspaceSecurityError(f"worker changed path outside allowed scope: {path}")
