@@ -208,16 +208,23 @@ class DurableDeploymentFabric(DeploymentFabric):
             )
         previous_snapshot = self.snapshot()
         try:
+            environment_key = (
+                record.intent.project_id,
+                record.intent.environment.environment_id,
+            )
             if record.state is DeploymentState.UNCERTAIN:
-                self._current_releases.pop(
-                    (
-                        record.intent.project_id,
-                        record.intent.environment.environment_id,
-                    ),
-                    None,
-                )
+                self._current_releases.pop(environment_key, None)
                 if record.intent.environment.tier is EnvironmentTier.STAGING:
                     self._healthy_staging.pop(record.intent.project_id, None)
+            elif record.state is DeploymentState.ROLLED_BACK:
+                if record.previous_release is None:
+                    self._current_releases.pop(environment_key, None)
+                    if record.intent.environment.tier is EnvironmentTier.STAGING:
+                        self._healthy_staging.pop(record.intent.project_id, None)
+                else:
+                    self._current_releases[environment_key] = record.previous_release
+                    if record.intent.environment.tier is EnvironmentTier.STAGING:
+                        self._healthy_staging[record.intent.project_id] = record.previous_release
             saved = super()._save(record)
             self._deployment_checkpoint_host.save(
                 host_task_id=self._deployment_host_task_id,
