@@ -39,6 +39,23 @@ def test_incomplete_or_read_only_repository_intent_stays_agent_task(command: str
     assert decision.route is CommandRouteKind.AGENT_TASK
 
 
+@pytest.mark.parametrize(
+    "command",
+    (
+        "do not develop issue #654 in repository Oleksii-debug/Nika-Core",
+        "don't implement PR 711 in repo Oleksii-debug/Nika-Core",
+        "never fix issue 654 in repository Oleksii-debug/Nika-Core",
+        "не розроби issue #654 у repository Oleksii-debug/Nika-Core",
+    ),
+)
+def test_negated_repository_development_intent_stays_agent_task(command: str) -> None:
+    decision = route_command(command)
+
+    assert decision.route is CommandRouteKind.AGENT_TASK
+    assert decision.normalized_goal == command
+    assert decision.requires_user_decision is False
+
+
 def test_development_intent_with_toolsmith_request_fails_closed_as_ambiguous() -> None:
     decision = route_command(
         "develop issue #654 in repository Oleksii-debug/Nika-Core and add plugin tool"
