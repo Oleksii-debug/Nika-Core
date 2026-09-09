@@ -77,6 +77,6 @@ def test_restart_rejects_healthy_snapshot_without_exact_health_release() -> None
 
     with pytest.raises(
         DeploymentFabricError,
-        match="snapshot health exact release",
+        match="snapshot health evidence requires exact release identity",
     ):
         DeploymentFabric(_NoopProvider()).restore(snapshot)
