@@ -70,17 +70,6 @@ class CandidateVerification:
         object.__setattr__(self, "state", state)
         object.__setattr__(self, "evidence_refs", evidence_refs)
 
-    @classmethod
-    def _classified_pass(
-        cls, candidate_sha: str, evidence_refs: tuple[str, ...]
-    ) -> CandidateVerification:
-        _validate_candidate_verification(candidate_sha, VerificationState.PASS, evidence_refs)
-        result = object.__new__(cls)
-        object.__setattr__(result, "candidate_sha", candidate_sha)
-        object.__setattr__(result, "state", VerificationState.PASS)
-        object.__setattr__(result, "evidence_refs", evidence_refs)
-        return result
-
     @property
     def merge_clearance(self) -> bool:
         """Verification can only clear its own exact head after all required checks pass."""
@@ -141,7 +130,13 @@ def classify_candidate_verification(
         return CandidateVerification(candidate_sha, VerificationState.RUNNING, refs)
     if any(item.state is CheckState.UNKNOWN for item in required):
         return CandidateVerification(candidate_sha, VerificationState.UNKNOWN, refs)
-    return CandidateVerification._classified_pass(candidate_sha, refs)
+
+    _validate_candidate_verification(candidate_sha, VerificationState.PASS, refs)
+    result = object.__new__(CandidateVerification)
+    object.__setattr__(result, "candidate_sha", candidate_sha)
+    object.__setattr__(result, "state", VerificationState.PASS)
+    object.__setattr__(result, "evidence_refs", refs)
+    return result
 
 
 def _validate_candidate_verification(
