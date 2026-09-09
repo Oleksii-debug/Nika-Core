@@ -9,6 +9,7 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.checkpoint import CheckpointService
 from nika_core.product_factory_deployment import (
     DeploymentFabric,
+    DeploymentFabricError,
     DeploymentFabricSnapshot,
     DeploymentIntent,
     DeploymentProviderPort,
@@ -200,6 +201,106 @@ class DurableDeploymentFabric(DeploymentFabric):
         self._deployment_checkpoint_host = checkpoint_host
         self._deployment_host_task_id = host_task_id
         self._deployment_project_id = project_id
+
+    def _finish_health(
+        self, record: DeploymentRecord, health: HealthEvidence
+    ) -> DeploymentRecord:
+        intent = record.intent
+        rollback_exact = getattr(self.provider, "rollback_exact", None)
+        exact_unhealthy = (
+            not health.healthy
+            and health.environment_id == intent.environment.environment_id
+            and health.release_sha == intent.release.source_sha
+            and health.release == intent.release
+        )
+        rollback_can_dispatch = (
+            record.previous_release is None or callable(rollback_exact)
+        )
+        if exact_unhealthy and rollback_can_dispatch:
+            record = self._save(
+                DeploymentRecord(
+                    intent,
+                    DeploymentState.UNCERTAIN,
+                    record.provider_evidence_refs,
+                    health=health,
+                    previous_release_sha=record.previous_release_sha,
+                    previous_release=record.previous_release,
+                )
+            )
+        return super()._finish_health(record, health)
+
+    def _mark_uncertain(
+        self,
+        record: DeploymentRecord,
+        evidence_refs: tuple[str, ...] = (),
+    ) -> DeploymentRecord:
+        if record.intent.environment.tier is EnvironmentTier.STAGING:
+            self._healthy_staging.pop(record.intent.project_id, None)
+        return self._save(
+            DeploymentRecord(
+                record.intent,
+                DeploymentState.UNCERTAIN,
+                record.provider_evidence_refs + evidence_refs,
+                health=record.health,
+                previous_release_sha=record.previous_release_sha,
+                previous_release=record.previous_release,
+            )
+        )
+
+    def reconcile(self, intent_id: str) -> DeploymentRecord:
+        record = self._record(intent_id)
+        previous = record.previous_release
+        if not (
+            record.state is DeploymentState.UNCERTAIN
+            and record.health is not None
+            and not record.health.healthy
+            and previous is not None
+        ):
+            return super().reconcile(intent_id)
+
+        inspection = self.provider.inspect(record.intent)
+        if not inspection.evidence_refs:
+            raise DeploymentFabricError("provider inspection requires evidence refs")
+        if (
+            inspection.release_sha == previous.source_sha
+            and inspection.release == previous
+            and inspection.healthy is True
+        ):
+            rollback = RollbackEvidence(
+                record.intent.environment.environment_id,
+                record.intent.release.source_sha,
+                previous.source_sha,
+                True,
+                inspection.evidence_refs,
+                failed_release=record.intent.release,
+                restored_release=previous,
+            )
+            return self._save(
+                DeploymentRecord(
+                    record.intent,
+                    DeploymentState.ROLLED_BACK,
+                    record.provider_evidence_refs + inspection.evidence_refs,
+                    health=record.health,
+                    rollback=rollback,
+                    previous_release_sha=record.previous_release_sha,
+                    previous_release=previous,
+                )
+            )
+
+        uncertain = self._mark_uncertain(record, inspection.evidence_refs)
+        if inspection.release_sha is None:
+            raise DeploymentFabricError(
+                "provider inspection did not prove restored previous release"
+            )
+        if inspection.release is None:
+            raise DeploymentFabricError(
+                "provider inspection requires exact release identity for rollback reconciliation"
+            )
+        if inspection.release != previous or inspection.release_sha != previous.source_sha:
+            raise DeploymentFabricError(
+                "provider reports a different release for rollback reconciliation"
+            )
+        return uncertain
 
     def _save(self, record: DeploymentRecord) -> DeploymentRecord:
         if record.intent.project_id != self._deployment_project_id:
