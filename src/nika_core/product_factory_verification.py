@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 MAX_EVIDENCE_REF_LENGTH = 512
+PRODUCT_FACTORY_REQUIRED_CHECK_IDS = ("core", "factory")
 
 
 class VerificationError(ValueError):
@@ -84,11 +85,14 @@ def classify_candidate_verification(
 ) -> CandidateVerification:
     """Classify bounded CI/test evidence without transferring clearance across SHAs.
 
-    The caller supplies the authoritative required-check identity set. Missing required evidence
-    remains UNKNOWN, so a partial observation set can never become merge clearance.
+    Product Factory clearance is bound to the canonical required-check profile. Callers may
+    provide that profile explicitly for adapter compatibility, but may not omit or substitute
+    gates. Missing required evidence remains UNKNOWN, so partial observations never clear merge.
     """
 
     _validate_sha(candidate_sha)
+    if not isinstance(evidence, tuple):
+        raise VerificationError("verification evidence must be a tuple")
     _validate_required_check_ids(required_check_ids)
 
     if any(not isinstance(item, ExactShaCheckEvidence) for item in evidence):
@@ -123,6 +127,7 @@ def classify_candidate_verification(
     if unexpected_required:
         raise VerificationError("required verification check id is not authoritative")
 
+    _validate_authoritative_required_profile(required_check_ids)
     required = tuple(evidence_by_check[check_id] for check_id in required_check_ids)
     if any(item.state is CheckState.FAIL for item in required):
         return CandidateVerification(candidate_sha, VerificationState.FAIL, refs)
@@ -147,6 +152,8 @@ def _validate_candidate_verification(
     _validate_sha(candidate_sha)
     if not isinstance(state, VerificationState):
         raise VerificationError("verification state must be a VerificationState")
+    if not isinstance(evidence_refs, tuple):
+        raise VerificationError("verification evidence refs must be a tuple")
     if any(not isinstance(ref, str) or not ref.strip() for ref in evidence_refs):
         raise VerificationError("verification evidence refs must be non-empty text")
     for ref in evidence_refs:
@@ -156,12 +163,19 @@ def _validate_candidate_verification(
 
 
 def _validate_required_check_ids(required_check_ids: tuple[str, ...]) -> None:
+    if not isinstance(required_check_ids, tuple):
+        raise VerificationError("required check ids must be a tuple")
     if not required_check_ids:
         raise VerificationError("required check ids must not be empty")
     if any(not isinstance(check_id, str) or not check_id.strip() for check_id in required_check_ids):
         raise VerificationError("required check ids must be non-empty text")
     if len(required_check_ids) != len(set(required_check_ids)):
         raise VerificationError("required check ids must be unique")
+
+
+def _validate_authoritative_required_profile(required_check_ids: tuple[str, ...]) -> None:
+    if required_check_ids != PRODUCT_FACTORY_REQUIRED_CHECK_IDS:
+        raise VerificationError("required check ids must match authoritative Product Factory profile")
 
 
 def _validate_evidence_ref(value: str) -> None:

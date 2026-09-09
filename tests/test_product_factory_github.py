@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +18,7 @@ from nika_core.product_factory_github import (
 )
 from nika_core.product_factory_orchestration import RepositoryRef
 from nika_core.product_factory_verification import (
+    PRODUCT_FACTORY_REQUIRED_CHECK_IDS,
     VerificationState,
     classify_candidate_verification,
 )
@@ -57,18 +59,18 @@ def _observation(**overrides: object) -> GitHubRepositoryObservation:
         ),
         "checks": (
             GitHubCheck(
-                check_id="core-ubuntu",
-                name="Core Ubuntu",
+                check_id="core",
+                name="Core CI",
                 head_sha=CANDIDATE_SHA,
                 state=CheckState.PASS,
-                evidence_ref="actions:run/core-ubuntu",
+                evidence_ref="actions:run/core",
             ),
             GitHubCheck(
-                check_id="core-windows",
-                name="Core Windows",
+                check_id="factory",
+                name="Product Factory acceptance",
                 head_sha=CANDIDATE_SHA,
                 state=CheckState.PASS,
-                evidence_ref="actions:run/core-windows",
+                evidence_ref="actions:run/factory",
             ),
         ),
     }
@@ -87,12 +89,12 @@ def test_binds_exact_repository_candidate_pr_and_checks() -> None:
     assert binding.pull_request_number == 720
     assert binding.checks_state is CheckState.PASS
     assert tuple(item.check_id for item in binding.check_evidence) == (
-        "core-ubuntu",
-        "core-windows",
+        "core",
+        "factory",
     )
     assert tuple(item.evidence_ref for item in binding.check_evidence) == (
-        "actions:run/core-ubuntu",
-        "actions:run/core-windows",
+        "actions:run/core",
+        "actions:run/factory",
     )
     assert all(item.required is False for item in binding.check_evidence)
     assert binding.integrated is False
@@ -133,18 +135,18 @@ def test_rejects_stale_pr_base_sha_even_when_branch_name_matches() -> None:
 def test_rejects_mixed_sha_checks() -> None:
     checks = (
         GitHubCheck(
-            check_id="core-ubuntu",
+            check_id="core",
             name="Core Ubuntu",
             head_sha=CANDIDATE_SHA,
             state=CheckState.PASS,
-            evidence_ref="actions:run/core-ubuntu",
+            evidence_ref="actions:run/core",
         ),
         GitHubCheck(
-            check_id="core-windows",
+            check_id="factory",
             name="Core Windows",
             head_sha="5" * 40,
             state=CheckState.PASS,
-            evidence_ref="actions:run/core-windows",
+            evidence_ref="actions:run/factory",
         ),
     )
     with pytest.raises(GitHubFactoryError, match="exact candidate sha"):
@@ -154,29 +156,29 @@ def test_rejects_mixed_sha_checks() -> None:
 def test_unknown_check_state_fails_closed() -> None:
     with pytest.raises(GitHubFactoryError, match="recognized CheckState"):
         GitHubCheck(
-            check_id="core-ubuntu",
+            check_id="core",
             name="Core Ubuntu",
             head_sha=CANDIDATE_SHA,
             state="unknown",  # type: ignore[arg-type]
-            evidence_ref="actions:run/core-ubuntu",
+            evidence_ref="actions:run/core",
         )
 
 
 def test_failed_check_prevents_green_projection() -> None:
     checks = (
         GitHubCheck(
-            check_id="core-ubuntu",
+            check_id="core",
             name="Core Ubuntu",
             head_sha=CANDIDATE_SHA,
             state=CheckState.PASS,
-            evidence_ref="actions:run/core-ubuntu",
+            evidence_ref="actions:run/core",
         ),
         GitHubCheck(
-            check_id="core-windows",
+            check_id="factory",
             name="Core Windows",
             head_sha=CANDIDATE_SHA,
             state=CheckState.FAIL,
-            evidence_ref="actions:run/core-windows",
+            evidence_ref="actions:run/factory",
         ),
     )
     binding = GitHubFactoryAdapter().bind(_repository(), _observation(checks=checks))
@@ -186,18 +188,18 @@ def test_failed_check_prevents_green_projection() -> None:
 def test_pending_check_prevents_green_projection() -> None:
     checks = (
         GitHubCheck(
-            check_id="core-ubuntu",
+            check_id="core",
             name="Core Ubuntu",
             head_sha=CANDIDATE_SHA,
             state=CheckState.PASS,
-            evidence_ref="actions:run/core-ubuntu",
+            evidence_ref="actions:run/core",
         ),
         GitHubCheck(
-            check_id="core-windows",
+            check_id="factory",
             name="Core Windows",
             head_sha=CANDIDATE_SHA,
             state=CheckState.PENDING,
-            evidence_ref="actions:run/core-windows",
+            evidence_ref="actions:run/factory",
         ),
     )
     binding = GitHubFactoryAdapter().bind(_repository(), _observation(checks=checks))
@@ -210,13 +212,61 @@ def test_merged_pr_projects_exact_integration_identity() -> None:
         head_branch="automation/dev04",
         head_sha=CANDIDATE_SHA,
         base_branch="main",
-        base_sha=MAIN_SHA,
+        base_sha="4" * 40,
         state=PullRequestState.MERGED,
         merge_sha=MERGE_SHA,
     )
-    binding = GitHubFactoryAdapter().bind(_repository(), _observation(pull_request=merged_pr))
+    binding = GitHubFactoryAdapter().bind(
+        _repository(),
+        _observation(
+            pull_request=merged_pr,
+            default_branch_ancestor_shas=(MERGE_SHA,),
+        ),
+    )
     assert binding.integrated is True
     assert binding.integration_sha == MERGE_SHA
+    assert binding.default_branch_ancestor_shas == (MERGE_SHA,)
+
+
+def test_merged_pr_requires_merge_commit_in_default_branch_history() -> None:
+    merged_pr = GitHubPullRequest(
+        number=720,
+        head_branch="automation/dev04",
+        head_sha=CANDIDATE_SHA,
+        base_branch="main",
+        base_sha="4" * 40,
+        state=PullRequestState.MERGED,
+        merge_sha=MERGE_SHA,
+    )
+
+    with pytest.raises(GitHubFactoryError, match="not contained"):
+        GitHubFactoryAdapter().bind(_repository(), _observation(pull_request=merged_pr))
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("issue", {"number": 553, "state": "open"}, "GitHubIssueRef"),
+        (
+            "pull_request",
+            SimpleNamespace(
+                number=720,
+                head_branch="automation/dev04",
+                head_sha=CANDIDATE_SHA,
+                base_branch="main",
+                base_sha=MAIN_SHA,
+                state=PullRequestState.MERGED,
+                merge_sha=MERGE_SHA,
+            ),
+            "GitHubPullRequest",
+        ),
+    ],
+)
+def test_nested_github_authority_requires_canonical_types(
+    field: str, value: object, message: str
+) -> None:
+    with pytest.raises(GitHubFactoryError, match=message):
+        _observation(**{field: value})
 
 
 def test_credentials_remain_opaque_repository_metadata() -> None:
@@ -254,12 +304,12 @@ def test_restart_replay_preserves_distinct_check_identity_and_provenance() -> No
     binding = GitHubFactoryAdapter().bind(_repository(), _observation(checks=restored))
 
     assert tuple(item.check_id for item in binding.check_evidence) == (
-        "core-ubuntu",
-        "core-windows",
+        "core",
+        "factory",
     )
     assert tuple(item.evidence_ref for item in binding.check_evidence) == (
-        "actions:run/core-ubuntu",
-        "actions:run/core-windows",
+        "actions:run/core",
+        "actions:run/factory",
     )
 
 
@@ -272,7 +322,7 @@ def test_missing_or_substituted_required_check_cannot_project_pass() -> None:
     result = classify_candidate_verification(
         CANDIDATE_SHA,
         binding.check_evidence,
-        required_check_ids=("core-ubuntu", "core-windows"),
+        required_check_ids=PRODUCT_FACTORY_REQUIRED_CHECK_IDS,
     )
 
     assert result.state is VerificationState.UNKNOWN

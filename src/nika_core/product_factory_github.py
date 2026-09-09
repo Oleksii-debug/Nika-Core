@@ -112,6 +112,7 @@ class GitHubRepositoryObservation:
     candidate_sha: str | None = None
     pull_request: GitHubPullRequest | None = None
     checks: tuple[GitHubCheck, ...] = ()
+    default_branch_ancestor_shas: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -124,6 +125,16 @@ class GitHubRepositoryObservation:
         ):
             raise GitHubFactoryError("repository identity must not be empty")
         _validate_sha(self.default_branch_sha, "default branch sha")
+        if not isinstance(self.default_branch_ancestor_shas, tuple):
+            raise GitHubFactoryError("default branch ancestor shas must be a tuple")
+        for ancestor_sha in self.default_branch_ancestor_shas:
+            _validate_sha(ancestor_sha, "default branch ancestor sha")
+        if len(self.default_branch_ancestor_shas) != len(set(self.default_branch_ancestor_shas)):
+            raise GitHubFactoryError("default branch ancestor shas must be unique")
+        if self.issue is not None and type(self.issue) is not GitHubIssueRef:
+            raise GitHubFactoryError("issue must be GitHubIssueRef evidence")
+        if self.pull_request is not None and type(self.pull_request) is not GitHubPullRequest:
+            raise GitHubFactoryError("pull request must be GitHubPullRequest evidence")
         if (self.candidate_branch is None) != (self.candidate_sha is None):
             raise GitHubFactoryError("candidate branch and sha must be present together")
         if self.candidate_branch is not None:
@@ -131,7 +142,7 @@ class GitHubRepositoryObservation:
                 raise GitHubFactoryError("candidate branch must not be empty")
             _validate_sha(self.candidate_sha or "", "candidate sha")
         if not isinstance(self.checks, tuple) or any(
-            not isinstance(check, GitHubCheck) for check in self.checks
+            type(check) is not GitHubCheck for check in self.checks
         ):
             raise GitHubFactoryError("checks must contain GitHubCheck evidence")
         check_ids = [check.check_id for check in self.checks]
@@ -148,6 +159,7 @@ class GitHubFactoryBinding:
     repository_full_name: str
     default_branch: str
     default_branch_sha: str
+    default_branch_ancestor_shas: tuple[str, ...]
     issue_number: int | None
     candidate_branch: str | None
     candidate_sha: str | None
@@ -186,7 +198,15 @@ class GitHubFactoryAdapter:
                 raise GitHubFactoryError("pull request head does not match candidate identity")
             if pr.base_branch != observation.default_branch:
                 raise GitHubFactoryError("pull request base does not match default branch")
-            if pr.base_sha != observation.default_branch_sha:
+            if pr.state is PullRequestState.MERGED:
+                if pr.merge_sha not in {
+                    observation.default_branch_sha,
+                    *observation.default_branch_ancestor_shas,
+                }:
+                    raise GitHubFactoryError(
+                        "pull request merge sha is not contained in default branch history"
+                    )
+            elif pr.base_sha != observation.default_branch_sha:
                 raise GitHubFactoryError("pull request base sha does not match default branch sha")
 
         checks_state: CheckState | None = None
@@ -223,6 +243,7 @@ class GitHubFactoryAdapter:
             repository_full_name=observed,
             default_branch=observation.default_branch,
             default_branch_sha=observation.default_branch_sha,
+            default_branch_ancestor_shas=observation.default_branch_ancestor_shas,
             issue_number=observation.issue.number if observation.issue is not None else None,
             candidate_branch=candidate_branch,
             candidate_sha=candidate_sha,
