@@ -186,9 +186,13 @@ def _next_action(
     build = _first_incomplete(build_entries)
     if build is not None:
         return f"test:{build.item_id}={build.state}"
+    if component_entries and not build_entries and not qa_entries:
+        return "test:not_started"
     qa = _first_incomplete(qa_entries)
     if qa is not None:
         return f"qa:{qa.item_id}={qa.state}"
+    if build_entries and not qa_entries:
+        return "qa:not_started"
     integration = _first_incomplete(integration_entries)
     if integration is not None:
         return f"integration:{integration.item_id}={integration.state}"
