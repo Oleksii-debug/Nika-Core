@@ -131,7 +131,22 @@ class CandidateReviewRecord:
         reviewer_authority: ReviewerAuthorityEvidence | None = None,
         verdict: ReviewVerdict | None = None,
     ) -> CandidateReviewRecord:
-        """Build a validated non-initial state only from canonical transition methods."""
+        """Reject direct construction outside the canonical transition surface."""
+        raise ReviewPipelineError(
+            "direct review-state construction is forbidden; use canonical transitions"
+        )
+
+    @classmethod
+    def __from_transition(
+        cls,
+        identity: CandidateReviewIdentity,
+        state: ReviewState,
+        *,
+        reviewer_id: str | None = None,
+        reviewer_authority: ReviewerAuthorityEvidence | None = None,
+        verdict: ReviewVerdict | None = None,
+    ) -> CandidateReviewRecord:
+        """Build a validated non-initial state for canonical lifecycle methods and restore."""
         if not isinstance(identity, CandidateReviewIdentity):
             raise ReviewPipelineError("review record requires a canonical candidate identity")
         if not isinstance(state, ReviewState):
@@ -171,7 +186,7 @@ class CandidateReviewRecord:
             if verdict_raw is not None:
                 verdict_raw["evidence_refs"] = tuple(verdict_raw["evidence_refs"])
                 verdict = ReviewVerdict(**verdict_raw)
-            record = cls._from_transition(
+            record = cls.__from_transition(
                 identity=identity,
                 state=ReviewState(raw["state"]),
                 reviewer_id=raw.get("reviewer_id"),
@@ -190,12 +205,12 @@ class CandidateReviewRecord:
 
     def require_review(self) -> CandidateReviewRecord:
         self._require_state(ReviewState.IMPLEMENTED)
-        return self._from_transition(self.identity, ReviewState.REVIEW_REQUIRED)
+        return self.__from_transition(self.identity, ReviewState.REVIEW_REQUIRED)
 
     def queue_qa(self, *, authority: TrustedReviewerAuthority) -> CandidateReviewRecord:
         self._require_state(ReviewState.REVIEW_REQUIRED)
         evidence = self._validate_authority(authority)
-        return self._from_transition(
+        return self.__from_transition(
             self.identity,
             ReviewState.QA_PENDING,
             reviewer_id=evidence.reviewer_id,
@@ -205,7 +220,7 @@ class CandidateReviewRecord:
     def start_qa(self, *, reviewer_id: str) -> CandidateReviewRecord:
         self._require_state(ReviewState.QA_PENDING)
         self._require_assigned_reviewer(reviewer_id)
-        return self._from_transition(
+        return self.__from_transition(
             self.identity,
             ReviewState.QA_RUNNING,
             reviewer_id=self.reviewer_id,
@@ -225,7 +240,7 @@ class CandidateReviewRecord:
         self._require_candidate(candidate_sha)
         self._require_assigned_reviewer(reviewer_id)
         verdict = ReviewVerdict(candidate_sha, reviewer_id, accepted, reason, evidence_refs)
-        return self._from_transition(
+        return self.__from_transition(
             self.identity,
             ReviewState.PASS if accepted else ReviewState.FAIL,
             reviewer_id=reviewer_id,
@@ -242,7 +257,7 @@ class CandidateReviewRecord:
         self._require_state(ReviewState.PASS)
         self._require_candidate(candidate_sha)
         self._validate_merge_clearance(verification)
-        return self._from_transition(
+        return self.__from_transition(
             self.identity,
             ReviewState.MERGE_READY,
             reviewer_id=self.reviewer_id,
@@ -253,7 +268,7 @@ class CandidateReviewRecord:
     def require_fix(self, *, candidate_sha: str) -> CandidateReviewRecord:
         self._require_state(ReviewState.FAIL)
         self._require_candidate(candidate_sha)
-        return self._from_transition(
+        return self.__from_transition(
             self.identity,
             ReviewState.FIX_REQUIRED,
             reviewer_id=self.reviewer_id,
