@@ -204,6 +204,8 @@ def _next_action(
     integration = _first_incomplete(integration_entries)
     if integration is not None:
         return f"integration:{integration.item_id}={integration.state}"
+    if qa_entries and not integration_entries:
+        return "integration:not_started"
     if component_entries:
         return "next_work"
     return "inspect_project"
