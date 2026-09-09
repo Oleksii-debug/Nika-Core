@@ -37,6 +37,7 @@ _FORM_ROLES: Final = frozenset(
     {"checkbox", "combobox", "listbox", "searchbox", "slider", "spinbutton", "textbox"}
 )
 _NON_CONTROL_SNAPSHOT_ROLES: Final = frozenset({"text"})
+_MAX_ACTION_DOWNLOADS: Final = 100
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,9 +127,18 @@ class DownloadBroker:
     def complete_since(self, page: Any, checkpoint: int) -> bool:
         """Join only downloads observed for the invoking page after its action boundary."""
         completed = False
-        for record in self._captured[checkpoint:]:
+        index = checkpoint
+        action_downloads = 0
+        # save_as pumps Playwright events, which can append further downloads. Drain that live
+        # queue instead of a slice, but fail closed on an unbounded download-producing action.
+        while index < len(self._captured):
+            record = self._captured[index]
+            index += 1
             if record.page is not page:
                 continue
+            action_downloads += 1
+            if action_downloads > _MAX_ACTION_DOWNLOADS:
+                raise UnsupportedInteractionError("action exceeded the download limit")
             if record.failed:
                 raise UnsupportedInteractionError("download could not be saved")
             if not record.saved:

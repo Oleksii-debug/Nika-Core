@@ -63,11 +63,13 @@ class _Download:
         self.suggested_filename = "доказ.txt"
         self.fails = fails
         self.attempts = 0
+        self.on_save = lambda: None
 
     def save_as(self, destination: str) -> None:
         self.attempts += 1
         assert not self.context.in_download_callback, "save must join the caller's control flow"
         assert not self.context.closed, "save must finish before browser teardown"
+        self.on_save()
         if self.fails:
             raise RuntimeError("download canceled: PRIVATE_URL_CANARY")
         Path(destination).write_text("complete UTF-8 evidence", encoding="utf-8")
@@ -172,3 +174,36 @@ def test_previous_action_download_cannot_verify_a_later_action(browser: Any) -> 
     _invoke(browser)
     assert not _verify(browser)
     assert download.attempts == 1
+
+
+@pytest.mark.parametrize("changed", ["none", "revision", "navigation"])
+def test_download_arriving_during_save_is_joined_before_success(browser: Any, changed: str) -> None:
+    first = _Download(browser.context, browser.page)
+    second = _Download(browser.context, browser.page, fails=True)
+    first.on_save = lambda: browser.context.emit_download(second)
+    browser.state.on_click = lambda: browser.context.emit_download(first)
+    _invoke(browser)
+    with pytest.raises(UnsupportedInteractionError, match="download could not be saved"):
+        _verify(browser, changed=changed)
+    assert (first.attempts, second.attempts) == (1, 1)
+
+
+def test_continuous_download_stream_fails_closed_at_a_finite_limit(browser: Any) -> None:
+    emitted: list[_Download] = []
+
+    def emit_next() -> None:
+        download = _Download(browser.context, browser.page)
+        download.on_save = emit_next
+        emitted.append(download)
+        browser.context.emit_download(download)
+
+    browser.state.on_click = emit_next
+    _invoke(browser)
+    with pytest.raises(UnsupportedInteractionError, match="download limit"):
+        _verify(browser, changed="revision")
+    attempts = sum(download.attempts for download in emitted)
+    assert 1 < attempts <= 100
+    assert emitted[-1].attempts == 0
+    with pytest.raises(UnsupportedInteractionError, match="download limit"):
+        _verify(browser)
+    assert sum(download.attempts for download in emitted) == attempts
