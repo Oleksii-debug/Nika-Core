@@ -131,3 +131,38 @@ def test_restore_rejects_truthy_non_boolean_verdict_acceptance() -> None:
 
     with pytest.raises(ReviewPipelineError, match="review snapshot is invalid"):
         CandidateReviewRecord.restore(json.dumps(raw))
+
+
+def test_durable_review_evidence_minimizes_credential_material_across_restart() -> None:
+    raw_authority = "https://reviewer:password@example.invalid/authority"
+    raw_reason = "Authorization: Bearer top-secret-review-token"
+    raw_refs = (
+        "https://example.invalid/callback?password=hunter2",
+        "https://example.invalid/callback#access_token=fragment-secret",
+        "Cookie: session=raw-cookie-value",
+        "https%253A%252F%252Fexample.invalid%252Fcb%253Ftoken%253Dnested-secret",
+    )
+    candidate = CandidateReviewRecord(
+        CandidateReviewIdentity("work-1", SHA_A, "dev-1")
+    ).require_review()
+    pending = candidate.queue_qa(
+        authority=_Authority(authority_ref=raw_authority)
+    ).start_qa(reviewer_id="qa-1")
+    passed = pending.record_verdict(
+        candidate_sha=SHA_A,
+        reviewer_id="qa-1",
+        accepted=True,
+        reason=raw_reason,
+        evidence_refs=raw_refs,
+    )
+
+    payload = passed.snapshot()
+    for secret in (raw_authority, raw_reason, *raw_refs):
+        assert secret not in payload
+    assert payload.count("evidence-sha256:") == 6
+
+    restored = CandidateReviewRecord.restore(payload)
+    restarted_payload = restored.snapshot()
+    assert restarted_payload == payload
+    for secret in (raw_authority, raw_reason, *raw_refs):
+        assert secret not in restarted_payload
