@@ -197,6 +197,18 @@ def test_operator_projection_retains_candidate_for_canonical_deployment_success_
                     state="completed",
                 ),
                 ProductStatusEntry(
+                    kind=ProductStatusKind.BUILD,
+                    item_id="work-654:test",
+                    label="Automated tests",
+                    state="passed",
+                ),
+                ProductStatusEntry(
+                    kind=ProductStatusKind.QA,
+                    item_id="work-654:qa",
+                    label="Independent QA",
+                    state="passed",
+                ),
+                ProductStatusEntry(
                     kind=ProductStatusKind.DEPLOYMENT,
                     item_id="work-654:deployment",
                     label="Deployment",
