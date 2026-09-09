@@ -12,7 +12,6 @@ from urllib.parse import urlsplit
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
 
-_SCHEMA_VERSION = 1
 _MAX_TEXT = 2048
 _MAX_MACHINE_INT = (1 << 63) - 1
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -249,38 +248,6 @@ class ModelArtifactRegistry:
     def __init__(self, store: SQLiteStore) -> None:
         self._store = store
         self._audit = AuditLog(store)
-        self._initialize()
-
-    def _initialize(self) -> None:
-        with self._store.connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS model_artifact_schema_migrations ("
-                "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
-            )
-            row = conn.execute(
-                "SELECT MAX(version) AS version FROM model_artifact_schema_migrations"
-            ).fetchone()
-            current = int(row["version"] or 0)
-            if current > _SCHEMA_VERSION:
-                raise ModelArtifactRegistryError(
-                    "model artifact schema is newer than this Nika build"
-                )
-            if current < 1:
-                conn.execute(
-                    "CREATE TABLE model_artifacts ("
-                    "provider_id TEXT NOT NULL, "
-                    "model_id TEXT NOT NULL, "
-                    "descriptor_json TEXT NOT NULL, "
-                    "descriptor_digest TEXT NOT NULL, "
-                    "created_at TEXT NOT NULL, "
-                    "PRIMARY KEY(provider_id, model_id))"
-                )
-                conn.execute(
-                    "INSERT INTO model_artifact_schema_migrations(version, applied_at) "
-                    "VALUES (?, ?)",
-                    (1, datetime.now(UTC).isoformat()),
-                )
 
     def register(self, descriptor: ModelArtifactDescriptor) -> str:
         if not isinstance(descriptor, ModelArtifactDescriptor):
