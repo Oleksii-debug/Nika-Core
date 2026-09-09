@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from datetime import datetime
 from typing import Any, NoReturn
 
@@ -201,6 +202,7 @@ class DurableDeploymentFabric(DeploymentFabric):
         self._deployment_checkpoint_host = checkpoint_host
         self._deployment_host_task_id = host_task_id
         self._deployment_project_id = project_id
+        self._rollback_health_by_intent: dict[str, HealthEvidence] = {}
 
     def _finish_health(
         self, record: DeploymentRecord, health: HealthEvidence
@@ -217,6 +219,7 @@ class DurableDeploymentFabric(DeploymentFabric):
             record.previous_release is None or callable(rollback_exact)
         )
         if exact_unhealthy and rollback_can_dispatch:
+            self._rollback_health_by_intent[intent.intent_id] = health
             record = self._save(
                 DeploymentRecord(
                     intent,
@@ -236,12 +239,17 @@ class DurableDeploymentFabric(DeploymentFabric):
     ) -> DeploymentRecord:
         if record.intent.environment.tier is EnvironmentTier.STAGING:
             self._healthy_staging.pop(record.intent.project_id, None)
+        health = record.health or self._rollback_health_by_intent.get(
+            record.intent.intent_id
+        )
+        if health is not None:
+            self._rollback_health_by_intent[record.intent.intent_id] = health
         return self._save(
             DeploymentRecord(
                 record.intent,
                 DeploymentState.UNCERTAIN,
                 record.provider_evidence_refs + evidence_refs,
-                health=record.health,
+                health=health,
                 previous_release_sha=record.previous_release_sha,
                 previous_release=record.previous_release,
             )
@@ -250,10 +258,11 @@ class DurableDeploymentFabric(DeploymentFabric):
     def reconcile(self, intent_id: str) -> DeploymentRecord:
         record = self._record(intent_id)
         previous = record.previous_release
+        rollback_health = record.health or self._rollback_health_by_intent.get(intent_id)
         if not (
             record.state is DeploymentState.UNCERTAIN
-            and record.health is not None
-            and not record.health.healthy
+            and rollback_health is not None
+            and not rollback_health.healthy
             and previous is not None
         ):
             return super().reconcile(intent_id)
@@ -280,7 +289,7 @@ class DurableDeploymentFabric(DeploymentFabric):
                     record.intent,
                     DeploymentState.ROLLED_BACK,
                     record.provider_evidence_refs + inspection.evidence_refs,
-                    health=record.health,
+                    health=rollback_health,
                     rollback=rollback,
                     previous_release_sha=record.previous_release_sha,
                     previous_release=previous,
@@ -332,6 +341,16 @@ class DurableDeploymentFabric(DeploymentFabric):
                 project_id=self._deployment_project_id,
                 snapshot=self.snapshot(),
             )
+            if (
+                saved.state is DeploymentState.UNCERTAIN
+                and saved.health is not None
+                and not saved.health.healthy
+            ):
+                self._rollback_health_by_intent[saved.intent.intent_id] = saved.health
+                saved = replace(saved, health=None)
+                self._records[saved.intent.intent_id] = saved
+            elif saved.state is not DeploymentState.UNCERTAIN:
+                self._rollback_health_by_intent.pop(saved.intent.intent_id, None)
         except BaseException:
             self.restore(previous_snapshot)
             raise
@@ -352,11 +371,29 @@ class DurableDeploymentFabric(DeploymentFabric):
             host_task_id=host_task_id,
             project_id=project_id,
         )
-        checkpoint_host.restore_latest(
+        snapshot = checkpoint_host.latest_snapshot(
             host_task_id=host_task_id,
             project_id=project_id,
-            fabric=fabric,
         )
+        if snapshot is not None:
+            rollback_health = {
+                record.intent.intent_id: record.health
+                for record in snapshot.records
+                if record.state is DeploymentState.UNCERTAIN
+                and record.health is not None
+                and not record.health.healthy
+            }
+            sanitized = replace(
+                snapshot,
+                records=tuple(
+                    replace(record, health=None)
+                    if record.intent.intent_id in rollback_health
+                    else record
+                    for record in snapshot.records
+                ),
+            )
+            fabric.restore(sanitized)
+            fabric._rollback_health_by_intent.update(rollback_health)
         return fabric
 
 
