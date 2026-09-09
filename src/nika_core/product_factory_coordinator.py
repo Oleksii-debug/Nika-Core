@@ -156,6 +156,10 @@ class ProductFactoryCoordinator:
 
     def start(self, component_id: str) -> ComponentWorkRequest:
         record = self._record(component_id)
+        if record.state in {WorkState.DONE, WorkState.CANCELLED}:
+            raise CoordinatorError(
+                f"component {component_id} is terminal ({record.state.value}) and cannot be started"
+            )
         if record.state is not WorkState.READY:
             raise CoordinatorError(f"component {component_id} is not ready")
         self._records[component_id] = WorkRecord(record.request, WorkState.RUNNING)
