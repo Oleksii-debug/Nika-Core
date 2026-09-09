@@ -14,7 +14,6 @@ from nika_core.product_factory_github import (
 )
 from nika_core.product_factory_orchestration import RepositoryRef
 
-
 MAIN_SHA = "1" * 40
 CANDIDATE_SHA = "2" * 40
 MERGE_SHA = "3" * 40
