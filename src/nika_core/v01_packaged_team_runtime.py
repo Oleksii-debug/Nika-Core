@@ -20,6 +20,7 @@ from nika_core.multi_agent import (
     V01CheckerAgent,
     encode_source_result,
 )
+from nika_core.multi_agent.model_gateway_runtime import ModelGatewayAgentRuntime
 from nika_core.research.local import extract_local_file
 from nika_core.research.models import (
     FreshnessState,
@@ -42,6 +43,7 @@ from nika_core.runtime.contracts import (
     RuntimeResumeRequest,
 )
 from nika_core.tools import ToolRisk, ToolSpec
+from nika_core.v01_model_settings import V01BoundModelRuntimeFactory
 from nika_core.v01_source_settings import MAX_SOURCE_BYTES, V01SourceSettings
 from nika_core.v01_three_agent_supervisor import (
     V01ChildAssignment,
@@ -57,6 +59,8 @@ _CHECKER_ID = "v01.checker"
 _WORKER_A_ID = "v01.source-a"
 _WORKER_B_ID = "v01.source-b"
 _GRANT = ToolGrant(tool_id="file.read", max_risk=0, scopes=("workspace",))
+_MAX_MODEL_ANALYSIS_CHARS = 2000
+_MODEL_SELECTION_FIELD = "v01_model_selection"
 
 
 class V01PackagedThreeAgentRuntime(AgentRuntimePort):
@@ -68,11 +72,17 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         store: SQLiteStore,
         config: AppConfig,
         source_settings: V01SourceSettings | None = None,
+        model_runtime_factory: V01BoundModelRuntimeFactory | None = None,
     ) -> None:
         self._sqlite = store
         self._sources = source_settings or V01SourceSettings(store, config)
         self._multi_store = MultiAgentStore(store)
         self._definitions = AgentDefinitionRepository(store)
+        self._model_factory = model_runtime_factory or V01BoundModelRuntimeFactory(
+            store=store,
+            definitions=self._definitions,
+        )
+        self._model_runtimes: dict[str, ModelGatewayAgentRuntime] = {}
         self._coordinator = MultiAgentSupervisor(
             runtime=self,
             store=self._multi_store,
@@ -124,7 +134,7 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
         if self._is_member_thread(request.thread_id):
-            return self._run_member_from_store(thread_id=request.thread_id)
+            return await self._run_member_from_store(thread_id=request.thread_id)
         command = str(request.payload.get("command", "")).strip()
         if not command:
             return self._failed()
@@ -141,7 +151,7 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
                 error_code=RuntimeErrorCode.INVALID_RESUME,
             )
         if self._is_member_thread(request.thread_id):
-            return self._run_member_from_store(thread_id=request.thread_id)
+            return await self._run_member_from_store(thread_id=request.thread_id)
         command = self._stored_outer_command(request.task_id)
         if not command:
             return self._failed()
@@ -149,7 +159,23 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
 
     async def cancel(self, *, task_id: str, thread_id: str) -> bool:
         if self._is_member_thread(thread_id):
+            identity = self._member_identity(thread_id)
+            if identity is None:
+                return True
+            team_id, member_id = identity
+            try:
+                handoff = self._multi_store.task_payload(team_id, member_id)
+            except KeyError:
+                return True
+            shared_task_id = str(handoff.get("shared_task_id", "")).strip()
+            model_runtime = self._model_runtimes.get(shared_task_id)
+            if model_runtime is not None:
+                await model_runtime.cancel(
+                    task_id=shared_task_id,
+                    thread_id=thread_id,
+                )
             return True
+
         team_id = self._team_id(task_id)
         try:
             state = self._multi_store.team_state(team_id)
@@ -163,6 +189,7 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         try:
             _root, source_a, source_b = self._source_config(task_id)
             self._ensure_definitions()
+            self._prime_model_runtime(task_id)
             team_id = self._team_id(task_id)
             adapter = V01ThreeAgentSupervisor(
                 coordinator=self._coordinator,
@@ -176,8 +203,10 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
                 team_id=team_id,
             )
         except Exception:  # noqa: BLE001 - runtime boundary fails closed without diagnostics
+            self._model_runtimes.pop(task_id, None)
             return self._failed()
 
+        self._model_runtimes.pop(task_id, None)
         if result.team_state is TeamState.CANCELLED:
             return RuntimeResult(outcome=RuntimeOutcome.CANCELLED, output=result.final_output)
         if result.team_state is not TeamState.COMPLETED:
@@ -192,7 +221,7 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
             },
         )
 
-    def _run_member_from_store(self, *, thread_id: str) -> RuntimeResult:
+    async def _run_member_from_store(self, *, thread_id: str) -> RuntimeResult:
         identity = self._member_identity(thread_id)
         if identity is None:
             return self._failed()
@@ -201,26 +230,29 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
             handoff = self._multi_store.task_payload(team_id, member_id)
             stage = str(handoff.get("stage", ""))
             if stage == "source_worker":
-                return self._run_source_worker(
+                return await self._run_source_worker(
                     team_id=team_id,
                     member_id=member_id,
+                    thread_id=thread_id,
                     handoff=handoff,
                 )
             if stage == "checker":
-                return self._run_checker(
+                return await self._run_checker(
                     team_id=team_id,
                     member_id=member_id,
+                    thread_id=thread_id,
                     handoff=handoff,
                 )
         except Exception:  # noqa: BLE001 - runtime boundary fails closed without diagnostics
             return self._failed()
         return self._failed()
 
-    def _run_source_worker(
+    async def _run_source_worker(
         self,
         *,
         team_id: str,
         member_id: str,
+        thread_id: str,
         handoff: Mapping[str, object],
     ) -> RuntimeResult:
         assignment = SourceInspectionAssignment.from_payload(
@@ -244,6 +276,42 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
             allowed_root=root,
             max_bytes=MAX_SOURCE_BYTES,
         )
+
+        model_runtime = self._model_runtime_for_task(assignment.task_id)
+        if model_runtime is not None:
+            model_result = await model_runtime.run(
+                RuntimeRequest(
+                    task_id=assignment.task_id,
+                    thread_id=thread_id,
+                    payload={
+                        "agent_id": {
+                            "worker-a": _WORKER_A_ID,
+                            "worker-b": _WORKER_B_ID,
+                        }[member_id],
+                        "agent_version": 1,
+                        "handoff": {
+                            "stage": "source_worker_model_analysis",
+                            "shared_task_id": assignment.task_id,
+                            "user_goal": str(handoff.get("user_goal", "")),
+                            "instruction": (
+                                "Explain briefly why the declared source evidence is relevant "
+                                "to the user goal. Use only the supplied evidence."
+                            ),
+                            "source_id": assignment.source.source_id,
+                            "source_kind": assignment.source.kind.value,
+                            "media_type": document.media_type,
+                            "source_text": document.text[:4000],
+                        },
+                    },
+                )
+            )
+            if model_result.outcome is not RuntimeOutcome.COMPLETED:
+                return model_result
+            # Worker model text is intentionally non-authoritative. It may affect
+            # completion/failure but must not mutate deterministic source evidence.
+            # The checker-level model synthesis is stored separately as model_analysis.
+            self._model_text(model_result)
+
         observed_at = datetime.now(UTC).isoformat()
         result_set = ResearchResultSet(
             result_set_id="result:" + hashlib.sha256(
@@ -283,11 +351,12 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
             output=encode_source_result(assignment, result_set),
         )
 
-    def _run_checker(
+    async def _run_checker(
         self,
         *,
         team_id: str,
         member_id: str,
+        thread_id: str,
         handoff: Mapping[str, object],
     ) -> RuntimeResult:
         raw_assignments = handoff.get("source_assignments")
@@ -297,17 +366,101 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
             SourceInspectionAssignment.from_payload(cast(Mapping[str, object], item))
             for item in raw_assignments
         )
+        inbound = self._multi_store.inbound_result_handoffs(team_id, member_id)
         summary = V01CheckerAgent().compare(
             team_id=team_id,
             task_id=str(handoff["shared_task_id"]),
             checker_id=member_id,
             assignments=assignments,
-            handoffs=self._multi_store.inbound_result_handoffs(team_id, member_id),
+            handoffs=inbound,
         )
+        summary_payload = summary.to_payload()
+        output: dict[str, object] = {"checker_summary": summary_payload}
+
+        shared_task_id = str(handoff["shared_task_id"])
+        model_runtime = self._model_runtime_for_task(shared_task_id)
+        if model_runtime is not None:
+            model_result = await model_runtime.run(
+                RuntimeRequest(
+                    task_id=shared_task_id,
+                    thread_id=thread_id,
+                    payload={
+                        "agent_id": _CHECKER_ID,
+                        "agent_version": 1,
+                        "handoff": {
+                            "stage": "checker_model_synthesis",
+                            "shared_task_id": shared_task_id,
+                            "user_goal": str(handoff.get("user_goal", "")),
+                            "instruction": (
+                                "Synthesize the two durable worker results. Do not change "
+                                "their provenance or deterministic checker status."
+                            ),
+                            "checker_summary": summary_payload,
+                        },
+                        "inbound_handoffs": [
+                            {
+                                "handoff_id": item.handoff_id,
+                                "team_id": item.team_id,
+                                "sender_id": item.sender_id,
+                                "recipient_id": item.recipient_id,
+                                "kind": item.kind.value,
+                                "correlation_id": item.correlation_id,
+                                "payload": dict(item.payload),
+                            }
+                            for item in inbound
+                        ],
+                    },
+                )
+            )
+            if model_result.outcome is not RuntimeOutcome.COMPLETED:
+                return model_result
+            output["model_analysis"] = {
+                "text": self._model_text(model_result),
+                "provider_id": model_result.output["provider_id"],
+                "provider_kind": model_result.output["provider_kind"],
+                "model": model_result.output["model"],
+            }
+
         return RuntimeResult(
             outcome=RuntimeOutcome.COMPLETED,
-            output={"checker_summary": summary.to_payload()},
+            output=output,
         )
+
+    def _prime_model_runtime(self, task_id: str) -> None:
+        self._model_runtime_for_task(task_id)
+
+    def _model_runtime_for_task(self, task_id: str) -> ModelGatewayAgentRuntime | None:
+        if not self._task_has_model_selection(task_id):
+            return None
+        cached = self._model_runtimes.get(task_id)
+        if cached is not None:
+            return cached
+        runtime = self._model_factory.for_task(task_id)
+        self._model_runtimes[task_id] = runtime
+        return runtime
+
+    def _task_has_model_selection(self, task_id: str) -> bool:
+        with self._sqlite.connection() as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        if row is None:
+            return False
+        payload = json.loads(row["payload_json"])
+        if not isinstance(payload, dict):
+            raise TypeError("task payload must be an object")
+        return _MODEL_SELECTION_FIELD in payload
+
+    @staticmethod
+    def _model_text(result: RuntimeResult) -> str:
+        value = result.output.get("text")
+        if not isinstance(value, str):
+            raise TypeError("model result text is missing")
+        text = value.strip()
+        if not text or "\x00" in text:
+            raise ValueError("model result text is invalid")
+        return text[:_MAX_MODEL_ANALYSIS_CHARS]
 
     def _source_config(self, task_id: str) -> tuple[Path, Path, Path]:
         # A pre-setup team may be adopted only with the very same declared sources.
