@@ -102,7 +102,7 @@ class ReviewVerdict:
         _validate_evidence_refs(self.evidence_refs)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class CandidateReviewRecord:
     identity: CandidateReviewIdentity
     state: ReviewState = ReviewState.IMPLEMENTED
@@ -110,8 +110,44 @@ class CandidateReviewRecord:
     reviewer_authority: ReviewerAuthorityEvidence | None = None
     verdict: ReviewVerdict | None = None
 
+    def __init__(self, identity: CandidateReviewIdentity) -> None:
+        """Create only the initial IMPLEMENTED state through the public constructor."""
+        if not isinstance(identity, CandidateReviewIdentity):
+            raise ReviewPipelineError("review record requires a canonical candidate identity")
+        object.__setattr__(self, "identity", identity)
+        object.__setattr__(self, "state", ReviewState.IMPLEMENTED)
+        object.__setattr__(self, "reviewer_id", None)
+        object.__setattr__(self, "reviewer_authority", None)
+        object.__setattr__(self, "verdict", None)
+        self._validate()
+
+    @classmethod
+    def _from_transition(
+        cls,
+        identity: CandidateReviewIdentity,
+        state: ReviewState,
+        *,
+        reviewer_id: str | None = None,
+        reviewer_authority: ReviewerAuthorityEvidence | None = None,
+        verdict: ReviewVerdict | None = None,
+    ) -> CandidateReviewRecord:
+        """Build a validated non-initial state only from canonical transition methods."""
+        if not isinstance(identity, CandidateReviewIdentity):
+            raise ReviewPipelineError("review record requires a canonical candidate identity")
+        if not isinstance(state, ReviewState):
+            raise ReviewPipelineError("review record requires a canonical review state")
+        record = object.__new__(cls)
+        object.__setattr__(record, "identity", identity)
+        object.__setattr__(record, "state", state)
+        object.__setattr__(record, "reviewer_id", reviewer_id)
+        object.__setattr__(record, "reviewer_authority", reviewer_authority)
+        object.__setattr__(record, "verdict", verdict)
+        record._validate()
+        return record
+
     def snapshot(self) -> str:
         """Return a deterministic restart-safe representation of the review state."""
+        self._validate()
         return json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
 
     @classmethod
@@ -135,7 +171,7 @@ class CandidateReviewRecord:
             if verdict_raw is not None:
                 verdict_raw["evidence_refs"] = tuple(verdict_raw["evidence_refs"])
                 verdict = ReviewVerdict(**verdict_raw)
-            record = cls(
+            record = cls._from_transition(
                 identity=identity,
                 state=ReviewState(raw["state"]),
                 reviewer_id=raw.get("reviewer_id"),
@@ -144,7 +180,6 @@ class CandidateReviewRecord:
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ReviewPipelineError("review snapshot is invalid") from exc
-        record._validate()
         if record.state is ReviewState.MERGE_READY:
             if verification is None:
                 raise ReviewPipelineError(
@@ -155,12 +190,12 @@ class CandidateReviewRecord:
 
     def require_review(self) -> CandidateReviewRecord:
         self._require_state(ReviewState.IMPLEMENTED)
-        return CandidateReviewRecord(self.identity, ReviewState.REVIEW_REQUIRED)
+        return self._from_transition(self.identity, ReviewState.REVIEW_REQUIRED)
 
     def queue_qa(self, *, authority: TrustedReviewerAuthority) -> CandidateReviewRecord:
         self._require_state(ReviewState.REVIEW_REQUIRED)
         evidence = self._validate_authority(authority)
-        return CandidateReviewRecord(
+        return self._from_transition(
             self.identity,
             ReviewState.QA_PENDING,
             reviewer_id=evidence.reviewer_id,
@@ -170,7 +205,7 @@ class CandidateReviewRecord:
     def start_qa(self, *, reviewer_id: str) -> CandidateReviewRecord:
         self._require_state(ReviewState.QA_PENDING)
         self._require_assigned_reviewer(reviewer_id)
-        return CandidateReviewRecord(
+        return self._from_transition(
             self.identity,
             ReviewState.QA_RUNNING,
             reviewer_id=self.reviewer_id,
@@ -190,7 +225,7 @@ class CandidateReviewRecord:
         self._require_candidate(candidate_sha)
         self._require_assigned_reviewer(reviewer_id)
         verdict = ReviewVerdict(candidate_sha, reviewer_id, accepted, reason, evidence_refs)
-        return CandidateReviewRecord(
+        return self._from_transition(
             self.identity,
             ReviewState.PASS if accepted else ReviewState.FAIL,
             reviewer_id=reviewer_id,
@@ -207,7 +242,7 @@ class CandidateReviewRecord:
         self._require_state(ReviewState.PASS)
         self._require_candidate(candidate_sha)
         self._validate_merge_clearance(verification)
-        return CandidateReviewRecord(
+        return self._from_transition(
             self.identity,
             ReviewState.MERGE_READY,
             reviewer_id=self.reviewer_id,
@@ -218,7 +253,7 @@ class CandidateReviewRecord:
     def require_fix(self, *, candidate_sha: str) -> CandidateReviewRecord:
         self._require_state(ReviewState.FAIL)
         self._require_candidate(candidate_sha)
-        return CandidateReviewRecord(
+        return self._from_transition(
             self.identity,
             ReviewState.FIX_REQUIRED,
             reviewer_id=self.reviewer_id,
