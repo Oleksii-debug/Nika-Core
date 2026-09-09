@@ -75,7 +75,7 @@ def project_operator_status(detail: ProductProjectDetail) -> FactoryOperatorProj
 
     return FactoryOperatorProjection(
         PROJECT=detail.summary.project_id,
-        WORK=_render_statuses(component_entries, empty="none"),
+        WORK=_render_work(detail, component_entries),
         OWNER=_render_values(owners, empty="unassigned"),
         STATE=detail.summary.state,
         BLOCKER=_render_blockers(active_blocker_entries, detail.summary.blocker_count),
@@ -103,6 +103,17 @@ def _statuses(
     kind: ProductStatusKind,
 ) -> tuple[ProductStatusEntry, ...]:
     return tuple(entry for entry in detail.statuses if entry.kind is kind)
+
+
+def _render_work(
+    detail: ProductProjectDetail,
+    component_entries: tuple[ProductStatusEntry, ...],
+) -> str:
+    if component_entries:
+        return _render_statuses(component_entries, empty="none")
+    if detail.summary.current_decision is None:
+        return detail.summary.goal
+    return "none"
 
 
 def _render_statuses(
