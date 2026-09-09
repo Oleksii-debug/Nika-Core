@@ -35,11 +35,15 @@ class ExactShaCheckEvidence:
     required: bool = True
 
     def __post_init__(self) -> None:
+        if not isinstance(self.check_id, str) or not isinstance(self.evidence_ref, str):
+            raise VerificationError("verification evidence identity must be text")
         if not self.check_id.strip() or not self.evidence_ref.strip():
             raise VerificationError("verification evidence identity must not be empty")
         _validate_sha(self.candidate_sha)
         if not isinstance(self.state, CheckState):
             raise VerificationError("verification check state must be a CheckState")
+        if not isinstance(self.required, bool):
+            raise VerificationError("verification required flag must be a bool")
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +80,9 @@ def classify_candidate_verification(
     _validate_sha(candidate_sha)
     _validate_required_check_ids(required_check_ids)
 
+    if any(not isinstance(item, ExactShaCheckEvidence) for item in evidence):
+        raise VerificationError("verification evidence must be ExactShaCheckEvidence")
+
     refs = tuple(item.evidence_ref for item in evidence)
     if len(refs) != len(set(refs)):
         raise VerificationError("verification evidence refs must be unique")
@@ -97,6 +104,14 @@ def classify_candidate_verification(
     if missing_required:
         return CandidateVerification(candidate_sha, VerificationState.UNKNOWN, refs)
 
+    unexpected_required = tuple(
+        item.check_id
+        for item in evidence
+        if item.required and item.check_id not in required_check_ids
+    )
+    if unexpected_required:
+        raise VerificationError("required verification check id is not authoritative")
+
     required = tuple(evidence_by_check[check_id] for check_id in required_check_ids)
     if any(item.state is CheckState.FAIL for item in required):
         return CandidateVerification(candidate_sha, VerificationState.FAIL, refs)
@@ -117,5 +132,7 @@ def _validate_required_check_ids(required_check_ids: tuple[str, ...]) -> None:
 
 
 def _validate_sha(value: str) -> None:
+    if not isinstance(value, str):
+        raise VerificationError("candidate SHA must be a lowercase 40-character hex digest")
     if len(value) != 40 or any(character not in "0123456789abcdef" for character in value):
         raise VerificationError("candidate SHA must be a lowercase 40-character hex digest")
