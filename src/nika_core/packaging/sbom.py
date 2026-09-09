@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 from packaging.markers import default_environment
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
 
 SBOM_FILE = "THIRD_PARTY_SBOM.cdx.json"
 SUPPLY_CHAIN_FILE = "THIRD_PARTY_SUPPLY_CHAIN.json"
@@ -316,12 +317,20 @@ def _project_identity(project_root: Path) -> tuple[str, str]:
     return canonicalize_name(raw_name), raw_version.strip()
 
 
+def _requirement_sort_key(requirement: Requirement) -> tuple[str, str, tuple[str, ...]]:
+    return (
+        canonicalize_name(requirement.name),
+        str(requirement.specifier),
+        tuple(sorted(requirement.extras)),
+    )
+
+
 def _runtime_requirements(
     project_root: Path,
     *,
     extras: tuple[str, ...],
     environment: dict[str, str],
-) -> dict[str, tuple[str, ...]]:
+) -> tuple[Requirement, ...]:
     try:
         with (project_root / "pyproject.toml").open("rb") as handle:
             project_data = tomllib.load(handle)
@@ -346,7 +355,7 @@ def _runtime_requirements(
             raise SupplyChainEvidenceError(f"Required runtime extra is missing: {extra}")
         entries.extend((extra, raw) for raw in requirements)
 
-    dependencies: dict[str, set[str]] = {}
+    active_requirements: list[Requirement] = []
     for active_extra, raw in entries:
         if not isinstance(raw, str):
             raise SupplyChainEvidenceError("Runtime dependency declaration must be a string")
@@ -358,14 +367,13 @@ def _runtime_requirements(
             ) from exc
         marker_environment = dict(environment)
         marker_environment["extra"] = active_extra or ""
-        if requirement.marker is not None and not requirement.marker.evaluate(marker_environment):
+        if (
+            requirement.marker is not None
+            and not requirement.marker.evaluate(marker_environment)
+        ):
             continue
-        name = canonicalize_name(requirement.name)
-        dependencies.setdefault(name, set()).update(requirement.extras)
-    return {
-        name: tuple(sorted(selected_extras))
-        for name, selected_extras in sorted(dependencies.items())
-    }
+        active_requirements.append(requirement)
+    return tuple(sorted(active_requirements, key=_requirement_sort_key))
 
 
 def _metadata_requirement_edges(
@@ -374,7 +382,7 @@ def _metadata_requirement_edges(
     environment: dict[str, str],
     active_extras: set[str],
     component_name: str,
-) -> tuple[tuple[str, tuple[str, ...]], ...]:
+) -> tuple[Requirement, ...]:
     if raw_requirements is None:
         return ()
     if not isinstance(raw_requirements, list):
@@ -382,7 +390,7 @@ def _metadata_requirement_edges(
             f"Runtime component dependency metadata is invalid: {component_name}"
         )
 
-    dependencies: dict[str, set[str]] = {}
+    dependencies: list[Requirement] = []
     marker_extras = ("", *sorted(active_extras))
     for raw in raw_requirements:
         if not isinstance(raw, str):
@@ -402,30 +410,85 @@ def _metadata_requirement_edges(
                 requirement.marker.evaluate({**environment, "extra": extra})
                 for extra in marker_extras
             )
-        if not enabled:
-            continue
-        name = canonicalize_name(requirement.name)
-        dependencies.setdefault(name, set()).update(requirement.extras)
-    return tuple(
-        (name, tuple(sorted(selected_extras)))
-        for name, selected_extras in sorted(dependencies.items())
-    )
+        if enabled:
+            dependencies.append(requirement)
+    return tuple(sorted(dependencies, key=_requirement_sort_key))
+
+
+def _component_versions(
+    components: list[dict[str, object]],
+) -> dict[str, str]:
+    versions: dict[str, str] = {}
+    for component in components:
+        if not isinstance(component, dict):
+            raise SupplyChainEvidenceError("Resolved runtime component must be an object")
+        raw_name = component.get("name")
+        raw_version = component.get("version")
+        if not isinstance(raw_name, str) or not isinstance(raw_version, str):
+            raise SupplyChainEvidenceError("Resolved runtime component identity is invalid")
+        name = canonicalize_name(raw_name)
+        try:
+            Version(raw_version)
+        except InvalidVersion as exc:
+            raise SupplyChainEvidenceError(
+                f"Resolved runtime component version is invalid: {name}"
+            ) from exc
+        previous = versions.get(name)
+        if previous is not None and previous != raw_version:
+            raise SupplyChainEvidenceError(
+                f"Resolved runtime component has conflicting versions: {name}"
+            )
+        versions[name] = raw_version
+    return versions
+
+
+def _requirement_version_check(
+    requirement: Requirement,
+    resolved_version: str,
+    *,
+    dependent_name: str,
+) -> None:
+    if not requirement.specifier:
+        return
+    try:
+        resolved = Version(resolved_version)
+    except InvalidVersion as exc:
+        raise SupplyChainEvidenceError(
+            f"Resolved runtime component version is invalid: {requirement.name}"
+        ) from exc
+    if not requirement.specifier.contains(resolved):
+        dependency_name = canonicalize_name(requirement.name)
+        raise SupplyChainEvidenceError(
+            "Resolved runtime version violates requirement: "
+            f"{dependent_name}->{dependency_name}{requirement.specifier} "
+            f"resolved={resolved_version}"
+        )
 
 
 def _resolved_dependency_graph(
     components: list[dict[str, object]],
     *,
     requirements_by_name: dict[str, object],
-    application_requirements: dict[str, tuple[str, ...]],
+    application_requirements: tuple[Requirement, ...],
     environment: dict[str, str],
 ) -> dict[str, tuple[str, ...]]:
-    component_names = {
-        str(component["name"]) for component in components if isinstance(component, dict)
-    }
-    selected_extras: dict[str, set[str]] = {
-        name: set(extras) for name, extras in application_requirements.items()
-    }
+    component_versions = _component_versions(components)
+    component_names = set(component_versions)
+    selected_extras: dict[str, set[str]] = {}
     graph: dict[str, set[str]] = {name: set() for name in component_names}
+
+    for requirement in application_requirements:
+        name = canonicalize_name(requirement.name)
+        if name not in component_names:
+            raise SupplyChainEvidenceError(
+                f"Declared runtime dependency is missing from inventory: {name}"
+            )
+        _requirement_version_check(
+            requirement,
+            component_versions[name],
+            dependent_name="nika-core",
+        )
+        selected_extras.setdefault(name, set()).update(requirement.extras)
 
     changed = True
     while changed:
@@ -437,16 +500,22 @@ def _resolved_dependency_graph(
                 active_extras=selected_extras.get(name, set()),
                 component_name=name,
             )
-            for dependency_name, dependency_extras in edges:
+            for requirement in edges:
+                dependency_name = canonicalize_name(requirement.name)
                 if dependency_name not in component_names:
                     raise SupplyChainEvidenceError(
                         "Resolved runtime dependency is missing from inventory: "
                         f"{name}->{dependency_name}"
                     )
+                _requirement_version_check(
+                    requirement,
+                    component_versions[dependency_name],
+                    dependent_name=name,
+                )
                 graph[name].add(dependency_name)
                 target_extras = selected_extras.setdefault(dependency_name, set())
                 before = len(target_extras)
-                target_extras.update(dependency_extras)
+                target_extras.update(requirement.extras)
                 if len(target_extras) != before:
                     changed = True
 
@@ -454,6 +523,7 @@ def _resolved_dependency_graph(
         name: tuple(sorted(dependencies))
         for name, dependencies in sorted(graph.items())
     }
+
 
 def build_supply_chain_evidence(
     report_path: Path,
@@ -500,10 +570,13 @@ def build_supply_chain_evidence(
         extras=extras,
         environment=environment,
     )
+    application_dependency_names = sorted(
+        {canonicalize_name(requirement.name) for requirement in application_requirements}
+    )
     component_names = {
         str(item["name"]) for item in components if isinstance(item, dict)
     }
-    missing = sorted(set(application_requirements) - component_names)
+    missing = sorted(set(application_dependency_names) - component_names)
     if missing:
         raise SupplyChainEvidenceError(
             f"Declared runtime dependencies are missing from resolved inventory: {missing}"
@@ -540,7 +613,7 @@ def build_supply_chain_evidence(
             "raw_report_persisted": False,
         },
         "runtime_extras": list(extras),
-        "declared_runtime_dependencies": list(application_requirements),
+        "declared_runtime_dependencies": application_dependency_names,
         "components": persistent_components,
         "policy": {
             "immutable_source_identity_required": True,
