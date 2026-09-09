@@ -25,6 +25,14 @@ def _canonical(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _is_lock_contention(exc: sqlite3.OperationalError) -> bool:
+    error_code = getattr(exc, "sqlite_errorcode", None)
+    return isinstance(error_code, int) and (error_code & 0xFF) in {
+        sqlite3.SQLITE_BUSY,
+        sqlite3.SQLITE_LOCKED,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class StoredProductDecision:
     project_id: str
@@ -69,11 +77,7 @@ class ProductDecisionRepository:
             try:
                 conn.execute("BEGIN IMMEDIATE")
             except sqlite3.OperationalError as exc:
-                error_code = getattr(exc, "sqlite_errorcode", None)
-                if isinstance(error_code, int) and (error_code & 0xFF) in {
-                    sqlite3.SQLITE_BUSY,
-                    sqlite3.SQLITE_LOCKED,
-                }:
+                if _is_lock_contention(exc):
                     raise ProductProjectError(
                         "product decision write is temporarily busy"
                     ) from exc
@@ -178,12 +182,22 @@ class ProductDecisionRepository:
                     "evidence_package_ids": list(evidence_package_ids),
                 },
             )
-            return self._get_version_conn(
+            stored = self._get_version_conn(
                 conn,
                 project_id,
                 decision.decision_id,
                 version,
             )
+            try:
+                conn.commit()
+            except sqlite3.OperationalError as exc:
+                if _is_lock_contention(exc):
+                    conn.rollback()
+                    raise ProductProjectError(
+                        "product decision write is temporarily busy"
+                    ) from exc
+                raise
+            return stored
 
     def get(self, project_id: str, decision_id: str) -> StoredProductDecision:
         with self.store.connection() as conn:
