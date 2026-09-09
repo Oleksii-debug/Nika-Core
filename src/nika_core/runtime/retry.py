@@ -26,10 +26,8 @@ class RetryPolicy:
 
     def __post_init__(self) -> None:
         _validate_retry_count(self.max_retries, field_name="max_retries", minimum=0)
-        if self.base_delay_seconds < 0:
-            raise ValueError("base_delay_seconds must not be negative")
-        if self.max_delay_seconds < 0:
-            raise ValueError("max_delay_seconds must not be negative")
+        _validate_retry_delay(self.base_delay_seconds, field_name="base_delay_seconds")
+        _validate_retry_delay(self.max_delay_seconds, field_name="max_delay_seconds")
         if self.base_delay_seconds > self.max_delay_seconds:
             raise ValueError("base_delay_seconds must not exceed max_delay_seconds")
 
@@ -118,6 +116,15 @@ def _validate_retry_count(value: int, *, field_name: str, minimum: int) -> int:
         qualifier = "positive" if minimum == 1 else "non-negative"
         raise ValueError(f"{field_name} must be a {qualifier} integer")
     return value
+
+
+def _validate_retry_delay(value: float, *, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{field_name} must be a finite non-negative number")
+    normalized = float(value)
+    if not isfinite(normalized) or normalized < 0:
+        raise ValueError(f"{field_name} must be a finite non-negative number")
+    return normalized
 
 
 def _require_bool(value: bool, *, field_name: str) -> bool:
