@@ -24,6 +24,22 @@ def _final_artifact_window(workflow: str) -> str:
     )
 
 
+def _exact_final_runtime_step(workflow: str) -> str:
+    return _between(
+        workflow,
+        "- name: Re-prove runtime from exact extracted final ZIP",
+        "- name: Record automated pre-human evidence",
+    )
+
+
+def _prehuman_evidence_step(workflow: str) -> str:
+    return _between(
+        workflow,
+        "- name: Record automated pre-human evidence",
+        "- name: Verify exact final distributable evidence binding",
+    )
+
+
 def test_m12_reexecutes_packaged_uia_from_the_exact_extracted_final_zip() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     final_artifact_window = _final_artifact_window(workflow)
@@ -45,19 +61,23 @@ def test_m12_reexecutes_packaged_uia_from_the_exact_extracted_final_zip() -> Non
 
 def test_m12_expands_the_same_zip_that_is_bound_to_distributable_evidence() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
-    final_artifact_window = _final_artifact_window(workflow)
+    runtime_step = _exact_final_runtime_step(workflow)
+    evidence_step = _prehuman_evidence_step(workflow)
 
-    assert "Expand-Archive" in final_artifact_window
-    expand_at = final_artifact_window.index("Expand-Archive")
-    expand_context = final_artifact_window[max(0, expand_at - 700) : expand_at + 700]
-    exact_zip_literal = "NikaCore-${{ steps.release.outputs.version }}-windows-x64.zip"
-
-    assert (
-        "steps.distributable.outputs.zip_path" in expand_context
-        or exact_zip_literal in expand_context
+    zip_binding = "$zipPath = '${{ steps.distributable.outputs.zip_path }}'"
+    expand_binding = "Expand-Archive -LiteralPath $zipPath -DestinationPath $extractRoot -Force"
+    evidence_binding = (
+        "distributable_zip_path = '${{ steps.distributable.outputs.zip_path }}'"
     )
-    assert "-DestinationPath" in expand_context
-    assert "exact_final_artifact_runtime_uia = $true" in final_artifact_window
+
+    # Bind identity semantically instead of relying on a brittle character-distance
+    # window: the runtime step must source the already-hashed distributable output,
+    # expand that exact variable, and record the same output in final evidence.
+    assert zip_binding in runtime_step
+    assert expand_binding in runtime_step
+    assert runtime_step.index(zip_binding) < runtime_step.index(expand_binding)
+    assert evidence_binding in evidence_step
+    assert "exact_final_artifact_runtime_uia = $true" in runtime_step
 
 
 def test_m12_extracts_to_a_fresh_unicode_and_space_path() -> None:
