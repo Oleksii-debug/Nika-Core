@@ -136,7 +136,7 @@ def test_operator_projection_surfaces_pending_owner_decision_before_next_work() 
     projection = project_operator_status(detail)
 
     assert projection.next == "owner_decision:decision-1"
-    assert projection.work == "none"
+    assert projection.work == "Ship Development Factory MVP"
     assert projection.owner == "unassigned"
 
 
