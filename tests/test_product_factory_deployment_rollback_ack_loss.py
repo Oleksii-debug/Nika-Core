@@ -2,12 +2,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-import pytest
-
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.product_factory_deployment import (
-    DeploymentFabricError,
     DeploymentIntent,
     DeploymentState,
     EnvironmentIdentity,
@@ -94,7 +91,7 @@ def _setup(tmp_path):
     return store, task.task_id
 
 
-def test_rollback_ack_loss_restart_never_redispatches_or_false_succeeds(tmp_path) -> None:
+def test_rollback_ack_loss_restart_reconciles_exact_previous_without_redispatch(tmp_path) -> None:
     previous = ReleaseRef("p1", "1.0.0", SHA_A, DIGEST_A)
     candidate = ReleaseRef("p1", "2.0.0", SHA_B, DIGEST_B)
     store, task_id = _setup(tmp_path)
@@ -110,6 +107,8 @@ def test_rollback_ack_loss_restart_never_redispatches_or_false_succeeds(tmp_path
     assert fabric.deploy(_intent("deploy:p1:a", previous)).state is DeploymentState.HEALTHY
     uncertain = fabric.deploy(_intent("deploy:p1:b", candidate))
     assert uncertain.state is DeploymentState.UNCERTAIN
+    assert uncertain.health is not None
+    assert not uncertain.health.healthy
     assert provider.rollback_calls == 1
 
     restarted_store = SQLiteStore(store.path)
@@ -127,18 +126,30 @@ def test_rollback_ack_loss_restart_never_redispatches_or_false_succeeds(tmp_path
     assert restarted_provider.deploy_calls == 0
     assert restarted_provider.rollback_calls == 0
 
-    with pytest.raises(
-        DeploymentFabricError,
-        match="different release for uncertain deployment",
-    ):
-        restarted.reconcile("deploy:p1:b")
-
+    reconciled = restarted.reconcile("deploy:p1:b")
+    assert reconciled.state is DeploymentState.ROLLED_BACK
+    assert reconciled.rollback is not None
+    assert reconciled.rollback.succeeded
+    assert reconciled.rollback.restored_release == previous
     assert restarted_provider.inspect_calls == 1
     assert restarted_provider.rollback_calls == 0
+
     persisted = restarted.snapshot()
-    record = next(
-        item for item in persisted.records if item.intent.intent_id == "deploy:p1:b"
+    assert persisted.current_releases == (("p1", "staging-1", SHA_A),)
+    assert persisted.healthy_staging == (("p1", SHA_A),)
+
+    final_store = SQLiteStore(store.path)
+    final_store.initialize()
+    final_provider = RollbackAckLossProvider(previous)
+    final = DurableDeploymentFabric.restore_latest(
+        final_provider,
+        checkpoint_host=ProductFactoryDeploymentCheckpointHost(final_store),
+        host_task_id=task_id,
+        project_id="p1",
     )
-    assert record.state is DeploymentState.UNCERTAIN
-    assert persisted.current_releases == ()
-    assert persisted.healthy_staging == ()
+    final_record = final.deploy(_intent("deploy:p1:b", candidate))
+    assert final_record.state is DeploymentState.ROLLED_BACK
+    assert final_provider.deploy_calls == 0
+    assert final_provider.rollback_calls == 0
+    assert final_provider.inspect_calls == 0
+    assert final.snapshot().current_releases == (("p1", "staging-1", SHA_A),)
