@@ -78,11 +78,27 @@ def test_operator_projection_exposes_required_factory_fields() -> None:
         "STATE": "active",
         "BLOCKER": "none",
         "CANDIDATE": "a" * 40,
-        "TEST": "passed",
+        "TEST": "unknown",
         "QA": "work-654:qa=passed",
         "INTEGRATION": "integration-654=pending",
         "NEXT": "continue_work:work-654",
     }
+
+
+def test_operator_projection_does_not_invent_test_success_from_qa() -> None:
+    detail = _detail(
+        ProductStatusEntry(
+            kind=ProductStatusKind.QA,
+            item_id="work-654:qa",
+            label="Independent QA",
+            state="passed",
+        ),
+    )
+
+    projection = project_operator_status(detail)
+
+    assert projection.test == "unknown"
+    assert projection.qa == "work-654:qa=passed"
 
 
 def test_operator_projection_prioritizes_blocker_without_inventing_progress() -> None:
