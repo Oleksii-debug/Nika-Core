@@ -119,7 +119,7 @@ def _validate_retry_count(value: int, *, field_name: str, minimum: int) -> int:
     return value
 
 
-def _normalize_retry_number(value: int | float, *, field_name: str) -> float:
+def _normalize_retry_number(value: float, *, field_name: str) -> float:
     try:
         return float(value)
     except OverflowError as exc:
