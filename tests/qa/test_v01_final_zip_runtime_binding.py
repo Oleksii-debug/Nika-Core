@@ -65,6 +65,10 @@ def test_m12_expands_the_same_zip_that_is_bound_to_distributable_evidence() -> N
     evidence_step = _prehuman_evidence_step(workflow)
 
     zip_binding = "$zipPath = '${{ steps.distributable.outputs.zip_path }}'"
+    archive_binding = (
+        "verify_release_archive(Path(r'$zipPath'), "
+        "source_sha='${{ env.NIKA_CANDIDATE_SHA }}')"
+    )
     expand_binding = "Expand-Archive -LiteralPath $zipPath -DestinationPath $extractRoot -Force"
     evidence_binding = (
         "distributable_zip_path = '${{ steps.distributable.outputs.zip_path }}'"
@@ -72,10 +76,13 @@ def test_m12_expands_the_same_zip_that_is_bound_to_distributable_evidence() -> N
 
     # Bind identity semantically instead of relying on a brittle character-distance
     # window: the runtime step must source the already-hashed distributable output,
-    # expand that exact variable, and record the same output in final evidence.
+    # canonically verify that exact variable, expand it, and record the same output
+    # in final evidence.
     assert zip_binding in runtime_step
+    assert archive_binding in runtime_step
     assert expand_binding in runtime_step
-    assert runtime_step.index(zip_binding) < runtime_step.index(expand_binding)
+    assert runtime_step.index(zip_binding) < runtime_step.index(archive_binding)
+    assert runtime_step.index(archive_binding) < runtime_step.index(expand_binding)
     assert evidence_binding in evidence_step
     assert "exact_final_artifact_runtime_uia = $true" in runtime_step
 
