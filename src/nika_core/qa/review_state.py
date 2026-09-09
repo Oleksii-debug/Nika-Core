@@ -329,28 +329,42 @@ class CandidateReviewRecord:
     def _validate_authority(
         self, authority: TrustedReviewerAuthority
     ) -> ReviewerAuthorityEvidence:
-        _validate_sha(authority.candidate_sha)
-        self._require_candidate(authority.candidate_sha)
-        self._validate_reviewer(authority.reviewer_id)
-        _validate_evidence_ref(authority.authority_ref, field="reviewer authority")
-        if authority.independent_review_authorized is not True:
+        try:
+            candidate_sha = authority.candidate_sha
+            reviewer_id = authority.reviewer_id
+            authority_ref = authority.authority_ref
+            independent_review_authorized = authority.independent_review_authorized
+        except AttributeError as exc:
+            raise ReviewPipelineError("trusted reviewer authority is malformed") from exc
+
+        _validate_sha(candidate_sha)
+        self._require_candidate(candidate_sha)
+        self._validate_reviewer(reviewer_id)
+        _validate_evidence_ref(authority_ref, field="reviewer authority")
+        if independent_review_authorized is not True:
             raise ReviewPipelineError(
                 "trusted reviewer authority did not authorize independent review"
             )
         return ReviewerAuthorityEvidence(
-            authority.candidate_sha,
-            authority.reviewer_id,
-            authority.authority_ref,
+            candidate_sha,
+            reviewer_id,
+            authority_ref,
             independent_review_authorized=True,
         )
 
     def _validate_merge_clearance(self, verification: ExactHeadMergeClearance) -> None:
-        _validate_sha(verification.candidate_sha)
-        if verification.candidate_sha != self.identity.candidate_sha:
+        try:
+            candidate_sha = verification.candidate_sha
+            merge_clearance = verification.merge_clearance
+        except AttributeError as exc:
+            raise ReviewPipelineError("exact-head verification clearance is malformed") from exc
+
+        _validate_sha(candidate_sha)
+        if candidate_sha != self.identity.candidate_sha:
             raise StaleCandidateReviewError(
                 "verification clearance does not match exact current candidate SHA"
             )
-        if verification.merge_clearance is not True:
+        if merge_clearance is not True:
             raise ReviewPipelineError(
                 "exact-head verification clearance is required for merge ready"
             )
