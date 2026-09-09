@@ -93,16 +93,14 @@ def test_restore_rejects_tampered_independent_review_authorization() -> None:
         CandidateReviewRecord.restore(payload)
 
 
-def test_restore_accepts_legacy_authorized_snapshot_without_decision_field() -> None:
+def test_restore_rejects_snapshot_missing_authorization_decision() -> None:
     payload = _pending_review().snapshot().replace(
         ',"independent_review_authorized":true',
         "",
     )
 
-    restored = CandidateReviewRecord.restore(payload)
-
-    assert restored.reviewer_authority is not None
-    assert restored.reviewer_authority.independent_review_authorized is True
+    with pytest.raises(ReviewPipelineError, match="review snapshot is invalid"):
+        CandidateReviewRecord.restore(payload)
 
 
 def test_restore_rejects_forged_merge_ready_without_exact_head_clearance() -> None:
