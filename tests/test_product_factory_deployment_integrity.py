@@ -77,6 +77,7 @@ class FakeProvider:
             intent.release.source_sha not in self.unhealthy,
             (f"health:{intent.intent_id}",),
             NOW,
+            release=intent.release,
         )
 
     def rollback(
