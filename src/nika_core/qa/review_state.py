@@ -145,6 +145,7 @@ class CandidateReviewRecord:
         reviewer_id: str | None = None,
         reviewer_authority: ReviewerAuthorityEvidence | None = None,
         verdict: ReviewVerdict | None = None,
+        verification: ExactHeadMergeClearance | None = None,
     ) -> CandidateReviewRecord:
         """Build a validated non-initial state for canonical lifecycle methods and restore."""
         if not isinstance(identity, CandidateReviewIdentity):
@@ -158,6 +159,12 @@ class CandidateReviewRecord:
         object.__setattr__(record, "reviewer_authority", reviewer_authority)
         object.__setattr__(record, "verdict", verdict)
         record._validate()
+        if record.state is ReviewState.MERGE_READY:
+            if verification is None:
+                raise ReviewPipelineError(
+                    "MERGE_READY construction requires exact-head verification clearance"
+                )
+            record._validate_merge_clearance(verification)
         return record
 
     def snapshot(self) -> str:
@@ -192,15 +199,10 @@ class CandidateReviewRecord:
                 reviewer_id=raw.get("reviewer_id"),
                 reviewer_authority=authority,
                 verdict=verdict,
+                verification=verification,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ReviewPipelineError("review snapshot is invalid") from exc
-        if record.state is ReviewState.MERGE_READY:
-            if verification is None:
-                raise ReviewPipelineError(
-                    "MERGE_READY restore requires exact-head verification clearance"
-                )
-            record._validate_merge_clearance(verification)
         return record
 
     def require_review(self) -> CandidateReviewRecord:
@@ -263,6 +265,7 @@ class CandidateReviewRecord:
             reviewer_id=self.reviewer_id,
             reviewer_authority=self.reviewer_authority,
             verdict=self.verdict,
+            verification=verification,
         )
 
     def require_fix(self, *, candidate_sha: str) -> CandidateReviewRecord:
