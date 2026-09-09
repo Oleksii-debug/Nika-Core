@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
