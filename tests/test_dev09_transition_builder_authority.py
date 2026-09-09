@@ -14,7 +14,11 @@ from nika_core.qa.review_state import (
 SHA_A = "a" * 40
 
 
-def test_internal_transition_builder_cannot_forge_merge_ready() -> None:
+def _merge_ready_inputs() -> tuple[
+    CandidateReviewIdentity,
+    ReviewerAuthorityEvidence,
+    ReviewVerdict,
+]:
     identity = CandidateReviewIdentity(
         work_id="work-1",
         candidate_sha=SHA_A,
@@ -33,9 +37,31 @@ def test_internal_transition_builder_cannot_forge_merge_ready() -> None:
         reason="independent review passed",
         evidence_refs=("qa://pass",),
     )
+    return identity, authority, verdict
+
+
+def test_public_transition_builder_cannot_forge_merge_ready() -> None:
+    identity, authority, verdict = _merge_ready_inputs()
 
     with pytest.raises(ReviewPipelineError):
         CandidateReviewRecord._from_transition(
+            identity,
+            ReviewState.MERGE_READY,
+            reviewer_id="reviewer-1",
+            reviewer_authority=authority,
+            verdict=verdict,
+        )
+
+
+def test_mangled_transition_builder_requires_exact_head_clearance_for_merge_ready() -> None:
+    identity, authority, verdict = _merge_ready_inputs()
+    builder = getattr(CandidateReviewRecord, "_CandidateReviewRecord__from_transition")
+
+    with pytest.raises(
+        ReviewPipelineError,
+        match="MERGE_READY construction requires exact-head verification clearance",
+    ):
+        builder(
             identity,
             ReviewState.MERGE_READY,
             reviewer_id="reviewer-1",
