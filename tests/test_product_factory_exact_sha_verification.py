@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 import nika_core.product_factory_verification as verification
 
 
