@@ -125,7 +125,7 @@ class _Session:
         self.session_id = "session-frame-regression"
         self.context_id = "context-frame-regression"
         self.registry = _Registry(page, page_id)
-        self.downloads = SimpleNamespace(saved=[])
+        self.downloads = SimpleNamespace(checkpoint=0, complete_since=lambda *_: False)
         self._page_id = page_id
 
     def page_ids(self) -> tuple[str, ...]:
