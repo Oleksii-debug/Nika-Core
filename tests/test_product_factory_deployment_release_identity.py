@@ -69,6 +69,7 @@ class _Provider(DeploymentProviderPort):
             self.healthy,
             ("health://ok",),
             NOW,
+            release=intent.release,
         )
 
     def rollback(
@@ -116,6 +117,7 @@ class _Provider(DeploymentProviderPort):
             intent.release.source_sha,
             True,
             ("inspect://ok",),
+            release=intent.release,
         )
 
 
