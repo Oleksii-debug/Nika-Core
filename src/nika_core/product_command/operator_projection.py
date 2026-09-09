@@ -142,7 +142,7 @@ def _incomplete(
     return tuple(
         entry
         for entry in entries
-        if entry.state.casefold() not in _TERMINAL_SUCCESS_STATES
+        if entry.state.strip().casefold() not in _TERMINAL_SUCCESS_STATES
     )
 
 

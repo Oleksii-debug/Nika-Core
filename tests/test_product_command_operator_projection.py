@@ -320,3 +320,31 @@ def test_operator_projection_resolved_blocker_does_not_mask_downstream_qa() -> N
 
     assert projection.blocker == "none"
     assert projection.next == "qa:work-654:qa=running"
+
+
+def test_operator_projection_trims_terminal_state_for_progression() -> None:
+    detail = _detail(
+        ProductStatusEntry(
+            kind=ProductStatusKind.COMPONENT,
+            item_id="work-654",
+            label="Issue 654",
+            state="completed",
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.BLOCKER,
+            item_id="work-654:blocker",
+            label="Credential blocker",
+            state="  ReSoLvEd  ",
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.QA,
+            item_id="work-654:qa",
+            label="QA",
+            state="running",
+        ),
+    )
+
+    projection = project_operator_status(detail)
+
+    assert projection.blocker == "none"
+    assert projection.next == "qa:work-654:qa=running"
