@@ -37,6 +37,22 @@ The deterministic test suite drives both the OpenAI-compatible provider and nati
 
 For the live-provider gate, focused CI may install Ollama and run `scripts/m4_ollama_proof.py` through the same `ModelGateway` and `OllamaProvider` contracts. The proof requires a non-empty response and the expected local-provider identity; it does not assert model prose. Large models are never pulled by ordinary shared CI merely to prove adapter plumbing.
 
+## True concurrent multi-provider / multi-replica operation
+
+Binding extension: `docs/LOCAL_INFERENCE_FABRIC.md`.
+
+ModelGateway is not a single-current-model abstraction. Nika must support many concurrent requests from independent projects/teams and may have several executable routes active at once, including:
+
+- one local server with multiple parallel slots;
+- multiple independent replicas of the same model on distinct provider/endpoint identities;
+- multiple different local models and engines concurrently;
+- local and cloud/API providers concurrently;
+- many API-backed agents concurrently when the configured provider permits it.
+
+No process-global mutable `current_model`, installation-wide single-model mutex or product-level single-project serialization is allowed. Each request binds its own project/agent/task/provider-route/model identity. Identical `model_id` values on different endpoint identities remain distinct routes. Cancellation/failure of one route or request must not cancel unrelated inference work.
+
+Provider concurrency metadata such as parallel-slot count, max concurrent requests, batching capability or endpoint instance identity describes the backend; it must not be interpreted as a global Nika agent/team limit. Same-model replicas and different-model routes are both valid first-class configurations.
+
 ## Standardized tools
 
 Tools have stable IDs, JSON-schema input metadata, risk class and deadline. `EXTERNAL_SIDE_EFFECT` and `HIGH_IMPACT` calls require explicit approval or an injected approval policy. Unknown tools, denials, timeouts and handler failures return normalized `ToolResult` failures.
@@ -56,6 +72,10 @@ The acceptance suite constructs a real official `MCPServer` in process, discover
 5. the shared capability contract, generic HTTP providers and Ollama fail closed on hard-cancellation claims unless evidence explicitly opts a provider in;
 6. explicit fallback still works for retryable failures, but timeout fallback remains blocked when hard cancellation is unproven;
 7. no secrets or prompt content appear in Git/audit evidence;
-8. exact green SHA is current-main-compatible before merge.
+8. exact green SHA is current-main-compatible before merge;
+9. concurrent ModelGateway calls remain isolated across independent agent/task identities;
+10. two distinct endpoint identities exposing the same model ID can be invoked concurrently without evidence collision;
+11. different local model routes can be active concurrently;
+12. local and API-backed requests can execute concurrently without a Nika-owned global model lock.
 
 Live Ollama execution is useful focused evidence but does not award physical-Windows Foundry inference credit. HUMAN_TESTED and NVDA_VERIFIED remain human-only states.
