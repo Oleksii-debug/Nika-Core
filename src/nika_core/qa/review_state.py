@@ -66,7 +66,7 @@ class ReviewerAuthorityEvidence:
     candidate_sha: str
     reviewer_id: str
     authority_ref: str
-    independent_review_authorized: bool = True
+    independent_review_authorized: bool
 
     def __post_init__(self) -> None:
         _validate_sha(self.candidate_sha)
