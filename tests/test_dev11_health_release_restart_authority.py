@@ -17,7 +17,6 @@ from nika_core.product_factory_deployment import (
     ReleaseRef,
 )
 
-
 SHA = "a" * 40
 DIGEST = "b" * 64
 
