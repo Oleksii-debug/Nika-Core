@@ -11,6 +11,11 @@ from nika_core.product_factory_orchestration import (
     ProductRepositoryGraph,
     RepositoryRef,
 )
+from nika_core.product_factory_review_authority import (
+    ProductFactoryReviewAuthorityError,
+    ProductFactoryReviewAuthorityPort,
+    ProductFactoryReviewSubject,
+)
 from nika_core.toolsmith.contracts import CodingResult, TestEvidence
 
 
@@ -65,13 +70,21 @@ class WorkerResultEnvelope:
     result_sha: str
     diff_digest: str
     coding_result: CodingResult
+    producer_actor_id: str | None = None
 
     def __post_init__(self) -> None:
-        if not all(value.strip() for value in (self.work_id, self.component_id, self.repository_id)):
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (self.work_id, self.component_id, self.repository_id)
+        ):
             raise CoordinatorError("worker result identity must not be empty")
         _validate_sha(self.base_sha, "base_sha")
         _validate_sha(self.result_sha, "result_sha")
         _validate_digest(self.diff_digest, "diff_digest")
+        if self.producer_actor_id is not None and (
+            not isinstance(self.producer_actor_id, str) or not self.producer_actor_id.strip()
+        ):
+            raise CoordinatorError("producer actor identity must be non-empty text")
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,8 +95,17 @@ class ReviewDecision:
     evidence_refs: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if not self.reviewer_id.strip() or not self.reason.strip() or not self.evidence_refs:
-            raise CoordinatorError("independent review requires reviewer, reason and evidence")
+        if (
+            not isinstance(self.reviewer_id, str)
+            or not self.reviewer_id.strip()
+            or type(self.accepted) is not bool
+            or not isinstance(self.reason, str)
+            or not self.reason.strip()
+            or not isinstance(self.evidence_refs, tuple)
+            or not self.evidence_refs
+            or any(not isinstance(ref, str) or not ref.strip() for ref in self.evidence_refs)
+        ):
+            raise CoordinatorError("independent review requires reviewer, exact decision, reason and evidence")
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +134,10 @@ class ProductFactoryCoordinator:
     """PF4 coordinator above bounded component work, not a second agent runtime."""
 
     graph: ProductRepositoryGraph
+    review_authority: ProductFactoryReviewAuthorityPort | None = field(
+        default=None,
+        repr=False,
+    )
     _records: dict[str, WorkRecord] = field(default_factory=dict, init=False, repr=False)
     _revision: int = field(default=0, init=False, repr=False)
     _trusted_plan: tuple[ComponentWorkRequest, ...] | None = field(
@@ -211,6 +237,13 @@ class ProductFactoryCoordinator:
         record = self._record(component_id)
         if record.state is not WorkState.REVIEW_REQUIRED or record.result is None:
             raise CoordinatorError("component is not awaiting independent review")
+
+        # Compatibility is deliberately narrow: old in-memory callers that have no
+        # producer attribution and no authority retain legacy behavior. Any attributed
+        # candidate, or any production binding that injects authority, is fail-closed.
+        if record.result.producer_actor_id is not None or self.review_authority is not None:
+            self._verify_review_authority(record, decision)
+
         state = WorkState.ACCEPTED if decision.accepted else WorkState.REPAIR_REQUIRED
         updated = WorkRecord(
             record.request,
@@ -385,6 +418,8 @@ class ProductFactoryCoordinator:
                     "accepted snapshot work requires successful result and accepted review"
                 )
             self._validate_success_evidence(request, result.coding_result.test_evidence)
+            if result.producer_actor_id is not None or self.review_authority is not None:
+                self._verify_review_authority(record, review)
             return
 
         if record.state is WorkState.REPAIR_REQUIRED:
@@ -398,6 +433,8 @@ class ProductFactoryCoordinator:
                         "review-rejected repair snapshot is internally inconsistent"
                     )
                 self._validate_success_evidence(request, result.coding_result.test_evidence)
+                if result.producer_actor_id is not None or self.review_authority is not None:
+                    self._verify_review_authority(record, review)
             elif review is not None:
                 raise CoordinatorError(
                     "worker-failed repair snapshot cannot contain review evidence"
@@ -412,6 +449,49 @@ class ProductFactoryCoordinator:
             return
 
         raise CoordinatorError("snapshot contains unknown work state")
+
+    def _verify_review_authority(
+        self,
+        record: WorkRecord,
+        decision: ReviewDecision,
+    ) -> None:
+        if record.result is None:
+            raise CoordinatorError("trusted review requires candidate result evidence")
+        producer_actor_id = record.result.producer_actor_id
+        if producer_actor_id is None:
+            raise CoordinatorError(
+                "trusted producer identity is required before independent review"
+            )
+        if producer_actor_id == decision.reviewer_id:
+            raise CoordinatorError(
+                "independent reviewer must differ from candidate producer"
+            )
+        if self.review_authority is None:
+            raise CoordinatorError("trusted independent reviewer authority is unavailable")
+
+        try:
+            subject = ProductFactoryReviewSubject(
+                project_id=record.request.project_id,
+                component_id=record.request.component_id,
+                work_id=record.request.work_id,
+                repository_id=record.request.repository_id,
+                base_sha=record.result.base_sha,
+                result_sha=record.result.result_sha,
+                diff_digest=record.result.diff_digest,
+                attempt=record.request.attempt,
+                producer_actor_id=producer_actor_id,
+                reviewer_id=decision.reviewer_id,
+                accepted=decision.accepted,
+            )
+            verified = self.review_authority.verify(subject, decision.evidence_refs)
+        except ProductFactoryReviewAuthorityError as exc:
+            raise CoordinatorError(f"invalid independent review subject: {exc}") from exc
+        except Exception as exc:  # noqa: BLE001 - authority failures are fail-closed
+            raise CoordinatorError(
+                "trusted independent reviewer authority verification failed"
+            ) from exc
+        if verified is not True:
+            raise CoordinatorError("trusted independent reviewer authority rejected evidence")
 
     def _validate_restored_dependencies(self, records: tuple[WorkRecord, ...]) -> None:
         accepted = {
@@ -686,11 +766,15 @@ def _stable_id(prefix: str, *parts: object) -> str:
     return f"{prefix}-{hashlib.sha256(payload.encode()).hexdigest()[:24]}"
 
 
-def _validate_sha(value: str, label: str) -> None:
-    if len(value) != 40 or any(char not in "0123456789abcdef" for char in value.casefold()):
+def _validate_sha(value: object, label: str) -> None:
+    if not isinstance(value, str) or len(value) != 40 or any(
+        char not in "0123456789abcdef" for char in value.casefold()
+    ):
         raise CoordinatorError(f"{label} must be a 40-character hexadecimal SHA")
 
 
-def _validate_digest(value: str, label: str) -> None:
-    if len(value) != 64 or any(char not in "0123456789abcdef" for char in value.casefold()):
+def _validate_digest(value: object, label: str) -> None:
+    if not isinstance(value, str) or len(value) != 64 or any(
+        char not in "0123456789abcdef" for char in value.casefold()
+    ):
         raise CoordinatorError(f"{label} must be a 64-character hexadecimal digest")
