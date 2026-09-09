@@ -28,9 +28,9 @@ class GitHubIssueRef:
     state: str
 
     def __post_init__(self) -> None:
-        if isinstance(self.number, bool) or self.number < 1:
+        if isinstance(self.number, bool) or not isinstance(self.number, int) or self.number < 1:
             raise GitHubFactoryError("issue number must be a positive integer")
-        if self.state not in {"open", "closed"}:
+        if not isinstance(self.state, str) or self.state not in {"open", "closed"}:
             raise GitHubFactoryError("issue state must be open or closed")
 
 
@@ -41,9 +41,11 @@ class GitHubCheck:
     state: CheckState
 
     def __post_init__(self) -> None:
-        if not self.name.strip():
+        if not isinstance(self.name, str) or not self.name.strip():
             raise GitHubFactoryError("check name must not be empty")
         _validate_sha(self.head_sha, "check head_sha")
+        if not isinstance(self.state, CheckState):
+            raise GitHubFactoryError("check state must be a recognized CheckState")
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,15 +54,24 @@ class GitHubPullRequest:
     head_branch: str
     head_sha: str
     base_branch: str
+    base_sha: str
     state: PullRequestState
     merge_sha: str | None = None
 
     def __post_init__(self) -> None:
-        if isinstance(self.number, bool) or self.number < 1:
+        if isinstance(self.number, bool) or not isinstance(self.number, int) or self.number < 1:
             raise GitHubFactoryError("pull request number must be a positive integer")
-        if not self.head_branch.strip() or not self.base_branch.strip():
+        if (
+            not isinstance(self.head_branch, str)
+            or not self.head_branch.strip()
+            or not isinstance(self.base_branch, str)
+            or not self.base_branch.strip()
+        ):
             raise GitHubFactoryError("pull request branches must not be empty")
         _validate_sha(self.head_sha, "pull request head_sha")
+        _validate_sha(self.base_sha, "pull request base_sha")
+        if not isinstance(self.state, PullRequestState):
+            raise GitHubFactoryError("pull request state must be a recognized PullRequestState")
         if self.state is PullRequestState.MERGED:
             if self.merge_sha is None:
                 raise GitHubFactoryError("merged pull request requires merge_sha")
@@ -82,15 +93,26 @@ class GitHubRepositoryObservation:
     checks: tuple[GitHubCheck, ...] = ()
 
     def __post_init__(self) -> None:
-        if not self.owner.strip() or not self.name.strip() or not self.default_branch.strip():
+        if (
+            not isinstance(self.owner, str)
+            or not self.owner.strip()
+            or not isinstance(self.name, str)
+            or not self.name.strip()
+            or not isinstance(self.default_branch, str)
+            or not self.default_branch.strip()
+        ):
             raise GitHubFactoryError("repository identity must not be empty")
         _validate_sha(self.default_branch_sha, "default branch sha")
         if (self.candidate_branch is None) != (self.candidate_sha is None):
             raise GitHubFactoryError("candidate branch and sha must be present together")
         if self.candidate_branch is not None:
-            if not self.candidate_branch.strip():
+            if not isinstance(self.candidate_branch, str) or not self.candidate_branch.strip():
                 raise GitHubFactoryError("candidate branch must not be empty")
             _validate_sha(self.candidate_sha or "", "candidate sha")
+        if not isinstance(self.checks, tuple) or any(
+            not isinstance(check, GitHubCheck) for check in self.checks
+        ):
+            raise GitHubFactoryError("checks must contain GitHubCheck evidence")
         names = [check.name for check in self.checks]
         if len(names) != len(set(names)):
             raise GitHubFactoryError("check names must be unique")
@@ -139,6 +161,8 @@ class GitHubFactoryAdapter:
                 raise GitHubFactoryError("pull request head does not match candidate identity")
             if pr.base_branch != observation.default_branch:
                 raise GitHubFactoryError("pull request base does not match default branch")
+            if pr.base_sha != observation.default_branch_sha:
+                raise GitHubFactoryError("pull request base sha does not match default branch sha")
 
         checks_state: CheckState | None = None
         if observation.checks:
@@ -151,8 +175,10 @@ class GitHubFactoryAdapter:
                 checks_state = CheckState.FAIL
             elif CheckState.PENDING in states:
                 checks_state = CheckState.PENDING
-            else:
+            elif states == {CheckState.PASS}:
                 checks_state = CheckState.PASS
+            else:
+                raise GitHubFactoryError("checks contain an unrecognized state")
 
         integrated = pr is not None and pr.state is PullRequestState.MERGED
         integration_sha = pr.merge_sha if integrated else None
@@ -173,6 +199,8 @@ class GitHubFactoryAdapter:
 
 
 def _normalize_full_name(locator: str) -> str:
+    if not isinstance(locator, str):
+        raise GitHubFactoryError("GitHub repository locator must be text")
     value = locator.strip().rstrip("/")
     for prefix in ("https://github.com/", "http://github.com/", "git@github.com:"):
         if value.casefold().startswith(prefix.casefold()):
@@ -186,5 +214,7 @@ def _normalize_full_name(locator: str) -> str:
 
 
 def _validate_sha(value: str, label: str) -> None:
-    if len(value) != 40 or any(char not in "0123456789abcdef" for char in value):
+    if not isinstance(value, str) or len(value) != 40 or any(
+        char not in "0123456789abcdef" for char in value
+    ):
         raise GitHubFactoryError(f"{label} must be an exact lowercase 40-character git sha")
