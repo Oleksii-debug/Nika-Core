@@ -44,7 +44,9 @@ class RetryPolicy:
             return False
         if result.error_code not in self.retryable_error_codes:
             return False
-        return result.resume_token is not None or self.allow_fresh_retry
+        resume_token = result.resume_token
+        has_resume_authority = isinstance(resume_token, str) and bool(resume_token.strip())
+        return has_resume_authority or self.allow_fresh_retry
 
     def delay_seconds(self, *, retry_number: int) -> float:
         """Return deterministic exponential backoff for a 1-based retry number."""
