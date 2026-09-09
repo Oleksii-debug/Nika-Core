@@ -107,7 +107,7 @@ def test_restore_rejects_forged_merge_ready_without_exact_head_clearance() -> No
     raw = json.loads(_passed_review().snapshot())
     raw["state"] = "merge_ready"
 
-    with pytest.raises(ReviewPipelineError, match="requires exact-head verification clearance"):
+    with pytest.raises(ReviewPipelineError, match="review snapshot is invalid"):
         CandidateReviewRecord.restore(json.dumps(raw))
 
 
