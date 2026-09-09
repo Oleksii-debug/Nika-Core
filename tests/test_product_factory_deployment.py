@@ -54,6 +54,7 @@ class FakeDeploymentProvider(DeploymentProviderPort):
             self.healthy,
             ("health://fake",),
             NOW,
+            release=intent.release,
         )
 
     def rollback(
@@ -72,7 +73,12 @@ class FakeDeploymentProvider(DeploymentProviderPort):
 
     def inspect(self, intent: DeploymentIntent) -> ProviderInspection:
         if self.inspection is None:
-            return ProviderInspection(intent.release.source_sha, True, ("inspect://fake",))
+            return ProviderInspection(
+                intent.release.source_sha,
+                True,
+                ("inspect://fake",),
+                release=intent.release,
+            )
         return self.inspection
 
 
