@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from nika_core.product_command.contracts import (
@@ -124,6 +126,8 @@ def _render_values(values: tuple[str, ...], *, empty: str) -> str:
 def _render_candidate(candidate_refs: tuple[str, ...]) -> str:
     if not candidate_refs:
         return "unknown"
+    if any(re.fullmatch(r"[0-9a-f]{40}", reference) is None for reference in candidate_refs):
+        return "invalid_candidate_identity"
     if len(candidate_refs) > 1:
         return "ambiguous_multiple_candidates"
     return candidate_refs[0]
