@@ -26,8 +26,13 @@ class RetryPolicy:
 
     def __post_init__(self) -> None:
         _validate_retry_count(self.max_retries, field_name="max_retries", minimum=0)
+        if not isinstance(self.retryable_error_codes, frozenset):
+            raise TypeError("retryable_error_codes must be a frozenset of RuntimeErrorCode values")
+        if any(not isinstance(code, RuntimeErrorCode) for code in self.retryable_error_codes):
+            raise TypeError("retryable_error_codes must contain only RuntimeErrorCode values")
         _validate_retry_delay(self.base_delay_seconds, field_name="base_delay_seconds")
         _validate_retry_delay(self.max_delay_seconds, field_name="max_delay_seconds")
+        _require_bool(self.allow_fresh_retry, field_name="allow_fresh_retry")
         if self.base_delay_seconds > self.max_delay_seconds:
             raise ValueError("base_delay_seconds must not exceed max_delay_seconds")
 
