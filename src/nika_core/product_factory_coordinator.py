@@ -216,7 +216,13 @@ class ProductFactoryCoordinator:
             if record.blocker != reason:
                 raise CoordinatorError("cancelled component reason cannot be rebound")
             return record
-        updated = WorkRecord(record.request, WorkState.CANCELLED, blocker=reason)
+        updated = WorkRecord(
+            record.request,
+            WorkState.CANCELLED,
+            record.result,
+            record.review,
+            reason,
+        )
         self._records[component_id] = updated
         self._touch()
         return updated
@@ -329,8 +335,17 @@ class ProductFactoryCoordinator:
             self._validate_success_evidence(request, result.coding_result.test_evidence)
             return
         if record.state is WorkState.CANCELLED:
-            if result is not None or review is not None or not blocker:
-                raise CoordinatorError("cancelled snapshot work requires cancellation reason without terminal evidence")
+            if not blocker:
+                raise CoordinatorError("cancelled snapshot work requires cancellation reason")
+            if review is not None:
+                if result is None or not result.coding_result.succeeded or review.accepted:
+                    raise CoordinatorError(
+                        "cancelled snapshot review evidence is internally inconsistent"
+                    )
+                self._validate_success_evidence(request, result.coding_result.test_evidence)
+                return
+            if result is not None and result.coding_result.succeeded:
+                self._validate_success_evidence(request, result.coding_result.test_evidence)
             return
         if record.state is WorkState.REPAIR_REQUIRED:
             if result is None or not blocker:
