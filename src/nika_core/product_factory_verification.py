@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-
 MAX_EVIDENCE_REF_LENGTH = 512
 
 
