@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from nika_core.product_command.contracts import (
+    EvidenceReference,
     ProductProjectDetail,
     ProductProjectSummary,
     ProductStatusEntry,
@@ -180,3 +181,38 @@ def test_operator_projection_wrong_kind_pass_does_not_clear_deployment() -> None
     projection = project_operator_status(detail)
 
     assert projection.next == "integration:work-654:deployment=passed"
+
+
+def test_operator_projection_retains_candidate_for_canonical_deployment_success_states() -> None:
+    candidate_sha = "a" * 40
+
+    for state in ("succeeded", "healthy"):
+        detail = ProductProjectDetail(
+            summary=_summary(),
+            statuses=(
+                ProductStatusEntry(
+                    kind=ProductStatusKind.COMPONENT,
+                    item_id="work-654",
+                    label="Issue 654",
+                    state="completed",
+                ),
+                ProductStatusEntry(
+                    kind=ProductStatusKind.DEPLOYMENT,
+                    item_id="work-654:deployment",
+                    label="Deployment",
+                    state=state,
+                    evidence=(
+                        EvidenceReference(
+                            kind="git_commit",
+                            reference=candidate_sha,
+                            label="Candidate",
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        projection = project_operator_status(detail)
+
+        assert projection.candidate == candidate_sha
+        assert projection.next == "next_work"
