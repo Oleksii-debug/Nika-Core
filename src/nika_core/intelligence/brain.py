@@ -695,7 +695,10 @@ class DeterministicBrain:
         adders: dict[str, list[str]] = {}
         removers: dict[str, list[str]] = {}
         for action in actions:
-            if action.action_id in unavailable_action_ids or not cls._action_applicable(action, state):
+            if (
+                action.action_id in unavailable_action_ids
+                or not cls._action_applicable(action, state)
+            ):
                 continue
             for fact in action.adds:
                 adders.setdefault(fact, []).append(action.action_id)
