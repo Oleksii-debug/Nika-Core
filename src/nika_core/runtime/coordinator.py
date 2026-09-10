@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import uuid
+from dataclasses import dataclass
 
 from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
@@ -15,12 +17,23 @@ from nika_core.runtime.contracts import (
     RuntimeRequest,
     RuntimeResult,
     RuntimeResumeMode,
+    RuntimeResumeProbePort,
     RuntimeResumeRequest,
 )
 from nika_core.runtime.idempotency import (
     IdempotencyConflictError,
     IdempotencyLedger,
     IdempotencyStatus,
+)
+from nika_core.runtime.recovery_claims import (
+    RECOVERY_RESUME_OPERATION_TYPE as _RECOVERY_RESUME_OPERATION_TYPE,
+)
+from nika_core.runtime.recovery_claims import (
+    begin_recovery_effect,
+    new_recovery_claim_metadata,
+    recovery_claim_is_reclaimable,
+    recovery_claim_metadata,
+    write_pending_recovery_claim,
 )
 from nika_core.runtime.retry import RetryPolicy
 from nika_core.runtime.session_store import (
@@ -45,6 +58,41 @@ _RESUMABLE_OUTCOMES = frozenset(
 )
 
 _CANCEL_OPERATION_TYPE = "runtime.cancel"
+_RECOVERY_SESSION_EPOCH_SCHEMA = "nika-runtime-recovery-session-epoch-v1"
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimeResumeClaim:
+    operation_key: str
+    claim_id: str
+    owner_id: str
+    task_id: str
+    runtime_id: str
+    thread_id: str
+    checkpoint_id: str
+    session_fingerprint: str
+    claim_fingerprint: str
+    resume_mode: RuntimeResumeMode
+
+
+class RuntimeRecoveryClaimConflict(IdempotencyConflictError):
+    """Another durable recovery owner already controls this persisted session epoch."""
+
+    def __init__(
+        self,
+        operation_key: str,
+        status: IdempotencyStatus | None,
+        *,
+        detail: str | None = None,
+    ) -> None:
+        self.operation_key = operation_key
+        self.status = status
+        status_text = status.value if status is not None else "conflicting-input"
+        detail_text = f"; {detail}" if detail else ""
+        super().__init__(
+            "durable runtime recovery is already claimed for this persisted session epoch; "
+            f"operation_key={operation_key} status={status_text}{detail_text}"
+        )
 
 
 class TaskRuntimeCoordinator:
@@ -56,11 +104,16 @@ class TaskRuntimeCoordinator:
         audit: AuditLog,
         session_store: RuntimeSessionStore | None = None,
         idempotency: IdempotencyLedger | None = None,
+        recovery_owner_id: str | None = None,
     ) -> None:
         self._queue = queue
         self._audit = audit
         self._sessions = session_store or RuntimeSessionStore(queue.store)
         self._idempotency = idempotency or IdempotencyLedger(queue.store)
+        owner_id = recovery_owner_id or uuid.uuid4().hex
+        if not owner_id.strip():
+            raise ValueError("recovery_owner_id must not be empty")
+        self._recovery_owner_id = owner_id
 
     @property
     def sessions(self) -> RuntimeSessionStore:
@@ -91,7 +144,24 @@ class TaskRuntimeCoordinator:
 
         result = await self._safe_run(runtime, request)
         retries_used = 0
+        resume_claim: _RuntimeResumeClaim | None = None
+        resume_claim_started = False
         while policy.should_retry(result, retries_used=retries_used):
+            if resume_claim is not None and result.resume_token is None:
+                self._audit.append(
+                    event_type="runtime.retry_blocked_unsafe_fresh_replay",
+                    entity_type="task",
+                    entity_id=request.task_id,
+                    payload={
+                        "runtime_id": runtime.runtime_id,
+                        "thread_id": request.thread_id,
+                        "retry_number": retries_used + 1,
+                        "error": result.error,
+                        "error_code": result.error_code.value if result.error_code else None,
+                        "reason": "durable resume lost its safe cursor",
+                    },
+                )
+                break
             retries_used += 1
             delay = policy.delay_seconds(retry_number=retries_used)
             self._queue.transition(request.task_id, TaskState.RETRYING)
@@ -124,21 +194,51 @@ class TaskRuntimeCoordinator:
                 },
             )
             if result.resume_token is not None:
-                result = await self._safe_resume(
-                    runtime,
-                    RuntimeResumeRequest(
-                        task_id=request.task_id,
-                        thread_id=request.thread_id,
-                        resume_token=result.resume_token,
-                        mode=RuntimeResumeMode.CONTINUE,
-                        max_steps=request.max_steps,
-                        timeout_seconds=request.timeout_seconds,
-                    ),
+                resume_request = RuntimeResumeRequest(
+                    task_id=request.task_id,
+                    thread_id=request.thread_id,
+                    resume_token=result.resume_token,
+                    mode=RuntimeResumeMode.CONTINUE,
+                    max_steps=request.max_steps,
+                    timeout_seconds=request.timeout_seconds,
                 )
+                if resume_claim is None:
+                    record = self._sessions.get(request.task_id)
+                    if record is None:
+                        raise RuntimeError(
+                            "durable retry returned a resume token without a persisted "
+                            "Nika runtime session"
+                        )
+                    if record.runtime_id != runtime.runtime_id:
+                        raise ValueError(
+                            f"Task {request.task_id} belongs to runtime {record.runtime_id}, "
+                            f"not {runtime.runtime_id}"
+                        )
+                    if record.thread_id != request.thread_id:
+                        raise ValueError("retry thread does not match persisted runtime session")
+                    if record.resume_token != result.resume_token:
+                        raise ValueError("retry token does not match persisted runtime session")
+                    task_state = self._task_state(request.task_id)
+                    resume_claim = await self._acquire_resume_claim(
+                        runtime,
+                        record,
+                        task_state=task_state,
+                        mode=RuntimeResumeMode.CONTINUE,
+                    )
+                if not resume_claim_started:
+                    self._begin_resume_effect(resume_claim)
+                    resume_claim_started = True
+                result = await self._safe_resume(runtime, resume_request)
             else:
                 result = await self._safe_run(runtime, request)
 
-        return self._finish(runtime.runtime_id, request.task_id, request.thread_id, result)
+        return self._finish(
+            runtime.runtime_id,
+            request.task_id,
+            request.thread_id,
+            result,
+            resume_claim=resume_claim,
+        )
 
     async def resume_approval(
         self,
@@ -149,7 +249,14 @@ class TaskRuntimeCoordinator:
             raise ValueError("resume_approval requires APPROVAL mode")
         if request.value is None:
             raise ValueError("approval decision must be explicit and not None")
-        self._require_approval_session(runtime, request)
+        record = self._require_approval_session(runtime, request)
+        task_state = self._task_state(request.task_id)
+        claim = await self._acquire_resume_claim(
+            runtime,
+            record,
+            task_state=task_state,
+            mode=RuntimeResumeMode.APPROVAL,
+        )
         self._queue.transition(request.task_id, TaskState.RUNNING)
         self._audit.append(
             event_type="runtime.approval_resumed",
@@ -157,8 +264,15 @@ class TaskRuntimeCoordinator:
             entity_id=request.task_id,
             payload={"runtime_id": runtime.runtime_id, "thread_id": request.thread_id},
         )
+        self._begin_resume_effect(claim)
         result = await self._safe_resume(runtime, request)
-        return self._finish(runtime.runtime_id, request.task_id, request.thread_id, result)
+        return self._finish(
+            runtime.runtime_id,
+            request.task_id,
+            request.thread_id,
+            result,
+            resume_claim=claim,
+        )
 
     async def resume_saved(
         self,
@@ -180,6 +294,13 @@ class TaskRuntimeCoordinator:
         if record.outcome == RuntimeOutcome.WAITING_APPROVAL:
             raise ValueError("Persisted approval wait requires explicit resume_saved_approval()")
 
+        task_state = self._task_state(task_id)
+        claim = await self._acquire_resume_claim(
+            runtime,
+            record,
+            task_state=task_state,
+            mode=RuntimeResumeMode.CONTINUE,
+        )
         mode = self._prepare_saved_resume_state(task_id, record)
         self._audit.append(
             event_type="runtime.saved_resume_started",
@@ -190,8 +311,10 @@ class TaskRuntimeCoordinator:
                 "thread_id": record.thread_id,
                 "stored_outcome": record.outcome.value if record.outcome else "active",
                 "mode": mode.value,
+                "recovery_claim": claim.operation_key,
             },
         )
+        self._begin_resume_effect(claim)
         result = await self._safe_resume(
             runtime,
             RuntimeResumeRequest(
@@ -204,7 +327,13 @@ class TaskRuntimeCoordinator:
                 timeout_seconds=timeout_seconds,
             ),
         )
-        return self._finish(runtime.runtime_id, task_id, record.thread_id, result)
+        return self._finish(
+            runtime.runtime_id,
+            task_id,
+            record.thread_id,
+            result,
+            resume_claim=claim,
+        )
 
     async def resume_saved_approval(
         self,
@@ -226,16 +355,28 @@ class TaskRuntimeCoordinator:
             )
         if record.outcome != RuntimeOutcome.WAITING_APPROVAL:
             raise ValueError("Persisted runtime session is not waiting for human approval")
-        if self._task_state(task_id) != TaskState.WAITING_APPROVAL:
+        task_state = self._task_state(task_id)
+        if task_state != TaskState.WAITING_APPROVAL:
             raise ValueError("Nika task is not in WAITING_APPROVAL state")
 
+        claim = await self._acquire_resume_claim(
+            runtime,
+            record,
+            task_state=task_state,
+            mode=RuntimeResumeMode.APPROVAL,
+        )
         self._queue.transition(task_id, TaskState.RUNNING)
         self._audit.append(
             event_type="runtime.saved_approval_resumed",
             entity_type="task",
             entity_id=task_id,
-            payload={"runtime_id": runtime.runtime_id, "thread_id": record.thread_id},
+            payload={
+                "runtime_id": runtime.runtime_id,
+                "thread_id": record.thread_id,
+                "recovery_claim": claim.operation_key,
+            },
         )
+        self._begin_resume_effect(claim)
         result = await self._safe_resume(
             runtime,
             RuntimeResumeRequest(
@@ -248,7 +389,13 @@ class TaskRuntimeCoordinator:
                 timeout_seconds=timeout_seconds,
             ),
         )
-        return self._finish(runtime.runtime_id, task_id, record.thread_id, result)
+        return self._finish(
+            runtime.runtime_id,
+            task_id,
+            record.thread_id,
+            result,
+            resume_claim=claim,
+        )
 
     async def cancel(
         self,
@@ -351,7 +498,8 @@ class TaskRuntimeCoordinator:
                 TaskState.ARCHIVED,
             }:
                 raise ValueError(
-                    f"Accepted runtime cancellation cannot be reconciled from task state {current.value}"
+                    "Accepted runtime cancellation cannot be reconciled from task state "
+                    f"{current.value}"
                 )
 
             self._sessions.delete_with_connection(conn, task_id)
@@ -460,6 +608,221 @@ class TaskRuntimeCoordinator:
             return RuntimeResumeMode.CONTINUE
         raise ValueError(f"Stored runtime outcome is not resumable: {record.outcome}")
 
+    async def _acquire_resume_claim(
+        self,
+        runtime: AgentRuntimePort,
+        record: RuntimeSessionRecord,
+        *,
+        task_state: TaskState,
+        mode: RuntimeResumeMode,
+    ) -> _RuntimeResumeClaim:
+        checkpoint_id = await self._resume_checkpoint_identity(runtime, record)
+        session_fingerprint = self._resume_session_fingerprint(record)
+        claim_fingerprint = self._resume_claim_fingerprint(
+            record=record,
+            task_state=task_state,
+            checkpoint_id=checkpoint_id,
+            mode=mode,
+        )
+        operation_key = f"runtime.recovery:{session_fingerprint}"
+        claim_id = uuid.uuid4().hex
+        metadata = new_recovery_claim_metadata(
+            claim_id=claim_id,
+            owner_id=self._recovery_owner_id,
+            checkpoint_id=checkpoint_id,
+            session_fingerprint=session_fingerprint,
+            claim_fingerprint=claim_fingerprint,
+            resume_mode=mode.value,
+        )
+
+        with self._queue.store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current_record = self._sessions.get_with_connection(conn, record.task_id)
+            if current_record != record:
+                raise ValueError("runtime session changed before durable recovery claim")
+            current_state = self._task_state_with_connection(conn, record.task_id)
+            if current_state != task_state:
+                raise ValueError("task state changed before durable recovery claim")
+
+            try:
+                reservation, created = self._idempotency.reserve_with_connection(
+                    conn,
+                    operation_key=operation_key,
+                    task_id=record.task_id,
+                    operation_type=_RECOVERY_RESUME_OPERATION_TYPE,
+                    input_fingerprint=claim_fingerprint,
+                )
+            except IdempotencyConflictError as exc:
+                raise RuntimeRecoveryClaimConflict(
+                    operation_key,
+                    None,
+                    detail=(
+                        "the same Nika session epoch was already claimed with different "
+                        "checkpoint/state evidence"
+                    ),
+                ) from exc
+
+            event_type = "runtime.recovery_claim_acquired"
+            previous_metadata = None
+            if not created:
+                if not recovery_claim_is_reclaimable(reservation):
+                    raise RuntimeRecoveryClaimConflict(operation_key, reservation.status)
+                previous_metadata = recovery_claim_metadata(reservation)
+                if previous_metadata is None:
+                    raise RuntimeRecoveryClaimConflict(
+                        operation_key,
+                        reservation.status,
+                        detail="pending claim lacks trusted pre-effect lease metadata",
+                    )
+                event_type = "runtime.recovery_claim_reclaimed"
+
+            write_pending_recovery_claim(
+                conn,
+                operation_key=operation_key,
+                metadata=metadata,
+            )
+            self._audit.append_with_connection(
+                conn,
+                event_type=event_type,
+                entity_type="runtime_recovery",
+                entity_id=operation_key,
+                payload={
+                    "task_id": record.task_id,
+                    "runtime_id": record.runtime_id,
+                    "thread_id": record.thread_id,
+                    "operation_key": operation_key,
+                    "claim_id": claim_id,
+                    "owner_id": self._recovery_owner_id,
+                    "session_updated_at": record.updated_at,
+                    "session_fingerprint": session_fingerprint,
+                    "claim_fingerprint": claim_fingerprint,
+                    "checkpoint_id": checkpoint_id,
+                    "checkpoint_proven": True,
+                    "resume_mode": mode.value,
+                    "lease_expires_at": metadata.lease_expires_at,
+                    "previous_claim_id": (
+                        previous_metadata.claim_id if previous_metadata is not None else None
+                    ),
+                    "previous_owner_id": (
+                        previous_metadata.owner_id if previous_metadata is not None else None
+                    ),
+                },
+            )
+
+        return _RuntimeResumeClaim(
+            operation_key=operation_key,
+            claim_id=claim_id,
+            owner_id=self._recovery_owner_id,
+            task_id=record.task_id,
+            runtime_id=record.runtime_id,
+            thread_id=record.thread_id,
+            checkpoint_id=checkpoint_id,
+            session_fingerprint=session_fingerprint,
+            claim_fingerprint=claim_fingerprint,
+            resume_mode=mode,
+        )
+
+    def _begin_resume_effect(self, claim: _RuntimeResumeClaim) -> None:
+        with self._queue.store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            metadata = begin_recovery_effect(
+                conn,
+                operation_key=claim.operation_key,
+                claim_id=claim.claim_id,
+            )
+            self._audit.append_with_connection(
+                conn,
+                event_type="runtime.recovery_effect_started",
+                entity_type="runtime_recovery",
+                entity_id=claim.operation_key,
+                payload={
+                    "task_id": claim.task_id,
+                    "runtime_id": claim.runtime_id,
+                    "thread_id": claim.thread_id,
+                    "operation_key": claim.operation_key,
+                    "claim_id": claim.claim_id,
+                    "owner_id": claim.owner_id,
+                    "checkpoint_id": claim.checkpoint_id,
+                    "effect_started_at": metadata.effect_started_at,
+                },
+            )
+
+    async def _resume_checkpoint_identity(
+        self,
+        runtime: AgentRuntimePort,
+        record: RuntimeSessionRecord,
+    ) -> str:
+        if not isinstance(runtime, RuntimeResumeProbePort):
+            raise TypeError(
+                "runtime cannot prove persisted checkpoint identity; "
+                "RuntimeResumeProbePort is required before durable resume"
+            )
+        try:
+            probe = await runtime.probe_resume(
+                task_id=record.task_id,
+                thread_id=record.thread_id,
+                resume_token=record.resume_token,
+            )
+        except Exception:  # noqa: BLE001 - adapter diagnostics are untrusted at this boundary
+            raise ValueError("runtime resume checkpoint probe failed") from None
+        if not probe.can_resume or not probe.checkpoint_id:
+            raise ValueError(
+                "runtime resume checkpoint is not readable: " f"{probe.status.value}"
+            )
+        return probe.checkpoint_id
+
+    @staticmethod
+    def _resume_session_fingerprint(record: RuntimeSessionRecord) -> str:
+        """Stable identity for one persisted Nika session epoch.
+
+        Checkpoint identity is deliberately excluded: a running owner may advance the framework
+        checkpoint while this Nika session row is still unresolved. Every such checkpoint must
+        remain covered by the same durable owner claim until Nika atomically finalizes a new
+        session epoch or deletes the session.
+        """
+        material = json.dumps(
+            {
+                "schema": _RECOVERY_SESSION_EPOCH_SCHEMA,
+                "task_id": record.task_id,
+                "runtime_id": record.runtime_id,
+                "thread_id": record.thread_id,
+                "resume_token": record.resume_token,
+                "stored_outcome": record.outcome.value if record.outcome else "active",
+                "session_updated_at": record.updated_at,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(material).hexdigest()
+
+    @staticmethod
+    def _resume_claim_fingerprint(
+        *,
+        record: RuntimeSessionRecord,
+        task_state: TaskState,
+        checkpoint_id: str,
+        mode: RuntimeResumeMode,
+    ) -> str:
+        material = json.dumps(
+            {
+                "operation": _RECOVERY_RESUME_OPERATION_TYPE,
+                "task_id": record.task_id,
+                "runtime_id": record.runtime_id,
+                "thread_id": record.thread_id,
+                "resume_token": record.resume_token,
+                "stored_outcome": record.outcome.value if record.outcome else "active",
+                "session_updated_at": record.updated_at,
+                "task_state": task_state.value,
+                "checkpoint_id": checkpoint_id,
+                "resume_mode": mode.value,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(material).hexdigest()
+
     def _task_state(self, task_id: str) -> TaskState:
         with self._queue.store.connection() as conn:
             return self._task_state_with_connection(conn, task_id)
@@ -505,13 +868,16 @@ class TaskRuntimeCoordinator:
         task_id: str,
         thread_id: str,
         result: RuntimeResult,
+        *,
+        resume_claim: _RuntimeResumeClaim | None = None,
     ) -> RuntimeResult:
-        """Commit result cursor, task state and audit evidence as one local transaction.
+        """Commit result cursor, task state, recovery claim and audit as one transaction.
 
         The runtime may already have durably checkpointed its own execution result. Nika must
         therefore never expose a partially finalized local product state. If session mutation,
-        task transition or audit serialization/write fails, the whole Nika transaction rolls
-        back and the previous recovery cursor/state remain available for explicit recovery.
+        task transition, recovery-claim finalization or audit serialization/write fails, the
+        whole Nika transaction rolls back. A claim that reached effect_started remains
+        authoritative and blocks automatic replay until reconciliation.
 
         A previously committed CANCELLED task is authoritative human intent. If an in-flight
         runtime coroutine races with accepted cancellation and reports a later outcome, Nika
@@ -555,6 +921,40 @@ class TaskRuntimeCoordinator:
                         "runtime_outcome": result.outcome.value,
                     },
                 )
+
+            effective_outcome = RuntimeOutcome.CANCELLED if cancellation_won else result.outcome
+            if resume_claim is not None:
+                self._idempotency.complete_with_connection(
+                    conn,
+                    resume_claim.operation_key,
+                    {
+                        "claim_id": resume_claim.claim_id,
+                        "owner_id": resume_claim.owner_id,
+                        "checkpoint_id": resume_claim.checkpoint_id,
+                        "session_fingerprint": resume_claim.session_fingerprint,
+                        "claim_fingerprint": resume_claim.claim_fingerprint,
+                        "checkpoint_proven": True,
+                        "resume_mode": resume_claim.resume_mode.value,
+                        "runtime_outcome": effective_outcome.value,
+                    },
+                )
+                self._audit.append_with_connection(
+                    conn,
+                    event_type="runtime.recovery_claim_completed",
+                    entity_type="runtime_recovery",
+                    entity_id=resume_claim.operation_key,
+                    payload={
+                        "task_id": task_id,
+                        "runtime_id": runtime_id,
+                        "thread_id": thread_id,
+                        "operation_key": resume_claim.operation_key,
+                        "claim_id": resume_claim.claim_id,
+                        "owner_id": resume_claim.owner_id,
+                        "checkpoint_id": resume_claim.checkpoint_id,
+                        "outcome": effective_outcome.value,
+                    },
+                )
+
             self._audit.append_with_connection(
                 conn,
                 event_type="runtime.finished",
@@ -563,11 +963,7 @@ class TaskRuntimeCoordinator:
                 payload={
                     "runtime_id": runtime_id,
                     "thread_id": thread_id,
-                    "outcome": (
-                        RuntimeOutcome.CANCELLED.value
-                        if cancellation_won
-                        else result.outcome.value
-                    ),
+                    "outcome": effective_outcome.value,
                     "runtime_reported_outcome": result.outcome.value,
                     "resume_token": result.resume_token,
                     "error": result.error,
@@ -582,7 +978,9 @@ class TaskRuntimeCoordinator:
             )
         return result
 
-    def _append_runtime_event_with_connection(self, conn, task_id: str, event: RuntimeEvent) -> None:
+    def _append_runtime_event_with_connection(
+        self, conn, task_id: str, event: RuntimeEvent
+    ) -> None:
         self._audit.append_with_connection(
             conn,
             event_type=event.event_type,
