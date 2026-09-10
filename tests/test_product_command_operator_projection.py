@@ -183,6 +183,12 @@ def test_operator_projection_terminal_owner_decision_does_not_mask_qa() -> None:
                     state="completed",
                 ),
                 ProductStatusEntry(
+                    kind=ProductStatusKind.BUILD,
+                    item_id="work-654:test",
+                    label="Automated tests",
+                    state="passed",
+                ),
+                ProductStatusEntry(
                     kind=ProductStatusKind.QA,
                     item_id="work-654:qa",
                     label="QA",
@@ -243,6 +249,12 @@ def test_operator_projection_does_not_advance_past_pending_qa() -> None:
             state="completed",
         ),
         ProductStatusEntry(
+            kind=ProductStatusKind.BUILD,
+            item_id="work-654:test",
+            label="Automated tests",
+            state="passed",
+        ),
+        ProductStatusEntry(
             kind=ProductStatusKind.QA,
             item_id="work-654:qa",
             label="QA",
@@ -264,6 +276,12 @@ def test_operator_projection_does_not_advance_past_pending_integration() -> None
             state="completed",
         ),
         ProductStatusEntry(
+            kind=ProductStatusKind.BUILD,
+            item_id="work-654:test",
+            label="Automated tests",
+            state="passed",
+        ),
+        ProductStatusEntry(
             kind=ProductStatusKind.QA,
             item_id="work-654:qa",
             label="QA",
@@ -271,7 +289,7 @@ def test_operator_projection_does_not_advance_past_pending_integration() -> None
         ),
         ProductStatusEntry(
             kind=ProductStatusKind.DEPLOYMENT,
-            item_id="integration-654",
+            item_id="work-654:integration",
             label="Integration",
             state="pending",
         ),
@@ -279,7 +297,7 @@ def test_operator_projection_does_not_advance_past_pending_integration() -> None
 
     projection = project_operator_status(detail)
 
-    assert projection.next == "integration:integration-654=pending"
+    assert projection.next == "integration:work-654:integration=pending"
 
 
 def test_operator_projection_completed_blocker_does_not_mask_downstream_qa() -> None:
@@ -295,6 +313,12 @@ def test_operator_projection_completed_blocker_does_not_mask_downstream_qa() -> 
             item_id="work-654:blocker",
             label="Credential blocker",
             state="completed",
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.BUILD,
+            item_id="work-654:test",
+            label="Automated tests",
+            state="passed",
         ),
         ProductStatusEntry(
             kind=ProductStatusKind.QA,
@@ -325,6 +349,12 @@ def test_operator_projection_resolved_blocker_does_not_mask_downstream_qa() -> N
             state="resolved",
         ),
         ProductStatusEntry(
+            kind=ProductStatusKind.BUILD,
+            item_id="work-654:test",
+            label="Automated tests",
+            state="passed",
+        ),
+        ProductStatusEntry(
             kind=ProductStatusKind.QA,
             item_id="work-654:qa",
             label="QA",
@@ -351,6 +381,12 @@ def test_operator_projection_trims_terminal_state_for_progression() -> None:
             item_id="work-654:blocker",
             label="Credential blocker",
             state="  ReSoLvEd  ",
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.BUILD,
+            item_id="work-654:test",
+            label="Automated tests",
+            state="passed",
         ),
         ProductStatusEntry(
             kind=ProductStatusKind.QA,
