@@ -29,6 +29,8 @@ _LIVE_AUTHORITY_KEY = secrets.token_bytes(32)
 _DURABLE_WORKER_DIAGNOSTIC_OMITTED = "worker diagnostic omitted from durable checkpoint"
 _DURABLE_REVIEW_REASON_OMITTED = "review rationale omitted from durable checkpoint"
 _DURABLE_BLOCKER_REASON_OMITTED = "blocker rationale omitted from durable checkpoint"
+_DURABLE_REFERENCE_SCAN_MAX_BYTES = 4096
+_DURABLE_REFERENCE_DECODE_MAX_PASSES = 16
 _DURABLE_REVIEW_CREDENTIAL_ASSIGNMENT = re.compile(
     r"(?:^|[\s?&#;,{\[(])['\"]?"
     r"(?:"
@@ -339,8 +341,7 @@ def _durable_blocker_reason(value: str) -> str:
 def _durable_free_text_reason(value: str, *, omitted: str) -> str:
     if (
         safe_evidence_reference(value) != value
-        or _reference_has_credential_assignment(value)
-        or _reference_has_url_userinfo(value)
+        or _reference_has_sensitive_encoded_shape(value)
     ):
         return omitted
     return value
@@ -350,27 +351,48 @@ def _durable_review_evidence_ref(value: str) -> str:
     safe_reference = safe_evidence_reference(value)
     if safe_reference != value:
         return safe_reference
-    if not (_reference_has_credential_assignment(value) or _reference_has_url_userinfo(value)):
+    if not _reference_has_sensitive_encoded_shape(value):
         return value
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
 
 
-def _reference_has_credential_assignment(value: str) -> bool:
+def _fully_decode_reference_for_secret_scan(value: str) -> str | None:
+    """Bounded fixed-point percent decoding for durable secret classification.
+
+    ``None`` means the input exceeded a resource bound or did not reach a fixed
+    point. Callers must treat that as sensitive rather than persist ambiguous text.
+    """
+
     decoded = value
-    for _ in range(3):
+    if len(decoded.encode("utf-8")) > _DURABLE_REFERENCE_SCAN_MAX_BYTES:
+        return None
+    for _ in range(_DURABLE_REFERENCE_DECODE_MAX_PASSES):
         next_decoded = unquote(decoded)
         if next_decoded == decoded:
-            break
+            return decoded
+        if len(next_decoded.encode("utf-8")) > _DURABLE_REFERENCE_SCAN_MAX_BYTES:
+            return None
         decoded = next_decoded
-    return _DURABLE_REVIEW_CREDENTIAL_ASSIGNMENT.search(decoded) is not None
+    return None
 
 
-def _reference_has_url_userinfo(value: str) -> bool:
-    if "://" not in value:
+def _reference_has_sensitive_encoded_shape(value: str) -> bool:
+    decoded = _fully_decode_reference_for_secret_scan(value)
+    if decoded is None:
+        return True
+    return (
+        safe_evidence_reference(decoded) != decoded
+        or _DURABLE_REVIEW_CREDENTIAL_ASSIGNMENT.search(decoded) is not None
+        or _decoded_reference_has_url_userinfo(decoded)
+    )
+
+
+def _decoded_reference_has_url_userinfo(decoded: str) -> bool:
+    if "://" not in decoded:
         return False
     try:
-        parsed = urlsplit(value)
+        parsed = urlsplit(decoded)
     except ValueError:
         return True
     return parsed.username is not None or parsed.password is not None

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -115,6 +116,12 @@ def _raw_checkpoint(store: SQLiteStore, checkpoint_id: str) -> str:
 
 def _digest_ref(value: str) -> str:
     return f"sha256:{hashlib.sha256(value.encode('utf-8')).hexdigest()}"
+
+
+def _percent_encode(value: str, passes: int) -> str:
+    for _ in range(passes):
+        value = quote(value, safe="")
+    return value
 
 
 def test_extra_worker_test_evidence_is_not_durable_authority(tmp_path: Path) -> None:
@@ -296,3 +303,60 @@ def test_safe_no_result_blocker_survives_checkpoint_and_restart(tmp_path: Path) 
     restored_record = restored.snapshot().records[0]
     assert restored_record.state is WorkState.BLOCKED
     assert restored_record.blocker == reason
+
+
+@pytest.mark.parametrize(
+    "encoded_secret",
+    (
+        _percent_encode("api_key=NIKA_DEEP_ASSIGNMENT_CANARY", 8),
+        _percent_encode(
+            "https://reviewer:NIKA_ENCODED_USERINFO_CANARY@example.invalid/review", 4
+        ),
+        _percent_encode("Bearer NIKA_ENCODED_BEARER_CANARY", 6),
+    ),
+)
+def test_deeply_encoded_secrets_are_minimized_across_durable_surfaces(
+    tmp_path: Path,
+    encoded_secret: str,
+) -> None:
+    store, binding, coordinator, task_id = _setup(tmp_path)
+    _record_success(coordinator)
+    coordinator.review(
+        "core",
+        ReviewDecision(
+            reviewer_id="independent-qa",
+            accepted=False,
+            reason=encoded_secret,
+            evidence_refs=(encoded_secret,),
+        ),
+    )
+
+    checkpoint = binding.checkpoint(coordinator)
+    durable = checkpoint.coordinator.records[0]
+    assert durable.review is not None
+    assert durable.review.reason == _REVIEW_OMITTED
+    assert durable.review.evidence_refs == (_digest_ref(encoded_secret),)
+    assert durable.blocker == _REVIEW_OMITTED
+
+    host = ProductFactoryCheckpointHost(store)
+    saved = host.save(host_task_id=task_id, checkpoint=checkpoint)
+    raw = _raw_checkpoint(store, saved.checkpoint_id)
+    assert encoded_secret not in raw
+
+    restarted = ProductFactoryCheckpointHost(SQLiteStore(store.path))
+    restored = restarted.restore_latest(host_task_id=task_id, binding=binding)
+    restored_record = restored.snapshot().records[0]
+    assert restored_record.review == durable.review
+    assert restored_record.blocker == _REVIEW_OMITTED
+
+
+def test_percent_decode_exhaustion_fails_closed(tmp_path: Path) -> None:
+    ambiguous = _percent_encode("tests://core/pass", 17)
+    store, binding, coordinator, task_id = _setup(tmp_path)
+    coordinator.block("core", ambiguous)
+
+    checkpoint = binding.checkpoint(coordinator)
+    assert checkpoint.coordinator.records[0].blocker == _BLOCKER_OMITTED
+    host = ProductFactoryCheckpointHost(store)
+    saved = host.save(host_task_id=task_id, checkpoint=checkpoint)
+    assert ambiguous not in _raw_checkpoint(store, saved.checkpoint_id)
