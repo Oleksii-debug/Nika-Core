@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from random import Random
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 
