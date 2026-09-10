@@ -11,7 +11,7 @@ from nika_core.product_command.contracts import (
 from nika_core.product_command.operator_projection import project_operator_status
 
 
-def test_operator_projection_requires_integration_after_qa_success() -> None:
+def test_operator_projection_requires_candidate_identity_before_integration() -> None:
     detail = ProductProjectDetail(
         summary=ProductProjectSummary(
             project_id="nika-core",
@@ -45,5 +45,6 @@ def test_operator_projection_requires_integration_after_qa_success() -> None:
 
     projection = project_operator_status(detail)
 
+    assert projection.candidate == "unknown"
     assert projection.integration == "not_started"
-    assert projection.next == "integration:not_started"
+    assert projection.next == "inspect_project:missing_candidate_identity"

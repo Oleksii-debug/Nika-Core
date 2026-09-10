@@ -286,6 +286,13 @@ def test_operator_projection_does_not_advance_past_pending_integration() -> None
             item_id="work-654:qa",
             label="QA",
             state="passed",
+            evidence=(
+                EvidenceReference(
+                    kind="git_commit",
+                    reference="c" * 40,
+                    label="Exact candidate SHA",
+                ),
+            ),
         ),
         ProductStatusEntry(
             kind=ProductStatusKind.DEPLOYMENT,

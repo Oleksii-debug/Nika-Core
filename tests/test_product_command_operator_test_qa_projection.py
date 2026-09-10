@@ -168,6 +168,13 @@ def test_operator_projection_wrong_kind_pass_does_not_clear_deployment() -> None
                 item_id="work-654:qa",
                 label="Independent QA",
                 state="passed",
+                evidence=(
+                    EvidenceReference(
+                        kind="git_commit",
+                        reference="b" * 40,
+                        label="Exact candidate SHA",
+                    ),
+                ),
             ),
             ProductStatusEntry(
                 kind=ProductStatusKind.DEPLOYMENT,

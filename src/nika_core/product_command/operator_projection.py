@@ -327,6 +327,7 @@ def _multi_component_next_action(
     build_entries: tuple[ProductStatusEntry, ...],
     qa_entries: tuple[ProductStatusEntry, ...],
     integration_entries: tuple[ProductStatusEntry, ...],
+    candidate: str,
 ) -> str | None:
     if len(component_entries) <= 1:
         return None
@@ -346,6 +347,9 @@ def _multi_component_next_action(
         pending = _first_incomplete(qas)
         if pending is not None:
             return f"qa:{pending.item_id}={pending.state}"
+
+    if candidate == "unknown":
+        return "inspect_project:missing_candidate_identity"
 
     associated_integrations = tuple(
         entry
@@ -392,6 +396,7 @@ def _next_action(
         build_entries,
         qa_entries,
         integration_entries,
+        candidate,
     )
     if multi_component is not None:
         return multi_component
@@ -406,6 +411,8 @@ def _next_action(
         return f"qa:{qa.item_id}={qa.state}"
     if build_entries and not qa_entries:
         return "qa:not_started"
+    if qa_entries and candidate == "unknown":
+        return "inspect_project:missing_candidate_identity"
     integration = _first_incomplete(integration_entries)
     if integration is not None:
         return f"integration:{integration.item_id}={integration.state}"
