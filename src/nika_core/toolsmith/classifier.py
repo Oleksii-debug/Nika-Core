@@ -37,7 +37,10 @@ def classify_gap(
     if search_result is not None:
         if not search_result.attempted_sources:
             return GapDecision(GapDisposition.BLOCK, "canonical reuse search attempted no sources")
-        if any(candidate.capability_id != gap.requested_capability for candidate in search_result.candidates):
+        if any(
+            candidate.capability_id != gap.requested_capability
+            for candidate in search_result.candidates
+        ):
             return GapDecision(GapDisposition.BLOCK, "canonical reuse search evidence capability mismatch")
 
         compatible = tuple(
