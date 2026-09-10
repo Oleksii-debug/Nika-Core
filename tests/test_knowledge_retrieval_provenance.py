@@ -88,17 +88,17 @@ def test_serialized_provenance_round_trips_and_revalidates_after_restart(
     ).hexdigest()
 
 
-def test_old_serialized_evidence_cannot_masquerade_after_corpus_update(
+def test_source_only_revision_makes_old_serialized_evidence_stale_after_restart(
     tmp_path: Path,
 ) -> None:
     store = _make_store(tmp_path / "nika.db")
     corpus = KnowledgeCorpus(store)
-    first = _request()
+    first = _request(source_locator="approved:source-v1")
     corpus.ingest(first)
     old_hit = corpus.search(_scope(), "alpha")[0]
     old_payload = serialize_retrieval_provenance(old_hit.provenance)
 
-    corpus.ingest(replace(first, text="beta replacement provenance marker"))
+    corpus.ingest(replace(first, source_locator="approved:source-v2"))
     restarted = _restart(store)
 
     with pytest.raises(StaleRetrievalEvidenceError, match="superseded"):
@@ -112,10 +112,11 @@ def test_old_serialized_evidence_cannot_masquerade_after_corpus_update(
     assert historical.version == 1
     assert status is RetrievalEvidenceStatus.SUPERSEDED
 
-    current_hit = KnowledgeCorpus(restarted).search(_scope(), "beta")[0]
+    current_hit = KnowledgeCorpus(restarted).search(_scope(), "alpha")[0]
     current_payload = serialize_retrieval_provenance(current_hit.provenance)
     current, current_status = restore_retrieval_provenance(restarted, current_payload)
     assert current.version == 2
+    assert current.source_locator_sha256 != historical.source_locator_sha256
     assert current_status is RetrievalEvidenceStatus.CURRENT
 
 
