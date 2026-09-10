@@ -36,7 +36,8 @@ def _redact_secrets(value: Any) -> Any:
             safe_key = redact_text(key) if isinstance(key, str) else key
             _require_unique_key(result, safe_key)
             if isinstance(key, str):
-                result[safe_key] = redact_mapping({key: item})[key]
+                redacted_item = redact_mapping({key: item})[key]
+                result[safe_key] = _redact_secrets(redacted_item)
             else:
                 result[safe_key] = _redact_secrets(item)
         return result
