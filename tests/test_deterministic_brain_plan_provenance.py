@@ -149,6 +149,20 @@ def test_brain_reseals_spoofed_or_stale_planner_provenance() -> None:
             actions=actions,
             planner=planner,
         )
+    with pytest.raises(
+        DeterministicPlanProvenanceMismatchError,
+        match="does not match the exact plan context",
+    ):
+        verify_plan_provenance(
+            replace(
+                result.plan,
+                steps=(PlanStep(action_id="advance", tool_id="substituted-tool"),),
+            ),
+            state=state,
+            goal=goal,
+            actions=actions,
+            planner=planner,
+        )
 
 
 def test_plan_provenance_round_trips_through_existing_audit_and_rejects_stale_restart_context(
