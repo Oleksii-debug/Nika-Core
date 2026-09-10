@@ -31,7 +31,12 @@ class UnifiedPlanningAdapter:
         if self._goal_satisfied(state, goal):
             return DeterministicPlan(steps=())
 
-        unreachable_fact = self._obviously_unreachable_fact(state, goal, actions)
+        # The Nika action tuple is a registry, not a priority signal. Give the replaceable
+        # solver one canonical syntactic problem so equal-quality choices cannot inherit
+        # incidental caller, dict, set or hash iteration order.
+        canonical_actions = tuple(sorted(actions, key=lambda definition: definition.action_id))
+
+        unreachable_fact = self._obviously_unreachable_fact(state, goal, canonical_actions)
         if unreachable_fact is not None:
             raise DeterministicPlanningError(
                 f"goal fact is unreachable from registered deterministic actions: {unreachable_fact}",
@@ -47,7 +52,7 @@ class UnifiedPlanningAdapter:
             ) from exc
 
         all_facts = set(state.facts) | set(goal.required) | set(goal.forbidden)
-        for action in actions:
+        for action in canonical_actions:
             all_facts.update(action.requires)
             all_facts.update(action.forbids)
             all_facts.update(action.adds)
@@ -62,35 +67,35 @@ class UnifiedPlanningAdapter:
             problem.set_initial_value(fluent, fact in state.facts)
 
         action_by_up_name: dict[str, DeterministicAction] = {}
-        for index, definition in enumerate(actions):
+        for index, definition in enumerate(canonical_actions):
             # Keep semantic no-ops out of the planning problem itself. The guard is dynamic:
             # an action that is a no-op now can still become applicable after an earlier action
             # changes one of its declared effect facts.
-            change_conditions = [up.Not(fluents[fact]) for fact in definition.adds]
-            change_conditions.extend(fluents[fact] for fact in definition.removes)
+            change_conditions = [up.Not(fluents[fact]) for fact in sorted(definition.adds)]
+            change_conditions.extend(fluents[fact] for fact in sorted(definition.removes))
             if not change_conditions:
                 continue
 
             up_name = f"action_{index}"
             planned_action = up.InstantaneousAction(up_name)
-            for fact in definition.requires:
+            for fact in sorted(definition.requires):
                 planned_action.add_precondition(fluents[fact])
-            for fact in definition.forbids:
+            for fact in sorted(definition.forbids):
                 planned_action.add_precondition(up.Not(fluents[fact]))
             if len(change_conditions) == 1:
                 planned_action.add_precondition(change_conditions[0])
             else:
                 planned_action.add_precondition(up.Or(*change_conditions))
-            for fact in definition.adds:
+            for fact in sorted(definition.adds):
                 planned_action.add_effect(fluents[fact], True)
-            for fact in definition.removes:
+            for fact in sorted(definition.removes):
                 planned_action.add_effect(fluents[fact], False)
             problem.add_action(planned_action)
             action_by_up_name[up_name] = definition
 
-        for fact in goal.required:
+        for fact in sorted(goal.required):
             problem.add_goal(fluents[fact])
-        for fact in goal.forbidden:
+        for fact in sorted(goal.forbidden):
             problem.add_goal(up.Not(fluents[fact]))
 
         try:
