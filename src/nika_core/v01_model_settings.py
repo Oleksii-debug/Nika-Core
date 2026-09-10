@@ -6,7 +6,7 @@ import re
 import sqlite3
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
 
 import httpx
@@ -157,6 +157,20 @@ class ModelSelection(BaseModel):
             raise ModelSetupError(
                 "Збережені налаштування моделі пошкоджені або несумісні."
             ) from exc
+
+
+class ModelRoutePolicyPort(Protocol):
+    """Authorize a frozen provider route without depending on provider SDK types."""
+
+    def allows(self, *, provider_id: str, provider_kind: ProviderKind) -> bool: ...
+
+
+class _ExplicitSelectionRoutePolicy:
+    """Treat the validated frozen selection as the default explicit authorization."""
+
+    def allows(self, *, provider_id: str, provider_kind: ProviderKind) -> bool:
+        del provider_id, provider_kind
+        return True
 
 
 class _ModelSetupRequest(ModelSelection):
@@ -404,12 +418,14 @@ class V01BoundModelRuntimeFactory:
         settings: V01ModelSettings | None = None,
         credential_resolver: CredentialResolverPort | None = None,
         client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient,
+        route_policy: ModelRoutePolicyPort | None = None,
     ) -> None:
         self._store = store
         self._definitions = definitions
         self._settings = settings or V01ModelSettings(store)
         self._credential_resolver = credential_resolver or EnvironmentCredentialResolver()
         self._client_factory = client_factory
+        self._route_policy = route_policy or _ExplicitSelectionRoutePolicy()
 
     def for_task(self, task_id: str) -> ModelGatewayAgentRuntime:
         selection = self._settings.for_task(task_id)
@@ -438,6 +454,16 @@ class V01BoundModelRuntimeFactory:
         )
 
     def _runtime_for_selection(self, selection: ModelSelection) -> ModelGatewayAgentRuntime:
+        try:
+            allowed = self._route_policy.allows(
+                provider_id=selection.provider_id,
+                provider_kind=selection.provider_kind,
+            )
+        except Exception as exc:
+            raise ModelSetupError("Не вдалося перевірити політику маршруту моделі.") from exc
+        if allowed is not True:
+            raise ModelSetupError("Вибраний маршрут моделі заборонено політикою.")
+
         gateway = ModelGateway(audit_log=AuditLog(self._store))
         if selection.route_kind == "ollama":
             gateway.register(
