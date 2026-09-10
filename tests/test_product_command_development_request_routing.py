@@ -38,6 +38,7 @@ def test_repository_development_intent_routes_to_product_factory(command: str) -
         "Repository Oleksii-debug/Nika-Core issue 654: should I fix it?",
         "Explain how to implement PR 711 in repo Oleksii-debug/Nika-Core",
         'What does "develop issue #654 in repository Oleksii-debug/Nika-Core" mean?',
+        "Please develop an explanation of why issue #654 in repository Oleksii-debug/Nika-Core should not be implemented.",
     ),
 )
 def test_incomplete_or_read_only_repository_intent_stays_agent_task(command: str) -> None:
