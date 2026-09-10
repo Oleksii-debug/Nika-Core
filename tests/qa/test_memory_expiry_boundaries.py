@@ -11,9 +11,9 @@ from typing import Any
 
 import pytest
 
+import nika_core.memory.service as memory_service
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.memory import MemoryScope, MemoryService
-import nika_core.memory.service as memory_service
 
 
 class FakeDateTime(RealDateTime):
