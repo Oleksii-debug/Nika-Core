@@ -6,7 +6,6 @@ from pathlib import Path
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.memory import MemoryScope, MemoryService
 
-
 _API_TOKEN = "sk-nika-memory-secret-123"
 _AUTH_SECRET = "auth-header-secret-456"
 _PASSWORD = "hunter2-memory-secret-789"
