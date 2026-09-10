@@ -242,6 +242,34 @@ class IdempotencyLedger:
         """Return external operations that must be reconciled before automatic recovery."""
         return self.list_for_task(task_id, status=IdempotencyStatus.UNCERTAIN)
 
+    def promote_pending_to_uncertain(self, task_id: str) -> tuple[str, ...]:
+        """Close the process-loss ambiguity window for one startup recovery task.
+
+        ``PENDING`` means the owning process may still be between durable reservation and
+        finalization, so normal execution must never rewrite it.  Startup recovery runs only
+        after that process has been recreated; at that boundary every leftover reservation has
+        an unknown external outcome and is therefore durably promoted to ``UNCERTAIN``.
+        """
+        if not task_id.strip():
+            raise ValueError("task_id must not be empty")
+        now = datetime.now(UTC).isoformat()
+        with self._store.connection() as conn:
+            rows = conn.execute(
+                """
+                UPDATE idempotency_records
+                SET status = ?, result_json = NULL, updated_at = ?
+                WHERE task_id = ? AND status = ?
+                RETURNING operation_key
+                """,
+                (
+                    IdempotencyStatus.UNCERTAIN.value,
+                    now,
+                    task_id,
+                    IdempotencyStatus.PENDING.value,
+                ),
+            ).fetchall()
+        return tuple(sorted(row["operation_key"] for row in rows))
+
     def _set_status(
         self,
         operation_key: str,
