@@ -140,6 +140,7 @@ class CredentialRefOpenAICompatibleProvider:
         return self._config.credential_ref
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
+        self._validate_explicit_model(request)
         material = self._resolve_material()
         provider: OpenAICompatibleProvider | None = None
         try:
@@ -166,6 +167,24 @@ class CredentialRefOpenAICompatibleProvider:
         finally:
             provider = None
             material = ""
+
+    def _validate_explicit_model(self, request: ModelRequest) -> None:
+        model = request.model
+        if model is None:
+            return
+        if (
+            not isinstance(model, str)
+            or not model.strip()
+            or model != model.strip()
+            or any(ord(char) < 32 for char in model)
+        ):
+            raise ModelGatewayError(
+                ModelErrorCode.INVALID_REQUEST,
+                "explicit model identity is invalid",
+                provider_id=self._config.provider_id,
+                retryable=False,
+                failure_effect=ModelFailureEffect.NO_EFFECT,
+            )
 
     def _resolve_material(self) -> str:
         try:
