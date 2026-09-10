@@ -118,10 +118,7 @@ def _expression_signature(expression: object) -> object:
 
 def _problem_signature(problem: _FakeProblem) -> tuple[object, ...]:
     return (
-        tuple(
-            (fluent.name, value)
-            for fluent, value in problem.initial_values
-        ),
+        tuple((fluent.name, value) for fluent, value in problem.initial_values),
         tuple(
             (
                 action.name,
@@ -143,12 +140,12 @@ def _shuffled_frozenset(values: tuple[str, ...], rng: Random) -> frozenset[str]:
     return frozenset(shuffled)
 
 
-def _equivalent_action(action_id: str, rng: Random) -> DeterministicAction:
+def _candidate_action(action_id: str, marker: str, rng: Random) -> DeterministicAction:
     return DeterministicAction(
         action_id=action_id,
         requires=_shuffled_frozenset(("ready-a", "ready-b", "ready-c"), rng),
         forbids=_shuffled_frozenset(("blocked-a", "blocked-b", "blocked-c"), rng),
-        adds=_shuffled_frozenset(("goal-a", "goal-b", "goal-c"), rng),
+        adds=_shuffled_frozenset(("goal-a", "goal-b", "goal-c", marker), rng),
         removes=_shuffled_frozenset(("stale-a", "stale-b", "stale-c"), rng),
     )
 
@@ -168,8 +165,8 @@ def test_equivalent_inputs_have_stable_solver_problem_and_tie_break(
     for seed in range(64):
         rng = Random(seed)
         actions = [
-            _equivalent_action("route-b", rng),
-            _equivalent_action("route-a", rng),
+            _candidate_action("route-b", "marker-b", rng),
+            _candidate_action("route-a", "marker-a", rng),
         ]
         rng.shuffle(actions)
         state = WorldState(
