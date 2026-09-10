@@ -37,15 +37,16 @@ No new project dependency is introduced by this lane.
 ## Safety and provenance invariants
 
 CSV/XLSX string cells whose first non-whitespace character is `=`, `+`, `-` or `@` are emitted as
-literal text by prefixing an apostrophe. HTML escapes all report-controlled text, including titles,
-summaries, review notes and source locators. Generated filenames retain only alphanumeric, hyphen and
-underscore characters from the result-set identity, are bounded to 64 identity characters, and are
-returned as a leaf filename rather than a caller-selected path.
+literal text by prefixing an apostrophe. HTML escapes all public report-controlled text, including titles,
+summaries and review notes. Raw source locators are not rendered; public output carries only the canonical
+safe evidence-location label. Generated filenames retain only alphanumeric, hyphen and underscore
+characters from the result-set identity, are bounded to 64 identity characters, and are returned as a
+leaf filename rather than a caller-selected path.
 
 Structured exports preserve result-set/workspace/query identity, result ordering and document identity,
-review state/note/update timestamp, ranking/match explanation, source identity/kind/freshness, locator
-and observation timestamp. Empty evidence is represented explicitly rather than silently inventing a
-source.
+review state/note/update timestamp, ranking/match explanation, source identity/kind/freshness, the public
+safe location label rather than the raw locator, and observation timestamp. Empty evidence is represented
+explicitly rather than silently inventing a source.
 
 XLSX export also enforces Excel's 32,767-character cell limit before serialization. The check runs
 after spreadsheet-formula neutralization, because the protective apostrophe can itself push a boundary
@@ -120,4 +121,3 @@ is never copied into TXT, CSV, HTML, DOCX, or XLSX output.
 
 This is intentionally a privacy-minimizing public projection. It does not mutate the
 stored research source, source identity, or internal locator.
-
