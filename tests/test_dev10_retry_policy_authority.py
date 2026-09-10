@@ -19,6 +19,28 @@ def test_retry_policy_rejects_raw_string_error_code_authority() -> None:
         )
 
 
+def test_runtime_result_rejects_raw_string_error_code_authority() -> None:
+    with pytest.raises(TypeError, match="RuntimeErrorCode"):
+        RuntimeResult(
+            outcome=RuntimeOutcome.FAILED,
+            error="temporary provider failure",
+            error_code="transient",  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("outcome", [RuntimeOutcome.WAITING_APPROVAL, RuntimeOutcome.PAUSED])
+@pytest.mark.parametrize("resume_token", [None, "", "   ", 7])
+def test_runtime_result_rejects_malformed_resumable_authority(
+    outcome: RuntimeOutcome,
+    resume_token: object,
+) -> None:
+    with pytest.raises(ValueError, match="usable resume token"):
+        RuntimeResult(
+            outcome=outcome,
+            resume_token=resume_token,  # type: ignore[arg-type]
+        )
+
+
 def test_retry_policy_rejects_mutable_error_code_authority() -> None:
     with pytest.raises(TypeError, match="frozenset"):
         RetryPolicy(
