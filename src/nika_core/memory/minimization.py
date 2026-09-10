@@ -12,6 +12,13 @@ _POSIX_LOCAL_USER_PATH = re.compile(
 _WINDOWS_LOCAL_USER_PATH = re.compile(
     r"(?i)(?<![A-Za-z0-9])[A-Z]:\\Users\\[^\\\s\"'<>]+(?:\\[^\s\"'<>]*)?"
 )
+_POSIX_LOCAL_USER_PATH_FULL = re.compile(
+    r"/(?:home|Users)/[^/\r\n\"'<>]+(?:/[^\r\n\"'<>]*)?"
+)
+_WINDOWS_LOCAL_USER_PATH_FULL = re.compile(
+    r"(?i)[A-Z]:[\\/]Users[\\/][^\\/\r\n\"'<>]+(?:[\\/][^\r\n\"'<>]*)?"
+)
+_KEY_COLLISION_ERROR = "memory persistence key collision after minimization"
 
 
 def minimize_for_persistence(value: Any) -> Any:
@@ -26,10 +33,12 @@ def _redact_secrets(value: Any) -> Any:
     if isinstance(value, Mapping):
         result: dict[Any, Any] = {}
         for key, item in value.items():
+            safe_key = redact_text(key) if isinstance(key, str) else key
+            _require_unique_key(result, safe_key)
             if isinstance(key, str):
-                result[key] = redact_mapping({key: item})[key]
+                result[safe_key] = redact_mapping({key: item})[key]
             else:
-                result[key] = _redact_secrets(item)
+                result[safe_key] = _redact_secrets(item)
         return result
     if isinstance(value, list):
         return [_redact_secrets(item) for item in value]
@@ -40,12 +49,31 @@ def _redact_secrets(value: Any) -> Any:
 
 def _redact_local_paths(value: Any) -> Any:
     if isinstance(value, str):
-        redacted = _POSIX_LOCAL_USER_PATH.sub("[LOCAL_PATH]", value)
-        return _WINDOWS_LOCAL_USER_PATH.sub("[LOCAL_PATH]", redacted)
+        return _redact_local_path_text(value)
     if isinstance(value, Mapping):
-        return {key: _redact_local_paths(item) for key, item in value.items()}
+        result: dict[Any, Any] = {}
+        for key, item in value.items():
+            safe_key = _redact_local_path_text(key) if isinstance(key, str) else key
+            _require_unique_key(result, safe_key)
+            result[safe_key] = _redact_local_paths(item)
+        return result
     if isinstance(value, list):
         return [_redact_local_paths(item) for item in value]
     if isinstance(value, tuple):
         return tuple(_redact_local_paths(item) for item in value)
     return value
+
+
+def _redact_local_path_text(value: str) -> str:
+    if (
+        _POSIX_LOCAL_USER_PATH_FULL.fullmatch(value)
+        or _WINDOWS_LOCAL_USER_PATH_FULL.fullmatch(value)
+    ):
+        return "[LOCAL_PATH]"
+    redacted = _POSIX_LOCAL_USER_PATH.sub("[LOCAL_PATH]", value)
+    return _WINDOWS_LOCAL_USER_PATH.sub("[LOCAL_PATH]", redacted)
+
+
+def _require_unique_key(result: Mapping[Any, Any], key: Any) -> None:
+    if key in result:
+        raise ValueError(_KEY_COLLISION_ERROR)
