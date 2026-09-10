@@ -62,17 +62,30 @@ class ResearchRepository:
     def upsert_source(self, source: SourceSpec) -> None:
         if source.kind is not SourceKind.LOCAL_FILE:
             raise ValueError("use the HTTP source repository for non-local sources")
+        required = (source.source_id, source.workspace_id, source.locator)
+        if any(not isinstance(value, str) or not value.strip() for value in required):
+            raise ValueError("source_id, workspace_id and locator are required")
         now = _now()
         with self._store.connection() as conn:
+            existing = conn.execute(
+                """SELECT workspace_id, kind, locator
+                FROM research_sources WHERE source_id=?""",
+                (source.source_id,),
+            ).fetchone()
+            if existing is not None:
+                identity = (
+                    existing["workspace_id"],
+                    existing["kind"],
+                    existing["locator"],
+                )
+                requested = (source.workspace_id, source.kind.value, source.locator)
+                if identity != requested:
+                    raise ValueError("source_id is already bound to different source metadata")
+                return
             conn.execute(
                 """INSERT INTO research_sources(
                     source_id, workspace_id, kind, locator, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(source_id) DO UPDATE SET
-                    workspace_id=excluded.workspace_id,
-                    kind=excluded.kind,
-                    locator=excluded.locator,
-                    updated_at=excluded.updated_at""",
+                ) VALUES (?, ?, ?, ?, ?, ?)""",
                 (
                     source.source_id,
                     source.workspace_id,
