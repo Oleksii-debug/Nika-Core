@@ -8,7 +8,9 @@ import httpx
 import pytest
 
 from nika_core.memory.contracts import MemoryRecord, MemoryScope
-from nika_core.model_gateway.context_provenance import (
+from nika_core.model_gateway.contracts import ModelMessage, ModelRequest, ProviderKind
+from nika_core.model_gateway.providers import OpenAICompatibleProvider
+from nika_core.multi_agent.context_provenance import (
     CONTEXT_PROVENANCE_METADATA_KEY,
     ContextProvenanceError,
     MemoryContextSelection,
@@ -16,8 +18,6 @@ from nika_core.model_gateway.context_provenance import (
     assemble_model_context,
     merge_context_provenance_metadata,
 )
-from nika_core.model_gateway.contracts import ModelMessage, ModelRequest, ProviderKind
-from nika_core.model_gateway.providers import OpenAICompatibleProvider
 from nika_core.multi_agent.research_results import SourceInspectionAssignment
 from nika_core.research.models import (
     FreshnessState,
