@@ -101,8 +101,6 @@ class DeterministicGoal:
             field_name="goal forbidden",
             reject_duplicates=True,
         )
-        if not required and not forbidden:
-            raise ValueError("goal must contain at least one constraint")
         if required & forbidden:
             raise ValueError("goal cannot require and forbid the same fact")
         object.__setattr__(self, "required", required)
