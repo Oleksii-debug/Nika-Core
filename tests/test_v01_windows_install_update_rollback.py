@@ -78,10 +78,20 @@ def _run(
 
 
 def _post_activation_injection_needle(mode: str) -> str:
-    failure_path = "$failedInstallPath" if mode == "Install" else "$failedActivationPath"
+    if mode == "Install":
+        return (
+            "            Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths "
+            "@($destinationPath, $rollbackPath, $stagePath, $failedInstallPath)\n"
+            "            [System.IO.Directory]::Move($stagePath, $destinationPath)\n"
+        )
     return (
-        "            Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths "
-        f"@($destinationPath, $rollbackPath, $stagePath, {failure_path})\n"
+        "            Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @(\n"
+        "                $destinationPath,\n"
+        "                $rollbackPath,\n"
+        "                $retiredRollbackPath,\n"
+        "                $stagePath,\n"
+        "                $failedActivationPath\n"
+        "            )\n"
         "            [System.IO.Directory]::Move($stagePath, $destinationPath)\n"
     )
 
