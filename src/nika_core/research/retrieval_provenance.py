@@ -103,7 +103,7 @@ def deserialize_retrieval_provenance(payload: str) -> RetrievalEvidence:
     except (TypeError, json.JSONDecodeError) as exc:
         raise ValueError("retrieval provenance is not valid JSON") from exc
     if not isinstance(decoded, dict):
-        raise ValueError("retrieval provenance envelope must be an object")
+        raise TypeError("retrieval provenance envelope must be an object")
     if set(decoded) != {"schema", "schema_version", "evidence"}:
         raise ValueError("retrieval provenance envelope fields are invalid")
     if decoded["schema"] != _EVIDENCE_SCHEMA:
@@ -115,7 +115,7 @@ def deserialize_retrieval_provenance(payload: str) -> RetrievalEvidence:
 
     values = decoded["evidence"]
     if not isinstance(values, dict):
-        raise ValueError("retrieval provenance evidence must be an object")
+        raise TypeError("retrieval provenance evidence must be an object")
     expected_fields = {field.name for field in fields(RetrievalEvidence)}
     if set(values) != expected_fields:
         raise ValueError("retrieval provenance fields are invalid")
