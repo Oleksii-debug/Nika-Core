@@ -77,6 +77,15 @@ def _run(
     )
 
 
+def _post_activation_injection_needle(mode: str) -> str:
+    failure_path = "$failedInstallPath" if mode == "Install" else "$failedActivationPath"
+    return (
+        "            Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths "
+        f"@($destinationPath, $rollbackPath, $stagePath, {failure_path})\n"
+        "            [System.IO.Directory]::Move($stagePath, $destinationPath)\n"
+    )
+
+
 def test_installer_contract_reuses_manifest_and_never_elevates() -> None:
     payload = SCRIPT.read_text(encoding="utf-8")
     assert "release-manifest.json" in payload
@@ -103,6 +112,13 @@ def test_installer_contract_reuses_manifest_and_never_elevates() -> None:
         "        }\n"
         "        if ($item.Length -ne [int64]$size)"
     ) in payload
+
+
+@pytest.mark.parametrize("mode", ["Install", "Update"])
+def test_post_activation_fault_injection_binding_is_unique(mode: str) -> None:
+    payload = SCRIPT.read_text(encoding="utf-8")
+    needle = _post_activation_injection_needle(mode)
+    assert payload.count(needle) == 1, "fault injection must bind exactly one activation phase"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
@@ -156,7 +172,6 @@ def test_tampered_update_fails_before_installed_tree_mutates(tmp_path: Path) -> 
     assert not (destination.parent / f".{destination.name}.rollback").exists()
 
 
-
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
 @pytest.mark.parametrize("mode", ["Install", "Update"])
 def test_post_activation_reparse_failure_cleans_or_restores_destination(
@@ -180,14 +195,10 @@ def test_post_activation_reparse_failure_cleans_or_restores_destination(
 
     instrumented = tmp_path / "install_nika_core_fault.ps1"
     payload = SCRIPT.read_text(encoding="utf-8")
-    # Both phases activate the same way. Bind the injection to the selected
-    # branch so a new Install try/catch cannot silently steal Update's fault.
-    prefix = (
-        "        try {\n"
-        if mode == "Install"
-        else "            Assert-NikaNoReparsePathChain -Path $rollbackPath\n"
-    )
-    needle = prefix + "            [System.IO.Directory]::Move($stagePath, $destinationPath)\n"
+    # Bind the injection to the selected guarded activation phase. The
+    # phase-specific failure path keeps Install and Update unambiguous even
+    # though both ultimately move the staged candidate into destination.
+    needle = _post_activation_injection_needle(mode)
     injection_marker = tmp_path / "junction-injected.marker"
     escaped_target = str(junction_target).replace("'", "''")
     escaped_marker = str(injection_marker).replace("'", "''")
@@ -394,4 +405,3 @@ def test_installer_rejects_canonical_data_root_junction_alias_before_mutation(
     assert rejected.returncode != 0, rejected.stdout or rejected.stderr
     assert "Reparse points are forbidden in installer path authority" in rejected.stderr
     assert not destination.exists()
-
