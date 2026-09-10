@@ -89,8 +89,8 @@ def test_binds_exact_repository_candidate_pr_and_checks() -> None:
     assert binding.pull_request_number == 720
     assert binding.checks_state is CheckState.PASS
     assert tuple(item.check_id for item in binding.check_evidence) == (
-        "core",
-        "factory",
+        "github:core",
+        "github:factory",
     )
     assert tuple(item.evidence_ref for item in binding.check_evidence) == (
         "actions:run/core",
@@ -304,8 +304,8 @@ def test_restart_replay_preserves_distinct_check_identity_and_provenance() -> No
     binding = GitHubFactoryAdapter().bind(_repository(), _observation(checks=restored))
 
     assert tuple(item.check_id for item in binding.check_evidence) == (
-        "core",
-        "factory",
+        "github:core",
+        "github:factory",
     )
     assert tuple(item.evidence_ref for item in binding.check_evidence) == (
         "actions:run/core",
@@ -319,6 +319,23 @@ def test_missing_or_substituted_required_check_cannot_project_pass() -> None:
         _observation(checks=(_observation().checks[0],)),
     )
 
+    result = classify_candidate_verification(
+        CANDIDATE_SHA,
+        binding.check_evidence,
+        required_check_ids=PRODUCT_FACTORY_REQUIRED_CHECK_IDS,
+    )
+
+    assert result.state is VerificationState.UNKNOWN
+    assert result.merge_clearance is False
+
+
+def test_provider_labels_cannot_impersonate_canonical_required_gates() -> None:
+    binding = GitHubFactoryAdapter().bind(_repository(), _observation())
+
+    assert tuple(item.check_id for item in binding.check_evidence) == (
+        "github:core",
+        "github:factory",
+    )
     result = classify_candidate_verification(
         CANDIDATE_SHA,
         binding.check_evidence,
