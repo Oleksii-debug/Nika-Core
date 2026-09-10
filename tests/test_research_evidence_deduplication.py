@@ -12,6 +12,7 @@ from nika_core.research.models import (
 from nika_core.research.network_repository import NetworkResearchRepository
 from nika_core.research.query_results import ScopedResearchResultWriter
 from nika_core.research.repository import ResearchRepository
+from nika_core.research.results import ResearchResultService
 
 
 class _DuplicatingEvidenceNetwork:
@@ -131,6 +132,28 @@ def test_same_source_same_content_does_not_multiply_result_or_evidence(tmp_path)
     assert result.items[0].rank == -2.0
     assert len(result.items[0].evidence) == 1
     assert result.items[0].evidence[0].source_id == "local-a"
+    assert network.get_result_set(result.result_set_id) == result
+
+
+def test_legacy_result_service_uses_same_dedupe_writer(tmp_path) -> None:
+    _, repository, network = _services(tmp_path)
+    _ingest_local(
+        repository,
+        source_id="legacy-a",
+        locator="legacy.txt",
+        text="legacy alpha evidence",
+    )
+    duplicate_network = _DuplicatingEvidenceNetwork(network)
+    service = ResearchResultService(
+        repository=repository,
+        network_repository=duplicate_network,  # type: ignore[arg-type]
+    )
+
+    result = service.search("ws", "alpha")
+
+    assert len(result.items) == 1
+    assert len(result.items[0].evidence) == 1
+    assert result.items[0].evidence[0].source_id == "legacy-a"
     assert network.get_result_set(result.result_set_id) == result
 
 
