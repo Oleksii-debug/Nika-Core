@@ -91,5 +91,10 @@ def test_non_integer_limits_fail_closed(tmp_path, limit: object) -> None:
     store, _, network = _services(tmp_path)
     service = DeterministicResearchQueryService(store=store, network_repository=network)
 
+    spec = ResearchQuerySpec(
+        workspace_id="ws",
+        text="bounded",
+        limit=limit,  # type: ignore[arg-type]
+    )
     with pytest.raises(TypeError, match="limit must be an integer"):
-        service.execute(ResearchQuerySpec(workspace_id="ws", text="bounded", limit=limit))  # type: ignore[arg-type]
+        service.execute(spec)
