@@ -23,7 +23,7 @@ class UnifiedPlanningAdapter:
         *,
         engine_name: str = "aries",
         max_expansions: int = 50_000,
-        solver_timeout_seconds: float = 30.0,
+        solver_timeout_seconds: float | None = None,
     ) -> None:
         if not engine_name.strip():
             raise ValueError("engine_name must not be empty")
@@ -33,7 +33,7 @@ class UnifiedPlanningAdapter:
             or max_expansions <= 0
         ):
             raise ValueError("max_expansions must be a positive integer")
-        if (
+        if solver_timeout_seconds is not None and (
             isinstance(solver_timeout_seconds, bool)
             or not isinstance(solver_timeout_seconds, (int, float))
             or not isfinite(float(solver_timeout_seconds))
@@ -42,7 +42,9 @@ class UnifiedPlanningAdapter:
             raise ValueError("solver_timeout_seconds must be a finite positive number")
         self._engine_name = engine_name
         self._max_expansions = max_expansions
-        self._solver_timeout_seconds = float(solver_timeout_seconds)
+        self._solver_timeout_seconds = (
+            None if solver_timeout_seconds is None else float(solver_timeout_seconds)
+        )
 
     def plan(
         self,
@@ -129,8 +131,11 @@ class UnifiedPlanningAdapter:
             problem.add_goal(up.Not(fluents[fact]))
 
         try:
+            solve_kwargs: dict[str, float] = {}
+            if self._solver_timeout_seconds is not None:
+                solve_kwargs["timeout"] = self._solver_timeout_seconds
             with up.OneshotPlanner(name=self._engine_name) as planner:
-                result = planner.solve(problem, timeout=self._solver_timeout_seconds)
+                result = planner.solve(problem, **solve_kwargs)
         except Exception as exc:
             raise DeterministicPlanningError(
                 "deterministic planner failed",
