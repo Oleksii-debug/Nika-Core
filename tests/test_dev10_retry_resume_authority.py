@@ -81,6 +81,7 @@ class _RecoveryRuntime:
     def __init__(self) -> None:
         self.run_calls = 0
         self.resume_calls = 0
+        self.probe_calls = 0
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
         self.run_calls += 1
@@ -101,6 +102,7 @@ class _RecoveryRuntime:
         thread_id: str,
         resume_token: str,
     ) -> RuntimeResumeProbe:
+        self.probe_calls += 1
         del task_id
         assert resume_token == thread_id
         return RuntimeResumeProbe(
@@ -189,7 +191,7 @@ def test_retry_dispatch_uses_one_usable_token_decision(
     assert TaskRuntimeCoordinator(queue, audit).sessions.get(task_id) is None
 
 
-def test_crash_left_retrying_session_is_recovered_by_resume_not_fresh_run(tmp_path) -> None:
+def test_crash_left_retrying_session_fails_closed_without_retry_authority(tmp_path) -> None:
     store, queue, task_id = _ready_task(tmp_path)
     queue.transition(task_id, TaskState.RUNNING)
     RuntimeSessionStore(store).record_active(
@@ -210,16 +212,46 @@ def test_crash_left_retrying_session_is_recovered_by_resume_not_fresh_run(tmp_pa
     )
 
     candidate = recovery.inspect()[0]
-    assert candidate.disposition == RecoveryDisposition.AUTO_RESUME_CRASH
+    assert candidate.disposition == RecoveryDisposition.INCONSISTENT_STATE
     assert candidate.task_state == TaskState.RETRYING
 
     execution = asyncio.run(recovery.resume_safe_crash_sessions(max_count=1))
 
-    assert len(execution) == 1
-    assert execution[0].succeeded
+    assert execution == ()
     assert runtime.run_calls == 0
-    assert runtime.resume_calls == 1
-    assert _task_state(store, task_id) == TaskState.COMPLETED
+    assert runtime.resume_calls == 0
+    assert runtime.probe_calls == 0
+    assert _task_state(store, task_id) == TaskState.RETRYING
+
+
+def test_direct_saved_resume_rejects_retrying_before_claim_or_runtime_effect(tmp_path) -> None:
+    store, queue, task_id = _ready_task(tmp_path)
+    queue.transition(task_id, TaskState.RUNNING)
+    sessions = RuntimeSessionStore(store)
+    sessions.record_active(
+        task_id=task_id,
+        runtime_id="retry-recovery-proof",
+        thread_id="thread-direct-retrying",
+        resume_token="thread-direct-retrying",
+    )
+    queue.transition(task_id, TaskState.RETRYING)
+
+    runtime = _RecoveryRuntime()
+    audit = AuditLog(store)
+    coordinator = TaskRuntimeCoordinator(queue, audit, session_store=sessions)
+
+    with pytest.raises(ValueError, match="lacks durable retry attempt/backoff authority"):
+        asyncio.run(coordinator.resume_saved(runtime, task_id=task_id))
+
+    assert runtime.run_calls == 0
+    assert runtime.resume_calls == 0
+    assert runtime.probe_calls == 0
+    assert _task_state(store, task_id) == TaskState.RETRYING
+    assert sessions.get(task_id) is not None
+    assert not any(
+        event.event_type.startswith("runtime.recovery_claim")
+        for event in audit.list_for(entity_type="runtime_recovery")
+    )
 
 
 def test_restart_rejects_malformed_persisted_resume_token_before_runtime_effect(tmp_path) -> None:
