@@ -121,6 +121,7 @@ def test_local_model_result_is_durable_and_restart_readable_without_reinference(
     assert result.outcome is RuntimeOutcome.COMPLETED
     assert calls == ["dev97-local-model"] * 3
     team_id = str(result.output["team_id"])
+    checker_member_id = str(result.output["team_result"]["checker"]["member_id"])
     expected_analysis = {
         "text": "durable checker synthesis",
         "provider_id": "ollama",
@@ -131,7 +132,7 @@ def test_local_model_result_is_durable_and_restart_readable_without_reinference(
         expected_analysis
     )
 
-    durable_checker = MultiAgentStore(store).member_result(team_id, "checker")
+    durable_checker = MultiAgentStore(store).member_result(team_id, checker_member_id)
     assert durable_checker.outcome == "completed"
     assert durable_checker.payload["model_analysis"] == expected_analysis
     task_events = AuditLog(store).list_for(entity_type="task", entity_id=task.task_id)
@@ -168,9 +169,10 @@ def test_local_model_result_is_durable_and_restart_readable_without_reinference(
     assert reconstructed.outcome is RuntimeOutcome.COMPLETED
     assert reconstructed.output == result.output
     assert (
-        MultiAgentStore(restarted_store).member_result(team_id, "checker").payload[
-            "model_analysis"
-        ]
+        MultiAgentStore(restarted_store).member_result(
+            team_id,
+            checker_member_id,
+        ).payload["model_analysis"]
         == expected_analysis
     )
     assert calls == ["dev97-local-model"] * 3
