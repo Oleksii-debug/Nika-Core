@@ -95,6 +95,10 @@ def _state_failure_snapshot(mode: str) -> dict[str, object]:
 const fs = require("fs");
 const MODE = {json.dumps(mode)};
 const CANARY = {json.dumps(canary)};
+let stateFailureResolve;
+const stateFailureRendered = new Promise((resolve) => {{
+  stateFailureResolve = resolve;
+}});
 
 class Element {{}}
 class HTMLElement extends Element {{
@@ -103,7 +107,22 @@ class HTMLElement extends Element {{
     this.id = id;
     this.hidden = false;
     this.textContent = "";
-    this.dataset = {{}};
+    this.dataset = id === "documentElement"
+      ? new Proxy({{}}, {{
+          set(target, key, value) {{
+            target[key] = String(value);
+            if (
+              key === "nikaReady"
+              && target[key] === "false"
+              && elements["product-project-summary"]?.hidden === true
+              && elements["product-project-empty"]?.textContent === "Стан поточного ProductProject недоступний."
+            ) {{
+              stateFailureResolve();
+            }}
+            return true;
+          }},
+        }})
+      : {{}};
     this.attributes = {{}};
     this.children = [];
     this.isContentEditable = false;
@@ -157,7 +176,13 @@ global.pywebview = {{
 
 eval(fs.readFileSync(process.argv[1], "utf8"));
 
-setTimeout(() => {{
+const watchdog = setTimeout(() => {{
+  fs.writeSync(2, "state failure completion witness timed out\\n");
+  process.exit(2);
+}}, 2000);
+
+stateFailureRendered.then(() => {{
+  clearTimeout(watchdog);
   const logText = element("activity-log").children.map((node) => node.textContent).join("\\n");
   const renderedText = [
     element("app-status").textContent,
@@ -175,7 +200,7 @@ setTimeout(() => {{
   }});
   fs.writeSync(1, snapshot + "\\n");
   process.exit(0);
-}}, 50);
+}});
 """
     result = subprocess.run(
         (_NODE, "-e", harness, str(_WEB_ROOT / "app.js")),
