@@ -111,12 +111,18 @@ def _install_fake_sdk(
             self.kwargs = kwargs
 
     class FoundryLocalManager:
-        instance = manager
+        # Mirror the official Python SDK singleton contract: initialize once,
+        # then consumers must reuse FoundryLocalManager.instance.
+        instance: _Manager | None = None
 
-        @staticmethod
-        def initialize(configuration: Configuration) -> None:
+        @classmethod
+        def initialize(cls, configuration: Configuration) -> None:
             assert configuration.kwargs["app_name"] == "NikaCore"
+            if cls.instance is not None:
+                events.append("double-initialize")
+                raise RuntimeError("FoundryLocalManager already initialized")
             events.append("initialize")
+            cls.instance = manager
 
     fake_sdk = SimpleNamespace(
         Configuration=Configuration,
