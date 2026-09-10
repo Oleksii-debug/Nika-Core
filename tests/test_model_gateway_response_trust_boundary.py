@@ -86,6 +86,12 @@ class _PoisonSuccessProvider:
             return replace(valid, model=123)  # type: ignore[arg-type]
         if self.mode == "wrong-model":
             return replace(valid, model="substituted-model")
+        if self.mode == "model-blank":
+            return replace(valid, model="   ")
+        if self.mode == "model-surrounding-whitespace":
+            return replace(valid, model=" fixture-model ")
+        if self.mode == "model-control":
+            return replace(valid, model="fixture\nmodel")
         if self.mode == "usage-not-dto":
             return replace(valid, usage=_CANARY)  # type: ignore[arg-type]
         if self.mode == "usage-secret":
@@ -112,6 +118,38 @@ class _PoisonSuccessProvider:
         if self.mode == "not-response":
             return {_CANARY: "not a response"}  # type: ignore[return-value]
         return valid
+
+
+class _RotatingCapabilitiesProvider:
+    def __init__(self) -> None:
+        self.capability_reads = 0
+        self.complete_calls = 0
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        self.capability_reads += 1
+        if self.capability_reads == 1:
+            return ProviderCapabilities(
+                provider_id="trusted",
+                kind=ProviderKind.LOCAL,
+                supports_private_data=True,
+            )
+        return ProviderCapabilities(
+            provider_id=_CANARY,
+            kind=ProviderKind.CLOUD,
+            supports_private_data=True,
+        )
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        self.complete_calls += 1
+        spoofed = self.capabilities
+        return ModelResponse(
+            request_id=request.request_id,
+            text="provider output",
+            provider_id=spoofed.provider_id,
+            provider_kind=spoofed.kind,
+            model=request.model or "fixture-model",
+        )
 
 
 def _request() -> ModelRequest:
@@ -188,6 +226,81 @@ def test_invalid_success_response_fails_before_completed_audit_or_fallback(
     )
     assert _CANARY not in durable
     assert '"failure_effect": "unknown"' in durable
+    assert '"provider_id": "trusted"' in durable
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ("model-blank", "model-surrounding-whitespace", "model-control"),
+)
+def test_provider_default_model_identity_must_be_canonical(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    audit = AuditLog(store)
+    primary = _PoisonSuccessProvider(mode)
+    gateway = ModelGateway(audit_log=audit)
+    gateway.register(primary)
+
+    with pytest.raises(ModelGatewayError) as caught:
+        asyncio.run(
+            gateway.complete(
+                replace(_request(), model=None, fallback_provider_ids=())
+            )
+        )
+
+    error = caught.value
+    assert error.code is ModelErrorCode.PROVIDER_ERROR
+    assert error.provider_id == "trusted"
+    assert error.failure_effect is ModelFailureEffect.UNKNOWN
+    events = audit.list_for(
+        entity_type="model_request",
+        entity_id="response-trust-request",
+    )
+    assert [event.event_type for event in events] == [
+        "model.requested",
+        "model.failed",
+    ]
+
+
+def test_registered_route_identity_is_frozen_before_untrusted_execution(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    audit = AuditLog(store)
+    primary = _RotatingCapabilitiesProvider()
+    fallback = _FallbackProvider()
+    gateway = ModelGateway(audit_log=audit)
+    gateway.register(primary)
+    gateway.register(fallback)
+
+    with pytest.raises(ModelGatewayError) as caught:
+        asyncio.run(gateway.complete(_request()))
+
+    error = caught.value
+    assert error.code is ModelErrorCode.PROVIDER_ERROR
+    assert error.provider_id == "trusted"
+    assert error.failure_effect is ModelFailureEffect.UNKNOWN
+    assert primary.complete_calls == 1
+    assert primary.capability_reads == 2
+    assert fallback.complete_calls == 0
+    events = audit.list_for(
+        entity_type="model_request",
+        entity_id="response-trust-request",
+    )
+    assert [event.event_type for event in events] == [
+        "model.requested",
+        "model.failed",
+    ]
+    durable = json.dumps(
+        [event.payload for event in events],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    assert _CANARY not in durable
     assert '"provider_id": "trusted"' in durable
 
 
