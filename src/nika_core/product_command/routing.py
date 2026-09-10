@@ -46,10 +46,14 @@ _DEVELOPMENT_REQUEST_PATTERNS = (
     ),
 )
 _DEVELOPMENT_ACTION_AUTHORITY_PATTERNS = (
-    re.compile(r"^(?:please\s+)?(?:develop|implement|fix)\b", re.IGNORECASE),
+    re.compile(
+        r"^(?:please\s+)?(?:develop|implement|fix)\s+"
+        r"(?:issue|pr|pull request)\s*#?\d+\b",
+        re.IGNORECASE,
+    ),
     re.compile(
         r"^(?:please\s+)?(?:can|could|would|will)\s+you\s+(?:please\s+)?"
-        r"(?:develop|implement|fix)\b",
+        r"(?:develop|implement|fix)\s+(?:issue|pr|pull request)\s*#?\d+\b",
         re.IGNORECASE,
     ),
     re.compile(
@@ -59,7 +63,8 @@ _DEVELOPMENT_ACTION_AUTHORITY_PATTERNS = (
         re.IGNORECASE,
     ),
     re.compile(
-        r"^(?:будь\s+ласка,?\s+)?(?:розроби|реалізуй|виправ)\b",
+        r"^(?:будь\s+ласка,?\s+)?(?:розроби|реалізуй|виправ)\s+"
+        r"(?:issue|pr|задачу|задача)\s*#?\d+\b",
         re.IGNORECASE,
     ),
 )
