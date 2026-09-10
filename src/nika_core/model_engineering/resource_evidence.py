@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import json
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from math import isfinite
@@ -39,7 +38,7 @@ class ResourceUnknownReason(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ResourceMetricEvidence:
-    """One numeric metric with explicit observed-vs-UNKNOWN semantics."""
+    """One resource metric with explicit observed-vs-UNKNOWN semantics."""
 
     status: ResourceMeasurementStatus
     scope: ResourceMeasurementScope
@@ -54,14 +53,12 @@ class ResourceMetricEvidence:
             raise ValueError("scope must be a ResourceMeasurementScope")
         if not isinstance(self.unit, ResourceMeasurementUnit):
             raise ValueError("unit must be a ResourceMeasurementUnit")
-
         if self.status is ResourceMeasurementStatus.UNKNOWN:
             if self.value is not None:
                 raise ValueError("unknown resource metric cannot carry a numeric value")
             if not isinstance(self.unknown_reason, ResourceUnknownReason):
                 raise ValueError("unknown resource metric requires unknown_reason")
             return
-
         if self.unknown_reason is not None:
             raise ValueError("observed resource metric cannot carry unknown_reason")
         if isinstance(self.value, bool) or not isinstance(self.value, (int, float)):
@@ -87,39 +84,32 @@ class ResourceMetricEvidence:
 def benchmark_resource_evidence_payload(
     report: CandidateBenchmarkReport,
 ) -> dict[str, Any]:
-    """Project benchmark snapshots into explicit resource evidence.
+    """Return bounded resource evidence without fabricating GPU attribution."""
 
-    ResourceObserverPort currently exposes host CPU/RAM plus optional Nika-process
-    RSS. AcceleratorSnapshot does not attest accelerator kind, so accelerator
-    readings are deliberately not relabelled as GPU measurements.
-    """
-
-    samples: list[dict[str, Any]] = []
-    for result in report.case_results:
-        samples.extend(
-            (
-                _sample_payload(
-                    case_id=result.case_id,
-                    phase="before",
-                    resource=result.resource_before,
-                    accelerator=result.accelerator_before,
-                ),
-                _sample_payload(
-                    case_id=result.case_id,
-                    phase="after",
-                    resource=result.resource_after,
-                    accelerator=result.accelerator_after,
-                ),
-            )
-        )
-
-    resource_snapshots = tuple(
+    snapshots = tuple(
         snapshot
         for result in report.case_results
         for snapshot in (result.resource_before, result.resource_after)
         if snapshot is not None
     )
-
+    rss_values = tuple(
+        value
+        for snapshot in snapshots
+        if (value := getattr(snapshot, "process_rss_bytes", None)) is not None
+    )
+    samples = [
+        _sample_payload(
+            case_id=result.case_id,
+            phase=phase,
+            resource=resource,
+            accelerator=accelerator,
+        )
+        for result in report.case_results
+        for phase, resource, accelerator in (
+            ("before", result.resource_before, result.accelerator_before),
+            ("after", result.resource_after, result.accelerator_after),
+        )
+    ]
     return {
         "schema": "nika-model-resource-evidence-v1",
         "candidate_id": report.candidate.candidate_id,
@@ -130,56 +120,40 @@ def benchmark_resource_evidence_payload(
             "during": "not_captured",
         },
         "summary": {
-            "peak_host_cpu_percent": _summary_metric(
-                (snapshot.cpu_percent for snapshot in resource_snapshots),
-                scope=ResourceMeasurementScope.HOST,
-                unit=ResourceMeasurementUnit.PERCENT,
-                aggregate=max,
-            ).as_dict(),
-            "peak_host_ram_percent": _summary_metric(
-                (snapshot.memory_percent for snapshot in resource_snapshots),
-                scope=ResourceMeasurementScope.HOST,
-                unit=ResourceMeasurementUnit.PERCENT,
-                aggregate=max,
-            ).as_dict(),
-            "min_host_available_ram_bytes": _summary_metric(
-                (snapshot.available_memory_bytes for snapshot in resource_snapshots),
-                scope=ResourceMeasurementScope.HOST,
-                unit=ResourceMeasurementUnit.BYTES,
-                aggregate=min,
-            ).as_dict(),
-            "peak_nika_process_rss_bytes": _summary_metric(
-                (
-                    snapshot.process_rss_bytes
-                    for snapshot in resource_snapshots
-                    if snapshot.process_rss_bytes is not None
-                ),
-                scope=ResourceMeasurementScope.NIKA_PROCESS,
-                unit=ResourceMeasurementUnit.BYTES,
-                aggregate=max,
-            ).as_dict(),
+            "peak_host_cpu_percent": _summary(
+                (item.cpu_percent for item in snapshots),
+                ResourceMeasurementScope.HOST,
+                ResourceMeasurementUnit.PERCENT,
+            ),
+            "peak_host_ram_percent": _summary(
+                (item.memory_percent for item in snapshots),
+                ResourceMeasurementScope.HOST,
+                ResourceMeasurementUnit.PERCENT,
+            ),
+            "min_host_available_ram_bytes": _summary(
+                (item.available_memory_bytes for item in snapshots),
+                ResourceMeasurementScope.HOST,
+                ResourceMeasurementUnit.BYTES,
+                minimum=True,
+            ),
+            "peak_nika_process_rss_bytes": _summary(
+                rss_values,
+                ResourceMeasurementScope.NIKA_PROCESS,
+                ResourceMeasurementUnit.BYTES,
+            ),
             "peak_gpu_utilization_percent": _unknown(
                 ResourceMeasurementScope.GPU_DEVICE,
                 ResourceMeasurementUnit.PERCENT,
                 ResourceUnknownReason.GPU_IDENTITY_UNAVAILABLE,
-            ).as_dict(),
+            ),
             "peak_gpu_memory_used_bytes": _unknown(
                 ResourceMeasurementScope.GPU_DEVICE,
                 ResourceMeasurementUnit.BYTES,
                 ResourceUnknownReason.GPU_IDENTITY_UNAVAILABLE,
-            ).as_dict(),
+            ),
         },
         "samples": samples,
     }
-
-
-def benchmark_resource_evidence_json(report: CandidateBenchmarkReport) -> str:
-    return json.dumps(
-        benchmark_resource_evidence_payload(report),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
 
 
 def _sample_payload(
@@ -200,7 +174,7 @@ def _sample_payload(
             ResourceMeasurementUnit.PERCENT,
             ResourceUnknownReason.RESOURCE_OBSERVER_NOT_CONFIGURED,
         )
-        available_ram = _unknown(
+        available = _unknown(
             ResourceMeasurementScope.HOST,
             ResourceMeasurementUnit.BYTES,
             ResourceUnknownReason.RESOURCE_OBSERVER_NOT_CONFIGURED,
@@ -221,18 +195,19 @@ def _sample_payload(
             ResourceMeasurementScope.HOST,
             ResourceMeasurementUnit.PERCENT,
         )
-        available_ram = _observed(
+        available = _observed(
             resource.available_memory_bytes,
             ResourceMeasurementScope.HOST,
             ResourceMeasurementUnit.BYTES,
         )
+        rss_value = getattr(resource, "process_rss_bytes", None)
         rss = (
             _observed(
-                resource.process_rss_bytes,
+                rss_value,
                 ResourceMeasurementScope.NIKA_PROCESS,
                 ResourceMeasurementUnit.BYTES,
             )
-            if resource.process_rss_bytes is not None
+            if rss_value is not None
             else _unknown(
                 ResourceMeasurementScope.NIKA_PROCESS,
                 ResourceMeasurementUnit.BYTES,
@@ -240,23 +215,25 @@ def _sample_payload(
             )
         )
 
+    gpu_percent = _unknown(
+        ResourceMeasurementScope.GPU_DEVICE,
+        ResourceMeasurementUnit.PERCENT,
+        ResourceUnknownReason.GPU_IDENTITY_UNAVAILABLE,
+    )
+    gpu_memory = _unknown(
+        ResourceMeasurementScope.GPU_DEVICE,
+        ResourceMeasurementUnit.BYTES,
+        ResourceUnknownReason.GPU_IDENTITY_UNAVAILABLE,
+    )
     return {
         "case_id": case_id,
         "phase": phase,
-        "host_cpu_percent": cpu.as_dict(),
-        "host_ram_percent": ram.as_dict(),
-        "host_available_ram_bytes": available_ram.as_dict(),
-        "nika_process_rss_bytes": rss.as_dict(),
-        "gpu_utilization_percent": _unknown(
-            ResourceMeasurementScope.GPU_DEVICE,
-            ResourceMeasurementUnit.PERCENT,
-            ResourceUnknownReason.GPU_IDENTITY_UNAVAILABLE,
-        ).as_dict(),
-        "gpu_memory_used_bytes": _unknown(
-            ResourceMeasurementScope.GPU_DEVICE,
-            ResourceMeasurementUnit.BYTES,
-            ResourceUnknownReason.GPU_IDENTITY_UNAVAILABLE,
-        ).as_dict(),
+        "host_cpu_percent": cpu,
+        "host_ram_percent": ram,
+        "host_available_ram_bytes": available,
+        "nika_process_rss_bytes": rss,
+        "gpu_utilization_percent": gpu_percent,
+        "gpu_memory_used_bytes": gpu_memory,
         "untyped_accelerator_observation_present": accelerator is not None,
     }
 
@@ -265,36 +242,36 @@ def _observed(
     value: float | int,
     scope: ResourceMeasurementScope,
     unit: ResourceMeasurementUnit,
-) -> ResourceMetricEvidence:
+) -> dict[str, Any]:
     return ResourceMetricEvidence(
-        status=ResourceMeasurementStatus.OBSERVED,
-        scope=scope,
-        unit=unit,
-        value=value,
-    )
+        ResourceMeasurementStatus.OBSERVED,
+        scope,
+        unit,
+        value,
+    ).as_dict()
 
 
 def _unknown(
     scope: ResourceMeasurementScope,
     unit: ResourceMeasurementUnit,
     reason: ResourceUnknownReason,
-) -> ResourceMetricEvidence:
+) -> dict[str, Any]:
     return ResourceMetricEvidence(
-        status=ResourceMeasurementStatus.UNKNOWN,
-        scope=scope,
-        unit=unit,
-        value=None,
-        unknown_reason=reason,
-    )
+        ResourceMeasurementStatus.UNKNOWN,
+        scope,
+        unit,
+        None,
+        reason,
+    ).as_dict()
 
 
-def _summary_metric(
+def _summary(
     values: Iterable[float | int],
-    *,
     scope: ResourceMeasurementScope,
     unit: ResourceMeasurementUnit,
-    aggregate: Callable[[Iterable[float | int]], float | int],
-) -> ResourceMetricEvidence:
+    *,
+    minimum: bool = False,
+) -> dict[str, Any]:
     observed = tuple(values)
     if not observed:
         return _unknown(
@@ -302,4 +279,5 @@ def _summary_metric(
             unit,
             ResourceUnknownReason.NO_OBSERVED_SAMPLE,
         )
-    return _observed(aggregate(observed), scope, unit)
+    value = min(observed) if minimum else max(observed)
+    return _observed(value, scope, unit)
