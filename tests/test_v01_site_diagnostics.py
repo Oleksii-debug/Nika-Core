@@ -26,10 +26,11 @@ class _Page:
 class _Registry:
     def __init__(self, page: _Page) -> None:
         self.page = page
+        self.record = _Record(self.page)
 
     def get(self, page_id: str) -> _Record:
         assert page_id == "page-1"
-        return _Record(self.page)
+        return self.record
 
 
 class _Session:

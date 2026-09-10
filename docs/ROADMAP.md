@@ -1,5 +1,7 @@
 # Nika Core — roadmap and progress truth
 
+Operating update, 2026-09-09: worker topology, routing and delivery sequencing are defined in `docs/AUTONOMOUS_WORKER_ORCHESTRATION.md` (DELIVERY-2026-09-09). Product requirements and acceptance criteria in this specification remain binding. Historical percentages and worker assignments are not current completion/ownership evidence.
+
 Baseline created: 2026-08-17. Scope reconciled: 2026-08-19. Product-factory scope expanded: 2026-08-20. Web/Cloud product direction bound: 2026-09-04.
 
 Progress is acceptance-gate based, not commit-count based. Regressions may reduce readiness. **Historical Core milestone credit and the expanded Full Product Vision are separate measurements.** See `docs/FULL_PRODUCT_VISION_2026-08-19.md`, `docs/AUTONOMOUS_PRODUCT_FACTORY.md`, and `docs/WEB_CLOUD_PRODUCT_ARCHITECTURE.md`.

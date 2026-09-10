@@ -207,7 +207,18 @@ class PlaywrightSiteDiagnosticsProbe:
         if registry is None:
             raise StaleSnapshotError("browser session is not started")
         record = registry.get(self.page_id)
-        data = _mapping(record.page.evaluate(_READ_ONLY_SITE_MODEL_JS), "payload")
+        page = record.page
+        document_generation = record.document_generation
+        data = _mapping(page.evaluate(_READ_ONLY_SITE_MODEL_JS), "payload")
+        current = registry.get(self.page_id)
+        if (
+            current is not record
+            or current.page is not page
+            or current.document_generation != document_generation
+        ):
+            raise StaleSnapshotError(
+                "browser page identity or document generation changed during site diagnostics"
+            )
 
         controls: list[SiteControlEvidence] = []
         for raw in _sequence(data.get("controls", ()), "controls", _MAX_CONTROLS):
@@ -258,7 +269,7 @@ class PlaywrightSiteDiagnosticsProbe:
             ready_state = "unknown"
 
         return SiteModel(
-            page_id=self.page_id, document_generation=record.document_generation,
+            page_id=self.page_id, document_generation=document_generation,
             url=_safe_url(data.get("url")), title=_safe_text(data.get("title")),
             ready_state=ready_state, controls=tuple(controls), headings=tuple(headings),
             forms=tuple(forms), frames=tuple(frames), shadow_root_count=shadow_count,

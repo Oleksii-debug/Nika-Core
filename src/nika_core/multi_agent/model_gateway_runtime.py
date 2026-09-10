@@ -140,6 +140,17 @@ class ModelGatewayAgentRuntime:
                 error="The model response did not match the configured provider route.",
                 error_code=RuntimeErrorCode.INTERNAL,
             )
+        if model_request.model is not None and response.model != model_request.model:
+            return RuntimeResult(
+                outcome=RuntimeOutcome.FAILED,
+                output={
+                    "recoverable": False,
+                    "provider_id": response.provider_id,
+                    "provider_kind": response.provider_kind.value,
+                },
+                error="The model response did not match the configured model identity.",
+                error_code=RuntimeErrorCode.INTERNAL,
+            )
 
         return RuntimeResult(
             outcome=RuntimeOutcome.COMPLETED,
