@@ -8,7 +8,7 @@ import pytest
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.intelligence.modes import IntelligenceMode, IntelligenceModeRouter
-from nika_core.kernel.audit import AuditLog
+from nika_core.kernel.audit import AuditEvent, AuditLog
 from nika_core.model_gateway.contracts import (
     ModelErrorCode,
     ModelFailureEffect,
@@ -82,23 +82,25 @@ def _request(request_id: str) -> ModelRequest:
     )
 
 
-def _audit_for(tmp_path: Path, *, fail: bool = False) -> tuple[AuditLog, _LocalProvider]:
+def _setup(
+    tmp_path: Path, *, fail: bool = False
+) -> tuple[AuditLog, _LocalProvider, IntelligenceModeRouter]:
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
     audit = AuditLog(store)
     gateway = ModelGateway(audit_log=audit)
     provider = _LocalProvider(fail=fail)
     gateway.register(provider)
-    return audit, provider
+    return audit, provider, IntelligenceModeRouter(gateway=gateway)
 
 
-def _durable_payloads(audit: AuditLog, request_id: str) -> tuple[object, ...]:
+def _durable_payloads(audit: AuditLog, request_id: str) -> tuple[AuditEvent, ...]:
     return audit.list_for(entity_type="model_request", entity_id=request_id)
 
 
-def _assert_private_material_absent(events: tuple[object, ...]) -> None:
+def _assert_private_material_absent(events: tuple[AuditEvent, ...]) -> None:
     durable = json.dumps(
-        [event.payload for event in events],  # type: ignore[attr-defined]
+        [event.payload for event in events],
         ensure_ascii=False,
         sort_keys=True,
     )
@@ -113,10 +115,7 @@ def _assert_private_material_absent(events: tuple[object, ...]) -> None:
 
 
 def test_local_success_audit_proves_validated_route_without_content(tmp_path: Path) -> None:
-    audit, provider = _audit_for(tmp_path)
-    gateway = ModelGateway(audit_log=audit)
-    gateway.register(provider)
-    router = IntelligenceModeRouter(gateway=gateway)
+    audit, provider, router = _setup(tmp_path)
     request = _request("local-privacy-success")
 
     response = asyncio.run(router.complete_model(IntelligenceMode.EMBEDDED_LOCAL, request))
@@ -156,13 +155,7 @@ def test_local_success_audit_proves_validated_route_without_content(tmp_path: Pa
 
 
 def test_local_failure_audit_is_terminal_and_redacted(tmp_path: Path) -> None:
-    store = SQLiteStore(tmp_path / "nika.db")
-    store.initialize()
-    audit = AuditLog(store)
-    gateway = ModelGateway(audit_log=audit)
-    provider = _LocalProvider(fail=True)
-    gateway.register(provider)
-    router = IntelligenceModeRouter(gateway=gateway)
+    audit, _, router = _setup(tmp_path, fail=True)
     request = _request("local-privacy-failure")
 
     with pytest.raises(ModelGatewayError) as caught:
