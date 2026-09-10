@@ -11,6 +11,7 @@ from nika_core.security import (
     V01_APPROVAL_AUTHORITY_VERSION,
     ActionIntent,
     ApprovalAuthority,
+    ApprovalEvidence,
     ApprovalLedger,
     ExecutionBudget,
     ExecutionBudgetLedger,
@@ -76,12 +77,15 @@ def _policy(
             workspace_root=tmp_path / "workspace",
             allowed_network_hosts=(),
         ),
-        budget=ExecutionBudget(max_network_calls=0),
+        budget=ExecutionBudget(max_network_calls=4),
         approval_verifier=authority.verifier(),
     )
 
 
-def _approved_evidence(authority: ApprovalAuthority, intent: ActionIntent):
+def _approved_evidence(
+    authority: ApprovalAuthority,
+    intent: ActionIntent,
+) -> ApprovalEvidence:
     request = authority.request(intent, now=NOW)
     return authority.approve(request.request_id, now=NOW + timedelta(seconds=1))
 
@@ -90,14 +94,14 @@ def _authorize(
     tmp_path: Path,
     authority: ApprovalAuthority,
     intent: ActionIntent,
-    approval: object,
+    approval: ApprovalEvidence,
     *,
     memory_permission: bool,
 ) -> None:
     authorize_action(
         intent,
         _policy(tmp_path, authority, memory_permission=memory_permission),
-        ExecutionBudgetLedger(ExecutionBudget(max_network_calls=0)),
+        ExecutionBudgetLedger(ExecutionBudget(max_network_calls=4)),
         ApprovalLedger(),
         approval=approval,
         now=NOW + timedelta(seconds=2),
