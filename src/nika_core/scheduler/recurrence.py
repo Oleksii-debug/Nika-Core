@@ -13,7 +13,8 @@ from nika_core.scheduler.store import IMMUTABLE_JOB_BINDING_KEY, ScheduledJobSto
 
 _RECURRENCE_PAYLOAD_KEY = "_nika_recurrence_v1"
 _TARGET_PAYLOAD_KEY = "target_payload"
-_RECURRENCE_VERSION = 1
+_TASK_ID_KEY = "task_id"
+_RECURRENCE_VERSION = 2
 
 
 class MissedRunPolicy(StrEnum):
@@ -54,6 +55,7 @@ class RecurrenceInvocation:
 @dataclass(frozen=True, slots=True)
 class RecurrenceState:
     recurrence_id: str
+    task_id: str
     action_id: str
     interval_seconds: int
     anchor_at: datetime
@@ -99,6 +101,7 @@ class DurableRecurrenceService:
         self,
         *,
         recurrence_id: str,
+        task_id: str,
         action_id: str,
         interval_seconds: int,
         start_at: datetime,
@@ -106,6 +109,7 @@ class DurableRecurrenceService:
         deadline_at: datetime | None = None,
     ) -> RecurrenceState:
         recurrence_key = _required_text(recurrence_id, "recurrence_id")
+        task_key = _canonical_task_id(task_id)
         target_action = _required_text(action_id, "action_id")
         interval = _validate_interval(interval_seconds)
         anchor = _require_aware_utc(start_at, "start_at")
@@ -127,6 +131,7 @@ class DurableRecurrenceService:
         if existing is not None:
             state, existing_payload = _decode_job(existing, expected_recurrence_id=recurrence_key)
             expected = (
+                task_key,
                 target_action,
                 interval,
                 anchor,
@@ -134,6 +139,7 @@ class DurableRecurrenceService:
                 user_payload,
             )
             actual = (
+                state.task_id,
                 state.action_id,
                 state.interval_seconds,
                 state.anchor_at,
@@ -146,6 +152,7 @@ class DurableRecurrenceService:
 
         state = RecurrenceState(
             recurrence_id=recurrence_key,
+            task_id=task_key,
             action_id=target_action,
             interval_seconds=interval,
             anchor_at=anchor,
@@ -351,8 +358,10 @@ class DurableRecurrenceService:
             trigger={"run_date": _iso(run_date)},
             payload={
                 "recurrence_id": state.recurrence_id,
+                _TASK_ID_KEY: state.task_id,
                 IMMUTABLE_JOB_BINDING_KEY: _definition_fingerprint(
                     recurrence_id=state.recurrence_id,
+                    task_id=state.task_id,
                     action_id=state.action_id,
                     interval_seconds=state.interval_seconds,
                     anchor_at=state.anchor_at,
@@ -384,6 +393,7 @@ def _encode_state(state: RecurrenceState) -> dict[str, Any]:
     return {
         "version": _RECURRENCE_VERSION,
         "recurrence_id": state.recurrence_id,
+        "task_id": state.task_id,
         "action_id": state.action_id,
         "interval_seconds": state.interval_seconds,
         "anchor_at": _iso(state.anchor_at),
@@ -418,6 +428,13 @@ def _decode_job(
     recurrence_id = _required_text(metadata.get("recurrence_id"), "persisted recurrence_id")
     if recurrence_id != expected_recurrence_id:
         raise ValueError("durable recurrence identity mismatch")
+    task_id = _canonical_task_id(metadata.get("task_id"), label="persisted task_id")
+    top_level_task_id = _canonical_task_id(
+        job.payload.get(_TASK_ID_KEY),
+        label="scheduled task_id",
+    )
+    if top_level_task_id != task_id:
+        raise ValueError("durable recurrence task identity mismatch")
     interval = _validate_interval(metadata.get("interval_seconds"))
     anchor = _parse_iso(metadata.get("anchor_at"), "anchor_at")
     deadline = _parse_optional_iso(metadata.get("deadline_at"), "deadline_at")
@@ -457,6 +474,7 @@ def _decode_job(
         raise ValueError("durable recurrence enabled state does not match lifecycle state")
     state = RecurrenceState(
         recurrence_id=recurrence_id,
+        task_id=task_id,
         action_id=_required_text(metadata.get("action_id"), "persisted action_id"),
         interval_seconds=interval,
         anchor_at=anchor,
@@ -472,6 +490,7 @@ def _decode_job(
     persisted_binding = job.payload.get(IMMUTABLE_JOB_BINDING_KEY)
     expected_binding = _definition_fingerprint(
         recurrence_id=state.recurrence_id,
+        task_id=state.task_id,
         action_id=state.action_id,
         interval_seconds=state.interval_seconds,
         anchor_at=state.anchor_at,
@@ -486,6 +505,7 @@ def _decode_job(
 def _definition_fingerprint(
     *,
     recurrence_id: str,
+    task_id: str,
     action_id: str,
     interval_seconds: int,
     anchor_at: datetime,
@@ -495,6 +515,7 @@ def _definition_fingerprint(
     material = json.dumps(
         {
             "recurrence_id": recurrence_id,
+            "task_id": task_id,
             "action_id": action_id,
             "interval_seconds": interval_seconds,
             "anchor_at": _iso(anchor_at),
@@ -562,6 +583,14 @@ def _require_aware_utc(value: datetime, label: str) -> datetime:
 
 def _iso(value: datetime) -> str:
     return value.astimezone(UTC).isoformat()
+
+
+def _canonical_task_id(value: object, *, label: str = "task_id") -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{label} is required")
+    if value != value.strip():
+        raise ValueError(f"{label} must be canonical")
+    return value
 
 
 def _required_text(value: object, label: str) -> str:
