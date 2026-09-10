@@ -342,7 +342,11 @@ def _decode_model_contents(model_text: str) -> tuple[str, ...]:
         if not isinstance(unit, dict) or set(unit) != {"position", "content"}:
             raise ContextProvenanceError("model context unit fields do not match schema")
         raw_position = unit["position"]
-        if isinstance(raw_position, bool) or raw_position != position:
+        if (
+            isinstance(raw_position, bool)
+            or not isinstance(raw_position, int)
+            or raw_position != position
+        ):
             raise ContextProvenanceError("model context positions must be contiguous and ordered")
         contents.append(_require_content(unit["content"]))
     if _canonical_json(payload) != model_text:
