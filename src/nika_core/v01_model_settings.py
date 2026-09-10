@@ -14,6 +14,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.intelligence.modes import (
+    IntelligenceMode,
+    IntelligenceModeError,
+    IntelligenceModePolicy,
+    IntelligenceModeRouter,
+)
 from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.model_gateway.api_route import (
@@ -404,12 +410,14 @@ class V01BoundModelRuntimeFactory:
         settings: V01ModelSettings | None = None,
         credential_resolver: CredentialResolverPort | None = None,
         client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient,
+        intelligence_policy: IntelligenceModePolicy | None = None,
     ) -> None:
         self._store = store
         self._definitions = definitions
         self._settings = settings or V01ModelSettings(store)
         self._credential_resolver = credential_resolver or EnvironmentCredentialResolver()
         self._client_factory = client_factory
+        self._intelligence_policy = intelligence_policy or IntelligenceModePolicy()
 
     def for_task(self, task_id: str) -> ModelGatewayAgentRuntime:
         selection = self._settings.for_task(task_id)
@@ -450,6 +458,19 @@ class V01BoundModelRuntimeFactory:
                 default=True,
             )
         else:
+            try:
+                policy_route = IntelligenceModeRouter(
+                    gateway=gateway,
+                    policy=self._intelligence_policy,
+                ).resolve(IntelligenceMode.EXTERNAL_API)
+            except IntelligenceModeError:
+                raise ModelSetupError(
+                    "Зовнішній API-доступ заборонено політикою Nika."
+                ) from None
+            if policy_route.provider_id != selection.provider_id:
+                raise ModelSetupError(
+                    "Вибраний API-постачальник не дозволений політикою Nika."
+                )
             if selection.credential_ref is None:
                 raise ModelSetupError("Збережена API-модель не має посилання на облікові дані.")
             gateway.register(
