@@ -60,6 +60,7 @@ def test_download_timeout_rejects_non_numeric_or_boolean_before_manager(
         -math.inf,
         10**10000,
     ),
+    ids=("zero", "negative", "nan", "positive-infinity", "negative-infinity", "huge-int"),
 )
 def test_download_timeout_rejects_non_finite_or_non_positive_before_manager(
     value: float,
