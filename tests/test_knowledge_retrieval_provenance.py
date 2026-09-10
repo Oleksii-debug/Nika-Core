@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -14,6 +15,7 @@ from nika_core.research.knowledge import (
     RetrievalScope,
 )
 from nika_core.research.retrieval_provenance import (
+    RetrievalEvidence,
     RetrievalEvidenceStatus,
     StaleRetrievalEvidenceError,
     deserialize_retrieval_provenance,
@@ -67,18 +69,23 @@ def test_serialized_provenance_round_trips_and_revalidates_after_restart(
 ) -> None:
     store = _make_store(tmp_path / "nika.db")
     corpus = KnowledgeCorpus(store)
-    corpus.ingest(_request())
+    request = _request(source_locator="approved:private-locator-canary")
+    corpus.ingest(request)
     hit = corpus.search(_scope(), "provenance")[0]
 
     payload = serialize_retrieval_provenance(hit.provenance)
     decoded = deserialize_retrieval_provenance(payload)
     restored, status = restore_retrieval_provenance(_restart(store), payload)
 
-    assert decoded == hit.provenance
-    assert restored == hit.provenance
+    assert decoded == RetrievalEvidence.from_provenance(hit.provenance)
+    assert restored == decoded
     assert status is RetrievalEvidenceStatus.CURRENT
-    assert serialize_retrieval_provenance(decoded) == payload
-    assert json.loads(payload)["provenance"]["source_id"] is None
+    assert serialize_retrieval_provenance(hit.provenance) == payload
+    assert json.loads(payload)["evidence"]["source_id"] is None
+    assert request.source_locator not in payload
+    assert decoded.source_locator_sha256 == hashlib.sha256(
+        request.source_locator.encode()
+    ).hexdigest()
 
 
 def test_old_serialized_evidence_cannot_masquerade_after_corpus_update(
@@ -125,9 +132,7 @@ def test_registered_source_change_invalidates_old_retrieval_evidence(
             ("source-a", "ws-a", original_locator, _TIMESTAMP, _TIMESTAMP),
         )
     corpus = KnowledgeCorpus(store)
-    corpus.ingest(
-        _request(source_id="source-a", source_locator=original_locator)
-    )
+    corpus.ingest(_request(source_id="source-a", source_locator=original_locator))
     payload = serialize_retrieval_provenance(
         corpus.search(_scope(), "provenance")[0].provenance
     )
@@ -157,7 +162,7 @@ def test_tampered_serialized_position_fails_authoritative_revalidation(
         corpus.search(_scope(), "provenance")[0].provenance
     )
     decoded = json.loads(payload)
-    decoded["provenance"]["start_char"] += 1
+    decoded["evidence"]["start_char"] += 1
     tampered = json.dumps(decoded, separators=(",", ":"), sort_keys=True)
 
     with pytest.raises(CorpusCorruptionError, match="start_char"):
