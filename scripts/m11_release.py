@@ -8,6 +8,7 @@ import re
 import sqlite3
 import subprocess
 import tempfile
+import time
 import tomllib
 from contextlib import closing
 from pathlib import Path
@@ -23,6 +24,7 @@ from nika_core.packaging.windows import default_windows_plan
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _PF11_EVIDENCE_NAME = "pf11-packaged-product-journey.json"
 _DATA_ADOPTION_EVIDENCE_NAME = "packaged-data-adoption-proof.json"
+_RECOVERY_DIALOG_TITLE = "Nika Core — відновлення даних"
 
 
 def project_version(project_root: Path) -> str:
@@ -175,7 +177,6 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-
 def _create_legacy_database(path: Path) -> str:
     """Create a minimal real legacy store using the canonical SQLite schema."""
     from nika_core.data.sqlite import SQLiteStore
@@ -221,6 +222,100 @@ def _run_packaged_pf11(
     return payload
 
 
+def _close_packaged_recovery_dialog(
+    process: subprocess.Popen,
+    *,
+    timeout_seconds: float = 10.0,
+) -> None:
+    """Close only the recovery dialog owned by the exact packaged child process."""
+    if os.name != "nt":
+        raise RuntimeError("packaged recovery dialog proof requires Windows")
+
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    enum_windows = user32.EnumWindows
+    enum_windows.argtypes = [enum_proc, wintypes.LPARAM]
+    enum_windows.restype = wintypes.BOOL
+    get_pid = user32.GetWindowThreadProcessId
+    get_pid.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    get_pid.restype = wintypes.DWORD
+    get_length = user32.GetWindowTextLengthW
+    get_length.argtypes = [wintypes.HWND]
+    get_length.restype = ctypes.c_int
+    get_text = user32.GetWindowTextW
+    get_text.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    get_text.restype = ctypes.c_int
+    post_message = user32.PostMessageW
+    post_message.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    post_message.restype = wintypes.BOOL
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError("packaged conflict process exited before recovery dialog was observed")
+        found: list[wintypes.HWND] = []
+
+        @enum_proc
+        def visit(hwnd: wintypes.HWND, _lparam: wintypes.LPARAM) -> bool:
+            owner_pid = wintypes.DWORD()
+            get_pid(hwnd, ctypes.byref(owner_pid))
+            if owner_pid.value != process.pid:
+                return True
+            length = get_length(hwnd)
+            if length <= 0:
+                return True
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            get_text(hwnd, buffer, length + 1)
+            if buffer.value == _RECOVERY_DIALOG_TITLE:
+                found.append(hwnd)
+                return False
+            return True
+
+        enum_windows(visit, 0)
+        if found:
+            if not post_message(found[0], 0x0010, 0, 0):  # WM_CLOSE
+                raise RuntimeError("packaged recovery dialog could not be closed")
+            return
+        time.sleep(0.05)
+    raise RuntimeError("packaged recovery dialog was not observed before timeout")
+
+
+def _run_packaged_conflict_refusal(
+    executable: Path,
+    *,
+    output: Path,
+    environment: dict[str, str],
+    cwd: Path,
+    legacy_database: Path,
+    canonical_database: Path,
+) -> None:
+    """Require the frozen default-startup path to reject conflicting databases."""
+    legacy_digest = _sha256(legacy_database)
+    canonical_digest = _sha256(canonical_database)
+    process = subprocess.Popen(
+        [str(executable), "--pf11-proof", "--pf11-proof-output", str(output)],
+        env=environment,
+        cwd=cwd,
+    )
+    try:
+        _close_packaged_recovery_dialog(process)
+        returncode = process.wait(timeout=10)
+    except Exception:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+        raise
+    if returncode != 1:
+        raise RuntimeError("packaged existing-canonical conflict did not fail closed")
+    if output.exists():
+        raise RuntimeError("packaged conflict reached PF11 runtime after startup refusal")
+    if _sha256(legacy_database) != legacy_digest or _sha256(canonical_database) != canonical_digest:
+        raise RuntimeError("packaged conflict modified a legacy or canonical database")
+
+
 def prove_packaged_data_adoption(bundle_dir: Path, *, source_sha: str) -> Path | None:
     """Exercise guarded legacy adoption through the real frozen Windows executable.
 
@@ -236,10 +331,6 @@ def prove_packaged_data_adoption(bundle_dir: Path, *, source_sha: str) -> Path |
 
     from nika_core.data.sqlite import SQLiteStore
     from nika_core.kernel.task_queue import TaskQueue
-    from nika_core.reliability.legacy_database import (
-        LegacyDatabaseConflict,
-        prepare_default_database,
-    )
 
     with tempfile.TemporaryDirectory(prefix="nika-packaged-data-upgrade-") as temporary:
         root = Path(temporary)
@@ -305,18 +396,25 @@ def prove_packaged_data_adoption(bundle_dir: Path, *, source_sha: str) -> Path |
         if not override.is_file() or default_override_target.exists() or _sha256(override_legacy) != override_digest:
             raise RuntimeError("explicit database override did not bypass legacy adoption")
 
-        conflict_legacy = root / "conflict-launch" / "data" / "nika_core.db"
+        conflict_cwd = root / "conflict-launch"
+        conflict_legacy = conflict_cwd / "data" / "nika_core.db"
         _create_legacy_database(conflict_legacy)
-        conflict_target = root / "conflict-profile" / "NikaCore" / "nika_core.db"
+        conflict_profile = root / "conflict-profile"
+        conflict_target = conflict_profile / "NikaCore" / "nika_core.db"
         _create_legacy_database(conflict_target)
-        try:
-            prepare_default_database(conflict_target, [conflict_legacy])
-        except LegacyDatabaseConflict:
-            conflict_refused = True
-        else:
-            conflict_refused = False
-        if not conflict_refused:
-            raise RuntimeError("existing canonical profile was not refused")
+        conflict_environment = dict(environment)
+        conflict_environment.pop("NIKA_DB_PATH", None)
+        conflict_environment.pop("NIKA_DATABASE_PATH", None)
+        conflict_environment["LOCALAPPDATA"] = str(conflict_profile)
+        conflict_environment["WIN_PD_OVERRIDE_LOCAL_APPDATA"] = str(conflict_profile)
+        _run_packaged_conflict_refusal(
+            executable,
+            output=root / "conflict.json",
+            environment=conflict_environment,
+            cwd=conflict_cwd,
+            legacy_database=conflict_legacy,
+            canonical_database=conflict_target,
+        )
 
     target = bundle_dir / _DATA_ADOPTION_EVIDENCE_NAME
     target.write_text(
