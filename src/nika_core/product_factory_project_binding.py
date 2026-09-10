@@ -32,7 +32,7 @@ _DURABLE_BLOCKER_REASON_OMITTED = "blocker rationale omitted from durable checkp
 _DURABLE_REFERENCE_SCAN_MAX_BYTES = 4096
 _DURABLE_REFERENCE_DECODE_MAX_PASSES = 16
 _DURABLE_REVIEW_CREDENTIAL_ASSIGNMENT = re.compile(
-    r"(?:^|[\s?&#;,{\[(])['\"]?"
+    r"(?:^|[\s/?&#;,{\[(])['\"]?"
     r"(?:"
     r"x[-_]?api[-_]?key|api[-_]?key|subscription[-_]?key|"
     r"client[-_]?secret|password|passwd|secret|auth|authorization|"
