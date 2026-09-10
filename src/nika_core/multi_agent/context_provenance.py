@@ -242,7 +242,13 @@ def _bind_research(
         raise ContextProvenanceError("research result digest is invalid")
     content = _require_content(item.snippet)
     content_sha256 = _sha256_text(content)
-    revision_id = "research:" + result_digest
+    revision_material = {
+        "result_digest": result_digest,
+        "document_id": item.document_id,
+        "ordinal": item.ordinal,
+        "content_sha256": content_sha256,
+    }
+    revision_id = "research:" + _sha256_text(_canonical_json(revision_material))
     freshness = tuple(
         sorted(
             {
