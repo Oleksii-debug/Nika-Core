@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from nika_core.research.models import FreshnessState, ResearchResultSet, SourceKind
@@ -144,3 +145,20 @@ def build_research_assisted_provenance(
             for selection in selections
         )
     )
+
+
+def attach_research_assisted_provenance(
+    *,
+    output: Mapping[str, object],
+    result_set: ResearchResultSet,
+    selections: tuple[ResearchEvidenceSelection, ...],
+) -> dict[str, object]:
+    """Attach validated research provenance to a response/planning payload."""
+    if "provenance" in output:
+        raise ResearchEvidenceTraceError("output already contains unvalidated provenance")
+    payload = dict(output)
+    payload["provenance"] = build_research_assisted_provenance(
+        result_set=result_set,
+        selections=selections,
+    ).to_payload()
+    return payload
