@@ -84,8 +84,14 @@ class ReviewDecision:
     evidence_refs: tuple[str, ...]
 
     def __post_init__(self) -> None:
+        if type(self.accepted) is not bool:
+            raise CoordinatorError("review acceptance must be an exact boolean")
         if not self.reviewer_id.strip() or not self.reason.strip() or not self.evidence_refs:
             raise CoordinatorError("independent review requires reviewer, reason and evidence")
+        if type(self.evidence_refs) is not tuple or any(
+            not _canonical_evidence_ref(reference) for reference in self.evidence_refs
+        ):
+            raise CoordinatorError("independent review evidence refs must be canonical text")
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +216,8 @@ class ProductFactoryCoordinator:
         if not reason:
             raise CoordinatorError("cancellation reason must not be empty")
         record = self._record(component_id)
+        if record.state is WorkState.RUNNING:
+            raise CoordinatorError("running component requires execution stop and fence proof")
         if record.state in {WorkState.ACCEPTED, WorkState.DONE}:
             raise CoordinatorError(f"{record.state.value} component cannot be cancelled")
         if record.state is WorkState.CANCELLED:
@@ -231,8 +239,7 @@ class ProductFactoryCoordinator:
         record = self._record(component_id)
         if record.state is not WorkState.REPAIR_REQUIRED:
             raise CoordinatorError("repair can only be prepared from repair_required")
-        if not reason.strip():
-            raise CoordinatorError("repair reason must not be empty")
+        reason = _canonical_repair_reason(reason)
         attempt = record.request.attempt + 1
         goal = f"{record.request.goal}\nRepair: {reason}"
         request = ComponentWorkRequest(
@@ -251,6 +258,8 @@ class ProductFactoryCoordinator:
         record = self._record(component_id)
         if record.state in {WorkState.ACCEPTED, WorkState.DONE, WorkState.CANCELLED}:
             raise CoordinatorError(f"{record.state.value} component cannot be blocked")
+        if record.result is not None or record.review is not None:
+            raise CoordinatorError("component with result or review evidence cannot be blocked")
         updated = WorkRecord(record.request, WorkState.BLOCKED, blocker=reason)
         self._records[component_id] = updated
         self._touch()
@@ -487,6 +496,27 @@ def _valid_repair_goal(initial_goal: str, current_goal: str, attempt: int) -> bo
         return False
     reasons = suffix.split(marker)[1:]
     return len(reasons) == attempt - 1 and all(reason.strip() for reason in reasons)
+
+
+def _canonical_evidence_ref(value: object) -> bool:
+    return (
+        type(value) is str
+        and bool(value)
+        and value == value.strip()
+        and not any(ord(character) < 32 or ord(character) == 127 for character in value)
+    )
+
+
+def _canonical_repair_reason(value: object) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or "\nRepair: " in value
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise CoordinatorError("repair reason must be canonical single-line text")
+    return value
 
 
 def _commands_equivalent(observed: tuple[str, ...], declared: tuple[str, ...], *, component_id: str) -> bool:

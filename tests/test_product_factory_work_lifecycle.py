@@ -195,3 +195,60 @@ def test_cancelled_snapshot_rejects_accepted_review_provenance() -> None:
     restored = ProductFactoryCoordinator(_graph())
     with pytest.raises(CoordinatorError, match="cancelled snapshot review evidence"):
         restored.restore(tampered, trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint)
+
+
+@pytest.mark.parametrize("accepted", (1, "false", None))
+def test_review_acceptance_requires_exact_boolean(accepted) -> None:
+    with pytest.raises(CoordinatorError, match="exact boolean"):
+        ReviewDecision("qa-1", accepted, "verified", ("ci:1",))
+
+
+@pytest.mark.parametrize(
+    "evidence_refs",
+    (("",), ("   ",), (" ci:1",), ("ci:1\nforged",), ["ci:1"]),
+)
+def test_review_evidence_refs_require_canonical_text(evidence_refs) -> None:
+    with pytest.raises(CoordinatorError, match="canonical text"):
+        ReviewDecision("qa-1", True, "verified", evidence_refs)
+
+
+@pytest.mark.parametrize("rejected_review", (False, True))
+def test_block_rejects_post_result_provenance(rejected_review: bool) -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    result = coordinator.record_result(_success(request))
+    if rejected_review:
+        decision = ReviewDecision("qa-1", False, "needs repair", ("ci:review-1",))
+        result = coordinator.review("core", decision)
+
+    snapshot = coordinator.snapshot()
+    with pytest.raises(CoordinatorError, match="result or review evidence"):
+        coordinator.block("core", "external dependency")
+    assert coordinator.snapshot() == snapshot
+    assert _core_record(coordinator) == result
+
+
+def test_running_work_cannot_be_cancelled_without_stop_and_fence_proof() -> None:
+    coordinator = _coordinator()
+    coordinator.start("core")
+    snapshot = coordinator.snapshot()
+
+    with pytest.raises(CoordinatorError, match="stop and fence proof"):
+        coordinator.cancel("core", reason="stop requested")
+    assert coordinator.snapshot() == snapshot
+
+
+@pytest.mark.parametrize(
+    "reason",
+    (" first", "first ", "first\nRepair: second", "first\nsecond", "first\tsecond"),
+)
+def test_repair_reason_rejects_ambiguous_or_control_text(reason: str) -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    coordinator.record_result(_success(request))
+    coordinator.review("core", ReviewDecision("qa-1", False, "needs repair", ("ci:1",)))
+    snapshot = coordinator.snapshot()
+
+    with pytest.raises(CoordinatorError, match="canonical single-line text"):
+        coordinator.prepare_repair("core", base_sha=SHA_A, reason=reason)
+    assert coordinator.snapshot() == snapshot
