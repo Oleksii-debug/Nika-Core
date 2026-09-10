@@ -18,12 +18,16 @@ from nika_core.runtime.contracts import (
     RuntimeRequest,
     RuntimeResult,
     RuntimeResumeMode,
+    RuntimeResumeProbe,
     RuntimeResumeProbePort,
+    RuntimeResumeProbeStatus,
     RuntimeResumeRequest,
+    RuntimeUnsupportedError,
 )
 from nika_core.runtime.idempotency import (
     IdempotencyConflictError,
     IdempotencyLedger,
+    IdempotencyRecord,
     IdempotencyStatus,
 )
 from nika_core.runtime.recovery_claims import (
@@ -1333,9 +1337,24 @@ class TaskRuntimeCoordinator:
                     resume_token=pause_token,
                 )
 
+            preserve_confirmed_pause_generation = (
+                pause_won
+                and current is TaskState.PAUSED
+                and current_record is not None
+                and current_record.outcome is RuntimeOutcome.PAUSED
+                and self._completed_pause_matches_session_with_connection(
+                    conn,
+                    task_id=task_id,
+                    record=current_record,
+                )
+            )
             if cancellation_won:
                 self._sessions.delete_with_connection(conn, task_id)
-            elif result.outcome in _RESUMABLE_OUTCOMES and result.resume_token:
+            elif (
+                result.outcome in _RESUMABLE_OUTCOMES
+                and result.resume_token
+                and not preserve_confirmed_pause_generation
+            ):
                 self._sessions.record_result_with_connection(
                     conn,
                     task_id=task_id,
@@ -1346,6 +1365,9 @@ class TaskRuntimeCoordinator:
             else:
                 self._sessions.delete_with_connection(conn, task_id)
 
+            paused_record = (
+                self._sessions.get_with_connection(conn, task_id) if pause_won else None
+            )
             target_state = _OUTCOME_TO_STATE[result.outcome]
             if not cancellation_won and current is not target_state:
                 self._queue.transition_with_connection(conn, task_id, target_state)
@@ -1372,6 +1394,13 @@ class TaskRuntimeCoordinator:
                 )
                 if pause_status is IdempotencyStatus.PENDING:
                     if reported_outcome is RuntimeOutcome.CANCELLED:
+                        if (
+                            paused_record is None
+                            or paused_record.outcome is not RuntimeOutcome.PAUSED
+                        ):
+                            raise ValueError(
+                                "Confirmed runtime pause is missing its durable session generation"
+                            )
                         self._idempotency.complete_with_connection(
                             conn,
                             pause_operation_key,
@@ -1379,6 +1408,7 @@ class TaskRuntimeCoordinator:
                                 "accepted": True,
                                 "applied": True,
                                 "task_state": TaskState.PAUSED.value,
+                                "paused_session_updated_at": paused_record.updated_at,
                             },
                         )
                     else:
