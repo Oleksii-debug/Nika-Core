@@ -217,6 +217,30 @@ def _current_work_entries(
     )
 
 
+def _single_component_candidate_entries(
+    candidate_entries: tuple[ProductStatusEntry, ...],
+) -> tuple[ProductStatusEntry, ...] | None:
+    components = _entries_of_kind(candidate_entries, ProductStatusKind.COMPONENT)
+    if len(components) != 1:
+        return None
+
+    component = components[0]
+    prefix = f"{component.item_id}:"
+    scoped_stages = tuple(
+        entry
+        for entry in candidate_entries
+        if entry.kind is not ProductStatusKind.COMPONENT
+        and entry.item_id.startswith(prefix)
+    )
+    if not scoped_stages:
+        return None
+
+    # Explicit item_id correlation is canonical evidence for this bounded
+    # projection. Once present, unrelated unscoped/historical stage rows must not
+    # contaminate the current component candidate identity.
+    return (component, *scoped_stages)
+
+
 def _active_candidate_entries(
     current_work_entries: tuple[ProductStatusEntry, ...],
 ) -> tuple[ProductStatusEntry, ...]:
@@ -225,6 +249,10 @@ def _active_candidate_entries(
         for entry in current_work_entries
         if entry.kind in _CANDIDATE_STATUS_KINDS
     )
+    scoped_single_component = _single_component_candidate_entries(candidate_entries)
+    if scoped_single_component is not None:
+        candidate_entries = scoped_single_component
+
     active_entries = _incomplete(candidate_entries)
 
     active_with_candidate = tuple(
