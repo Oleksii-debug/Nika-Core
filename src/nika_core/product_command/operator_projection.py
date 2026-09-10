@@ -65,14 +65,15 @@ class FactoryOperatorProjection(BaseModel):
 def project_operator_status(detail: ProductProjectDetail) -> FactoryOperatorProjection:
     """Project existing ProductProject presentation state without inventing new authority."""
 
-    component_entries = _statuses(detail, ProductStatusKind.COMPONENT)
+    current_work_entries = _current_work_window(detail)
+    component_entries = _entries_of_kind(current_work_entries, ProductStatusKind.COMPONENT)
     blocker_entries = _statuses(detail, ProductStatusKind.BLOCKER)
     active_blocker_entries = _incomplete(blocker_entries)
-    build_entries = _statuses(detail, ProductStatusKind.BUILD)
-    qa_entries = _statuses(detail, ProductStatusKind.QA)
+    build_entries = _entries_of_kind(current_work_entries, ProductStatusKind.BUILD)
+    qa_entries = _entries_of_kind(current_work_entries, ProductStatusKind.QA)
     integration_entries = tuple(
         entry
-        for entry in detail.statuses
+        for entry in current_work_entries
         if entry.kind in {ProductStatusKind.RELEASE, ProductStatusKind.DEPLOYMENT}
     )
 
@@ -86,7 +87,7 @@ def project_operator_status(detail: ProductProjectDetail) -> FactoryOperatorProj
     candidate_refs = tuple(
         dict.fromkeys(
             evidence.reference
-            for entry in _active_candidate_entries(detail)
+            for entry in _active_candidate_entries(current_work_entries)
             for evidence in entry.evidence
             if evidence.kind == "git_commit"
         )
@@ -118,6 +119,13 @@ def _statuses(
     kind: ProductStatusKind,
 ) -> tuple[ProductStatusEntry, ...]:
     return tuple(entry for entry in detail.statuses if entry.kind is kind)
+
+
+def _entries_of_kind(
+    entries: tuple[ProductStatusEntry, ...],
+    kind: ProductStatusKind,
+) -> tuple[ProductStatusEntry, ...]:
+    return tuple(entry for entry in entries if entry.kind is kind)
 
 
 def _render_work(
@@ -195,7 +203,7 @@ def _has_candidate_evidence(entry: ProductStatusEntry) -> bool:
     return any(evidence.kind == "git_commit" for evidence in entry.evidence)
 
 
-def _current_candidate_window(
+def _current_work_window(
     detail: ProductProjectDetail,
 ) -> tuple[ProductStatusEntry, ...]:
     last_component_index = next(
@@ -206,17 +214,24 @@ def _current_candidate_window(
         ),
         None,
     )
-    statuses = (
-        detail.statuses
-        if last_component_index is None
-        else detail.statuses[last_component_index:]
+    if last_component_index is None:
+        return tuple(
+            entry for entry in detail.statuses if entry.kind in _CANDIDATE_STATUS_KINDS
+        )
+    return tuple(
+        entry
+        for entry in detail.statuses[last_component_index:]
+        if entry.kind in _CANDIDATE_STATUS_KINDS
     )
-    return tuple(entry for entry in statuses if entry.kind in _CANDIDATE_STATUS_KINDS)
 
 
-def _active_candidate_entries(detail: ProductProjectDetail) -> tuple[ProductStatusEntry, ...]:
+def _active_candidate_entries(
+    current_work_entries: tuple[ProductStatusEntry, ...],
+) -> tuple[ProductStatusEntry, ...]:
     candidate_entries = tuple(
-        entry for entry in detail.statuses if entry.kind in _CANDIDATE_STATUS_KINDS
+        entry
+        for entry in current_work_entries
+        if entry.kind in _CANDIDATE_STATUS_KINDS
     )
     active_entries = _incomplete(candidate_entries)
 
@@ -231,15 +246,13 @@ def _active_candidate_entries(detail: ProductProjectDetail) -> tuple[ProductStat
     if any(entry.kind is ProductStatusKind.COMPONENT for entry in active_entries):
         return ()
 
-    current_window = _current_candidate_window(detail)
-    current_active = _incomplete(current_window)
-    if current_active:
+    if active_entries:
         earliest_active_stage = min(
-            _CANDIDATE_STAGE_ORDER[entry.kind] for entry in current_active
+            _CANDIDATE_STAGE_ORDER[entry.kind] for entry in active_entries
         )
         return tuple(
             entry
-            for entry in current_window
+            for entry in candidate_entries
             if _is_terminal_success(entry)
             and _CANDIDATE_STAGE_ORDER[entry.kind] < earliest_active_stage
             and _has_candidate_evidence(entry)
@@ -247,7 +260,7 @@ def _active_candidate_entries(detail: ProductProjectDetail) -> tuple[ProductStat
 
     return tuple(
         entry
-        for entry in current_window
+        for entry in candidate_entries
         if entry.kind in _TERMINAL_CANDIDATE_STATUS_KINDS
         and _is_terminal_success(entry)
         and _has_candidate_evidence(entry)
@@ -281,15 +294,11 @@ def _next_action(
     build = _first_incomplete(build_entries)
     if build is not None:
         return f"test:{build.item_id}={build.state}"
-    if component_entries and not build_entries and not qa_entries:
+    if component_entries and not build_entries:
         return "test:not_started"
     qa = _first_incomplete(qa_entries)
     if qa is not None:
         return f"qa:{qa.item_id}={qa.state}"
-    if not build_entries and qa_entries:
-        integration = _first_incomplete(integration_entries)
-        if not integration_entries or integration is None:
-            return "test:not_started"
     if build_entries and not qa_entries:
         return "qa:not_started"
     integration = _first_incomplete(integration_entries)
