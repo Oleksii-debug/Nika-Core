@@ -16,7 +16,7 @@ class ResearchResultService:
         self._repository = repository
         self._network = network_repository
         self._result_writer = ScopedResearchResultWriter(
-            store=repository._store,  # noqa: SLF001 - same-package canonical store ownership
+            store=repository._store,
             network_repository=network_repository,
         )
 
