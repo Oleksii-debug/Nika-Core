@@ -10,6 +10,9 @@ from nika_core.model_engineering.contracts import (
     CandidateBenchmarkReport,
     CaseBenchmarkResult,
 )
+from nika_core.model_engineering.resource_evidence import (
+    benchmark_resource_evidence_payload,
+)
 from nika_core.resources.contracts import ResourceSnapshot
 
 
@@ -119,6 +122,7 @@ def benchmark_report_payload(report: CandidateBenchmarkReport) -> dict[str, Any]
             "peak_accelerator_percent": report.peak_accelerator_percent,
             "peak_accelerator_memory_bytes": report.peak_accelerator_memory_bytes,
         },
+        "resource_evidence": benchmark_resource_evidence_payload(report),
         "cases": [_case_payload(item) for item in report.case_results],
     }
 
