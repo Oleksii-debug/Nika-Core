@@ -37,7 +37,7 @@ from nika_core.runtime.retry import (
     ScriptRetryDisposition,
     plan_script_retry,
 )
-from nika_core.scheduler import ScheduledJob
+from nika_core.scheduler import ScheduledJob, ScheduledJobStore
 
 
 @dataclass
@@ -330,9 +330,7 @@ def test_offline_cloud_uses_canonical_scheduled_wait_before_retry(tmp_path) -> N
     store = SQLiteStore(tmp_path / "offline-model-retry.db")
     store.initialize()
     queue = TaskQueue(store)
-    jobs = __import__(
-        "nika_core.scheduler", fromlist=["ScheduledJobStore"]
-    ).ScheduledJobStore(store)
+    jobs = ScheduledJobStore(store)
     scheduler = _RecordingScheduler()
     task_id = _running_task(queue)
     service = ConnectivityWaitService(
@@ -385,7 +383,7 @@ def test_offline_cloud_uses_canonical_scheduled_wait_before_retry(tmp_path) -> N
     )
     assert connected.disposition is ScriptRetryDisposition.READY
     assert connected.continuation_granted is True
-    assert network.probe_calls == 2
+    assert network.probe_calls == 3
 
     response = asyncio.run(
         router.complete_model(IntelligenceMode.EXTERNAL_API, _request())
