@@ -46,7 +46,7 @@ class MCPServerConfig:
             or any(character.isspace() for character in self.server_id)
         ):
             raise ValueError("server_id must not contain whitespace or ':'")
-        if self.default_risk not in {
+        if not isinstance(self.default_risk, ToolRisk) or self.default_risk not in {
             ToolRisk.EXTERNAL_SIDE_EFFECT,
             ToolRisk.HIGH_IMPACT,
         }:
