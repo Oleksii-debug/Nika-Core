@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from collections.abc import Callable
 from threading import Event
 from types import SimpleNamespace
+
+import pytest
 
 from nika_core.model_gateway.contracts import (
     ModelMessage,
@@ -77,11 +80,13 @@ class _Manager:
         self.catalog = _Catalog(model)
 
 
-def _provider(*, manager_factory: object | None = None) -> FoundryLocalProvider:
-    kwargs: dict[str, object] = {"default_model": "lifecycle-model"}
-    if manager_factory is not None:
-        kwargs["manager_factory"] = manager_factory
-    return FoundryLocalProvider(**kwargs)  # type: ignore[arg-type]
+def _provider(
+    *, manager_factory: Callable[[], object] | None = None
+) -> FoundryLocalProvider:
+    return FoundryLocalProvider(
+        default_model="lifecycle-model",
+        manager_factory=manager_factory,
+    )
 
 
 def _request(request_id: str) -> ModelRequest:
@@ -94,7 +99,9 @@ def _request(request_id: str) -> ModelRequest:
     )
 
 
-def _install_fake_sdk(monkeypatch: object) -> tuple[list[str], _LifecycleModel]:
+def _install_fake_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[str], _LifecycleModel]:
     model = _LifecycleModel()
     manager = _Manager(model)
     events: list[str] = []
@@ -106,8 +113,8 @@ def _install_fake_sdk(monkeypatch: object) -> tuple[list[str], _LifecycleModel]:
     class FoundryLocalManager:
         instance = manager
 
-        @classmethod
-        def initialize(cls, configuration: Configuration) -> None:
+        @staticmethod
+        def initialize(configuration: Configuration) -> None:
             assert configuration.kwargs["app_name"] == "NikaCore"
             events.append("initialize")
 
@@ -115,11 +122,13 @@ def _install_fake_sdk(monkeypatch: object) -> tuple[list[str], _LifecycleModel]:
         Configuration=Configuration,
         FoundryLocalManager=FoundryLocalManager,
     )
-    monkeypatch.setitem(sys.modules, "foundry_local_sdk", fake_sdk)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "foundry_local_sdk", fake_sdk)
     return events, model
 
 
-def test_multiple_providers_share_one_process_sdk_initialization(monkeypatch: object) -> None:
+def test_multiple_providers_share_one_process_sdk_initialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     events, _model = _install_fake_sdk(monkeypatch)
     first = _provider()
     second = _provider()
@@ -130,7 +139,9 @@ def test_multiple_providers_share_one_process_sdk_initialization(monkeypatch: ob
     assert events == ["initialize"]
 
 
-def test_adapter_close_then_recreate_does_not_double_initialize_sdk(monkeypatch: object) -> None:
+def test_adapter_close_then_recreate_does_not_double_initialize_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     events, _model = _install_fake_sdk(monkeypatch)
     first = _provider()
 
@@ -148,7 +159,10 @@ def test_adapter_close_then_recreate_does_not_double_initialize_sdk(monkeypatch:
 def test_owner_close_never_unloads_during_other_provider_native_request() -> None:
     model = _LifecycleModel()
     manager = _Manager(model)
-    manager_factory = lambda: manager
+
+    def manager_factory() -> _Manager:
+        return manager
+
     owner = _provider(manager_factory=manager_factory)
     consumer = _provider(manager_factory=manager_factory)
 
