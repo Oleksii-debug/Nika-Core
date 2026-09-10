@@ -120,6 +120,14 @@ def test_namespace_read_is_exact_after_restart(tmp_path: Path) -> None:
             key="shared-key",
             value={"marker": marker},
         )
+    memory.put(
+        scope=MemoryScope.USER,
+        owner_id="task-a",
+        namespace="context",
+        key="shared-key",
+        value={"marker": "user-context"},
+        user_approved=True,
+    )
 
     _, restarted = _service(db_path)
     records = restarted.list_namespace(
@@ -187,25 +195,65 @@ def test_lazy_expiry_cleanup_deletes_only_exact_identity_after_restart(tmp_path:
 def test_scoped_write_and_delete_do_not_cross_project_after_restart(tmp_path: Path) -> None:
     db_path = tmp_path / "nika.db"
     _, memory = _service(db_path)
-    shared = {
+    target = {
         "scope": MemoryScope.WORKSPACE,
+        "owner_id": "project-a",
         "namespace": "task-context",
         "key": "state",
     }
 
-    memory.put(**shared, owner_id="project-a", value={"project": "a-v1"})
-    memory.put(**shared, owner_id="project-b", value={"project": "b"})
+    memory.put(**target, value={"project": "a-v1"})
+    memory.put(
+        scope=MemoryScope.WORKSPACE,
+        owner_id="project-a",
+        namespace="other-context",
+        key="state",
+        value={"project": "a-other"},
+    )
+    memory.put(
+        scope=MemoryScope.WORKSPACE,
+        owner_id="project-b",
+        namespace="task-context",
+        key="state",
+        value={"project": "b"},
+    )
 
     _, restarted = _service(db_path)
-    restarted.put(**shared, owner_id="project-a", value={"project": "a-v2"})
+    restarted.put(**target, value={"project": "a-v2"})
 
-    foreign = restarted.get(**shared, owner_id="project-b")
-    assert foreign is not None
-    assert foreign.value == {"project": "b"}
+    same_owner_other_namespace = restarted.get(
+        scope=MemoryScope.WORKSPACE,
+        owner_id="project-a",
+        namespace="other-context",
+        key="state",
+    )
+    other_project = restarted.get(
+        scope=MemoryScope.WORKSPACE,
+        owner_id="project-b",
+        namespace="task-context",
+        key="state",
+    )
+    assert same_owner_other_namespace is not None
+    assert same_owner_other_namespace.value == {"project": "a-other"}
+    assert other_project is not None
+    assert other_project.value == {"project": "b"}
 
-    assert restarted.delete(**shared, owner_id="project-a") is True
-    assert restarted.get(**shared, owner_id="project-a") is None
+    assert restarted.delete(**target) is True
+    assert restarted.get(**target) is None
 
-    surviving = restarted.get(**shared, owner_id="project-b")
-    assert surviving is not None
-    assert surviving.value == {"project": "b"}
+    same_owner_other_namespace = restarted.get(
+        scope=MemoryScope.WORKSPACE,
+        owner_id="project-a",
+        namespace="other-context",
+        key="state",
+    )
+    other_project = restarted.get(
+        scope=MemoryScope.WORKSPACE,
+        owner_id="project-b",
+        namespace="task-context",
+        key="state",
+    )
+    assert same_owner_other_namespace is not None
+    assert same_owner_other_namespace.value == {"project": "a-other"}
+    assert other_project is not None
+    assert other_project.value == {"project": "b"}
