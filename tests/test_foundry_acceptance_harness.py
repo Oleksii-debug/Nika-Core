@@ -154,6 +154,19 @@ def test_run_acceptance_uses_two_child_processes_and_binds_sha(
     assert evidence["no_silent_fallback"] is True
 
 
+def test_run_acceptance_rejects_non_windows_before_child(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(harness.platform, "system", lambda: "Linux")
+
+    def child_must_not_run(*args, **kwargs):
+        raise AssertionError("child proof must not run on non-Windows host")
+
+    monkeypatch.setattr(harness, "_run_child", child_must_not_run)
+    with pytest.raises(RuntimeError, match="must run on Windows"):
+        harness.run_acceptance(_args(), repo_root=tmp_path)
+
+
 def test_run_acceptance_rejects_sha_drift_after_first_run(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
