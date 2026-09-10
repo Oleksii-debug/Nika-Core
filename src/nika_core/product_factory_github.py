@@ -227,7 +227,7 @@ class GitHubFactoryAdapter:
                 raise GitHubFactoryError("checks contain an unrecognized state")
             check_evidence = tuple(
                 ExactShaCheckEvidence(
-                    check_id=check.check_id,
+                    check_id=_provider_check_id(check.check_id),
                     candidate_sha=check.head_sha,
                     state=_verification_check_state(check.state),
                     evidence_ref=check.evidence_ref,
@@ -254,6 +254,12 @@ class GitHubFactoryAdapter:
             integrated=integrated,
             integration_sha=integration_sha,
         )
+
+
+def _provider_check_id(check_id: str) -> str:
+    """Keep untrusted provider identity outside the canonical Product Factory gate namespace."""
+
+    return f"github:{check_id}"
 
 
 def _verification_check_state(state: CheckState) -> VerificationCheckState:
