@@ -6,7 +6,12 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.task_state import TaskState
-from nika_core.runtime.contracts import RuntimeCapability, RuntimeRequest, RuntimeResult, RuntimeResumeRequest
+from nika_core.runtime.contracts import (
+    RuntimeCapability,
+    RuntimeRequest,
+    RuntimeResult,
+    RuntimeResumeRequest,
+)
 from nika_core.runtime.recovery import RecoveryDisposition, RuntimeRecoveryService
 from nika_core.runtime.registry import RuntimeRegistry
 from nika_core.runtime.session_store import RuntimeSessionStore
