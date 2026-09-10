@@ -145,6 +145,80 @@ def test_packaged_data_adoption_task_reader_closes_sqlite_handle(
     assert connection.closed is True
 
 
+def test_packaged_conflict_refusal_runs_exact_frozen_executable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "NikaCore.exe"
+    executable.write_bytes(b"frozen-executable")
+    cwd = tmp_path / "conflict-launch"
+    cwd.mkdir()
+    legacy_database = cwd / "data" / "nika_core.db"
+    legacy_database.parent.mkdir()
+    legacy_database.write_bytes(b"legacy-db")
+    canonical_database = tmp_path / "profile" / "NikaCore" / "nika_core.db"
+    canonical_database.parent.mkdir(parents=True)
+    canonical_database.write_bytes(b"canonical-db")
+    output = tmp_path / "conflict.json"
+    environment = {"LOCALAPPDATA": str(tmp_path / "profile")}
+    observed: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 4242
+
+        def poll(self) -> None:
+            return None
+
+        def wait(self, *, timeout: int) -> int:
+            observed["wait_timeout"] = timeout
+            return 1
+
+        def kill(self) -> None:
+            raise AssertionError("successful refusal proof must not kill the child")
+
+    process = FakeProcess()
+
+    def fake_popen(
+        command: list[str],
+        *,
+        env: dict[str, str],
+        cwd: Path,
+    ) -> FakeProcess:
+        observed["command"] = command
+        observed["environment"] = env
+        observed["cwd"] = cwd
+        return process
+
+    def fake_close_dialog(child: FakeProcess) -> None:
+        observed["dialog_process"] = child
+
+    monkeypatch.setattr(m11_release.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(m11_release, "_close_packaged_recovery_dialog", fake_close_dialog)
+
+    m11_release._run_packaged_conflict_refusal(
+        executable,
+        output=output,
+        environment=environment,
+        cwd=cwd,
+        legacy_database=legacy_database,
+        canonical_database=canonical_database,
+    )
+
+    assert observed["command"] == [
+        str(executable),
+        "--pf11-proof",
+        "--pf11-proof-output",
+        str(output),
+    ]
+    assert observed["environment"] is environment
+    assert observed["cwd"] == cwd
+    assert observed["dialog_process"] is process
+    assert observed["wait_timeout"] == 10
+    assert not output.exists()
+    assert legacy_database.read_bytes() == b"legacy-db"
+    assert canonical_database.read_bytes() == b"canonical-db"
+
+
 def test_third_party_notice_verification_fails_closed(tmp_path: Path) -> None:
     assert verify_third_party_notices(tmp_path) == ("missing:THIRD_PARTY_NOTICES.txt",)
 
