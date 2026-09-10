@@ -15,6 +15,7 @@ from nika_core.research import (
     SourceKind,
     SourceSpec,
 )
+from nika_core.research.network_repository import NetworkResearchRepository
 
 
 def _setup(tmp_path: Path) -> tuple[SQLiteStore, ResearchRepository, LocalCorpusService, Path]:
@@ -136,6 +137,28 @@ def test_conflicting_duplicate_source_id_cannot_rebind_provenance(tmp_path: Path
     assert row["locator"] == str(first_path.resolve())
     assert _count(store, "corpus_documents") == 1
     assert _count(store, "corpus_origins") == 1
+
+
+def test_http_owned_source_id_rejects_local_artifact_before_publication(tmp_path: Path) -> None:
+    store, _, service, root = _setup(tmp_path)
+    source_path = root / "local.txt"
+    source_path.write_text("must never publish", encoding="utf-8")
+    NetworkResearchRepository(store).register_source(
+        SourceSpec("shared", "ws", SourceKind.HTTP, "https://example.invalid/source")
+    )
+    blob_store = ContentAddressedBlobStore(tmp_path / "blobs")
+
+    with pytest.raises(ValueError, match="already owned by an HTTP source"):
+        service.ingest_artifact(
+            SourceSpec("shared", "ws", SourceKind.LOCAL_FILE, str(source_path)),
+            blob_store=blob_store,
+        )
+
+    assert _count(store, "research_http_sources") == 1
+    assert _count(store, "research_sources") == 0
+    assert _count(store, "corpus_artifacts") == 0
+    assert _count(store, "corpus_artifact_origins") == 0
+    _assert_retrieval_empty(store)
 
 
 @pytest.mark.parametrize(
