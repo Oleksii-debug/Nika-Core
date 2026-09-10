@@ -173,7 +173,8 @@ setTimeout(() => {{
     state: element("product-project-state").textContent,
     rendered_text: renderedText,
   }});
-  process.stdout.write(snapshot + "\\n", () => process.exit(0));
+  fs.writeSync(process.stdout.fd, snapshot + "\\n");
+  process.exit(0);
 }}, 50);
 """
     result = subprocess.run(
