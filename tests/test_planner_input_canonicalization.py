@@ -150,15 +150,17 @@ def _equivalent_inputs(*, reversed_order: bool) -> tuple[
 
 
 def test_semantically_equal_serializations_canonicalize_identically() -> None:
+    first_state, first_goal, first_actions = _equivalent_inputs(reversed_order=False)
+    second_state, second_goal, second_actions = _equivalent_inputs(reversed_order=True)
     first = canonicalize_planner_inputs(
-        state=_equivalent_inputs(reversed_order=False)[0],
-        goal=_equivalent_inputs(reversed_order=False)[1],
-        actions=_equivalent_inputs(reversed_order=False)[2],
+        state=first_state,
+        goal=first_goal,
+        actions=first_actions,
     )
     second = canonicalize_planner_inputs(
-        state=_equivalent_inputs(reversed_order=True)[0],
-        goal=_equivalent_inputs(reversed_order=True)[1],
-        actions=_equivalent_inputs(reversed_order=True)[2],
+        state=second_state,
+        goal=second_goal,
+        actions=second_actions,
     )
 
     assert first == second
@@ -188,9 +190,28 @@ def test_adapter_builds_same_problem_and_plan_for_equivalent_input_orders(
     assert captures[0] == captures[1]
 
 
-def test_empty_goal_is_rejected_before_planning() -> None:
-    with pytest.raises(ValueError, match="goal must contain at least one constraint"):
-        DeterministicGoal()
+def test_empty_goal_is_rejected_before_solver_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    solver_touched = False
+
+    def fail_if_solver_is_touched() -> object:
+        nonlocal solver_touched
+        solver_touched = True
+        raise AssertionError("solver must not be touched for an invalid empty goal")
+
+    monkeypatch.setattr(
+        UnifiedPlanningAdapter,
+        "_shortcuts",
+        staticmethod(fail_if_solver_is_touched),
+    )
+
+    with pytest.raises(ValueError, match="planner goal must contain at least one constraint"):
+        UnifiedPlanningAdapter().plan(
+            state=WorldState(),
+            goal=DeterministicGoal(),
+            actions=(),
+        )
+
+    assert solver_touched is False
 
 
 def test_duplicate_constraints_are_rejected_after_normalization() -> None:
