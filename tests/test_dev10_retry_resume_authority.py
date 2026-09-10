@@ -248,10 +248,13 @@ def test_direct_saved_resume_rejects_retrying_before_claim_or_runtime_effect(tmp
     assert runtime.probe_calls == 0
     assert _task_state(store, task_id) == TaskState.RETRYING
     assert sessions.get(task_id) is not None
-    assert not any(
-        event.event_type.startswith("runtime.recovery_claim")
-        for event in audit.list_for(entity_type="runtime_recovery")
-    )
+    with store.connection() as conn:
+        recovery_claim_count = conn.execute(
+            "SELECT COUNT(*) FROM audit_events "
+            "WHERE entity_type = ? AND event_type LIKE ?",
+            ("runtime_recovery", "runtime.recovery_claim%"),
+        ).fetchone()[0]
+    assert recovery_claim_count == 0
 
 
 def test_restart_rejects_malformed_persisted_resume_token_before_runtime_effect(tmp_path) -> None:
