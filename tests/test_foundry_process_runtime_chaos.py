@@ -11,9 +11,11 @@ from nika_core.model_gateway.contracts import (
     ModelGatewayError,
     ModelMessage,
     ModelRequest,
+    ModelResourcePolicy,
     PrivacyClass,
 )
 from nika_core.model_gateway.foundry_local import FoundryLocalProvider
+from nika_core.resources.contracts import ResourceSnapshot
 
 
 FOUNDRY_CONCURRENCY_BLOCKED = pytest.mark.xfail(
@@ -114,6 +116,25 @@ class _SharedNativeModel:
         return Client()
 
 
+class _BlockingLoadModel(_SharedNativeModel):
+    def __init__(self) -> None:
+        super().__init__(initially_loaded=False)
+        self.load_release = threading.Event()
+        self._load_condition = threading.Condition()
+
+    def load(self) -> None:
+        with self._load_condition:
+            self.load_count += 1
+            self._load_condition.notify_all()
+        if not self.load_release.wait(timeout=2.0):
+            raise RuntimeError("test load release barrier timed out")
+        self.is_loaded = True
+
+    def wait_load_count(self, count: int, timeout: float = 0.5) -> bool:
+        with self._load_condition:
+            return self._load_condition.wait_for(lambda: self.load_count >= count, timeout=timeout)
+
+
 class _Catalog:
     def __init__(self, model: _SharedNativeModel) -> None:
         self._model = model
@@ -127,6 +148,20 @@ class _Manager:
         self.catalog = _Catalog(model)
 
 
+class _MutableObserver:
+    def __init__(self) -> None:
+        self.snapshot_called = threading.Event()
+        self.snapshot_value = ResourceSnapshot(
+            cpu_percent=10.0,
+            memory_percent=20.0,
+            available_memory_bytes=8 * 1024**3,
+        )
+
+    def snapshot(self) -> ResourceSnapshot:
+        self.snapshot_called.set()
+        return self.snapshot_value
+
+
 def _request(request_id: str) -> ModelRequest:
     return ModelRequest(
         request_id=request_id,
@@ -137,9 +172,16 @@ def _request(request_id: str) -> ModelRequest:
     )
 
 
-def _provider(manager: _Manager) -> FoundryLocalProvider:
+def _provider(
+    manager: _Manager,
+    *,
+    resource_policy: ModelResourcePolicy | None = None,
+    resource_observer: _MutableObserver | None = None,
+) -> FoundryLocalProvider:
     return FoundryLocalProvider(
         default_model="qa-process-model",
+        resource_policy=resource_policy,
+        resource_observer=resource_observer,
         manager_factory=lambda: manager,
     )
 
@@ -172,6 +214,31 @@ def test_distinct_foundry_instances_never_overlap_shared_native_inference() -> N
 
 
 @FOUNDRY_CONCURRENCY_BLOCKED
+def test_shared_model_load_is_single_owner_across_provider_instances() -> None:
+    model = _BlockingLoadModel()
+    manager = _Manager(model)
+    first_provider = _provider(manager)
+    second_provider = _provider(manager)
+
+    async def scenario() -> tuple[bool, object, object]:
+        first_task = asyncio.create_task(first_provider.complete(_request("first-load")))
+        assert await asyncio.to_thread(model.wait_load_count, 1, 1.0)
+
+        second_task = asyncio.create_task(second_provider.complete(_request("second-load")))
+        second_entered_load = await asyncio.to_thread(model.wait_load_count, 2, 0.5)
+        model.load_release.set()
+        first, second = await asyncio.gather(first_task, second_task)
+        return second_entered_load, first, second
+
+    second_entered_load, first, second = asyncio.run(scenario())
+
+    assert second_entered_load is False
+    assert model.load_count == 1
+    assert first.request_id == "first-load"
+    assert second.request_id == "second-load"
+
+
+@FOUNDRY_CONCURRENCY_BLOCKED
 def test_cross_instance_cancel_while_queued_never_starts_native_request() -> None:
     model = _SharedNativeModel(block_ids=frozenset({"first", "second"}))
     manager = _Manager(model)
@@ -199,6 +266,44 @@ def test_cross_instance_cancel_while_queued_never_starts_native_request() -> Non
     assert overlapped is False
     assert model.started_ids == ["first"]
     assert model.max_active == 1
+
+
+@FOUNDRY_CONCURRENCY_BLOCKED
+def test_resource_preflight_occurs_after_waiting_for_shared_native_authority() -> None:
+    model = _SharedNativeModel(block_ids=frozenset({"blocker", "resource-queued"}))
+    manager = _Manager(model)
+    blocker = _provider(manager)
+    observer = _MutableObserver()
+    queued = _provider(
+        manager,
+        resource_policy=ModelResourcePolicy(max_cpu_percent=80.0),
+        resource_observer=observer,
+    )
+
+    async def scenario() -> tuple[bool, object]:
+        blocker_task = asyncio.create_task(blocker.complete(_request("blocker")))
+        assert await asyncio.to_thread(model.wait_started, "blocker")
+
+        queued_task = asyncio.create_task(queued.complete(_request("resource-queued")))
+        early_snapshot = await asyncio.to_thread(observer.snapshot_called.wait, 0.5)
+        observer.snapshot_value = ResourceSnapshot(
+            cpu_percent=95.0,
+            memory_percent=20.0,
+            available_memory_bytes=8 * 1024**3,
+        )
+        model.release.set()
+
+        blocker_response = await blocker_task
+        assert blocker_response.request_id == "blocker"
+        queued_result = await asyncio.gather(queued_task, return_exceptions=True)
+        return early_snapshot, queued_result[0]
+
+    early_snapshot, queued_result = asyncio.run(scenario())
+
+    assert early_snapshot is False
+    assert isinstance(queued_result, ModelGatewayError)
+    assert queued_result.code is ModelErrorCode.RESOURCE_LIMIT
+    assert "resource-queued" not in model.started_ids
 
 
 def test_concurrent_foundry_failure_does_not_poison_sibling_response() -> None:
