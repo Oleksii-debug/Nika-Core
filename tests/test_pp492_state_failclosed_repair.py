@@ -152,6 +152,7 @@ global.pywebview = {{
       if (MODE === "throw") throw new Error(CANARY);
       return {{ ok: false, message: CANARY }};
     }},
+  }},
 }};
 
 eval(fs.readFileSync(process.argv[1], "utf8"));
