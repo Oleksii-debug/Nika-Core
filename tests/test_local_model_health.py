@@ -51,6 +51,7 @@ def _factory(
     def create(**kwargs: object) -> _FakeClient:
         assert kwargs["timeout"] == 2.0
         assert kwargs["follow_redirects"] is False
+        assert kwargs["trust_env"] is False
         return _FakeClient(responses, calls)
 
     return create
@@ -202,6 +203,31 @@ def test_invalid_configuration_performs_no_network_calls() -> None:
     assert snapshot.reachable is ModelHealthFact.UNKNOWN
     assert snapshot.model_present is ModelHealthFact.UNKNOWN
     assert snapshot.model_ready is ModelHealthFact.UNKNOWN
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://example.com:11434",
+        "http://user:secret@localhost:11434",
+        "http://localhost.:11434",
+    ],
+)
+def test_non_loopback_or_ambiguous_configuration_performs_no_network_calls(
+    base_url: str,
+) -> None:
+    calls: list[str] = []
+    probe = OllamaModelHealthProbe(
+        model_id="local-model:1",
+        base_url=base_url,
+        client_factory=_factory({}, calls),
+    )
+
+    snapshot = probe.snapshot()
+
+    assert snapshot.configured is ModelHealthFact.NO
+    assert snapshot.reachable is ModelHealthFact.UNKNOWN
     assert calls == []
 
 
