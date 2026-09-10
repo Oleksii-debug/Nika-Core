@@ -150,5 +150,5 @@ def _validate_identifier(value: str, *, field: str) -> None:
 def _required_text(payload: Mapping[str, object], key: str) -> str:
     value = payload.get(key)
     if not isinstance(value, str):
-        raise ValueError(f"{key} must be text")
+        raise TypeError(f"{key} must be text")
     return value
