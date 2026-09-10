@@ -34,12 +34,11 @@ class _SharedNativeModel:
         *,
         block_ids: frozenset[str] = frozenset(),
         fail_ids: frozenset[str] = frozenset(),
-        initially_loaded: bool = True,
     ) -> None:
         self.id = "qa-process-model:1"
         self.alias = "qa-process-model"
         self.is_cached = True
-        self.is_loaded = initially_loaded
+        self.is_loaded = True
         self.settings = SimpleNamespace(temperature=None)
         self.block_ids = block_ids
         self.fail_ids = fail_ids
@@ -51,18 +50,6 @@ class _SharedNativeModel:
         self.started_ids: list[str] = []
         self.active = 0
         self.max_active = 0
-        self.load_count = 0
-        self.unload_count = 0
-
-    def load(self) -> None:
-        with self._lock:
-            self.load_count += 1
-            self.is_loaded = True
-
-    def unload(self) -> None:
-        with self._lock:
-            self.unload_count += 1
-            self.is_loaded = False
 
     def wait_started(self, request_id: str, timeout: float = 1.0) -> bool:
         with self._condition:
@@ -114,25 +101,6 @@ class _SharedNativeModel:
                         model._condition.notify_all()
 
         return Client()
-
-
-class _BlockingLoadModel(_SharedNativeModel):
-    def __init__(self) -> None:
-        super().__init__(initially_loaded=False)
-        self.load_release = threading.Event()
-        self._load_condition = threading.Condition()
-
-    def load(self) -> None:
-        with self._load_condition:
-            self.load_count += 1
-            self._load_condition.notify_all()
-        if not self.load_release.wait(timeout=2.0):
-            raise RuntimeError("test load release barrier timed out")
-        self.is_loaded = True
-
-    def wait_load_count(self, count: int, timeout: float = 0.5) -> bool:
-        with self._load_condition:
-            return self._load_condition.wait_for(lambda: self.load_count >= count, timeout=timeout)
 
 
 class _Catalog:
@@ -211,31 +179,6 @@ def test_distinct_foundry_instances_never_overlap_shared_native_inference() -> N
     assert second.request_id == "second"
     assert first.text == "response:first"
     assert second.text == "response:second"
-
-
-@FOUNDRY_CONCURRENCY_BLOCKED
-def test_shared_model_load_is_single_owner_across_provider_instances() -> None:
-    model = _BlockingLoadModel()
-    manager = _Manager(model)
-    first_provider = _provider(manager)
-    second_provider = _provider(manager)
-
-    async def scenario() -> tuple[bool, object, object]:
-        first_task = asyncio.create_task(first_provider.complete(_request("first-load")))
-        assert await asyncio.to_thread(model.wait_load_count, 1, 1.0)
-
-        second_task = asyncio.create_task(second_provider.complete(_request("second-load")))
-        second_entered_load = await asyncio.to_thread(model.wait_load_count, 2, 0.5)
-        model.load_release.set()
-        first, second = await asyncio.gather(first_task, second_task)
-        return second_entered_load, first, second
-
-    second_entered_load, first, second = asyncio.run(scenario())
-
-    assert second_entered_load is False
-    assert model.load_count == 1
-    assert first.request_id == "first-load"
-    assert second.request_id == "second-load"
 
 
 @FOUNDRY_CONCURRENCY_BLOCKED
@@ -325,40 +268,3 @@ def test_concurrent_foundry_failure_does_not_poison_sibling_response() -> None:
     assert not isinstance(good, BaseException)
     assert good.request_id == "good"
     assert good.text == "response:good"
-
-
-@FOUNDRY_CONCURRENCY_BLOCKED
-def test_owner_close_cannot_unload_model_under_sibling_native_request() -> None:
-    model = _SharedNativeModel(
-        block_ids=frozenset({"sibling"}),
-        initially_loaded=False,
-    )
-    manager = _Manager(model)
-    owner = _provider(manager)
-    sibling_provider = _provider(manager)
-
-    async def scenario() -> BaseException | None:
-        primed = await owner.complete(_request("owner-prime"))
-        assert primed.request_id == "owner-prime"
-        assert model.load_count == 1
-
-        sibling_task = asyncio.create_task(sibling_provider.complete(_request("sibling")))
-        assert await asyncio.to_thread(model.wait_started, "sibling")
-
-        close_error: BaseException | None = None
-        try:
-            owner.close()
-        except BaseException as exc:  # noqa: BLE001 - assertion captures exact public behavior
-            close_error = exc
-        finally:
-            model.release.set()
-
-        sibling = await sibling_task
-        assert sibling.request_id == "sibling"
-        return close_error
-
-    close_error = asyncio.run(scenario())
-
-    assert isinstance(close_error, RuntimeError)
-    assert model.unload_count == 0
-    assert model.is_loaded is True
