@@ -18,16 +18,12 @@ from nika_core.runtime.contracts import (
     RuntimeRequest,
     RuntimeResult,
     RuntimeResumeMode,
-    RuntimeResumeProbe,
     RuntimeResumeProbePort,
-    RuntimeResumeProbeStatus,
     RuntimeResumeRequest,
-    RuntimeUnsupportedError,
 )
 from nika_core.runtime.idempotency import (
     IdempotencyConflictError,
     IdempotencyLedger,
-    IdempotencyRecord,
     IdempotencyStatus,
 )
 from nika_core.runtime.recovery_claims import (
@@ -1350,18 +1346,15 @@ class TaskRuntimeCoordinator:
             )
             if cancellation_won:
                 self._sessions.delete_with_connection(conn, task_id)
-            elif (
-                result.outcome in _RESUMABLE_OUTCOMES
-                and result.resume_token
-                and not preserve_confirmed_pause_generation
-            ):
-                self._sessions.record_result_with_connection(
-                    conn,
-                    task_id=task_id,
-                    runtime_id=runtime_id,
-                    thread_id=thread_id,
-                    result=result,
-                )
+            elif result.outcome in _RESUMABLE_OUTCOMES and result.resume_token:
+                if not preserve_confirmed_pause_generation:
+                    self._sessions.record_result_with_connection(
+                        conn,
+                        task_id=task_id,
+                        runtime_id=runtime_id,
+                        thread_id=thread_id,
+                        result=result,
+                    )
             else:
                 self._sessions.delete_with_connection(conn, task_id)
 
