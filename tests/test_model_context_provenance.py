@@ -14,6 +14,7 @@ from nika_core.multi_agent.context_provenance import (
     CONTEXT_PROVENANCE_METADATA_KEY,
     ContextProvenanceError,
     MemoryContextSelection,
+    ModelContextAssembly,
     ResearchContextSelection,
     assemble_model_context,
     merge_context_provenance_metadata,
@@ -165,6 +166,27 @@ def test_reordering_moves_content_and_provenance_together_without_rebinding() ->
         "source-a",
     ]
     assert [item.position for item in reversed_assembly.provenance] == [1, 2]
+
+
+def test_manual_model_text_rebinding_is_rejected_by_assembly_object() -> None:
+    selection = _selection(
+        "source-a",
+        member_id="worker-a",
+        document_id="doc-a-r7",
+        snippet="trusted visible body",
+    )
+    assembly = assemble_model_context((selection,), authorizer=lambda _: True)
+    tampered_text = json.dumps(
+        {"context_units": [{"position": 1, "content": "foreign body"}]},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    with pytest.raises(ContextProvenanceError, match="does not match provenance"):
+        ModelContextAssembly(
+            model_text=tampered_text,
+            provenance=assembly.provenance,
+        )
 
 
 def test_stale_research_chunk_fails_before_authorization_or_rendering() -> None:
