@@ -152,7 +152,6 @@ global.pywebview = {{
       if (MODE === "throw") throw new Error(CANARY);
       return {{ ok: false, message: CANARY }};
     }},
-  }},
 }};
 
 eval(fs.readFileSync(process.argv[1], "utf8"));
@@ -166,13 +165,14 @@ setTimeout(() => {{
     element("product-project-state").textContent,
     logText,
   ].join("\\n");
-  console.log(JSON.stringify({{
+  const snapshot = JSON.stringify({{
     ready: document.documentElement.dataset.nikaReady || null,
     summary_hidden: element("product-project-summary").hidden,
     project_id: element("product-project-id").textContent,
     state: element("product-project-state").textContent,
     rendered_text: renderedText,
-  }}));
+  }});
+  process.stdout.write(snapshot + "\\n", () => process.exit(0));
 }}, 50);
 """
     result = subprocess.run(
