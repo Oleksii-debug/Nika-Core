@@ -67,6 +67,12 @@ class ResearchRepository:
             raise ValueError("source_id, workspace_id and locator are required")
         now = _now()
         with self._store.connection() as conn:
+            http_collision = conn.execute(
+                "SELECT 1 FROM research_http_sources WHERE source_id=?",
+                (source.source_id,),
+            ).fetchone()
+            if http_collision is not None:
+                raise ValueError("source_id is already owned by an HTTP source")
             existing = conn.execute(
                 """SELECT workspace_id, kind, locator
                 FROM research_sources WHERE source_id=?""",
