@@ -442,7 +442,6 @@ def test_rest_client_pins_github_api_host() -> None:
     assert client._api_base == "https://api.github.com"
 
 
-
 def test_report_never_contains_token_value() -> None:
     token = "ghp_SYNTHETIC_SUPER_SECRET_CANARY"
     responses = base_responses()
