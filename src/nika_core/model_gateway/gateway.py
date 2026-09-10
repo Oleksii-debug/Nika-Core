@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from math import isfinite
 from typing import Protocol
 
@@ -15,6 +15,7 @@ from .contracts import (
     ModelResponse,
     ModelUsage,
     PrivacyClass,
+    ProviderCapabilities,
     ProviderKind,
 )
 
@@ -28,6 +29,12 @@ class _AuditLogPort(Protocol):
         entity_id: str,
         payload: dict[str, object] | None = None,
     ) -> int: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _RegisteredProvider:
+    provider: ModelProvider
+    capabilities: ProviderCapabilities
 
 
 _SAFE_FALLBACK_CODES = frozenset(
@@ -53,17 +60,21 @@ _SAFE_PROVIDER_MESSAGES = {
 
 class ModelGateway:
     def __init__(self, *, audit_log: _AuditLogPort | None = None) -> None:
-        self._providers: dict[str, ModelProvider] = {}
+        self._providers: dict[str, _RegisteredProvider] = {}
         self._defaults: dict[ProviderKind, str] = {}
         self._audit_log = audit_log
 
     def register(self, provider: ModelProvider, *, default: bool = False) -> None:
-        provider_id = provider.capabilities.provider_id
+        capabilities = self._read_capabilities_for_registration(provider)
+        provider_id = capabilities.provider_id
         if provider_id in self._providers:
             raise ValueError(f"duplicate provider_id: {provider_id}")
-        self._providers[provider_id] = provider
+        self._providers[provider_id] = _RegisteredProvider(
+            provider=provider,
+            capabilities=capabilities,
+        )
         if default:
-            self._defaults[provider.capabilities.kind] = provider_id
+            self._defaults[capabilities.kind] = provider_id
 
     def providers(self) -> tuple[str, ...]:
         return tuple(sorted(self._providers))
@@ -74,8 +85,10 @@ class ModelGateway:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + request.timeout_seconds
 
-        for index, provider in enumerate(providers):
-            capabilities = provider.capabilities
+        for index, registered in enumerate(providers):
+            self._assert_capability_contract(registered)
+            provider = registered.provider
+            capabilities = registered.capabilities
             remaining = deadline - loop.time()
             if remaining <= 0:
                 error = ModelGatewayError(
@@ -123,7 +136,7 @@ class ModelGateway:
                 )
                 self._audit_failure(request, capabilities.provider_id, error)
                 if self._can_fallback(error=error, index=index, providers=providers):
-                    self._audit_fallback(request, provider, providers[index + 1], error)
+                    self._audit_fallback(request, registered, providers[index + 1], error)
                     continue
                 terminal_error = error
             except asyncio.CancelledError:
@@ -139,7 +152,7 @@ class ModelGateway:
                 )
                 self._audit_failure(request, capabilities.provider_id, error)
                 if self._can_fallback(error=error, index=index, providers=providers):
-                    self._audit_fallback(request, provider, providers[index + 1], error)
+                    self._audit_fallback(request, registered, providers[index + 1], error)
                     continue
                 terminal_error = error
             except Exception:  # noqa: BLE001 - provider implementations are untrusted
@@ -203,7 +216,7 @@ class ModelGateway:
             retryable=True,
         )
 
-    def _select_candidates(self, request: ModelRequest) -> tuple[ModelProvider, ...]:
+    def _select_candidates(self, request: ModelRequest) -> tuple[_RegisteredProvider, ...]:
         primary = self._select(request)
         candidates = [primary]
         seen = {primary.capabilities.provider_id}
@@ -226,18 +239,70 @@ class ModelGateway:
         return tuple(candidates)
 
     def _validate_privacy_route(
-        self, request: ModelRequest, providers: tuple[ModelProvider, ...]
+        self, request: ModelRequest, providers: tuple[_RegisteredProvider, ...]
     ) -> None:
-        if request.privacy is PrivacyClass.PUBLIC:
-            return
         for provider in providers:
+            self._assert_capability_contract(provider)
             capabilities = provider.capabilities
-            if not capabilities.supports_private_data:
+            if (
+                request.privacy is not PrivacyClass.PUBLIC
+                and not capabilities.supports_private_data
+            ):
                 raise ModelGatewayError(
                     ModelErrorCode.INVALID_REQUEST,
                     "private data cannot be routed to this provider",
                     provider_id=capabilities.provider_id,
                 )
+
+    @staticmethod
+    def _read_capabilities_for_registration(
+        provider: ModelProvider,
+    ) -> ProviderCapabilities:
+        try:
+            capabilities = provider.capabilities
+        except Exception:  # noqa: BLE001 - provider metadata is untrusted
+            raise ValueError("provider capabilities could not be read") from None
+        return ModelGateway._validate_capability_value(capabilities)
+
+    @staticmethod
+    def _validate_capability_value(capabilities: object) -> ProviderCapabilities:
+        if type(capabilities) is not ProviderCapabilities:
+            raise ValueError("provider capabilities must use ProviderCapabilities")
+        if (
+            not isinstance(capabilities.provider_id, str)
+            or not capabilities.provider_id.strip()
+            or capabilities.provider_id != capabilities.provider_id.strip()
+        ):
+            raise ValueError("provider capabilities require a normalized provider_id")
+        if not isinstance(capabilities.kind, ProviderKind):
+            raise ValueError("provider capabilities require a ProviderKind")
+        for field_name in (
+            "supports_private_data",
+            "supports_tools",
+            "supports_streaming",
+            "supports_hard_cancellation",
+        ):
+            if type(getattr(capabilities, field_name)) is not bool:
+                raise ValueError(f"provider capability {field_name} must be boolean")
+        return capabilities
+
+    @staticmethod
+    def _assert_capability_contract(provider: _RegisteredProvider) -> None:
+        try:
+            current = ModelGateway._validate_capability_value(
+                provider.provider.capabilities
+            )
+        except Exception:  # noqa: BLE001 - provider metadata is untrusted
+            current = None
+        if current == provider.capabilities:
+            return
+        raise ModelGatewayError(
+            ModelErrorCode.PROVIDER_ERROR,
+            "model provider capability contract changed after registration",
+            provider_id=provider.capabilities.provider_id,
+            retryable=False,
+            failure_effect=ModelFailureEffect.NO_EFFECT,
+        )
 
     @staticmethod
     def _validate_success_response(
@@ -351,7 +416,10 @@ class ModelGateway:
 
     @staticmethod
     def _can_fallback(
-        *, error: ModelGatewayError, index: int, providers: tuple[ModelProvider, ...]
+        *,
+        error: ModelGatewayError,
+        index: int,
+        providers: tuple[_RegisteredProvider, ...],
     ) -> bool:
         if index + 1 >= len(providers):
             return False
@@ -383,8 +451,8 @@ class ModelGateway:
     def _audit_fallback(
         self,
         request: ModelRequest,
-        current: ModelProvider,
-        fallback: ModelProvider,
+        current: _RegisteredProvider,
+        fallback: _RegisteredProvider,
         error: ModelGatewayError,
     ) -> None:
         self._audit(
@@ -398,7 +466,7 @@ class ModelGateway:
             },
         )
 
-    def _select(self, request: ModelRequest) -> ModelProvider:
+    def _select(self, request: ModelRequest) -> _RegisteredProvider:
         if request.provider_id:
             provider = self._providers.get(request.provider_id)
             if provider is None:
