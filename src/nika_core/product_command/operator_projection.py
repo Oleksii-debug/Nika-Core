@@ -65,7 +65,7 @@ class FactoryOperatorProjection(BaseModel):
 def project_operator_status(detail: ProductProjectDetail) -> FactoryOperatorProjection:
     """Project existing ProductProject presentation state without inventing new authority."""
 
-    current_work_entries = _current_work_window(detail)
+    current_work_entries = _current_work_entries(detail)
     component_entries = _entries_of_kind(current_work_entries, ProductStatusKind.COMPONENT)
     blocker_entries = _statuses(detail, ProductStatusKind.BLOCKER)
     active_blocker_entries = _incomplete(blocker_entries)
@@ -92,6 +92,7 @@ def project_operator_status(detail: ProductProjectDetail) -> FactoryOperatorProj
             if evidence.kind == "git_commit"
         )
     )
+    candidate = _render_candidate(candidate_refs)
 
     return FactoryOperatorProjection(
         PROJECT=detail.summary.project_id,
@@ -99,7 +100,7 @@ def project_operator_status(detail: ProductProjectDetail) -> FactoryOperatorProj
         OWNER=_render_owner(owners),
         STATE=detail.summary.state,
         BLOCKER=_render_blockers(active_blocker_entries, detail.summary.blocker_count),
-        CANDIDATE=_render_candidate(candidate_refs),
+        CANDIDATE=candidate,
         TEST=_render_statuses(build_entries, empty="unknown"),
         QA=_render_statuses(qa_entries, empty="unknown"),
         INTEGRATION=_render_statuses(integration_entries, empty="not_started"),
@@ -110,6 +111,7 @@ def project_operator_status(detail: ProductProjectDetail) -> FactoryOperatorProj
             build_entries,
             qa_entries,
             integration_entries,
+            candidate,
         ),
     )
 
@@ -203,25 +205,15 @@ def _has_candidate_evidence(entry: ProductStatusEntry) -> bool:
     return any(evidence.kind == "git_commit" for evidence in entry.evidence)
 
 
-def _current_work_window(
+def _current_work_entries(
     detail: ProductProjectDetail,
 ) -> tuple[ProductStatusEntry, ...]:
-    last_component_index = next(
-        (
-            index
-            for index in range(len(detail.statuses) - 1, -1, -1)
-            if detail.statuses[index].kind is ProductStatusKind.COMPONENT
-        ),
-        None,
-    )
-    if last_component_index is None:
-        return tuple(
-            entry for entry in detail.statuses if entry.kind in _CANDIDATE_STATUS_KINDS
-        )
+    # ProductStatusEntry carries no canonical sequence/epoch field. Preserve every
+    # candidate-stage fact instead of treating tuple order (for example, the last
+    # COMPONENT row) as authority. Ambiguous historical/current candidate identity
+    # is handled fail-closed by CANDIDATE/NEXT rather than by silently dropping rows.
     return tuple(
-        entry
-        for entry in detail.statuses[last_component_index:]
-        if entry.kind in _CANDIDATE_STATUS_KINDS
+        entry for entry in detail.statuses if entry.kind in _CANDIDATE_STATUS_KINDS
     )
 
 
@@ -241,9 +233,9 @@ def _active_candidate_entries(
     if active_with_candidate:
         return active_with_candidate
 
-    # A current component without an exact candidate is a hard epoch boundary:
-    # never inherit terminal evidence from older work and call it current.
-    if any(entry.kind is ProductStatusKind.COMPONENT for entry in active_entries):
+    if active_entries and any(
+        entry.kind is ProductStatusKind.COMPONENT for entry in active_entries
+    ):
         return ()
 
     if active_entries:
@@ -273,6 +265,57 @@ def _first_incomplete(
     return next(iter(_incomplete(entries)), None)
 
 
+def _component_stage_entries(
+    component: ProductStatusEntry,
+    entries: tuple[ProductStatusEntry, ...],
+) -> tuple[ProductStatusEntry, ...]:
+    prefix = f"{component.item_id}:"
+    return tuple(entry for entry in entries if entry.item_id.startswith(prefix))
+
+
+def _multi_component_next_action(
+    component_entries: tuple[ProductStatusEntry, ...],
+    build_entries: tuple[ProductStatusEntry, ...],
+    qa_entries: tuple[ProductStatusEntry, ...],
+    integration_entries: tuple[ProductStatusEntry, ...],
+) -> str | None:
+    if len(component_entries) <= 1:
+        return None
+
+    for component in component_entries:
+        builds = _component_stage_entries(component, build_entries)
+        if not builds:
+            return f"test:not_started:{component.item_id}"
+        pending = _first_incomplete(builds)
+        if pending is not None:
+            return f"test:{pending.item_id}={pending.state}"
+
+    for component in component_entries:
+        qas = _component_stage_entries(component, qa_entries)
+        if not qas:
+            return f"qa:not_started:{component.item_id}"
+        pending = _first_incomplete(qas)
+        if pending is not None:
+            return f"qa:{pending.item_id}={pending.state}"
+
+    associated_integrations = tuple(
+        entry
+        for component in component_entries
+        for entry in _component_stage_entries(component, integration_entries)
+    )
+    if integration_entries and len(associated_integrations) != len(integration_entries):
+        return "inspect_project:ambiguous_integration_identity"
+    for component in component_entries:
+        integrations = _component_stage_entries(component, integration_entries)
+        if not integrations:
+            return f"integration:not_started:{component.item_id}"
+        pending = _first_incomplete(integrations)
+        if pending is not None:
+            return f"integration:{pending.item_id}={pending.state}"
+
+    return "next_work"
+
+
 def _next_action(
     detail: ProductProjectDetail,
     component_entries: tuple[ProductStatusEntry, ...],
@@ -280,6 +323,7 @@ def _next_action(
     build_entries: tuple[ProductStatusEntry, ...],
     qa_entries: tuple[ProductStatusEntry, ...],
     integration_entries: tuple[ProductStatusEntry, ...],
+    candidate: str,
 ) -> str:
     if _first_incomplete(blocker_entries) is not None or detail.summary.blocker_count > 0:
         return "resolve_blocker"
@@ -291,6 +335,18 @@ def _next_action(
     active = _first_incomplete(component_entries)
     if active is not None:
         return f"continue_work:{active.item_id}"
+    if candidate in {"ambiguous_multiple_candidates", "invalid_candidate_identity"}:
+        return "inspect_project:ambiguous_candidate_identity"
+
+    multi_component = _multi_component_next_action(
+        component_entries,
+        build_entries,
+        qa_entries,
+        integration_entries,
+    )
+    if multi_component is not None:
+        return multi_component
+
     build = _first_incomplete(build_entries)
     if build is not None:
         return f"test:{build.item_id}={build.state}"
