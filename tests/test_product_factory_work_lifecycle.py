@@ -212,6 +212,27 @@ def test_review_evidence_refs_require_canonical_text(evidence_refs) -> None:
         ReviewDecision("qa-1", True, "verified", evidence_refs)
 
 
+def test_review_evidence_refs_enforce_utf8_count_and_aggregate_bounds() -> None:
+    boundary_refs = ("x" * 4096,) * 4
+    decision = ReviewDecision("qa-1", True, "verified", boundary_refs)
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    coordinator.record_result(_success(request))
+    coordinator.review("core", decision)
+
+    snapshot = coordinator.snapshot()
+    restored = ProductFactoryCoordinator(_graph())
+    restored.restore(snapshot, trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint)
+    assert _core_record(restored).review == decision
+
+    with pytest.raises(CoordinatorError, match="canonical text"):
+        ReviewDecision("qa-1", True, "verified", ("é" * 2049,))
+    with pytest.raises(CoordinatorError, match="canonical text"):
+        ReviewDecision("qa-1", True, "verified", ("ci:1",) * 33)
+    with pytest.raises(CoordinatorError, match="canonical text"):
+        ReviewDecision("qa-1", True, "verified", boundary_refs + ("x",))
+
+
 @pytest.mark.parametrize("rejected_review", (False, True))
 def test_block_rejects_post_result_provenance(rejected_review: bool) -> None:
     coordinator = _coordinator()
@@ -251,4 +272,27 @@ def test_repair_reason_rejects_ambiguous_or_control_text(reason: str) -> None:
 
     with pytest.raises(CoordinatorError, match="canonical single-line text"):
         coordinator.prepare_repair("core", base_sha=SHA_A, reason=reason)
+    assert coordinator.snapshot() == snapshot
+
+
+def test_repair_reason_is_utf8_byte_bounded_and_restores_at_boundary() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    coordinator.record_result(_success(request))
+    coordinator.review("core", ReviewDecision("qa-1", False, "needs repair", ("ci:1",)))
+    repaired = coordinator.prepare_repair("core", base_sha=SHA_A, reason="x" * 4096)
+    assert repaired.goal.endswith("\nRepair: " + "x" * 4096)
+
+    snapshot = coordinator.snapshot()
+    restored = ProductFactoryCoordinator(_graph())
+    restored.restore(snapshot, trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint)
+    assert _core_record(restored).request == repaired
+
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    coordinator.record_result(_success(request))
+    coordinator.review("core", ReviewDecision("qa-1", False, "needs repair", ("ci:1",)))
+    snapshot = coordinator.snapshot()
+    with pytest.raises(CoordinatorError, match="canonical single-line text"):
+        coordinator.prepare_repair("core", base_sha=SHA_A, reason="é" * 2049)
     assert coordinator.snapshot() == snapshot

@@ -13,6 +13,11 @@ from nika_core.product_factory_orchestration import (
 )
 from nika_core.toolsmith.contracts import CodingResult, TestEvidence
 
+_MAX_EVIDENCE_REF_UTF8_BYTES = 4096
+_MAX_REVIEW_EVIDENCE_REFS = 32
+_MAX_REVIEW_EVIDENCE_UTF8_BYTES = 16384
+_MAX_REPAIR_REASON_UTF8_BYTES = 4096
+
 
 class CoordinatorError(ValueError):
     """Raised when Product Factory orchestration invariants are violated."""
@@ -88,8 +93,12 @@ class ReviewDecision:
             raise CoordinatorError("review acceptance must be an exact boolean")
         if not self.reviewer_id.strip() or not self.reason.strip() or not self.evidence_refs:
             raise CoordinatorError("independent review requires reviewer, reason and evidence")
-        if type(self.evidence_refs) is not tuple or any(
-            not _canonical_evidence_ref(reference) for reference in self.evidence_refs
+        if (
+            type(self.evidence_refs) is not tuple
+            or len(self.evidence_refs) > _MAX_REVIEW_EVIDENCE_REFS
+            or any(not _canonical_evidence_ref(reference) for reference in self.evidence_refs)
+            or sum(len(reference.encode("utf-8")) for reference in self.evidence_refs)
+            > _MAX_REVIEW_EVIDENCE_UTF8_BYTES
         ):
             raise CoordinatorError("independent review evidence refs must be canonical text")
 
@@ -244,7 +253,7 @@ class ProductFactoryCoordinator:
         goal = f"{record.request.goal}\nRepair: {reason}"
         request = ComponentWorkRequest(
             work_id=_work_id(project_id=self.graph.project_id, component_id=component_id, repository_id=record.request.repository_id, goal=goal, base_sha=base_sha, allowed_paths=record.request.allowed_paths, permission_ceiling=record.request.permission_ceiling, acceptance_commands=record.request.acceptance_commands, attempt=attempt),
-            project_id=record.request.project_id, component_id=component_id, repository_id=record.request.repository_id,
+            project_id=record.request.project_id, component_id=record.request.component_id, repository_id=record.request.repository_id,
             goal=goal, base_sha=base_sha, allowed_paths=record.request.allowed_paths,
             permission_ceiling=record.request.permission_ceiling, acceptance_commands=record.request.acceptance_commands, attempt=attempt,
         )
@@ -495,7 +504,12 @@ def _valid_repair_goal(initial_goal: str, current_goal: str, attempt: int) -> bo
     if not suffix.startswith(marker):
         return False
     reasons = suffix.split(marker)[1:]
-    return len(reasons) == attempt - 1 and all(reason.strip() for reason in reasons)
+    if len(reasons) != attempt - 1:
+        return False
+    try:
+        return all(_canonical_repair_reason(reason) == reason for reason in reasons)
+    except CoordinatorError:
+        return False
 
 
 def _canonical_evidence_ref(value: object) -> bool:
@@ -503,6 +517,7 @@ def _canonical_evidence_ref(value: object) -> bool:
         type(value) is str
         and bool(value)
         and value == value.strip()
+        and len(value.encode("utf-8")) <= _MAX_EVIDENCE_REF_UTF8_BYTES
         and not any(ord(character) < 32 or ord(character) == 127 for character in value)
     )
 
@@ -512,6 +527,7 @@ def _canonical_repair_reason(value: object) -> str:
         type(value) is not str
         or not value
         or value != value.strip()
+        or len(value.encode("utf-8")) > _MAX_REPAIR_REASON_UTF8_BYTES
         or "\nRepair: " in value
         or any(ord(character) < 32 or ord(character) == 127 for character in value)
     ):
