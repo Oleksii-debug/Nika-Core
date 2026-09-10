@@ -203,10 +203,15 @@ class GitHubFactoryAdapter:
             if pr.base_branch != observation.default_branch:
                 raise GitHubFactoryError("pull request base does not match default branch")
             if pr.state is PullRequestState.MERGED:
-                if pr.merge_sha not in {
+                default_branch_history = {
                     observation.default_branch_sha,
                     *observation.default_branch_ancestor_shas,
-                }:
+                }
+                if pr.base_sha not in default_branch_history:
+                    raise GitHubFactoryError(
+                        "pull request base sha is not contained in default branch history"
+                    )
+                if pr.merge_sha not in default_branch_history:
                     raise GitHubFactoryError(
                         "pull request merge sha is not contained in default branch history"
                     )

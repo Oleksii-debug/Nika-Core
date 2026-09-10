@@ -26,6 +26,7 @@ from nika_core.product_factory_verification import (
 MAIN_SHA = "1" * 40
 CANDIDATE_SHA = "2" * 40
 MERGE_SHA = "3" * 40
+DESCENDANT_SHA = "4" * 40
 
 
 def _repository(**overrides: object) -> RepositoryRef:
@@ -206,13 +207,13 @@ def test_pending_check_prevents_green_projection() -> None:
     assert binding.checks_state is CheckState.PENDING
 
 
-def test_merged_pr_projects_exact_integration_identity() -> None:
+def test_merged_pr_projects_exact_integration_identity_from_branch_history() -> None:
     merged_pr = GitHubPullRequest(
         number=720,
         head_branch="automation/dev04",
         head_sha=CANDIDATE_SHA,
         base_branch="main",
-        base_sha="4" * 40,
+        base_sha=MAIN_SHA,
         state=PullRequestState.MERGED,
         merge_sha=MERGE_SHA,
     )
@@ -220,12 +221,36 @@ def test_merged_pr_projects_exact_integration_identity() -> None:
         _repository(),
         _observation(
             pull_request=merged_pr,
-            default_branch_ancestor_shas=(MERGE_SHA,),
+            default_branch_sha=DESCENDANT_SHA,
+            default_branch_ancestor_shas=(MAIN_SHA, MERGE_SHA),
         ),
     )
     assert binding.integrated is True
     assert binding.integration_sha == MERGE_SHA
-    assert binding.default_branch_ancestor_shas == (MERGE_SHA,)
+    assert binding.default_branch_sha == DESCENDANT_SHA
+    assert binding.default_branch_ancestor_shas == (MAIN_SHA, MERGE_SHA)
+
+
+def test_merged_pr_requires_historical_base_in_default_branch_history() -> None:
+    merged_pr = GitHubPullRequest(
+        number=720,
+        head_branch="automation/dev04",
+        head_sha=CANDIDATE_SHA,
+        base_branch="main",
+        base_sha=DESCENDANT_SHA,
+        state=PullRequestState.MERGED,
+        merge_sha=MERGE_SHA,
+    )
+
+    with pytest.raises(GitHubFactoryError, match="base sha is not contained"):
+        GitHubFactoryAdapter().bind(
+            _repository(),
+            _observation(
+                pull_request=merged_pr,
+                default_branch_sha=MERGE_SHA,
+                default_branch_ancestor_shas=(MAIN_SHA,),
+            ),
+        )
 
 
 def test_merged_pr_requires_merge_commit_in_default_branch_history() -> None:
@@ -234,13 +259,20 @@ def test_merged_pr_requires_merge_commit_in_default_branch_history() -> None:
         head_branch="automation/dev04",
         head_sha=CANDIDATE_SHA,
         base_branch="main",
-        base_sha="4" * 40,
+        base_sha=MAIN_SHA,
         state=PullRequestState.MERGED,
         merge_sha=MERGE_SHA,
     )
 
-    with pytest.raises(GitHubFactoryError, match="not contained"):
-        GitHubFactoryAdapter().bind(_repository(), _observation(pull_request=merged_pr))
+    with pytest.raises(GitHubFactoryError, match="merge sha is not contained"):
+        GitHubFactoryAdapter().bind(
+            _repository(),
+            _observation(
+                pull_request=merged_pr,
+                default_branch_sha=DESCENDANT_SHA,
+                default_branch_ancestor_shas=(MAIN_SHA,),
+            ),
+        )
 
 
 @pytest.mark.parametrize(
