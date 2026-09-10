@@ -255,7 +255,10 @@ def test_ruleset_without_visible_bypass_actors_cannot_prove_governance() -> None
     assert report["controls"]["proof_eligible_ruleset_count"] == 0
     assert report["controls"]["ruleset_bypass_evidence_missing_count"] == 1
     assert "PROTECTION_DETAILS_NOT_PROVEN" in report["blockers"]
-    assert report["evidence_errors"] == ["ruleset_21:bypass_actors_not_visible"]
+    assert report["evidence_errors"] == [
+        "protection:http_403:forbidden",
+        "ruleset_21:bypass_actors_not_visible",
+    ]
 
 
 def test_ruleset_bypass_actor_blocks_when_ruleset_is_needed_for_proof() -> None:
@@ -437,7 +440,6 @@ def test_rest_client_pins_github_api_host() -> None:
     client = GitHubRestClient(token="synthetic-token", timeout=1.0)
 
     assert client._api_base == "https://api.github.com"
-
 
 def test_report_never_contains_token_value() -> None:
     token = "ghp_SYNTHETIC_SUPER_SECRET_CANARY"
