@@ -14,8 +14,8 @@ _SECRET_ASSIGNMENT = re.compile(
 _HEADER_SECRET = re.compile(
     r"(?i)\b(authorization|proxy-authorization|cookie|set-cookie)\s*[:=]\s*[^\r\n]*"
 )
-_SAFE_CODE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}\\Z")
-_SAFE_REFERENCE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+~-]{0,159}\\Z")
+_SAFE_CODE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}\Z")
+_SAFE_REFERENCE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+~-]{0,159}\Z")
 _SENSITIVE_REFERENCE_RE = re.compile(
     r"(?i)^(?:authorization|proxy-authorization|cookie|set-cookie|password|passwd|"
     r"client[_-]?secret|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|token):"
