@@ -6,21 +6,11 @@ This document does **not** reduce the final Nika Core scope. `docs/MASTER_SPEC.m
 
 The purpose of this release train is to create explicit intermediate finishes so the user receives a practical Windows Nika before the entire Full Product Vision is complete.
 
-# Current execution mode — V0.1 ONLY until V0.1 release
+# Current execution mode — parallel product delivery
 
-The previous policy that allowed ordinary future-version development to continue in parallel is superseded for the current execution period.
+Effective 2026-09-09, worker organization and sequencing follow docs/AUTONOMOUS_WORKER_ORCHESTRATION.md, DELIVERY-2026-09-09. Advance a usable Windows product and the real development-factory cycle through independent, bounded packages. The earlier blanket V0.1-only mandate is superseded. The full product scope and every applicable acceptance requirement below remain binding.
 
-Until V0.1 is accepted/released:
-
-1. **All permanent-worker development, research, QA, release and integration effort is directed to V0.1 or to a proven direct V0.1 dependency.**
-2. Do not start a new V0.2/V0.3/V0.4/V0.5/V1.0-only source, research, QA or integration lane.
-3. Existing future-version PRs, branches and evidence are preserved; do not delete useful work merely because it is temporarily outside the nearest release.
-4. A worker already inside a non-V0.1 mutation may finish only the smallest atomic safe step needed to leave the branch consistent and publish a durable handoff. It then freezes that future-version lane and retasks to V0.1.
-5. Existing future-version code may be **REUSED** when it directly closes a V0.1 blocker. Reuse does not justify continuing unrelated later-version scope.
-6. Every new production CLAIM must identify `V01_BLOCKER` and `V01_USER_JOURNEY`. A claim without a concrete V0.1 contribution should not begin.
-7. P10-09 audits V0.1 candidates and direct V0.1 dependencies. P10-10 integrates V0.1 candidates/dependencies only, except the minimum safe closure of an already-running atomic integration operation.
-8. Security, accessibility, restart safety, provenance and exact-head evidence are not weakened to make V0.1 faster.
-9. `HUMAN_TESTED` and `NVDA_VERIFIED` remain human-only states.
+An intermediate release is an explicitly named checkpoint, never a replacement for the owner's full-product goal. Freeze a human-test candidate and its provenance, not the entire development effort. Preserve existing useful work; prioritize integration and user-visible completion over starting additional subsystems.
 
 # V0.1 — Usable Agent Team Alpha
 
@@ -214,35 +204,11 @@ V0.1 is blocked by defects in capabilities it claims, including:
 - exact release/package/provenance/security gates are red;
 - packaged Windows UI cannot expose the workflow accessibly enough for the human/NVDA acceptance protocol.
 
-# V0.1 worker allocation until release
+# Worker allocation and later capabilities
 
-All ten permanent roles remain active, but their work is retasked to one release rather than later-version feature expansion.
+DEV01–DEV13 plus COORD-A and COORD-B replace the historical ten P10 roles. Live dispatch and exclusive ownership are maintained in issue #553 under docs/AUTONOMOUS_WORKER_ORCHESTRATION.md. Every assignment identifies the user outcome, current blocker, existing candidate, owner, reviewer and acceptance evidence.
 
-- **P10-01 — integration/control plane:** maintain the V0.1 blocker DAG, ownership, acceptance matrix and sequencing. Reject new future-version-only claims.
-- **P10-02 — team/task product path:** converge the real three-agent operational journey and only ProductProject/Product Factory pieces that are direct dependencies of that journey. Do not advance full Product Factory scope merely for V0.4.
-- **P10-03 — tools/adapters:** close only missing tools/adapters needed by the V0.1 workflow; do not expand general Software Factory/Toolsmith roadmap for later versions.
-- **P10-04 — security/approval:** prove bounded browser/Windows standing permissions, approval boundaries, credential handling, effect authority and audit for V0.1 actions.
-- **P10-05 — runtime/durability:** own durable timing/waiting, restart/recovery, pause/cancel, idempotency/reconciliation and non-duplicate side effects for V0.1.
-- **P10-06 — monitoring/search:** concentrate Research on the monitoring/search/change-detection/report functions required by V0.1; freeze Media/Trader/Labs work unless a specific V0.1 dependency is proven.
-- **P10-07 — Windows/UIA/Product Journey:** wire the packaged Windows UI, three-agent/task controls, browser/Windows semantic interaction, keyboard accessibility and pre-human Product Journey for V0.1.
-- **P10-08 — package/release:** produce exact-SHA V0.1 packaging, provenance, secrets scan, notices/SBOM as applicable, update/backup/recovery and repository-governance evidence required for the candidate.
-- **P10-09 — independent audit:** spend QA capacity on V0.1 production candidates/direct dependencies and the two representative V0.1 end-to-end scenarios; avoid new future-version-only QA oracles.
-- **P10-10 — integration/sealing:** merge only exact-current V0.1 dependencies/candidates with required audit/green evidence, rebuild the V0.1 DAG after each integration, and seal the candidate.
-
-## Claim/report rule during V0.1 focus
-
-Every new CLAIM should state:
-
-- `V01_BLOCKER=<specific blocker>`;
-- `V01_USER_JOURNEY=<UI/team/timing/browser/monitoring/security/restart/package/etc.>`;
-- exact owned slice/branch;
-- why the work is required for V0.1 now.
-
-Every cycle report should state whether the blocker is integrated, still candidate-only, waiting audit/CI, or not yet proven.
-
-# Later versions — planned, currently frozen for new work
-
-The following scopes remain part of the product plan but do not receive new future-version-only execution until V0.1 is released.
+The later capability groups below remain part of the required product plan. Version names describe intermediate acceptance groupings; they do not impose a blanket prohibition on a dispatched Factory dependency or redefine final scope. Work order follows the shared critical path and WIP limit. Never claim one group's evidence for another.
 
 ## V0.2 — Personal Operations Beta
 
