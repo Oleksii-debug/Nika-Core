@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, fields
+from dataclasses import asdict, dataclass, fields
 from enum import StrEnum
 
 from nika_core.research.knowledge import (
@@ -35,35 +35,88 @@ class StaleRetrievalEvidenceError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class RetrievalEvidence:
+    workspace_id: str
+    artifact_key: str
+    version: int
+    source_id: str | None
+    source_locator_sha256: str
+    normalized_sha256: str
+    raw_sha256: str | None
+    parser_name: str
+    parser_version: str
+    normalization_version: str
+    chunker_version: str
+    chunk_max_chars: int
+    chunk_overlap_chars: int
+    approved_by: str
+    chunk_id: str
+    chunk_ordinal: int
+    start_char: int
+    end_char: int
+    chunk_sha256: str
+
+    @classmethod
+    def from_provenance(cls, provenance: KnowledgeProvenance) -> RetrievalEvidence:
+        return cls(
+            workspace_id=provenance.workspace_id,
+            artifact_key=provenance.artifact_key,
+            version=provenance.version,
+            source_id=provenance.source_id,
+            source_locator_sha256=_sha256(provenance.source_locator),
+            normalized_sha256=provenance.normalized_sha256,
+            raw_sha256=provenance.raw_sha256,
+            parser_name=provenance.parser_name,
+            parser_version=provenance.parser_version,
+            normalization_version=provenance.normalization_version,
+            chunker_version=provenance.chunker_version,
+            chunk_max_chars=provenance.chunk_max_chars,
+            chunk_overlap_chars=provenance.chunk_overlap_chars,
+            approved_by=provenance.approved_by,
+            chunk_id=provenance.chunk_id,
+            chunk_ordinal=provenance.chunk_ordinal,
+            start_char=provenance.start_char,
+            end_char=provenance.end_char,
+            chunk_sha256=provenance.chunk_sha256,
+        )
+
+
+def _sha256(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
 def serialize_retrieval_provenance(provenance: KnowledgeProvenance) -> str:
-    """Serialize complete retrieval evidence deterministically for durable replay."""
+    """Serialize audit evidence without duplicating the raw source locator."""
     payload = {
         "schema": _EVIDENCE_SCHEMA,
         "schema_version": _EVIDENCE_SCHEMA_VERSION,
-        "provenance": asdict(provenance),
+        "evidence": asdict(RetrievalEvidence.from_provenance(provenance)),
     }
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
-def deserialize_retrieval_provenance(payload: str) -> KnowledgeProvenance:
-    """Decode only the exact versioned provenance contract; never synthesize source evidence."""
+def deserialize_retrieval_provenance(payload: str) -> RetrievalEvidence:
+    """Decode exact evidence fields; source identity remains absent when it was absent."""
     try:
         decoded = json.loads(payload)
     except (TypeError, json.JSONDecodeError) as exc:
         raise ValueError("retrieval provenance is not valid JSON") from exc
     if not isinstance(decoded, dict):
         raise ValueError("retrieval provenance envelope must be an object")
-    if set(decoded) != {"schema", "schema_version", "provenance"}:
+    if set(decoded) != {"schema", "schema_version", "evidence"}:
         raise ValueError("retrieval provenance envelope fields are invalid")
     if decoded["schema"] != _EVIDENCE_SCHEMA:
         raise ValueError("retrieval provenance schema is unsupported")
+    if type(decoded["schema_version"]) is not int:
+        raise ValueError("retrieval provenance schema version must be an integer")
     if decoded["schema_version"] != _EVIDENCE_SCHEMA_VERSION:
         raise ValueError("retrieval provenance schema version is unsupported")
 
-    values = decoded["provenance"]
+    values = decoded["evidence"]
     if not isinstance(values, dict):
-        raise ValueError("retrieval provenance payload must be an object")
-    expected_fields = {field.name for field in fields(KnowledgeProvenance)}
+        raise ValueError("retrieval provenance evidence must be an object")
+    expected_fields = {field.name for field in fields(RetrievalEvidence)}
     if set(values) != expected_fields:
         raise ValueError("retrieval provenance fields are invalid")
     for name, value in values.items():
@@ -75,12 +128,14 @@ def deserialize_retrieval_provenance(payload: str) -> KnowledgeProvenance:
                 raise ValueError(f"retrieval provenance {name} must be a string or null")
         elif not isinstance(value, str):
             raise ValueError(f"retrieval provenance {name} must be a string")
-    return KnowledgeProvenance(**values)
+    if len(values["source_locator_sha256"]) != 64:
+        raise ValueError("retrieval provenance source locator digest is invalid")
+    return RetrievalEvidence(**values)
 
 
 def verify_retrieval_provenance(
     store: ConnectionProvider,
-    provenance: KnowledgeProvenance,
+    evidence: RetrievalEvidence,
     *,
     require_current: bool = True,
 ) -> RetrievalEvidenceStatus:
@@ -105,10 +160,10 @@ def verify_retrieval_provenance(
              AND c.chunk_id=?
             WHERE a.workspace_id=? AND a.artifact_key=?""",
             (
-                provenance.version,
-                provenance.chunk_id,
-                provenance.workspace_id,
-                provenance.artifact_key,
+                evidence.version,
+                evidence.chunk_id,
+                evidence.workspace_id,
+                evidence.artifact_key,
             ),
         ).fetchone()
         if row is None:
@@ -118,7 +173,7 @@ def verify_retrieval_provenance(
 
         authoritative = {
             "source_id": row["source_id"],
-            "source_locator": row["source_locator"],
+            "source_locator_sha256": _sha256(row["source_locator"]),
             "normalized_sha256": row["normalized_sha256"],
             "raw_sha256": row["raw_sha256"],
             "parser_name": row["parser_name"],
@@ -135,28 +190,29 @@ def verify_retrieval_provenance(
             "chunk_sha256": row["chunk_sha256"],
         }
         for name, value in authoritative.items():
-            if getattr(provenance, name) != value:
+            if getattr(evidence, name) != value:
                 raise CorpusCorruptionError(
                     f"retrieval provenance {name} does not match durable authority"
                 )
 
         normalized_text = row["normalized_text"]
-        if hashlib.sha256(normalized_text.encode()).hexdigest() != row["normalized_sha256"]:
+        if _sha256(normalized_text) != row["normalized_sha256"]:
             raise CorpusCorruptionError("retrieval provenance version hash mismatch")
         chunk_text = row["text"]
-        if hashlib.sha256(chunk_text.encode()).hexdigest() != row["chunk_sha256"]:
+        if _sha256(chunk_text) != row["chunk_sha256"]:
             raise CorpusCorruptionError("retrieval provenance chunk hash mismatch")
-        if normalized_text[provenance.start_char : provenance.end_char] != chunk_text:
+        if normalized_text[evidence.start_char : evidence.end_char] != chunk_text:
             raise CorpusCorruptionError("retrieval provenance position does not match source text")
 
-        if provenance.source_id is not None:
+        if evidence.source_id is not None:
             local_rows = conn.execute(
                 "SELECT workspace_id, locator FROM research_sources WHERE source_id=?",
-                (provenance.source_id,),
+                (evidence.source_id,),
             ).fetchall()
             http_rows = conn.execute(
-                "SELECT workspace_id, url AS locator FROM research_http_sources WHERE source_id=?",
-                (provenance.source_id,),
+                """SELECT workspace_id, url AS locator FROM research_http_sources
+                WHERE source_id=?""",
+                (evidence.source_id,),
             ).fetchall()
             source_rows = tuple(local_rows) + tuple(http_rows)
             if len(source_rows) != 1:
@@ -165,8 +221,8 @@ def verify_retrieval_provenance(
                 )
             source = source_rows[0]
             if (
-                source["workspace_id"] != provenance.workspace_id
-                or source["locator"] != provenance.source_locator
+                source["workspace_id"] != evidence.workspace_id
+                or source["locator"] != row["source_locator"]
             ):
                 raise CorpusCorruptionError(
                     "retrieval source identity no longer matches durable authority"
@@ -174,7 +230,7 @@ def verify_retrieval_provenance(
 
         status = (
             RetrievalEvidenceStatus.CURRENT
-            if int(row["current_version"]) == provenance.version
+            if int(row["current_version"]) == evidence.version
             else RetrievalEvidenceStatus.SUPERSEDED
         )
     if require_current and status is RetrievalEvidenceStatus.SUPERSEDED:
@@ -189,12 +245,12 @@ def restore_retrieval_provenance(
     payload: str,
     *,
     require_current: bool = True,
-) -> tuple[KnowledgeProvenance, RetrievalEvidenceStatus]:
+) -> tuple[RetrievalEvidence, RetrievalEvidenceStatus]:
     """Decode and authoritatively revalidate durable retrieval evidence."""
-    provenance = deserialize_retrieval_provenance(payload)
+    evidence = deserialize_retrieval_provenance(payload)
     status = verify_retrieval_provenance(
         store,
-        provenance,
+        evidence,
         require_current=require_current,
     )
-    return provenance, status
+    return evidence, status
