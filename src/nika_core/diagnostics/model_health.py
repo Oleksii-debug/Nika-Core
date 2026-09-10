@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -133,6 +134,7 @@ class OllamaModelHealthProbe:
             with self._client_factory(
                 timeout=self._timeout_seconds,
                 follow_redirects=False,
+                trust_env=False,
             ) as client:
                 tags_response = client.get(f"{self._base_url}/api/tags")
                 reachable = ModelHealthFact.YES
@@ -185,7 +187,25 @@ class OllamaModelHealthProbe:
             or not self._base_url.strip()
             or not isinstance(self._provider_id, str)
             or not self._provider_id.strip()
+            or isinstance(self._timeout_seconds, bool)
+            or not isinstance(self._timeout_seconds, (int, float))
             or self._timeout_seconds <= 0
+        ):
+            return ModelHealthFact.NO
+        try:
+            parsed = urlsplit(self._base_url)
+            port = parsed.port
+        except ValueError:
+            return ModelHealthFact.NO
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+            or port is None
         ):
             return ModelHealthFact.NO
         return ModelHealthFact.YES
