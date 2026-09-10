@@ -101,21 +101,11 @@ def _evaluation() -> EvaluationSet:
     )
 
 
-def test_fake_resource_observer_emits_explicit_unknown_without_erasing_zero() -> None:
+def test_fake_observers_keep_zero_distinct_and_do_not_fabricate_gpu() -> None:
     resources = _FakeResourceObserver(
         (
-            ResourceSnapshot(
-                cpu_percent=12.5,
-                memory_percent=25.0,
-                available_memory_bytes=8_000,
-                process_rss_bytes=None,
-            ),
-            ResourceSnapshot(
-                cpu_percent=42.0,
-                memory_percent=40.0,
-                available_memory_bytes=6_000,
-                process_rss_bytes=0,
-            ),
+            ResourceSnapshot(12.5, 0.0, 8_000),
+            ResourceSnapshot(42.0, 40.0, 6_000),
         )
     )
     accelerator = _FakeAcceleratorObserver(
@@ -144,34 +134,26 @@ def test_fake_resource_observer_emits_explicit_unknown_without_erasing_zero() ->
 
     before, after = payload["samples"]
     assert before["phase"] == "before"
-    assert before["host_cpu_percent"] == {
+    assert before["host_ram_percent"] == {
         "status": "observed",
         "scope": "host",
         "unit": "percent",
-        "value": 12.5,
+        "value": 0.0,
         "unknown_reason": None,
     }
     assert before["nika_process_rss_bytes"]["status"] == "unknown"
     assert before["nika_process_rss_bytes"]["value"] is None
-    assert (
-        before["nika_process_rss_bytes"]["unknown_reason"]
-        == "metric_unavailable"
-    )
+    assert before["nika_process_rss_bytes"]["unknown_reason"] == "metric_unavailable"
+    assert after["host_cpu_percent"]["value"] == 42.0
 
-    assert after["phase"] == "after"
-    assert after["nika_process_rss_bytes"]["status"] == "observed"
-    assert after["nika_process_rss_bytes"]["value"] == 0
-    assert after["nika_process_rss_bytes"]["unknown_reason"] is None
-
-    # Existing accelerator evidence is intentionally generic. Without accelerator
-    # kind attestation, even a numeric 91% reading is not truthful GPU evidence.
+    # AcceleratorSnapshot has no accelerator-kind attestation. Even a numeric
+    # 91% reading therefore cannot be promoted into GPU evidence.
     assert report.peak_accelerator_percent == 91.0
     assert before["untyped_accelerator_observation_present"] is True
     assert before["gpu_utilization_percent"]["status"] == "unknown"
     assert before["gpu_utilization_percent"]["value"] is None
-    assert (
-        before["gpu_utilization_percent"]["unknown_reason"]
-        == "gpu_identity_unavailable"
+    assert before["gpu_utilization_percent"]["unknown_reason"] == (
+        "gpu_identity_unavailable"
     )
     assert payload["summary"]["peak_gpu_utilization_percent"]["value"] is None
 
