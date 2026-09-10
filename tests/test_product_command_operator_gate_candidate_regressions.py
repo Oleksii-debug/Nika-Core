@@ -236,3 +236,89 @@ def test_terminal_integration_preserves_exact_current_candidate() -> None:
 
     assert projection.candidate == current_sha
     assert projection.next == "next_work"
+
+
+def test_historical_incomplete_integration_cannot_override_current_work_epoch() -> None:
+    historical_sha = "d" * 40
+    current_sha = "e" * 40
+    detail = _detail(
+        ProductStatusEntry(
+            kind=ProductStatusKind.COMPONENT,
+            item_id="work-old",
+            label="Old work",
+            state="completed",
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.DEPLOYMENT,
+            item_id="work-old:integration",
+            label="Old integration",
+            state="pending",
+            evidence=_candidate(historical_sha),
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.COMPONENT,
+            item_id="work-current",
+            label="Current work",
+            state="completed",
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.BUILD,
+            item_id="work-current:test",
+            label="Current tests",
+            state="passed",
+            evidence=_candidate(current_sha),
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.QA,
+            item_id="work-current:qa",
+            label="Current QA",
+            state="passed",
+            evidence=_candidate(current_sha),
+        ),
+    )
+
+    projection = project_operator_status(detail)
+
+    assert projection.work == "work-current=completed"
+    assert projection.candidate == current_sha
+    assert projection.test == "work-current:test=passed"
+    assert projection.qa == "work-current:qa=passed"
+    assert projection.integration == "not_started"
+    assert projection.next == "integration:not_started"
+
+
+def test_previous_work_gates_cannot_satisfy_new_component_without_current_gates() -> None:
+    detail = _detail(
+        ProductStatusEntry(
+            kind=ProductStatusKind.COMPONENT,
+            item_id="work-a",
+            label="Work A",
+            state="completed",
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.BUILD,
+            item_id="work-a:test",
+            label="Work A tests",
+            state="passed",
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.QA,
+            item_id="work-a:qa",
+            label="Work A QA",
+            state="passed",
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.COMPONENT,
+            item_id="work-b",
+            label="Work B",
+            state="completed",
+        ),
+    )
+
+    projection = project_operator_status(detail)
+
+    assert projection.work == "work-b=completed"
+    assert projection.test == "unknown"
+    assert projection.qa == "unknown"
+    assert projection.integration == "not_started"
+    assert projection.next == "test:not_started"
