@@ -129,6 +129,15 @@ class ModelContextAssembly:
         if tuple(item.position for item in self.provenance) != expected_positions:
             raise ValueError("provenance positions must be contiguous and ordered")
 
+        contents = _decode_model_contents(self.model_text)
+        if len(contents) != len(self.provenance):
+            raise ContextProvenanceError("model content/provenance unit counts do not match")
+        for content, evidence in zip(contents, self.provenance, strict=True):
+            if _sha256_text(content) != evidence.content_sha256:
+                raise ContextProvenanceError(
+                    f"model content does not match provenance at position {evidence.position}"
+                )
+
     def to_request_metadata(self) -> dict[str, str]:
         """Return content-free metadata; provider adapters must not serialize it as messages."""
         payload = {
@@ -317,6 +326,30 @@ def _bind_memory(
     )
 
 
+def _decode_model_contents(model_text: str) -> tuple[str, ...]:
+    try:
+        payload = json.loads(model_text)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ContextProvenanceError("model context must be canonical JSON") from exc
+    if not isinstance(payload, dict) or set(payload) != {"context_units"}:
+        raise ContextProvenanceError("model context fields do not match schema")
+    units = payload["context_units"]
+    if not isinstance(units, list) or not units:
+        raise ContextProvenanceError("model context units must be a non-empty list")
+
+    contents: list[str] = []
+    for position, unit in enumerate(units, start=1):
+        if not isinstance(unit, dict) or set(unit) != {"position", "content"}:
+            raise ContextProvenanceError("model context unit fields do not match schema")
+        raw_position = unit["position"]
+        if isinstance(raw_position, bool) or raw_position != position:
+            raise ContextProvenanceError("model context positions must be contiguous and ordered")
+        contents.append(_require_content(unit["content"]))
+    if _canonical_json(payload) != model_text:
+        raise ContextProvenanceError("model context JSON is not canonical")
+    return tuple(contents)
+
+
 def _canonical_json(value: object) -> str:
     try:
         return json.dumps(
@@ -349,7 +382,7 @@ def _require_identifier(value: str, label: str) -> None:
         raise ValueError(f"{label} must not contain control characters")
 
 
-def _require_content(value: str) -> str:
+def _require_content(value: object) -> str:
     if not isinstance(value, str):
         raise TypeError("context content must be text")
     if not value:
