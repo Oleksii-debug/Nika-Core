@@ -9,7 +9,11 @@ from enum import StrEnum
 from typing import TypeAlias
 
 from nika_core.memory.contracts import MemoryRecord, MemoryScope
-from nika_core.multi_agent.research_results import SourceInspectionAssignment
+from nika_core.multi_agent.research_results import (
+    SourceInspectionAssignment,
+    SourceResultBindingError,
+    encode_source_result,
+)
 from nika_core.research.models import (
     FreshnessState,
     ResearchResultItem,
@@ -220,26 +224,25 @@ def _bind_research(
 ) -> tuple[str, ContextEvidenceProvenance]:
     assignment = selection.assignment
     result_set = selection.result_set
-    if result_set.workspace_id != assignment.source.workspace_id:
-        raise ContextProvenanceError("research result workspace does not match trusted assignment")
+    try:
+        encoded = encode_source_result(assignment, result_set)
+    except (SourceResultBindingError, TypeError, ValueError) as exc:
+        raise ContextProvenanceError(
+            "research result is not bound to the trusted source assignment"
+        ) from exc
 
     matches = tuple(item for item in result_set.items if item.ordinal == selection.item_ordinal)
     if len(matches) != 1:
         raise ContextProvenanceError("research item ordinal is missing or duplicated")
     item = matches[0]
-    _validate_research_item(assignment, item)
+    _validate_research_freshness(assignment.source.kind, item)
 
+    result_digest = encoded.get("result_digest")
+    if not isinstance(result_digest, str) or not _is_sha256(result_digest):
+        raise ContextProvenanceError("research result digest is invalid")
     content = _require_content(item.snippet)
     content_sha256 = _sha256_text(content)
-    revision_material = {
-        "source_id": assignment.source.source_id,
-        "workspace_id": assignment.source.workspace_id,
-        "source_kind": assignment.source.kind.value,
-        "result_set_id": result_set.result_set_id,
-        "document_id": item.document_id,
-        "content_sha256": content_sha256,
-    }
-    revision_id = "research:" + _sha256_text(_canonical_json(revision_material))
+    revision_id = "research:" + result_digest
     freshness = tuple(
         sorted(
             {
@@ -259,31 +262,16 @@ def _bind_research(
     )
 
 
-def _validate_research_item(
-    assignment: SourceInspectionAssignment,
+def _validate_research_freshness(
+    source_kind: SourceKind,
     item: ResearchResultItem,
 ) -> None:
-    if not isinstance(item, ResearchResultItem):
-        raise TypeError("research result item must be ResearchResultItem")
-    if not item.evidence:
-        raise ContextProvenanceError("research item has no structured provenance")
     for evidence in item.evidence:
-        if (
-            evidence.source_id != assignment.source.source_id
-            or evidence.source_kind is not assignment.source.kind
-            or evidence.locator != assignment.source.locator
-        ):
-            raise ContextProvenanceError(
-                "research item provenance does not match trusted assignment"
-            )
         if evidence.freshness in _UNSAFE_FRESHNESS:
             raise ContextProvenanceError(
                 f"research item freshness is unsafe: {evidence.freshness.value}"
             )
-        if (
-            assignment.source.kind is SourceKind.HTTP
-            and evidence.freshness is FreshnessState.UNKNOWN
-        ):
+        if source_kind is SourceKind.HTTP and evidence.freshness is FreshnessState.UNKNOWN:
             raise ContextProvenanceError("HTTP research item freshness is unknown")
 
 
