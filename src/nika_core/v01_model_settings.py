@@ -23,6 +23,7 @@ from nika_core.model_gateway.api_route import (
     EnvironmentCredentialResolver,
 )
 from nika_core.model_gateway.contracts import PrivacyClass, ProviderKind
+from nika_core.model_gateway.foundry_local import FoundryLocalProvider
 from nika_core.model_gateway.gateway import ModelGateway, model_identity_fingerprint
 from nika_core.model_gateway.providers import OllamaProvider
 from nika_core.multi_agent.model_gateway_runtime import ModelGatewayAgentRuntime
@@ -61,15 +62,20 @@ class ModelSetupError(ValueError):
 
 
 class ModelSelection(BaseModel):
-    """Secret-free durable identity for one explicit V0.1 model route."""
+    """Secret-free durable identity for one explicit V0.1 intelligence route."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     schema_version: Literal[1] = 1
-    route_kind: Literal["ollama", "openai_compatible"]
-    provider_id: str = Field(min_length=1, max_length=128)
-    model: str = Field(min_length=1, max_length=512)
-    base_url: str = Field(min_length=1, max_length=2048)
+    route_kind: Literal[
+        "deterministic",
+        "foundry_local",
+        "ollama",
+        "openai_compatible",
+    ]
+    provider_id: str | None = Field(default=None, min_length=1, max_length=128)
+    model: str | None = Field(default=None, min_length=1, max_length=512)
+    base_url: str | None = Field(default=None, min_length=1, max_length=2048)
     credential_ref: str | None = Field(default=None, max_length=512, repr=False)
     private_data_allowed: bool = False
     timeout_seconds: float = Field(default=60.0, gt=0.0, le=MAX_MODEL_TIMEOUT_SECONDS)
@@ -83,7 +89,9 @@ class ModelSelection(BaseModel):
 
     @field_validator("provider_id", "model", "base_url")
     @classmethod
-    def clean_text(cls, value: str) -> str:
+    def clean_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         if value != value.strip() or not value or any(ord(char) < 32 for char in value):
             raise ValueError("invalid model route text")
         return value
@@ -109,9 +117,35 @@ class ModelSelection(BaseModel):
 
     @model_validator(mode="after")
     def coherent_route(self) -> ModelSelection:
+        if self.route_kind == "deterministic":
+            if any(
+                value is not None
+                for value in (
+                    self.provider_id,
+                    self.model,
+                    self.base_url,
+                    self.credential_ref,
+                )
+            ):
+                raise ValueError("deterministic route must not name a provider or model")
+            return self
+
+        if self.route_kind == "foundry_local":
+            if self.provider_id != "foundry-local":
+                raise ValueError("embedded provider identity must be foundry-local")
+            if self.model is None:
+                raise ValueError("embedded route requires an explicit model")
+            if self.base_url is not None:
+                raise ValueError("embedded route must not contain a network endpoint")
+            if self.credential_ref is not None:
+                raise ValueError("embedded route must not contain a credential reference")
+            return self
+
         if self.route_kind == "ollama":
             if self.provider_id != "ollama":
                 raise ValueError("Ollama provider identity must be ollama")
+            if self.model is None or self.base_url is None:
+                raise ValueError("Ollama route requires an explicit model and endpoint")
             if self.credential_ref is not None:
                 raise ValueError("Ollama route must not contain a credential reference")
             parsed = urlsplit(self.base_url)
@@ -125,8 +159,10 @@ class ModelSelection(BaseModel):
                 raise ValueError("Ollama base URL must not contain path, query, or fragment")
             return self
 
-        if self.provider_id == "ollama":
-            raise ValueError("configured API route must not impersonate Ollama")
+        if self.provider_id is None or self.model is None or self.base_url is None:
+            raise ValueError("configured API route requires provider, model, and endpoint")
+        if self.provider_id in {"ollama", "foundry-local"}:
+            raise ValueError("configured API route must not impersonate a local provider")
         if self.credential_ref is None or _ENV_CREDENTIAL_REF.fullmatch(self.credential_ref) is None:
             raise ValueError("configured API route requires an env credential reference")
         ApiModelRouteConfig(
@@ -139,12 +175,30 @@ class ModelSelection(BaseModel):
         return self
 
     @property
-    def provider_kind(self) -> ProviderKind:
-        return ProviderKind.LOCAL if self.route_kind == "ollama" else ProviderKind.CLOUD
+    def intelligence_mode(self) -> Literal[
+        "no_llm",
+        "embedded",
+        "local_external",
+        "api_configured",
+    ]:
+        return {
+            "deterministic": "no_llm",
+            "foundry_local": "embedded",
+            "ollama": "local_external",
+            "openai_compatible": "api_configured",
+        }[self.route_kind]
+
+    @property
+    def provider_kind(self) -> ProviderKind | None:
+        if self.route_kind == "deterministic":
+            return None
+        if self.route_kind in {"foundry_local", "ollama"}:
+            return ProviderKind.LOCAL
+        return ProviderKind.CLOUD
 
     @property
     def effective_private_data_allowed(self) -> bool:
-        return True if self.route_kind == "ollama" else self.private_data_allowed
+        return True if self.route_kind != "openai_compatible" else self.private_data_allowed
 
     def canonical_json(self) -> str:
         return self.model_dump_json()
@@ -228,7 +282,7 @@ class V01ModelSettings:
         row = conn.execute("SELECT * FROM v01_model_settings WHERE singleton = 1").fetchone()
         self._revision(row)
         if row is None:
-            raise ModelSetupError("Спочатку виберіть постачальника та модель.")
+            raise ModelSetupError("Спочатку виберіть режим та, якщо потрібно, модель.")
         return ModelSelection.from_stored(row["selection_json"])
 
     def configure(self, payload: Mapping[str, Any]) -> UIResult:
@@ -257,6 +311,7 @@ class V01ModelSettings:
                     "selection_json=excluded.selection_json",
                     (next_revision, selection.canonical_json()),
                 )
+                provider_kind = selection.provider_kind
                 self._audit.append_with_connection(
                     conn,
                     event_type="v01.model.configured",
@@ -264,9 +319,16 @@ class V01ModelSettings:
                     entity_id="default",
                     payload={
                         "revision": next_revision,
+                        "intelligence_mode": selection.intelligence_mode,
                         "provider_id": selection.provider_id,
-                        "provider_kind": selection.provider_kind.value,
-                        "model_fingerprint": model_identity_fingerprint(selection.model),
+                        "provider_kind": (
+                            provider_kind.value if provider_kind is not None else None
+                        ),
+                        "model_fingerprint": (
+                            model_identity_fingerprint(selection.model)
+                            if selection.model is not None
+                            else None
+                        ),
                     },
                 )
             return UIResult(
@@ -278,7 +340,7 @@ class V01ModelSettings:
         except ModelSetupError as exc:
             message = str(exc)
         except (ValidationError, TypeError, ValueError):
-            message = "Перевірте постачальника, модель, адресу, тайм-аут і параметри доступу."
+            message = "Перевірте режим, постачальника, модель, адресу, тайм-аут і параметри доступу."
         except sqlite3.Error:
             message = "Не вдалося зберегти налаштування моделі."
         return UIResult(
@@ -299,12 +361,14 @@ class V01ModelSettings:
             if row is None:
                 return {"status": "missing", "revision": 0}
             selection = ModelSelection.from_stored(row["selection_json"])
+            provider_kind = selection.provider_kind
             return {
                 "status": "ready",
                 "revision": self._revision(row),
+                "intelligence_mode": selection.intelligence_mode,
                 "route_kind": selection.route_kind,
                 "provider_id": selection.provider_id,
-                "provider_kind": selection.provider_kind.value,
+                "provider_kind": provider_kind.value if provider_kind is not None else None,
                 "model": selection.model,
                 "base_url": selection.base_url,
                 "timeout_seconds": selection.timeout_seconds,
@@ -378,6 +442,7 @@ class V01ModelSettings:
                     datetime.now(UTC).isoformat(),
                 ),
             )
+            accepted_provider_kind = accepted.provider_kind
             self._audit.append_with_connection(
                 conn,
                 event_type="v01.model.bound",
@@ -385,9 +450,18 @@ class V01ModelSettings:
                 entity_id=task_id,
                 payload={
                     "schema_version": _SCHEMA_VERSION,
+                    "intelligence_mode": accepted.intelligence_mode,
                     "provider_id": accepted.provider_id,
-                    "provider_kind": accepted.provider_kind.value,
-                    "model_fingerprint": model_identity_fingerprint(accepted.model),
+                    "provider_kind": (
+                        accepted_provider_kind.value
+                        if accepted_provider_kind is not None
+                        else None
+                    ),
+                    "model_fingerprint": (
+                        model_identity_fingerprint(accepted.model)
+                        if accepted.model is not None
+                        else None
+                    ),
                 },
             )
             return accepted
@@ -404,15 +478,19 @@ class V01BoundModelRuntimeFactory:
         settings: V01ModelSettings | None = None,
         credential_resolver: CredentialResolverPort | None = None,
         client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient,
+        foundry_manager_factory: Callable[[], Any] | None = None,
     ) -> None:
         self._store = store
         self._definitions = definitions
         self._settings = settings or V01ModelSettings(store)
         self._credential_resolver = credential_resolver or EnvironmentCredentialResolver()
         self._client_factory = client_factory
+        self._foundry_manager_factory = foundry_manager_factory
 
-    def for_task(self, task_id: str) -> ModelGatewayAgentRuntime:
+    def for_task(self, task_id: str) -> ModelGatewayAgentRuntime | None:
         selection = self._settings.for_task(task_id)
+        if selection.route_kind == "deterministic":
+            return None
         return self._runtime_for_selection(selection)
 
     def supervisor_for_task(
@@ -430,6 +508,10 @@ class V01BoundModelRuntimeFactory:
         """
 
         selection = self._settings.for_task(task_id)
+        if selection.route_kind == "deterministic":
+            raise ModelSetupError(
+                "Детермінований режим виконується packaged runtime без ModelGateway."
+            )
         return MultiAgentSupervisor(
             runtime=self._runtime_for_selection(selection),
             store=store,
@@ -437,27 +519,54 @@ class V01BoundModelRuntimeFactory:
             runtime_timeout_seconds=selection.timeout_seconds,
         )
 
+    @staticmethod
+    def _required_text(value: str | None, *, field: str) -> str:
+        if value is None:
+            raise ModelSetupError(f"Збережений маршрут моделі не має поля {field}.")
+        return value
+
     def _runtime_for_selection(self, selection: ModelSelection) -> ModelGatewayAgentRuntime:
+        if selection.route_kind == "deterministic":
+            raise ModelSetupError(
+                "Детермінований режим не повинен створювати ModelGateway runtime."
+            )
+        provider_id = self._required_text(selection.provider_id, field="provider_id")
+        model = self._required_text(selection.model, field="model")
+        provider_kind = selection.provider_kind
+        if provider_kind is None:
+            raise ModelSetupError("Збережений маршрут моделі не має типу постачальника.")
+
         gateway = ModelGateway(audit_log=AuditLog(self._store))
-        if selection.route_kind == "ollama":
+        if selection.route_kind == "foundry_local":
+            gateway.register(
+                FoundryLocalProvider(
+                    default_model=model,
+                    manager_factory=self._foundry_manager_factory,
+                    allow_download=False,
+                ),
+                default=True,
+            )
+        elif selection.route_kind == "ollama":
+            base_url = self._required_text(selection.base_url, field="base_url")
             gateway.register(
                 OllamaProvider(
-                    default_model=selection.model,
-                    base_url=selection.base_url,
+                    default_model=model,
+                    base_url=base_url,
                     think=False,
                     client_factory=self._client_factory,
                 ),
                 default=True,
             )
         else:
+            base_url = self._required_text(selection.base_url, field="base_url")
             if selection.credential_ref is None:
                 raise ModelSetupError("Збережена API-модель не має посилання на облікові дані.")
             gateway.register(
                 CredentialRefOpenAICompatibleProvider(
                     config=ApiModelRouteConfig(
-                        provider_id=selection.provider_id,
-                        base_url=selection.base_url,
-                        default_model=selection.model,
+                        provider_id=provider_id,
+                        base_url=base_url,
+                        default_model=model,
                         credential_ref=selection.credential_ref,
                         supports_private_data=selection.private_data_allowed,
                         supports_hard_cancellation=False,
@@ -470,9 +579,9 @@ class V01BoundModelRuntimeFactory:
         return ModelGatewayAgentRuntime(
             gateway=gateway,
             definitions=self._definitions,
-            provider_id=selection.provider_id,
-            provider_kind=selection.provider_kind,
-            model=selection.model,
+            provider_id=provider_id,
+            provider_kind=provider_kind,
+            model=model,
             timeout_seconds=selection.timeout_seconds,
             privacy=PrivacyClass.PRIVATE,
             temperature=0.0,
