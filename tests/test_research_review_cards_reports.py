@@ -18,6 +18,11 @@ from nika_core.research.review import (
     ResearchReviewState,
 )
 
+_PUBLIC_SOURCE_1 = (
+    "source-sha256:"
+    "ffa6a744d78d28386438b4a8e8ee32f56718633735057b1b5ddfb5d224d45d98"
+)
+
 
 def _store(tmp_path: Path) -> SQLiteStore:
     store = SQLiteStore(tmp_path / "nika.db")
@@ -169,12 +174,14 @@ def test_cards_and_plain_text_report_preserve_review_and_provenance(tmp_path: Pa
 
     assert len(report.cards) == 1
     assert report.cards[0].review.state is ResearchReviewState.SAVED
+    assert report.cards[0].evidence[0].source_id == "source-1"
     assert report.cards[0].evidence[0].locator == "https://example.org/opportunity"
     assert "Research results" in report.text
     assert "Result 1: Українська можливість" in report.text
     assert "Review: saved" in report.text
     assert "Review note: важливий доказ" in report.text
-    assert "Source ID: source-1" in report.text
+    assert f"Source ID: {_PUBLIC_SOURCE_1}" in report.text
+    assert "Source ID: source-1" not in report.text
     assert "Source kind: http" in report.text
     assert "Freshness: current" in report.text
     assert "Location: http-source" in report.text

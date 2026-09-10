@@ -67,13 +67,28 @@ class AccessibleResearchReport:
     text: str
 
 
+def safe_evidence_source_reference(evidence: ResearchEvidence) -> str:
+    """Return a bounded deterministic public token for an internal source identity.
+
+    ``ResearchEvidence.source_id`` is internal exact-correlation state and may be
+    caller supplied. Public reports therefore never reproduce it verbatim. The
+    SHA-256 token is stable across report formats while revealing no raw URL,
+    path, credential, or token bytes from the internal identifier.
+    """
+
+    if not isinstance(evidence, ResearchEvidence):
+        raise TypeError("evidence must be a ResearchEvidence")
+    digest = hashlib.sha256(evidence.source_id.encode("utf-8")).hexdigest()
+    return f"source-sha256:{digest}"
+
+
 def safe_evidence_locator(evidence: ResearchEvidence) -> str:
     """Return a public provenance label without exposing the raw source locator.
 
-    Exact provenance remains available through the stable source_id on the same
-    evidence record. Public reports deliberately avoid reproducing URLs, signed
-    paths, credentials, query strings, fragments, or private local filesystem
-    paths from locator.
+    Exact provenance remains on the internal evidence record. Public reports pair
+    this coarse locator label with ``safe_evidence_source_reference`` rather than
+    reproducing raw source IDs, URLs, signed paths, credentials, query strings,
+    fragments, or private local filesystem paths.
     """
 
     if not isinstance(evidence, ResearchEvidence):
@@ -117,7 +132,7 @@ def _render_accessible_report_text(
                 lines.extend(
                     [
                         f"  Evidence {evidence_index}",
-                        f"  Source ID: {evidence.source_id}",
+                        f"  Source ID: {safe_evidence_source_reference(evidence)}",
                         f"  Source kind: {evidence.source_kind.value}",
                         f"  Freshness: {freshness}",
                         f"  Location: {safe_evidence_locator(evidence)}",

@@ -19,6 +19,11 @@ from nika_core.research.review import (
     render_accessible_report_text,
 )
 
+_PUBLIC_SOURCE_1 = (
+    "source-sha256:"
+    "ffa6a744d78d28386438b4a8e8ee32f56718633735057b1b5ddfb5d224d45d98"
+)
+
 
 def _report() -> AccessibleResearchReport:
     card = ResearchCard(
@@ -81,7 +86,7 @@ def test_csv_preserves_review_provenance_and_blocks_formula_injection() -> None:
     assert row["review_state"] == "saved"
     assert row["review_note"] == "'  @SUM(A1:A2) перевірити вручну"
     assert row["review_updated_at"] == "2026-08-20T07:10:00+00:00"
-    assert row["source_id"] == "source-1"
+    assert row["source_id"] == _PUBLIC_SOURCE_1
     assert row["source_kind"] == "http"
     assert row["freshness"] == "current"
     assert row["locator"] == "http-source"
@@ -107,6 +112,7 @@ def test_html_is_semantic_and_escapes_untrusted_text() -> None:
     )
     assert "Грант &amp; навчання &lt;script&gt;alert(1)&lt;/script&gt;" in text
     assert '<dt lang="en">Review updated</dt><dd>2026-08-20T07:10:00+00:00</dd>' in text
+    assert f'<dt lang="en">Source ID</dt><dd>{_PUBLIC_SOURCE_1}</dd>' in text
     assert "<dt lang=\"en\">Location</dt><dd>http-source</dd>" in text
     assert "https://example.org/" not in text
     assert "<script>alert(1)</script>" not in text
@@ -122,7 +128,7 @@ def test_docx_has_heading_hierarchy_labels_review_and_provenance() -> None:
     assert ("Heading 3", "Evidence") in paragraphs
     assert ("Normal", "Review: saved") in paragraphs
     assert ("Normal", "Review updated: 2026-08-20T07:10:00+00:00") in paragraphs
-    assert ("Normal", "Source ID: source-1") in paragraphs
+    assert ("Normal", f"Source ID: {_PUBLIC_SOURCE_1}") in paragraphs
     assert ("Normal", "Location: http-source") in paragraphs
     assert document.core_properties.title == "Research results"
     assert document.core_properties.author == "Nika Core"
@@ -146,7 +152,7 @@ def test_xlsx_is_flat_accessible_and_blocks_formula_injection() -> None:
     assert values["title"] == "'=1+1 Українська <можливість>"
     assert values["review_note"] == "'  @SUM(A1:A2) перевірити вручну"
     assert values["review_updated_at"] == "2026-08-20T07:10:00+00:00"
-    assert values["source_id"] == "source-1"
+    assert values["source_id"] == _PUBLIC_SOURCE_1
     assert values["locator"] == "http-source"
     assert workbook["Results"]["G2"].data_type == "s"
     assert workbook.properties.title == "Research results"
@@ -155,11 +161,14 @@ def test_xlsx_is_flat_accessible_and_blocks_formula_injection() -> None:
     assert workbook.properties.modified.isoformat() == "2026-08-20T07:00:00"
 
 
-def test_all_formats_redact_raw_http_and_local_locator_secrets() -> None:
+def test_all_formats_redact_raw_http_local_locator_and_source_id_secrets() -> None:
     report = _report()
     card = report.cards[0]
     hostile_http = ResearchEvidence(
-        source_id="http-source-id",
+        source_id=(
+            "https://source-user:source-pass@example.invalid/private/SOURCE_ID_HTTP_PATH"
+            "?api_key=SOURCE_ID_HTTP_QUERY#SOURCE_ID_HTTP_FRAGMENT"
+        ),
         source_kind=SourceKind.HTTP,
         locator=(
             "https://resolver-user:resolver-pass@example.org/private/HTTP_PATH_CANARY"
@@ -169,7 +178,7 @@ def test_all_formats_redact_raw_http_and_local_locator_secrets() -> None:
         freshness=FreshnessState.CURRENT,
     )
     hostile_local = ResearchEvidence(
-        source_id="local-source-id",
+        source_id=r"C:\Users\Private Source\Secrets\SOURCE_ID_LOCAL_PATH.txt",
         source_kind=SourceKind.LOCAL_FILE,
         locator=r"C:\Users\Private User\Secrets\LOCAL_PATH_CANARY.txt",
         observed_at="2026-08-20T07:01:00+00:00",
@@ -209,6 +218,13 @@ def test_all_formats_redact_raw_http_and_local_locator_secrets() -> None:
         "HTTP_FRAGMENT_CANARY",
         "Private User",
         "LOCAL_PATH_CANARY",
+        "source-user",
+        "source-pass",
+        "SOURCE_ID_HTTP_PATH",
+        "SOURCE_ID_HTTP_QUERY",
+        "SOURCE_ID_HTTP_FRAGMENT",
+        "Private Source",
+        "SOURCE_ID_LOCAL_PATH",
     )
     exporter = ResearchReportExporter()
     for report_format in ResearchReportFormat:

@@ -18,6 +18,7 @@ from nika_core.research.review import (
     ResearchCard,
     render_accessible_report_text,
     safe_evidence_locator,
+    safe_evidence_source_reference,
 )
 
 _FORMULA_PREFIXES = ("=", "+", "-", "@")
@@ -157,7 +158,10 @@ class ResearchReportExporter:
                 parts.extend(
                     [
                         "<li><dl>",
-                        f"<dt{english_attr}>Source ID</dt><dd>{_escape(evidence.source_id)}</dd>",
+                        (
+                            f"<dt{english_attr}>Source ID</dt>"
+                            f"<dd>{_escape(safe_evidence_source_reference(evidence))}</dd>"
+                        ),
                         (
                             f"<dt{english_attr}>Source kind</dt>"
                             f"<dd>{_escape(evidence.source_kind.value)}</dd>"
@@ -211,7 +215,11 @@ class ResearchReportExporter:
                     )
                     paragraph = document.add_paragraph(style="List Number")
                     paragraph.add_run(f"Evidence {evidence_index}").bold = True
-                    _add_labeled_paragraph(document, "Source ID", evidence.source_id)
+                    _add_labeled_paragraph(
+                        document,
+                        "Source ID",
+                        safe_evidence_source_reference(evidence),
+                    )
                     _add_labeled_paragraph(document, "Source kind", evidence.source_kind.value)
                     _add_labeled_paragraph(document, "Freshness", freshness)
                     _add_labeled_paragraph(document, "Location", safe_evidence_locator(evidence))
@@ -315,7 +323,7 @@ def _rows(report: AccessibleResearchReport) -> list[dict[str, object]]:
             if evidence is not None:
                 row.update(
                     {
-                        "source_id": evidence.source_id,
+                        "source_id": safe_evidence_source_reference(evidence),
                         "source_kind": evidence.source_kind.value,
                         "freshness": (
                             evidence.freshness.value if evidence.freshness is not None else "n/a"
