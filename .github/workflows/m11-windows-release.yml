@@ -14,6 +14,7 @@ on:
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
       - "tests/test_release_sbom.py"
+      - "tests/test_release_provenance_workflow.py"
       - "tests/test_qa_workflow_lineage.py"
       - "pyproject.toml"
       - ".github/workflows/m11-windows-release.yml"
@@ -32,6 +33,7 @@ on:
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
       - "tests/test_release_sbom.py"
+      - "tests/test_release_provenance_workflow.py"
       - "tests/test_qa_workflow_lineage.py"
       - "pyproject.toml"
       - ".github/workflows/m11-windows-release.yml"
@@ -64,7 +66,7 @@ jobs:
         run: python scripts/qa_assert_checkout_identity.py
       - name: Install GUI, packaging and test dependencies
         run: python -m pip install -e ".[gui,qa,dev]"
-      - name: Resolve exact runtime dependency provenance
+      - name: Install exact runtime and capture dependency provenance
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force ./build/m11 | Out-Null
@@ -72,7 +74,7 @@ jobs:
           python -m pip list --format=freeze --exclude nika-core |
             Set-Content -Encoding utf8NoBOM $constraints
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m pip install --dry-run --ignore-installed --quiet --constraint $constraints --report ./build/m11/pip-runtime-report.json ".[gui]"
+          python -m pip install --ignore-installed --quiet --constraint $constraints --report ./build/m11/pip-runtime-report.json ".[gui]"
           $resolverExit = $LASTEXITCODE
           Remove-Item $constraints -Force -ErrorAction SilentlyContinue
           if ($resolverExit -ne 0) { exit $resolverExit }
@@ -84,7 +86,7 @@ jobs:
           if (-not $version) { throw 'Could not resolve [project].version from pyproject.toml' }
           "version=$version" >> $env:GITHUB_OUTPUT
       - name: Run M11 M12 source regressions
-        run: python -m pytest tests/test_m11_m12_release.py tests/test_release_sbom.py tests/test_qa_workflow_lineage.py -q
+        run: python -m pytest tests/test_m11_m12_release.py tests/test_release_sbom.py tests/test_release_provenance_workflow.py tests/test_qa_workflow_lineage.py -q
       - name: Build standalone one-dir Windows candidate, notices and manifest
         shell: pwsh
         run: >-
