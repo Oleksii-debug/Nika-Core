@@ -9,7 +9,7 @@ from nika_core.product_factory_toolsmith_state_impl import (
 )
 
 _DURABLE_REASON = "Product Factory worker capability gap"
-_DURABLE_ATTEMPTED_METHODS: tuple[str, ...] = ()
+_DURABLE_SEARCH_EVIDENCE_MARKER = "capability search evidence present"
 
 
 class ProductFactoryToolsmithBindingRepository(_BindingRepository):
@@ -33,10 +33,13 @@ class ProductFactoryToolsmithBindingRepository(_BindingRepository):
                 "attempted methods must not be empty"
             )
 
+        durable_attempted_methods = (
+            (_DURABLE_SEARCH_EVIDENCE_MARKER,) if attempted_methods else ()
+        )
         return super().reserve(
             host_task_id=host_task_id,
             request=request,
             capability_id=capability_id,
             reason=_DURABLE_REASON,
-            attempted_methods=_DURABLE_ATTEMPTED_METHODS,
+            attempted_methods=durable_attempted_methods,
         )
