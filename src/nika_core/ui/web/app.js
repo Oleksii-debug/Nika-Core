@@ -14,6 +14,41 @@
   const sourceStatus = document.getElementById("source-setup-status");
   let sourceRevision = 0;
   let sourceDirty = false;
+  const modelInputs = Object.freeze({
+    route_kind: document.getElementById("model-route-kind"),
+    provider_id: document.getElementById("model-provider"),
+    model: document.getElementById("model-name"),
+    base_url: document.getElementById("model-base-url"),
+    credential_ref: document.getElementById("model-credential-ref"),
+    private_data_allowed: document.getElementById("model-private-data"),
+    timeout_seconds: document.getElementById("model-timeout"),
+  });
+  const modelStatus = document.getElementById("model-settings-status");
+  const modelSave = document.getElementById("model-save");
+  let modelRevision = 0;
+  let modelDirty = false;
+  let modelPending = false;
+  let modelGeneration = 0;
+  const recoveryStatus = document.getElementById("recovery-status");
+  const recoverySummary = document.getElementById("recovery-summary");
+  const recoveryFields = Object.freeze({
+    auto_resume_count: document.getElementById("recovery-auto-count"),
+    manual_resume_count: document.getElementById("recovery-manual-count"),
+    approval_count: document.getElementById("recovery-approval-count"),
+    uncertain_count: document.getElementById("recovery-uncertain-count"),
+    blocked_count: document.getElementById("recovery-blocked-count"),
+    resume_failed_count: document.getElementById("recovery-failed-count"),
+  });
+  const allowedRecoveryStatuses = new Set([
+    "not_started",
+    "inventory",
+    "ready",
+    "recovering",
+    "manual",
+    "attention",
+    "failed",
+  ]);
+  let recoverySignature = null;
   const autostartInput = document.getElementById("autostart-enabled");
   const autostartSave = document.getElementById("autostart-save");
   const autostartStatus = document.getElementById("autostart-status");
@@ -195,6 +230,8 @@
   }
 
   function reportStateUnavailable() {
+    renderStartupRecovery(null);
+    renderModelSettings(null);
     renderProductProjectUnavailable(productProjectUnavailableMessage);
     renderTeamTaskUnavailable();
     announce(productProjectUnavailableMessage, true);
@@ -452,6 +489,310 @@
     return { ok: true, changed };
   }
 
+  function validStartupRecovery(snapshot) {
+    if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return false;
+    if (snapshot.schema_version !== 1 || !allowedRecoveryStatuses.has(snapshot.status)) return false;
+    return Object.keys(recoveryFields).every((field) => (
+      Number.isSafeInteger(snapshot[field]) && snapshot[field] >= 0
+    ));
+  }
+
+  function renderStartupRecovery(snapshot) {
+    if (!recoveryStatus || !recoverySummary) {
+      return { ok: false, changed: false, message: "Стан відновлення недоступний." };
+    }
+    if (!validStartupRecovery(snapshot)) {
+      const changed = recoverySignature !== "invalid";
+      recoverySignature = "invalid";
+      recoveryStatus.textContent = "Стан відновлення недоступний або несумісний.";
+      recoverySummary.hidden = true;
+      for (const node of Object.values(recoveryFields)) {
+        if (node) node.textContent = "—";
+      }
+      return {
+        ok: false,
+        changed,
+        message: "Стан відновлення після перезапуску недоступний або несумісний.",
+        assertive: true,
+      };
+    }
+
+    for (const [field, node] of Object.entries(recoveryFields)) {
+      if (node) node.textContent = String(snapshot[field]);
+    }
+    recoverySummary.hidden = false;
+
+    const messages = {
+      not_started: "Перевірка незавершеної роботи ще не почалася.",
+      inventory: "Nika перевіряє незавершену роботу після перезапуску.",
+      ready: "Перевірку відновлення завершено. Немає роботи, яку треба автоматично або вручну продовжити.",
+      recovering: "Nika безпечно продовжує лише crash-left роботу з перевіреним checkpoint.",
+      manual: "Є робота, що очікує ручного продовження або підтвердження. Автоматичний запуск не виконується.",
+      attention: "Невизначена або заблокована робота. Автоматичний повтор не виконується; потрібна перевірка стану.",
+      failed: "Не вдалося безпечно перевірити незавершену роботу. Автоматичне продовження заблоковано.",
+    };
+    const nextSignature = JSON.stringify([
+      snapshot.status,
+      ...Object.keys(recoveryFields).map((field) => snapshot[field]),
+    ]);
+    const changed = recoverySignature !== null && recoverySignature !== nextSignature;
+    recoverySignature = nextSignature;
+    recoveryStatus.textContent = messages[snapshot.status];
+    return {
+      ok: true,
+      changed,
+      message: messages[snapshot.status],
+      assertive: ["attention", "failed"].includes(snapshot.status),
+    };
+  }
+
+  function setModelControlsDisabled(disabled) {
+    for (const input of Object.values(modelInputs)) {
+      if (input) input.disabled = disabled;
+    }
+    if (modelSave) modelSave.disabled = disabled;
+  }
+
+  function applyModelRouteControls(disabled = false) {
+    const route = modelInputs.route_kind?.value;
+    const local = route === "ollama";
+    if (modelInputs.route_kind) modelInputs.route_kind.disabled = disabled;
+    if (modelInputs.model) modelInputs.model.disabled = disabled;
+    if (modelInputs.base_url) modelInputs.base_url.disabled = disabled;
+    if (modelInputs.timeout_seconds) modelInputs.timeout_seconds.disabled = disabled;
+    if (modelInputs.provider_id) modelInputs.provider_id.disabled = disabled || local;
+    if (modelInputs.credential_ref) modelInputs.credential_ref.disabled = disabled || local;
+    if (modelInputs.private_data_allowed) {
+      modelInputs.private_data_allowed.disabled = disabled || local;
+    }
+    if (modelSave) modelSave.disabled = disabled;
+    if (local && !disabled) {
+      if (modelInputs.provider_id) modelInputs.provider_id.value = "ollama";
+      if (modelInputs.credential_ref) modelInputs.credential_ref.value = "";
+      if (modelInputs.private_data_allowed) modelInputs.private_data_allowed.checked = true;
+    }
+  }
+
+  function validModelSnapshot(snapshot) {
+    if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return false;
+    if (snapshot.status === "invalid") return true;
+    if (snapshot.status === "missing") {
+      return snapshot.revision === 0;
+    }
+    if (snapshot.status !== "ready") return false;
+    if (!Number.isSafeInteger(snapshot.revision) || snapshot.revision < 1) return false;
+    if (!["ollama", "openai_compatible"].includes(snapshot.route_kind)) return false;
+    if (typeof snapshot.provider_id !== "string" || !snapshot.provider_id.trim()) return false;
+    if (typeof snapshot.model !== "string" || !snapshot.model.trim()) return false;
+    if (typeof snapshot.base_url !== "string" || !snapshot.base_url.trim()) return false;
+    if (
+      typeof snapshot.timeout_seconds !== "number"
+      || !Number.isFinite(snapshot.timeout_seconds)
+      || snapshot.timeout_seconds <= 0
+      || snapshot.timeout_seconds > 600
+    ) return false;
+    if (typeof snapshot.private_data_allowed !== "boolean") return false;
+    if (typeof snapshot.credential_configured !== "boolean") return false;
+    if (snapshot.route_kind === "ollama") {
+      return snapshot.provider_id === "ollama"
+        && snapshot.credential_configured === false
+        && snapshot.private_data_allowed === true;
+    }
+    return snapshot.provider_id !== "ollama" && snapshot.credential_configured === true;
+  }
+
+  function defaultModelDraft() {
+    if (modelInputs.route_kind) modelInputs.route_kind.value = "ollama";
+    if (modelInputs.provider_id) modelInputs.provider_id.value = "ollama";
+    if (modelInputs.model) modelInputs.model.value = "";
+    if (modelInputs.base_url) modelInputs.base_url.value = "http://localhost:11434";
+    if (modelInputs.credential_ref) modelInputs.credential_ref.value = "";
+    if (modelInputs.private_data_allowed) modelInputs.private_data_allowed.checked = true;
+    if (modelInputs.timeout_seconds) modelInputs.timeout_seconds.value = "60";
+  }
+
+  function renderModelSettings(snapshot) {
+    if (!modelStatus || modelPending) return;
+    const valid = validModelSnapshot(snapshot);
+    if (!valid || snapshot?.status === "invalid") {
+      if (!modelDirty) modelRevision = 0;
+      setModelControlsDisabled(true);
+      modelStatus.textContent = snapshot?.status === "invalid"
+        ? "Збережені налаштування моделі пошкоджені або несумісні. Нові завдання з моделлю заблоковано."
+        : "Не вдалося прочитати налаштування моделі. Перечитайте стан перед зміною.";
+      return;
+    }
+
+    if (snapshot.status === "missing") {
+      if (!modelDirty) {
+        modelRevision = 0;
+        defaultModelDraft();
+      }
+      applyModelRouteControls(false);
+      modelStatus.textContent = modelDirty
+        ? "Модель змінено, але ще не збережено."
+        : "Модель для нових завдань ще не вибрано. Вкажіть назву моделі й збережіть.";
+      return;
+    }
+
+    if (modelDirty && snapshot.revision !== modelRevision) {
+      setModelControlsDisabled(false);
+      applyModelRouteControls(false);
+      if (modelSave) modelSave.disabled = true;
+      modelStatus.textContent = "Збережені налаштування змінилися в іншому вікні. Натисніть «Перечитати модель» перед збереженням.";
+      return;
+    }
+
+    if (!modelDirty) {
+      modelRevision = snapshot.revision;
+      modelInputs.route_kind.value = snapshot.route_kind;
+      modelInputs.provider_id.value = snapshot.provider_id;
+      modelInputs.model.value = snapshot.model;
+      modelInputs.base_url.value = snapshot.base_url;
+      modelInputs.credential_ref.value = "";
+      modelInputs.private_data_allowed.checked = snapshot.private_data_allowed;
+      modelInputs.timeout_seconds.value = String(snapshot.timeout_seconds);
+    }
+    applyModelRouteControls(false);
+    const credentialNote = snapshot.route_kind === "openai_compatible"
+      ? " Посилання на змінну середовища налаштовано, але навмисно не показується; для зміни API-маршруту введіть env:НАЗВА знову."
+      : "";
+    modelStatus.textContent = modelDirty
+      ? "Модель змінено, але ще не збережено."
+      : `Модель збережено для нових завдань: ${snapshot.provider_id}, ${snapshot.model}.${credentialNote}`;
+  }
+
+  function updateModelRouteDraft() {
+    const route = modelInputs.route_kind?.value;
+    if (route === "ollama") {
+      if (modelInputs.provider_id) modelInputs.provider_id.value = "ollama";
+      if (modelInputs.credential_ref) modelInputs.credential_ref.value = "";
+      if (modelInputs.private_data_allowed) modelInputs.private_data_allowed.checked = true;
+      if (modelInputs.base_url && !modelInputs.base_url.value.trim()) {
+        modelInputs.base_url.value = "http://localhost:11434";
+      }
+    } else if (route === "openai_compatible") {
+      if (modelInputs.provider_id?.value === "ollama") modelInputs.provider_id.value = "";
+      if (modelInputs.base_url?.value === "http://localhost:11434") modelInputs.base_url.value = "";
+      if (modelInputs.private_data_allowed) modelInputs.private_data_allowed.checked = false;
+    }
+    applyModelRouteControls(false);
+  }
+
+  function markModelDirty() {
+    if (modelPending) return;
+    modelDirty = true;
+    updateModelRouteDraft();
+    if (modelStatus) {
+      modelStatus.textContent = "Модель змінено, але ще не збережено.";
+    }
+  }
+
+  for (const input of Object.values(modelInputs)) {
+    input?.addEventListener(input?.type === "checkbox" || input?.tagName === "SELECT" ? "change" : "input", markModelDirty);
+  }
+
+  function modelPayload() {
+    const route = modelInputs.route_kind?.value;
+    const model = modelInputs.model?.value.trim() || "";
+    const baseUrl = modelInputs.base_url?.value.trim() || "";
+    const timeout = Number(modelInputs.timeout_seconds?.value);
+    if (!["ollama", "openai_compatible"].includes(route)) {
+      throw new Error("Виберіть тип маршруту моделі.");
+    }
+    if (!model) throw new Error("Введіть назву моделі.");
+    if (!baseUrl) throw new Error("Введіть базову адресу постачальника.");
+    if (!Number.isFinite(timeout) || timeout <= 0 || timeout > 600) {
+      throw new Error("Тайм-аут моделі має бути числом від 1 до 600 секунд.");
+    }
+    if (route === "ollama") {
+      return {
+        revision: modelRevision,
+        route_kind: "ollama",
+        provider_id: "ollama",
+        model,
+        base_url: baseUrl,
+        credential_ref: null,
+        private_data_allowed: true,
+        timeout_seconds: timeout,
+      };
+    }
+    const provider = modelInputs.provider_id?.value.trim() || "";
+    const credentialRef = modelInputs.credential_ref?.value.trim() || "";
+    if (!provider || provider === "ollama") {
+      throw new Error("Введіть окремий ідентифікатор постачальника API.");
+    }
+    if (!/^env:[A-Za-z_][A-Za-z0-9_]*$/.test(credentialRef)) {
+      throw new Error("Введіть лише посилання на змінну середовища у форматі env:НАЗВА.");
+    }
+    return {
+      revision: modelRevision,
+      route_kind: "openai_compatible",
+      provider_id: provider,
+      model,
+      base_url: baseUrl,
+      credential_ref: credentialRef,
+      private_data_allowed: Boolean(modelInputs.private_data_allowed?.checked),
+      timeout_seconds: timeout,
+    };
+  }
+
+  async function dispatchModel(actionId, trigger) {
+    if (modelPending) return;
+    const save = actionId === "settings.model.configure";
+    let payload = {};
+    if (save) {
+      try {
+        payload = modelPayload();
+      } catch (error) {
+        announce(error instanceof Error ? error.message : "Перевірте налаштування моделі.", true);
+        modelStatus.textContent = error instanceof Error ? error.message : "Перевірте налаштування моделі.";
+        if (modelInputs.route_kind?.value === "openai_compatible"
+            && !modelInputs.credential_ref?.value.trim()) {
+          modelInputs.credential_ref?.focus();
+        } else if (!modelInputs.model?.value.trim()) {
+          modelInputs.model?.focus();
+        } else {
+          modelInputs.route_kind?.focus();
+        }
+        return;
+      }
+    }
+
+    modelPending = true;
+    modelGeneration += 1;
+    setModelControlsDisabled(true);
+    let result = null;
+    try {
+      result = await globalThis.pywebview.api.dispatch({
+        request_id: requestId(),
+        action_id: actionId,
+        payload,
+      });
+      if (!["completed", "failed", "rejected"].includes(result?.status)) {
+        throw new Error("Invalid model settings acknowledgement");
+      }
+      const failed = result.status !== "completed";
+      if (!failed) modelDirty = false;
+      announce(result.message, failed);
+      appendLog(result.message);
+    } catch {
+      announce("Немає підтвердження зміни моделі. Перечитайте збережені налаштування перед повтором.", true);
+      appendLog("Немає підтвердження зміни моделі; автоматичний повтор не виконується.");
+    } finally {
+      modelPending = false;
+      modelGeneration += 1;
+      if (!await refreshState({ announceTeamTransitions: false })) renderModelSettings(null);
+      const focusId = result?.focus_id
+        || (result?.status === "failed" || result?.status === "rejected"
+          ? trigger?.dataset?.errorFocusTarget
+          : null);
+      if (focusId) focusElementById(focusId);
+      else if (modelInputs.route_kind && !modelInputs.route_kind.disabled) modelInputs.route_kind.focus();
+      else trigger?.focus?.();
+    }
+  }
+
   function renderAutostart(snapshot) {
     if (!autostartInput || !autostartSave || !autostartStatus || autostartPending) return;
     const messages = {
@@ -529,6 +870,10 @@
   for (const input of Object.values(sourceInputs)) {
     input?.addEventListener("input", () => { sourceDirty = true; });
   }
+  document.getElementById("model-reload")?.addEventListener("click", () => {
+    modelDirty = false;
+  });
+
   document.getElementById("source-reload")?.addEventListener("click", async () => {
     sourceDirty = false;
     if (await refreshState()) announce("Збережені налаштування перечитано.");
@@ -536,8 +881,10 @@
 
   async function refreshState({ announceTeamTransitions = true } = {}) {
     const autostartReadGeneration = autostartGeneration;
+    const modelReadGeneration = modelGeneration;
     if (!globalThis.pywebview?.api?.get_state) {
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
+      if (modelReadGeneration === modelGeneration) renderModelSettings(null);
       reportStateUnavailable();
       return false;
     }
@@ -546,28 +893,38 @@
       response = await globalThis.pywebview.api.get_state();
     } catch {
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
+      if (modelReadGeneration === modelGeneration) renderModelSettings(null);
       reportStateUnavailable();
       return false;
     }
     if (!response?.ok) {
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
+      if (modelReadGeneration === modelGeneration) renderModelSettings(null);
       reportStateUnavailable();
       return false;
     }
     const state = response.state || {};
+    const recoveryRender = renderStartupRecovery(state.startup_recovery ?? null);
     if (autostartReadGeneration === autostartGeneration) renderAutostart(state.autostart ?? null);
+    if (modelReadGeneration === modelGeneration) renderModelSettings(state.v01_model_settings ?? null);
     renderSourceSetup(state.v01_sources ?? null);
     renderItems(tasksList, tasksEmpty, state.tasks || [], (item) => `${item.command || "Без назви"} — ${item.state}`);
     renderItems(agentsList, agentsEmpty, state.agents || [], (item) => `${item.name} — ${item.goal}`);
     renderItems(workspacesList, workspacesEmpty, state.workspaces || [], (item) => `${item.name} — ${item.description || "Без опису"}`);
     const productReady = renderProductProject(state.product_project ?? null);
     const teamRender = renderTeamTask(state.v01_team_task ?? null);
+    if (!recoveryRender.ok) {
+      announce(recoveryRender.message, true);
+      return false;
+    }
     if (!teamRender.ok) {
       announce(teamTaskUnavailableMessage, true);
       return false;
     }
     if (!productReady) return false;
-    if (announceTeamTransitions && teamRender.changed) {
+    if (announceTeamTransitions && recoveryRender.changed) {
+      announce(recoveryRender.message, recoveryRender.assertive);
+    } else if (announceTeamTransitions && teamRender.changed) {
       announce("Стан командного завдання оновлено.");
     }
     return true;
@@ -580,6 +937,10 @@
     }
     if (["settings.autostart.configure", "settings.autostart.refresh"].includes(actionId)) {
       await dispatchAutostart(actionId, trigger);
+      return;
+    }
+    if (["settings.model.configure", "settings.model.refresh"].includes(actionId)) {
+      await dispatchModel(actionId, trigger);
       return;
     }
     const payload = {};
