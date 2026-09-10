@@ -62,13 +62,15 @@ class RecoveryExecution:
 class RuntimeRecoveryService:
     """Inventory and safely resume runtime work after Nika process recreation.
 
-    Startup recovery is intentionally conservative. Only an ACTIVE session left in RUNNING or
-    RETRYING state by abrupt process loss is eligible for automatic continuation, and only when
-    no unresolved external side-effect reservation exists. A recovery claim abandoned before
-    its runtime effect starts is reclaimable only after its durable activation lease expires.
-    Once effect_started is persisted, restart remains fail-closed until reconciliation. Before
-    any execution, the registered runtime must also prove that the persisted resume cursor
-    resolves to a readable durable checkpoint.
+    Startup recovery is intentionally conservative. Only an ACTIVE session left in RUNNING
+    state by abrupt process loss is eligible for automatic continuation, and only when no
+    unresolved external side-effect reservation exists. RETRYING is fail-closed because the
+    canonical runtime session does not durably encode retry number or not-before authority;
+    replaying it after restart could reset bounded backoff or retry budget. A recovery claim
+    abandoned before its runtime effect starts is reclaimable only after its durable activation
+    lease expires. Once effect_started is persisted, restart remains fail-closed until
+    reconciliation. Before any execution, the registered runtime must also prove that the
+    persisted resume cursor resolves to a readable durable checkpoint.
     """
 
     def __init__(
@@ -95,8 +97,9 @@ class RuntimeRecoveryService:
     def inspect(self) -> tuple[RecoveryCandidate, ...]:
         """Return deterministic recovery decisions for every persisted runtime session.
 
-        ACTIVE/RUNNING-or-RETRYING candidates are provisional until
-        ``resume_safe_crash_sessions`` performs the runtime-specific async checkpoint preflight.
+        ACTIVE/RUNNING candidates are provisional until ``resume_safe_crash_sessions`` performs
+        the runtime-specific async checkpoint preflight. ACTIVE/RETRYING candidates remain
+        fail-closed until canonical durable retry attempt + not-before authority exists.
         The sync inventory deliberately never touches third-party checkpoint objects.
 
         Generic external-effect reservations left PENDING across process recreation have unknown
@@ -154,7 +157,7 @@ class RuntimeRecoveryService:
         max_steps: int = 64,
         timeout_seconds: float | None = None,
     ) -> tuple[RecoveryExecution, ...]:
-        """Resume only crash-left ACTIVE sessions with readable durable checkpoints."""
+        """Resume only crash-left ACTIVE/RUNNING sessions with readable durable checkpoints."""
         if max_count <= 0:
             raise ValueError("max_count must be positive")
         eligible = [
@@ -351,13 +354,21 @@ class RuntimeRecoveryService:
             )
 
         if record.is_active:
-            if task_state in {TaskState.RUNNING, TaskState.RETRYING}:
+            if task_state == TaskState.RETRYING:
+                return self._candidate(
+                    record,
+                    task_state,
+                    RecoveryDisposition.INCONSISTENT_STATE,
+                    "crash-left RETRYING session has no durable retry attempt/not-before "
+                    "authority; automatic resume would reset bounded retry semantics",
+                )
+            if task_state == TaskState.RUNNING:
                 return self._candidate(
                     record,
                     task_state,
                     RecoveryDisposition.AUTO_RESUME_CRASH,
-                    "active session with stale RUNNING/RETRYING state indicates abrupt process "
-                    "loss; checkpoint preflight and durable recovery claim are required before "
+                    "active session with stale RUNNING state indicates abrupt process loss; "
+                    "checkpoint preflight and durable recovery claim are required before "
                     "automatic resume",
                 )
             if task_state in {TaskState.PAUSED, TaskState.FAILED}:
