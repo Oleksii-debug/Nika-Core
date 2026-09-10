@@ -54,7 +54,7 @@ class _LifecycleModel:
                 del messages
                 if model.block_chat:
                     model.chat_started.set()
-                    model.chat_release.wait()
+                    model.chat_release.wait(1.0)
                 return SimpleNamespace(
                     choices=[SimpleNamespace(message=SimpleNamespace(content="ready"))],
                     usage=SimpleNamespace(
