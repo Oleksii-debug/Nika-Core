@@ -344,3 +344,51 @@ def test_provider_labels_cannot_impersonate_canonical_required_gates() -> None:
 
     assert result.state is VerificationState.UNKNOWN
     assert result.merge_clearance is False
+
+
+def test_top_level_observation_requires_canonical_runtime_authority() -> None:
+    merged_pr = GitHubPullRequest(
+        number=720,
+        head_branch="automation/dev04",
+        head_sha=CANDIDATE_SHA,
+        base_branch="main",
+        base_sha="4" * 40,
+        state=PullRequestState.MERGED,
+        merge_sha=MERGE_SHA,
+    )
+    canonical = _observation(
+        pull_request=merged_pr,
+        default_branch_ancestor_shas=(MERGE_SHA,),
+    )
+    structural_observation = SimpleNamespace(
+        owner=canonical.owner,
+        name=canonical.name,
+        default_branch=canonical.default_branch,
+        default_branch_sha=canonical.default_branch_sha,
+        issue=canonical.issue,
+        candidate_branch=canonical.candidate_branch,
+        candidate_sha=canonical.candidate_sha,
+        pull_request=canonical.pull_request,
+        checks=canonical.checks,
+        default_branch_ancestor_shas=canonical.default_branch_ancestor_shas,
+    )
+
+    with pytest.raises(GitHubFactoryError, match="GitHubRepositoryObservation"):
+        GitHubFactoryAdapter().bind(
+            _repository(), structural_observation  # type: ignore[arg-type]
+        )
+
+
+def test_top_level_repository_requires_canonical_runtime_authority() -> None:
+    structural_repository = SimpleNamespace(
+        repository_id="forged-core",
+        provider="github",
+        locator="https://github.com/Oleksii-debug/Nika-Core.git",
+        default_branch="main",
+        credential_ref=None,
+    )
+
+    with pytest.raises(GitHubFactoryError, match="RepositoryRef"):
+        GitHubFactoryAdapter().bind(  # type: ignore[arg-type]
+            structural_repository, _observation()
+        )

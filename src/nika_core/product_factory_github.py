@@ -179,6 +179,10 @@ class GitHubFactoryAdapter:
         repository: RepositoryRef,
         observation: GitHubRepositoryObservation,
     ) -> GitHubFactoryBinding:
+        if type(repository) is not RepositoryRef:
+            raise GitHubFactoryError("repository must be canonical RepositoryRef authority")
+        if type(observation) is not GitHubRepositoryObservation:
+            raise GitHubFactoryError("observation must be canonical GitHubRepositoryObservation authority")
         if repository.provider.strip().casefold() != "github":
             raise GitHubFactoryError("repository provider must be github")
         expected = _normalize_full_name(repository.locator)
