@@ -26,12 +26,12 @@ def _store(path: Path) -> SQLiteStore:
     return store
 
 
-def _raw_memory_value(store: SQLiteStore) -> str:
+def _raw_memory_value(store: SQLiteStore, *, key: str = "candidate") -> str:
     with store.connection() as conn:
         row = conn.execute(
             "SELECT value_json FROM memory_records WHERE scope=? AND owner_id=? "
             "AND namespace=? AND memory_key=?",
-            ("workspace", "research", "inference", "candidate"),
+            ("workspace", "research", "inference", key),
         ).fetchone()
     assert row is not None
     return str(row["value_json"])
@@ -141,6 +141,55 @@ def test_memory_persistence_minimizes_model_and_tool_secrets_across_restart(
     assert raw_after_restart == raw_before_restart
     for secret in sensitive_fragments:
         assert secret not in raw_after_restart
+
+
+def test_memory_persistence_redacts_embedded_windows_paths_across_restart(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "nika.db"
+    first_store = _store(db_path)
+    memory = MemoryService(first_store)
+    messages = {
+        "backslash": r"Opened C:\Users\Alice Smith\Private Data\result.txt successfully",
+        "slash": "Opened C:/Users/Alice Smith/Private Data/result.txt successfully",
+        "mixed": r"Opened C:\Users/Alice Smith\Private Data/result.txt successfully",
+        "spaced_file": (
+            r"Opened C:\Users\Alice Smith\Private Data\final result.txt successfully"
+        ),
+    }
+
+    memory.put(
+        scope=MemoryScope.WORKSPACE,
+        owner_id="research",
+        namespace="inference",
+        key="embedded-windows-paths",
+        value=messages,
+    )
+
+    raw_before_restart = _raw_memory_value(first_store, key="embedded-windows-paths")
+    for fragment in ("Alice Smith", "Private Data", "result.txt"):
+        assert fragment not in raw_before_restart
+
+    durable = json.loads(raw_before_restart)
+    assert durable == {
+        name: "Opened [LOCAL_PATH] successfully"
+        for name in messages
+    }
+
+    restarted_store = _store(db_path)
+    restarted = MemoryService(restarted_store)
+    record = restarted.get(
+        scope=MemoryScope.WORKSPACE,
+        owner_id="research",
+        namespace="inference",
+        key="embedded-windows-paths",
+    )
+    assert record is not None
+    assert record.value == durable
+    assert _raw_memory_value(
+        restarted_store,
+        key="embedded-windows-paths",
+    ) == raw_before_restart
 
 
 def test_memory_persistence_fails_closed_on_redacted_mapping_key_collision(

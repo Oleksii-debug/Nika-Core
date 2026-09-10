@@ -10,7 +10,11 @@ _POSIX_LOCAL_USER_PATH = re.compile(
     r"(?<![A-Za-z0-9])/(?:home|Users)/[^/\s\"'<>]+(?:/[^\s\"'<>]*)?"
 )
 _WINDOWS_LOCAL_USER_PATH = re.compile(
-    r"(?i)(?<![A-Za-z0-9])[A-Z]:\\Users\\[^\\\s\"'<>]+(?:\\[^\s\"'<>]*)?"
+    r"(?i)(?<![A-Za-z0-9])[A-Z]:[\\/]Users[\\/]"
+    r"[^\\/\r\n\"'<>]+(?=[\\/])[\\/]"
+    r"(?:[^\\/\r\n\"'<>]+(?=[\\/])[\\/])*"
+    r"(?:[^\\/\r\n\"'<>]*?\.[A-Za-z0-9]{1,16}"
+    r"(?=$|[\s,;:!?()\[\]{}])|[^\s\\/\r\n\"'<>]+)"
 )
 _POSIX_LOCAL_USER_PATH_FULL = re.compile(
     r"/(?:home|Users)/[^/\r\n\"'<>]+(?:/[^\r\n\"'<>]*)?"
