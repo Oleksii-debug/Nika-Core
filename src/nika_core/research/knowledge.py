@@ -41,6 +41,7 @@ class CorpusCorruptionError(RuntimeError):
 class RetrievalScope:
     principal_id: str
     workspace_ids: tuple[str, ...]
+    allowed_artifact_keys: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if not self.principal_id.strip():
@@ -53,6 +54,13 @@ class RetrievalScope:
         if len(set(cleaned)) != len(cleaned):
             raise ValueError("workspace_ids must be unique")
         object.__setattr__(self, "workspace_ids", tuple(sorted(cleaned)))
+        if self.allowed_artifact_keys is not None:
+            artifact_keys = tuple(key.strip() for key in self.allowed_artifact_keys)
+            if any(not key for key in artifact_keys):
+                raise ValueError("allowed_artifact_keys must not contain empty values")
+            if len(set(artifact_keys)) != len(artifact_keys):
+                raise ValueError("allowed_artifact_keys must be unique")
+            object.__setattr__(self, "allowed_artifact_keys", tuple(sorted(artifact_keys)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -449,7 +457,7 @@ class KnowledgeCorpus:
         conn: sqlite3.Connection,
         scope: RetrievalScope,
     ) -> None:
-        placeholders = ",".join("?" for _ in scope.workspace_ids)
+        workspace_placeholders = ",".join("?" for _ in scope.workspace_ids)
         conn.execute("DROP TABLE IF EXISTS temp.knowledge_scope_fts")
         conn.execute(
             """CREATE VIRTUAL TABLE temp.knowledge_scope_fts USING fts5(
@@ -463,6 +471,15 @@ class KnowledgeCorpus:
                 tokenize='unicode61 remove_diacritics 2'
             )"""
         )
+        artifact_filter = ""
+        params: list[object] = [*scope.workspace_ids]
+        if scope.allowed_artifact_keys is not None:
+            if not scope.allowed_artifact_keys:
+                return
+            artifact_placeholders = ",".join("?" for _ in scope.allowed_artifact_keys)
+            artifact_filter = f"\n              AND f.artifact_key IN ({artifact_placeholders})"
+            params.extend(scope.allowed_artifact_keys)
+        params.append(scope.principal_id)
         conn.execute(
             f"""INSERT INTO knowledge_scope_fts(
                 workspace_id, artifact_key, version, ordinal, chunk_id, title, body
@@ -474,7 +491,7 @@ class KnowledgeCorpus:
               ON a.workspace_id=f.workspace_id
              AND a.artifact_key=f.artifact_key
              AND a.current_version=CAST(f.version AS INTEGER)
-            WHERE f.workspace_id IN ({placeholders})
+            WHERE f.workspace_id IN ({workspace_placeholders}){artifact_filter}
               AND (
                 a.visibility='workspace'
                 OR EXISTS (
@@ -484,7 +501,7 @@ class KnowledgeCorpus:
                       AND acl.principal_id=?
                 )
               )""",
-            [*scope.workspace_ids, scope.principal_id],
+            params,
         )
 
     def search(

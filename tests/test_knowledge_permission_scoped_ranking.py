@@ -53,8 +53,16 @@ def _request(
     )
 
 
-def _scope(principal_id: str, *workspace_ids: str) -> RetrievalScope:
-    return RetrievalScope(principal_id=principal_id, workspace_ids=workspace_ids)
+def _scope(
+    principal_id: str,
+    *workspace_ids: str,
+    allowed_artifact_keys: tuple[str, ...] | None = None,
+) -> RetrievalScope:
+    return RetrievalScope(
+        principal_id=principal_id,
+        workspace_ids=workspace_ids,
+        allowed_artifact_keys=allowed_artifact_keys,
+    )
 
 
 def _seed_balanced_pair(corpus: KnowledgeCorpus) -> None:
@@ -140,3 +148,97 @@ def test_restricted_documents_cannot_change_unauthorized_bm25_ranking(
     )
     assert len(alice_hits) == 100
     assert all(hit.provenance.artifact_key.startswith("alice-only-") for hit in alice_hits)
+
+
+def test_exact_authorized_artifact_scope_is_applied_before_ranking_and_limit(
+    tmp_path: Path,
+) -> None:
+    store = _make_store(tmp_path)
+    corpus = KnowledgeCorpus(store)
+    corpus.ingest(
+        _request(
+            workspace_id="ws-a",
+            artifact_key="allowed-document",
+            text="needle authorized result",
+        )
+    )
+    corpus.ingest(
+        _request(
+            workspace_id="ws-a",
+            artifact_key="denied-document",
+            text=" ".join(["needle"] * 40 + ["DENIED_CANARY"]),
+        )
+    )
+
+    unrestricted = corpus.search(_scope("user:reader", "ws-a"), "needle", limit=1)
+    assert unrestricted[0].provenance.artifact_key == "denied-document"
+
+    authorized = corpus.search(
+        _scope(
+            "user:reader",
+            "ws-a",
+            allowed_artifact_keys=("allowed-document",),
+        ),
+        "needle",
+        limit=1,
+    )
+
+    assert [hit.provenance.artifact_key for hit in authorized] == ["allowed-document"]
+    assert all("DENIED_CANARY" not in hit.text for hit in authorized)
+    assert all("DENIED_CANARY" not in hit.snippet for hit in authorized)
+
+
+def test_exact_authorized_artifact_scope_intersects_incumbent_acl(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    corpus = KnowledgeCorpus(store)
+    corpus.ingest(
+        _request(
+            workspace_id="ws-a",
+            artifact_key="alice-only",
+            text="needle restricted canary",
+            visibility=KnowledgeVisibility.RESTRICTED,
+            allowed_principals=("user:alice",),
+        )
+    )
+
+    reader_scope = _scope(
+        "user:reader",
+        "ws-a",
+        allowed_artifact_keys=("alice-only",),
+    )
+    assert corpus.search(reader_scope, "needle") == []
+
+    alice_scope = _scope(
+        "user:alice",
+        "ws-a",
+        allowed_artifact_keys=("alice-only",),
+    )
+    assert [hit.provenance.artifact_key for hit in corpus.search(alice_scope, "needle")] == [
+        "alice-only"
+    ]
+
+
+def test_next_search_rebuilds_exact_artifact_scope_after_revocation(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    corpus = KnowledgeCorpus(store)
+    corpus.ingest(
+        _request(
+            workspace_id="ws-a",
+            artifact_key="revocable-document",
+            text="needle revocable content",
+        )
+    )
+
+    granted_scope = _scope(
+        "user:reader",
+        "ws-a",
+        allowed_artifact_keys=("revocable-document",),
+    )
+    assert corpus.search(granted_scope, "needle", limit=1)
+
+    revoked_scope = _scope(
+        "user:reader",
+        "ws-a",
+        allowed_artifact_keys=(),
+    )
+    assert corpus.search(revoked_scope, "needle", limit=1) == []
