@@ -65,7 +65,11 @@ class FactoryOperatorProjection(BaseModel):
 def project_operator_status(detail: ProductProjectDetail) -> FactoryOperatorProjection:
     """Project existing ProductProject presentation state without inventing new authority."""
 
-    current_work_entries = _current_work_entries(detail)
+    all_current_work_entries = _current_work_entries(detail)
+    current_work_entries = (
+        _single_component_current_work_entries(all_current_work_entries)
+        or all_current_work_entries
+    )
     component_entries = _entries_of_kind(current_work_entries, ProductStatusKind.COMPONENT)
     blocker_entries = _statuses(detail, ProductStatusKind.BLOCKER)
     active_blocker_entries = _incomplete(blocker_entries)
@@ -241,6 +245,15 @@ def _single_component_candidate_entries(
     return (component, *scoped_stages)
 
 
+def _single_component_current_work_entries(
+    current_work_entries: tuple[ProductStatusEntry, ...],
+) -> tuple[ProductStatusEntry, ...] | None:
+    components = _entries_of_kind(current_work_entries, ProductStatusKind.COMPONENT)
+    if len(components) != 1 or not _is_terminal_success(components[0]):
+        return None
+    return _single_component_candidate_entries(current_work_entries)
+
+
 def _active_candidate_entries(
     current_work_entries: tuple[ProductStatusEntry, ...],
 ) -> tuple[ProductStatusEntry, ...]:
@@ -249,6 +262,14 @@ def _active_candidate_entries(
         for entry in current_work_entries
         if entry.kind in _CANDIDATE_STATUS_KINDS
     )
+    components = _entries_of_kind(candidate_entries, ProductStatusKind.COMPONENT)
+    if len(components) > 1:
+        # ProductStatusEntry has no canonical epoch identity. With multiple work
+        # components represented, preserve every candidate-bearing fact so a
+        # conflicting historical/current identity fails closed instead of picking
+        # whichever incomplete stage happens to appear first.
+        return tuple(entry for entry in candidate_entries if _has_candidate_evidence(entry))
+
     scoped_single_component = _single_component_candidate_entries(candidate_entries)
     if scoped_single_component is not None:
         candidate_entries = scoped_single_component
