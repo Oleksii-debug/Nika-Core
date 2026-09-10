@@ -20,7 +20,6 @@ from nika_core.tools import (
     ToolSpec,
 )
 
-
 _MCP_TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_.-]{1,128}\Z")
 
 
@@ -54,7 +53,9 @@ class MCPServerConfig:
         if isinstance(self.timeout_seconds, bool) or not isinstance(
             self.timeout_seconds, (int, float)
         ):
-            raise ValueError("timeout_seconds must be a finite positive number")
+            raise ValueError(  # noqa: TRY004 - preserve public config error contract.
+                "timeout_seconds must be a finite positive number"
+            )
         try:
             normalized_timeout = float(self.timeout_seconds)
         except (OverflowError, TypeError, ValueError):
@@ -208,7 +209,7 @@ class MCPClientAdapter:
                 if exc.code == REQUEST_TIMEOUT:
                     raise TimeoutError("MCP tool timed out") from None
                 raise RuntimeError("MCP tool call failed") from None
-            except Exception:
+            except Exception:  # noqa: BLE001 - suppress untrusted transport/decode details.
                 raise RuntimeError("MCP tool call failed") from None
 
             if result.is_error:
