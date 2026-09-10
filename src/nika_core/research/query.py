@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
 
 from nika_core.data.sqlite import SQLiteStore
@@ -13,6 +15,23 @@ from nika_core.research.models import (
 from nika_core.research.network_repository import NetworkResearchRepository
 from nika_core.research.normalize import normalize_text
 from nika_core.research.query_results import ScopedResearchResultWriter
+from nika_core.security.policy import ActionIntent
+from nika_core.security.standing_permission import (
+    PermissionContext,
+    StandingPermissionStore,
+    StandingPermissionUse,
+)
+from nika_core.tools import ToolRisk
+
+RESEARCH_SEARCH_ACTION_CLASS = "research.search"
+
+
+def research_workspace_target(workspace_id: str) -> str:
+    return f"research-workspace:{workspace_id}"
+
+
+def research_document_resource(document_id: str) -> str:
+    return f"research-document:{document_id}"
 
 
 class SearchMode(StrEnum):
@@ -38,22 +57,41 @@ class ResearchQuerySpec:
 
 
 @dataclass(frozen=True, slots=True)
+class ResearchQueryAuthorization:
+    """Trusted current-context authority for one retrieval execution."""
+
+    permission_id: str
+    subject_id: str
+    context: PermissionContext
+
+    def __post_init__(self) -> None:
+        if not self.permission_id.strip():
+            raise ValueError("permission_id is required")
+        if not self.subject_id.strip():
+            raise ValueError("subject_id is required")
+
+
+@dataclass(frozen=True, slots=True)
 class ResearchQueryExecution:
     spec: ResearchQuerySpec
     result_set: ResearchResultSet
 
 
 class DeterministicResearchQueryService:
-    """Safe FTS5 query/filter layer with no LLM or raw FTS syntax exposure."""
+    """Safe FTS5 query/filter layer with optional canonical read authorization."""
 
     def __init__(
         self,
         *,
         store: SQLiteStore,
         network_repository: NetworkResearchRepository,
+        permission_store: StandingPermissionStore | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._store = store
         self._network = network_repository
+        self._permissions = permission_store
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._result_writer = ScopedResearchResultWriter(
             store=store,
             network_repository=network_repository,
@@ -63,10 +101,21 @@ class DeterministicResearchQueryService:
         self,
         spec: ResearchQuerySpec,
         *,
+        authorization: ResearchQueryAuthorization | None = None,
         result_set_id: str | None = None,
     ) -> ResearchQueryExecution:
         self._validate_spec(spec)
-        hits = self._search(spec, self._fts_query(spec.text, spec.mode))
+        if self._permissions is None:
+            if authorization is not None:
+                raise ValueError("authorization requires a configured permission store")
+        elif authorization is None:
+            raise PermissionError("research retrieval requires current authorization context")
+
+        hits = self._search(
+            spec,
+            self._fts_query(spec.text, spec.mode),
+            authorization=authorization,
+        )
         match_reason = (
             f"Quoted phrase full-text match for: {spec.text}"
             if spec.mode is SearchMode.PHRASE
@@ -170,7 +219,51 @@ class DeterministicResearchQueryService:
         terms = [term for term in normalized.split(" ") if term]
         return " AND ".join('"' + term.replace('"', '""') + '"' for term in terms)
 
-    def _search(self, spec: ResearchQuerySpec, fts_query: str) -> list[SearchHit]:
+    def _authorized_document_ids(
+        self,
+        *,
+        spec: ResearchQuerySpec,
+        candidates: tuple[str, ...],
+        authorization: ResearchQueryAuthorization,
+    ) -> tuple[str, ...]:
+        assert self._permissions is not None
+        authorized: list[str] = []
+        for document_id in candidates:
+            resource_id = research_document_resource(document_id)
+            use = StandingPermissionUse(
+                subject_id=authorization.subject_id,
+                context=authorization.context,
+                intent=ActionIntent(
+                    action_id=f"research-search:{document_id}",
+                    tool_id=RESEARCH_SEARCH_ACTION_CLASS,
+                    risk=ToolRisk.READ_ONLY,
+                    target=research_workspace_target(spec.workspace_id),
+                    task_id=authorization.context.task_id,
+                    project_id=authorization.context.project_id,
+                    resource=resource_id,
+                ),
+                resource_id=resource_id,
+            )
+            try:
+                self._permissions.authorize(
+                    authorization.permission_id,
+                    use,
+                    now=self._clock(),
+                )
+            except PermissionError:
+                continue
+            authorized.append(document_id)
+            if len(authorized) >= spec.limit:
+                break
+        return tuple(authorized)
+
+    def _search(
+        self,
+        spec: ResearchQuerySpec,
+        fts_query: str,
+        *,
+        authorization: ResearchQueryAuthorization | None,
+    ) -> list[SearchHit]:
         filters = spec.filters
         clauses = ["corpus_fts MATCH ?", "corpus_fts.workspace_id=?"]
         params: list[object] = [fts_query, spec.workspace_id]
@@ -225,6 +318,26 @@ class DeterministicResearchQueryService:
                 return []
             clauses.append("(" + " OR ".join(origin_clauses) + ")")
             params.extend(origin_params)
+
+        if self._permissions is not None:
+            assert authorization is not None
+            candidate_sql = f"""SELECT corpus_fts.document_id
+            FROM corpus_fts
+            JOIN corpus_documents d ON d.document_id=corpus_fts.document_id
+            WHERE {' AND '.join(clauses)}
+            ORDER BY bm25(corpus_fts), corpus_fts.document_id"""
+            with self._store.connection() as conn:
+                candidate_rows = conn.execute(candidate_sql, params).fetchall()
+            authorized_ids = self._authorized_document_ids(
+                spec=spec,
+                candidates=tuple(row["document_id"] for row in candidate_rows),
+                authorization=authorization,
+            )
+            if not authorized_ids:
+                return []
+            placeholders = ",".join("?" for _ in authorized_ids)
+            clauses.append(f"corpus_fts.document_id IN ({placeholders})")
+            params.extend(authorized_ids)
 
         params.append(spec.limit)
         sql = f"""SELECT corpus_fts.document_id, corpus_fts.title,
