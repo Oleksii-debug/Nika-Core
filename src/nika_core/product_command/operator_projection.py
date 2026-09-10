@@ -249,9 +249,24 @@ def _single_component_current_work_entries(
     current_work_entries: tuple[ProductStatusEntry, ...],
 ) -> tuple[ProductStatusEntry, ...] | None:
     components = _entries_of_kind(current_work_entries, ProductStatusKind.COMPONENT)
-    if len(components) != 1 or not _is_terminal_success(components[0]):
+    if len(components) == 1:
+        if not _is_terminal_success(components[0]):
+            return None
+        return _single_component_candidate_entries(current_work_entries)
+
+    active_components = _incomplete(components)
+    if len(active_components) != 1:
         return None
-    return _single_component_candidate_entries(current_work_entries)
+
+    current_component = active_components[0]
+    prefix = f"{current_component.item_id}:"
+    scoped_stages = tuple(
+        entry
+        for entry in current_work_entries
+        if entry.kind is not ProductStatusKind.COMPONENT
+        and entry.item_id.startswith(prefix)
+    )
+    return (current_component, *scoped_stages)
 
 
 def _active_candidate_entries(
