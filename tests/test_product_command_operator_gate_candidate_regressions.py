@@ -166,3 +166,43 @@ def test_two_components_reject_unscoped_integration_identity() -> None:
     )
     projection = project_operator_status(detail)
     assert projection.next == "inspect_project:ambiguous_integration_identity"
+
+
+def test_single_component_scopes_test_gate_to_current_work_identity() -> None:
+    historical_sha = "a" * 40
+    current_sha = "b" * 40
+
+    with_historical_build = _detail(
+        ProductStatusEntry(kind=ProductStatusKind.BUILD, item_id="work-old:test", label="Old tests", state="passed", evidence=_candidate(historical_sha)),
+        ProductStatusEntry(kind=ProductStatusKind.COMPONENT, item_id="work-current", label="Current work", state="completed"),
+        ProductStatusEntry(kind=ProductStatusKind.QA, item_id="work-current:qa", label="Current QA", state="passed", evidence=_candidate(current_sha)),
+        ProductStatusEntry(kind=ProductStatusKind.DEPLOYMENT, item_id="work-current:integration", label="Current integration", state="succeeded", evidence=_candidate(current_sha)),
+    )
+    projection = project_operator_status(with_historical_build)
+    assert projection.candidate == current_sha
+    assert projection.test == "unknown"
+    assert projection.qa == "work-current:qa=passed"
+    assert projection.integration == "work-current:integration=succeeded"
+    assert projection.next == "test:not_started"
+
+    without_historical_build = _detail(
+        ProductStatusEntry(kind=ProductStatusKind.COMPONENT, item_id="work-current", label="Current work", state="completed"),
+        ProductStatusEntry(kind=ProductStatusKind.QA, item_id="work-current:qa", label="Current QA", state="passed", evidence=_candidate(current_sha)),
+        ProductStatusEntry(kind=ProductStatusKind.DEPLOYMENT, item_id="work-current:integration", label="Current integration", state="succeeded", evidence=_candidate(current_sha)),
+    )
+    projection = project_operator_status(without_historical_build)
+    assert projection.candidate == current_sha
+    assert projection.test == "unknown"
+    assert projection.next == "test:not_started"
+
+    with_current_build = _detail(
+        ProductStatusEntry(kind=ProductStatusKind.BUILD, item_id="work-old:test", label="Old tests", state="passed", evidence=_candidate(historical_sha)),
+        ProductStatusEntry(kind=ProductStatusKind.COMPONENT, item_id="work-current", label="Current work", state="completed"),
+        ProductStatusEntry(kind=ProductStatusKind.BUILD, item_id="work-current:test", label="Current tests", state="passed", evidence=_candidate(current_sha)),
+        ProductStatusEntry(kind=ProductStatusKind.QA, item_id="work-current:qa", label="Current QA", state="passed", evidence=_candidate(current_sha)),
+        ProductStatusEntry(kind=ProductStatusKind.DEPLOYMENT, item_id="work-current:integration", label="Current integration", state="succeeded", evidence=_candidate(current_sha)),
+    )
+    projection = project_operator_status(with_current_build)
+    assert projection.candidate == current_sha
+    assert projection.test == "work-current:test=passed"
+    assert projection.next == "next_work"
