@@ -15,6 +15,7 @@ _SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _MANIFEST_VERSION = 2
 _RELEASE_MANIFEST_NAME = "release-manifest.json"
 _MAX_RELEASE_MANIFEST_BYTES = 4 * 1024 * 1024
+_MAX_PRODUCT_VERSION_CHARS = 128
 _MANIFEST_KEYS = frozenset({"manifest_version", "product", "version", "source_sha", "files"})
 _RELEASE_FILE_KEYS = frozenset({"path", "size", "sha256"})
 _WINDOWS_FORBIDDEN_CHARS = frozenset('<>"|?*')
@@ -178,6 +179,16 @@ def _release_path_is_secret(value: object) -> bool:
 
 def _canonical_release_path(value: object) -> bool:
     return _canonical_relative_path(value) and value != _RELEASE_MANIFEST_NAME
+
+
+def _valid_product_version(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and len(value) <= _MAX_PRODUCT_VERSION_CHARS
+        and value == value.strip()
+        and not any(ord(character) < 32 for character in value)
+    )
 
 
 def _secret_assignment_value_is_placeholder(value: bytes) -> bool:
@@ -569,17 +580,21 @@ def verify_distributable_evidence(
     *,
     source_sha: str,
     artifact_reference: str,
+    expected_product_version: str,
 ) -> tuple[str, ...]:
     """Verify that pre-human evidence binds the exact uploaded distributable.
 
     The evidence is intentionally outside the ZIP: embedding its own digest would be
     recursive. The verifier therefore binds an immutable outer artifact by path,
-    byte size, SHA-256, and exact source commit immediately before upload.
+    byte size, SHA-256, exact source commit, and trusted canonical product version
+    immediately before upload.
     """
     findings: list[str] = []
     normalized_source_sha = source_sha.strip().casefold()
     if not _SOURCE_SHA_RE.fullmatch(normalized_source_sha):
         return ("distributable:source-sha-format",)
+    if not _valid_product_version(expected_product_version):
+        return ("distributable:expected-product-version-format",)
     if not artifact_path.is_file():
         return ("distributable:missing-artifact",)
 
@@ -598,10 +613,8 @@ def verify_distributable_evidence(
 
     product_version = payload.get("product_version")
     if (
-        not isinstance(product_version, str)
-        or not product_version
-        or product_version != product_version.strip()
-        or any(ord(character) < 32 for character in product_version)
+        not _valid_product_version(product_version)
+        or product_version != expected_product_version
     ):
         findings.append("distributable:product-version")
 

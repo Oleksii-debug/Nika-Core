@@ -207,6 +207,7 @@ jobs:
           --artifact-reference '${{ steps.distributable.outputs.zip_path }}'
           --evidence ./dist/m12-prehuman-evidence.json
           --source-sha '${{ env.NIKA_CANDIDATE_SHA }}'
+          --product-version '${{ steps.release.outputs.version }}'
       - name: Upload exact pre-human candidate evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -265,7 +266,8 @@ jobs:
             --artifact $zipPath `
             --artifact-reference './dist/NikaCore-${{ steps.release.outputs.version }}-windows-x64.zip' `
             --evidence ./attestation-input/m12-prehuman-evidence.json `
-            --source-sha '${{ github.sha }}'
+            --source-sha '${{ github.sha }}' `
+            --product-version '${{ steps.release.outputs.version }}'
       - name: Attest exact final distributable
         id: attest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6

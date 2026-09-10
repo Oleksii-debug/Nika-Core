@@ -3,12 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from nika_core.packaging.release import verify_distributable_evidence
 
 SOURCE_SHA = "0123456789abcdef0123456789abcdef01234567"
+PRODUCT_VERSION = "0.0.2"
 ARTIFACT_REFERENCE = "./dist/NikaCore-0.0.2-windows-x64.zip"
 REQUIRED_TRUE_FIELDS = (
     "release_manifest_source_sha_bound",
@@ -44,7 +46,7 @@ def _write_bound_evidence(tmp_path: Path) -> tuple[Path, Path, dict[str, object]
     artifact.write_bytes(b"controlled exact distributable bytes")
     payload: dict[str, object] = {
         "schema_version": 3,
-        "product_version": "0.0.2",
+        "product_version": PRODUCT_VERSION,
         "commit_sha": SOURCE_SHA,
         "distributable_zip_path": ARTIFACT_REFERENCE,
         "distributable_zip_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
@@ -57,12 +59,18 @@ def _write_bound_evidence(tmp_path: Path) -> tuple[Path, Path, dict[str, object]
     return artifact, evidence, payload
 
 
-def _verify(artifact: Path, evidence: Path) -> tuple[str, ...]:
+def _verify(
+    artifact: Path,
+    evidence: Path,
+    *,
+    expected_product_version: str = PRODUCT_VERSION,
+) -> tuple[str, ...]:
     return verify_distributable_evidence(
         artifact,
         evidence,
         source_sha=SOURCE_SHA,
         artifact_reference=ARTIFACT_REFERENCE,
+        expected_product_version=expected_product_version,
     )
 
 
@@ -127,7 +135,7 @@ def test_prehuman_verifier_requires_automation_only_truth_exact_false(
     assert f"distributable:required-false:{field}" in findings
 
 
-@pytest.mark.parametrize("unsafe_value", ("", " 0.0.2", "0.0.2\n", True, None))
+@pytest.mark.parametrize("unsafe_value", ("", " 0.0.2", "0.0.2\n", "x" * 129, True, None))
 def test_prehuman_verifier_requires_bounded_product_version(
     tmp_path: Path,
     unsafe_value: object,
@@ -142,6 +150,37 @@ def test_prehuman_verifier_requires_bounded_product_version(
     findings = _verify(artifact, evidence)
 
     assert "distributable:product-version" in findings
+
+
+def test_prehuman_verifier_binds_product_version_to_trusted_release_identity(
+    tmp_path: Path,
+) -> None:
+    artifact, evidence, payload = _write_bound_evidence(tmp_path)
+    payload["product_version"] = "999.0"
+    evidence.write_text(json.dumps(payload), encoding="utf-8")
+
+    findings = _verify(artifact, evidence)
+
+    assert "distributable:product-version" in findings
+
+
+@pytest.mark.parametrize(
+    "unsafe_expected_version",
+    ("", " 0.0.2", "0.0.2\n", "x" * 129, True, None),
+)
+def test_prehuman_verifier_rejects_noncanonical_trusted_product_version(
+    tmp_path: Path,
+    unsafe_expected_version: object,
+) -> None:
+    artifact, evidence, _payload = _write_bound_evidence(tmp_path)
+
+    findings = _verify(
+        artifact,
+        evidence,
+        expected_product_version=cast(str, unsafe_expected_version),
+    )
+
+    assert findings == ("distributable:expected-product-version-format",)
 
 
 def test_prehuman_schema_does_not_silently_accept_unknown_fields(tmp_path: Path) -> None:
