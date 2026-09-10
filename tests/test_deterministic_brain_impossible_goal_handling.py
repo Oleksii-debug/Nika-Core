@@ -55,7 +55,10 @@ def test_brain_classifies_planner_impossibility_as_no_valid_plan(
             actions: tuple[DeterministicAction, ...],
         ) -> DeterministicPlan:
             del state, goal, actions
-            raise DeterministicPlanningError("goal has no valid deterministic plan", code=planner_code)
+            raise DeterministicPlanningError(
+                "goal has no valid deterministic plan",
+                code=planner_code,
+            )
 
     result = asyncio.run(
         DeterministicBrain(planner=NoPlanPlanner(), tools=ToolExecutor()).run(
