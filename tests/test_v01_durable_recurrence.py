@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.task_state import TaskState
 from nika_core.scheduler.apscheduler_adapter import APSchedulerAdapter
 from nika_core.scheduler.contracts import ScheduledJob
 from nika_core.scheduler.recurrence import (
@@ -18,6 +19,8 @@ from nika_core.scheduler.recurrence import (
     RecurrenceTerminalReason,
 )
 from nika_core.scheduler.store import ScheduledJobStore
+
+TASK_ID = "task-recurrence-test"
 
 
 @dataclass
@@ -62,6 +65,37 @@ def _store(tmp_path: Path) -> SQLiteStore:
     return store
 
 
+def _set_task_state(store: SQLiteStore, task_id: str, state: TaskState) -> None:
+    now = datetime.now(UTC).isoformat()
+    with store.connection() as conn:
+        existing = conn.execute(
+            "SELECT 1 FROM tasks WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                """
+                INSERT INTO tasks(
+                    task_id, workspace_id, agent_id, state, payload_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    "recurrence-test-workspace",
+                    "recurrence-test-agent",
+                    state.value,
+                    "{}",
+                    now,
+                    now,
+                ),
+            )
+        else:
+            conn.execute(
+                "UPDATE tasks SET state = ?, updated_at = ? WHERE task_id = ?",
+                (state.value, now, task_id),
+            )
+
+
 def _service(
     store: SQLiteStore,
     clock: FakeClock,
@@ -101,6 +135,7 @@ def test_next_occurrence_is_durable_and_reconstructable_after_restart(tmp_path: 
 
     created = service.create(
         recurrence_id="weather Київ",
+        task_id=TASK_ID,
         action_id="monitor.check",
         interval_seconds=300,
         start_at=start,
@@ -109,10 +144,12 @@ def test_next_occurrence_is_durable_and_reconstructable_after_restart(tmp_path: 
     )
 
     assert created.status is RecurrenceStatus.ACTIVE
+    assert created.task_id == TASK_ID
     assert created.missed_run_policy is MissedRunPolicy.COALESCE_ONE
     assert created.next_due_at == start
     assert created.next_occurrence_id is not None
     assert scheduler.upserts[-1].trigger == {"run_date": start.isoformat()}
+    assert scheduler.upserts[-1].payload["task_id"] == TASK_ID
     assert scheduler.upserts[-1].misfire_grace_seconds is None
 
     restarted, _ = _service(store, clock, calls)
@@ -124,6 +161,7 @@ def test_real_apscheduler_adapter_reinstalls_next_date_intent_without_sleep(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
+    _set_task_state(store, TASK_ID, TaskState.RUNNING)
     jobs = ScheduledJobStore(store)
     clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
     calls: list[RecurrenceInvocation] = []
@@ -151,6 +189,7 @@ def test_real_apscheduler_adapter_reinstalls_next_date_intent_without_sleep(
     service_ref["service"] = service
     service.create(
         recurrence_id="apscheduler-integration",
+        task_id=TASK_ID,
         action_id="monitor.check",
         interval_seconds=60,
         start_at=clock.value,
@@ -170,6 +209,113 @@ def test_real_apscheduler_adapter_reinstalls_next_date_intent_without_sleep(
         adapter.shutdown()
 
 
+@pytest.mark.parametrize(
+    "terminal_state",
+    (TaskState.CANCELLED, TaskState.COMPLETED, TaskState.ARCHIVED),
+)
+def test_terminal_task_suppresses_recurrence_on_restart_before_handler(
+    tmp_path: Path,
+    terminal_state: TaskState,
+) -> None:
+    store = _store(tmp_path)
+    _set_task_state(store, TASK_ID, TaskState.RUNNING)
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    calls: list[RecurrenceInvocation] = []
+    service, scheduler = _service(store, clock, calls)
+    service.create(
+        recurrence_id=f"terminal-{terminal_state.value.lower()}",
+        task_id=TASK_ID,
+        action_id="monitor.check",
+        interval_seconds=60,
+        start_at=clock.value,
+    )
+    persisted = scheduler.upserts[-1]
+    _set_task_state(store, TASK_ID, terminal_state)
+
+    jobs = ScheduledJobStore(store)
+    restarted_ref: dict[str, DurableRecurrenceService] = {}
+
+    def scheduler_resolver(action_id: str):
+        assert action_id == DurableRecurrenceService.ACTION_ID
+        return restarted_ref["service"].action_handler
+
+    def target_resolver(action_id: str):
+        assert action_id == "monitor.check"
+
+        def handler(invocation: RecurrenceInvocation) -> None:
+            calls.append(invocation)
+
+        return handler
+
+    adapter = APSchedulerAdapter(jobs, scheduler_resolver)
+    restarted = DurableRecurrenceService(
+        jobs=jobs,
+        scheduler=adapter,
+        handler_resolver=target_resolver,
+        clock=clock,
+    )
+    restarted_ref["service"] = restarted
+
+    adapter.start()
+    try:
+        assert not adapter.has_runtime_job(persisted.job_id)
+        suppressed = jobs.get(persisted.job_id)
+        assert suppressed is not None
+        assert suppressed.enabled is False
+        assert calls == []
+    finally:
+        adapter.shutdown()
+
+
+def test_missing_task_suppresses_recurrence_on_restart_before_handler(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    calls: list[RecurrenceInvocation] = []
+    service, scheduler = _service(store, clock, calls)
+    service.create(
+        recurrence_id="missing-task",
+        task_id=TASK_ID,
+        action_id="monitor.check",
+        interval_seconds=60,
+        start_at=clock.value,
+    )
+    persisted = scheduler.upserts[-1]
+
+    jobs = ScheduledJobStore(store)
+    restarted_ref: dict[str, DurableRecurrenceService] = {}
+
+    def scheduler_resolver(action_id: str):
+        assert action_id == DurableRecurrenceService.ACTION_ID
+        return restarted_ref["service"].action_handler
+
+    def target_resolver(action_id: str):
+        assert action_id == "monitor.check"
+
+        def handler(invocation: RecurrenceInvocation) -> None:
+            calls.append(invocation)
+
+        return handler
+
+    adapter = APSchedulerAdapter(jobs, scheduler_resolver)
+    restarted = DurableRecurrenceService(
+        jobs=jobs,
+        scheduler=adapter,
+        handler_resolver=target_resolver,
+        clock=clock,
+    )
+    restarted_ref["service"] = restarted
+
+    adapter.start()
+    try:
+        assert not adapter.has_runtime_job(persisted.job_id)
+        suppressed = jobs.get(persisted.job_id)
+        assert suppressed is not None
+        assert suppressed.enabled is False
+        assert calls == []
+    finally:
+        adapter.shutdown()
+
+
 def test_completed_occurrence_is_not_repeated_and_missed_runs_coalesce_once(
     tmp_path: Path,
 ) -> None:
@@ -180,6 +326,7 @@ def test_completed_occurrence_is_not_repeated_and_missed_runs_coalesce_once(
     service, _ = _service(store, clock, calls)
     service.create(
         recurrence_id="monitor",
+        task_id=TASK_ID,
         action_id="monitor.check",
         interval_seconds=300,
         start_at=start,
@@ -223,6 +370,7 @@ def test_pause_survives_restart_and_resume_keeps_one_coalesced_intent(tmp_path: 
     service, _ = _service(store, clock, calls)
     service.create(
         recurrence_id="paused-monitor",
+        task_id=TASK_ID,
         action_id="monitor.check",
         interval_seconds=300,
         start_at=start,
@@ -257,6 +405,7 @@ def test_cancel_is_durable_idempotent_and_terminates_recurrence(tmp_path: Path) 
     service, _ = _service(store, clock, calls)
     service.create(
         recurrence_id="cancel-me",
+        task_id=TASK_ID,
         action_id="monitor.check",
         interval_seconds=60,
         start_at=clock.value + timedelta(minutes=1),
@@ -281,6 +430,7 @@ def test_deadline_stops_future_occurrences_without_late_catchup(tmp_path: Path) 
     service, _ = _service(store, clock, calls)
     service.create(
         recurrence_id="deadline-monitor",
+        task_id=TASK_ID,
         action_id="monitor.check",
         interval_seconds=300,
         start_at=start,
@@ -313,6 +463,7 @@ def test_restart_after_deadline_terminates_overdue_intent_without_handler(tmp_pa
     service, _ = _service(store, clock, calls)
     service.create(
         recurrence_id="offline-deadline",
+        task_id=TASK_ID,
         action_id="monitor.check",
         interval_seconds=300,
         start_at=start + timedelta(minutes=5),
@@ -337,6 +488,7 @@ def test_condition_stop_terminates_recurrence(tmp_path: Path) -> None:
     service, _ = _service(store, clock, calls, decision=RecurrenceDecision.STOP)
     service.create(
         recurrence_id="until-condition",
+        task_id=TASK_ID,
         action_id="monitor.check",
         interval_seconds=60,
         start_at=start,
@@ -359,6 +511,7 @@ def test_occurrence_identity_is_stable_for_external_effect_dedupe(tmp_path: Path
     service, _ = _service(store, clock, calls)
     initial = service.create(
         recurrence_id="effect-series",
+        task_id=TASK_ID,
         action_id="monitor.check",
         interval_seconds=60,
         start_at=start,
@@ -385,6 +538,7 @@ def test_same_recurrence_id_with_conflicting_definition_fails_closed(tmp_path: P
     service, _ = _service(store, clock, calls)
     service.create(
         recurrence_id="same-id",
+        task_id=TASK_ID,
         action_id="monitor.check",
         interval_seconds=60,
         start_at=clock.value,
@@ -394,11 +548,43 @@ def test_same_recurrence_id_with_conflicting_definition_fails_closed(tmp_path: P
     with pytest.raises(ValueError, match="different recurrence"):
         service.create(
             recurrence_id="same-id",
+            task_id=TASK_ID,
             action_id="monitor.check",
             interval_seconds=120,
             start_at=clock.value,
             payload={"scope": "one"},
         )
+    with pytest.raises(ValueError, match="different recurrence"):
+        service.create(
+            recurrence_id="same-id",
+            task_id="different-task",
+            action_id="monitor.check",
+            interval_seconds=60,
+            start_at=clock.value,
+            payload={"scope": "one"},
+        )
+
+
+@pytest.mark.parametrize("bad_task_id", ("", " task", "task "))
+def test_invalid_task_id_fails_before_persistence(
+    tmp_path: Path,
+    bad_task_id: str,
+) -> None:
+    store = _store(tmp_path)
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    calls: list[RecurrenceInvocation] = []
+    service, scheduler = _service(store, clock, calls)
+
+    with pytest.raises(ValueError, match="task_id"):
+        service.create(
+            recurrence_id="bad-task-binding",
+            task_id=bad_task_id,
+            action_id="monitor.check",
+            interval_seconds=60,
+            start_at=clock.value,
+        )
+    assert scheduler.upserts == []
+    assert service.get("bad-task-binding") is None
 
 
 def test_naive_time_and_invalid_interval_fail_before_persistence(tmp_path: Path) -> None:
@@ -410,6 +596,7 @@ def test_naive_time_and_invalid_interval_fail_before_persistence(tmp_path: Path)
     with pytest.raises(ValueError, match="timezone-aware"):
         service.create(
             recurrence_id="naive",
+            task_id=TASK_ID,
             action_id="monitor.check",
             interval_seconds=60,
             start_at=datetime.fromisoformat("2030-01-01T12:00:00"),
@@ -417,6 +604,7 @@ def test_naive_time_and_invalid_interval_fail_before_persistence(tmp_path: Path)
     with pytest.raises(ValueError, match="positive integer"):
         service.create(
             recurrence_id="bad-interval",
+            task_id=TASK_ID,
             action_id="monitor.check",
             interval_seconds=0,
             start_at=clock.value,
