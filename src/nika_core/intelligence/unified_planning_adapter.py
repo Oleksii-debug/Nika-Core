@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import deque
+from math import isfinite
 from typing import Any
 
 from nika_core.intelligence.contracts import (
@@ -16,10 +18,31 @@ from nika_core.intelligence.contracts import (
 class UnifiedPlanningAdapter:
     """Adapter from Nika boolean-fact planning contracts to Unified Planning."""
 
-    def __init__(self, *, engine_name: str = "aries") -> None:
+    def __init__(
+        self,
+        *,
+        engine_name: str = "aries",
+        max_expansions: int = 50_000,
+        solver_timeout_seconds: float = 30.0,
+    ) -> None:
         if not engine_name.strip():
             raise ValueError("engine_name must not be empty")
+        if (
+            isinstance(max_expansions, bool)
+            or not isinstance(max_expansions, int)
+            or max_expansions <= 0
+        ):
+            raise ValueError("max_expansions must be a positive integer")
+        if (
+            isinstance(solver_timeout_seconds, bool)
+            or not isinstance(solver_timeout_seconds, (int, float))
+            or not isfinite(float(solver_timeout_seconds))
+            or solver_timeout_seconds <= 0
+        ):
+            raise ValueError("solver_timeout_seconds must be a finite positive number")
         self._engine_name = engine_name
+        self._max_expansions = max_expansions
+        self._solver_timeout_seconds = float(solver_timeout_seconds)
 
     def plan(
         self,
@@ -34,9 +57,14 @@ class UnifiedPlanningAdapter:
         unreachable_fact = self._obviously_unreachable_fact(state, goal, actions)
         if unreachable_fact is not None:
             raise DeterministicPlanningError(
-                f"goal fact is unreachable from registered deterministic actions: {unreachable_fact}",
+                (
+                    "goal fact is unreachable from registered deterministic actions: "
+                    f"{unreachable_fact}"
+                ),
                 code=DeterministicErrorCode.GOAL_UNREACHABLE,
             )
+
+        self._bounded_reachability_precheck(state=state, goal=goal, actions=actions)
 
         try:
             up = self._shortcuts()
@@ -73,6 +101,12 @@ class UnifiedPlanningAdapter:
 
             up_name = f"action_{index}"
             planned_action = up.InstantaneousAction(up_name)
+            # Nika accepts each effectful deterministic action at most once in a returned plan.
+            # Encode that invariant into the solver problem so a search path cannot cycle by
+            # toggling facts and reusing the same action forever.
+            used_fluent = up.Fluent(f"used_action_{index}", up.BoolType())
+            problem.add_fluent(used_fluent, default_initial_value=False)
+            planned_action.add_precondition(up.Not(used_fluent))
             for fact in definition.requires:
                 planned_action.add_precondition(fluents[fact])
             for fact in definition.forbids:
@@ -85,6 +119,7 @@ class UnifiedPlanningAdapter:
                 planned_action.add_effect(fluents[fact], True)
             for fact in definition.removes:
                 planned_action.add_effect(fluents[fact], False)
+            planned_action.add_effect(used_fluent, True)
             problem.add_action(planned_action)
             action_by_up_name[up_name] = definition
 
@@ -95,7 +130,7 @@ class UnifiedPlanningAdapter:
 
         try:
             with up.OneshotPlanner(name=self._engine_name) as planner:
-                result = planner.solve(problem)
+                result = planner.solve(problem, timeout=self._solver_timeout_seconds)
         except Exception as exc:
             raise DeterministicPlanningError(
                 "deterministic planner failed",
@@ -133,6 +168,85 @@ class UnifiedPlanningAdapter:
             goal=goal,
             planned_actions=tuple(planned_actions),
         )
+
+    def _bounded_reachability_precheck(
+        self,
+        *,
+        state: WorldState,
+        goal: DeterministicGoal,
+        actions: tuple[DeterministicAction, ...],
+    ) -> None:
+        """Prove finite reachability or fail before the external engine is started."""
+        indexed_actions = tuple(
+            sorted(enumerate(actions), key=lambda item: (item[1].action_id, item[0]))
+        )
+        empty_used: frozenset[int] = frozenset()
+        queue: deque[tuple[frozenset[str], frozenset[int]]] = deque(
+            ((state.facts, empty_used),)
+        )
+        # For equal world facts, a state that has consumed a subset of the same actions dominates
+        # one that has consumed more: it has identical applicability facts and strictly more
+        # remaining capabilities. This prunes duplicate paths and fact-toggle cycles soundly.
+        seen_by_facts: dict[frozenset[str], list[frozenset[int]]] = {
+            state.facts: [empty_used]
+        }
+        scheduled_states = 1
+
+        while queue:
+            facts, used_indexes = queue.popleft()
+            if used_indexes not in seen_by_facts.get(facts, ()):
+                continue
+
+            for index, action in indexed_actions:
+                if index in used_indexes:
+                    continue
+                if not action.requires <= facts or action.forbids & facts:
+                    continue
+
+                next_facts = frozenset((facts - action.removes) | action.adds)
+                if next_facts == facts:
+                    continue
+                next_used = used_indexes | {index}
+                if self._goal_satisfied_facts(next_facts, goal):
+                    return
+                if not self._record_nondominated_state(
+                    seen_by_facts=seen_by_facts,
+                    facts=next_facts,
+                    used_indexes=next_used,
+                ):
+                    continue
+                if scheduled_states >= self._max_expansions:
+                    raise DeterministicPlanningError(
+                        "deterministic reachability precheck exhausted max_expansions budget: "
+                        f"{self._max_expansions}",
+                        code=DeterministicErrorCode.PLANNER_RESOURCE_LIMIT,
+                    )
+                scheduled_states += 1
+                queue.append((next_facts, next_used))
+
+        raise DeterministicPlanningError(
+            "goal is not reachable within the finite deterministic action state space",
+            code=DeterministicErrorCode.GOAL_UNREACHABLE,
+        )
+
+    @staticmethod
+    def _record_nondominated_state(
+        *,
+        seen_by_facts: dict[frozenset[str], list[frozenset[int]]],
+        facts: frozenset[str],
+        used_indexes: frozenset[int],
+    ) -> bool:
+        known = seen_by_facts.get(facts, [])
+        if any(previous <= used_indexes for previous in known):
+            return False
+        seen_by_facts[facts] = [
+            previous for previous in known if not used_indexes < previous
+        ] + [used_indexes]
+        return True
+
+    @staticmethod
+    def _goal_satisfied_facts(facts: frozenset[str], goal: DeterministicGoal) -> bool:
+        return goal.required <= facts and not goal.forbidden & facts
 
     @classmethod
     def _validated_plan(
@@ -237,7 +351,7 @@ class UnifiedPlanningAdapter:
 
     @staticmethod
     def _goal_satisfied(state: WorldState, goal: DeterministicGoal) -> bool:
-        return goal.required <= state.facts and not goal.forbidden & state.facts
+        return UnifiedPlanningAdapter._goal_satisfied_facts(state.facts, goal)
 
     @staticmethod
     def _shortcuts() -> Any:
