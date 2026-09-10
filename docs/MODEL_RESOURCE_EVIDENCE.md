@@ -37,21 +37,19 @@ Stable UNKNOWN reasons currently are:
 
 ## CPU and RAM semantics
 
-The current shared `PsutilResourceObserver` reports:
-
-- host CPU percentage;
-- host RAM percentage;
-- host available RAM bytes;
-- optional RSS bytes for the Nika process.
+Live `main`'s shared `PsutilResourceObserver` reports host CPU percentage, host
+RAM percentage, host available RAM bytes, and optional RSS bytes for the Nika
+process. The incumbent #534 Model Engineering branch is based on an older
+`ResourceSnapshot` shape that has only the three host measurements. This
+evidence layer therefore capability-checks optional process RSS: if the field is
+absent or unavailable it is `unknown` with `metric_unavailable`, never zero.
 
 Those scopes are preserved literally. Host CPU/RAM are not labelled as
-model-process consumption. Nika-process RSS is not labelled as an external
-Ollama/Foundry/provider process measurement.
+model-process consumption. Nika-process RSS, when available, is not labelled as
+an external Ollama/Foundry/provider process measurement.
 
 If the resource observer is not configured, the per-sample CPU/RAM metrics are
-`unknown` with `resource_observer_not_configured`. If optional process RSS is
-missing from an otherwise valid snapshot, only RSS becomes `unknown` with
-`metric_unavailable`.
+`unknown` with `resource_observer_not_configured`.
 
 ## GPU semantics
 
@@ -97,7 +95,8 @@ fake completion gateway. It proves:
 
 - exactly two resource/accelerator snapshot calls for one benchmark case;
 - observed CPU/RAM values preserve their scope and units;
-- unavailable RSS is UNKNOWN while a real RSS value of zero remains observed;
+- a real observed host-RAM value of zero remains observed while unavailable RSS
+  remains UNKNOWN;
 - missing observers produce UNKNOWN rather than zero;
 - untyped accelerator readings do not become GPU evidence;
 - invalid percent values and UNKNOWN-with-numeric-value constructions fail
