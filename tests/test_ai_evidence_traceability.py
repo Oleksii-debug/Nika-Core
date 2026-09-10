@@ -7,7 +7,7 @@ import pytest
 from nika_core.intelligence.evidence_trace import (
     ResearchEvidenceSelection,
     ResearchEvidenceTraceError,
-    build_research_assisted_provenance,
+    attach_research_assisted_provenance,
 )
 from nika_core.research.models import (
     FreshnessState,
@@ -64,9 +64,9 @@ def _similar_source_result_set() -> ResearchResultSet:
     )
 
 
-def _selection(*, source_id: str = "source-b", document_id: str = "document-b") -> (
-    ResearchEvidenceSelection
-):
+def _selection(
+    *, source_id: str = "source-b", document_id: str = "document-b"
+) -> ResearchEvidenceSelection:
     return ResearchEvidenceSelection(
         result_set_id="results-similar-sources",
         item_ordinal=1,
@@ -80,14 +80,14 @@ def _selection(*, source_id: str = "source-b", document_id: str = "document-b") 
 def test_response_provenance_references_exact_selected_similar_source_without_body() -> None:
     result_set = _similar_source_result_set()
 
-    provenance = build_research_assisted_provenance(
+    response_payload = attach_research_assisted_provenance(
+        output={"text": "research-assisted answer"},
         result_set=result_set,
         selections=(_selection(),),
-    ).to_payload()
-    response_payload = {"text": "research-assisted answer", "provenance": provenance}
-
+    )
+    provenance = response_payload["provenance"]
+    assert isinstance(provenance, dict)
     traces = provenance["research_evidence"]
-    assert isinstance(traces, list)
     assert traces == [
         {
             "schema": "nika.intelligence.research-evidence-trace:v1",
@@ -125,7 +125,8 @@ def test_fabricated_cross_source_association_fails_closed() -> None:
         ResearchEvidenceTraceError,
         match="selected source_id does not match retrieval evidence",
     ):
-        build_research_assisted_provenance(
+        attach_research_assisted_provenance(
+            output={"text": "must not gain false provenance"},
             result_set=result_set,
             selections=(_selection(source_id="source-a"),),
         )
@@ -138,7 +139,20 @@ def test_same_looking_source_cannot_be_selected_by_wrong_document_identity() -> 
         ResearchEvidenceTraceError,
         match="selected document_id does not match retrieval item",
     ):
-        build_research_assisted_provenance(
+        attach_research_assisted_provenance(
+            output={"plan": ["step-1"]},
             result_set=result_set,
             selections=(_selection(document_id="document-a"),),
+        )
+
+
+def test_unvalidated_existing_provenance_is_not_silently_accepted() -> None:
+    with pytest.raises(
+        ResearchEvidenceTraceError,
+        match="output already contains unvalidated provenance",
+    ):
+        attach_research_assisted_provenance(
+            output={"text": "answer", "provenance": {"source_id": "fabricated"}},
+            result_set=_similar_source_result_set(),
+            selections=(_selection(),),
         )
