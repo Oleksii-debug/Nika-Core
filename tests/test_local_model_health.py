@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Self
 
 import httpx
 import pytest
@@ -29,7 +30,7 @@ class _FakeClient:
         self._responses = responses
         self._calls = calls
 
-    def __enter__(self) -> _FakeClient:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *args: object) -> None:

@@ -13,7 +13,7 @@ from nika_core.resources.contracts import ResourceObserverPort
 def _resource_observer() -> ResourceObserverPort | None:
     try:
         from nika_core.resources import PsutilResourceObserver
-    except Exception:
+    except Exception:  # noqa: BLE001
         # psutil is optional for the base install; import diagnostics are never echoed publicly.
         return None
     return PsutilResourceObserver()
@@ -43,7 +43,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         config = AppConfig.from_environment()
-    except Exception:
+    except Exception:  # noqa: BLE001
         # Pydantic diagnostics can include raw environment values, so expose a stable message only.
         report = _configuration_failure_report()
     else:

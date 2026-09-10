@@ -219,7 +219,7 @@ class OllamaModelHealthProbe:
                 provider_id=self._provider_id,
                 model_id=self._model_id,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001
             return ModelHealthFact.UNKNOWN
         if result is True:
             return ModelHealthFact.YES

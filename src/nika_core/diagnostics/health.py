@@ -282,7 +282,7 @@ class HealthService:
             )
         try:
             snapshot = observer.snapshot()
-        except Exception:
+        except Exception:  # noqa: BLE001
             # Provider-controlled diagnostics may contain credentials and must not cross
             # this public boundary.
             return HealthCheck(
