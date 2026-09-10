@@ -186,3 +186,31 @@ def test_equivalent_inputs_have_stable_solver_problem_and_tie_break(
     assert plan_evidence == {("route-a",)}
     assert len(fake_up.problem_signatures) == 64
     assert len(set(fake_up.problem_signatures)) == 1
+
+
+def test_aries_plan_evidence_stays_stable_across_randomized_input_order() -> None:
+    planner = UnifiedPlanningAdapter()
+    plan_evidence: set[tuple[str, ...]] = set()
+
+    for seed in range(8):
+        rng = Random(seed)
+        actions = [
+            _candidate_action("route-b", "marker-b", rng),
+            _candidate_action("route-a", "marker-a", rng),
+        ]
+        rng.shuffle(actions)
+        plan = planner.plan(
+            state=WorldState(
+                frozenset(
+                    {"ready-a", "ready-b", "ready-c", "stale-a", "stale-b", "stale-c"}
+                )
+            ),
+            goal=DeterministicGoal(
+                required=_shuffled_frozenset(("goal-a", "goal-b", "goal-c"), rng),
+                forbidden=_shuffled_frozenset(("stale-a", "stale-b", "stale-c"), rng),
+            ),
+            actions=tuple(actions),
+        )
+        plan_evidence.add(tuple(step.action_id for step in plan.steps))
+
+    assert len(plan_evidence) == 1
