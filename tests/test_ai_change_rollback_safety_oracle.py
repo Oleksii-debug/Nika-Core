@@ -3,6 +3,9 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+import pytest
+
+from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.experiments import (
     ArtifactKind,
@@ -15,7 +18,13 @@ from nika_core.experiments import (
     SQLiteExperimentRepository,
     StrategyRef,
 )
-from nika_core.v01_model_settings import ModelSelection, V01ModelSettings
+from nika_core.kernel.task_queue import TaskQueue
+from nika_core.v01_model_settings import (
+    ModelSelection,
+    ModelSetupError,
+    V01BoundModelRuntimeFactory,
+    V01ModelSettings,
+)
 
 
 def _store(tmp_path: Path) -> SQLiteStore:
@@ -32,6 +41,20 @@ def _local(*, revision: int, model: str) -> dict[str, object]:
         "model": model,
         "base_url": "http://127.0.0.1:11434",
         "credential_ref": None,
+        "private_data_allowed": False,
+        "timeout_seconds": 30.0,
+        "revision": revision,
+    }
+
+
+def _cloud(*, revision: int, model: str) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "route_kind": "openai_compatible",
+        "provider_id": "configured-api",
+        "model": model,
+        "base_url": "https://api.example.test/v1",
+        "credential_ref": "env:NIKA_DEV80_TEST",
         "private_data_allowed": False,
         "timeout_seconds": 30.0,
         "revision": revision,
@@ -61,6 +84,20 @@ def _strategy(candidate_id: str, artifact_ref: str) -> StrategyRef:
         artifact_ref=artifact_ref,
         permission_fingerprint="perm-v1",
     )
+
+
+def _assert_selection_preserved(
+    store: SQLiteStore,
+    selection_id: str,
+    selection: ModelSelection,
+) -> None:
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT selection_json FROM v01_model_selections WHERE selection_id = ?",
+            (selection_id,),
+        ).fetchone()
+    assert row is not None
+    assert row["selection_json"] == selection.canonical_json()
 
 
 def test_m8_selection_preserves_previous_config_ref_and_does_not_silently_activate(
@@ -133,14 +170,40 @@ def test_successful_default_switch_retains_previous_identity_across_restart(
     assert current["status"] == "ready"
     assert current["revision"] == 2
     assert current["model"] == "candidate-v2"
+    _assert_selection_preserved(store, stable_id, stable)
 
-    with store.connection() as conn:
-        row = conn.execute(
-            "SELECT selection_json FROM v01_model_selections WHERE selection_id = ?",
-            (stable_id,),
-        ).fetchone()
-    assert row is not None
-    assert row["selection_json"] == stable.canonical_json()
+
+def test_failed_runtime_activation_does_not_destroy_previous_selection_identity(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = V01ModelSettings(store)
+    stable_payload = _local(revision=0, model="stable-v1")
+    stable = _selection(stable_payload)
+    stable_id = _selection_id(stable)
+    _configure(settings, stable_payload)
+
+    _configure(settings, _cloud(revision=1, model="candidate-v2"))
+    payload = settings.prepare_task_payload({"command": "Use candidate."})
+    task_id = TaskQueue(store).create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload=payload,
+    ).task_id
+
+    factory = V01BoundModelRuntimeFactory(
+        store=store,
+        definitions=AgentDefinitionRepository(store),
+        settings=settings,
+    )
+    with pytest.raises(ModelSetupError, match="заборонено політикою Nika"):
+        factory.for_task(task_id)
+
+    restarted = V01ModelSettings(store)
+    current = restarted.snapshot()
+    assert current["status"] == "ready"
+    assert current["model"] == "candidate-v2"
+    _assert_selection_preserved(store, stable_id, stable)
 
 
 def test_failed_candidate_configuration_commit_keeps_previous_default(
