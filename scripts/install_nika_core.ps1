@@ -49,6 +49,7 @@ function Get-NikaCanonicalDataRoot {
     }
 
     $canonicalDatabase = Get-NikaFullPath $databasePath
+    Assert-NikaNoReparsePathChain -Path $canonicalDatabase
     $dataRoot = Split-Path -Parent $canonicalDatabase
     if ([string]::IsNullOrWhiteSpace($dataRoot)) {
         throw "Configured Nika Core database path has no safe parent."
