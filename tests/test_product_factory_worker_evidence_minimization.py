@@ -254,6 +254,14 @@ def test_nested_and_aws_review_credentials_are_minimized_without_safe_ref_loss(
             "https://reviewer:NIKA_BLOCKER_URL_CANARY@example.invalid/blocker",
             "NIKA_BLOCKER_URL_CANARY",
         ),
+        (
+            "https://example.invalid/review/api_key=NIKA_BLOCKER_PATH_CANARY",
+            "NIKA_BLOCKER_PATH_CANARY",
+        ),
+        (
+            "https://example.invalid/review/api%255Fkey=NIKA_BLOCKER_ENCODED_PATH_CANARY",
+            "NIKA_BLOCKER_ENCODED_PATH_CANARY",
+        ),
     ),
 )
 def test_no_result_blocker_secret_is_minimized_before_checkpoint_and_restart(
@@ -303,6 +311,51 @@ def test_safe_no_result_blocker_survives_checkpoint_and_restart(tmp_path: Path) 
     restored_record = restored.snapshot().records[0]
     assert restored_record.state is WorkState.BLOCKED
     assert restored_record.blocker == reason
+
+
+@pytest.mark.parametrize(
+    "secret_ref",
+    (
+        "https://example.invalid/review/api_key=NIKA_REVIEW_PATH_CANARY",
+        "https://example.invalid/review/api%255Fkey=NIKA_REVIEW_PATH_CANARY",
+    ),
+)
+def test_url_path_credentials_are_minimized_from_review_surfaces_and_restart(
+    tmp_path: Path,
+    secret_ref: str,
+) -> None:
+    canary = "NIKA_REVIEW_PATH_CANARY"
+    safe_ref = "https://example.invalid/review/evidence=tests-core-pass"
+    store, binding, coordinator, task_id = _setup(tmp_path)
+    _record_success(coordinator)
+    coordinator.review(
+        "core",
+        ReviewDecision(
+            reviewer_id="independent-qa",
+            accepted=False,
+            reason=secret_ref,
+            evidence_refs=(secret_ref, safe_ref),
+        ),
+    )
+
+    checkpoint = binding.checkpoint(coordinator)
+    durable = checkpoint.coordinator.records[0]
+    assert durable.review is not None
+    assert durable.review.reason == _REVIEW_OMITTED
+    assert durable.review.evidence_refs == (_digest_ref(secret_ref), safe_ref)
+    assert durable.blocker == _REVIEW_OMITTED
+
+    host = ProductFactoryCheckpointHost(store)
+    saved = host.save(host_task_id=task_id, checkpoint=checkpoint)
+    raw = _raw_checkpoint(store, saved.checkpoint_id)
+    assert canary not in raw
+    assert safe_ref in raw
+
+    restarted = ProductFactoryCheckpointHost(SQLiteStore(store.path))
+    restored = restarted.restore_latest(host_task_id=task_id, binding=binding)
+    restored_record = restored.snapshot().records[0]
+    assert restored_record.review == durable.review
+    assert restored_record.blocker == _REVIEW_OMITTED
 
 
 @pytest.mark.parametrize(
