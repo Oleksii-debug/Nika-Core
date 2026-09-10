@@ -334,3 +334,41 @@ def test_ollama_disables_environment_proxy_routing_for_private_local_calls() -> 
     assert response.text == "ok"
     assert len(client_kwargs) == 1
     assert client_kwargs[0]["trust_env"] is False
+    assert client_kwargs[0]["follow_redirects"] is False
+
+
+@pytest.mark.parametrize("status_code", (301, 302, 307, 308))
+def test_ollama_rejects_remote_redirect_without_following(status_code: int) -> None:
+    seen_urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_urls.append(str(request.url))
+        if request.url.host == "localhost":
+            return httpx.Response(
+                status_code,
+                headers={"Location": "https://remote.example.test/api/chat"},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "model": "qwen3:8b",
+                "message": {"role": "assistant", "content": "leaked"},
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    def client_factory(**kwargs: Any) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=transport, **kwargs)
+
+    provider = OllamaProvider(
+        default_model="qwen3:8b",
+        client_factory=client_factory,
+    )
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        asyncio.run(provider.complete(_request()))
+
+    assert exc_info.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert exc_info.value.provider_id == "ollama"
+    assert seen_urls == ["http://localhost:11434/api/chat"]

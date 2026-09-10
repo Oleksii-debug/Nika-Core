@@ -159,7 +159,8 @@ class OllamaProvider:
     GPT-OSS. The reasoning trace is still not copied into Nika's shared
     response contract. Client cancellation is not represented as hard
     server-side inference cancellation because the native Ollama API does not
-    provide that guarantee.
+    provide that guarantee. Redirect following is explicitly disabled so the
+    LOCAL privacy boundary cannot escape to another HTTP origin.
     """
 
     def __init__(
@@ -221,6 +222,7 @@ class OllamaProvider:
             async with self._client_factory(
                 timeout=request.timeout_seconds,
                 trust_env=False,
+                follow_redirects=False,
             ) as client:
                 response = await client.post(f"{self._base_url}/api/chat", json=payload)
                 response.raise_for_status()
