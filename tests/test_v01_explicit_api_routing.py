@@ -7,6 +7,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+import nika_core.v01_model_settings as model_settings_module
 from nika_core.builder.compiler import AgentCompiler
 from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.builder.spec import AgentDefinition
@@ -141,7 +142,9 @@ def test_invalid_api_route_is_rejected_before_task_binding(tmp_path: Path) -> No
     assert settings.snapshot() == {"status": "missing", "revision": 0}
 
 
-def test_policy_denies_selected_cloud_before_provider_or_credential_use(tmp_path: Path) -> None:
+def test_policy_denies_selected_cloud_before_provider_or_credential_use(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     store = _store(tmp_path)
     settings = V01ModelSettings(store)
     definitions = _definitions(store)
@@ -149,6 +152,16 @@ def test_policy_denies_selected_cloud_before_provider_or_credential_use(tmp_path
     task_id = _task(settings, store)
     policy = _RecordingRoutePolicy(allow_cloud=False)
     resolver = _StaticResolver("must-not-be-read")
+
+    def forbidden_provider(**kwargs: object) -> object:
+        del kwargs
+        raise AssertionError("denied cloud route must not construct a provider")
+
+    monkeypatch.setattr(
+        model_settings_module,
+        "CredentialRefOpenAICompatibleProvider",
+        forbidden_provider,
+    )
 
     def forbidden_client_factory(**kwargs: object) -> httpx.AsyncClient:
         del kwargs
