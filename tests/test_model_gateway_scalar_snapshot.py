@@ -99,7 +99,11 @@ class _ResponseScalarProvider:
         if self.mode == "usage-int-subclass":
             return replace(
                 response,
-                usage=ModelUsage(input_tokens=_BehavioralInt(1), output_tokens=2, total_tokens=3),
+                usage=ModelUsage(
+                    input_tokens=_BehavioralInt(1),
+                    output_tokens=2,
+                    total_tokens=3,
+                ),
             )
         if self.mode == "latency-float-subclass":
             return replace(response, latency_ms=_BehavioralFloat(1.5))
