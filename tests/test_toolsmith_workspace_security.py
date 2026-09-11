@@ -27,7 +27,7 @@ from nika_core.toolsmith.workspace_security import (
         "C:/repo/file.py",
         "C:\\repo\\file.py",
         "//server/share/file.py",
-        "\\\\server\\share\\file.py",
+        "\\\\server\\share/file.py",
         ".git/config",
         "src/.GIT/config",
         "src/file.py:secret",
@@ -130,7 +130,7 @@ def test_job_workspace_cannot_live_inside_production_repository(tmp_path: Path) 
     production.mkdir()
     nested = production / "jobs" / "job-1"
     nested.mkdir(parents=True)
-    with pytest.raises(WorkspaceSecurityError, match="must not be inside"):
+    with pytest.raises(WorkspaceSecurityError, match="fully disjoint"):
         make_sterile_git_plan(
             repository_root=production,
             job_root=nested,
