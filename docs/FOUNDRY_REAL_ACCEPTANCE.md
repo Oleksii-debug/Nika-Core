@@ -25,17 +25,25 @@ Use a physical Windows machine with the repository checked out at the exact comm
 
 The operator must supply the exact Foundry alias, exact public selected model ID, and a model-license identifier/evidence reference that was actually reviewed. The harness never infers or invents model-license metadata.
 
+The aggregate `--output` path is also part of the trust boundary. It is required and must resolve outside the repository worktree. An in-repository output path is rejected before physical child execution so writing acceptance evidence cannot make the exact checkout dirty and invalidate a reboot rerun.
+
 ## Run
 
-From a clean repository checkout in PowerShell:
+From a clean repository checkout in PowerShell, create a retained evidence directory outside the checkout and write the first aggregate there:
 
 ```powershell
+$evidenceRoot = Join-Path $env:USERPROFILE 'Documents\NikaCoreEvidence'
+New-Item -ItemType Directory -Force -Path $evidenceRoot | Out-Null
+$preRebootEvidence = Join-Path $evidenceRoot 'foundry-local-acceptance-pre-reboot.json'
+
 python scripts/prove_foundry_acceptance.py `
   --model '<EXACT_FOUNDRY_ALIAS>' `
   --model-id '<EXACT_PUBLIC_MODEL_ID>' `
   --model-license '<REVIEWED_LICENSE_REFERENCE>' `
-  --output '.\foundry-local-acceptance-evidence.json'
+  --output $preRebootEvidence
 ```
+
+The harness resolves the supplied output path before running the physical proof and refuses it if it is inside the Git worktree. Keep the evidence directory separate from the repository; do not add or ignore an evidence filename inside the checkout merely to satisfy the clean-worktree check.
 
 Optional resource policy flags from the canonical proof may be supplied: `--max-cpu-percent`, `--max-memory-percent`, and `--min-available-memory-gb`. `--hash-model-cache` may also be used when exact cache-byte evidence is required; it can be expensive for large artifacts.
 
@@ -45,6 +53,19 @@ Do not add `--allow-download`: the acceptance wrapper intentionally exposes no s
 
 Only a successfully written aggregate JSON with `physical_windows_foundry_inference_proven=true`, `retest_runtime_required=false`, two validated child runs, and the intended exact `nika_sha` is physical Foundry evidence. Hosted/cloud CI that lacks the real Windows Foundry runtime/model must not set those fields by simulation.
 
-This harness proves fresh-process rerun, not a Windows OS reboot. If the release gate requires reboot persistence, perform one additional physical step: reboot Windows without changing the repository SHA or model cache, rerun the same command, and retain both aggregate JSON files. The two files must name the same Nika SHA, provider/model identity and reviewed license reference, and both must independently pass the fixed response/no-download/no-fallback contract.
+This harness proves fresh-process rerun, not a Windows OS reboot. If the release gate requires reboot persistence, retain the pre-reboot JSON above, reboot Windows without changing the repository SHA or model cache, return to the same clean checkout, and write a second distinct aggregate outside the worktree:
+
+```powershell
+$evidenceRoot = Join-Path $env:USERPROFILE 'Documents\NikaCoreEvidence'
+$postRebootEvidence = Join-Path $evidenceRoot 'foundry-local-acceptance-post-reboot.json'
+
+python scripts/prove_foundry_acceptance.py `
+  --model '<EXACT_FOUNDRY_ALIAS>' `
+  --model-id '<EXACT_PUBLIC_MODEL_ID>' `
+  --model-license '<REVIEWED_LICENSE_REFERENCE>' `
+  --output $postRebootEvidence
+```
+
+The pre-reboot and post-reboot files must be distinct, must name the same Nika SHA, provider/model identity and reviewed license reference, and must independently pass the fixed response/no-download/no-fallback contract. Because both evidence files live outside the worktree, the first successful run cannot dirty the checkout and block the required second run.
 
 Until that real machine run exists for the exact release candidate, classify Foundry physical acceptance as `RETEST_RUNTIME_REQUIRED` rather than PASS.
