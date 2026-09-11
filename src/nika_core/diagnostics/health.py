@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import math
+import os
+import shutil
 import sqlite3
-from collections.abc import Callable
+import stat
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from functools import cache
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from nika_core.config import AppConfig
 from nika_core.data.schema import SCHEMA_VERSION
+from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_project_schema import PRODUCT_PROJECT_SCHEMA_VERSION
 from nika_core.resources.contracts import ResourceObserverPort, ResourceSnapshot
 
@@ -78,6 +85,18 @@ class HealthReport:
         return "\n".join(lines)
 
 
+@dataclass(frozen=True, slots=True)
+class _FileIdentity:
+    device: int
+    inode: int
+    size: int
+    modified_ns: int
+
+
+SchemaColumn = tuple[str, str, int, int]
+SchemaSignature = tuple[tuple[str, tuple[SchemaColumn, ...]], ...]
+
+
 class HealthService:
     """Read-only deterministic health aggregation over canonical Nika Core surfaces."""
 
@@ -137,7 +156,9 @@ class HealthService:
                     summary="Canonical SQLite database file does not exist.",
                 )
             ]
-        if not path.is_file():
+        try:
+            self._file_identity(path)
+        except OSError:
             return [
                 HealthCheck(
                     check_id="database.present",
@@ -180,26 +201,84 @@ class HealthService:
                         check_id="database.schema.product-project",
                     )
                 )
+                checks.append(self._check_schema_shape(conn))
         except (OSError, sqlite3.Error):
             checks.append(
                 HealthCheck(
                     check_id="database.open",
                     status=HealthStatus.FAIL,
-                    summary="SQLite database could not be opened safely in read-only mode.",
+                    summary=(
+                        "SQLite database could not be snapshotted safely for read-only health."
+                    ),
                 )
             )
         return checks
 
-    @staticmethod
-    def _read_only_connection(path: Path) -> sqlite3.Connection:
-        uri = f"{path.resolve().as_uri()}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True)
+    @classmethod
+    @contextmanager
+    def _read_only_connection(cls, path: Path) -> Iterator[sqlite3.Connection]:
+        """Inspect a stable copy so SQLite never opens or mutates the source database."""
+        with TemporaryDirectory(prefix="nika-health-db-") as directory:
+            snapshot = Path(directory) / "nika-health.db"
+            source_wal = Path(f"{path}-wal")
+            snapshot_wal = Path(f"{snapshot}-wal")
+
+            main_before = cls._file_identity(path)
+            wal_before = cls._optional_file_identity(source_wal)
+            copied_main = cls._copy_stable_file(path, snapshot)
+            if copied_main != main_before:
+                raise OSError("SQLite main file changed before health snapshot completed")
+            if wal_before is not None:
+                copied_wal = cls._copy_stable_file(source_wal, snapshot_wal)
+                if copied_wal != wal_before:
+                    raise OSError("SQLite WAL changed before health snapshot completed")
+
+            if cls._file_identity(path) != main_before:
+                raise OSError("SQLite main file changed while health snapshot was captured")
+            if cls._optional_file_identity(source_wal) != wal_before:
+                raise OSError("SQLite WAL changed while health snapshot was captured")
+
+            uri = f"{snapshot.resolve().as_uri()}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True)
+            try:
+                conn.execute("PRAGMA query_only = ON")
+                yield conn
+            finally:
+                conn.close()
+
+    @classmethod
+    def _copy_stable_file(cls, source: Path, destination: Path) -> _FileIdentity:
+        before = cls._file_identity(source)
+        with source.open("rb") as source_file, destination.open("xb") as destination_file:
+            shutil.copyfileobj(source_file, destination_file)
+            descriptor_after = cls._identity_from_stat(os.fstat(source_file.fileno()))
+        after = cls._file_identity(source)
+        if before != descriptor_after or before != after:
+            raise OSError("SQLite source file changed while being copied")
+        return before
+
+    @classmethod
+    def _optional_file_identity(cls, path: Path) -> _FileIdentity | None:
         try:
-            conn.execute("PRAGMA query_only = ON")
-        except sqlite3.Error:
-            conn.close()
-            raise
-        return conn
+            return cls._file_identity(path)
+        except FileNotFoundError:
+            return None
+
+    @classmethod
+    def _file_identity(cls, path: Path) -> _FileIdentity:
+        metadata = os.stat(path, follow_symlinks=False)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OSError("health source is not a regular file")
+        return cls._identity_from_stat(metadata)
+
+    @staticmethod
+    def _identity_from_stat(metadata: os.stat_result) -> _FileIdentity:
+        return _FileIdentity(
+            device=metadata.st_dev,
+            inode=metadata.st_ino,
+            size=metadata.st_size,
+            modified_ns=metadata.st_mtime_ns,
+        )
 
     @staticmethod
     def _check_database_integrity(conn: sqlite3.Connection) -> HealthCheck:
@@ -268,6 +347,52 @@ class HealthService:
                 "or newer than this build."
             ),
         )
+
+    @classmethod
+    def _check_schema_shape(cls, conn: sqlite3.Connection) -> HealthCheck:
+        expected = dict(cls._canonical_schema_signature())
+        actual = dict(cls._schema_signature(conn))
+        valid = all(actual.get(table_name) == columns for table_name, columns in expected.items())
+        if valid:
+            return HealthCheck(
+                check_id="database.schema.shape",
+                status=HealthStatus.PASS,
+                summary="Required schema shape matches the canonical SQLite store.",
+            )
+        return HealthCheck(
+            check_id="database.schema.shape",
+            status=HealthStatus.FAIL,
+            summary="Required canonical tables or columns are missing or malformed.",
+        )
+
+    @staticmethod
+    @cache
+    def _canonical_schema_signature() -> SchemaSignature:
+        """Derive required shape from the canonical migration authority, never a second schema list."""
+        with TemporaryDirectory(prefix="nika-health-schema-") as directory:
+            database = Path(directory) / "canonical.db"
+            SQLiteStore(database).initialize()
+            with sqlite3.connect(database) as conn:
+                return HealthService._schema_signature(conn)
+
+    @staticmethod
+    def _schema_signature(conn: sqlite3.Connection) -> SchemaSignature:
+        table_names = tuple(
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            )
+        )
+        signature: list[tuple[str, tuple[SchemaColumn, ...]]] = []
+        for table_name in table_names:
+            rows = conn.execute(
+                'SELECT name, type, "notnull", pk FROM pragma_table_info(?) ORDER BY cid',
+                (table_name,),
+            )
+            columns = tuple((str(row[0]), str(row[1]), int(row[2]), int(row[3])) for row in rows)
+            signature.append((str(table_name), columns))
+        return tuple(signature)
 
     def _check_resources(self) -> HealthCheck:
         observer = self._resource_observer
