@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from collections.abc import Mapping
 from typing import Any
@@ -27,6 +28,8 @@ from nika_core.runtime.contracts import (
     RuntimeOutcome,
     RuntimeRequest,
     RuntimeResult,
+    RuntimeResumeProbe,
+    RuntimeResumeProbeStatus,
     RuntimeResumeRequest,
 )
 
@@ -99,6 +102,43 @@ class ModelGatewayAgentRuntime:
         if self._provider_kind is ProviderKind.LOCAL:
             capabilities.add(RuntimeCapability.LOCAL_MODELS)
         return frozenset(capabilities)
+
+    def initial_resume_token(self, *, task_id: str, thread_id: str) -> str:
+        """Persist an opaque in-flight marker without claiming durable inference resume."""
+        material = json.dumps(
+            {
+                "schema": "nika-model-gateway-inflight-v1",
+                "runtime_id": self.runtime_id,
+                "task_id": task_id,
+                "thread_id": thread_id,
+                "model_fingerprint": model_identity_fingerprint(self._model),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return f"model-gateway-inflight-v1:{hashlib.sha256(material).hexdigest()}"
+
+    async def probe_resume(
+        self,
+        *,
+        task_id: str,
+        thread_id: str,
+        resume_token: str,
+    ) -> RuntimeResumeProbe:
+        expected = self.initial_resume_token(task_id=task_id, thread_id=thread_id)
+        if resume_token != expected:
+            return RuntimeResumeProbe(
+                status=RuntimeResumeProbeStatus.INVALID,
+                reason="persisted model inference marker does not match this runtime route",
+            )
+        return RuntimeResumeProbe(
+            status=RuntimeResumeProbeStatus.UNVERIFIABLE,
+            reason=(
+                "opaque model inference has no readable durable checkpoint; "
+                "automatic replay is not safe"
+            ),
+        )
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
         try:
