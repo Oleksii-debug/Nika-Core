@@ -94,7 +94,7 @@ def _run_installed_pf11(executable: Path, output: Path, *, env: dict[str, str]) 
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise RuntimeError("installed NikaCore.exe did not emit valid PF11 JSON") from exc
     if not isinstance(payload, dict):
-        raise RuntimeError("installed NikaCore.exe PF11 evidence must be an object")
+        raise TypeError("installed NikaCore.exe PF11 evidence must be an object")
     project_id = payload.get("project_id")
     if (
         payload.get("route") != "product_project"
