@@ -53,7 +53,7 @@ class _EmptyEffectJournal:
 
 def _as_string_list(value: object, *, field: str) -> list[str]:
     if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-        raise ValueError(f"{field} must be a list of strings")
+        raise TypeError(f"{field} must be a list of strings")
     return value
 
 
@@ -66,20 +66,20 @@ def _goal(raw: Mapping[str, object]) -> DeterministicGoal:
 
 def _actions(raw_actions: object) -> tuple[DeterministicAction, ...]:
     if not isinstance(raw_actions, list):
-        raise ValueError("actions must be a list")
+        raise TypeError("actions must be a list")
     actions: list[DeterministicAction] = []
     for index, raw in enumerate(raw_actions):
         if not isinstance(raw, dict):
-            raise ValueError(f"actions[{index}] must be an object")
+            raise TypeError(f"actions[{index}] must be an object")
         action_id = raw.get("action_id")
         if not isinstance(action_id, str):
-            raise ValueError(f"actions[{index}].action_id must be a string")
+            raise TypeError(f"actions[{index}].action_id must be a string")
         tool_id = raw.get("tool_id")
         if tool_id is not None and not isinstance(tool_id, str):
-            raise ValueError(f"actions[{index}].tool_id must be a string or null")
+            raise TypeError(f"actions[{index}].tool_id must be a string or null")
         arguments = raw.get("arguments", {})
         if not isinstance(arguments, dict):
-            raise ValueError(f"actions[{index}].arguments must be an object")
+            raise TypeError(f"actions[{index}].arguments must be an object")
         actions.append(
             DeterministicAction(
                 action_id=action_id,
@@ -109,18 +109,18 @@ def _build_tools(
     if raw_tools is None:
         raw_tools = []
     if not isinstance(raw_tools, list):
-        raise ValueError("tools must be a list")
+        raise TypeError("tools must be a list")
     executor = ToolExecutor()
     for index, raw in enumerate(raw_tools):
         if not isinstance(raw, dict):
-            raise ValueError(f"tools[{index}] must be an object")
+            raise TypeError(f"tools[{index}] must be an object")
         tool_id = raw.get("tool_id")
         risk_name = raw.get("risk", ToolRisk.READ_ONLY.value)
         behavior = raw.get("behavior", "success")
         if not isinstance(tool_id, str):
-            raise ValueError(f"tools[{index}].tool_id must be a string")
+            raise TypeError(f"tools[{index}].tool_id must be a string")
         if not isinstance(risk_name, str):
-            raise ValueError(f"tools[{index}].risk must be a string")
+            raise TypeError(f"tools[{index}].risk must be a string")
         if behavior not in {"success", "fail_once"}:
             raise ValueError(f"tools[{index}].behavior is unsupported: {behavior!r}")
         try:
@@ -210,7 +210,7 @@ def _case_inputs(
 ) -> tuple[WorldState, DeterministicGoal, tuple[DeterministicAction, ...]]:
     raw_goal = case.get("goal")
     if not isinstance(raw_goal, dict):
-        raise ValueError("goal must be an object")
+        raise TypeError("goal must be an object")
     state = WorldState(frozenset(_as_string_list(case.get("state", []), field="state")))
     return state, _goal(raw_goal), _actions(case.get("actions"))
 
@@ -222,10 +222,10 @@ async def _single_run(case: Mapping[str, object]) -> dict[str, object]:
     journal = _EmptyEffectJournal() if case.get("effect_journal") == "empty" else None
     task_id = case.get("task_id")
     if task_id is not None and not isinstance(task_id, str):
-        raise ValueError("task_id must be a string")
+        raise TypeError("task_id must be a string")
     case_id = case.get("id")
     if not isinstance(case_id, str):
-        raise ValueError("case id must be a string")
+        raise TypeError("case id must be a string")
     result = await DeterministicBrain(
         planner=UnifiedPlanningAdapter(),
         tools=tools,
@@ -245,7 +245,7 @@ async def _restart_replay(case: Mapping[str, object]) -> dict[str, object]:
     calls: dict[str, int] = {}
     case_id = case.get("id")
     if not isinstance(case_id, str):
-        raise ValueError("case id must be a string")
+        raise TypeError("case id must be a string")
 
     first = await DeterministicBrain(
         planner=UnifiedPlanningAdapter(),
@@ -276,8 +276,10 @@ async def _restart_replay(case: Mapping[str, object]) -> dict[str, object]:
 async def _repeatability(case: Mapping[str, object]) -> dict[str, object]:
     state, goal, actions = _case_inputs(case)
     runs = case.get("runs")
-    if not isinstance(runs, int) or isinstance(runs, bool) or runs < 2:
-        raise ValueError("repeatability runs must be an integer >= 2")
+    if not isinstance(runs, int) or isinstance(runs, bool):
+        raise TypeError("repeatability runs must be an integer")
+    if runs < 2:
+        raise ValueError("repeatability runs must be >= 2")
     records: list[dict[str, object]] = []
     for index in range(runs):
         result = await DeterministicBrain(
@@ -315,19 +317,26 @@ async def _evaluate_case(case: Mapping[str, object]) -> dict[str, object]:
 
 async def evaluate(dataset_path: Path) -> dict[str, object]:
     raw_bytes = dataset_path.read_bytes()
+    dataset_sha256 = hashlib.sha256(raw_bytes).hexdigest()
     dataset = json.loads(raw_bytes)
     if not isinstance(dataset, dict):
-        raise ValueError("dataset root must be an object")
+        raise TypeError("dataset root must be an object")
     if dataset.get("schema_version") != 1:
         raise ValueError("unsupported dataset schema_version")
     dataset_id = dataset.get("dataset_id")
     dataset_version = dataset.get("dataset_version")
-    if not isinstance(dataset_id, str) or not dataset_id:
+    if not isinstance(dataset_id, str):
+        raise TypeError("dataset_id must be a string")
+    if not dataset_id:
         raise ValueError("dataset_id must be a non-empty string")
-    if not isinstance(dataset_version, str) or not dataset_version:
+    if not isinstance(dataset_version, str):
+        raise TypeError("dataset_version must be a string")
+    if not dataset_version:
         raise ValueError("dataset_version must be a non-empty string")
     raw_cases = dataset.get("cases")
-    if not isinstance(raw_cases, list) or not raw_cases:
+    if not isinstance(raw_cases, list):
+        raise TypeError("dataset cases must be a list")
+    if not raw_cases:
         raise ValueError("dataset cases must be a non-empty list")
 
     case_results: list[dict[str, object]] = []
@@ -340,19 +349,23 @@ async def evaluate(dataset_path: Path) -> dict[str, object]:
 
     for raw_case in raw_cases:
         if not isinstance(raw_case, dict):
-            raise ValueError("each evaluation case must be an object")
+            raise TypeError("each evaluation case must be an object")
         case_id = raw_case.get("id")
         category = raw_case.get("category")
         expected = raw_case.get("expected")
-        if not isinstance(case_id, str) or not case_id:
+        if not isinstance(case_id, str):
+            raise TypeError("case id must be a string")
+        if not case_id:
             raise ValueError("case id must be a non-empty string")
         if case_id in seen_ids:
             raise ValueError(f"duplicate evaluation case id: {case_id}")
         seen_ids.add(case_id)
-        if not isinstance(category, str) or not category:
+        if not isinstance(category, str):
+            raise TypeError(f"case {case_id} category must be a string")
+        if not category:
             raise ValueError(f"case {case_id} category must be a non-empty string")
         if not isinstance(expected, dict):
-            raise ValueError(f"case {case_id} expected must be an object")
+            raise TypeError(f"case {case_id} expected must be an object")
 
         observed = await _evaluate_case(raw_case)
         passed, check_total, check_passed = _matches(expected, observed)
@@ -382,6 +395,7 @@ async def evaluate(dataset_path: Path) -> dict[str, object]:
     evidence_core = {
         "dataset_id": dataset_id,
         "dataset_version": dataset_version,
+        "dataset_sha256": dataset_sha256,
         "runner_version": RUNNER_VERSION,
         "cases": [
             {"id": case["id"], "observed_fingerprint": case["observed_fingerprint"]}
@@ -393,7 +407,7 @@ async def evaluate(dataset_path: Path) -> dict[str, object]:
         "dataset": {
             "id": dataset_id,
             "version": dataset_version,
-            "sha256": hashlib.sha256(raw_bytes).hexdigest(),
+            "sha256": dataset_sha256,
         },
         "runner": {"version": RUNNER_VERSION},
         "metrics": {
