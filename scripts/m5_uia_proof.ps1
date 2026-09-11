@@ -743,7 +743,7 @@ try {
         Set-BoundControlValue $sourceBControl 'Джерело Б.txt'
         Set-BoundControlFocus $saveSourcesControl
         [System.Windows.Forms.SendKeys]::SendWait(' ')
-        Wait-BoundTextEvidence 'Джерела збережено. Можна створити нове командне завдання.'
+        Wait-BoundTextEvidence 'Джерела збережено для нових завдань. Можна створити командне завдання.'
         Wait-FocusName $commandControl
         Set-BoundControlValue $commandControl 'Порівняй два контрольовані джерела.'
         Set-BoundControlFocus $startControl
