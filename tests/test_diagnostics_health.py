@@ -12,7 +12,6 @@ from nika_core.data.schema import SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.diagnostics import HealthService, HealthStatus
 from nika_core.diagnostics import __main__ as diagnostics_cli
-from nika_core.product_project_schema import PRODUCT_PROJECT_SCHEMA_VERSION
 from nika_core.resources.contracts import ResourceSnapshot
 
 _FIXED_NOW = datetime(2026, 8, 26, 20, 0, tzinfo=UTC)
