@@ -38,6 +38,11 @@ class ModelHealthSnapshot:
             raise ValueError(
                 "model_ready=yes requires configured=yes, reachable=yes, and model_present=yes"
             )
+        if (
+            self.inference_proven is ModelHealthFact.YES
+            and self.configured is not ModelHealthFact.YES
+        ):
+            raise ValueError("inference_proven=yes requires configured=yes")
 
     def as_dict(self) -> dict[str, str]:
         return {
@@ -89,7 +94,13 @@ class ModelHealthProbePort(Protocol):
 
 
 class ModelInferenceEvidencePort(Protocol):
-    def has_successful_inference(self, *, provider_id: str, model_id: str) -> bool | None: ...
+    def has_successful_inference(
+        self,
+        *,
+        provider_id: str,
+        model_id: str,
+        route_identity: str,
+    ) -> bool | None: ...
 
 
 class OllamaModelHealthProbe:
@@ -120,16 +131,17 @@ class OllamaModelHealthProbe:
 
     def snapshot(self) -> ModelHealthSnapshot:
         configured = self._configured()
-        inference_proven = self._inference_proven()
         if configured is not ModelHealthFact.YES:
             return ModelHealthSnapshot(
                 configured=configured,
                 reachable=ModelHealthFact.UNKNOWN,
                 model_present=ModelHealthFact.UNKNOWN,
                 model_ready=ModelHealthFact.UNKNOWN,
-                inference_proven=inference_proven,
+                inference_proven=ModelHealthFact.UNKNOWN,
             )
 
+        route_identity = self._route_identity()
+        inference_proven = self._inference_proven(route_identity=route_identity)
         try:
             with self._client_factory(
                 timeout=self._timeout_seconds,
@@ -210,7 +222,16 @@ class OllamaModelHealthProbe:
             return ModelHealthFact.NO
         return ModelHealthFact.YES
 
-    def _inference_proven(self) -> ModelHealthFact:
+    def _route_identity(self) -> str:
+        parsed = urlsplit(self._base_url)
+        host = parsed.hostname
+        port = parsed.port
+        if host is None or port is None:
+            raise ValueError("validated Ollama route lost host or port identity")
+        host_identity = f"[{host}]" if ":" in host else host
+        return f"{parsed.scheme.lower()}://{host_identity}:{port}"
+
+    def _inference_proven(self, *, route_identity: str) -> ModelHealthFact:
         evidence_port = self._evidence_port
         if evidence_port is None:
             return ModelHealthFact.UNKNOWN
@@ -218,6 +239,7 @@ class OllamaModelHealthProbe:
             result = evidence_port.has_successful_inference(
                 provider_id=self._provider_id,
                 model_id=self._model_id,
+                route_identity=route_identity,
             )
         except Exception:  # noqa: BLE001
             return ModelHealthFact.UNKNOWN
