@@ -8,6 +8,7 @@ from nika_core.product_factory_coordinator import (
     ProductFactoryCoordinator,
 )
 from nika_core.product_factory_orchestration import ProductRepositoryGraph
+from nika_core.product_factory_review_authority import ProductFactoryReviewAuthorityPort
 from nika_core.product_project import ProductProject
 
 
@@ -40,6 +41,7 @@ class ProductProjectCoordinatorBinding:
 
     project: ProductProject
     graph: ProductRepositoryGraph
+    review_authority: ProductFactoryReviewAuthorityPort | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.project.project_id != self.graph.project_id:
@@ -63,7 +65,10 @@ class ProductProjectCoordinatorBinding:
         component_goals: dict[str, str],
         permission_ceiling: frozenset[str],
     ) -> ProductFactoryCoordinator:
-        coordinator = ProductFactoryCoordinator(self.graph)
+        coordinator = ProductFactoryCoordinator(
+            self.graph,
+            review_authority=self.review_authority,
+        )
         coordinator.plan(
             base_shas=base_shas,
             goals=component_goals,
@@ -95,7 +100,10 @@ class ProductProjectCoordinatorBinding:
         trusted_plan_fingerprint: str | None = None,
     ) -> ProductFactoryCoordinator:
         self._validate_checkpoint(checkpoint)
-        coordinator = ProductFactoryCoordinator(self.graph)
+        coordinator = ProductFactoryCoordinator(
+            self.graph,
+            review_authority=self.review_authority,
+        )
         try:
             coordinator.restore(
                 checkpoint.coordinator,
