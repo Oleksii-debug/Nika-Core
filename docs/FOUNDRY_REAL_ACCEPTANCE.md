@@ -7,6 +7,7 @@ This is the physical Windows acceptance path for the existing Nika Foundry Local
 A successful `scripts/prove_foundry_acceptance.py` run records and validates:
 
 - the exact clean Nika `HEAD` SHA and hashes of the acceptance wrapper and canonical child proof;
+- child Python import authority is pinned to this exact checkout: safe-path mode (`-P`), `PYTHONPATH=<checkout>/src`, and user-site packages disabled, so another installed Nika package cannot silently supply the code under test;
 - exact Foundry provider, model alias, public model ID and operator-supplied reviewed license reference;
 - Windows/platform, Foundry WinML SDK and resource snapshots already emitted by the child proof;
 - a fixed temperature-zero prompt fixture whose response must be exactly `NIKA_FOUNDRY_LOCAL_OK`;
