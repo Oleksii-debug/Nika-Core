@@ -52,7 +52,8 @@ jobs:
       - name: Re-prove exact generated C1 ZIP
         shell: pwsh
         run: |
-          $evidence = Get-Content ./dist/pf11-c1-medium-app-evidence.json -Raw | ConvertFrom-Json
+          $evidencePath = [System.IO.Path]::GetFullPath('./dist/pf11-c1-medium-app-evidence.json')
+          $evidence = Get-Content -LiteralPath $evidencePath -Raw | ConvertFrom-Json
           $package = [System.IO.Path]::GetFullPath([string]$evidence.package_path)
           if (-not (Test-Path -LiteralPath $package -PathType Leaf)) {
             throw "C1 exact package is missing: $package"
@@ -106,6 +107,25 @@ jobs:
           if (($outputs -join ',') -ne '1,1') {
             throw "Exact C1 ZIP restart proof changed durable row count: $($outputs -join ',')"
           }
+
+          $exactEvidence = [ordered]@{
+            schema = 'nika-pf11-c1-exact-package-evidence-v1'
+            source_sha = '${{ env.NIKA_CANDIDATE_SHA }}'
+            package_file = [System.IO.Path]::GetFileName($package)
+            package_sha256 = $actualSha
+            factory_evidence_sha256 = (Get-FileHash -LiteralPath $evidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            installer_sha256 = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+            installed_executable_sha256 = (Get-FileHash -LiteralPath $installedExe -Algorithm SHA256).Hash.ToLowerInvariant()
+            proof_scope = 'exact-generated-zip-after-extract-install'
+            installed_executable_proven = $true
+            packaged_restart_proven = $true
+            restart_outputs = @($outputs)
+            human_tested = $false
+            nvda_verified = $false
+            production_release_ready = $false
+          }
+          $exactEvidencePath = [System.IO.Path]::GetFullPath('./dist/pf11-c1-exact-package-evidence.json')
+          $exactEvidence | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $exactEvidencePath -Encoding utf8
       - name: Verify evidence is fail-safe about human accessibility status
         shell: pwsh
         run: |
@@ -120,11 +140,24 @@ jobs:
           if ($evidence.package_sha256.Length -ne 64) { throw 'C1 package SHA-256 is missing' }
           if ($evidence.research_package_id -ne 'c1-research-local-windows-v1') { throw 'C1 research handoff proof is missing' }
           if ($evidence.selected_option_id -ne 'local-tk-sqlite') { throw 'C1 selected product option proof is missing' }
+
+          $exact = Get-Content ./dist/pf11-c1-exact-package-evidence.json -Raw | ConvertFrom-Json
+          if ($exact.schema -ne 'nika-pf11-c1-exact-package-evidence-v1') { throw 'Exact C1 package evidence schema is invalid' }
+          if ($exact.source_sha -ne '${{ env.NIKA_CANDIDATE_SHA }}') { throw 'Exact C1 package evidence source SHA is stale' }
+          if ($exact.package_sha256 -ne [string]$evidence.package_sha256) { throw 'Exact C1 package evidence is not bound to Factory package SHA' }
+          if ($exact.proof_scope -ne 'exact-generated-zip-after-extract-install') { throw 'Exact C1 package proof scope is invalid' }
+          if ($exact.installed_executable_proven -ne $true) { throw 'Exact C1 package install proof is missing' }
+          if ($exact.packaged_restart_proven -ne $true) { throw 'Exact C1 package restart proof is missing' }
+          if (($exact.restart_outputs -join ',') -ne '1,1') { throw 'Exact C1 restart outputs are invalid' }
+          if ($exact.human_tested -ne $false) { throw 'Exact package evidence may not claim HUMAN_TESTED' }
+          if ($exact.nvda_verified -ne $false) { throw 'Exact package evidence may not claim NVDA_VERIFIED' }
+          if ($exact.production_release_ready -ne $false) { throw 'Exact package evidence may not claim release readiness' }
       - name: Upload exact C1 package evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: PF11-C1-medium-app-${{ env.NIKA_CANDIDATE_SHA }}
           path: |
             dist/pf11-c1-medium-app-evidence.json
+            dist/pf11-c1-exact-package-evidence.json
             build/pf11-c1/product/NikaC1ExpenseManager-windows-x64.zip
           if-no-files-found: error

@@ -40,6 +40,11 @@ def test_c1_workflow_reproves_the_exact_generated_zip_before_upload() -> None:
     assert "Expand-Archive -LiteralPath $package" in workflow
     assert "& $installer -BundlePath $bundle -Destination $installRoot" in workflow
     assert "& $installedExe --self-test $database $proof" in workflow
+    assert "nika-pf11-c1-exact-package-evidence-v1" in workflow
+    assert "proof_scope = 'exact-generated-zip-after-extract-install'" in workflow
+    assert "factory_evidence_sha256" in workflow
+    assert "installed_executable_sha256" in workflow
+    assert "dist/pf11-c1-exact-package-evidence.json" in workflow
     assert workflow.index("Re-prove exact generated C1 ZIP") < workflow.index(
         "Upload exact C1 package evidence"
     )
