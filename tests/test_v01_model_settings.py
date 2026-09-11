@@ -58,6 +58,7 @@ def test_local_model_selection_is_durable_and_snapshot_is_ui_safe(tmp_path: Path
     assert settings.snapshot() == {
         "status": "ready",
         "revision": 1,
+        "intelligence_mode": "local_external",
         "route_kind": "ollama",
         "provider_id": "ollama",
         "provider_kind": "local",

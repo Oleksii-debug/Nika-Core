@@ -10,6 +10,7 @@ from nika_core.builder.compiler import AgentCompiler
 from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.builder.spec import AgentDefinition
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.intelligence.modes import IntelligenceModePolicy
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.multi_agent.contracts import AgentHandoff, ChildRequest, HandoffKind, TeamQuota
 from nika_core.multi_agent.store import MultiAgentStore
@@ -69,6 +70,13 @@ def _api(
         "timeout_seconds": timeout_seconds,
         "revision": revision,
     }
+
+
+def _api_policy() -> IntelligenceModePolicy:
+    return IntelligenceModePolicy(
+        external_api_enabled=True,
+        external_provider_id="configured-api",
+    )
 
 
 def _local(*, revision: int = 0, model: str = "qwen3:8b") -> dict[str, object]:
@@ -206,6 +214,7 @@ def test_bound_api_route_drives_all_three_members_and_survives_settings_change_r
         settings=settings,
         credential_resolver=resolver,
         client_factory=client_factory,
+        intelligence_policy=_api_policy(),
     )
     executions = _run_three_members(
         store=store,
@@ -234,6 +243,7 @@ def test_bound_api_route_drives_all_three_members_and_survives_settings_change_r
         settings=restarted_settings,
         credential_resolver=resolver,
         client_factory=client_factory,
+        intelligence_policy=_api_policy(),
     )
     restarted = _run_three_members(
         store=restarted_store,
@@ -343,6 +353,7 @@ def test_configured_api_failure_never_switches_to_local_route(tmp_path: Path) ->
         settings=settings,
         credential_resolver=_StaticResolver("example-material"),
         client_factory=client_factory,
+        intelligence_policy=_api_policy(),
     ).for_task(task_id)
 
     executions = _run_three_members(
@@ -386,6 +397,7 @@ def test_api_private_data_permission_fails_before_credential_resolution_or_trans
         settings=settings,
         credential_resolver=resolver,
         client_factory=client_factory,
+        intelligence_policy=_api_policy(),
     ).for_task(task_id)
 
     executions = _run_three_members(
@@ -466,6 +478,7 @@ def test_bound_supervisor_uses_frozen_model_timeout_instead_of_default(
         settings=settings,
         credential_resolver=_StaticResolver("example-material"),
         client_factory=client_factory,
+        intelligence_policy=_api_policy(),
     )
     supervisor = factory.supervisor_for_task(task_id, store=team_store)
 
