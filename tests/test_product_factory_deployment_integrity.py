@@ -77,6 +77,7 @@ class FakeProvider:
             intent.release.source_sha not in self.unhealthy,
             (f"health:{intent.intent_id}",),
             NOW,
+            release=intent.release,
         )
 
     def rollback(
@@ -93,6 +94,25 @@ class FakeProvider:
             (f"rollback:{intent.intent_id}",),
         )
 
+    def rollback_exact(
+        self,
+        intent: DeploymentIntent,
+        previous_release: ReleaseRef | None,
+    ) -> RollbackEvidence:
+        previous_release_sha = (
+            None if previous_release is None else previous_release.source_sha
+        )
+        self.rollback_previous.append((intent.project_id, previous_release_sha))
+        return RollbackEvidence(
+            intent.environment.environment_id,
+            intent.release.source_sha,
+            previous_release_sha,
+            True,
+            (f"rollback:{intent.intent_id}",),
+            failed_release=intent.release,
+            restored_release=previous_release,
+        )
+
     def inspect(self, intent: DeploymentIntent) -> ProviderInspection:
         return self.inspections.get(
             intent.intent_id,
@@ -100,6 +120,7 @@ class FakeProvider:
                 intent.release.source_sha,
                 True,
                 (f"inspect:{intent.intent_id}",),
+                release=intent.release,
             ),
         )
 
