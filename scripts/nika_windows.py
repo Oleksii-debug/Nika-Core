@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,10 @@ from nika_core.ui.bridge import UIActionBridge
 from nika_core.ui.bridge_models import UIResult
 from nika_core.ui.desktop_backend import DesktopBackend
 from nika_core.ui.shell import launch_windows_shell
+from nika_core.v01_packaged_team_runtime import V01PackagedThreeAgentRuntime
+from nika_core.v01_packaged_team_state import V01PackagedTeamStateProvider
+from nika_core.v01_source_settings import V01SourceSettings
+from nika_core.windows_autostart import WindowsAutostartService
 
 _PF11_REFINED_GOAL = (
     "Create an accessible Windows product with keyboard-first packaged restart acceptance"
@@ -51,11 +56,21 @@ def build_windows_bridge(
     store.initialize()
     actions = build_default_action_registry()
     keymap = Keymap(store, actions)
+    source_settings = V01SourceSettings(store, config)
     backend = DesktopBackend(
         queue=TaskQueue(store),
         agents=AgentRegistry(store),
         workspaces=WorkspaceRegistry(store),
         audit=AuditLog(store),
+        runtime=V01PackagedThreeAgentRuntime(
+            store=store, config=config, source_settings=source_settings
+        ),
+        prepare_task_payload=source_settings.prepare_task_payload,
+        autostart_service=(
+            WindowsAutostartService(Path(sys.executable))
+            if sys.platform == "win32" and getattr(sys, "frozen", False)
+            else None
+        ),
     )
     products = ProductProjectCommandService(ProductProjectRepository(store))
     product_router = PackagedProductCommandRouter(
@@ -73,6 +88,14 @@ def build_windows_bridge(
         router=product_router,
         command_center=command_center,
     )
+    packaged_state = V01PackagedTeamStateProvider(
+        base_state=product_state,
+        store=store,
+    )
+
+    def source_state() -> Mapping[str, Any]:
+        return {**packaged_state(), "v01_sources": source_settings.snapshot()}
+
     bridge = UIActionBridge(
         actions,
         keymap,
@@ -81,21 +104,18 @@ def build_windows_bridge(
             "task.pause": backend.pause_task,
             "task.resume": backend.resume_task,
             "agent.stop": backend.stop_agent,
-            "nav.tasks": lambda _payload: _focus(
-                "tasks-heading", "Завдання відкрито."
-            ),
-            "nav.agents": lambda _payload: _focus(
-                "agents-heading", "Агенти відкрито."
-            ),
+            "team.sources.configure": source_settings.configure,
+            "settings.autostart.configure": backend.autostart_settings.configure,
+            "settings.autostart.refresh": backend.autostart_settings.refresh,
+            "nav.tasks": lambda _payload: _focus("tasks-heading", "Завдання відкрито."),
+            "nav.agents": lambda _payload: _focus("agents-heading", "Агенти відкрито."),
             "nav.logs": lambda _payload: _focus("logs-heading", "Журнал відкрито."),
             "nav.workspaces": lambda _payload: _focus(
                 "workspaces-heading", "Робочі простори відкрито."
             ),
-            "command.focus": lambda _payload: _focus(
-                "command-input", "Командне поле активне."
-            ),
+            "command.focus": lambda _payload: _focus("command-input", "Командне поле активне."),
         },
-        state_provider=product_state,
+        state_provider=source_state,
     )
     return bridge, products
 
@@ -305,13 +325,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--pf11-proof-output", type=Path)
     parser.add_argument(
         "--pf11-proof-command",
-        default=(
-            "Створи застосунок для керування витратами"
-            " малого бізнесу"
-        ),
+        default=("Створи застосунок для керування витратами малого бізнесу"),
     )
     args = parser.parse_args(argv)
-    config = AppConfig.from_environment()
+    from nika_core.reliability.legacy_database import LegacyDatabaseConflict
+    from nika_core.ui.startup_error import show_recovery_error
+
+    try:
+        config = AppConfig.from_environment()
+    except LegacyDatabaseConflict as exc:
+        show_recovery_error(str(exc))
+        return 1
     if args.pf11_proof:
         return _run_pf11_proof(
             config,
