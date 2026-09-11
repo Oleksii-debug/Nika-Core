@@ -426,8 +426,10 @@ class ProductFactoryCoordinator:
 
     def _verify_trusted_review(self, record: WorkRecord, decision: ReviewDecision) -> None:
         result = record.result
-        if result is None or result.producer_actor_id is None:
-            return
+        if result is None:
+            raise CoordinatorError("trusted independent review requires worker result evidence")
+        if result.producer_actor_id is None:
+            raise CoordinatorError("trusted independent review requires producer actor identity")
         if result.producer_actor_id == decision.reviewer_id:
             raise CoordinatorError("independent reviewer must differ from candidate producer")
         if self.review_authority is None:
