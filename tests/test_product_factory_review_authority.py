@@ -8,8 +8,8 @@ from nika_core.product_factory_coordinator import (
     CoordinatorError,
     ProductFactoryCoordinator,
     ReviewDecision,
-    WorkState,
     WorkerResultEnvelope,
+    WorkState,
 )
 from nika_core.product_factory_orchestration import (
     ProductComponent,
@@ -23,7 +23,6 @@ from nika_core.product_factory_review_authority import (
     TeamPlanReviewAuthority,
 )
 from nika_core.toolsmith.contracts import CodingResult, TestEvidence
-
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
@@ -215,9 +214,7 @@ def test_team_plan_rejects_unassigned_reviewer_before_evidence_authority() -> No
 
 def test_team_plan_rejects_role_without_independent_review_assignment() -> None:
     evidence = _ExactEvidenceAuthority(trusted_reviewer=TRUSTED_REVIEWER)
-    coordinator = _coordinator(
-        _authority(evidence, reviewer_independent=False)
-    )
+    coordinator = _coordinator(_authority(evidence, reviewer_independent=False))
     _record_secure_candidate(coordinator)
 
     with pytest.raises(CoordinatorError, match="authority rejected"):
@@ -237,9 +234,7 @@ def test_team_plan_rejects_role_without_independent_review_assignment() -> None:
 
 def test_team_plan_rejects_reviewer_outside_component_scope() -> None:
     evidence = _ExactEvidenceAuthority()
-    coordinator = _coordinator(
-        _authority(evidence, reviewer_components=("other-component",))
-    )
+    coordinator = _coordinator(_authority(evidence, reviewer_components=("other-component",)))
     _record_secure_candidate(coordinator)
 
     with pytest.raises(CoordinatorError, match="authority rejected"):
