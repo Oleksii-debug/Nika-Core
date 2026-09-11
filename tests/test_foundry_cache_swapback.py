@@ -41,5 +41,11 @@ def test_same_size_swap_open_then_restore_original_path_fails_closed(
 
     monkeypatch.setattr(foundry_cache_evidence.os, "open", swap_open_restore)
 
-    with pytest.raises(ValueError, match="changed before hashing"):
+    # POSIX permits renaming an open file, so the descriptor/path identity guard must
+    # catch the completed swap-back. Windows can deny that rename while the descriptor
+    # is open; in that case the injected attack is already stopped inside os.open and
+    # the production boundary deliberately collapses the OSError to the bounded
+    # fail-closed "cannot be opened" diagnostic.
+    expected = "cannot be opened" if os.name == "nt" else "changed before hashing"
+    with pytest.raises(ValueError, match=expected):
         foundry_cache_tree_sha256(cache)
