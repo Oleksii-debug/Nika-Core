@@ -164,6 +164,129 @@ function Test-NikaSafeRelativePath {
     return $true
 }
 
+function Assert-NikaUniqueJsonObjectKeys {
+    param([Parameter(Mandatory=$true)][string]$Json)
+
+    # ConvertFrom-Json is the syntax/value decoder, but Windows PowerShell collapses
+    # duplicate object members. This bounded structural pass runs only after syntax
+    # validation and tracks decoded key identities per object before trust decisions.
+    $stack = [System.Collections.Generic.List[object]]::new()
+    $index = 0
+    while ($index -lt $Json.Length) {
+        $character = $Json[$index]
+        if ($character -eq '"') {
+            $start = $index
+            $index += 1
+            $closed = $false
+            while ($index -lt $Json.Length) {
+                if ($Json[$index] -eq '\') {
+                    $index += 2
+                    continue
+                }
+                if ($Json[$index] -eq '"') {
+                    $closed = $true
+                    break
+                }
+                $index += 1
+            }
+            if (-not $closed) {
+                throw "Release manifest is invalid JSON."
+            }
+
+            $token = $Json.Substring($start, $index - $start + 1)
+            if ($stack.Count -gt 0) {
+                $frame = $stack[$stack.Count - 1]
+                if ($frame.Kind -eq "object" -and $frame.ExpectKey) {
+                    try {
+                        $key = $token | ConvertFrom-Json
+                    }
+                    catch {
+                        throw "Release manifest is invalid JSON."
+                    }
+                    if (-not ($key -is [string])) {
+                        throw "Release manifest is invalid JSON."
+                    }
+                    if (-not $frame.Keys.Add([string]$key)) {
+                        throw "Release manifest contains a duplicate JSON member."
+                    }
+                    $frame.ExpectKey = $false
+                }
+            }
+            $index += 1
+            continue
+        }
+
+        switch ($character) {
+            '{' {
+                $stack.Add([pscustomobject]@{
+                    Kind = "object"
+                    ExpectKey = $true
+                    Keys = [System.Collections.Generic.HashSet[string]]::new(
+                        [System.StringComparer]::Ordinal
+                    )
+                })
+                break
+            }
+            '[' {
+                $stack.Add([pscustomobject]@{
+                    Kind = "array"
+                    ExpectKey = $false
+                    Keys = $null
+                })
+                break
+            }
+            '}' {
+                if ($stack.Count -eq 0 -or $stack[$stack.Count - 1].Kind -ne "object") {
+                    throw "Release manifest is invalid JSON."
+                }
+                $stack.RemoveAt($stack.Count - 1)
+                break
+            }
+            ']' {
+                if ($stack.Count -eq 0 -or $stack[$stack.Count - 1].Kind -ne "array") {
+                    throw "Release manifest is invalid JSON."
+                }
+                $stack.RemoveAt($stack.Count - 1)
+                break
+            }
+            ',' {
+                if ($stack.Count -gt 0) {
+                    $frame = $stack[$stack.Count - 1]
+                    if ($frame.Kind -eq "object") {
+                        $frame.ExpectKey = $true
+                    }
+                }
+                break
+            }
+        }
+        $index += 1
+    }
+
+    if ($stack.Count -ne 0) {
+        throw "Release manifest is invalid JSON."
+    }
+}
+
+function Assert-NikaExactJsonObjectShape {
+    param(
+        [Parameter(Mandatory=$true)][object]$Object,
+        [Parameter(Mandatory=$true)][string[]]$RequiredKeys
+    )
+
+    if ($null -eq $Object -or $Object -isnot [pscustomobject]) {
+        throw "Release manifest object shape is invalid."
+    }
+    $actualKeys = @($Object.PSObject.Properties.Name)
+    if ($actualKeys.Count -ne $RequiredKeys.Count) {
+        throw "Release manifest object shape is invalid."
+    }
+    foreach ($key in $RequiredKeys) {
+        if (-not ($actualKeys -ccontains $key)) {
+            throw "Release manifest object shape is invalid."
+        }
+    }
+}
+
 function Get-NikaManifestProperty {
     param(
         [Parameter(Mandatory=$true)][object]$Object,
@@ -188,22 +311,54 @@ function Assert-NikaReleaseBundle {
     }
 
     try {
-        $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $manifestJson = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8
+        $manifest = $manifestJson | ConvertFrom-Json
     }
     catch {
         throw "Release manifest is invalid JSON."
     }
+    Assert-NikaUniqueJsonObjectKeys -Json $manifestJson
+    Assert-NikaExactJsonObjectShape -Object $manifest -RequiredKeys @(
+        "manifest_version",
+        "product",
+        "version",
+        "source_sha",
+        "files"
+    )
 
     $manifestVersion = Get-NikaManifestProperty -Object $manifest -Name "manifest_version"
     $product = Get-NikaManifestProperty -Object $manifest -Name "product"
+    $version = Get-NikaManifestProperty -Object $manifest -Name "version"
     $sourceSha = Get-NikaManifestProperty -Object $manifest -Name "source_sha"
-    $files = @(Get-NikaManifestProperty -Object $manifest -Name "files")
+    $rawFiles = Get-NikaManifestProperty -Object $manifest -Name "files"
 
-    if ($manifestVersion -ne 2) { throw "Unsupported release manifest version." }
-    if ($product -ne "NikaCore") { throw "Release manifest product mismatch." }
-    if ([string]$sourceSha -cnotmatch '^[0-9a-f]{40}$') {
+    if (
+        $manifestVersion -is [bool] -or
+        -not (($manifestVersion -is [int]) -or ($manifestVersion -is [long])) -or
+        [int64]$manifestVersion -ne 2
+    ) {
+        throw "Unsupported release manifest version."
+    }
+    if (
+        -not ($product -is [string]) -or
+        -not [System.StringComparer]::Ordinal.Equals([string]$product, "NikaCore")
+    ) {
+        throw "Release manifest product mismatch."
+    }
+    if (
+        -not ($version -is [string]) -or
+        [string]::IsNullOrWhiteSpace([string]$version) -or
+        [string]$version -cne ([string]$version).Trim()
+    ) {
+        throw "Release manifest product version is invalid."
+    }
+    if (-not ($sourceSha -is [string]) -or [string]$sourceSha -cnotmatch '^[0-9a-f]{40}$') {
         throw "Release manifest source SHA is invalid."
     }
+    if ($rawFiles -isnot [System.Array]) {
+        throw "Release manifest files collection is invalid."
+    }
+    $files = @($rawFiles)
     if ($files.Count -eq 0) { throw "Release manifest contains no files." }
 
     $expected = [System.Collections.Generic.HashSet[string]]::new(
@@ -211,9 +366,18 @@ function Assert-NikaReleaseBundle {
     )
     $exeBound = $false
     foreach ($entry in $files) {
-        $relative = [string](Get-NikaManifestProperty -Object $entry -Name "path")
+        Assert-NikaExactJsonObjectShape -Object $entry -RequiredKeys @("path", "size", "sha256")
+        $rawRelative = Get-NikaManifestProperty -Object $entry -Name "path"
         $size = Get-NikaManifestProperty -Object $entry -Name "size"
-        $sha256 = [string](Get-NikaManifestProperty -Object $entry -Name "sha256")
+        $rawSha256 = Get-NikaManifestProperty -Object $entry -Name "sha256"
+        if (-not ($rawRelative -is [string])) {
+            throw "Release manifest contains an unsafe path."
+        }
+        if (-not ($rawSha256 -is [string])) {
+            throw "Release manifest contains an invalid file digest."
+        }
+        $relative = [string]$rawRelative
+        $sha256 = [string]$rawSha256
 
         if (-not (Test-NikaSafeRelativePath -RelativePath $relative)) {
             throw "Release manifest contains an unsafe path."
@@ -221,7 +385,11 @@ function Assert-NikaReleaseBundle {
         if (-not $expected.Add($relative)) {
             throw "Release manifest contains a duplicate Windows path."
         }
-        if ($size -is [bool] -or -not ($size -is [ValueType]) -or [int64]$size -lt 0) {
+        if (
+            $size -is [bool] -or
+            -not (($size -is [int]) -or ($size -is [long])) -or
+            [int64]$size -lt 0
+        ) {
             throw "Release manifest contains an invalid file size."
         }
         if ($sha256 -cnotmatch '^[0-9a-f]{64}$') {
