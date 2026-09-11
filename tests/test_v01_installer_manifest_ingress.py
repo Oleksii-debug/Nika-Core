@@ -11,7 +11,6 @@ import pytest
 
 from nika_core.packaging.release import build_release_manifest, write_release_manifest
 
-
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "install_nika_core.ps1"
 SOURCE_SHA = "0123456789abcdef0123456789abcdef01234567"
 
