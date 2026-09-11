@@ -259,7 +259,11 @@ def _close_packaged_recovery_dialog(
         found: list[wintypes.HWND] = []
 
         @enum_proc
-        def visit(hwnd: wintypes.HWND, _lparam: wintypes.LPARAM) -> bool:
+        def visit(
+            hwnd: wintypes.HWND,
+            _lparam: wintypes.LPARAM,
+            found: list[wintypes.HWND] = found,
+        ) -> bool:
             owner_pid = wintypes.DWORD()
             get_pid(hwnd, ctypes.byref(owner_pid))
             if owner_pid.value != process.pid:
