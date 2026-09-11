@@ -104,13 +104,28 @@ jobs:
             [void]$startInfo.ArgumentList.Add($proof)
             $process = [System.Diagnostics.Process]::new()
             $process.StartInfo = $startInfo
-            if (-not $process.Start()) {
-              $process.Dispose()
-              throw "Exact C1 ZIP installed executable did not start on attempt $attempt."
+            $exitCode = $null
+            try {
+              if (-not $process.Start()) {
+                throw "Exact C1 ZIP installed executable did not start on attempt $attempt."
+              }
+              if (-not $process.WaitForExit(30000)) {
+                try {
+                  $process.Kill($true)
+                }
+                catch {
+                  throw "Exact C1 ZIP installed executable timed out on attempt $attempt and process-tree termination failed."
+                }
+                if (-not $process.WaitForExit(5000)) {
+                  throw "Exact C1 ZIP installed executable timed out on attempt $attempt and did not terminate after kill."
+                }
+                throw "Exact C1 ZIP installed executable timed out after 30 seconds on attempt $attempt."
+              }
+              $exitCode = $process.ExitCode
             }
-            $process.WaitForExit()
-            $exitCode = $process.ExitCode
-            $process.Dispose()
+            finally {
+              $process.Dispose()
+            }
             if ($exitCode -ne 0) {
               throw "Exact C1 ZIP installed executable self-test failed on attempt $attempt with exit code $exitCode."
             }
