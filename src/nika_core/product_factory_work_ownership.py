@@ -193,7 +193,7 @@ class ProductFactoryWorkOwnership:
             value = self._clock()
         except WorkOwnershipError:
             raise
-        except Exception as exc:  # noqa: BLE001 - clock is authority and must fail closed
+        except Exception as exc:
             raise WorkOwnershipError("work ownership clock failed") from exc
         if not isinstance(value, datetime):
             raise WorkOwnershipError("work ownership clock must return datetime")
