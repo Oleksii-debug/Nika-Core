@@ -1,0 +1,453 @@
+from __future__ import annotations
+
+import json
+from dataclasses import asdict, dataclass
+from enum import StrEnum
+from typing import Protocol
+
+from nika_core.product_command.reference_safety import safe_evidence_reference
+
+_MAX_EVIDENCE_REFS = 16
+_MAX_EVIDENCE_REF_CHARS = 256
+_MAX_REASON_CHARS = 2048
+
+
+class ReviewPipelineError(ValueError):
+    """Raised when Product Factory review/QA invariants are violated."""
+
+
+class StaleCandidateReviewError(ReviewPipelineError):
+    """Raised when review evidence targets a different candidate SHA."""
+
+
+class ExactHeadMergeClearance(Protocol):
+    """Structural DEV08 compatibility surface without duplicating verification state."""
+
+    candidate_sha: str
+
+    @property
+    def merge_clearance(self) -> bool: ...
+
+
+class TrustedReviewerAuthority(Protocol):
+    """Trusted application-layer attestation authorizing an independent reviewer."""
+
+    candidate_sha: str
+    reviewer_id: str
+    authority_ref: str
+
+    @property
+    def independent_review_authorized(self) -> bool: ...
+
+
+class ReviewState(StrEnum):
+    IMPLEMENTED = "implemented"
+    REVIEW_REQUIRED = "review_required"
+    QA_PENDING = "qa_pending"
+    QA_RUNNING = "qa_running"
+    PASS = "pass"
+    FAIL = "fail"
+    FIX_REQUIRED = "fix_required"
+    MERGE_READY = "merge_ready"
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateReviewIdentity:
+    work_id: str
+    candidate_sha: str
+    implementer_id: str
+
+    def __post_init__(self) -> None:
+        _validate_canonical_identity(self.work_id, field="candidate work")
+        _validate_canonical_identity(self.implementer_id, field="implementer")
+        _validate_sha(self.candidate_sha)
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewerAuthorityEvidence:
+    candidate_sha: str
+    reviewer_id: str
+    authority_ref: str
+    independent_review_authorized: bool
+
+    def __post_init__(self) -> None:
+        _validate_sha(self.candidate_sha)
+        _validate_canonical_identity(self.reviewer_id, field="reviewer")
+        _validate_evidence_ref(self.authority_ref, field="reviewer authority")
+        object.__setattr__(
+            self,
+            "authority_ref",
+            safe_evidence_reference(self.authority_ref),
+        )
+        if self.independent_review_authorized is not True:
+            raise ReviewPipelineError(
+                "reviewer authority evidence must preserve explicit independent authorization"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewVerdict:
+    candidate_sha: str
+    reviewer_id: str
+    accepted: bool
+    reason: str
+    evidence_refs: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _validate_sha(self.candidate_sha)
+        _validate_canonical_identity(self.reviewer_id, field="reviewer")
+        if type(self.accepted) is not bool:
+            raise ReviewPipelineError("review verdict accepted must be boolean")
+        if not isinstance(self.reason, str):
+            raise ReviewPipelineError("review verdict reason must be a string")
+        if not self.reason.strip():
+            raise ReviewPipelineError("review verdict reason must not be empty")
+        if self.reason != self.reason.strip():
+            raise ReviewPipelineError(
+                "review verdict reason must be canonical without edge whitespace"
+            )
+        if len(self.reason) > _MAX_REASON_CHARS:
+            raise ReviewPipelineError("review verdict reason exceeds bounded evidence limit")
+        _validate_evidence_refs(self.evidence_refs)
+        object.__setattr__(self, "reason", safe_evidence_reference(self.reason))
+        object.__setattr__(
+            self,
+            "evidence_refs",
+            tuple(safe_evidence_reference(value) for value in self.evidence_refs),
+        )
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class CandidateReviewRecord:
+    identity: CandidateReviewIdentity
+    state: ReviewState = ReviewState.IMPLEMENTED
+    reviewer_id: str | None = None
+    reviewer_authority: ReviewerAuthorityEvidence | None = None
+    verdict: ReviewVerdict | None = None
+
+    def __init__(self, identity: CandidateReviewIdentity) -> None:
+        """Create only the initial IMPLEMENTED state through the public constructor."""
+        if not isinstance(identity, CandidateReviewIdentity):
+            raise ReviewPipelineError("review record requires a canonical candidate identity")
+        object.__setattr__(self, "identity", identity)
+        object.__setattr__(self, "state", ReviewState.IMPLEMENTED)
+        object.__setattr__(self, "reviewer_id", None)
+        object.__setattr__(self, "reviewer_authority", None)
+        object.__setattr__(self, "verdict", None)
+        self._validate()
+
+    @classmethod
+    def _from_transition(
+        cls,
+        identity: CandidateReviewIdentity,
+        state: ReviewState,
+        *,
+        reviewer_id: str | None = None,
+        reviewer_authority: ReviewerAuthorityEvidence | None = None,
+        verdict: ReviewVerdict | None = None,
+    ) -> CandidateReviewRecord:
+        """Reject direct construction outside the canonical transition surface."""
+        raise ReviewPipelineError(
+            "direct review-state construction is forbidden; use canonical transitions"
+        )
+
+    @classmethod
+    def __from_transition(
+        cls,
+        identity: CandidateReviewIdentity,
+        state: ReviewState,
+        *,
+        reviewer_id: str | None = None,
+        reviewer_authority: ReviewerAuthorityEvidence | None = None,
+        verdict: ReviewVerdict | None = None,
+        verification: ExactHeadMergeClearance | None = None,
+    ) -> CandidateReviewRecord:
+        """Build a validated non-initial state for canonical lifecycle methods and restore."""
+        if not isinstance(identity, CandidateReviewIdentity):
+            raise ReviewPipelineError("review record requires a canonical candidate identity")
+        if not isinstance(state, ReviewState):
+            raise ReviewPipelineError("review record requires a canonical review state")
+        record = object.__new__(cls)
+        object.__setattr__(record, "identity", identity)
+        object.__setattr__(record, "state", state)
+        object.__setattr__(record, "reviewer_id", reviewer_id)
+        object.__setattr__(record, "reviewer_authority", reviewer_authority)
+        object.__setattr__(record, "verdict", verdict)
+        record._validate()
+        if record.state is ReviewState.MERGE_READY:
+            if verification is None:
+                raise ReviewPipelineError(
+                    "MERGE_READY construction requires exact-head verification clearance"
+                )
+            record._validate_merge_clearance(verification)
+        return record
+
+    def snapshot(self) -> str:
+        """Return a deterministic restart-safe representation of the review state."""
+        self._validate()
+        return json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
+
+    @classmethod
+    def restore(
+        cls,
+        payload: str,
+        *,
+        verification: ExactHeadMergeClearance | None = None,
+    ) -> CandidateReviewRecord:
+        try:
+            raw = json.loads(payload)
+            identity = CandidateReviewIdentity(**raw["identity"])
+            authority_raw = raw.get("reviewer_authority")
+            authority = (
+                ReviewerAuthorityEvidence(**authority_raw)
+                if authority_raw is not None
+                else None
+            )
+            verdict_raw = raw.get("verdict")
+            verdict = None
+            if verdict_raw is not None:
+                verdict_raw["evidence_refs"] = tuple(verdict_raw["evidence_refs"])
+                verdict = ReviewVerdict(**verdict_raw)
+            record = cls.__from_transition(
+                identity=identity,
+                state=ReviewState(raw["state"]),
+                reviewer_id=raw.get("reviewer_id"),
+                reviewer_authority=authority,
+                verdict=verdict,
+                verification=verification,
+            )
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            raise ReviewPipelineError("review snapshot is invalid") from exc
+        return record
+
+    def require_review(self) -> CandidateReviewRecord:
+        self._require_state(ReviewState.IMPLEMENTED)
+        return self.__from_transition(self.identity, ReviewState.REVIEW_REQUIRED)
+
+    def queue_qa(self, *, authority: TrustedReviewerAuthority) -> CandidateReviewRecord:
+        self._require_state(ReviewState.REVIEW_REQUIRED)
+        evidence = self._validate_authority(authority)
+        return self.__from_transition(
+            self.identity,
+            ReviewState.QA_PENDING,
+            reviewer_id=evidence.reviewer_id,
+            reviewer_authority=evidence,
+        )
+
+    def start_qa(self, *, reviewer_id: str) -> CandidateReviewRecord:
+        self._require_state(ReviewState.QA_PENDING)
+        self._require_assigned_reviewer(reviewer_id)
+        return self.__from_transition(
+            self.identity,
+            ReviewState.QA_RUNNING,
+            reviewer_id=self.reviewer_id,
+            reviewer_authority=self.reviewer_authority,
+        )
+
+    def record_verdict(
+        self,
+        *,
+        candidate_sha: str,
+        reviewer_id: str,
+        accepted: bool,
+        reason: str,
+        evidence_refs: tuple[str, ...],
+    ) -> CandidateReviewRecord:
+        self._require_state(ReviewState.QA_RUNNING)
+        self._require_candidate(candidate_sha)
+        self._require_assigned_reviewer(reviewer_id)
+        verdict = ReviewVerdict(candidate_sha, reviewer_id, accepted, reason, evidence_refs)
+        return self.__from_transition(
+            self.identity,
+            ReviewState.PASS if accepted else ReviewState.FAIL,
+            reviewer_id=reviewer_id,
+            reviewer_authority=self.reviewer_authority,
+            verdict=verdict,
+        )
+
+    def mark_merge_ready(
+        self,
+        *,
+        candidate_sha: str,
+        verification: ExactHeadMergeClearance,
+    ) -> CandidateReviewRecord:
+        self._require_state(ReviewState.PASS)
+        self._require_candidate(candidate_sha)
+        self._validate_merge_clearance(verification)
+        return self.__from_transition(
+            self.identity,
+            ReviewState.MERGE_READY,
+            reviewer_id=self.reviewer_id,
+            reviewer_authority=self.reviewer_authority,
+            verdict=self.verdict,
+            verification=verification,
+        )
+
+    def require_fix(self, *, candidate_sha: str) -> CandidateReviewRecord:
+        self._require_state(ReviewState.FAIL)
+        self._require_candidate(candidate_sha)
+        return self.__from_transition(
+            self.identity,
+            ReviewState.FIX_REQUIRED,
+            reviewer_id=self.reviewer_id,
+            reviewer_authority=self.reviewer_authority,
+            verdict=self.verdict,
+        )
+
+    def successor(self, *, candidate_sha: str, implementer_id: str) -> CandidateReviewRecord:
+        """Start a fresh review lifecycle; verdicts never transfer to a successor head."""
+        _validate_sha(candidate_sha)
+        if candidate_sha == self.identity.candidate_sha:
+            raise ReviewPipelineError("successor candidate SHA must change")
+        return CandidateReviewRecord(
+            CandidateReviewIdentity(self.identity.work_id, candidate_sha, implementer_id)
+        )
+
+    def _validate(self) -> None:
+        if self.reviewer_id is not None:
+            self._validate_reviewer(self.reviewer_id)
+        pre_assignment = {ReviewState.IMPLEMENTED, ReviewState.REVIEW_REQUIRED}
+        if self.state in pre_assignment:
+            if self.reviewer_id is not None or self.reviewer_authority is not None:
+                raise ReviewPipelineError("reviewer authority cannot be bound before QA is queued")
+        else:
+            if self.reviewer_id is None or self.reviewer_authority is None:
+                raise ReviewPipelineError(
+                    "QA state requires trusted independent reviewer authority"
+                )
+            self._require_candidate(self.reviewer_authority.candidate_sha)
+            self._require_assigned_reviewer(self.reviewer_authority.reviewer_id)
+        pre_verdict = {
+            ReviewState.IMPLEMENTED,
+            ReviewState.REVIEW_REQUIRED,
+            ReviewState.QA_PENDING,
+            ReviewState.QA_RUNNING,
+        }
+        if self.state in pre_verdict and self.verdict is not None:
+            raise ReviewPipelineError("pre-verdict review state cannot contain a verdict")
+        terminal = {
+            ReviewState.PASS,
+            ReviewState.FAIL,
+            ReviewState.FIX_REQUIRED,
+            ReviewState.MERGE_READY,
+        }
+        if self.state in terminal:
+            if self.verdict is None:
+                raise ReviewPipelineError("terminal review state requires exact verdict evidence")
+            self._require_candidate(self.verdict.candidate_sha)
+            self._require_assigned_reviewer(self.verdict.reviewer_id)
+            if self.state in {ReviewState.PASS, ReviewState.MERGE_READY} and not self.verdict.accepted:
+                raise ReviewPipelineError("passing review state requires accepted verdict")
+            if self.state in {ReviewState.FAIL, ReviewState.FIX_REQUIRED} and self.verdict.accepted:
+                raise ReviewPipelineError("failing review state requires rejected verdict")
+
+    def _validate_authority(
+        self, authority: TrustedReviewerAuthority
+    ) -> ReviewerAuthorityEvidence:
+        try:
+            candidate_sha = authority.candidate_sha
+            reviewer_id = authority.reviewer_id
+            authority_ref = authority.authority_ref
+            independent_review_authorized = authority.independent_review_authorized
+        except AttributeError as exc:
+            raise ReviewPipelineError("trusted reviewer authority is malformed") from exc
+
+        _validate_sha(candidate_sha)
+        self._require_candidate(candidate_sha)
+        self._validate_reviewer(reviewer_id)
+        _validate_evidence_ref(authority_ref, field="reviewer authority")
+        if independent_review_authorized is not True:
+            raise ReviewPipelineError(
+                "trusted reviewer authority did not authorize independent review"
+            )
+        return ReviewerAuthorityEvidence(
+            candidate_sha,
+            reviewer_id,
+            authority_ref,
+            independent_review_authorized=True,
+        )
+
+    def _validate_merge_clearance(self, verification: ExactHeadMergeClearance) -> None:
+        try:
+            candidate_sha = verification.candidate_sha
+            merge_clearance = verification.merge_clearance
+        except AttributeError as exc:
+            raise ReviewPipelineError("exact-head verification clearance is malformed") from exc
+
+        _validate_sha(candidate_sha)
+        if candidate_sha != self.identity.candidate_sha:
+            raise StaleCandidateReviewError(
+                "verification clearance does not match exact current candidate SHA"
+            )
+        if merge_clearance is not True:
+            raise ReviewPipelineError(
+                "exact-head verification clearance is required for merge ready"
+            )
+
+    def _require_state(self, expected: ReviewState) -> None:
+        self._validate()
+        if self.state is not expected:
+            raise ReviewPipelineError(
+                f"review transition requires {expected.value}, got {self.state.value}"
+            )
+
+    def _require_candidate(self, candidate_sha: str) -> None:
+        _validate_sha(candidate_sha)
+        if candidate_sha != self.identity.candidate_sha:
+            raise StaleCandidateReviewError(
+                "review evidence does not match exact current candidate SHA"
+            )
+
+    def _validate_reviewer(self, reviewer_id: str) -> None:
+        _validate_canonical_identity(reviewer_id, field="reviewer")
+        if reviewer_id == self.identity.implementer_id:
+            raise ReviewPipelineError("candidate implementer cannot independently review own work")
+
+    def _require_assigned_reviewer(self, reviewer_id: str) -> None:
+        self._validate_reviewer(reviewer_id)
+        if reviewer_id != self.reviewer_id:
+            raise ReviewPipelineError("reviewer identity does not match queued independent reviewer")
+
+
+def _validate_canonical_identity(value: str, *, field: str) -> None:
+    if not isinstance(value, str):
+        raise ReviewPipelineError(f"{field} identity must be a string")
+    if not value.strip():
+        raise ReviewPipelineError(f"{field} identity must not be empty")
+    if value != value.strip():
+        raise ReviewPipelineError(f"{field} identity must be canonical without edge whitespace")
+
+
+def _validate_sha(value: str) -> None:
+    if not isinstance(value, str) or len(value) != 40 or any(
+        char not in "0123456789abcdef" for char in value
+    ):
+        raise ReviewPipelineError(
+            "candidate SHA must be a canonical lowercase 40-character hexadecimal SHA"
+        )
+
+
+def _validate_evidence_ref(value: str, *, field: str) -> None:
+    if not isinstance(value, str):
+        raise ReviewPipelineError(f"{field} reference must be a string")
+    if not value.strip() or len(value) > _MAX_EVIDENCE_REF_CHARS:
+        raise ReviewPipelineError(f"{field} reference exceeds bounded evidence limit")
+    if value != value.strip():
+        raise ReviewPipelineError(
+            f"{field} reference must be canonical without edge whitespace"
+        )
+
+
+def _validate_evidence_refs(values: tuple[str, ...]) -> None:
+    if not isinstance(values, tuple) or not values or len(values) > _MAX_EVIDENCE_REFS:
+        raise ReviewPipelineError("review verdict requires bounded evidence references")
+    if any(not isinstance(value, str) for value in values):
+        raise ReviewPipelineError("review evidence reference must be a string")
+    if any(not value.strip() or len(value) > _MAX_EVIDENCE_REF_CHARS for value in values):
+        raise ReviewPipelineError("review evidence reference exceeds bounded evidence limit")
+    if any(value != value.strip() for value in values):
+        raise ReviewPipelineError(
+            "review evidence reference must be canonical without edge whitespace"
+        )
+    if len(set(values)) != len(values):
+        raise ReviewPipelineError("review evidence references must be unique")
