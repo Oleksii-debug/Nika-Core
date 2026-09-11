@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -10,11 +11,14 @@ import zipfile
 from pathlib import Path
 
 from nika_core.packaging.release import (
+    build_release_manifest,
     verify_distributable_evidence,
     verify_release_archive,
+    write_release_manifest,
 )
 
 _INSTALLER_NAME = "install_nika_core.ps1"
+_UPGRADE_PROBE_NAME = "m12-byte-distinct-upgrade-proof.txt"
 
 
 def parser() -> argparse.ArgumentParser:
@@ -106,8 +110,45 @@ def _run_installed_pf11(executable: Path, output: Path, *, env: dict[str, str]) 
     return payload
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _build_acceptance_upgrade_bundle(source: Path, target: Path) -> Path:
+    """Create one controlled byte-distinct package for installer transition evidence."""
+    shutil.copytree(source, target)
+    manifest_path = target / "release-manifest.json"
+    try:
+        raw_manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("exact final ZIP contains an unreadable release manifest") from exc
+    if not isinstance(raw_manifest, dict):
+        raise TypeError("exact final ZIP release manifest must be an object")
+
+    product = raw_manifest.get("product")
+    version = raw_manifest.get("version")
+    source_sha = raw_manifest.get("source_sha")
+    if not all(isinstance(value, str) and value.strip() for value in (product, version, source_sha)):
+        raise RuntimeError("exact final ZIP release manifest has invalid identity fields")
+
+    probe = target / _UPGRADE_PROBE_NAME
+    probe.write_text("M12 byte-distinct installer transition proof\n", encoding="utf-8")
+    manifest = build_release_manifest(
+        target,
+        product=product,
+        version=f"{version}-m12-transition-proof",
+        source_sha=source_sha,
+    )
+    write_release_manifest(target, manifest)
+    return probe
+
+
 def prove_packaged_installer_lifecycle(artifact: Path) -> None:
-    """Prove Install -> Update -> Rollback using only the exact final ZIP contents."""
+    """Prove byte-distinct Install -> Update -> Rollback from the exact final ZIP."""
     shell = _powershell()
     with tempfile.TemporaryDirectory(prefix="nika-m12-installer-") as temporary:
         root = Path(temporary)
@@ -122,6 +163,13 @@ def prove_packaged_installer_lifecycle(artifact: Path) -> None:
             raise RuntimeError("exact final ZIP does not contain the canonical installer")
         if not executable.is_file():
             raise RuntimeError("exact final ZIP does not contain NikaCore.exe")
+
+        upgrade_bundle = root / "byte-distinct-upgrade"
+        upgrade_probe = _build_acceptance_upgrade_bundle(bundle, upgrade_bundle)
+        exact_manifest_sha = _sha256(bundle / "release-manifest.json")
+        upgrade_manifest_sha = _sha256(upgrade_bundle / "release-manifest.json")
+        if exact_manifest_sha == upgrade_manifest_sha:
+            raise RuntimeError("acceptance upgrade package is not byte-distinct")
 
         destination = root / "installed" / "Nika Core"
         rollback = destination.parent / f".{destination.name}.rollback"
@@ -145,17 +193,29 @@ def prove_packaged_installer_lifecycle(artifact: Path) -> None:
             root / "pf11-install.json",
             env=environment,
         )
+        if _sha256(destination / "release-manifest.json") != exact_manifest_sha:
+            raise RuntimeError("Install did not preserve exact final package identity")
+        if (destination / _UPGRADE_PROBE_NAME).exists():
+            raise RuntimeError("Install unexpectedly contains the upgrade proof marker")
 
         _run_installer(
             shell,
             installer,
             mode="Update",
             destination=destination,
-            bundle=bundle,
+            bundle=upgrade_bundle,
             env=environment,
         )
         if not rollback.is_dir():
             raise RuntimeError("Update succeeded without creating a rollback image")
+        if _sha256(destination / "release-manifest.json") != upgrade_manifest_sha:
+            raise RuntimeError("Update did not activate the byte-distinct package identity")
+        if _sha256(rollback / "release-manifest.json") != exact_manifest_sha:
+            raise RuntimeError("Update rollback image did not preserve exact original identity")
+        if not (destination / upgrade_probe.name).is_file():
+            raise RuntimeError("Update did not activate the byte-distinct proof marker")
+        if (rollback / upgrade_probe.name).exists():
+            raise RuntimeError("original rollback image contains the upgrade proof marker")
         update_proof = _run_installed_pf11(
             destination / "NikaCore.exe",
             root / "pf11-update.json",
@@ -174,6 +234,14 @@ def prove_packaged_installer_lifecycle(artifact: Path) -> None:
         )
         if not rollback.is_dir():
             raise RuntimeError("Rollback did not preserve the replaced image for recovery")
+        if _sha256(destination / "release-manifest.json") != exact_manifest_sha:
+            raise RuntimeError("Rollback did not restore exact original package identity")
+        if _sha256(rollback / "release-manifest.json") != upgrade_manifest_sha:
+            raise RuntimeError("Rollback did not retain the replaced upgrade package identity")
+        if (destination / upgrade_probe.name).exists():
+            raise RuntimeError("Rollback left the upgrade proof marker in the active image")
+        if not (rollback / upgrade_probe.name).is_file():
+            raise RuntimeError("Rollback image did not retain the replaced upgrade proof marker")
         rollback_proof = _run_installed_pf11(
             destination / "NikaCore.exe",
             root / "pf11-rollback.json",
