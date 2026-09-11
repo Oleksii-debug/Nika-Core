@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -107,6 +108,8 @@ def test_child_command_never_grants_download_authority(tmp_path: Path) -> None:
         min_available_memory_gb=None,
     )
     command = harness._child_command(args, output=tmp_path / "evidence.json", repo_root=tmp_path)
+    assert command[1] == "-P"
+    assert command[2] == str(tmp_path / "scripts" / "prove_foundry_local.py")
     assert "--allow-download" not in command
     assert command.count("--prompt") == 1
     assert command[command.index("--prompt") + 1] == harness.FIXTURE_PROMPT
@@ -123,6 +126,36 @@ def _args() -> SimpleNamespace:
         max_memory_percent=None,
         min_available_memory_gb=None,
     )
+
+
+def test_run_child_binds_repo_source_and_disables_user_site(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "src").mkdir()
+    child_path = tmp_path / "scripts" / "prove_foundry_local.py"
+    child_path.write_text("# child\n", encoding="utf-8")
+    output = tmp_path / "child-evidence.json"
+    observed: dict[str, object] = {}
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "foreign-source"))
+
+    def fake_run(command, **kwargs):
+        observed["command"] = command
+        observed["env"] = kwargs["env"]
+        output.write_text(json.dumps(_child()), encoding="utf-8")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(harness.subprocess, "run", fake_run)
+    proof = harness._run_child(_args(), output=output, repo_root=tmp_path)
+
+    command = observed["command"]
+    env = observed["env"]
+    assert isinstance(command, list)
+    assert command[1] == "-P"
+    assert isinstance(env, dict)
+    assert env["PYTHONPATH"] == str((tmp_path / "src").resolve())
+    assert env["PYTHONNOUSERSITE"] == "1"
+    assert proof["schema"] == harness.CHILD_SCHEMA
 
 
 def test_run_acceptance_uses_two_child_processes_and_binds_sha(
@@ -150,6 +183,11 @@ def test_run_acceptance_uses_two_child_processes_and_binds_sha(
     assert evidence["restart_rerun"]["fresh_child_processes"] == 2
     assert evidence["model"]["acquisition_state"] == "cached_before_harness"
     assert evidence["fixture"]["validated_real_response"] == harness.FIXTURE_RESPONSE
+    assert evidence["harness"]["source_binding"] == {
+        "safe_path": True,
+        "pythonpath": "src",
+        "user_site_disabled": True,
+    }
     assert evidence["no_silent_download"] is True
     assert evidence["no_silent_fallback"] is True
 
