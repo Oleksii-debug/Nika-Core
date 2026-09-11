@@ -472,11 +472,24 @@ def _zip_member_path(member: zipfile.ZipInfo) -> str:
     return member.filename
 
 
-def verify_release_archive(artifact_path: Path, *, source_sha: str) -> tuple[str, ...]:
-    """Verify the embedded manifest against the exact files in a Windows release ZIP."""
+def verify_release_archive(
+    artifact_path: Path,
+    *,
+    source_sha: str,
+    expected_product_version: str | None = None,
+) -> tuple[str, ...]:
+    """Verify the embedded manifest against the exact files in a Windows release ZIP.
+
+    When expected_product_version is provided, bind the embedded manifest version to
+    that trusted release identity in addition to the exact source and file evidence.
+    """
     normalized_source_sha = source_sha.strip().casefold()
     if not _SOURCE_SHA_RE.fullmatch(normalized_source_sha):
         return ("archive:source-sha-format",)
+    if expected_product_version is not None and not _valid_product_version(
+        expected_product_version
+    ):
+        return ("archive:expected-product-version-format",)
     if not artifact_path.is_file():
         return ("archive:missing-artifact",)
 
@@ -537,6 +550,11 @@ def verify_release_archive(artifact_path: Path, *, source_sha: str) -> tuple[str
                 return tuple(f"archive:{finding}" for finding in structure_findings)
             if manifest.source_sha != normalized_source_sha:
                 findings.append("archive:source-sha")
+            if (
+                expected_product_version is not None
+                and manifest.version != expected_product_version
+            ):
+                findings.append("archive:product-version")
 
             expected = {entry.path: entry for entry in manifest.files}
             actual = {
