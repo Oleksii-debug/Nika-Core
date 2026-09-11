@@ -39,7 +39,10 @@ def test_c1_workflow_reproves_the_exact_generated_zip_before_upload() -> None:
     assert "Get-FileHash -LiteralPath $package -Algorithm SHA256" in workflow
     assert "Expand-Archive -LiteralPath $package" in workflow
     assert "& $installer -BundlePath $bundle -Destination $installRoot" in workflow
-    assert "& $installedExe --self-test $database $proof" in workflow
+    assert "[System.Diagnostics.ProcessStartInfo]::new()" in workflow
+    assert "$startInfo.ArgumentList.Add('--self-test')" in workflow
+    assert "$process.WaitForExit()" in workflow
+    assert "& $installedExe --self-test $database $proof" not in workflow
     assert "nika-pf11-c1-exact-package-evidence-v1" in workflow
     assert "proof_scope = 'exact-generated-zip-after-extract-install'" in workflow
     assert "factory_evidence_sha256" in workflow
