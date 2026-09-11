@@ -25,6 +25,12 @@ def _make_store(path: Path) -> SQLiteStore:
             VALUES (?, ?, ?, ?)""",
             ("ws-a", "A", _TIMESTAMP, _TIMESTAMP),
         )
+        conn.execute(
+            """INSERT INTO research_sources(
+                source_id, workspace_id, kind, locator, created_at, updated_at
+            ) VALUES ('fixture-source', 'ws-a', 'local_file', 'approved:ws-a', ?, ?)""",
+            (_TIMESTAMP, _TIMESTAMP),
+        )
     return store
 
 
@@ -35,10 +41,11 @@ def _request(artifact_key: str, text: str = "alpha or beta literal gamma") -> Kn
         title="Same title",
         media_type="text/plain",
         text=text,
-        source_locator=f"approved:ws-a:{artifact_key}",
+        source_locator="approved:ws-a",
         parser_name="text",
         parser_version="1",
         approved_by="approval:owner",
+        source_id="fixture-source",
     )
 
 
