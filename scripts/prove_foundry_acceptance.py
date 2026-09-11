@@ -56,6 +56,30 @@ def _require_normalized_text(value: Any, *, label: str, max_length: int) -> str:
     return value
 
 
+def _external_output_path(output: Path, *, repo_root: Path) -> Path:
+    candidate = output.expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    resolved = candidate.resolve(strict=False)
+    resolved_repo = repo_root.resolve(strict=True)
+    try:
+        resolved.relative_to(resolved_repo)
+    except ValueError:
+        return resolved
+    raise RuntimeError("--output must resolve outside the repository worktree")
+
+
+def _write_acceptance_evidence(
+    evidence: dict[str, Any], *, output: Path, repo_root: Path
+) -> Path:
+    resolved_output = _external_output_path(output, repo_root=repo_root)
+    resolved_output.parent.mkdir(parents=True, exist_ok=True)
+    resolved_output.write_text(
+        json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return resolved_output
+
+
 def _child_environment(repo_root: Path) -> dict[str, str]:
     env = os.environ.copy()
     env["PYTHONPATH"] = str((repo_root / "src").resolve())
@@ -306,7 +330,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("foundry-local-acceptance-evidence.json"),
+        required=True,
+        help="Aggregate evidence JSON path; must resolve outside the repository worktree",
     )
     return parser.parse_args()
 
@@ -316,12 +341,10 @@ def main() -> int:
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         raise ValueError("--timeout must be finite and greater than zero")
     repo_root = Path(__file__).resolve().parents[1]
+    output = _external_output_path(args.output, repo_root=repo_root)
     evidence = run_acceptance(args, repo_root=repo_root)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
-        json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
-    print(f"Foundry Local acceptance evidence written to {args.output}")
+    output = _write_acceptance_evidence(evidence, output=output, repo_root=repo_root)
+    print(f"Foundry Local acceptance evidence written to {output}")
     return 0
 
 
