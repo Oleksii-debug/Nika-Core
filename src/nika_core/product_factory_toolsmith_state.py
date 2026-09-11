@@ -3,12 +3,12 @@ from __future__ import annotations
 from nika_core.product_factory_coordinator import ComponentWorkRequest
 from nika_core.product_factory_toolsmith_state_impl import (
     ComponentCapabilityBinding,
-    ComponentCapabilityBindingState as ComponentCapabilityBindingState,
+    ComponentCapabilityBindingState as _ComponentCapabilityBindingState,
     ProductFactoryToolsmithBindingError,
-)
-from nika_core.product_factory_toolsmith_state_impl import (
     ProductFactoryToolsmithBindingRepository as _BindingRepository,
 )
+
+ComponentCapabilityBindingState = _ComponentCapabilityBindingState
 
 _DURABLE_REASON = "Product Factory worker capability gap"
 _DURABLE_SEARCH_EVIDENCE_MARKER = "capability search evidence present"
