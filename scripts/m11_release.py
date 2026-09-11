@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import tomllib
@@ -19,6 +20,7 @@ from nika_core.packaging.windows import default_windows_plan
 
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _PF11_EVIDENCE_NAME = "pf11-packaged-product-journey.json"
+_PACKAGED_INSTALLER_NAME = "install_nika_core.ps1"
 
 
 def project_version(project_root: Path) -> str:
@@ -60,6 +62,21 @@ def _require_exact_nonnegative_int(payload: dict[str, object], field: str) -> in
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise RuntimeError(f"packaged PF11 proof returned invalid {field}")
     return value
+
+
+def _stage_canonical_installer(project_root: Path, bundle_dir: Path) -> Path:
+    """Stage the canonical Windows installer inside the manifest-bound release bundle."""
+    source = project_root / "scripts" / _PACKAGED_INSTALLER_NAME
+    if not source.is_file() or source.is_symlink():
+        raise RuntimeError(f"canonical Windows installer is missing or unsafe: {source}")
+    if not bundle_dir.is_dir():
+        raise RuntimeError(f"Windows release bundle is missing: {bundle_dir}")
+
+    target = bundle_dir / _PACKAGED_INSTALLER_NAME
+    if target.is_symlink():
+        raise RuntimeError(f"packaged Windows installer target is unsafe: {target}")
+    shutil.copy2(source, target)
+    return target
 
 
 def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path:
@@ -171,6 +188,7 @@ def build(
     if notice_findings:
         raise RuntimeError(f"third-party notice verification failed: {notice_findings}")
 
+    _stage_canonical_installer(project_root, plan.bundle_dir)
     manifest = build_release_manifest(
         plan.bundle_dir,
         product="NikaCore",
