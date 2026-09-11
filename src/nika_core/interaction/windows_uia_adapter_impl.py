@@ -502,47 +502,19 @@ class PywinautoUIABackend:
         self,
         hwnd: int,
     ) -> tuple[tuple[int, ...], int] | None:
-        """Return provider-native focused UIA identity mapped to Nika generation.
-
-        ``CurrentHasKeyboardFocus`` observed while enumerating an entire tree can
-        lag or be absent even after a successful UIA ``SetFocus``.  UI Automation
-        exposes one authoritative focused element through ``GetFocusedElement``;
-        pywinauto exposes that as ``UIAElementInfo.get_active()``.  We use it only
-        as a read-side observation, then bind it back to the exact live Nika
-        RuntimeId/generation using UIA CompareElements semantics.  No name,
-        coordinates or approximate matching are accepted.
-        """
-
-        try:
-            from pywinauto.controls.uiawrapper import UIAWrapper
-            from pywinauto.windows.uia_element_info import UIAElementInfo
-
-            focused_wrapper = UIAWrapper(UIAElementInfo.get_active())
-        except Exception as exc:  # noqa: BLE001 - transient provider focus query
-            logger.debug("UIA GetFocusedElement unavailable: %r", exc)
-            return None
-
-        focused_runtime_id = self._runtime_id(focused_wrapper.element_info)
-        matches: list[UIAControlRecord] = []
-        for wrapper, record in self._pairs(hwnd, "control"):
-            same = self._same_element(wrapper, focused_wrapper)
-            if same is True:
-                matches.append(record)
-                continue
-            if same is None and record.runtime_id == focused_runtime_id:
-                raise AmbiguousTargetError(
-                    "cannot bind provider focused element to exact RuntimeId/generation"
-                )
-
-        if len(matches) > 1:
+        focused = [
+            record
+            for record in self.enumerate_controls(hwnd, "control")
+            if record.focused and record.runtime_id is not None
+        ]
+        if len(focused) > 1:
             raise AmbiguousTargetError(
-                "provider focused element matched multiple UIA controls"
+                "multiple UIA controls report keyboard focus"
             )
-        if not matches:
+        if not focused:
             return None
-        record = matches[0]
-        if record.runtime_id is None:
-            return None
+        record = focused[0]
+        assert record.runtime_id is not None
         return record.runtime_id, record.element_generation
 
     def focus(
@@ -665,96 +637,176 @@ class PywinautoUIABackend:
 
 
 class WindowsUIAInteractionAdapter:
-    """Strict semantic UIA adapter backed by exact RuntimeId + generation identity."""
+    """Semantic Windows adapter with exact process/window/control identity."""
 
     def __init__(
         self,
         *,
         process_id: int,
-        window_title: str,
-        backend: WindowsUIABackend | None = None,
+        window_title: str | None = None,
+        native_handle: int | None = None,
         view: str = "control",
+        backend: WindowsUIABackend | None = None,
     ) -> None:
         if process_id <= 0:
             raise ValueError("process_id must be positive")
-        if not window_title.strip():
-            raise ValueError("window_title is required")
+        if (window_title is None) == (native_handle is None):
+            raise ValueError(
+                "provide exactly one of window_title or native_handle"
+            )
         if view not in {"control", "content"}:
             raise ValueError("view must be 'control' or 'content'")
         self.process_id = process_id
         self.window_title = window_title
-        self.backend = backend or PywinautoUIABackend()
+        self.native_handle = native_handle
         self.view = view
-        started = self.backend.process_started_ns(process_id)
-        executable = self.backend.executable(process_id)
-        self._application = ApplicationIdentity(
-            process_id,
-            executable,
-            started,
-        )
-        self._window: WindowIdentity | None = None
-        self._window_handle: int | None = None
-        self._window_generation = 0
-        self._snapshot_revision = 0
-        self._identity_by_node: dict[str, tuple[tuple[int, ...], int]] = {}
+        self.backend = backend or PywinautoUIABackend()
+        self._application: ApplicationIdentity | None = None
+        self._hwnd: int | None = None
+        self._generation = 0
+        self._identity_by_node: dict[
+            str,
+            tuple[tuple[int, ...], int],
+        ] = {}
 
-    @staticmethod
-    def _identity_digest(runtime_id: tuple[int, ...], generation: int) -> str:
-        payload = f"{','.join(str(item) for item in runtime_id)}|{generation}".encode()
-        return hashlib.sha256(payload).hexdigest()
-
-    def _live_hwnd(self) -> int:
-        windows = [
+    def _exact_window(self) -> UIAWindowRecord:
+        windows = tuple(
             window
             for window in self.backend.enumerate_windows(self.process_id)
-            if window.title == self.window_title
-        ]
-        if not windows:
-            raise TargetNotFoundError(
-                f"UIA window {self.window_title!r} is not available"
-            )
-        if len(windows) != 1:
-            raise AmbiguousTargetError(
-                f"multiple UIA windows match exact title {self.window_title!r}"
-            )
-        window = windows[0]
-        if not window.enabled:
-            raise UnsupportedInteractionError("target window is disabled")
-        if self._window_handle is None:
-            self._window_handle = window.hwnd
-            self._window_generation = 1
-        elif self._window_handle != window.hwnd:
-            self._window_handle = window.hwnd
-            self._window_generation += 1
-        return window.hwnd
-
-    def _semantic_snapshot(
-        self,
-        *,
-        revision: int,
-        controls: tuple[UIAControlRecord, ...],
-    ) -> SemanticSnapshot:
-        hwnd = self._live_hwnd()
-        assert self._window_handle == hwnd
-        self._window = WindowIdentity(
-            native_handle=hwnd,
-            generation=self._window_generation,
-            title=self.window_title,
+            if window.pid == self.process_id
         )
-        nodes: list[ControlNode] = []
-        self._identity_by_node = {}
-        for record in controls:
-            runtime_id = record.runtime_id
-            if runtime_id is None:
-                continue
-            identity = (runtime_id, record.element_generation)
-            node_id = self._identity_digest(*identity)
-            if node_id in self._identity_by_node:
-                raise AmbiguousTargetError(
-                    f"duplicate Nika UIA identity for {identity!r}"
+        if self.native_handle is not None:
+            matches = [
+                window
+                for window in windows
+                if window.hwnd == self.native_handle
+            ]
+        else:
+            matches = [
+                window
+                for window in windows
+                if window.title == self.window_title
+            ]
+        if not matches:
+            raise TargetNotFoundError(
+                "exact top-level UIA window was not found"
+            )
+        if len(matches) != 1:
+            raise AmbiguousTargetError(
+                "multiple top-level UIA windows match the exact identity"
+            )
+        return matches[0]
+
+    def _identity(
+        self,
+        window: UIAWindowRecord,
+    ) -> tuple[ApplicationIdentity, WindowIdentity]:
+        app = ApplicationIdentity(
+            executable=self.backend.executable(self.process_id),
+            pid=self.process_id,
+            process_started_ns=self.backend.process_started_ns(self.process_id),
+        )
+        if self._application is None:
+            self._application = app
+            self._hwnd = window.hwnd
+            self._generation = 1
+        elif app != self._application or window.hwnd != self._hwnd:
+            raise StaleSnapshotError(
+                "process/window identity changed; rebind is required"
+            )
+        return app, WindowIdentity(
+            application=app,
+            native_handle=window.hwnd,
+            generation=self._generation,
+        )
+
+    @staticmethod
+    def _node_id(
+        hwnd: int,
+        window_generation: int,
+        runtime_id: tuple[int, ...],
+        element_generation: int,
+    ) -> str:
+        payload = (
+            f"{hwnd}:{window_generation}:{element_generation}:"
+            + ".".join(str(part) for part in runtime_id)
+        )
+        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        return "uia:" + digest[:32]
+
+    @staticmethod
+    def _revision(
+        records: tuple[UIAControlRecord, ...],
+        generation: int,
+    ) -> int:
+        stable = [
+            (
+                record.runtime_id,
+                record.element_generation,
+                record.automation_id,
+                record.role,
+                record.name,
+                record.enabled,
+                record.visible,
+                record.focused,
+                record.value,
+                record.class_name,
+                record.framework_id,
+                record.patterns,
+            )
+            for record in records
+        ]
+        payload = repr((generation, stable)).encode("utf-8")
+        return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
+
+    def observe(self) -> SemanticSnapshot:
+        window = self._exact_window()
+        application, window_identity = self._identity(window)
+        records = self.backend.enumerate_controls(window.hwnd, self.view)
+        identity_by_node: dict[
+            str,
+            tuple[tuple[int, ...], int],
+        ] = {}
+        controls: list[ControlNode] = []
+        for record in records:
+            if record.runtime_id is None:
+                raise UnsupportedInteractionError(
+                    "UIA control has no RuntimeId; positional fallback is forbidden"
                 )
-            self._identity_by_node[node_id] = identity
-            nodes.append(
+            node_id = self._node_id(
+                window.hwnd,
+                self._generation,
+                record.runtime_id,
+                record.element_generation,
+            )
+            if node_id in identity_by_node:
+                raise AmbiguousTargetError(
+                    "duplicate UIA RuntimeId/generation identity after normalization"
+                )
+            identity_by_node[node_id] = (
+                record.runtime_id,
+                record.element_generation,
+            )
+            attributes = tuple(
+                (key, value)
+                for key, value in (
+                    (
+                        "runtime_id",
+                        ".".join(str(part) for part in record.runtime_id),
+                    ),
+                    (
+                        "element_generation",
+                        str(record.element_generation),
+                    ),
+                    ("automation_id", record.automation_id),
+                    ("class_name", record.class_name),
+                    ("framework_id", record.framework_id),
+                    ("patterns", ",".join(record.patterns)),
+                    ("view", self.view),
+                )
+                if value
+            )
+            controls.append(
                 ControlNode(
                     node_id=node_id,
                     role=record.role,
@@ -764,45 +816,58 @@ class WindowsUIAInteractionAdapter:
                     focused=record.focused,
                     value=record.value,
                     bounds=record.bounds,
-                    automation_id=record.automation_id,
-                    class_name=record.class_name,
-                    framework_id=record.framework_id,
+                    attributes=attributes,
                 )
             )
+        self._identity_by_node = identity_by_node
         return SemanticSnapshot(
-            revision=revision,
-            target=InteractionTarget(self._application, self._window),
-            controls=tuple(nodes),
+            target=InteractionTarget(
+                application=application,
+                window=window_identity,
+            ),
+            generation=self._generation,
+            revision=self._revision(records, self._generation),
+            controls=tuple(controls),
         )
 
-    def observe(self) -> SemanticSnapshot:
-        hwnd = self._live_hwnd()
-        records = self.backend.enumerate_controls(hwnd, self.view)
-        self._snapshot_revision += 1
-        return self._semantic_snapshot(
-            revision=self._snapshot_revision,
-            controls=records,
-        )
+    def _live_hwnd(self) -> int:
+        window = self._exact_window()
+        self._identity(window)
+        assert self._hwnd is not None
+        return self._hwnd
+
+    def _control_identity(
+        self,
+        node: ControlNode,
+    ) -> tuple[tuple[int, ...], int]:
+        identity = self._identity_by_node.get(node.node_id)
+        if identity is None:
+            raise StaleSnapshotError(
+                "control does not belong to the current observation"
+            )
+        return identity
 
     def capture_focus(self) -> str | None:
-        hwnd = self._live_hwnd()
-        focused = self.backend.focused_identity(hwnd)
-        if focused is None:
+        identity = self.backend.focused_identity(self._live_hwnd())
+        if identity is None:
             return None
-        runtime_id, generation = focused
-        node_id = self._identity_digest(runtime_id, generation)
-        if self._identity_by_node.get(node_id) != focused:
-            return None
-        return node_id
+        matches = [
+            node_id
+            for node_id, known_identity in self._identity_by_node.items()
+            if known_identity == identity
+        ]
+        if len(matches) > 1:
+            raise AmbiguousTargetError(
+                "focused UIA identity maps to multiple semantic nodes"
+            )
+        return matches[0] if matches else None
 
     def focus(self, node: ControlNode) -> None:
         hwnd = self._live_hwnd()
         runtime_id, generation = self._control_identity(node)
         self.backend.focus(hwnd, runtime_id, generation)
         if self.backend.focused_identity(hwnd) != (runtime_id, generation):
-            raise StaleSnapshotError(
-                "UIA focus verification failed for RuntimeId/generation"
-            )
+            raise StaleSnapshotError("UIA focus verification failed")
 
     def restore_focus(self, node_id: str | None) -> bool:
         if node_id is None:
@@ -811,35 +876,16 @@ class WindowsUIAInteractionAdapter:
         if identity is None:
             return False
         hwnd = self._live_hwnd()
-        runtime_id, generation = identity
         try:
-            self.backend.focus(hwnd, runtime_id, generation)
+            self.backend.focus(hwnd, *identity)
         except (TargetNotFoundError, StaleSnapshotError):
             return False
         return self.backend.focused_identity(hwnd) == identity
 
-    def pattern_capabilities(self, node: ControlNode) -> tuple[str, ...]:
-        hwnd = self._live_hwnd()
-        runtime_id, generation = self._control_identity(node)
-        records = [
-            record
-            for record in self.backend.enumerate_controls(hwnd, self.view)
-            if record.runtime_id == runtime_id
-            and record.element_generation == generation
-        ]
-        if len(records) != 1:
-            raise StaleSnapshotError(
-                "UIA pattern capability target is stale or ambiguous"
-            )
-
-    def _control_identity(self, node: ControlNode) -> tuple[tuple[int, ...], int]:
-        identity = self._identity_by_node.get(node.node_id)
-        if identity is None:
-            raise StaleSnapshotError("control is not from the latest UIA snapshot")
-        expected = self._identity_digest(*identity)
-        if expected != node.node_id:
-            raise StaleSnapshotError("control identity digest mismatch")
-        return identity
+    @staticmethod
+    def pattern_capabilities(node: ControlNode) -> tuple[str, ...]:
+        value = dict(node.attributes).get("patterns", "")
+        return tuple(item for item in value.split(",") if item)
 
     def act(
         self,
@@ -847,25 +893,128 @@ class WindowsUIAInteractionAdapter:
         action: InteractionAction,
         value: str | None,
     ) -> None:
-        if action is InteractionAction.SET_VALUE and value is None:
-            raise ValueError("SET_VALUE requires a value")
         hwnd = self._live_hwnd()
         runtime_id, generation = self._control_identity(node)
+        if not node.enabled or not node.visible:
+            raise UnsupportedInteractionError(
+                "disabled/hidden controls cannot be acted on"
+            )
+        if action is InteractionAction.FOCUS:
+            self.focus(node)
+            return
+
+        required_pattern = {
+            InteractionAction.INVOKE: "Invoke",
+            InteractionAction.SET_VALUE: "Value",
+            InteractionAction.SELECT: "SelectionItem",
+            InteractionAction.TOGGLE: "Toggle",
+            InteractionAction.EXPAND: "ExpandCollapse",
+            InteractionAction.COLLAPSE: "ExpandCollapse",
+        }.get(action)
+        if required_pattern not in self.pattern_capabilities(node):
+            raise UnsupportedInteractionError(
+                f"{required_pattern or action.value} pattern is unavailable"
+            )
+        if action is InteractionAction.SET_VALUE and value is None:
+            raise ValueError("SET_VALUE requires a value")
+
         method = {
-            InteractionAction.FOCUS: self.backend.focus,
             InteractionAction.INVOKE: self.backend.invoke,
             InteractionAction.SET_VALUE: self.backend.set_value,
             InteractionAction.SELECT: self.backend.select,
             InteractionAction.TOGGLE: self.backend.toggle,
             InteractionAction.EXPAND: self.backend.expand,
             InteractionAction.COLLAPSE: self.backend.collapse,
-        }.get(action)
-        if method is None:
-            raise UnsupportedInteractionError(
-                f"{action.value} has no semantic Windows UIA effect adapter"
-            )
+        }[action]
         if action is InteractionAction.SET_VALUE:
             assert value is not None
             method(hwnd, runtime_id, generation, value)  # type: ignore[call-arg]
         else:
             method(hwnd, runtime_id, generation)  # type: ignore[call-arg]
+
+    def verify(
+        self,
+        before: SemanticSnapshot,
+        after: SemanticSnapshot,
+        node: ControlNode,
+        action: InteractionAction,
+        value: str | None,
+    ) -> bool:
+        if before.target != after.target or before.generation != after.generation:
+            return False
+        if action is InteractionAction.FOCUS:
+            return any(
+                control.node_id == node.node_id and control.focused
+                for control in after.controls
+            )
+        if action is InteractionAction.SET_VALUE:
+            return any(
+                control.node_id == node.node_id and control.value == value
+                for control in after.controls
+            )
+        return after.revision != before.revision
+
+
+@dataclass(frozen=True, slots=True)
+class UIABackendMeasurement:
+    backend: str
+    sample_count: int
+    median_observe_ms: float
+    exact_identity: bool
+    strict_ambiguity: bool
+    focus_verified: bool
+    pattern_coverage: tuple[str, ...]
+
+
+def choose_measured_backend(
+    pywinauto: UIABackendMeasurement,
+    raw_uia: UIABackendMeasurement | None,
+) -> str:
+    """Retain pywinauto unless a raw UIA adapter is safely and materially better."""
+
+    if pywinauto.backend != "pywinauto" or pywinauto.sample_count < 3:
+        raise ValueError(
+            "pywinauto baseline requires at least three measured samples"
+        )
+    if not (
+        pywinauto.exact_identity
+        and pywinauto.strict_ambiguity
+        and pywinauto.focus_verified
+    ):
+        raise ValueError(
+            "pywinauto measurement does not prove the required safety baseline"
+        )
+    if raw_uia is None:
+        return "pywinauto"
+    if raw_uia.backend != "raw-uia" or raw_uia.sample_count < 3:
+        raise ValueError(
+            "raw UIA comparison requires at least three measured samples"
+        )
+    if not (
+        raw_uia.exact_identity
+        and raw_uia.strict_ambiguity
+        and raw_uia.focus_verified
+    ):
+        return "pywinauto"
+    coverage_better = set(raw_uia.pattern_coverage) > set(
+        pywinauto.pattern_coverage
+    )
+    latency_better = (
+        raw_uia.median_observe_ms
+        <= pywinauto.median_observe_ms * 0.8
+    )
+    return "raw-uia" if coverage_better or latency_better else "pywinauto"
+
+
+def measure_observation(
+    adapter: WindowsUIAInteractionAdapter,
+    samples: int = 5,
+) -> tuple[float, ...]:
+    if not 3 <= samples <= 20:
+        raise ValueError("samples must be between 3 and 20")
+    results: list[float] = []
+    for _ in range(samples):
+        started = time.perf_counter()
+        adapter.observe()
+        results.append((time.perf_counter() - started) * 1000.0)
+    return tuple(results)
