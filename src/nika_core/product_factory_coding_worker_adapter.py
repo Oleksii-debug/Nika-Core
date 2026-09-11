@@ -352,6 +352,7 @@ class CodingWorkerComponentAdapter:
             result_sha=exact.result_sha,
             diff_digest=exact.diff_digest,
             coding_result=result,
+            producer_actor_id=f"workspace-lease:{context.lease.lease_id}",
         )
 
 
