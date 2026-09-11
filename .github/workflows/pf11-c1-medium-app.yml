@@ -49,6 +49,63 @@ jobs:
           --source-sha '${{ env.NIKA_CANDIDATE_SHA }}'
           --evidence ./dist/pf11-c1-medium-app-evidence.json
           --windows-package
+      - name: Re-prove exact generated C1 ZIP
+        shell: pwsh
+        run: |
+          $evidence = Get-Content ./dist/pf11-c1-medium-app-evidence.json -Raw | ConvertFrom-Json
+          $package = [System.IO.Path]::GetFullPath([string]$evidence.package_path)
+          if (-not (Test-Path -LiteralPath $package -PathType Leaf)) {
+            throw "C1 exact package is missing: $package"
+          }
+          $actualSha = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualSha -ne [string]$evidence.package_sha256) {
+            throw 'C1 exact package SHA-256 differs from recorded evidence.'
+          }
+
+          $extractRoot = Join-Path $env:RUNNER_TEMP 'Nika C1 — exact ZIP'
+          $installRoot = Join-Path $env:RUNNER_TEMP 'Nika C1 — installed from exact ZIP'
+          $dataRoot = Join-Path $env:RUNNER_TEMP 'Nika C1 — exact ZIP data'
+          foreach ($path in @($extractRoot, $installRoot, $dataRoot)) {
+            if (Test-Path -LiteralPath $path) {
+              Remove-Item -LiteralPath $path -Recurse -Force
+            }
+          }
+          New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
+          Expand-Archive -LiteralPath $package -DestinationPath $extractRoot -Force
+
+          $bundle = Join-Path $extractRoot 'NikaC1ExpenseManager'
+          $installer = Join-Path $bundle 'install.ps1'
+          $packagedExe = Join-Path $bundle 'NikaC1ExpenseManager.exe'
+          if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
+            throw 'Exact C1 ZIP does not contain its installer.'
+          }
+          if (-not (Test-Path -LiteralPath $packagedExe -PathType Leaf)) {
+            throw 'Exact C1 ZIP does not contain its executable.'
+          }
+
+          & $installer -BundlePath $bundle -Destination $installRoot | Out-Host
+          $installedExe = Join-Path $installRoot 'NikaC1ExpenseManager.exe'
+          if (-not (Test-Path -LiteralPath $installedExe -PathType Leaf)) {
+            throw 'Exact C1 ZIP installer did not materialize its executable.'
+          }
+
+          New-Item -ItemType Directory -Path $dataRoot -Force | Out-Null
+          $database = Join-Path $dataRoot 'expenses.db'
+          $outputs = @()
+          foreach ($attempt in 1,2) {
+            $proof = Join-Path $dataRoot "proof-$attempt.txt"
+            & $installedExe --self-test $database $proof
+            if ($LASTEXITCODE -ne 0) {
+              throw "Exact C1 ZIP installed executable self-test failed on attempt $attempt."
+            }
+            if (-not (Test-Path -LiteralPath $proof -PathType Leaf)) {
+              throw "Exact C1 ZIP installed executable omitted proof $attempt."
+            }
+            $outputs += (Get-Content -LiteralPath $proof -Raw).Trim()
+          }
+          if (($outputs -join ',') -ne '1,1') {
+            throw "Exact C1 ZIP restart proof changed durable row count: $($outputs -join ',')"
+          }
       - name: Verify evidence is fail-safe about human accessibility status
         shell: pwsh
         run: |

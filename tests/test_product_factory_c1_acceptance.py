@@ -30,6 +30,21 @@ def test_c1_cli_canonicalizes_relative_root_before_package_subprocesses() -> Non
     assert "root=args.root," not in script
 
 
+def test_c1_workflow_reproves_the_exact_generated_zip_before_upload() -> None:
+    workflow = (
+        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "pf11-c1-medium-app.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "Re-prove exact generated C1 ZIP" in workflow
+    assert "Get-FileHash -LiteralPath $package -Algorithm SHA256" in workflow
+    assert "Expand-Archive -LiteralPath $package" in workflow
+    assert "& $installer -BundlePath $bundle -Destination $installRoot" in workflow
+    assert "& $installedExe --self-test $database $proof" in workflow
+    assert workflow.index("Re-prove exact generated C1 ZIP") < workflow.index(
+        "Upload exact C1 package evidence"
+    )
+
+
 def test_c1_medium_app_uses_real_product_factory_lifecycle(tmp_path: Path) -> None:
     evidence = C1MediumAppAcceptanceRunner(
         root=tmp_path / "C1 medium app",
