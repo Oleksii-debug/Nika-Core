@@ -42,15 +42,21 @@ class ProductFactoryReviewSubject:
             self.producer_actor_id,
             self.reviewer_id,
         )
-        if not all(value.strip() for value in identities):
+        if not all(isinstance(value, str) and value.strip() for value in identities):
             raise ProductFactoryReviewAuthorityError(
-                "review subject identity must not be empty"
+                "review subject identity must be non-empty text"
             )
         _validate_sha(self.base_sha, "base_sha")
         _validate_sha(self.result_sha, "result_sha")
         _validate_digest(self.diff_digest, "diff_digest")
-        if self.attempt < 1:
-            raise ProductFactoryReviewAuthorityError("review subject attempt must be positive")
+        if type(self.attempt) is not int or self.attempt < 1:
+            raise ProductFactoryReviewAuthorityError(
+                "review subject attempt must be an exact positive integer"
+            )
+        if type(self.accepted) is not bool:
+            raise ProductFactoryReviewAuthorityError(
+                "review subject accepted must be an exact boolean"
+            )
         if self.producer_actor_id == self.reviewer_id:
             raise ProductFactoryReviewAuthorityError(
                 "independent reviewer must differ from candidate producer"
@@ -133,7 +139,7 @@ class TeamPlanReviewAuthority:
 
 
 def _validate_sha(value: str, label: str) -> None:
-    if len(value) != 40 or any(
+    if not isinstance(value, str) or len(value) != 40 or any(
         char not in "0123456789abcdef" for char in value.casefold()
     ):
         raise ProductFactoryReviewAuthorityError(
@@ -142,7 +148,7 @@ def _validate_sha(value: str, label: str) -> None:
 
 
 def _validate_digest(value: str, label: str) -> None:
-    if len(value) != 64 or any(
+    if not isinstance(value, str) or len(value) != 64 or any(
         char not in "0123456789abcdef" for char in value.casefold()
     ):
         raise ProductFactoryReviewAuthorityError(
