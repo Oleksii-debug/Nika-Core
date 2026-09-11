@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Self
 
 import pytest
 
@@ -70,7 +71,7 @@ class _FakePlanner:
     def __init__(self, captures: list[tuple[object, ...]]) -> None:
         self._captures = captures
 
-    def __enter__(self) -> _FakePlanner:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
