@@ -4,10 +4,11 @@ import asyncio
 import hashlib
 import json
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Iterator, Protocol
+from typing import Protocol
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_factory_checkpoint_host import (
@@ -273,7 +274,7 @@ class ProductFactoryProgramHost:
                             result,
                         )
                     else:
-                        self._ledger._set_status_with_connection(  # noqa: SLF001
+                        self._ledger._set_status_with_connection(
                             connection,
                             operation_key,
                             IdempotencyStatus.COMPLETED,
@@ -583,7 +584,7 @@ class ProductFactoryProgramHost:
                     coordinator=coordinator,
                 )
                 if was_uncertain:
-                    self._ledger._set_status_with_connection(  # noqa: SLF001
+                    self._ledger._set_status_with_connection(
                         connection,
                         operation_key,
                         IdempotencyStatus.COMPLETED,
@@ -598,17 +599,21 @@ class ProductFactoryProgramHost:
                     )
         except Exception as exc:  # noqa: BLE001 - external effect must become uncertain
             coordinator.restore(before)
+            marker_detail = ""
             try:
                 self._mark_uncertain_fenced(operation_key, lease)
-            except Exception:
-                pass
+            except Exception as marker_exc:  # noqa: BLE001 - PENDING remains replay-blocking
+                marker_detail = f"; uncertainty marker failed: {type(marker_exc).__name__}"
             self._release_best_effort(lease)
             return _outcome(
                 request,
                 coordinator,
                 ProgramWorkDisposition.UNCERTAIN,
                 IdempotencyStatus.UNCERTAIN,
-                f"worker evidence could not be durably reconciled: {type(exc).__name__}",
+                (
+                    "worker evidence could not be durably reconciled: "
+                    f"{type(exc).__name__}{marker_detail}"
+                ),
             )
 
         self._release_best_effort(lease)
@@ -694,7 +699,7 @@ class ProductFactoryProgramHost:
                 binding=binding,
                 coordinator=coordinator,
             )
-            current = self._ledger._require_with_connection(connection, operation_key)  # noqa: SLF001
+            current = self._ledger._require_with_connection(connection, operation_key)
             if current.status is IdempotencyStatus.PENDING:
                 self._ledger.mark_uncertain_with_connection(connection, operation_key)
 
@@ -720,7 +725,7 @@ class ProductFactoryProgramHost:
         with self.store.connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._assert_lease(connection, lease)
-            current = self._ledger._require_with_connection(connection, operation_key)  # noqa: SLF001
+            current = self._ledger._require_with_connection(connection, operation_key)
             if current.status is IdempotencyStatus.PENDING:
                 self._ledger.mark_uncertain_with_connection(connection, operation_key)
 
@@ -755,7 +760,6 @@ class ProductFactoryProgramHost:
                 fence=lease.fence,
             )
         except WorkOwnershipError:
-            # Expiry/takeover already revoked this authority. Never mutate with a stale fence.
             return
 
 
