@@ -79,6 +79,7 @@ class GitHubPullRequest:
     base_sha: str
     state: PullRequestState
     merge_sha: str | None = None
+    head_repository_full_name: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.number, bool) or not isinstance(self.number, int) or self.number < 1:
@@ -90,6 +91,8 @@ class GitHubPullRequest:
             or not self.base_branch.strip()
         ):
             raise GitHubFactoryError("pull request branches must not be empty")
+        if self.head_repository_full_name is not None:
+            _normalize_full_name(self.head_repository_full_name)
         _validate_sha(self.head_sha, "pull request head_sha")
         _validate_sha(self.base_sha, "pull request base_sha")
         if not isinstance(self.state, PullRequestState):
@@ -147,6 +150,7 @@ class GitHubRepositoryObservation:
     issue: GitHubIssueRef | None = None
     candidate_branch: str | None = None
     candidate_sha: str | None = None
+    candidate_repository_full_name: str | None = None
     pull_request: GitHubPullRequest | None = None
     checks: tuple[GitHubCheck, ...] = ()
     default_branch_ancestor_shas: tuple[str, ...] = ()
@@ -174,10 +178,14 @@ class GitHubRepositoryObservation:
             raise GitHubFactoryError("pull request must be GitHubPullRequest evidence")
         if (self.candidate_branch is None) != (self.candidate_sha is None):
             raise GitHubFactoryError("candidate branch and sha must be present together")
+        if self.candidate_repository_full_name is not None and self.candidate_branch is None:
+            raise GitHubFactoryError("candidate repository requires candidate branch and sha")
         if self.candidate_branch is not None:
             if not isinstance(self.candidate_branch, str) or not self.candidate_branch.strip():
                 raise GitHubFactoryError("candidate branch must not be empty")
             _validate_sha(self.candidate_sha or "", "candidate sha")
+            if self.candidate_repository_full_name is not None:
+                _normalize_full_name(self.candidate_repository_full_name)
         if not isinstance(self.checks, tuple) or any(
             type(check) is not GitHubCheck for check in self.checks
         ):
@@ -198,6 +206,7 @@ class GitHubFactoryBinding:
     default_branch_sha: str
     default_branch_ancestor_shas: tuple[str, ...]
     issue_number: int | None
+    candidate_repository_full_name: str | None
     candidate_branch: str | None
     candidate_sha: str | None
     pull_request_number: int | None
@@ -240,10 +249,38 @@ class GitHubFactoryAdapter:
         pr = observation.pull_request
         candidate_sha = observation.candidate_sha
         candidate_branch = observation.candidate_branch
+        candidate_repository_full_name: str | None = None
+        if candidate_sha is not None:
+            candidate_repository_full_name = (
+                _normalize_full_name(observation.candidate_repository_full_name)
+                if observation.candidate_repository_full_name is not None
+                else observed
+            )
+            if (
+                candidate_repository_full_name == observed
+                and candidate_branch == observation.default_branch
+            ):
+                raise GitHubFactoryError(
+                    "target default branch cannot be used as isolated candidate ref"
+                )
+
         integration_evidence: GitHubIntegrationEvidence | None = None
         if pr is not None:
-            if candidate_sha is None or candidate_branch is None:
+            if (
+                candidate_sha is None
+                or candidate_branch is None
+                or candidate_repository_full_name is None
+            ):
                 raise GitHubFactoryError("pull request requires explicit candidate identity")
+            pr_head_repository_full_name = (
+                _normalize_full_name(pr.head_repository_full_name)
+                if pr.head_repository_full_name is not None
+                else observed
+            )
+            if pr_head_repository_full_name != candidate_repository_full_name:
+                raise GitHubFactoryError(
+                    "pull request head repository does not match candidate repository identity"
+                )
             if pr.head_sha != candidate_sha or pr.head_branch != candidate_branch:
                 raise GitHubFactoryError("pull request head does not match candidate identity")
             if pr.base_branch != observation.default_branch:
@@ -323,6 +360,7 @@ class GitHubFactoryAdapter:
             default_branch_sha=observation.default_branch_sha,
             default_branch_ancestor_shas=observation.default_branch_ancestor_shas,
             issue_number=observation.issue.number if observation.issue is not None else None,
+            candidate_repository_full_name=candidate_repository_full_name,
             candidate_branch=candidate_branch,
             candidate_sha=candidate_sha,
             pull_request_number=pr.number if pr is not None else None,
