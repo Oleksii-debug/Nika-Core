@@ -21,8 +21,8 @@ from nika_core.multi_agent.model_gateway_runtime import ModelGatewayAgentRuntime
 from nika_core.runtime.contracts import (
     RuntimeCapability,
     RuntimeOutcome,
-    RuntimeResumeProbeStatus,
     RuntimeRequest,
+    RuntimeResumeProbeStatus,
 )
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
 from nika_core.runtime.recovery import RecoveryDisposition, RuntimeRecoveryService
