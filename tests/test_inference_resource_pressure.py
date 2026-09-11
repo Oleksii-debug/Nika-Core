@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -68,11 +69,6 @@ class Catalog:
     def get_model(self, alias: str) -> object:
         assert alias == "huge-model"
         return self._model
-
-
-class Manager:
-    def __init__(self, model: object) -> None:
-        self.catalog = Catalog(model)
 
 
 class TrackingFallbackProvider(DeterministicMockProvider):
@@ -162,7 +158,7 @@ def test_simulated_provider_oom_is_failure_not_recovery_success() -> None:
     model = OomModel()
     provider = FoundryLocalProvider(
         default_model="huge-model",
-        manager_factory=lambda: Manager(model),
+        manager_factory=lambda: SimpleNamespace(catalog=Catalog(model)),
     )
 
     with pytest.raises(ModelGatewayError) as exc_info:
@@ -211,7 +207,7 @@ def test_provider_oom_does_not_silently_switch_provider_or_model() -> None:
     gateway.register(
         FoundryLocalProvider(
             default_model="huge-model",
-            manager_factory=lambda: Manager(model),
+            manager_factory=lambda: SimpleNamespace(catalog=Catalog(model)),
         )
     )
     gateway.register(fallback)
