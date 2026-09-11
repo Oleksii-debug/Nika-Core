@@ -31,7 +31,11 @@ def main() -> int:
         expected_product_version=args.product_version,
     )
     if not findings:
-        findings = verify_release_archive(args.artifact, source_sha=args.source_sha)
+        findings = verify_release_archive(
+            args.artifact,
+            source_sha=args.source_sha,
+            expected_product_version=args.product_version,
+        )
     if findings:
         raise SystemExit("M12 distributable evidence verification failed: " + ", ".join(findings))
     print("M12 distributable evidence verified")
