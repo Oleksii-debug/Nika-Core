@@ -66,20 +66,19 @@ class ComponentCapabilityBinding:
             raise ProductFactoryToolsmithBindingError(
                 "durable capability binding requires a permission ceiling"
             )
-        if self.state is ComponentCapabilityBindingState.RESERVED:
-            if any(
-                value is not None
-                for value in (
-                    self.escalation_row_version,
-                    self.candidate_state,
-                    self.next_work_id,
-                    self.pinned_version,
-                    self.pinned_digest,
-                )
-            ):
-                raise ProductFactoryToolsmithBindingError(
-                    "reserved binding contains later-stage evidence"
-                )
+        if self.state is ComponentCapabilityBindingState.RESERVED and any(
+            value is not None
+            for value in (
+                self.escalation_row_version,
+                self.candidate_state,
+                self.next_work_id,
+                self.pinned_version,
+                self.pinned_digest,
+            )
+        ):
+            raise ProductFactoryToolsmithBindingError(
+                "reserved binding contains later-stage evidence"
+            )
         if self.state is ComponentCapabilityBindingState.BEGUN:
             if self.escalation_row_version is None or not self.candidate_state:
                 raise ProductFactoryToolsmithBindingError(
@@ -99,17 +98,16 @@ class ComponentCapabilityBinding:
         if self.state in {
             ComponentCapabilityBindingState.RESUME_PREPARED,
             ComponentCapabilityBindingState.CONSUMED,
-        }:
-            if (
-                self.escalation_row_version is None
-                or not self.candidate_state
-                or not self.next_work_id
-                or not self.pinned_version
-                or not self.pinned_digest
-            ):
-                raise ProductFactoryToolsmithBindingError(
-                    "prepared/consumed binding is missing exact resume evidence"
-                )
+        } and (
+            self.escalation_row_version is None
+            or not self.candidate_state
+            or not self.next_work_id
+            or not self.pinned_version
+            or not self.pinned_digest
+        ):
+            raise ProductFactoryToolsmithBindingError(
+                "prepared/consumed binding is missing exact resume evidence"
+            )
 
 
 class ProductFactoryToolsmithBindingRepository:
