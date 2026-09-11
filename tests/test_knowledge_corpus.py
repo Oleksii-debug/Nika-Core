@@ -39,6 +39,15 @@ def _make_store(tmp_path: Path, *workspace_ids: str) -> SQLiteStore:
                 for workspace_id in workspace_ids
             ),
         )
+        conn.executemany(
+            """INSERT INTO research_sources(
+                source_id, workspace_id, kind, locator, created_at, updated_at
+            ) VALUES (?, ?, 'local_file', 'approved:fixture-a', ?, ?)""",
+            (
+                (f"fixture-source:{workspace_id}", workspace_id, _TIMESTAMP, _TIMESTAMP)
+                for workspace_id in workspace_ids
+            ),
+        )
     return store
 
 
@@ -55,6 +64,7 @@ def _request(**overrides: object) -> KnowledgeIngestRequest:
         "approved_by": "approval:owner",
     }
     values.update(overrides)
+    values.setdefault("source_id", f"fixture-source:{values['workspace_id']}")
     return KnowledgeIngestRequest(**values)  # type: ignore[arg-type]
 
 
@@ -95,6 +105,11 @@ def _register_http_source(
             ) VALUES (?, ?, ?, 'unknown', ?, ?)""",
             (source_id, workspace_id, locator, _TIMESTAMP, _TIMESTAMP),
         )
+
+
+def test_legacy_namespace_is_reserved_for_migration_only() -> None:
+    with pytest.raises(ValueError, match="reserved for migration"):
+        _request(artifact_key="legacy:forged")
 
 
 def test_duplicate_restart_change_and_reversion_create_expected_versions(tmp_path: Path) -> None:
