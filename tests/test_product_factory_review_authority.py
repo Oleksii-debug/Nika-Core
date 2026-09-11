@@ -68,7 +68,11 @@ def _coordinator(authority: _ExactAuthority | None) -> ProductFactoryCoordinator
     return coordinator
 
 
-def _record_secure_candidate(coordinator: ProductFactoryCoordinator) -> None:
+def _record_secure_candidate(
+    coordinator: ProductFactoryCoordinator,
+    *,
+    producer_actor_id: str | None = PRODUCER,
+) -> None:
     request = coordinator.start("core")
     coordinator.record_result(
         WorkerResultEnvelope(
@@ -88,7 +92,7 @@ def _record_secure_candidate(coordinator: ProductFactoryCoordinator) -> None:
                     ),
                 ),
             ),
-            producer_actor_id=PRODUCER,
+            producer_actor_id=producer_actor_id,
         )
     )
 
@@ -109,6 +113,26 @@ def test_secure_candidate_cannot_self_review() -> None:
                 reviewer_id=PRODUCER,
                 accepted=True,
                 reason="self review must fail",
+                evidence_refs=EVIDENCE,
+            ),
+        )
+
+    assert _record(coordinator).state is WorkState.REVIEW_REQUIRED
+    assert authority.calls == []
+
+
+def test_secure_candidate_rejects_missing_producer_identity() -> None:
+    authority = _ExactAuthority()
+    coordinator = _coordinator(authority)
+    _record_secure_candidate(coordinator, producer_actor_id=None)
+
+    with pytest.raises(CoordinatorError, match="producer actor identity"):
+        coordinator.review(
+            "core",
+            ReviewDecision(
+                reviewer_id=TRUSTED_REVIEWER,
+                accepted=True,
+                reason="anonymous producer must fail closed",
                 evidence_refs=EVIDENCE,
             ),
         )
