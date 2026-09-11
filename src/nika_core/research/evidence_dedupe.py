@@ -83,9 +83,13 @@ class ResearchEvidenceDeduplicator:
         if len(rows) == 1:
             # snapshot_id is already the canonical source_id + raw revision identity.
             return f"snapshot:{rows[0]['snapshot_id']}"
+        if len(rows) > 1:
+            raise ValueError(
+                "ambiguous HTTP revision provenance cannot be deduplicated safely"
+            )
 
-        # Never over-collapse when revision provenance cannot be resolved uniquely. Exact
-        # duplicate occurrences still collapse, while ambiguous revisions remain distinct.
+        # No durable HTTP origin could be resolved. Preserve the occurrence identity rather
+        # than inventing a revision authority from incomplete provenance.
         return (
             f"occurrence:{document_id}\0{evidence.locator}\0{evidence.observed_at}"
         )
