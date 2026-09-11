@@ -120,6 +120,44 @@ class ProductFactoryCoordinator:
         repr=False,
     )
     _trusted_plan_fingerprint: str | None = field(default=None, init=False, repr=False)
+    _component_by_id: dict[str, ProductComponent] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _repository_by_id: dict[str, RepositoryRef] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _dependents_by_component: dict[str, tuple[str, ...]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _remaining_dependencies: dict[str, int] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+
+    def __post_init__(self) -> None:
+        self._component_by_id = {
+            component.component_id: component for component in self.graph.components
+        }
+        self._repository_by_id = {
+            repository.repository_id: repository for repository in self.graph.repositories
+        }
+        dependents: dict[str, list[str]] = {
+            component_id: [] for component_id in self._component_by_id
+        }
+        for component in self.graph.components:
+            for dependency_id in component.dependencies:
+                dependents[dependency_id].append(component.component_id)
+        self._dependents_by_component = {
+            component_id: tuple(sorted(component_ids))
+            for component_id, component_ids in dependents.items()
+        }
 
     @property
     def trusted_plan_fingerprint(self) -> str:
@@ -173,6 +211,7 @@ class ProductFactoryCoordinator:
             self._records[component_id].request for component_id in sorted(self._records)
         )
         self._trusted_plan_fingerprint = trusted_plan_fingerprint(self._trusted_plan)
+        self._rebuild_dependency_progress()
         self._advance_ready()
         return self.snapshot()
 
@@ -221,7 +260,8 @@ class ProductFactoryCoordinator:
         )
         self._records[component_id] = updated
         self._touch()
-        self._advance_ready()
+        if decision.accepted:
+            self._advance_ready(component_id)
         return updated
 
     def prepare_repair(self, component_id: str, *, base_sha: str, reason: str) -> ComponentWorkRequest:
@@ -344,6 +384,7 @@ class ProductFactoryCoordinator:
         self._revision = snapshot.revision
         self._trusted_plan = plan
         self._trusted_plan_fingerprint = authority
+        self._rebuild_dependency_progress()
         self._advance_ready()
 
     def _validate_restored_record(self, record: WorkRecord) -> None:
@@ -478,22 +519,47 @@ class ProductFactoryCoordinator:
                 )
             remaining.pop(match_index)
 
-    def _advance_ready(self) -> None:
-        accepted = {key for key, item in self._records.items() if item.state is WorkState.ACCEPTED}
-        components = self._components()
+    def _rebuild_dependency_progress(self) -> None:
+        accepted = {
+            component_id
+            for component_id, record in self._records.items()
+            if record.state is WorkState.ACCEPTED
+        }
+        self._remaining_dependencies = {
+            component_id: sum(
+                dependency_id not in accepted
+                for dependency_id in component.dependencies
+            )
+            for component_id, component in self._component_by_id.items()
+        }
+
+    def _advance_ready(self, accepted_component_id: str | None = None) -> None:
+        if accepted_component_id is None:
+            candidate_ids = tuple(self._records)
+        else:
+            candidate_ids = self._dependents_by_component.get(accepted_component_id, ())
+            for component_id in candidate_ids:
+                remaining = self._remaining_dependencies[component_id]
+                if remaining > 0:
+                    self._remaining_dependencies[component_id] = remaining - 1
+
         changed = False
-        for component_id, record in tuple(self._records.items()):
-            if record.state is WorkState.PLANNED and set(components[component_id].dependencies) <= accepted:
+        for component_id in candidate_ids:
+            record = self._records[component_id]
+            if (
+                record.state is WorkState.PLANNED
+                and self._remaining_dependencies[component_id] == 0
+            ):
                 self._records[component_id] = WorkRecord(record.request, WorkState.READY)
                 changed = True
         if changed:
             self._touch()
 
     def _components(self) -> dict[str, ProductComponent]:
-        return {component.component_id: component for component in self.graph.components}
+        return self._component_by_id
 
     def _repositories(self) -> dict[str, RepositoryRef]:
-        return {repository.repository_id: repository for repository in self.graph.repositories}
+        return self._repository_by_id
 
     def _record(self, component_id: str) -> WorkRecord:
         try:
