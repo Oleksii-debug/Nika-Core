@@ -27,6 +27,15 @@ def _make_store(tmp_path: Path) -> SQLiteStore:
                 ("ws-b", "B", _TIMESTAMP, _TIMESTAMP),
             ),
         )
+        conn.executemany(
+            """INSERT INTO research_sources(
+                source_id, workspace_id, kind, locator, created_at, updated_at
+            ) VALUES (?, ?, 'local_file', ?, ?, ?)""",
+            (
+                ("fixture-source:ws-a", "ws-a", "approved:ws-a", _TIMESTAMP, _TIMESTAMP),
+                ("fixture-source:ws-b", "ws-b", "approved:ws-b", _TIMESTAMP, _TIMESTAMP),
+            ),
+        )
     return store
 
 
@@ -44,10 +53,11 @@ def _request(
         title=artifact_key,
         media_type="text/plain",
         text=text,
-        source_locator=f"approved:{workspace_id}:{artifact_key}",
+        source_locator=f"approved:{workspace_id}",
         parser_name="text",
         parser_version="1",
         approved_by="approval:owner",
+        source_id=f"fixture-source:{workspace_id}",
         visibility=visibility,
         allowed_principals=allowed_principals,
     )
