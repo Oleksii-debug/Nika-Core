@@ -120,9 +120,9 @@ def test_memory_persistence_minimizes_model_and_tool_secrets_across_restart(
         "windows_slash": {"[LOCAL_PATH]": "windows-slash"},
         "signed_url": {
             "https://example.test/result?signature=[REDACTED]"
-            "&expires=[REDACTED]&page=1": "cached"
+            "&expires=[REDACTED]&page=1": "[REDACTED]"
         },
-        "authorization": {"Authorization: [REDACTED]": "upstream"},
+        "authorization": "[REDACTED]",
     }
     assert durable["benign"] == value["benign"]
 

@@ -9,6 +9,12 @@ from nika_core.media.privacy import redact_mapping, redact_text
 _POSIX_LOCAL_USER_PATH = re.compile(
     r"(?<![A-Za-z0-9])/(?:home|Users)/[^/\s\"'<>]+(?:/[^\s\"'<>]*)?"
 )
+_WINDOWS_LOCAL_USER_FILE_PATH = re.compile(
+    r"(?i)(?<![A-Za-z0-9])[A-Z]:[\\/]Users[\\/]"
+    r"(?:[^\\/\r\n\"'<>]+[\\/])+"
+    r"[^\\/\r\n\"'<>]*?\.[A-Za-z0-9]{1,16}"
+    r"(?=$|[\s,;:!?()\[\]{}])"
+)
 _WINDOWS_LOCAL_USER_PATH = re.compile(
     r"(?i)(?<![A-Za-z0-9])[A-Z]:[\\/]Users[\\/]"
     r"[^\\/\r\n\"'<>]+(?=[\\/])[\\/]"
@@ -75,7 +81,8 @@ def _redact_local_path_text(value: str) -> str:
         or _WINDOWS_LOCAL_USER_PATH_FULL.fullmatch(value)
     ):
         return "[LOCAL_PATH]"
-    redacted = _POSIX_LOCAL_USER_PATH.sub("[LOCAL_PATH]", value)
+    redacted = _WINDOWS_LOCAL_USER_FILE_PATH.sub("[LOCAL_PATH]", value)
+    redacted = _POSIX_LOCAL_USER_PATH.sub("[LOCAL_PATH]", redacted)
     return _WINDOWS_LOCAL_USER_PATH.sub("[LOCAL_PATH]", redacted)
 
 
