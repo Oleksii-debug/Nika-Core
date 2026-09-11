@@ -1,10 +1,15 @@
 param(
     [Parameter(Mandatory=$true)][string]$ExePath,
     [string]$WindowTitle = 'Nika Core M5 Proof',
-    [ValidateRange(30, 120)][int]$StartupTimeoutSeconds = 90
+    [ValidateRange(30, 120)][int]$StartupTimeoutSeconds = 90,
+    [switch]$VerifySourceSetup,
+    [ValidateSet('None', 'Enable', 'Observe', 'Disable')][string]$AutostartPhase = 'None'
 )
 
 $ErrorActionPreference = 'Stop'
+if ($AutostartPhase -ne 'None' -and ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted')) {
+    throw 'Autostart mutation proof is restricted to an isolated GitHub-hosted Windows runner.'
+}
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Windows.Forms
@@ -58,13 +63,52 @@ $expectedExecutablePath = $null
 $boundWindowHandle = $null
 $boundWindowRuntimeId = $null
 $script:nextControlGeneration = 1
+$sourceProofRoot = $null
+$previousProofEnvironment = @{}
 
-function Get-ElementRuntimeId([System.Windows.Automation.AutomationElement]$Element) {
-    $runtimeId = $Element.GetRuntimeId()
-    if ($null -eq $runtimeId -or $runtimeId.Length -eq 0) {
-        throw 'UI Automation element did not expose a RuntimeId.'
+class NikaUiaRuntimeIdUnavailableException : System.Exception {
+    NikaUiaRuntimeIdUnavailableException([string]$message) : base($message) {}
+}
+
+foreach ($name in @('NIKA_DB_PATH', 'NIKA_V01_SOURCE_ROOT', 'NIKA_V01_SOURCE_A', 'NIKA_V01_SOURCE_B')) {
+    $previousProofEnvironment[$name] = [System.Environment]::GetEnvironmentVariable($name, 'Process')
+}
+
+function Get-ElementRuntimeId(
+    [System.Windows.Automation.AutomationElement]$Element,
+    [ValidateRange(1, 40)][int]$Attempts = 20,
+    [ValidateRange(10, 500)][int]$DelayMilliseconds = 100
+) {
+    # WebView2 can transiently surface a semantic AutomationElement before its
+    # provider exposes RuntimeId. RuntimeId remains mandatory authority: retry
+    # only the same captured element for a short bounded interval and never
+    # fall back to Name, ControlType, HWND or coordinates.
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        $runtimeId = $Element.GetRuntimeId()
+        if ($null -ne $runtimeId -and $runtimeId.Length -gt 0) {
+            return [int[]]$runtimeId
+        }
+        if ($attempt -lt $Attempts) {
+            Start-Sleep -Milliseconds $DelayMilliseconds
+        }
     }
-    return [int[]]$runtimeId
+
+    $safeName = '<unavailable>'
+    $safeControlType = '<unavailable>'
+    try {
+        if (-not [string]::IsNullOrWhiteSpace($Element.Current.Name)) {
+            $safeName = $Element.Current.Name
+        }
+        if ($null -ne $Element.Current.ControlType) {
+            $safeControlType = $Element.Current.ControlType.ProgrammaticName
+        }
+    } catch [System.Windows.Automation.ElementNotAvailableException] {
+        throw
+    }
+    throw [NikaUiaRuntimeIdUnavailableException]::new(
+        "UI Automation element did not expose a RuntimeId after bounded retry. " +
+        "Name='$safeName', ControlType='$safeControlType', Attempts=$Attempts."
+    )
 }
 
 function Test-SameAutomationElement(
@@ -89,7 +133,30 @@ function Add-UniqueAutomationElement($Elements, [System.Windows.Automation.Autom
 }
 
 try {
+    # Use controlled data in a private temporary directory. A real user's database
+    # and environment-provided sources must never be used by this automated proof.
+    $sourceProofRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('nika-uia-source-' + [guid]::NewGuid().ToString('N'))
+    $sourceFolder = Join-Path $sourceProofRoot 'Джерела команди'
+    New-Item -ItemType Directory -Path $sourceFolder -Force | Out-Null
+    'Контрольоване спільне свідчення.' | Set-Content -LiteralPath (Join-Path $sourceFolder 'Джерело А.txt') -Encoding utf8
+    'Контрольоване спільне свідчення.' | Set-Content -LiteralPath (Join-Path $sourceFolder 'Джерело Б.txt') -Encoding utf8
+    $env:NIKA_DB_PATH = Join-Path $sourceProofRoot 'nika-proof.db'
+    foreach ($name in @('NIKA_V01_SOURCE_ROOT', 'NIKA_V01_SOURCE_A', 'NIKA_V01_SOURCE_B')) {
+        [System.Environment]::SetEnvironmentVariable($name, $null, 'Process')
+    }
     $ExePath = [System.IO.Path]::GetFullPath((Resolve-Path -LiteralPath $ExePath).Path)
+    $autostartCommand = if ($ExePath -match '[ \t]') { '"' + $ExePath + '"' } else { $ExePath }
+    if ($AutostartPhase -ne 'None') {
+        $runKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Run')
+        try { $existingAutostart = if ($null -eq $runKey) { $null } else { $runKey.GetValue('NikaCore', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } }
+        finally { if ($null -ne $runKey) { $runKey.Dispose() } }
+        if ($AutostartPhase -eq 'Enable' -and $null -ne $existingAutostart) {
+            throw 'Autostart enable proof refuses an existing NikaCore registration.'
+        }
+        if ($AutostartPhase -ne 'Enable' -and $existingAutostart -cne $autostartCommand) {
+            throw 'Autostart continuation requires the exact proof-owned executable registration.'
+        }
+    }
     $expectedExecutablePath = $ExePath
     $process = Start-Process -FilePath $ExePath -PassThru
     $expectedProcessId = $process.Id
@@ -236,6 +303,22 @@ try {
         return $true
     }
 
+    function Add-AddressableBoundCandidate(
+        $Candidates,
+        [System.Windows.Automation.AutomationElement]$Candidate
+    ) {
+        # Before control authority exists, provider artifacts without RuntimeId are
+        # not addressable controls. Omit them from this enumeration and let the
+        # caller retry from fresh roots. Once an identity is captured, RuntimeId
+        # loss remains fatal in Resolve-BoundControlIdentity.
+        try {
+            Get-ElementRuntimeId $Candidate 1 10 | Out-Null
+        } catch [NikaUiaRuntimeIdUnavailableException] {
+            return
+        }
+        Add-UniqueAutomationElement $Candidates $Candidate
+    }
+
     function Find-BoundDescendantName(
         [System.Windows.Automation.AutomationElement]$ExactWindow,
         [string]$Expected,
@@ -261,14 +344,14 @@ try {
         foreach ($searchRoot in (Get-BoundSearchRoots $ExactWindow)) {
             try {
                 if (Test-ElementMatchesSemanticLocator $searchRoot $Expected $ExpectedControlType) {
-                    Add-UniqueAutomationElement $candidates $searchRoot
+                    Add-AddressableBoundCandidate $candidates $searchRoot
                 }
                 $matches = $searchRoot.FindAll(
                     [System.Windows.Automation.TreeScope]::Descendants,
                     $condition
                 )
                 for ($index = 0; $index -lt $matches.Count; $index++) {
-                    Add-UniqueAutomationElement $candidates $matches.Item($index)
+                    Add-AddressableBoundCandidate $candidates $matches.Item($index)
                 }
             } catch [System.Windows.Automation.ElementNotAvailableException] {
                 # Never choose from a partially enumerated candidate set. The caller
@@ -441,6 +524,48 @@ try {
     $semanticElapsed = [Math]::Round($startupWatch.Elapsed.TotalSeconds, 1)
     Write-Host "Required packaged WebView2 UIA semantics became discoverable after ${semanticElapsed}s."
 
+    function Wait-BoundTextEvidence(
+        [string]$Expected,
+        [int]$Attempts = 80
+    ) {
+        # Read-only text is evidence, not action authority. Chromium/WebView2 may
+        # expose the same semantic text through overlapping accessibility nodes.
+        # Require exact Name + Text under the already bound process/window, but do
+        # not reject equivalent duplicates and do not turn them into a control identity.
+        $nameCondition = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::NameProperty,
+            $Expected
+        )
+        $typeCondition = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::Text
+        )
+        $condition = [System.Windows.Automation.AndCondition]::new(
+            [System.Windows.Automation.Condition[]]@($nameCondition, $typeCondition)
+        )
+        for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+            Start-Sleep -Milliseconds 250
+            Assert-BoundProcessGeneration
+            $currentWindow = Find-ExactWindow
+            if ($null -eq $currentWindow) { continue }
+            try {
+                foreach ($searchRoot in (Get-BoundSearchRoots $currentWindow)) {
+                    if (Test-ElementMatchesSemanticLocator $searchRoot $Expected ([System.Windows.Automation.ControlType]::Text)) {
+                        return
+                    }
+                    $matches = $searchRoot.FindAll(
+                        [System.Windows.Automation.TreeScope]::Descendants,
+                        $condition
+                    )
+                    if ($matches.Count -gt 0) { return }
+                }
+            } catch [System.Windows.Automation.ElementNotAvailableException] {
+                continue
+            }
+        }
+        throw "Expected bound read-only UI Automation text '$Expected' did not appear."
+    }
+
     function Wait-DescendantName(
         [string]$Expected,
         [System.Windows.Automation.ControlType]$ExpectedControlType = $null,
@@ -454,7 +579,15 @@ try {
             try {
                 $element = Find-BoundDescendantName $currentWindow $Expected $ExpectedControlType
                 if ($null -ne $element) {
-                    return New-BoundControlIdentity $element $Expected $ExpectedControlType
+                    try {
+                        return New-BoundControlIdentity $element $Expected $ExpectedControlType
+                    } catch [NikaUiaRuntimeIdUnavailableException] {
+                        # Authority has not been issued yet. Discard this unbound provider
+                        # observation and retry the whole semantic lookup from fresh roots.
+                        # Once New-BoundControlIdentity succeeds, Resolve-BoundControlIdentity
+                        # never catches this exception and RuntimeId loss remains fail-closed.
+                        continue
+                    }
                 }
             } catch [System.Windows.Automation.ElementNotAvailableException] {
                 # An incomplete enumeration is never accepted. Retry from fresh roots.
@@ -518,20 +651,133 @@ try {
         }
     }
 
+    function Set-BoundControlValue($Control, [string]$Value) {
+        Set-BoundControlFocus $Control
+        $target = Resolve-BoundControlIdentity $Control
+        $valuePattern = $target.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+        if ($valuePattern.Current.IsReadOnly) { throw 'A required source input is read-only.' }
+        $valuePattern.SetValue($Value)
+        $target = Resolve-BoundControlIdentity $Control
+        $verifiedPattern = $target.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+        if ($verifiedPattern.Current.Value -cne $Value) { throw 'Semantic input value was not applied.' }
+    }
+
     # The DOM can be visible in UIA before the asynchronous pywebview JS API call
     # has returned the Action Registry/keymap. Wait for the application's explicit
     # ready status so this gate tests keyboard behavior rather than an initialization race.
-    Wait-DescendantName 'Nika Core готова до роботи.' | Out-Null
+    Wait-BoundTextEvidence 'Nika Core готова до роботи.'
 
-    $startControl = Wait-DescendantName 'Створити завдання' ([System.Windows.Automation.ControlType]::Button)
-    $tasksControl = Wait-DescendantName 'Завдання' ([System.Windows.Automation.ControlType]::Text)
-    $commandControl = Wait-DescendantName 'Що має зробити Nika?' ([System.Windows.Automation.ControlType]::Edit)
+    $startControl = $null
+    $tasksControl = $null
+    $commandControl = $null
+    if ($AutostartPhase -ne 'Observe') {
+        $startControl = Wait-DescendantName 'Створити завдання' ([System.Windows.Automation.ControlType]::Button)
+        $tasksControl = Wait-DescendantName 'Завдання' ([System.Windows.Automation.ControlType]::Text)
+        $commandControl = Wait-DescendantName 'Що має зробити Nika?' ([System.Windows.Automation.ControlType]::Edit)
 
-    Set-BoundControlFocus $startControl
-    [System.Windows.Forms.SendKeys]::SendWait('%1')
-    Wait-FocusName $tasksControl
-    [System.Windows.Forms.SendKeys]::SendWait('^+p')
-    Wait-FocusName $commandControl
+        Set-BoundControlFocus $startControl
+        [System.Windows.Forms.SendKeys]::SendWait('%1')
+        Wait-FocusName $tasksControl
+        [System.Windows.Forms.SendKeys]::SendWait('^+p')
+        Wait-FocusName $commandControl
+    }
+
+    if ($AutostartPhase -ne 'None') {
+        $autostartControl = Wait-DescendantName 'Запускати Nika разом із Windows' ([System.Windows.Automation.ControlType]::CheckBox)
+        $autostartSaveControl = if ($AutostartPhase -eq 'Observe') {
+            $null
+        } else {
+            Wait-DescendantName 'Зберегти автозапуск' ([System.Windows.Automation.ControlType]::Button)
+        }
+        $initialToggle = if ($AutostartPhase -eq 'Enable') { [System.Windows.Automation.ToggleState]::Off } else { [System.Windows.Automation.ToggleState]::On }
+        # Observe is read-only persistence evidence after a fresh process restart.
+        # It never receives mutation authority: use the freshly and uniquely resolved
+        # semantic element that already acquired a mandatory RuntimeId, and do not
+        # attempt to restore a previous UIA provider generation. Enable/Disable keep
+        # strict generation-bound Resolve-BoundControlIdentity before every action.
+        $target = if ($AutostartPhase -eq 'Observe') {
+            $autostartControl.Element
+        } else {
+            Resolve-BoundControlIdentity $autostartControl
+        }
+        if (-not (Test-ElementMatchesSemanticLocator $target 'Запускати Nika разом із Windows' ([System.Windows.Automation.ControlType]::CheckBox))) {
+            throw 'Packaged autostart checkbox changed semantic identity.'
+        }
+        if ($target.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Current.ToggleState -ne $initialToggle) {
+            throw 'Packaged autostart checkbox does not reflect persisted OS state.'
+        }
+        if ($AutostartPhase -ne 'Observe') {
+            Set-BoundControlFocus $autostartControl
+            [System.Windows.Forms.SendKeys]::SendWait(' ')
+            Set-BoundControlFocus $autostartSaveControl
+            [System.Windows.Forms.SendKeys]::SendWait(' ')
+            Wait-FocusName $autostartControl
+        }
+        $expectedStateText = if ($AutostartPhase -eq 'Disable') { 'Автозапуск вимкнено.' } else { 'Автозапуск увімкнено для цього застосунку.' }
+        Wait-BoundTextEvidence $expectedStateText
+        if ($AutostartPhase -eq 'Observe') {
+            $freshReadOnlyControl = Wait-DescendantName 'Запускати Nika разом із Windows' ([System.Windows.Automation.ControlType]::CheckBox)
+            $target = $freshReadOnlyControl.Element
+        } else {
+            $target = Resolve-BoundControlIdentity $autostartControl
+        }
+        $expectedToggle = if ($AutostartPhase -eq 'Disable') { [System.Windows.Automation.ToggleState]::Off } else { [System.Windows.Automation.ToggleState]::On }
+        if ($target.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Current.ToggleState -ne $expectedToggle) {
+            throw 'Packaged autostart checkbox acknowledgement is inconsistent.'
+        }
+        $runKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Run')
+        try { $actualAutostart = if ($null -eq $runKey) { $null } else { $runKey.GetValue('NikaCore', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } }
+        finally { if ($null -ne $runKey) { $runKey.Dispose() } }
+        $expectedAutostart = if ($AutostartPhase -eq 'Disable') { $null } else { $autostartCommand }
+        if ($actualAutostart -cne $expectedAutostart) { throw 'Actual per-user autostart registration does not match the UI acknowledgement.' }
+        Write-Host "Packaged autostart phase $AutostartPhase verified through exact semantic controls and OS readback."
+    }
+
+    if ($VerifySourceSetup) {
+        $sourceRootControl = Wait-DescendantName 'Папка джерел — повний шлях' ([System.Windows.Automation.ControlType]::Edit)
+        $sourceAControl = Wait-DescendantName 'Перший файл — назва в цій папці або повний шлях' ([System.Windows.Automation.ControlType]::Edit)
+        $sourceBControl = Wait-DescendantName 'Другий файл — назва в цій папці або повний шлях' ([System.Windows.Automation.ControlType]::Edit)
+        $saveSourcesControl = Wait-DescendantName 'Зберегти джерела' ([System.Windows.Automation.ControlType]::Button)
+        Set-BoundControlValue $sourceRootControl $sourceFolder
+        Set-BoundControlValue $sourceAControl 'Джерело А.txt'
+        Set-BoundControlValue $sourceBControl 'Джерело Б.txt'
+        Set-BoundControlFocus $saveSourcesControl
+        [System.Windows.Forms.SendKeys]::SendWait(' ')
+        Wait-BoundTextEvidence 'Джерела збережено. Можна створити нове командне завдання.'
+        Wait-FocusName $commandControl
+        Set-BoundControlValue $commandControl 'Порівняй два контрольовані джерела.'
+        Set-BoundControlFocus $startControl
+        try {
+            # Exercise the registered task.create shortcut on a non-editable
+            # control. Never retry this effect: require its observable focus
+            # acknowledgement before waiting for the actual terminal result.
+            [System.Windows.Forms.SendKeys]::SendWait('^n')
+            Wait-FocusName $tasksControl
+            Wait-BoundTextEvidence 'Командне завдання завершено; збережені результати учасників доступні.'
+        } catch {
+            # Diagnostics are restricted to this proof's clean, controlled database
+            # and the exact bound Nika window. No source contents or stored payloads.
+            $diagnosticWindow = Find-ExactWindow
+            if ($null -ne $diagnosticWindow) {
+                $diagnosticNames = Get-BoundDescendantNames $diagnosticWindow
+                Write-Host ('Controlled proof UIA names: ' + (($diagnosticNames | Select-Object -Unique | Select-Object -First 120) -join ' | '))
+            }
+            $stateProbe = @'
+import sqlite3, sys
+from pathlib import Path
+with sqlite3.connect(Path(sys.argv[1]).resolve().as_uri() + '?mode=ro', uri=True) as db:
+    for table in ('tasks', 'multi_agent_teams', 'multi_agent_members'):
+        counts = {}
+        for state in ('ready', 'running', 'active', 'completed', 'failed', 'cancelled', 'paused'):
+            counts[state] = db.execute('SELECT COUNT(*) FROM ' + table + ' WHERE LOWER(state) = ?', (state,)).fetchone()[0]
+        print('Controlled proof states:', table, counts)
+    print('Controlled proof result rows:', db.execute('SELECT COUNT(*) FROM multi_agent_results').fetchone()[0])
+'@
+            $stateProbe | python - $env:NIKA_DB_PATH
+            throw
+        }
+        Write-Host 'Packaged source setup -> save action -> canonical task/team -> visible completed result verified.'
+    }
 
     Write-Host 'WebView2 UI Automation descendants, exact semantic identity, and keyboard/focus flow verified successfully.'
     Write-Host (($names | Select-Object -Unique | Select-Object -First 40) -join ' | ')
@@ -540,6 +786,12 @@ finally {
     if ($null -ne $startupWatch) { $startupWatch.Stop() }
     if ($null -ne $process -and !$process.HasExited) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    }
+    foreach ($name in $previousProofEnvironment.Keys) {
+        [System.Environment]::SetEnvironmentVariable($name, $previousProofEnvironment[$name], 'Process')
+    }
+    if ($null -ne $sourceProofRoot) {
+        Remove-Item -LiteralPath $sourceProofRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
     if ($null -eq $previousWebView2BrowserArgs) {
         Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
