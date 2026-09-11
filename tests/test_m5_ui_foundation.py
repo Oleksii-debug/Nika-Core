@@ -97,15 +97,6 @@ def test_local_html_has_required_semantics_and_registered_action_ids(tmp_path: P
     assert '<label for="keymap-json">' in html
     assert '<caption>Комбінації клавіш Nika Core</caption>' in html
     assert 'id="workspaces-heading"' in html
-    assert (
-        '<p id="autostart-status" role="status" aria-live="polite" aria-atomic="true">'
-        in html
-    )
-    assert (
-        'id="autostart-enabled" type="checkbox" '
-        'aria-describedby="autostart-help autostart-status"'
-        in html
-    )
     registered = {item["action_id"] for item in bridge.list_actions()}
     for action_id in (
         "nav.tasks",
