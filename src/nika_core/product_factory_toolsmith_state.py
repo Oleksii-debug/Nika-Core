@@ -4,6 +4,8 @@ from nika_core.product_factory_coordinator import ComponentWorkRequest
 from nika_core.product_factory_toolsmith_state_impl import (
     ComponentCapabilityBinding,
     ProductFactoryToolsmithBindingError,
+)
+from nika_core.product_factory_toolsmith_state_impl import (
     ProductFactoryToolsmithBindingRepository as _BindingRepository,
 )
 
