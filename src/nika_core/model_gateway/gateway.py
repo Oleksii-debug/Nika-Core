@@ -270,7 +270,7 @@ class ModelGateway:
         except Exception:  # noqa: BLE001 - provider implementations are untrusted
             raise ValueError("model provider capabilities are invalid") from None
 
-        if not _is_canonical_identity(provider_id):
+        if type(provider_id) is not str or not _is_canonical_identity(provider_id):
             raise ValueError("model provider_id must be canonical text")
         if not isinstance(kind, ProviderKind):
             raise TypeError("model provider kind must be ProviderKind")
@@ -326,11 +326,13 @@ class ModelGateway:
             return None, invalid_error
 
         invalid = (
-            request_id != request.request_id
+            type(request_id) is not str
+            or request_id != request.request_id
+            or type(provider_id) is not str
             or provider_id != trusted_provider_id
             or provider_kind is not trusted_provider_kind
-            or not isinstance(text, str)
-            or not isinstance(model, str)
+            or type(text) is not str
+            or type(model) is not str
             or not model
             or (request.model is None and not _is_canonical_identity(model))
             or (request.model is not None and model != request.model)
@@ -338,8 +340,7 @@ class ModelGateway:
         if not invalid:
             for value in (input_tokens, output_tokens, total_tokens):
                 if value is not None and (
-                    isinstance(value, bool)
-                    or not isinstance(value, int)
+                    type(value) is not int
                     or value < 0
                     or value > _MAX_DURABLE_TOKEN_COUNT
                 ):
@@ -347,7 +348,7 @@ class ModelGateway:
                     break
 
         if not invalid and latency_ms is not None:
-            if isinstance(latency_ms, bool) or not isinstance(latency_ms, (int, float)):
+            if type(latency_ms) not in (int, float):
                 invalid = True
             else:
                 try:
