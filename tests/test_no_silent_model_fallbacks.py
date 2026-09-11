@@ -100,6 +100,33 @@ class _AlternateProvider:
         )
 
 
+class _DefaultingProvider:
+    def __init__(self, *, provider_id: str, kind: ProviderKind) -> None:
+        self._capabilities = ProviderCapabilities(
+            provider_id=provider_id,
+            kind=kind,
+            supports_private_data=True,
+        )
+        self.calls = 0
+        self.models: list[str | None] = []
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return self._capabilities
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        self.calls += 1
+        self.models.append(request.model)
+        selected_model = request.model or "provider-default"
+        return ModelResponse(
+            request_id=request.request_id,
+            text="ok",
+            provider_id=self.capabilities.provider_id,
+            provider_kind=self.capabilities.kind,
+            model=selected_model,
+        )
+
+
 class _Resolver:
     def __init__(self, *, material: str = "fixture-secret", fail: bool = False) -> None:
         self.material = material
@@ -143,38 +170,13 @@ def _route(mode: IntelligenceMode) -> tuple[str, ProviderKind, IntelligenceModeP
 
 
 _FAILURES = (
-    (
-        "provider-unavailable",
-        ModelErrorCode.UNAVAILABLE,
-        True,
-        ModelFailureEffect.NO_EFFECT,
-    ),
-    ("model-missing", ModelErrorCode.UNAVAILABLE, False, ModelFailureEffect.NO_EFFECT),
-    ("timeout", ModelErrorCode.TIMEOUT, True, ModelFailureEffect.NO_EFFECT),
-    (
-        "malformed-response",
-        ModelErrorCode.PROVIDER_ERROR,
-        False,
-        ModelFailureEffect.UNKNOWN,
-    ),
-    (
-        "authentication",
-        ModelErrorCode.AUTHENTICATION,
-        False,
-        ModelFailureEffect.NO_EFFECT,
-    ),
-    (
-        "resource-pressure",
-        ModelErrorCode.RESOURCE_LIMIT,
-        False,
-        ModelFailureEffect.NO_EFFECT,
-    ),
-    (
-        "download-required",
-        ModelErrorCode.UNAVAILABLE,
-        False,
-        ModelFailureEffect.NO_EFFECT,
-    ),
+    (ModelErrorCode.UNAVAILABLE, True, ModelFailureEffect.NO_EFFECT),
+    (ModelErrorCode.UNAVAILABLE, False, ModelFailureEffect.NO_EFFECT),
+    (ModelErrorCode.TIMEOUT, True, ModelFailureEffect.NO_EFFECT),
+    (ModelErrorCode.PROVIDER_ERROR, False, ModelFailureEffect.UNKNOWN),
+    (ModelErrorCode.AUTHENTICATION, False, ModelFailureEffect.NO_EFFECT),
+    (ModelErrorCode.RESOURCE_LIMIT, False, ModelFailureEffect.NO_EFFECT),
+    (ModelErrorCode.UNAVAILABLE, False, ModelFailureEffect.NO_EFFECT),
 )
 
 
@@ -186,18 +188,13 @@ _FAILURES = (
         IntelligenceMode.EXTERNAL_API,
     ),
 )
-@pytest.mark.parametrize(
-    ("failure_name", "code", "retryable", "failure_effect"),
-    _FAILURES,
-)
-def test_selected_intelligence_route_never_crosses_provider_on_failure(
+@pytest.mark.parametrize(("code", "retryable", "failure_effect"), _FAILURES)
+def test_selected_route_never_crosses_provider_on_failure(
     mode: IntelligenceMode,
-    failure_name: str,
     code: ModelErrorCode,
     retryable: bool,
     failure_effect: ModelFailureEffect,
 ) -> None:
-    del failure_name
     provider_id, kind, policy = _route(mode)
     gateway = _RecordingGateway()
     selected = _FailingProvider(
@@ -224,6 +221,8 @@ def test_selected_intelligence_route_never_crosses_provider_on_failure(
 
     assert caught.value.code is code
     assert caught.value.provider_id == provider_id
+    assert caught.value.retryable is retryable
+    assert caught.value.failure_effect is failure_effect
     assert selected.calls == 1
     assert [alternate.calls for alternate in alternates] == [0, 0, 0]
     assert len(gateway.requests) == 1
@@ -233,9 +232,12 @@ def test_selected_intelligence_route_never_crosses_provider_on_failure(
     assert gateway.requests[0].fallback_provider_ids == ()
 
 
-def test_ai_route_never_silently_becomes_deterministic_mode() -> None:
+def test_model_completion_never_silently_becomes_deterministic_mode() -> None:
     gateway = _RecordingGateway()
-    unexpected = _AlternateProvider(provider_id="fallback-cloud", kind=ProviderKind.CLOUD)
+    unexpected = _AlternateProvider(
+        provider_id="fallback-cloud",
+        kind=ProviderKind.CLOUD,
+    )
     gateway.register(unexpected)
     router = IntelligenceModeRouter(gateway=gateway)
 
@@ -245,6 +247,52 @@ def test_ai_route_never_silently_becomes_deterministic_mode() -> None:
     assert caught.value.code is IntelligenceModeErrorCode.DETERMINISTIC_PATH_REQUIRED
     assert gateway.requests == []
     assert unexpected.calls == 0
+
+
+@pytest.mark.parametrize(
+    "model",
+    ("", "   ", " model-a", "model-a ", "model\x00a", "model\u200ba", 0),
+)
+def test_invalid_explicit_model_fails_at_canonical_request_boundary(
+    model: object,
+) -> None:
+    gateway = ModelGateway()
+    provider = _DefaultingProvider(provider_id="foundry-local", kind=ProviderKind.LOCAL)
+    gateway.register(provider, default=True)
+    router = IntelligenceModeRouter(gateway=gateway)
+
+    with pytest.raises((TypeError, ValueError)):
+        request = _request(model=model)
+        asyncio.run(router.complete_model(IntelligenceMode.EMBEDDED_LOCAL, request))
+
+    assert provider.calls == 0
+    assert provider.models == []
+
+
+@pytest.mark.parametrize(
+    "mode",
+    (
+        IntelligenceMode.EMBEDDED_LOCAL,
+        IntelligenceMode.EXTERNAL_LOCAL,
+        IntelligenceMode.EXTERNAL_API,
+    ),
+)
+def test_valid_explicit_model_stays_pinned_through_selected_route(
+    mode: IntelligenceMode,
+) -> None:
+    provider_id, kind, policy = _route(mode)
+    gateway = ModelGateway()
+    provider = _DefaultingProvider(provider_id=provider_id, kind=kind)
+    gateway.register(provider, default=True)
+    router = IntelligenceModeRouter(gateway=gateway, policy=policy)
+
+    response = asyncio.run(router.complete_model(mode, _request(model="pinned-model")))
+
+    assert provider.calls == 1
+    assert provider.models == ["pinned-model"]
+    assert response.provider_id == provider_id
+    assert response.provider_kind is kind
+    assert response.model == "pinned-model"
 
 
 def _api_provider(
@@ -263,30 +311,6 @@ def _api_provider(
         credential_resolver=resolver,
         client_factory=client_factory,
     )
-
-
-@pytest.mark.parametrize("model", ("", "   ", " model-a", "model-a ", "model\x00a", 0))
-def test_invalid_explicit_api_model_fails_before_credential_or_transport(model: object) -> None:
-    resolver = _Resolver()
-    client_calls = 0
-
-    def client_factory(**kwargs: object) -> httpx.AsyncClient:
-        nonlocal client_calls
-        del kwargs
-        client_calls += 1
-        raise AssertionError("invalid explicit model must fail before transport construction")
-
-    provider = _api_provider(resolver=resolver, client_factory=client_factory)
-
-    with pytest.raises(ModelGatewayError) as caught:
-        asyncio.run(provider.complete(_request(model=model)))
-
-    assert caught.value.code is ModelErrorCode.INVALID_REQUEST
-    assert caught.value.provider_id == "configured-api"
-    assert caught.value.retryable is False
-    assert caught.value.failure_effect is ModelFailureEffect.NO_EFFECT
-    assert resolver.references == []
-    assert client_calls == 0
 
 
 @pytest.mark.parametrize(
@@ -324,7 +348,7 @@ def test_only_none_deliberately_selects_configured_api_default(
     assert resolver.references == ["env:NIKA_TEST_REFERENCE"]
 
 
-def test_configured_api_authentication_failure_is_truthful_and_transport_free() -> None:
+def test_configured_api_authentication_failure_is_transport_free() -> None:
     resolver = _Resolver(fail=True)
     client_calls = 0
 

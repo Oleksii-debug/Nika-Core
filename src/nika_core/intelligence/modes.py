@@ -2,16 +2,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import StrEnum
+from typing import Protocol
 
 from nika_core.model_gateway.contracts import (
-    ModelErrorCode,
-    ModelFailureEffect,
-    ModelGatewayError,
     ModelRequest,
     ModelResponse,
     ProviderKind,
 )
-from nika_core.model_gateway.gateway import ModelGateway
+
+
+class ModelCompletionPort(Protocol):
+    """Provider-neutral completion boundary required by intelligence routing."""
+
+    async def complete(self, request: ModelRequest) -> ModelResponse: ...
 
 
 class IntelligenceMode(StrEnum):
@@ -119,7 +122,7 @@ class IntelligenceModeRouter:
     def __init__(
         self,
         *,
-        gateway: ModelGateway,
+        gateway: ModelCompletionPort,
         policy: IntelligenceModePolicy | None = None,
     ) -> None:
         self._gateway = gateway
@@ -196,7 +199,6 @@ class IntelligenceModeRouter:
             )
         if route.provider_id is None:  # resolve() proves this for model-backed routes.
             raise AssertionError("model-backed intelligence route has no provider identity")
-        self._validate_explicit_model(route=route, request=request)
 
         routed_request = replace(
             request,
@@ -219,29 +221,6 @@ class IntelligenceModeRouter:
                 IntelligenceModeErrorCode.MODE_DISABLED,
                 f"intelligence mode is disabled: {route.mode.value}",
                 mode=route.mode,
-            )
-
-    @staticmethod
-    def _validate_explicit_model(
-        *,
-        route: IntelligenceRoute,
-        request: ModelRequest,
-    ) -> None:
-        model = request.model
-        if model is None:
-            return
-        if (
-            not isinstance(model, str)
-            or not model.strip()
-            or model != model.strip()
-            or any(ord(char) < 32 for char in model)
-        ):
-            raise ModelGatewayError(
-                ModelErrorCode.INVALID_REQUEST,
-                "explicit model identity is invalid",
-                provider_id=route.provider_id,
-                retryable=False,
-                failure_effect=ModelFailureEffect.NO_EFFECT,
             )
 
     @staticmethod
