@@ -18,6 +18,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--prehuman-evidence", type=Path, required=True)
     result.add_argument("--verification", type=Path, required=True)
     result.add_argument("--source-sha", required=True)
+    result.add_argument("--product-version", required=True)
     result.add_argument("--repository", required=True)
     result.add_argument("--signer-workflow", required=True)
     result.add_argument("--source-ref", required=True)
@@ -35,6 +36,7 @@ def main() -> int:
         args.verification,
         source_sha=args.source_sha,
         artifact_reference=args.artifact_reference,
+        expected_product_version=args.product_version,
         repository=args.repository,
         signer_workflow=args.signer_workflow,
         source_ref=args.source_ref,
