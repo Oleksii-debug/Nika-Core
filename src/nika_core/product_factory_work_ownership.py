@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -22,10 +23,21 @@ class WorkOwnershipLease:
 
 
 class ProductFactoryWorkOwnership:
-    """Durable single-writer lease authority for Product Factory work slices."""
+    """Durable single-writer lease authority for Product Factory work slices.
 
-    def __init__(self, store: SQLiteStore) -> None:
+    Production time authority is internal. Tests may inject one trusted clock when the
+    service is constructed; individual callers cannot choose the instant used to expire,
+    renew, take over, or assert a lease.
+    """
+
+    def __init__(
+        self,
+        store: SQLiteStore,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self._store = store
+        self._clock = clock or _utc_now
 
     def acquire(
         self,
@@ -33,20 +45,13 @@ class ProductFactoryWorkOwnership:
         project_id: str,
         work_id: str,
         owner_id: str,
-        now: datetime | None = None,
         lease_seconds: int = 300,
     ) -> WorkOwnershipLease:
         _identity(project_id, work_id, owner_id)
-        if isinstance(lease_seconds, bool) or not isinstance(lease_seconds, int) or lease_seconds <= 0:
-            raise WorkOwnershipError("lease_seconds must be a positive integer")
-        explicit_instant = _aware(now) if now is not None else None
+        _lease_seconds(lease_seconds)
         with self._store.connection() as connection:
             _begin_immediate(connection)
-            instant = (
-                explicit_instant
-                if explicit_instant is not None
-                else _aware(datetime.now(UTC))
-            )
+            instant = self._instant()
             expires_at = _expiry(instant, lease_seconds)
             row = connection.execute(
                 "SELECT owner_id, fence, issued_at, expires_at FROM product_factory_work_ownership "
@@ -78,6 +83,8 @@ class ProductFactoryWorkOwnership:
                 ):
                     raise WorkOwnershipError("corrupt work ownership record")
                 if current_owner is not None and current_expires > instant:
+                    if instant < current_issued:
+                        raise WorkOwnershipError("work ownership clock precedes lease issuance")
                     if current_owner == owner_id:
                         raise WorkOwnershipError(
                             "work is already owned by this owner; renew the existing lease"
@@ -89,6 +96,7 @@ class ProductFactoryWorkOwnership:
                     "issued_at = ?, expires_at = ? WHERE project_id = ? AND work_id = ?",
                     (owner_id, fence, _stamp(instant), _stamp(expires_at), project_id, work_id),
                 )
+            _commit_mutation(connection)
         return WorkOwnershipLease(project_id, work_id, owner_id, fence, instant, expires_at)
 
     def renew(
@@ -98,27 +106,18 @@ class ProductFactoryWorkOwnership:
         work_id: str,
         owner_id: str,
         fence: int,
-        now: datetime | None = None,
         lease_seconds: int = 300,
     ) -> WorkOwnershipLease:
         _identity(project_id, work_id, owner_id)
         _strict_fence(fence)
-        if isinstance(lease_seconds, bool) or not isinstance(lease_seconds, int) or lease_seconds <= 0:
-            raise WorkOwnershipError("lease_seconds must be a positive integer")
-        explicit_instant = _aware(now) if now is not None else None
+        _lease_seconds(lease_seconds)
         with self._store.connection() as connection:
             _begin_immediate(connection)
-            instant = (
-                explicit_instant
-                if explicit_instant is not None
-                else _aware(datetime.now(UTC))
-            )
+            instant = self._instant()
             expires_at = _expiry(instant, lease_seconds)
             current = _load(connection, project_id, work_id)
             _assert_exact(current, owner_id=owner_id, fence=fence, now=instant)
             assert current is not None
-            if instant < current.issued_at:
-                raise WorkOwnershipError("renewal time precedes lease issuance")
             if expires_at <= current.expires_at:
                 raise WorkOwnershipError("renewal must extend the current lease")
             connection.execute(
@@ -126,6 +125,7 @@ class ProductFactoryWorkOwnership:
                 "WHERE project_id = ? AND work_id = ?",
                 (_stamp(expires_at), project_id, work_id),
             )
+            _commit_mutation(connection)
         return WorkOwnershipLease(project_id, work_id, owner_id, fence, current.issued_at, expires_at)
 
     def release(self, *, project_id: str, work_id: str, owner_id: str, fence: int) -> None:
@@ -133,27 +133,25 @@ class ProductFactoryWorkOwnership:
         _strict_fence(fence)
         with self._store.connection() as connection:
             _begin_immediate(connection)
+            instant = self._instant()
             current = _load(connection, project_id, work_id)
-            if current is None or current.owner_id != owner_id or current.fence != fence:
-                raise WorkOwnershipError("stale work ownership authority")
+            _assert_exact(current, owner_id=owner_id, fence=fence, now=instant)
             connection.execute(
                 "UPDATE product_factory_work_ownership SET owner_id = NULL, "
                 "issued_at = NULL, expires_at = NULL WHERE project_id = ? AND work_id = ?",
                 (project_id, work_id),
             )
+            _commit_mutation(connection)
 
-    def current(
-        self,
-        *,
-        project_id: str,
-        work_id: str,
-        now: datetime | None = None,
-    ) -> WorkOwnershipLease | None:
+    def current(self, *, project_id: str, work_id: str) -> WorkOwnershipLease | None:
         _identity(project_id, work_id)
-        instant = _aware(now or datetime.now(UTC))
+        instant = self._instant()
         with self._store.connection() as connection:
             current = _load(connection, project_id, work_id)
-        if current is None or current.expires_at <= instant:
+        if current is None:
+            return None
+        _validate_observation_time(current, instant)
+        if current.expires_at <= instant:
             return None
         return current
 
@@ -164,14 +162,42 @@ class ProductFactoryWorkOwnership:
         work_id: str,
         owner_id: str,
         fence: int,
-        now: datetime | None = None,
     ) -> None:
         _identity(project_id, work_id, owner_id)
         _strict_fence(fence)
-        instant = _aware(now or datetime.now(UTC))
+        instant = self._instant()
         with self._store.connection() as connection:
             current = _load(connection, project_id, work_id)
         _assert_exact(current, owner_id=owner_id, fence=fence, now=instant)
+
+    def assert_owner_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        project_id: str,
+        work_id: str,
+        owner_id: str,
+        fence: int,
+    ) -> None:
+        """Assert exact ownership inside the caller's already-serialized mutation transaction."""
+        _identity(project_id, work_id, owner_id)
+        _strict_fence(fence)
+        if not connection.in_transaction:
+            raise WorkOwnershipError("fenced mutation requires an active SQLite transaction")
+        instant = self._instant()
+        current = _load(connection, project_id, work_id)
+        _assert_exact(current, owner_id=owner_id, fence=fence, now=instant)
+
+    def _instant(self) -> datetime:
+        try:
+            value = self._clock()
+        except WorkOwnershipError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - clock is authority and must fail closed
+            raise WorkOwnershipError("work ownership clock failed") from exc
+        if not isinstance(value, datetime):
+            raise WorkOwnershipError("work ownership clock must return datetime")
+        return _aware(value)
 
 
 def _load(
@@ -200,6 +226,11 @@ def _load(
     )
 
 
+def _validate_observation_time(current: WorkOwnershipLease, now: datetime) -> None:
+    if now < current.issued_at:
+        raise WorkOwnershipError("work ownership clock precedes lease issuance")
+
+
 def _assert_exact(
     current: WorkOwnershipLease | None,
     *,
@@ -207,9 +238,11 @@ def _assert_exact(
     fence: int,
     now: datetime,
 ) -> None:
+    if current is None:
+        raise WorkOwnershipError("stale work ownership authority")
+    _validate_observation_time(current, now)
     if (
-        current is None
-        or current.owner_id != owner_id
+        current.owner_id != owner_id
         or current.fence != fence
         or current.expires_at <= now
     ):
@@ -220,11 +253,27 @@ def _begin_immediate(connection: sqlite3.Connection) -> None:
     try:
         connection.execute("BEGIN IMMEDIATE")
     except sqlite3.OperationalError as exc:
-        code = getattr(exc, "sqlite_errorcode", None)
-        base_code = code & 0xFF if isinstance(code, int) else None
-        if base_code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+        if _is_busy_or_locked(exc):
             raise WorkOwnershipError("work ownership authority is busy") from exc
         raise
+
+
+def _commit_mutation(connection: sqlite3.Connection) -> None:
+    try:
+        connection.commit()
+    except sqlite3.OperationalError as exc:
+        if _is_busy_or_locked(exc):
+            connection.rollback()
+            raise WorkOwnershipError("work ownership authority is busy") from exc
+        raise
+
+
+def _is_busy_or_locked(exc: sqlite3.OperationalError) -> bool:
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        return (code & 0xFF) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+    message = str(exc).lower()
+    return "database is locked" in message or "database table is locked" in message
 
 
 def _identity(*values: str) -> None:
@@ -239,6 +288,11 @@ def _strict_fence(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise WorkOwnershipError("work ownership fence must be a positive integer")
     return value
+
+
+def _lease_seconds(value: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise WorkOwnershipError("lease_seconds must be a positive integer")
 
 
 def _aware(value: datetime) -> datetime:
@@ -270,3 +324,7 @@ def _optional_time(value: object) -> datetime | None:
         return _aware(datetime.fromisoformat(value))
     except (TypeError, ValueError) as exc:
         raise WorkOwnershipError("corrupt work ownership timestamp") from exc
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
