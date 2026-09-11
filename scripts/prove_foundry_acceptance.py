@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import platform
 import subprocess
 import sys
@@ -53,6 +54,13 @@ def _require_normalized_text(value: Any, *, label: str, max_length: int) -> str:
         f"{label} must be normalized non-empty text",
     )
     return value
+
+
+def _child_environment(repo_root: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str((repo_root / "src").resolve())
+    env["PYTHONNOUSERSITE"] = "1"
+    return env
 
 
 def _validate_model_evidence(
@@ -142,6 +150,7 @@ def validate_child_evidence(
 def _child_command(args: argparse.Namespace, *, output: Path, repo_root: Path) -> list[str]:
     command = [
         sys.executable,
+        "-P",
         str(repo_root / "scripts" / "prove_foundry_local.py"),
         "--model",
         args.model,
@@ -172,6 +181,7 @@ def _run_child(args: argparse.Namespace, *, output: Path, repo_root: Path) -> di
         result = subprocess.run(
             _child_command(args, output=output, repo_root=repo_root),
             cwd=repo_root,
+            env=_child_environment(repo_root),
             check=False,
             capture_output=True,
             text=True,
@@ -238,6 +248,11 @@ def run_acceptance(args: argparse.Namespace, *, repo_root: Path) -> dict[str, An
             "sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             "child_path": "scripts/prove_foundry_local.py",
             "child_sha256": hashlib.sha256(proof_script.read_bytes()).hexdigest(),
+            "source_binding": {
+                "safe_path": True,
+                "pythonpath": "src",
+                "user_site_disabled": True,
+            },
         },
         "model": {
             "provider_id": PROVIDER_ID,
