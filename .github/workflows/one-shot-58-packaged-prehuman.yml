@@ -1,0 +1,157 @@
+name: ONE-SHOT-58 Packaged Full-Product Pre-Human
+
+on:
+  pull_request:
+    paths:
+      - "scripts/one_shot_58_packaged_prehuman.ps1"
+      - ".github/workflows/one-shot-58-packaged-prehuman.yml"
+
+permissions:
+  contents: read
+
+env:
+  NIKA_TARGET_SHA: 6fb06dfe704495f141af9a20cdc73f2443f61358
+  NIKA_HARNESS_SHA: ${{ github.event.pull_request.head.sha }}
+
+concurrency:
+  group: one-shot-58-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  packaged-prehuman:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout QA harness exact head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.NIKA_HARNESS_SHA }}
+          path: qa
+          persist-credentials: false
+
+      - name: Checkout exact integrated main target
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.NIKA_TARGET_SHA }}
+          path: source
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: source/pyproject.toml
+
+      - name: Verify target and harness checkout identities
+        shell: pwsh
+        run: |
+          $target = (git -C source rev-parse HEAD).Trim().ToLowerInvariant()
+          $harness = (git -C qa rev-parse HEAD).Trim().ToLowerInvariant()
+          if ($target -ne '${{ env.NIKA_TARGET_SHA }}') {
+            throw "Target checkout mismatch: $target"
+          }
+          if ($harness -ne '${{ env.NIKA_HARNESS_SHA }}') {
+            throw "Harness checkout mismatch: $harness"
+          }
+          $targetDetached = (git -C source symbolic-ref -q HEAD)
+          $symbolicRefExit = $LASTEXITCODE
+          if ($symbolicRefExit -eq 0 -or $targetDetached) {
+            throw "Exact integrated target unexpectedly checked out a symbolic branch ref: $targetDetached"
+          }
+          if ($symbolicRefExit -ne 1) {
+            throw "Detached-head probe failed unexpectedly with exit code $symbolicRefExit."
+          }
+          git -C source rev-parse --verify HEAD | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not neutralize detached-head probe after exact target verification."
+          }
+          Write-Host "Exact integrated target: $target"
+          Write-Host "Exact QA harness: $harness"
+          Write-Host "Target checkout is detached at the exact target SHA as required."
+
+      - name: Install exact target GUI QA and development dependencies
+        run: python -m pip install -e "./source[gui,qa,dev]"
+
+      - name: Run focused exact-target source gates
+        working-directory: source
+        run: >-
+          python -m pytest
+          tests/test_packaged_current_product_project.py
+          tests/test_m11_m12_release.py
+          tests/test_m5_ui_foundation.py
+          tests/test_m5_keymap_semantic_focus.py
+          -q
+
+      - name: Run Ruff on exact-target journey surfaces
+        working-directory: source
+        run: >-
+          python -m ruff check
+          scripts/nika_windows.py
+          src/nika_core/product_factory_packaged_journey.py
+          src/nika_core/ui
+          tests/test_packaged_current_product_project.py
+          tests/test_m5_keymap_semantic_focus.py
+
+      - name: Resolve canonical package version
+        id: release
+        shell: pwsh
+        run: |
+          $version = python -c "import tomllib; print(tomllib.load(open('source/pyproject.toml','rb'))['project']['version'])"
+          if (-not $version) { throw 'Could not resolve target [project].version.' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Build exact integrated-main one-dir package
+        shell: pwsh
+        run: |
+          Push-Location source
+          try {
+            python scripts/m11_release.py --source-sha '${{ env.NIKA_TARGET_SHA }}'
+            if ($LASTEXITCODE -ne 0) { throw "M11 package build exited $LASTEXITCODE" }
+          } finally {
+            Pop-Location
+          }
+
+      - name: Re-run integrated packaged WebView2 smoke
+        shell: pwsh
+        run: >-
+          ./source/scripts/m5_uia_proof.ps1
+          -ExePath ./source/dist/NikaCore/NikaCore.exe
+          -WindowTitle 'Nika Core ${{ steps.release.outputs.version }}'
+
+      - name: Copy exact package to Unicode and spaced path
+        shell: pwsh
+        run: |
+          $target = Join-Path $env:RUNNER_TEMP 'Nika ONE-SHOT 58\Пакет Nika'
+          Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $target -Force | Out-Null
+          Copy-Item -Path './source/dist/NikaCore/*' -Destination $target -Recurse -Force
+          "NIKA_PROOF_BUNDLE=$target" >> $env:GITHUB_ENV
+          $evidence = Join-Path $env:RUNNER_TEMP 'Nika ONE-SHOT 58\evidence\one-shot-58-prehuman.json'
+          $database = Join-Path $env:RUNNER_TEMP 'Nika ONE-SHOT 58\дані стану\product factory.db'
+          "NIKA_PROOF_EVIDENCE=$evidence" >> $env:GITHUB_ENV
+          "NIKA_PROOF_DATABASE=$database" >> $env:GITHUB_ENV
+
+      - name: Run ONE-SHOT-58 exact packaged PRE-HUMAN journey
+        shell: pwsh
+        run: >-
+          ./qa/scripts/one_shot_58_packaged_prehuman.ps1
+          -ExePath "$env:NIKA_PROOF_BUNDLE\NikaCore.exe"
+          -BundleDir "$env:NIKA_PROOF_BUNDLE"
+          -DatabasePath "$env:NIKA_PROOF_DATABASE"
+          -TargetSourceSha '${{ env.NIKA_TARGET_SHA }}'
+          -HarnessSha '${{ env.NIKA_HARNESS_SHA }}'
+          -EvidencePath "$env:NIKA_PROOF_EVIDENCE"
+          -WindowTitle 'Nika Core ${{ steps.release.outputs.version }}'
+
+      - name: Upload ONE-SHOT-58 evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: one-shot-58-prehuman-${{ env.NIKA_TARGET_SHA }}-${{ env.NIKA_HARNESS_SHA }}
+          path: |
+            ${{ runner.temp }}/Nika ONE-SHOT 58/evidence/*.json
+            source/dist/NikaCore/release-manifest.json
+            source/dist/NikaCore/THIRD_PARTY_NOTICES.txt
+            source/dist/NikaCore/pf11-packaged-product-journey.json
+          if-no-files-found: warn
