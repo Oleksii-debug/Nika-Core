@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from math import isfinite
 from typing import Protocol
 
 
@@ -75,8 +76,16 @@ class ModelRequest:
             raise ValueError("fallback provider IDs must be unique")
         if self.provider_id is not None and self.provider_id in self.fallback_provider_ids:
             raise ValueError("primary provider cannot also be a fallback provider")
-        if self.timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be greater than zero")
+        if isinstance(self.timeout_seconds, bool) or not isinstance(
+            self.timeout_seconds, (int, float)
+        ):
+            raise TypeError("timeout_seconds must be numeric")
+        try:
+            finite_timeout = isfinite(float(self.timeout_seconds))
+        except OverflowError:
+            finite_timeout = False
+        if not finite_timeout or self.timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be finite and greater than zero")
         if self.temperature is not None and not 0 <= self.temperature <= 2:
             raise ValueError("temperature must be between 0 and 2")
 
@@ -136,10 +145,25 @@ class ModelResourcePolicy:
             ("max_cpu_percent", self.max_cpu_percent),
             ("max_memory_percent", self.max_memory_percent),
         ):
-            if value is not None and not 0 < value <= 100:
-                raise ValueError(f"{name} must be in the range (0, 100]")
-        if self.min_available_memory_bytes is not None and self.min_available_memory_bytes <= 0:
-            raise ValueError("min_available_memory_bytes must be greater than zero")
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{name} must be numeric")
+            if not 0 < value <= 100:
+                raise ValueError(f"{name} must be finite and in the range (0, 100]")
+            try:
+                finite_value = isfinite(float(value))
+            except OverflowError:
+                finite_value = False
+            if not finite_value:
+                raise ValueError(f"{name} must be finite and in the range (0, 100]")
+        if self.min_available_memory_bytes is not None:
+            if isinstance(self.min_available_memory_bytes, bool) or not isinstance(
+                self.min_available_memory_bytes, int
+            ):
+                raise TypeError("min_available_memory_bytes must be an integer")
+            if self.min_available_memory_bytes <= 0:
+                raise ValueError("min_available_memory_bytes must be greater than zero")
 
 
 @dataclass(frozen=True, slots=True)
