@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Mapping, Protocol
+from typing import Protocol
 
 
 class DeterministicErrorCode(StrEnum):
@@ -61,6 +63,24 @@ class DeterministicGoal:
             raise ValueError("goal facts must not be empty")
 
 
+class _FrozenArguments(Mapping[str, object]):
+    """Defensive immutable snapshot that yields copies of nested execution values."""
+
+    __slots__ = ("_payload",)
+
+    def __init__(self, values: Mapping[str, object]) -> None:
+        self._payload = deepcopy(dict(values))
+
+    def __getitem__(self, key: str) -> object:
+        return deepcopy(self._payload[key])
+
+    def __iter__(self):
+        return iter(self._payload)
+
+    def __len__(self) -> int:
+        return len(self._payload)
+
+
 @dataclass(frozen=True, slots=True)
 class DeterministicAction:
     action_id: str
@@ -69,7 +89,7 @@ class DeterministicAction:
     adds: frozenset[str] = field(default_factory=frozenset)
     removes: frozenset[str] = field(default_factory=frozenset)
     tool_id: str | None = None
-    arguments: dict[str, object] = field(default_factory=dict)
+    arguments: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.action_id.strip():
@@ -83,6 +103,11 @@ class DeterministicAction:
             raise ValueError("action facts must not be empty")
         if self.tool_id is not None and not self.tool_id.strip():
             raise ValueError("tool_id must not be empty")
+        if not isinstance(self.arguments, Mapping):
+            raise TypeError("action arguments must be a mapping")
+        if any(not isinstance(key, str) for key in self.arguments):
+            raise TypeError("action argument names must be strings")
+        object.__setattr__(self, "arguments", _FrozenArguments(self.arguments))
 
 
 @dataclass(frozen=True, slots=True)

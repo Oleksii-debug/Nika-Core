@@ -100,9 +100,10 @@ def _build_provenance(
                 "adds": sorted(action.adds),
                 "removes": sorted(action.removes),
                 "tool_id": action.tool_id,
-                # Tool arguments can contain user/private values. The deterministic planning
-                # rule is the capability/precondition/effect contract, not those invocation
-                # values, so raw arguments are intentionally excluded from durable provenance.
+                # Bind execution semantics without persisting raw argument names or values.
+                # DeterministicAction owns an immutable defensive snapshot, so this digest and
+                # ToolCall's later dict(action.arguments) consume the same frozen identity.
+                "arguments_fingerprint": _fingerprint(dict(action.arguments)),
                 "registered": True,
             }
         )
