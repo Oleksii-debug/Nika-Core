@@ -208,7 +208,7 @@ def merge_context_provenance_metadata(
     if CONTEXT_PROVENANCE_METADATA_KEY in metadata:
         raise ValueError("context provenance metadata already exists")
     result = dict(metadata)
-    result.update(assembly.to_request_metada))
+    result.update(assembly.to_request_metadata())
     return result
 
 
