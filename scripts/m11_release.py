@@ -19,6 +19,7 @@ from nika_core.packaging.windows import default_windows_plan
 
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _PF11_EVIDENCE_NAME = "pf11-packaged-product-journey.json"
+_PF11_REFINEMENT_EVIDENCE_NAME = "pf11-packaged-product-refinement.json"
 
 
 def project_version(project_root: Path) -> str:
@@ -63,7 +64,7 @@ def _require_exact_nonnegative_int(payload: dict[str, object], field: str) -> in
 
 
 def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path:
-    """Run the packaged executable twice and persist restart-bound PF11 evidence."""
+    """Run the packaged executable twice and persist the generic restart-bound PF11 evidence."""
     executable = bundle_dir / "NikaCore.exe"
     if not executable.is_file():
         raise RuntimeError(f"packaged PF11 proof executable is missing: {executable}")
@@ -106,6 +107,99 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
     if first != second:
         raise RuntimeError("packaged PF11 ProductProject restart replay changed durable identity")
     project_id = first.get("project_id")
+    if (
+        first.get("route") != "product_project"
+        or first.get("spec_version") != 1
+        or not isinstance(project_id, str)
+        or not project_id.strip()
+        or first.get("command_center_state_proven") is not True
+        or first.get("bounded_projection_proven") is not True
+        or first.get("bridge_state_project_id") != project_id
+        or first.get("bridge_state_spec_version") != 1
+    ):
+        raise RuntimeError("packaged PF11 ProductProject proof returned invalid route evidence")
+    status_count = _require_exact_nonnegative_int(first, "bridge_state_status_count")
+    decision_count = _require_exact_nonnegative_int(first, "bridge_state_decision_count")
+    for forbidden_true in (
+        "human_tested",
+        "nvda_verified",
+        "production_release_ready",
+    ):
+        if first.get(forbidden_true) is not False:
+            raise RuntimeError(f"packaged PF11 proof may not set {forbidden_true}=true")
+
+    target = bundle_dir / _PF11_EVIDENCE_NAME
+    evidence = {
+        "schema_version": 2,
+        "source_sha": source_sha,
+        "route": first["route"],
+        "product_project_id": project_id,
+        "product_project_spec_version": first["spec_version"],
+        "product_project_state": first.get("state"),
+        "product_command_center_proven": True,
+        "packaged_bridge_state_proven": True,
+        "bounded_projection_proven": True,
+        "bridge_state_status_count": status_count,
+        "bridge_state_decision_count": decision_count,
+        "packaged_executable_proven": True,
+        "restart_replay_proven": True,
+        "human_tested": False,
+        "nvda_verified": False,
+        "production_release_ready": False,
+    }
+    target.write_text(
+        json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return target
+
+
+def prove_packaged_product_refinement(bundle_dir: Path, *, source_sha: str) -> Path:
+    """Prove the additive packaged goal-refinement journey against the exact executable."""
+    executable = bundle_dir / "NikaCore.exe"
+    if not executable.is_file():
+        raise RuntimeError(f"packaged PF11 refinement executable is missing: {executable}")
+    if not _FULL_SHA_RE.fullmatch(source_sha):
+        raise ValueError("packaged PF11 refinement proof requires exact source SHA")
+
+    with tempfile.TemporaryDirectory(prefix="nika-pf11-refinement-proof-") as temporary:
+        root = Path(temporary)
+        database = root / "product-refinement.db"
+        outputs: list[dict[str, object]] = []
+        environment = dict(os.environ)
+        environment["NIKA_DB_PATH"] = str(database)
+        for attempt in (1, 2):
+            output = root / f"refinement-proof-{attempt}.json"
+            completed = subprocess.run(
+                [
+                    str(executable),
+                    "--pf11-refinement-proof",
+                    "--pf11-refinement-proof-output",
+                    str(output),
+                ],
+                check=False,
+                env=environment,
+                timeout=60,
+            )
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    f"packaged PF11 refinement proof failed on attempt {attempt}: "
+                    f"exit {completed.returncode}"
+                )
+            try:
+                payload = json.loads(output.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    "packaged PF11 refinement proof did not emit valid JSON evidence"
+                ) from exc
+            if not isinstance(payload, dict):
+                raise TypeError("packaged PF11 refinement proof evidence must be a JSON object")
+            outputs.append(payload)
+
+    first, second = outputs
+    if first != second:
+        raise RuntimeError("packaged PF11 refinement restart replay changed durable identity")
+    project_id = first.get("project_id")
     goal = first.get("goal")
     if (
         first.get("route") != "product_project"
@@ -123,7 +217,7 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
         or first.get("bridge_state_project_id") != project_id
         or first.get("bridge_state_spec_version") != 2
     ):
-        raise RuntimeError("packaged PF11 ProductProject proof returned invalid route evidence")
+        raise RuntimeError("packaged PF11 refinement proof returned invalid route evidence")
     status_count = _require_exact_nonnegative_int(first, "bridge_state_status_count")
     decision_count = _require_exact_nonnegative_int(first, "bridge_state_decision_count")
     for forbidden_true in (
@@ -132,11 +226,13 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
         "production_release_ready",
     ):
         if first.get(forbidden_true) is not False:
-            raise RuntimeError(f"packaged PF11 proof may not set {forbidden_true}=true")
+            raise RuntimeError(
+                f"packaged PF11 refinement proof may not set {forbidden_true}=true"
+            )
 
-    target = bundle_dir / _PF11_EVIDENCE_NAME
+    target = bundle_dir / _PF11_REFINEMENT_EVIDENCE_NAME
     evidence = {
-        "schema_version": 2,
+        "schema_version": 1,
         "source_sha": source_sha,
         "route": first["route"],
         "product_project_id": project_id,
@@ -176,6 +272,7 @@ def build(
     PyInstaller.__main__.run(list(plan.pyinstaller_args()))
 
     prove_packaged_product_journey(plan.bundle_dir, source_sha=exact_source_sha)
+    prove_packaged_product_refinement(plan.bundle_dir, source_sha=exact_source_sha)
     build_third_party_notices(plan.bundle_dir)
     notice_findings = verify_third_party_notices(plan.bundle_dir)
     if notice_findings:

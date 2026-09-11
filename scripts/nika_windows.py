@@ -73,19 +73,19 @@ def build_windows_bridge(
         ),
     )
     products = ProductProjectCommandService(ProductProjectRepository(store))
-    product_router = PackagedProductCommandRouter(
+    base_product_router = PackagedProductCommandRouter(
         products=products,
         ordinary_handler=backend.create_task,
         selection_store=PackagedProductSelectionStore(store),
     )
-    product_entry = PackagedProductRefinementRouter(
+    product_router = PackagedProductRefinementRouter(
         products=products,
-        base_router=product_router,
+        base_router=base_product_router,
     )
     command_center = ProductCommandCenter(products)
     product_state = PackagedProductStateProvider(
         base_state=backend.snapshot,
-        router=product_router,
+        router=base_product_router,
         command_center=command_center,
     )
     packaged_state = V01PackagedTeamStateProvider(
@@ -100,7 +100,7 @@ def build_windows_bridge(
         actions,
         keymap,
         handlers={
-            "task.create": product_entry.create,
+            "task.create": product_router.create,
             "task.pause": backend.pause_task,
             "task.resume": backend.resume_task,
             "agent.stop": backend.stop_agent,
@@ -216,12 +216,13 @@ def _run_pf11_proof(
     command: str,
     output_path: Path | None,
 ) -> int:
+    """Preserve the integrated generic PF11 v1 ProductProject restart contract."""
     bridge, products = build_windows_bridge(config)
     decision = route_command(command)
     if decision.normalized_goal is None:
         raise RuntimeError("PF11 proof command did not produce a normalized ProductProject goal")
-    initial_goal = decision.normalized_goal
-    project_id = product_project_identity(initial_goal)
+    goal = decision.normalized_goal
+    project_id = product_project_identity(goal)
     recovered_before_command = bridge.get_state()
     recovered_project = recovered_before_command.get("state", {}).get("product_project")
     if isinstance(recovered_project, Mapping) and recovered_project.get("project_id") != project_id:
@@ -229,6 +230,84 @@ def _run_pf11_proof(
     result = bridge.dispatch(
         {
             "request_id": "pf11-packaged-proof",
+            "action_id": "task.create",
+            "payload": {"command": command},
+        }
+    )
+    if result.get("status") != "completed":
+        raise RuntimeError(f"PF11 packaged ProductProject route failed: {result}")
+    detail = products.inspect_project(project_id)
+    if detail.summary.project_id != project_id or detail.summary.version != 1:
+        raise RuntimeError("PF11 packaged ProductProject identity/version proof failed")
+    if detail.summary.goal != goal:
+        raise RuntimeError("PF11 packaged ProductProject goal proof failed")
+    product_state = _require_product_state(
+        bridge.get_state(),
+        project_id=project_id,
+        spec_version=1,
+        goal=goal,
+    )
+    current_result = bridge.dispatch(
+        {
+            "request_id": "pf11-packaged-current-proof",
+            "action_id": "task.create",
+            "payload": {"command": "Show current ProductProject"},
+        }
+    )
+    _require_current_product_result(
+        current_result,
+        project_id=project_id,
+        spec_version=detail.summary.version,
+        state=detail.summary.state,
+        goal=detail.summary.goal,
+    )
+    payload = {
+        "route": decision.route.value,
+        "project_id": project_id,
+        "spec_version": detail.summary.version,
+        "state": detail.summary.state,
+        "command_center_state_proven": True,
+        "current_command_proven": True,
+        "current_command_focus_proven": True,
+        "bridge_state_project_id": product_state["project_id"],
+        "bridge_state_spec_version": product_state["spec_version"],
+        "bridge_state_status_count": product_state["status_count"],
+        "bridge_state_decision_count": product_state["decision_count"],
+        "restart_selection_integrity_proven": True,
+        "bounded_projection_proven": True,
+        "human_tested": False,
+        "nvda_verified": False,
+        "production_release_ready": False,
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    if output_path is None:
+        print(serialized)
+    else:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(serialized + "\n", encoding="utf-8")
+    return 0
+
+
+def _run_pf11_refinement_proof(
+    config: AppConfig,
+    *,
+    command: str,
+    output_path: Path | None,
+) -> int:
+    """Prove additive packaged ProductProject refinement without mutating generic PF11 semantics."""
+    bridge, products = build_windows_bridge(config)
+    decision = route_command(command)
+    if decision.normalized_goal is None:
+        raise RuntimeError("PF11 refinement proof did not produce a normalized ProductProject goal")
+    initial_goal = decision.normalized_goal
+    project_id = product_project_identity(initial_goal)
+    recovered_before_command = bridge.get_state()
+    recovered_project = recovered_before_command.get("state", {}).get("product_project")
+    if isinstance(recovered_project, Mapping) and recovered_project.get("project_id") != project_id:
+        raise RuntimeError("PF11 refinement restart restored a different ProductProject selection")
+    result = bridge.dispatch(
+        {
+            "request_id": "pf11-packaged-refinement-create-proof",
             "action_id": "task.create",
             "payload": {"command": command},
         }
@@ -277,7 +356,7 @@ def _run_pf11_proof(
     )
     current_result = bridge.dispatch(
         {
-            "request_id": "pf11-packaged-current-proof",
+            "request_id": "pf11-packaged-refinement-current-proof",
             "action_id": "task.create",
             "payload": {"command": "Show current ProductProject"},
         }
@@ -323,11 +402,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pf11-proof", action="store_true")
     parser.add_argument("--pf11-proof-output", type=Path)
+    parser.add_argument("--pf11-refinement-proof", action="store_true")
+    parser.add_argument("--pf11-refinement-proof-output", type=Path)
     parser.add_argument(
         "--pf11-proof-command",
         default=("Створи застосунок для керування витратами малого бізнесу"),
     )
     args = parser.parse_args(argv)
+    if args.pf11_proof and args.pf11_refinement_proof:
+        parser.error("--pf11-proof and --pf11-refinement-proof are mutually exclusive")
+
     from nika_core.reliability.legacy_database import LegacyDatabaseConflict
     from nika_core.ui.startup_error import show_recovery_error
 
@@ -341,6 +425,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             config,
             command=args.pf11_proof_command,
             output_path=args.pf11_proof_output,
+        )
+    if args.pf11_refinement_proof:
+        return _run_pf11_refinement_proof(
+            config,
+            command=args.pf11_proof_command,
+            output_path=args.pf11_refinement_proof_output,
         )
     bridge, _products = build_windows_bridge(config)
     launch_windows_shell(bridge, title=f"Nika Core {config.app_version}")
