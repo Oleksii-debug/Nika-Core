@@ -17,6 +17,7 @@ _MAX_EVIDENCE_REF_UTF8_BYTES = 4096
 _MAX_REVIEW_EVIDENCE_REFS = 32
 _MAX_REVIEW_EVIDENCE_UTF8_BYTES = 16384
 _MAX_REPAIR_REASON_UTF8_BYTES = 4096
+_MAX_CANCELLATION_REASON_UTF8_BYTES = 4096
 
 
 class CoordinatorError(ValueError):
@@ -221,13 +222,11 @@ class ProductFactoryCoordinator:
         return updated
 
     def cancel(self, component_id: str, *, reason: str) -> WorkRecord:
-        reason = reason.strip()
-        if not reason:
-            raise CoordinatorError("cancellation reason must not be empty")
+        reason = _canonical_cancellation_reason(reason)
         record = self._record(component_id)
         if record.state is WorkState.RUNNING:
             raise CoordinatorError("running component requires execution stop and fence proof")
-        if record.state in {WorkState.ACCEPTED, WorkState.DONE}:
+        if record.state in {WorkState.BLOCKED, WorkState.ACCEPTED, WorkState.DONE}:
             raise CoordinatorError(f"{record.state.value} component cannot be cancelled")
         if record.state is WorkState.CANCELLED:
             if record.blocker != reason:
@@ -353,8 +352,9 @@ class ProductFactoryCoordinator:
             self._validate_success_evidence(request, result.coding_result.test_evidence)
             return
         if record.state is WorkState.CANCELLED:
-            if not blocker:
+            if blocker is None:
                 raise CoordinatorError("cancelled snapshot work requires cancellation reason")
+            _canonical_cancellation_reason(blocker)
             if review is not None:
                 if result is None or not result.coding_result.succeeded or review.accepted:
                     raise CoordinatorError(
@@ -532,6 +532,18 @@ def _canonical_repair_reason(value: object) -> str:
         or any(ord(character) < 32 or ord(character) == 127 for character in value)
     ):
         raise CoordinatorError("repair reason must be canonical single-line text")
+    return value
+
+
+def _canonical_cancellation_reason(value: object) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or len(value.encode("utf-8")) > _MAX_CANCELLATION_REASON_UTF8_BYTES
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise CoordinatorError("cancellation reason must be canonical single-line text")
     return value
 
 
