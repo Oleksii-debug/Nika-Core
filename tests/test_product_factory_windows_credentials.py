@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sys
 import types
 from concurrent.futures import ThreadPoolExecutor
@@ -19,6 +20,8 @@ RAW_SECRET = "unit-test-secret-never-log"
 PROJECT = "product-a"
 AUDIENCE = "github-api"
 SCOPE = "repo:read"
+ACTIVE_AUTHORITY = hashlib.sha256(b"unit-active-authority").hexdigest()
+NEXT_AUTHORITY = hashlib.sha256(b"unit-next-authority").hexdigest()
 
 
 @dataclass(slots=True)
@@ -55,10 +58,20 @@ def new_store(backend: FakeWinVaultBackend | None = None) -> WindowsCredentialSt
     return WindowsCredentialStore(backend or FakeWinVaultBackend())
 
 
+def _seed_authority(
+    store: WindowsCredentialStore,
+    backend: FakeWinVaultBackend,
+    generation: int,
+    fingerprint: str,
+) -> None:
+    backend.passwords[(store._authority_target("secret-a", generation), "nika-core")] = fingerprint
+
+
 def seeded_store() -> tuple[WindowsCredentialStore, FakeWinVaultBackend]:
     backend = FakeWinVaultBackend()
     store = new_store(backend)
     store.provision_secret("secret-a", 1, RAW_SECRET)
+    _seed_authority(store, backend, 1, ACTIVE_AUTHORITY)
     return store, backend
 
 
@@ -344,8 +357,9 @@ def test_expired_handle_is_removed_and_cannot_be_replayed() -> None:
 
 
 def test_revoke_handles_invalidates_only_matching_generation() -> None:
-    store, _backend = seeded_store()
+    store, backend = seeded_store()
     store.provision_secret("secret-a", 2, "generation-two")
+    _seed_authority(store, backend, 2, NEXT_AUTHORITY)
     handle_1 = issue(store)
     handle_2 = store.issue_handle(
         secret_ref="secret-a",
@@ -397,6 +411,7 @@ def test_restart_keeps_os_material_but_never_restores_process_handles() -> None:
     backend = FakeWinVaultBackend()
     first = new_store(backend)
     first.provision_secret("secret-a", 1, RAW_SECRET)
+    _seed_authority(first, backend, 1, ACTIVE_AUTHORITY)
     old_handle = issue(first)
 
     restarted = new_store(backend)

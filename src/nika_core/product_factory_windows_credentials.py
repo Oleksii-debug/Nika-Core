@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import hmac
 import secrets
@@ -13,6 +14,12 @@ _CREDENTIAL_BLOB_MAX_BYTES = 5 * 512
 _GENERIC_TARGET_MAX_CHARS = 32767
 _SERVICE_PREFIX = "NikaCore.ProductFactory.v1"
 _USERNAME = "nika-core"
+_AUTHORITY_SEGMENT = "authority"
+_ERROR_ALREADY_EXISTS = 183
+_TOKEN_QUERY = 0x0008
+_TOKEN_USER = 1
+_PROCESS_AUTHORITY_LOCK_GUARD = RLock()
+_PROCESS_AUTHORITY_HANDLES: dict[str, int] = {}
 
 
 class ProtectedCredentialStoreError(RuntimeError):
@@ -42,8 +49,7 @@ class CredentialHandleUse:
 
     def __post_init__(self) -> None:
         _aware(self.used_at)
-        if self.generation < 1:
-            raise ProtectedCredentialStoreError("credential generation must be positive")
+        _positive_generation(self.generation)
         _nonempty("secret_ref", self.secret_ref)
         _nonempty("project_id", self.project_id)
         _nonempty("audience", self.audience)
@@ -52,25 +58,29 @@ class CredentialHandleUse:
 
 @dataclass(frozen=True, slots=True)
 class _HandleBinding:
+    operation_id: str
     secret_ref: str
     generation: int
     project_id: str
     audience: str
     scopes: frozenset[str]
     expires_at: datetime
+    authority_fingerprint: str
 
 
 @dataclass(slots=True)
 class WindowsCredentialStore:
-    """Windows Credential Manager adapter with in-process opaque lease handles."""
+    """Windows Credential Manager adapter with process-owned opaque lease handles."""
 
     _backend: WindowsVaultBackendPort = field(repr=False)
     service_prefix: str = _SERVICE_PREFIX
     _handles: dict[str, _HandleBinding] = field(default_factory=dict, init=False, repr=False)
+    _operation_handles: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         _nonempty("credential service prefix", self.service_prefix)
+        _ensure_process_authority_owner(self.service_prefix)
 
     def provision_secret(self, secret_ref: str, generation: int, raw_secret: str) -> None:
         target = self._target(secret_ref, generation)
@@ -93,6 +103,75 @@ class WindowsCredentialStore:
         with self._lock:
             return self._read_password(target) is not None
 
+    def bind_authority(
+        self,
+        *,
+        secret_ref: str,
+        generation: int,
+        authority_fingerprint: str,
+    ) -> None:
+        target = self._authority_target(secret_ref, generation)
+        fingerprint = _fingerprint(authority_fingerprint)
+        with self._lock:
+            if not self.contains(secret_ref, generation):
+                raise ProtectedCredentialStoreError(
+                    "protected credential generation is unavailable for authority binding"
+                )
+            existing = self._read_password(target)
+            if existing is None:
+                self._set_password(target, fingerprint)
+                return
+            if hmac.compare_digest(_fingerprint(existing), fingerprint):
+                return
+        raise ProtectedCredentialStoreError(
+            "credential authority binding conflicts with existing protected metadata"
+        )
+
+    def authority_matches(
+        self,
+        *,
+        secret_ref: str,
+        generation: int,
+        authority_fingerprint: str,
+    ) -> bool:
+        target = self._authority_target(secret_ref, generation)
+        fingerprint = _fingerprint(authority_fingerprint)
+        with self._lock:
+            existing = self._read_password(target)
+            if existing is None:
+                return False
+            return hmac.compare_digest(_fingerprint(existing), fingerprint)
+
+    def retire_authority(
+        self,
+        *,
+        secret_ref: str,
+        generation: int,
+        current_authority_fingerprint: str,
+        retired_authority_fingerprint: str,
+    ) -> None:
+        target = self._authority_target(secret_ref, generation)
+        current = _fingerprint(current_authority_fingerprint)
+        retired = _fingerprint(retired_authority_fingerprint)
+        if hmac.compare_digest(current, retired):
+            raise ProtectedCredentialStoreError(
+                "credential authority retirement requires a state transition"
+            )
+        with self._lock:
+            existing = self._read_password(target)
+            if existing is None:
+                raise ProtectedCredentialStoreError(
+                    "credential authority binding is unavailable for retirement"
+                )
+            existing_fingerprint = _fingerprint(existing)
+            if hmac.compare_digest(existing_fingerprint, retired):
+                return
+            if not hmac.compare_digest(existing_fingerprint, current):
+                raise ProtectedCredentialStoreError(
+                    "credential authority retirement conflicts with protected metadata"
+                )
+            self._set_password(target, retired)
+
     def issue_handle(
         self,
         *,
@@ -102,27 +181,74 @@ class WindowsCredentialStore:
         audience: str,
         scopes: frozenset[str],
         expires_at: datetime,
+        operation_id: str | None = None,
     ) -> str:
-        self._target(secret_ref, generation)
-        _nonempty("project_id", project_id)
-        _nonempty("audience", audience)
-        if not scopes or any(not scope.strip() for scope in scopes):
-            raise ProtectedCredentialStoreError("credential handle scopes must not be empty")
-        instant = _aware(expires_at)
+        effective_operation_id = operation_id or (
+            "nika-store-operation-" + secrets.token_urlsafe(24)
+        )
         with self._lock:
+            authority_fingerprint = self._current_authority_fingerprint(
+                secret_ref,
+                generation,
+            )
+            binding = self._handle_binding(
+                operation_id=effective_operation_id,
+                secret_ref=secret_ref,
+                generation=generation,
+                project_id=project_id,
+                audience=audience,
+                scopes=scopes,
+                expires_at=expires_at,
+                authority_fingerprint=authority_fingerprint,
+            )
+            existing_handle = self._operation_handles.get(effective_operation_id)
+            if existing_handle is not None:
+                self._require_operation_binding(existing_handle, binding)
+                return existing_handle
             if not self.contains(secret_ref, generation):
                 raise ProtectedCredentialStoreError(
                     "protected credential generation is unavailable"
                 )
             handle = "nika-credential-handle-" + secrets.token_urlsafe(32)
-            self._handles[handle] = _HandleBinding(
+            self._handles[handle] = binding
+            self._operation_handles[effective_operation_id] = handle
+            return handle
+
+    def reconcile_handle(
+        self,
+        *,
+        operation_id: str,
+        secret_ref: str,
+        generation: int,
+        project_id: str,
+        audience: str,
+        scopes: frozenset[str],
+        expires_at: datetime,
+    ) -> str | None:
+        with self._lock:
+            handle = self._operation_handles.get(operation_id)
+            if handle is None:
+                return None
+            authority_fingerprint = self._current_authority_fingerprint(
                 secret_ref,
                 generation,
-                project_id,
-                audience,
-                scopes,
-                instant,
             )
+            binding = self._handle_binding(
+                operation_id=operation_id,
+                secret_ref=secret_ref,
+                generation=generation,
+                project_id=project_id,
+                audience=audience,
+                scopes=scopes,
+                expires_at=expires_at,
+                authority_fingerprint=authority_fingerprint,
+            )
+            self._require_operation_binding(handle, binding)
+            if not self.contains(secret_ref, generation):
+                self._drop_handle(handle)
+                raise ProtectedCredentialStoreError(
+                    "protected credential generation is unavailable"
+                )
             return handle
 
     def validate_handle(
@@ -144,7 +270,7 @@ class WindowsCredentialStore:
             if binding is None:
                 raise ProtectedCredentialStoreError("unknown or invalidated credential handle")
             if binding.expires_at <= instant:
-                self._handles.pop(handle_ref, None)
+                self._drop_handle(handle_ref)
                 raise ProtectedCredentialStoreError("credential handle has expired")
             if binding.project_id != project_id:
                 raise ProtectedCredentialStoreError("credential handle belongs to another project")
@@ -154,8 +280,21 @@ class WindowsCredentialStore:
                 raise ProtectedCredentialStoreError(
                     "credential handle does not authorize requested scope"
                 )
+            try:
+                current_authority = self._current_authority_fingerprint(
+                    binding.secret_ref,
+                    binding.generation,
+                )
+            except ProtectedCredentialStoreError:
+                self._drop_handle(handle_ref)
+                raise
+            if not hmac.compare_digest(current_authority, binding.authority_fingerprint):
+                self._drop_handle(handle_ref)
+                raise ProtectedCredentialStoreError(
+                    "credential handle authority was retired or superseded"
+                )
             if not self.contains(binding.secret_ref, binding.generation):
-                self._handles.pop(handle_ref, None)
+                self._drop_handle(handle_ref)
                 raise ProtectedCredentialStoreError(
                     "protected credential generation is unavailable"
                 )
@@ -176,7 +315,7 @@ class WindowsCredentialStore:
                 for handle_ref, binding in self._handles.items()
                 if binding.secret_ref == secret_ref and binding.generation == generation
             ]:
-                del self._handles[handle_ref]
+                self._drop_handle(handle_ref)
 
     def delete_secret(self, secret_ref: str, generation: int) -> bool:
         target = self._target(secret_ref, generation)
@@ -190,16 +329,99 @@ class WindowsCredentialStore:
                 raise _backend_error("delete", exc) from None
             return True
 
+    def delete_authority(self, secret_ref: str, generation: int) -> bool:
+        authority_target = self._authority_target(secret_ref, generation)
+        with self._lock:
+            if self.contains(secret_ref, generation):
+                raise ProtectedCredentialStoreError(
+                    "credential authority cannot be retired while secret material exists"
+                )
+            if self._read_password(authority_target) is None:
+                return False
+            try:
+                self._backend.delete_password(authority_target, _USERNAME)
+            except Exception as exc:
+                raise _backend_error("delete authority", exc) from None
+            return True
+
+    def _handle_binding(
+        self,
+        *,
+        operation_id: str,
+        secret_ref: str,
+        generation: int,
+        project_id: str,
+        audience: str,
+        scopes: frozenset[str],
+        expires_at: datetime,
+        authority_fingerprint: str,
+    ) -> _HandleBinding:
+        _nonempty("operation_id", operation_id)
+        self._target(secret_ref, generation)
+        _nonempty("project_id", project_id)
+        _nonempty("audience", audience)
+        if not scopes or any(not scope.strip() for scope in scopes):
+            raise ProtectedCredentialStoreError("credential handle scopes must not be empty")
+        return _HandleBinding(
+            operation_id,
+            secret_ref,
+            generation,
+            project_id,
+            audience,
+            scopes,
+            _aware(expires_at),
+            _fingerprint(authority_fingerprint),
+        )
+
+    def _current_authority_fingerprint(self, secret_ref: str, generation: int) -> str:
+        target = self._authority_target(secret_ref, generation)
+        existing = self._read_password(target)
+        if existing is None:
+            raise ProtectedCredentialStoreError(
+                "protected credential authority binding is unavailable"
+            )
+        return _fingerprint(existing)
+
+    def _require_operation_binding(
+        self,
+        handle_ref: str,
+        expected: _HandleBinding,
+    ) -> None:
+        actual = self._handles.get(handle_ref)
+        if actual is None:
+            raise ProtectedCredentialStoreError(
+                "credential handle operation index references missing handle"
+            )
+        if actual != expected:
+            raise ProtectedCredentialStoreError(
+                "credential handle operation identity conflicts with existing binding"
+            )
+
+    def _drop_handle(self, handle_ref: str) -> None:
+        binding = self._handles.pop(handle_ref, None)
+        if binding is not None and self._operation_handles.get(binding.operation_id) == handle_ref:
+            del self._operation_handles[binding.operation_id]
+
     def _target(self, secret_ref: str, generation: int) -> str:
+        digest = self._reference_digest(secret_ref, generation)
+        return self._bounded_target(f"{self.service_prefix}.{digest}.g{generation}")
+
+    def _authority_target(self, secret_ref: str, generation: int) -> str:
+        digest = self._reference_digest(secret_ref, generation)
+        return self._bounded_target(
+            f"{self.service_prefix}.{_AUTHORITY_SEGMENT}.{digest}.g{generation}"
+        )
+
+    def _reference_digest(self, secret_ref: str, generation: int) -> str:
         _nonempty("secret_ref", secret_ref)
-        if generation < 1:
-            raise ProtectedCredentialStoreError("credential generation must be positive")
+        _positive_generation(generation)
         try:
             encoded_ref = secret_ref.encode("utf-8")
         except UnicodeEncodeError:
             raise ProtectedCredentialStoreError("secret_ref must be valid UTF-8 text") from None
-        digest = hashlib.sha256(encoded_ref).hexdigest()
-        target = f"{self.service_prefix}.{digest}.g{generation}"
+        return hashlib.sha256(encoded_ref).hexdigest()
+
+    def _bounded_target(self, target: str) -> str:
         if len(target) > _GENERIC_TARGET_MAX_CHARS:
             raise ProtectedCredentialStoreError("credential target exceeds Windows target limit")
         return target
@@ -236,6 +458,156 @@ def create_windows_credential_store() -> WindowsCredentialStore:
     return WindowsCredentialStore(backend)
 
 
+def _current_user_scope_key() -> str:
+    """Return a stable hash of the primary Windows user SID for cross-session namespacing."""
+
+    windll = getattr(ctypes, "windll", None)
+    if windll is None:
+        # Non-Windows unit tests can monkeypatch the Win32 event surface without
+        # fabricating a real access token. Real Windows CPython always exposes windll.
+        return "nonwindows-test-user"
+    try:
+        kernel32 = windll.kernel32
+        advapi32 = windll.advapi32
+        get_current_process = kernel32.GetCurrentProcess
+        get_current_process.restype = ctypes.c_void_p
+        open_process_token = advapi32.OpenProcessToken
+        open_process_token.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        open_process_token.restype = ctypes.c_int
+        get_token_information = advapi32.GetTokenInformation
+        get_token_information.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        get_token_information.restype = ctypes.c_int
+        get_length_sid = advapi32.GetLengthSid
+        get_length_sid.argtypes = [ctypes.c_void_p]
+        get_length_sid.restype = ctypes.c_uint32
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [ctypes.c_void_p]
+        close_handle.restype = ctypes.c_int
+
+        token = ctypes.c_void_p()
+        if not open_process_token(
+            get_current_process(),
+            _TOKEN_QUERY,
+            ctypes.byref(token),
+        ):
+            raise ProtectedCredentialStoreError(
+                "credential authority user identity could not open process token"
+            )
+        try:
+            required = ctypes.c_uint32(0)
+            get_token_information(
+                token,
+                _TOKEN_USER,
+                None,
+                0,
+                ctypes.byref(required),
+            )
+            if required.value == 0:
+                raise ProtectedCredentialStoreError(
+                    "credential authority user identity size is unavailable"
+                )
+            buffer = ctypes.create_string_buffer(required.value)
+            if not get_token_information(
+                token,
+                _TOKEN_USER,
+                buffer,
+                required.value,
+                ctypes.byref(required),
+            ):
+                raise ProtectedCredentialStoreError(
+                    "credential authority user identity could not be read"
+                )
+            sid_pointer = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p))[0]
+            if not sid_pointer:
+                raise ProtectedCredentialStoreError(
+                    "credential authority user identity is invalid"
+                )
+            sid_length = int(get_length_sid(sid_pointer))
+            if sid_length <= 0:
+                raise ProtectedCredentialStoreError(
+                    "credential authority user identity length is invalid"
+                )
+            sid_bytes = ctypes.string_at(sid_pointer, sid_length)
+            return hashlib.sha256(sid_bytes).hexdigest()
+        finally:
+            close_handle(token)
+    except ProtectedCredentialStoreError:
+        raise
+    except Exception as exc:
+        raise ProtectedCredentialStoreError(
+            f"credential authority user identity failed ({type(exc).__name__})"
+        ) from None
+
+
+def _ensure_process_authority_owner(service_prefix: str) -> None:
+    if sys.platform != "win32":
+        return
+    # Preserve a narrow fake-Windows unit seam. Physical Windows always exposes
+    # ctypes.WinDLL, and the real gate is exercised by the PF3 Windows proof.
+    if not hasattr(ctypes, "WinDLL"):
+        return
+    try:
+        encoded_prefix = service_prefix.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ProtectedCredentialStoreError(
+            "credential service prefix must be valid UTF-8 text"
+        ) from None
+    user_scope = _current_user_scope_key()
+    lock_key = hashlib.sha256(encoded_prefix).hexdigest()
+    process_key = f"{user_scope}:{lock_key}"
+    with _PROCESS_AUTHORITY_LOCK_GUARD:
+        if process_key in _PROCESS_AUTHORITY_HANDLES:
+            return
+        object_name = (
+            "Global\\NikaCore.ProductFactory.CredentialAuthority."
+            f"{user_scope}.{lock_key}"
+        )
+        try:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            create_event = kernel32.CreateEventW
+            create_event.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_wchar_p,
+            ]
+            create_event.restype = ctypes.c_void_p
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = [ctypes.c_void_p]
+            close_handle.restype = ctypes.c_int
+
+            ctypes.set_last_error(0)
+            raw_handle = create_event(None, 0, 0, object_name)
+            last_error = ctypes.get_last_error()
+            if not raw_handle:
+                raise ProtectedCredentialStoreError(
+                    f"credential authority host initialization failed (winerror={last_error})"
+                )
+            handle = int(raw_handle)
+            if last_error == _ERROR_ALREADY_EXISTS:
+                close_handle(ctypes.c_void_p(handle))
+                raise ProtectedCredentialStoreError(
+                    "another credential authority host is active"
+                )
+        except ProtectedCredentialStoreError:
+            raise
+        except Exception as exc:
+            raise ProtectedCredentialStoreError(
+                f"credential authority host initialization failed ({type(exc).__name__})"
+            ) from None
+        _PROCESS_AUTHORITY_HANDLES[process_key] = handle
+
+
 def _validated_material(raw_secret: str) -> str:
     if not isinstance(raw_secret, str):
         raise TypeError("credential material must be text")
@@ -253,6 +625,22 @@ def _material_bytes(raw_secret: str) -> bytes:
         raise ProtectedCredentialStoreError(
             "credential material must be valid Unicode text"
         ) from None
+
+
+def _fingerprint(value: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError("credential authority fingerprint must be text")
+    if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+        raise ProtectedCredentialStoreError(
+            "credential authority fingerprint must be canonical sha256"
+        )
+    return value
+
+
+def _positive_generation(generation: int) -> int:
+    if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+        raise ProtectedCredentialStoreError("credential generation must be a positive integer")
+    return generation
 
 
 def _nonempty(label: str, value: str) -> str:

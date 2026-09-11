@@ -11,6 +11,7 @@ from nika_core.product_factory_credentials import (
     CredentialBrokerError,
     CredentialBrokerSnapshot,
     SecretRef,
+    credential_authority_fingerprint,
 )
 
 NOW = datetime(2026, 8, 21, 13, 30, tzinfo=UTC)
@@ -21,13 +22,54 @@ SECRET_REF = "secret-a"
 @dataclass(slots=True)
 class _ProtectedStore:
     material: set[tuple[str, int]] = field(default_factory=set)
+    authorities: dict[tuple[str, int], str] = field(default_factory=dict)
+    operation_handles: dict[str, str] = field(default_factory=dict)
 
     def contains(self, secret_ref: str, generation: int) -> bool:
         return (secret_ref, generation) in self.material
 
+    def bind_authority(
+        self,
+        *,
+        secret_ref: str,
+        generation: int,
+        authority_fingerprint: str,
+    ) -> None:
+        key = (secret_ref, generation)
+        existing = self.authorities.get(key)
+        if existing is not None and existing != authority_fingerprint:
+            raise AssertionError("authority conflict")
+        self.authorities[key] = authority_fingerprint
+
+    def authority_matches(
+        self,
+        *,
+        secret_ref: str,
+        generation: int,
+        authority_fingerprint: str,
+    ) -> bool:
+        return self.authorities.get((secret_ref, generation)) == authority_fingerprint
+
+    def retire_authority(
+        self,
+        *,
+        secret_ref: str,
+        generation: int,
+        current_authority_fingerprint: str,
+        retired_authority_fingerprint: str,
+    ) -> None:
+        key = (secret_ref, generation)
+        existing = self.authorities.get(key)
+        if existing == retired_authority_fingerprint:
+            return
+        if existing != current_authority_fingerprint:
+            raise AssertionError("authority retirement conflict")
+        self.authorities[key] = retired_authority_fingerprint
+
     def issue_handle(
         self,
         *,
+        operation_id: str,
         secret_ref: str,
         generation: int,
         project_id: str,
@@ -38,26 +80,47 @@ class _ProtectedStore:
         del project_id, audience, scopes, expires_at
         if not self.contains(secret_ref, generation):
             raise AssertionError("missing protected material")
-        return f"handle:{secret_ref}:{generation}"
+        return self.operation_handles.setdefault(
+            operation_id,
+            f"handle:{secret_ref}:{generation}:{operation_id}",
+        )
+
+    def reconcile_handle(
+        self,
+        *,
+        operation_id: str,
+        secret_ref: str,
+        generation: int,
+        project_id: str,
+        audience: str,
+        scopes: frozenset[str],
+        expires_at: datetime,
+    ) -> str | None:
+        del secret_ref, generation, project_id, audience, scopes, expires_at
+        return self.operation_handles.get(operation_id)
 
     def revoke_handles(self, secret_ref: str, generation: int) -> None:
         del secret_ref, generation
+        self.operation_handles.clear()
 
 
 def _broker() -> tuple[CredentialBroker, _ProtectedStore]:
     store = _ProtectedStore({(SECRET_REF, 1)})
-    broker = CredentialBroker(store)
-    broker.register_secret(
-        SecretRef(
-            SECRET_REF,
-            PROJECT_ID,
-            "github",
-            "repository automation",
-            frozenset({"repo:read"}),
-            frozenset({"github-api"}),
-        ),
-        now=NOW,
+    reference = SecretRef(
+        SECRET_REF,
+        PROJECT_ID,
+        "github",
+        "repository automation",
+        frozenset({"repo:read"}),
+        frozenset({"github-api"}),
     )
+    store.bind_authority(
+        secret_ref=reference.secret_ref,
+        generation=reference.generation,
+        authority_fingerprint=credential_authority_fingerprint(reference),
+    )
+    broker = CredentialBroker(store)
+    broker.register_secret(reference, now=NOW)
     return broker, store
 
 

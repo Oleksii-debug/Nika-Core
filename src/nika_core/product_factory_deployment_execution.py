@@ -149,6 +149,14 @@ class DeploymentExecutionCoordinator:
                 )
             )
         try:
+            credential = self.credentials.get_secret_ref(
+                project_id=record.spec.intent.project_id,
+                secret_ref=record.spec.credential_ref,
+            )
+            if not _provider_ref_matches(credential.provider, record.spec.intent.environment.provider_ref):
+                raise CredentialBrokerError(
+                    "credential provider does not match deployment environment"
+                )
             credential_lease = self.credentials.issue_lease(
                 project_id=record.spec.intent.project_id,
                 secret_ref=record.spec.credential_ref,
@@ -324,6 +332,14 @@ class DeploymentExecutionCoordinator:
     def _save(self, record: DeploymentExecutionRecord) -> DeploymentExecutionRecord:
         self._records[record.spec.operation_id] = record
         return record
+
+
+def _provider_ref_matches(credential_provider: str, provider_ref: str) -> bool:
+    return provider_ref in {
+        credential_provider,
+        f"provider:{credential_provider}",
+        f"provider://{credential_provider}",
+    }
 
 
 def _aware(value: datetime) -> datetime:
