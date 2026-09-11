@@ -109,6 +109,12 @@ def _file_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
     )
 
 
+def _file_anchor_identity(info: os.stat_result) -> tuple[int, int, int]:
+    """Cross-stat identity fields used to bind an opened descriptor to its pathname."""
+
+    return (int(info.st_dev), int(info.st_ino), int(info.st_size))
+
+
 def _inventory_identity(
     root: Path,
     files: list[tuple[Path, os.stat_result]],
@@ -139,17 +145,18 @@ def _hash_file(
         if not stat.S_ISREG(opened.st_mode):
             raise ValueError("model cache file changed before hashing")
 
-        # Compare pathname snapshots with pathname snapshots and descriptor snapshots
-        # with descriptor snapshots. Python's Windows path-stat implementation may
-        # expose metadata through a different OS query than fstat(), so treating all
-        # five stat fields as one cross-API identity can false-reject an unchanged file.
-        # A replacement between inventory and open is still caught by the immediate
-        # second lstat() of the pathname; descriptor mutation is caught independently.
+        # Keep pathname metadata comparisons in their own stat domain because Python's
+        # Windows path-stat and descriptor-stat APIs can expose different ctime values.
+        # Device + inode + size are nevertheless the stable cross-domain anchor that
+        # proves the descriptor we are about to read is the file inventoried at this
+        # pathname. Without that binding, a same-size replacement could be opened and
+        # the original pathname restored before the second lstat(), yielding evidence
+        # for bytes that are no longer present in the final inventory.
         after_open = _lstat_plain(path)
         _resolved_within_root(root, path)
         if (
             _file_identity(after_open) != _file_identity(before)
-            or int(opened.st_size) != int(before.st_size)
+            or _file_anchor_identity(opened) != _file_anchor_identity(before)
         ):
             raise ValueError("model cache file changed before hashing")
 
