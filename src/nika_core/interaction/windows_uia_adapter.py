@@ -1,14 +1,14 @@
 """Strict Windows UIA adapter with live pre-effect semantic authority revalidation.
 
 The incumbent implementation lives in ``windows_uia_adapter_impl`` unchanged so its
-RuntimeId + generation identity and pywinauto tracking remain reviewable.  This
-module adds the action-boundary fail-closed contract: an observed ControlNode may
-cause an effect only while the exact live UIA identity still has the same semantic
-role/name/actionability and the required UIA pattern.
+RuntimeId + generation identity and pywinauto tracking remain reviewable. This
+module adds the action-boundary fail-closed contract and a provider-native focus
+read that maps UIA ``GetFocusedElement`` back to the incumbent exact identity.
 """
 
 from __future__ import annotations
 
+import logging
 import time
 
 from .domain import (
@@ -20,7 +20,9 @@ from .domain import (
     UnsupportedInteractionError,
 )
 from .windows_uia_adapter_impl import (
-    PywinautoUIABackend,
+    PywinautoUIABackend as _BasePywinautoUIABackend,
+)
+from .windows_uia_adapter_impl import (
     UIABackendMeasurement,
     UIAControlRecord,
     UIAWindowRecord,
@@ -31,6 +33,8 @@ from .windows_uia_adapter_impl import (
 from .windows_uia_adapter_impl import (
     WindowsUIAInteractionAdapter as _BaseWindowsUIAInteractionAdapter,
 )
+
+logger = logging.getLogger(__name__)
 
 _REQUIRED_PATTERN = {
     InteractionAction.INVOKE: "Invoke",
@@ -44,8 +48,74 @@ _FOCUS_ACK_ATTEMPTS = 20
 _FOCUS_ACK_DELAY_SECONDS = 0.05
 
 
+class PywinautoUIABackend(_BasePywinautoUIABackend):
+    """Incumbent backend with provider-native exact focus observation."""
+
+    def focused_identity(
+        self,
+        hwnd: int,
+    ) -> tuple[tuple[int, ...], int] | None:
+        """Map UIA GetFocusedElement to the exact live Nika identity.
+
+        Tree-wide ``CurrentHasKeyboardFocus`` can lag or be omitted by a provider
+        after successful ``SetFocus``. UIA exposes the actual input-focus element
+        directly. This remains read-only: the focused element is accepted only
+        when UIA CompareElements binds it to exactly one current tracked
+        RuntimeId/generation. No name, bounds, coordinates, or RuntimeId-only
+        fallback is used.
+        """
+
+        try:
+            from pywinauto.controls.uiawrapper import UIAWrapper
+            from pywinauto.windows.uia_element_info import UIAElementInfo
+
+            focused_wrapper = UIAWrapper(UIAElementInfo.get_active())
+        except Exception as exc:  # noqa: BLE001 - transient provider focus query
+            logger.debug("UIA GetFocusedElement unavailable: %r", exc)
+            return None
+
+        focused_runtime_id = self._runtime_id(focused_wrapper.element_info)
+        matches: list[UIAControlRecord] = []
+        for wrapper, record in self._pairs(hwnd, "control"):
+            same = self._same_element(wrapper, focused_wrapper)
+            if same is True:
+                matches.append(record)
+            elif same is None and record.runtime_id == focused_runtime_id:
+                raise AmbiguousTargetError(
+                    "cannot bind provider focused element to exact RuntimeId/generation"
+                )
+
+        if len(matches) > 1:
+            raise AmbiguousTargetError(
+                "provider focused element matched multiple UIA controls"
+            )
+        if not matches:
+            return None
+        record = matches[0]
+        if record.runtime_id is None:
+            return None
+        return record.runtime_id, record.element_generation
+
+
 class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
     """Incumbent adapter plus exact live semantic revalidation before effects."""
+
+    def __init__(
+        self,
+        *,
+        process_id: int,
+        window_title: str | None = None,
+        native_handle: int | None = None,
+        view: str = "control",
+        backend: WindowsUIABackend | None = None,
+    ) -> None:
+        super().__init__(
+            process_id=process_id,
+            window_title=window_title,
+            native_handle=native_handle,
+            view=view,
+            backend=backend or PywinautoUIABackend(),
+        )
 
     def _revalidate_action_authority(
         self,
@@ -128,13 +198,7 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
         runtime_id: tuple[int, ...],
         generation: int,
     ) -> None:
-        """Wait read-only for provider focus acknowledgement of one exact effect.
-
-        Some Windows UIA providers acknowledge ``SetFocus`` before their focused
-        identity property catches up.  The focus effect is therefore issued once;
-        this helper only polls live authority for that exact RuntimeId/generation.
-        Any replacement, ambiguity or semantic/actionability drift fails closed.
-        """
+        """Wait read-only for provider focus acknowledgement of one exact effect."""
 
         expected_identity = (runtime_id, generation)
         last_focused: tuple[tuple[int, ...], int] | None = None
