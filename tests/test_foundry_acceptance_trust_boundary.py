@@ -88,3 +88,39 @@ def test_identity_authority_is_normalized_and_bounded_before_git_or_child(
 
     with pytest.raises(RuntimeError, match="normalized non-empty text"):
         harness.run_acceptance(args, repo_root=tmp_path)
+
+
+def test_acceptance_output_inside_worktree_is_rejected(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    output = repo_root / "foundry-local-acceptance-evidence.json"
+
+    with pytest.raises(RuntimeError, match="outside the repository worktree"):
+        harness._write_acceptance_evidence(
+            {"schema": harness.SCHEMA}, output=output, repo_root=repo_root
+        )
+
+    assert not output.exists()
+
+
+def test_pre_and_post_reboot_evidence_remain_external_to_worktree(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    evidence_root = tmp_path / "retained-evidence"
+    outputs = (
+        evidence_root / "foundry-local-acceptance-pre-reboot.json",
+        evidence_root / "foundry-local-acceptance-post-reboot.json",
+    )
+
+    written = [
+        harness._write_acceptance_evidence(
+            {"schema": harness.SCHEMA, "run": index},
+            output=output,
+            repo_root=repo_root,
+        )
+        for index, output in enumerate(outputs, start=1)
+    ]
+
+    assert written == [output.resolve() for output in outputs]
+    assert all(output.is_file() for output in outputs)
+    assert list(repo_root.iterdir()) == []
