@@ -9,6 +9,7 @@ on:
       - "tests/test_interaction_windows_uia_adapter.py"
       - "tests/test_interaction_pywinauto_identity.py"
       - "tests/test_interaction_windows_uia_action_authority.py"
+      - "tests/test_interaction_windows_uia_focus_ack.py"
       - ".github/workflows/dev04-windows-uia-proof.yml"
   workflow_dispatch:
 
@@ -46,5 +47,6 @@ jobs:
           tests/test_interaction_windows_uia_adapter.py
           tests/test_interaction_pywinauto_identity.py
           tests/test_interaction_windows_uia_action_authority.py
+          tests/test_interaction_windows_uia_focus_ack.py
       - name: Run live WinForms semantic UIA proof
         run: python scripts/dev04_windows_uia_proof.py
