@@ -5,7 +5,11 @@ from dataclasses import replace
 import pytest
 
 import nika_core.interaction.windows_uia_adapter as uia_module
-from nika_core.interaction.domain import AmbiguousTargetError, StaleSnapshotError
+from nika_core.interaction.domain import (
+    AmbiguousTargetError,
+    InteractionAction,
+    StaleSnapshotError,
+)
 from nika_core.interaction.windows_uia_adapter import (
     UIAControlRecord,
     UIAWindowRecord,
@@ -106,6 +110,20 @@ def test_focus_effect_is_issued_once_while_provider_acknowledgement_is_polled(
     assert backend.focused_reads == 3
 
 
+def test_focus_action_uses_same_single_effect_acknowledgement_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _remove_focus_sleep(monkeypatch)
+    backend = FocusAckBackend("lag_then_success")
+    adapter = _adapter(backend)
+    node = adapter.observe().controls[0]
+
+    adapter.act(node, InteractionAction.FOCUS, None)
+
+    assert backend.focus_calls == 1
+    assert backend.focused_reads == 3
+
+
 def test_focus_acknowledgement_rejects_runtime_generation_replacement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -159,5 +177,43 @@ def test_focus_acknowledgement_times_out_without_reissuing_focus(
     with pytest.raises(StaleSnapshotError, match="timed out"):
         adapter.focus(node)
 
+    assert backend.focus_calls == 1
+    assert backend.focused_reads == 3
+
+
+def test_restore_focus_waits_for_same_identity_without_reissuing_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _remove_focus_sleep(monkeypatch)
+    backend = FocusAckBackend("lag_then_success")
+    adapter = _adapter(backend)
+    node = adapter.observe().controls[0]
+
+    assert adapter.restore_focus(node.node_id)
+    assert backend.focus_calls == 1
+    assert backend.focused_reads == 3
+
+
+def test_restore_focus_fails_closed_on_identity_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _remove_focus_sleep(monkeypatch)
+    backend = FocusAckBackend("replacement")
+    adapter = _adapter(backend)
+    node = adapter.observe().controls[0]
+
+    assert not adapter.restore_focus(node.node_id)
+    assert backend.focus_calls == 1
+
+
+def test_restore_focus_timeout_does_not_reissue_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _remove_focus_sleep(monkeypatch, attempts=3)
+    backend = FocusAckBackend("timeout")
+    adapter = _adapter(backend)
+    node = adapter.observe().controls[0]
+
+    assert not adapter.restore_focus(node.node_id)
     assert backend.focus_calls == 1
     assert backend.focused_reads == 3
