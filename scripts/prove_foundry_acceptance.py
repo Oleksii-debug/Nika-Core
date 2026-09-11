@@ -35,12 +35,24 @@ def _git(repo_root: Path, *args: str) -> str:
 
 
 def _tracked_worktree_is_clean(repo_root: Path) -> bool:
-    return not _git(repo_root, "status", "--porcelain", "--untracked-files=no")
+    return not _git(repo_root, "status", "--porcelain", "--untracked-files=all")
 
 
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise RuntimeError(message)
+
+
+def _require_normalized_text(value: Any, *, label: str, max_length: int) -> str:
+    _require(isinstance(value, str), f"{label} must be text")
+    _require(
+        bool(value)
+        and value == value.strip()
+        and len(value) <= max_length
+        and not any(ord(char) < 32 for char in value),
+        f"{label} must be normalized non-empty text",
+    )
+    return value
 
 
 def _validate_model_evidence(
@@ -182,9 +194,16 @@ def _run_child(args: argparse.Namespace, *, output: Path, repo_root: Path) -> di
 
 def run_acceptance(args: argparse.Namespace, *, repo_root: Path) -> dict[str, Any]:
     _require(platform.system() == "Windows", "real Foundry acceptance must run on Windows")
+    _require_normalized_text(args.model, label="model alias", max_length=512)
+    _require_normalized_text(args.model_id, label="model ID", max_length=1024)
+    _require_normalized_text(
+        args.model_license,
+        label="reviewed model-license reference",
+        max_length=2048,
+    )
     _require(
         _tracked_worktree_is_clean(repo_root),
-        "tracked worktree must be clean for SHA-bound proof",
+        "worktree must be clean, including untracked files, for SHA-bound proof",
     )
     start_sha = _git(repo_root, "rev-parse", "HEAD")
     _require(len(start_sha) == 40, "could not resolve exact Nika commit SHA")
@@ -205,7 +224,10 @@ def run_acceptance(args: argparse.Namespace, *, repo_root: Path) -> dict[str, An
 
     final_sha = _git(repo_root, "rev-parse", "HEAD")
     _require(final_sha == start_sha, "Nika SHA changed during Foundry acceptance")
-    _require(_tracked_worktree_is_clean(repo_root), "tracked worktree changed during acceptance")
+    _require(
+        _tracked_worktree_is_clean(repo_root),
+        "worktree changed or gained untracked files during acceptance",
+    )
 
     proof_script = repo_root / "scripts" / "prove_foundry_local.py"
     return {
