@@ -11,6 +11,7 @@ from nika_core.intelligence.contracts import (
     DeterministicPlanProvenance,
     WorldState,
 )
+from nika_core.tools import tool_arguments_fingerprint
 
 _STATE_VERSION = "world-state/v1"
 
@@ -100,10 +101,13 @@ def _build_provenance(
                 "adds": sorted(action.adds),
                 "removes": sorted(action.removes),
                 "tool_id": action.tool_id,
-                # Bind execution semantics without persisting raw argument names or values.
-                # DeterministicAction owns an immutable defensive snapshot, so this digest and
-                # ToolCall's later dict(action.arguments) consume the same frozen identity.
-                "arguments_fingerprint": _fingerprint(dict(action.arguments)),
+                # Reuse ToolExecutor's canonical argument identity. Raw names/values never enter
+                # durable provenance; only the canonical digest is nested inside the rule digest.
+                "arguments_fingerprint": (
+                    tool_arguments_fingerprint(action.arguments)
+                    if action.tool_id is not None
+                    else None
+                ),
                 "registered": True,
             }
         )
