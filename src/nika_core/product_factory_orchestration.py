@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ntpath
 import posixpath
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -438,15 +439,16 @@ class ProductRepositoryGraph:
         seen: dict[tuple[str, str], str] = {}
         for repository in self.repositories:
             provider = repository.provider.strip().casefold()
-            locator = repository.locator.strip()
+            locator = repository.locator
             if provider == "github":
-                locator = locator.rstrip("/").casefold()
+                locator = locator.strip().rstrip("/").casefold()
             elif provider == "local-git":
-                locator = posixpath.normpath(locator.replace("\\", "/"))
-                if locator != "/":
-                    locator = locator.rstrip("/")
+                locator = _normalize_local_git_locator(
+                    locator,
+                    windows_path_semantics=repository.windows_path_semantics,
+                )
             else:
-                locator = locator.rstrip("/")
+                locator = locator.strip().rstrip("/")
             key = (provider, locator)
             previous = seen.get(key)
             if previous is not None and previous != repository.repository_id:
@@ -581,6 +583,77 @@ class ProductRepositoryGraph:
         if not {repo_id for repo_id, _ in result}.issubset(repos):
             raise RepositoryGraphError("lease path repository mismatch")
         return tuple(result)
+
+
+def _normalize_local_git_locator(locator: str, *, windows_path_semantics: bool) -> str:
+    if not windows_path_semantics:
+        normalized = posixpath.normpath(locator.replace("\\", "/"))
+        return normalized if normalized == "/" else normalized.rstrip("/")
+
+    raw = locator.replace("\\", "/")
+    if raw.startswith(("//?/", "//./")):
+        raise RepositoryGraphError("Windows local-git locator must not use a device namespace")
+
+    drive, tail = ntpath.splitdrive(locator)
+    is_unc = drive.startswith(("\\\\", "//"))
+    if drive and not is_unc and not tail.startswith(("\\", "/")):
+        raise RepositoryGraphError("Windows local-git locator must not be drive-relative")
+    if not drive and tail.startswith(("\\", "/")):
+        raise RepositoryGraphError("Windows local-git locator must not be root-relative")
+    if is_unc:
+        unc = drive.replace("\\", "/").lstrip("/")
+        unc_parts = unc.split("/")
+        if len(unc_parts) != 2 or any(not part for part in unc_parts):
+            raise RepositoryGraphError("Windows local-git UNC locator requires server and share")
+        _validate_windows_locator_component(unc_parts[0], original=locator)
+        _validate_windows_locator_component(unc_parts[1], original=locator)
+    elif drive:
+        if len(drive) != 2 or drive[1] != ":" or not drive[0].isalpha():
+            raise RepositoryGraphError("Windows local-git locator has an unsafe drive identity")
+
+    path_tail = tail.replace("\\", "/")
+    for component in path_tail.split("/"):
+        if not component or component in {".", ".."}:
+            continue
+        _validate_windows_locator_component(component, original=locator)
+
+    normalized = ntpath.normcase(ntpath.normpath(locator)).replace("\\", "/")
+    if normalized.startswith("//"):
+        return "//" + normalized.lstrip("/").rstrip("/")
+    return normalized.rstrip("/") or normalized
+
+
+def _validate_windows_locator_component(component: str, *, original: str) -> None:
+    reserved_stems = {
+        "aux",
+        "con",
+        "conin$",
+        "conout$",
+        "nul",
+        "prn",
+        *(f"com{index}" for index in range(10)),
+        *(f"lpt{index}" for index in range(10)),
+        "com¹",
+        "com²",
+        "com³",
+        "lpt¹",
+        "lpt²",
+        "lpt³",
+    }
+    invalid_characters = frozenset('<>:"|?*')
+    if component.startswith(" ") or component.endswith((" ", ".")):
+        raise RepositoryGraphError(
+            f"Windows local-git locator component has unsafe edge identity: {original!r}"
+        )
+    if any(character in invalid_characters or ord(character) < 32 for character in component):
+        raise RepositoryGraphError(
+            f"Windows local-git locator component contains reserved syntax: {original!r}"
+        )
+    stem = component.split(".", 1)[0].casefold()
+    if stem in reserved_stems:
+        raise RepositoryGraphError(
+            f"Windows local-git locator component uses a reserved device name: {original!r}"
+        )
 
 
 def _normalize_repo_path(path: str, *, windows_path_semantics: bool = False) -> str:
