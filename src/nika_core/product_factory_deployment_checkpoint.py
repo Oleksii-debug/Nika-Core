@@ -315,6 +315,15 @@ class DurableDeploymentFabric(DeploymentFabric):
         snapshot = self.snapshot()
         if not self._rollback_health_by_intent:
             return snapshot
+        unresolved_staging_projects = {
+            record.intent.project_id
+            for record in snapshot.records
+            if (
+                record.state is DeploymentState.UNCERTAIN
+                and record.intent.environment.tier is EnvironmentTier.STAGING
+                and record.intent.intent_id in self._rollback_health_by_intent
+            )
+        }
         return replace(
             snapshot,
             records=tuple(
@@ -329,6 +338,16 @@ class DurableDeploymentFabric(DeploymentFabric):
                 )
                 else record
                 for record in snapshot.records
+            ),
+            healthy_staging=tuple(
+                entry
+                for entry in snapshot.healthy_staging
+                if entry[0] not in unresolved_staging_projects
+            ),
+            exact_healthy_staging=tuple(
+                entry
+                for entry in snapshot.exact_healthy_staging
+                if entry[0] not in unresolved_staging_projects
             ),
         )
 
