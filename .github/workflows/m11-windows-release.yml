@@ -8,10 +8,13 @@ on:
       - "src/nika_core/ui/**"
       - "scripts/nika_windows.py"
       - "scripts/m11_release.py"
+      - "scripts/m11_sbom_evidence.py"
       - "scripts/m5_uia_proof.ps1"
       - "scripts/v01_autostart_uia_proof.ps1"
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
+      - "tests/test_release_sbom.py"
+      - "tests/test_release_provenance_workflow.py"
       - "tests/test_qa_workflow_lineage.py"
       - "pyproject.toml"
       - ".github/workflows/m11-windows-release.yml"
@@ -24,10 +27,13 @@ on:
       - "src/nika_core/ui/**"
       - "scripts/nika_windows.py"
       - "scripts/m11_release.py"
+      - "scripts/m11_sbom_evidence.py"
       - "scripts/m5_uia_proof.ps1"
       - "scripts/v01_autostart_uia_proof.ps1"
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
+      - "tests/test_release_sbom.py"
+      - "tests/test_release_provenance_workflow.py"
       - "tests/test_qa_workflow_lineage.py"
       - "pyproject.toml"
       - ".github/workflows/m11-windows-release.yml"
@@ -60,6 +66,18 @@ jobs:
         run: python scripts/qa_assert_checkout_identity.py
       - name: Install GUI, packaging and test dependencies
         run: python -m pip install -e ".[gui,qa,dev]"
+      - name: Install exact runtime and capture dependency provenance
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ./build/m11 | Out-Null
+          $constraints = "./build/m11/pip-installed-constraints.txt"
+          python -m pip list --format=freeze --exclude nika-core |
+            Set-Content -Encoding utf8NoBOM $constraints
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip install --ignore-installed --quiet --constraint $constraints --report ./build/m11/pip-runtime-report.json ".[gui]"
+          $resolverExit = $LASTEXITCODE
+          Remove-Item $constraints -Force -ErrorAction SilentlyContinue
+          if ($resolverExit -ne 0) { exit $resolverExit }
       - name: Resolve canonical project version
         id: release
         shell: pwsh
@@ -68,12 +86,19 @@ jobs:
           if (-not $version) { throw 'Could not resolve [project].version from pyproject.toml' }
           "version=$version" >> $env:GITHUB_OUTPUT
       - name: Run M11 M12 source regressions
-        run: python -m pytest tests/test_m11_m12_release.py tests/test_qa_workflow_lineage.py -q
+        run: python -m pytest tests/test_m11_m12_release.py tests/test_release_sbom.py tests/test_release_provenance_workflow.py tests/test_qa_workflow_lineage.py -q
       - name: Build standalone one-dir Windows candidate, notices and manifest
         shell: pwsh
         run: >-
           python scripts/m11_release.py
           --source-sha '${{ env.NIKA_CANDIDATE_SHA }}'
+      - name: Generate and verify machine-readable supply-chain evidence
+        run: >-
+          python scripts/m11_sbom_evidence.py
+          --bundle ./dist/NikaCore
+          --report ./build/m11/pip-runtime-report.json
+          --source-sha '${{ env.NIKA_CANDIDATE_SHA }}'
+          --version '${{ steps.release.outputs.version }}'
       - name: Verify packaged WebView2 UI Automation and keyboard focus
         shell: pwsh
         run: ./scripts/v01_autostart_uia_proof.ps1 -ExePath ./dist/NikaCore/NikaCore.exe -WindowTitle 'Nika Core ${{ steps.release.outputs.version }}'
@@ -88,4 +113,6 @@ jobs:
             dist/NikaCore-${{ steps.release.outputs.version }}-windows-x64.zip
             dist/NikaCore/release-manifest.json
             dist/NikaCore/THIRD_PARTY_NOTICES.txt
+            dist/NikaCore/THIRD_PARTY_SUPPLY_CHAIN.json
+            dist/NikaCore/THIRD_PARTY_SBOM.cdx.json
           if-no-files-found: error
