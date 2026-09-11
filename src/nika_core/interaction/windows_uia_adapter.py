@@ -9,6 +9,8 @@ role/name/actionability and the required UIA pattern.
 
 from __future__ import annotations
 
+import time
+
 from .domain import (
     AmbiguousTargetError,
     ControlNode,
@@ -37,6 +39,8 @@ _REQUIRED_PATTERN = {
     InteractionAction.EXPAND: "ExpandCollapse",
     InteractionAction.COLLAPSE: "ExpandCollapse",
 }
+_FOCUS_ACK_ATTEMPTS = 20
+_FOCUS_ACK_DELAY_SECONDS = 0.05
 
 
 class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
@@ -92,6 +96,68 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
 
         return hwnd, runtime_id, generation
 
+    def _await_focus_acknowledgement(
+        self,
+        node: ControlNode,
+        *,
+        hwnd: int,
+        runtime_id: tuple[int, ...],
+        generation: int,
+    ) -> None:
+        """Wait read-only for provider focus acknowledgement of one exact effect.
+
+        Some Windows UIA providers acknowledge ``SetFocus`` before their focused
+        identity property catches up.  The focus effect is therefore issued once;
+        this helper only polls live authority for that exact RuntimeId/generation.
+        Any replacement, ambiguity or semantic/actionability drift fails closed.
+        """
+
+        expected_identity = (runtime_id, generation)
+        last_focused: tuple[tuple[int, ...], int] | None = None
+        for attempt in range(_FOCUS_ACK_ATTEMPTS):
+            if self._live_hwnd() != hwnd:
+                raise StaleSnapshotError(
+                    "UIA focus authority is stale: target window identity changed"
+                )
+            matches = [
+                record
+                for record in self.backend.enumerate_controls(hwnd, self.view)
+                if record.runtime_id == runtime_id
+                and record.element_generation == generation
+            ]
+            if not matches:
+                raise StaleSnapshotError(
+                    "UIA focus authority is stale: RuntimeId/generation is no longer live"
+                )
+            if len(matches) != 1:
+                raise AmbiguousTargetError(
+                    "UIA focus authority is ambiguous for the exact RuntimeId/generation"
+                )
+            live = matches[0]
+            if live.role != node.role or live.name != node.name:
+                raise StaleSnapshotError(
+                    "UIA focus authority changed: accessible role/name drifted"
+                )
+            if live.enabled != node.enabled or live.visible != node.visible:
+                raise StaleSnapshotError(
+                    "UIA focus authority changed: enabled/visible state drifted"
+                )
+            if not live.enabled or not live.visible:
+                raise UnsupportedInteractionError(
+                    "disabled/hidden controls cannot receive UIA focus authority"
+                )
+
+            last_focused = self.backend.focused_identity(hwnd)
+            if last_focused == expected_identity:
+                return
+            if attempt + 1 < _FOCUS_ACK_ATTEMPTS:
+                time.sleep(_FOCUS_ACK_DELAY_SECONDS)
+
+        raise StaleSnapshotError(
+            "UIA focus verification timed out waiting for exact "
+            f"RuntimeId/generation acknowledgement; last focused identity={last_focused!r}"
+        )
+
     def act(
         self,
         node: ControlNode,
@@ -107,8 +173,12 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
         )
         if action is InteractionAction.FOCUS:
             self.backend.focus(hwnd, runtime_id, generation)
-            if self.backend.focused_identity(hwnd) != (runtime_id, generation):
-                raise StaleSnapshotError("UIA focus verification failed")
+            self._await_focus_acknowledgement(
+                node,
+                hwnd=hwnd,
+                runtime_id=runtime_id,
+                generation=generation,
+            )
             return
 
         method = {
