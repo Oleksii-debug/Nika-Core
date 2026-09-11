@@ -29,6 +29,12 @@ def _make_store(tmp_path: Path) -> SQLiteStore:
             VALUES ('ws-a', 'A', ?, ?)""",
             (_TIMESTAMP, _TIMESTAMP),
         )
+        conn.execute(
+            """INSERT INTO research_sources(
+                source_id, workspace_id, kind, locator, created_at, updated_at
+            ) VALUES ('fixture-source', 'ws-a', 'local_file', 'approved:fixture-a', ?, ?)""",
+            (_TIMESTAMP, _TIMESTAMP),
+        )
     return store
 
 
@@ -43,6 +49,7 @@ def _request(text: str) -> KnowledgeIngestRequest:
         parser_name="text",
         parser_version="1",
         approved_by="approval:owner",
+        source_id="fixture-source",
     )
 
 
