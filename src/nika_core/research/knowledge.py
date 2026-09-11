@@ -16,6 +16,7 @@ from nika_core.research.normalize import normalize_text
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 NORMALIZATION_VERSION = "nika-normalize-nfkc-v1"
 CHUNKER_VERSION = "nika-research-chunker-v1"
+_LEGACY_ARTIFACT_PREFIX = "legacy:"
 
 
 class ConnectionProvider(Protocol):
@@ -74,7 +75,7 @@ class KnowledgeIngestRequest:
     parser_name: str
     parser_version: str
     approved_by: str
-    source_id: str | None = None
+    source_id: str
     raw_sha256: str | None = None
     visibility: KnowledgeVisibility = KnowledgeVisibility.WORKSPACE
     allowed_principals: tuple[str, ...] = ()
@@ -89,14 +90,15 @@ class KnowledgeIngestRequest:
             "parser_name": self.parser_name,
             "parser_version": self.parser_version,
             "approved_by": self.approved_by,
+            "source_id": self.source_id,
         }
         for name, value in required.items():
             if not value.strip():
                 raise ValueError(f"{name} is required")
+        if self.artifact_key.startswith(_LEGACY_ARTIFACT_PREFIX):
+            raise ValueError("legacy artifact keys are reserved for migration")
         if not isinstance(self.visibility, KnowledgeVisibility):
             raise TypeError("visibility must be a KnowledgeVisibility value")
-        if self.source_id is not None and not self.source_id.strip():
-            raise ValueError("source_id must be non-empty when provided")
         if self.raw_sha256 is not None and not _SHA256.fullmatch(self.raw_sha256):
             raise ValueError("raw_sha256 must be a lowercase SHA-256 hex digest")
         principals = tuple(principal.strip() for principal in self.allowed_principals)
@@ -391,8 +393,6 @@ class KnowledgeCorpus:
         conn: sqlite3.Connection,
         request: KnowledgeIngestRequest,
     ) -> None:
-        if request.source_id is None:
-            return
         local_rows = conn.execute(
             """SELECT workspace_id, locator FROM research_sources
             WHERE source_id=?""",
