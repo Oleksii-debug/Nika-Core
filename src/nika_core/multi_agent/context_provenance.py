@@ -6,7 +6,6 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import TypeAlias
 
 from nika_core.memory.contracts import MemoryRecord, MemoryScope
 from nika_core.multi_agent.research_results import (
@@ -72,7 +71,7 @@ class MemoryContextSelection:
             raise TypeError("record must be MemoryRecord")
 
 
-ContextSelection: TypeAlias = ResearchContextSelection | MemoryContextSelection
+type ContextSelection = ResearchContextSelection | MemoryContextSelection
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,7 +146,7 @@ class ModelContextAssembly:
         return {CONTEXT_PROVENANCE_METADATA_KEY: _canonical_json(payload)}
 
 
-ContextAuthorizer: TypeAlias = Callable[[ContextEvidenceProvenance], bool]
+type ContextAuthorizer = Callable[[ContextEvidenceProvenance], bool]
 
 
 def assemble_model_context(
@@ -209,7 +208,7 @@ def merge_context_provenance_metadata(
     if CONTEXT_PROVENANCE_METADATA_KEY in metadata:
         raise ValueError("context provenance metadata already exists")
     result = dict(metadata)
-    result.update(assembly.to_request_metadata())
+    result.update(assembly.to_request_metada))
     return result
 
 
@@ -286,8 +285,11 @@ def _validate_research_freshness(
             raise ContextProvenanceError(
                 f"research item freshness is unsafe: {evidence.freshness.value}"
             )
-        if source_kind is SourceKind.HTTP and evidence.freshness is FreshnessState.UNKNOWN:
-            raise ContextProvenanceError("HTTP research item freshness is unknown")
+        if source_kind is SourceKind.HTTP:
+            if evidence.freshness is None:
+                raise ContextProvenanceError("HTTP research item freshness is missing")
+            if evidence.freshness is FreshnessState.UNKNOWN:
+                raise ContextProvenanceError("HTTP research item freshness is unknown")
 
 
 def _bind_memory(

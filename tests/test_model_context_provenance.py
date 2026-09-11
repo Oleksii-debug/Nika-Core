@@ -12,6 +12,7 @@ from nika_core.model_gateway.contracts import ModelMessage, ModelRequest, Provid
 from nika_core.model_gateway.providers import OpenAICompatibleProvider
 from nika_core.multi_agent.context_provenance import (
     CONTEXT_PROVENANCE_METADATA_KEY,
+    ContextEvidenceProvenance,
     ContextProvenanceError,
     MemoryContextSelection,
     ModelContextAssembly,
@@ -30,7 +31,17 @@ from nika_core.research.models import (
 )
 
 
-def _assignment(source_id: str, *, member_id: str) -> SourceInspectionAssignment:
+def _assignment(
+    source_id: str,
+    *,
+    member_id: str,
+    source_kind: SourceKind = SourceKind.LOCAL_FILE,
+) -> SourceInspectionAssignment:
+    locator = (
+        f"https://example.invalid/{source_id}"
+        if source_kind is SourceKind.HTTP
+        else f"/trusted/{source_id}.txt"
+    )
     return SourceInspectionAssignment(
         team_id="team-1",
         task_id="task-1",
@@ -39,8 +50,8 @@ def _assignment(source_id: str, *, member_id: str) -> SourceInspectionAssignment
         source=SourceSpec(
             source_id=source_id,
             workspace_id="workspace-1",
-            kind=SourceKind.LOCAL_FILE,
-            locator=f"/trusted/{source_id}.txt",
+            kind=source_kind,
+            locator=locator,
         ),
         tool_call_id=f"tool-{source_id}",
         effect_id=f"effect-{source_id}",
@@ -53,7 +64,7 @@ def _result(
     *,
     document_id: str,
     snippet: str,
-    freshness: FreshnessState = FreshnessState.CURRENT,
+    freshness: FreshnessState | None = FreshnessState.CURRENT,
 ) -> ResearchResultSet:
     observed = "2026-09-10T17:00:00+00:00"
     return ResearchResultSet(
@@ -89,9 +100,10 @@ def _selection(
     member_id: str,
     document_id: str,
     snippet: str,
-    freshness: FreshnessState = FreshnessState.CURRENT,
+    freshness: FreshnessState | None = FreshnessState.CURRENT,
+    source_kind: SourceKind = SourceKind.LOCAL_FILE,
 ) -> ResearchContextSelection:
-    assignment = _assignment(source_id, member_id=member_id)
+    assignment = _assignment(source_id, member_id=member_id, source_kind=source_kind)
     return ResearchContextSelection(
         assignment=assignment,
         result_set=_result(
@@ -209,6 +221,42 @@ def test_stale_research_chunk_fails_before_authorization_or_rendering() -> None:
     assert authorizer_calls == []
 
 
+def test_http_research_requires_explicit_freshness_evidence() -> None:
+    missing = _selection(
+        "http-source",
+        member_id="worker-http",
+        document_id="doc-http-missing",
+        snippet="freshness must be proven before model injection",
+        freshness=None,
+        source_kind=SourceKind.HTTP,
+    )
+    authorizer_calls: list[str] = []
+
+    def authorizer(provenance: ContextEvidenceProvenance) -> bool:
+        authorizer_calls.append(provenance.source_id)
+        return True
+
+    with pytest.raises(ContextProvenanceError, match="freshness is missing"):
+        assemble_model_context((missing,), authorizer=authorizer)
+
+    assert authorizer_calls == []
+
+    current = _selection(
+        "http-source",
+        member_id="worker-http",
+        document_id="doc-http-current",
+        snippet="current evidence remains admissible",
+        freshness=FreshnessState.CURRENT,
+        source_kind=SourceKind.HTTP,
+    )
+    assembly = assemble_model_context((current,), authorizer=authorizer)
+
+    assert json.loads(assembly.model_text)["context_units"][0]["content"] == (
+        "current evidence remains admissible"
+    )
+    assert authorizer_calls == ["http-source"]
+
+
 def test_unauthorized_chunk_fails_closed_before_model_context_is_returned() -> None:
     allowed = _selection(
         "source-allowed",
@@ -224,8 +272,8 @@ def test_unauthorized_chunk_fails_closed_before_model_context_is_returned() -> N
     )
     seen: list[str] = []
 
-    def authorizer(provenance: object) -> bool:
-        source_id = getattr(provenance, "source_id")
+    def authorizer(provenance: ContextEvidenceProvenance) -> bool:
+        source_id = provenance.source_id
         seen.append(source_id)
         return source_id != "source-denied"
 
