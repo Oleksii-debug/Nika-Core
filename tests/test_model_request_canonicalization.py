@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import fields
 import math
+from dataclasses import fields
 from typing import Any
 
 import pytest
@@ -9,7 +9,6 @@ import pytest
 from nika_core.model_gateway.contracts import (
     ModelMessage,
     ModelRequest,
-    PrivacyClass,
     ProviderKind,
 )
 
