@@ -63,12 +63,24 @@ class UnifiedPlanningAdapter:
 
         action_by_up_name: dict[str, DeterministicAction] = {}
         for index, definition in enumerate(actions):
+            # Keep semantic no-ops out of the planning problem itself. The guard is dynamic:
+            # an action that is a no-op now can still become applicable after an earlier action
+            # changes one of its declared effect facts.
+            change_conditions = [up.Not(fluents[fact]) for fact in definition.adds]
+            change_conditions.extend(fluents[fact] for fact in definition.removes)
+            if not change_conditions:
+                continue
+
             up_name = f"action_{index}"
             planned_action = up.InstantaneousAction(up_name)
             for fact in definition.requires:
                 planned_action.add_precondition(fluents[fact])
             for fact in definition.forbids:
                 planned_action.add_precondition(up.Not(fluents[fact]))
+            if len(change_conditions) == 1:
+                planned_action.add_precondition(change_conditions[0])
+            else:
+                planned_action.add_precondition(up.Or(*change_conditions))
             for fact in definition.adds:
                 planned_action.add_effect(fluents[fact], True)
             for fact in definition.removes:
@@ -107,7 +119,7 @@ class UnifiedPlanningAdapter:
                 code=DeterministicErrorCode.UNSUPPORTED_PROBLEM,
             )
 
-        plan_steps: list[PlanStep] = []
+        planned_actions: list[DeterministicAction] = []
         for action_instance in actions_in_plan:
             definition = action_by_up_name.get(action_instance.action.name)
             if definition is None:
@@ -115,8 +127,56 @@ class UnifiedPlanningAdapter:
                     "planner returned an unknown action",
                     code=DeterministicErrorCode.PLANNER_FAILURE,
                 )
+            planned_actions.append(definition)
+        return self._validated_plan(
+            state=state,
+            goal=goal,
+            planned_actions=tuple(planned_actions),
+        )
+
+    @classmethod
+    def _validated_plan(
+        cls,
+        *,
+        state: WorldState,
+        goal: DeterministicGoal,
+        planned_actions: tuple[DeterministicAction, ...],
+    ) -> DeterministicPlan:
+        """Validate solver output against Nika semantics and drop state no-ops."""
+        simulated_facts = set(state.facts)
+        plan_steps: list[PlanStep] = []
+        seen_effectful_actions: set[str] = set()
+
+        for definition in planned_actions:
+            if not definition.requires <= simulated_facts or definition.forbids & simulated_facts:
+                raise DeterministicPlanningError(
+                    f"planner returned an inapplicable action: {definition.action_id}",
+                    code=DeterministicErrorCode.INVALID_PLAN,
+                )
+
+            changes_state = bool(
+                (definition.adds - simulated_facts) or (definition.removes & simulated_facts)
+            )
+            if not changes_state:
+                continue
+            if definition.action_id in seen_effectful_actions:
+                raise DeterministicPlanningError(
+                    f"planner returned a repeated deterministic action: {definition.action_id}",
+                    code=DeterministicErrorCode.INVALID_PLAN,
+                )
+
+            simulated_facts.difference_update(definition.removes)
+            simulated_facts.update(definition.adds)
             plan_steps.append(
                 PlanStep(action_id=definition.action_id, tool_id=definition.tool_id)
+            )
+            seen_effectful_actions.add(definition.action_id)
+
+        simulated_state = WorldState(frozenset(simulated_facts))
+        if not cls._goal_satisfied(simulated_state, goal):
+            raise DeterministicPlanningError(
+                "planner returned a plan that does not satisfy the goal",
+                code=DeterministicErrorCode.INVALID_PLAN,
             )
         return DeterministicPlan(steps=tuple(plan_steps))
 
