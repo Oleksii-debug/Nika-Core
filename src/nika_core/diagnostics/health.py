@@ -372,8 +372,11 @@ class HealthService:
         with TemporaryDirectory(prefix="nika-health-schema-") as directory:
             database = Path(directory) / "canonical.db"
             SQLiteStore(database).initialize()
-            with sqlite3.connect(database) as conn:
+            conn = sqlite3.connect(database)
+            try:
                 return HealthService._schema_signature(conn)
+            finally:
+                conn.close()
 
     @staticmethod
     def _schema_signature(conn: sqlite3.Connection) -> SchemaSignature:
