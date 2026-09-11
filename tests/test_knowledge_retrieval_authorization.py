@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from nika_core.research.knowledge import (
     KnowledgeIngestRequest,
     RetrievalScope,
 )
+from nika_core.research.knowledge_schema import _backfill_legacy_corpus, _rebuild_current_fts
 from nika_core.research.retrieval_authorization import (
     RetrievalAuthorizationBinding,
     StandingPermissionKnowledgeRetriever,
@@ -37,6 +39,7 @@ _BINDING = RetrievalAuthorizationBinding(
 def _setup(
     tmp_path: Path,
 ) -> tuple[
+    SQLiteStore,
     KnowledgeCorpus,
     StandingPermissionStore,
     StandingPermissionKnowledgeRetriever,
@@ -49,6 +52,12 @@ def _setup(
             VALUES (?, ?, ?, ?)""",
             ("ws", "Research", _START.isoformat(), _START.isoformat()),
         )
+        conn.execute(
+            """INSERT INTO research_sources(
+                source_id, workspace_id, kind, locator, created_at, updated_at
+            ) VALUES (?, ?, 'local_file', ?, ?, ?)""",
+            ("native-source", "ws", "approved:native", _START.isoformat(), _START.isoformat()),
+        )
     corpus = KnowledgeCorpus(store)
     permissions = StandingPermissionStore(store)
     permissions.initialize()
@@ -57,10 +66,11 @@ def _setup(
         corpus=corpus,
         permissions=permissions,
     )
-    return corpus, permissions, retriever
+    return store, corpus, permissions, retriever
 
 
 def _ingest(
+    store: SQLiteStore,
     corpus: KnowledgeCorpus,
     *,
     document_id: str,
@@ -68,18 +78,36 @@ def _ingest(
     text: str,
     legacy: bool = True,
 ) -> None:
-    artifact_key = f"legacy:{document_id}" if legacy else document_id
+    if legacy:
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO corpus_documents(
+                    document_id, workspace_id, normalized_sha256, title, media_type,
+                    normalized_text, created_at
+                ) VALUES (?, 'ws', ?, ?, 'text/plain', ?, ?)""",
+                (
+                    document_id,
+                    hashlib.sha256(text.encode()).hexdigest(),
+                    title,
+                    text,
+                    _START.isoformat(),
+                ),
+            )
+            _backfill_legacy_corpus(conn)
+            _rebuild_current_fts(conn)
+        return
     corpus.ingest(
         KnowledgeIngestRequest(
             workspace_id="ws",
-            artifact_key=artifact_key,
+            artifact_key=document_id,
             title=title,
             media_type="text/plain",
             text=text,
-            source_locator=f"approved:{artifact_key}",
+            source_locator="approved:native",
             parser_name="text",
             parser_version="1",
             approved_by="approval:owner",
+            source_id="native-source",
         )
     )
 
@@ -104,14 +132,16 @@ def _grant(permissions: StandingPermissionStore, *document_ids: str) -> None:
 def test_denied_high_rank_document_cannot_consume_limit_or_materialize(
     tmp_path: Path,
 ) -> None:
-    corpus, permissions, retriever = _setup(tmp_path)
+    store, corpus, permissions, retriever = _setup(tmp_path)
     _ingest(
+        store,
         corpus,
         document_id="denied",
         title="needle needle needle",
         text=" ".join(["needle"] * 40 + ["DENIED_CANARY"]),
     )
     _ingest(
+        store,
         corpus,
         document_id="allowed",
         title="Allowed",
@@ -139,8 +169,9 @@ def test_denied_high_rank_document_cannot_consume_limit_or_materialize(
 
 
 def test_revocation_is_observed_by_the_next_search(tmp_path: Path) -> None:
-    corpus, permissions, retriever = _setup(tmp_path)
+    store, corpus, permissions, retriever = _setup(tmp_path)
     _ingest(
+        store,
         corpus,
         document_id="revocable",
         title="Revocable",
@@ -171,8 +202,9 @@ def test_revocation_is_observed_by_the_next_search(tmp_path: Path) -> None:
 
 
 def test_unmapped_native_artifact_fails_closed(tmp_path: Path) -> None:
-    corpus, permissions, retriever = _setup(tmp_path)
+    store, corpus, permissions, retriever = _setup(tmp_path)
     _ingest(
+        store,
         corpus,
         document_id="native-document",
         title="Native",
