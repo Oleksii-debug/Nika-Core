@@ -1,0 +1,53 @@
+from __future__ import annotations
+
+import pytest
+
+from nika_core.model_gateway.contracts import ModelMessage, ModelRequest
+
+
+def _request(**overrides: object) -> ModelRequest:
+    values: dict[str, object] = {
+        "request_id": "request-1",
+        "messages": (ModelMessage(role="user", content="hello"),),
+    }
+    values.update(overrides)
+    return ModelRequest(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("request_id", "request\x00a"),
+        ("request_id", "request\nx"),
+        ("model", "model\x00a"),
+        ("model", "model\nx"),
+        ("provider_id", "cloud\x00a"),
+        ("provider_id", "cloud\nx"),
+    ),
+)
+def test_request_identifiers_reject_internal_control_characters(
+    field: str, value: str
+) -> None:
+    with pytest.raises(ValueError, match="control characters"):
+        _request(**{field: value})
+
+
+@pytest.mark.parametrize("provider_id", ("fallback\x00a", "fallback\nx"))
+def test_fallback_provider_ids_reject_internal_control_characters(
+    provider_id: str,
+) -> None:
+    with pytest.raises(ValueError, match="control characters"):
+        _request(fallback_provider_ids=(provider_id,))
+
+
+def test_metadata_keys_share_identifier_control_character_boundary() -> None:
+    with pytest.raises(ValueError, match="control characters"):
+        _request(metadata={"trace\x00id": "safe-value"})
+
+
+def test_message_content_keeps_separate_text_semantics() -> None:
+    message = ModelMessage(role="user", content="line one\nline two")
+    request = _request(messages=(message,))
+
+    assert request.messages == (message,)
+    assert request.messages[0].content == "line one\nline two"
