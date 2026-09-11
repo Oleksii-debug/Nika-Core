@@ -83,7 +83,8 @@ class ProductFactoryProgramHost:
     1. acquire exact `(project_id, work_id, owner_id, fence)` authority;
     2. in one writer transaction assert that fence, persist RUNNING, and reserve the
        idempotent external operation;
-    3. only then call the external worker;
+    3. after any bounded concurrency wait, revalidate/re-establish exact fence authority
+       immediately before an external dispatch or recovery effect;
     4. reconcile returned evidence under the same fence and atomically persist the
        result checkpoint plus ledger completion;
     5. release the lease only after a terminal durable transition, or after durable
@@ -370,6 +371,7 @@ class ProductFactoryProgramHost:
             return _existing_operation_outcome(request, operation)
 
         async with semaphore:
+            lease = self._reestablish_effect_authority(request, lease)
             try:
                 envelope = await self.worker.dispatch(request)
             except asyncio.CancelledError:
@@ -431,6 +433,7 @@ class ProductFactoryProgramHost:
                 self._release_best_effort(lease)
                 return _existing_operation_outcome(request, operation)
             async with semaphore:
+                lease = self._reestablish_effect_authority(request, lease)
                 try:
                     envelope = await self.worker.dispatch(request)
                 except asyncio.CancelledError:
@@ -487,6 +490,7 @@ class ProductFactoryProgramHost:
             )
 
         async with semaphore:
+            lease = self._reestablish_effect_authority(request, lease)
             try:
                 state = await self.worker.inspect(request.work_id)
             except asyncio.CancelledError:
@@ -530,6 +534,7 @@ class ProductFactoryProgramHost:
                     operation_status=IdempotencyStatus.UNCERTAIN,
                     detail="worker state is missing; duplicate execution is forbidden",
                 )
+            lease = self._reestablish_effect_authority(request, lease)
             try:
                 envelope = await self.worker.recover(request, state)
             except asyncio.CancelledError:
@@ -741,6 +746,41 @@ class ProductFactoryProgramHost:
             raise ProductFactoryProgramError(
                 f"Product Factory work ownership is unavailable for {request.work_id}: {exc}"
             ) from exc
+
+    def _reestablish_effect_authority(
+        self,
+        request: ComponentWorkRequest,
+        lease: WorkOwnershipLease,
+    ) -> WorkOwnershipLease:
+        """Fail closed or mint a new fence after a wait, before any external effect."""
+        try:
+            self._ownership.assert_owner(
+                project_id=lease.project_id,
+                work_id=lease.work_id,
+                owner_id=lease.owner_id,
+                fence=lease.fence,
+            )
+            return lease
+        except WorkOwnershipError:
+            pass
+        try:
+            replacement = self._ownership.acquire(
+                project_id=request.project_id,
+                work_id=request.work_id,
+                owner_id=self.owner_id,
+                lease_seconds=self.lease_seconds,
+            )
+        except WorkOwnershipError as exc:
+            raise ProductFactoryProgramError(
+                f"stale Product Factory authority cannot start external effect for {request.work_id}: {exc}"
+            ) from exc
+        self._ownership.assert_owner(
+            project_id=replacement.project_id,
+            work_id=replacement.work_id,
+            owner_id=replacement.owner_id,
+            fence=replacement.fence,
+        )
+        return replacement
 
     def _assert_lease(self, connection, lease: WorkOwnershipLease) -> None:
         self._ownership.assert_owner_in_transaction(
