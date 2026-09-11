@@ -41,7 +41,12 @@ def test_c1_workflow_reproves_the_exact_generated_zip_before_upload() -> None:
     assert "& $installer -BundlePath $bundle -Destination $installRoot" in workflow
     assert "[System.Diagnostics.ProcessStartInfo]::new()" in workflow
     assert "$startInfo.ArgumentList.Add('--self-test')" in workflow
-    assert "$process.WaitForExit()" in workflow
+    assert "$process.WaitForExit(30000)" in workflow
+    assert "$process.WaitForExit()" not in workflow
+    assert "$process.Kill($true)" in workflow
+    assert "$process.WaitForExit(5000)" in workflow
+    assert "finally {" in workflow
+    assert "$process.Dispose()" in workflow
     assert "& $installedExe --self-test $database $proof" not in workflow
     assert "nika-pf11-c1-exact-package-evidence-v1" in workflow
     assert "proof_scope = 'exact-generated-zip-after-extract-install'" in workflow
