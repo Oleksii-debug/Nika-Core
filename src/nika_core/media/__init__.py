@@ -54,6 +54,13 @@ from nika_core.media.models import Page
 from nika_core.media.presenter import render_accessible_media_text
 from nika_core.media.repository import MediaRepository
 from nika_core.media.schema import MEDIA_SCHEMA_VERSION, initialize_media_schema
+from nika_core.media.subtitle_acquisition import (
+    RemoteSubtitleResult,
+    SubtitleAcquisitionPolicy,
+    YtDlpSubtitleAcquirer,
+    stable_subtitle_track,
+    stable_subtitle_tracks,
+)
 
 __all__ = [
     "MEDIA_SCHEMA_VERSION",
@@ -89,21 +96,26 @@ __all__ = [
     "ProvenanceEvent",
     "RemoteAcquisitionPolicy",
     "RemoteAcquisitionResult",
+    "RemoteSubtitleResult",
     "ResourceClass",
     "RevisionCorrector",
     "Segment",
     "SemanticCorrectionPolicy",
     "SemanticCorrectionSuggestion",
     "StructuredMediaArtifact",
+    "SubtitleAcquisitionPolicy",
     "SubtitleKind",
     "SubtitleTrack",
     "TextRevision",
     "Transcript",
     "TranscriptMethod",
     "YtDlpRemoteAcquirer",
+    "YtDlpSubtitleAcquirer",
     "build_corpus_media_handoff",
     "initialize_media_schema",
     "normalize_text",
     "render_accessible_media_text",
+    "stable_subtitle_track",
+    "stable_subtitle_tracks",
     "validate_artifact_for_handoff",
 ]
