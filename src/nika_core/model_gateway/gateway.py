@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from math import isfinite
 from typing import Protocol
 
 from .contracts import (
@@ -12,7 +13,9 @@ from .contracts import (
     ModelProvider,
     ModelRequest,
     ModelResponse,
+    ModelUsage,
     PrivacyClass,
+    ProviderCapabilities,
     ProviderKind,
 )
 
@@ -28,6 +31,12 @@ class _AuditLogPort(Protocol):
     ) -> int: ...
 
 
+@dataclass(frozen=True, slots=True)
+class _RegisteredProvider:
+    provider: ModelProvider
+    capabilities: ProviderCapabilities
+
+
 _SAFE_FALLBACK_CODES = frozenset(
     {
         ModelErrorCode.UNAVAILABLE,
@@ -35,6 +44,8 @@ _SAFE_FALLBACK_CODES = frozenset(
         ModelErrorCode.TIMEOUT,
     }
 )
+_MAX_DURABLE_TOKEN_COUNT = (1 << 63) - 1
+
 _SAFE_PROVIDER_MESSAGES = {
     ModelErrorCode.INVALID_REQUEST: "model provider rejected the request",
     ModelErrorCode.UNAVAILABLE: "model provider is unavailable",
@@ -49,17 +60,21 @@ _SAFE_PROVIDER_MESSAGES = {
 
 class ModelGateway:
     def __init__(self, *, audit_log: _AuditLogPort | None = None) -> None:
-        self._providers: dict[str, ModelProvider] = {}
+        self._providers: dict[str, _RegisteredProvider] = {}
         self._defaults: dict[ProviderKind, str] = {}
         self._audit_log = audit_log
 
     def register(self, provider: ModelProvider, *, default: bool = False) -> None:
-        provider_id = provider.capabilities.provider_id
+        capabilities = self._snapshot_capabilities(provider)
+        provider_id = capabilities.provider_id
         if provider_id in self._providers:
             raise ValueError(f"duplicate provider_id: {provider_id}")
-        self._providers[provider_id] = provider
+        self._providers[provider_id] = _RegisteredProvider(
+            provider=provider,
+            capabilities=capabilities,
+        )
         if default:
-            self._defaults[provider.capabilities.kind] = provider_id
+            self._defaults[capabilities.kind] = provider_id
 
     def providers(self) -> tuple[str, ...]:
         return tuple(sorted(self._providers))
@@ -70,8 +85,9 @@ class ModelGateway:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + request.timeout_seconds
 
-        for index, provider in enumerate(providers):
-            capabilities = provider.capabilities
+        for index, registered in enumerate(providers):
+            provider = registered.provider
+            capabilities = registered.capabilities
             remaining = deadline - loop.time()
             if remaining <= 0:
                 error = ModelGatewayError(
@@ -119,7 +135,7 @@ class ModelGateway:
                 )
                 self._audit_failure(request, capabilities.provider_id, error)
                 if self._can_fallback(error=error, index=index, providers=providers):
-                    self._audit_fallback(request, provider, providers[index + 1], error)
+                    self._audit_fallback(request, registered, providers[index + 1], error)
                     continue
                 terminal_error = error
             except asyncio.CancelledError:
@@ -135,7 +151,7 @@ class ModelGateway:
                 )
                 self._audit_failure(request, capabilities.provider_id, error)
                 if self._can_fallback(error=error, index=index, providers=providers):
-                    self._audit_fallback(request, provider, providers[index + 1], error)
+                    self._audit_fallback(request, registered, providers[index + 1], error)
                     continue
                 terminal_error = error
             except Exception:  # noqa: BLE001 - provider implementations are untrusted
@@ -164,20 +180,36 @@ class ModelGateway:
                 self._audit_failure(request, capabilities.provider_id, error)
                 raise error
 
+            canonical_response, response_error = self._snapshot_success_response(
+                response=response,
+                request=request,
+                trusted_provider_id=capabilities.provider_id,
+                trusted_provider_kind=capabilities.kind,
+            )
+            if response_error is not None:
+                self._audit_failure(
+                    request,
+                    capabilities.provider_id,
+                    response_error,
+                )
+                raise response_error
+            if canonical_response is None:
+                raise AssertionError("validated model response snapshot is unavailable")
+
             self._audit(
                 event_type="model.completed",
                 request=request,
                 payload={
-                    "provider_id": response.provider_id,
-                    "model_fingerprint": model_identity_fingerprint(response.model),
-                    "input_tokens": response.usage.input_tokens,
-                    "output_tokens": response.usage.output_tokens,
-                    "total_tokens": response.usage.total_tokens,
-                    "latency_ms": response.latency_ms,
+                    "provider_id": canonical_response.provider_id,
+                    "model_fingerprint": model_identity_fingerprint(canonical_response.model),
+                    "input_tokens": canonical_response.usage.input_tokens,
+                    "output_tokens": canonical_response.usage.output_tokens,
+                    "total_tokens": canonical_response.usage.total_tokens,
+                    "latency_ms": canonical_response.latency_ms,
                     "attempt": index + 1,
                 },
             )
-            return response
+            return canonical_response
 
         raise ModelGatewayError(
             ModelErrorCode.UNAVAILABLE,
@@ -185,7 +217,7 @@ class ModelGateway:
             retryable=True,
         )
 
-    def _select_candidates(self, request: ModelRequest) -> tuple[ModelProvider, ...]:
+    def _select_candidates(self, request: ModelRequest) -> tuple[_RegisteredProvider, ...]:
         primary = self._select(request)
         candidates = [primary]
         seen = {primary.capabilities.provider_id}
@@ -208,7 +240,7 @@ class ModelGateway:
         return tuple(candidates)
 
     def _validate_privacy_route(
-        self, request: ModelRequest, providers: tuple[ModelProvider, ...]
+        self, request: ModelRequest, providers: tuple[_RegisteredProvider, ...]
     ) -> None:
         if request.privacy is PrivacyClass.PUBLIC:
             return
@@ -220,6 +252,140 @@ class ModelGateway:
                     "private data cannot be routed to this provider",
                     provider_id=capabilities.provider_id,
                 )
+
+    @staticmethod
+    def _snapshot_capabilities(provider: ModelProvider) -> ProviderCapabilities:
+        try:
+            capabilities = provider.capabilities
+            if not isinstance(capabilities, ProviderCapabilities):
+                raise TypeError("model provider capabilities must be ProviderCapabilities")
+            provider_id = capabilities.provider_id
+            kind = capabilities.kind
+            supports_private_data = capabilities.supports_private_data
+            supports_tools = capabilities.supports_tools
+            supports_streaming = capabilities.supports_streaming
+            supports_hard_cancellation = capabilities.supports_hard_cancellation
+        except (TypeError, ValueError):
+            raise
+        except Exception:  # noqa: BLE001 - provider implementations are untrusted
+            raise ValueError("model provider capabilities are invalid") from None
+
+        if type(provider_id) is not str or not _is_canonical_identity(provider_id):
+            raise ValueError("model provider_id must be canonical text")
+        if not isinstance(kind, ProviderKind):
+            raise TypeError("model provider kind must be ProviderKind")
+        for value in (
+            supports_private_data,
+            supports_tools,
+            supports_streaming,
+            supports_hard_cancellation,
+        ):
+            if not isinstance(value, bool):
+                raise TypeError("model provider capability flags must be bool")
+        return ProviderCapabilities(
+            provider_id=provider_id,
+            kind=kind,
+            supports_private_data=supports_private_data,
+            supports_tools=supports_tools,
+            supports_streaming=supports_streaming,
+            supports_hard_cancellation=supports_hard_cancellation,
+        )
+
+    @staticmethod
+    def _snapshot_success_response(
+        *,
+        response: object,
+        request: ModelRequest,
+        trusted_provider_id: str,
+        trusted_provider_kind: ProviderKind,
+    ) -> tuple[ModelResponse | None, ModelGatewayError | None]:
+        invalid_error = ModelGatewayError(
+            ModelErrorCode.PROVIDER_ERROR,
+            "model provider returned an invalid success response",
+            provider_id=trusted_provider_id,
+            retryable=False,
+            failure_effect=ModelFailureEffect.UNKNOWN,
+        )
+        if not isinstance(response, ModelResponse):
+            return None, invalid_error
+
+        try:
+            request_id = response.request_id
+            provider_id = response.provider_id
+            provider_kind = response.provider_kind
+            text = response.text
+            model = response.model
+            raw_usage = response.usage
+            latency_ms = response.latency_ms
+            if not isinstance(raw_usage, ModelUsage):
+                return None, invalid_error
+            input_tokens = raw_usage.input_tokens
+            output_tokens = raw_usage.output_tokens
+            total_tokens = raw_usage.total_tokens
+        except Exception:  # noqa: BLE001 - provider DTOs are untrusted
+            return None, invalid_error
+
+        invalid = (
+            type(request_id) is not str
+            or request_id != request.request_id
+            or type(provider_id) is not str
+            or provider_id != trusted_provider_id
+            or provider_kind is not trusted_provider_kind
+            or type(text) is not str
+            or type(model) is not str
+            or not model
+            or (request.model is None and not _is_canonical_identity(model))
+            or (request.model is not None and model != request.model)
+        )
+        if not invalid:
+            for value in (input_tokens, output_tokens, total_tokens):
+                if value is not None and (
+                    type(value) is not int
+                    or value < 0
+                    or value > _MAX_DURABLE_TOKEN_COUNT
+                ):
+                    invalid = True
+                    break
+
+        if not invalid and total_tokens is not None:
+            known_component_tokens = sum(
+                value
+                for value in (input_tokens, output_tokens)
+                if value is not None
+            )
+            if total_tokens < known_component_tokens:
+                invalid = True
+
+        if not invalid and latency_ms is not None:
+            if type(latency_ms) not in (int, float):
+                invalid = True
+            else:
+                try:
+                    finite_latency = isfinite(float(latency_ms))
+                except OverflowError:
+                    finite_latency = False
+                if not finite_latency or latency_ms < 0:
+                    invalid = True
+
+        if invalid:
+            return None, invalid_error
+        usage = ModelUsage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+        )
+        return (
+            ModelResponse(
+                request_id=request_id,
+                text=text,
+                provider_id=provider_id,
+                provider_kind=provider_kind,
+                model=model,
+                usage=usage,
+                latency_ms=latency_ms,
+            ),
+            None,
+        )
 
     @staticmethod
     def _normalize_provider_error(
@@ -269,7 +435,10 @@ class ModelGateway:
 
     @staticmethod
     def _can_fallback(
-        *, error: ModelGatewayError, index: int, providers: tuple[ModelProvider, ...]
+        *,
+        error: ModelGatewayError,
+        index: int,
+        providers: tuple[_RegisteredProvider, ...],
     ) -> bool:
         if index + 1 >= len(providers):
             return False
@@ -301,8 +470,8 @@ class ModelGateway:
     def _audit_fallback(
         self,
         request: ModelRequest,
-        current: ModelProvider,
-        fallback: ModelProvider,
+        current: _RegisteredProvider,
+        fallback: _RegisteredProvider,
         error: ModelGatewayError,
     ) -> None:
         self._audit(
@@ -316,7 +485,7 @@ class ModelGateway:
             },
         )
 
-    def _select(self, request: ModelRequest) -> ModelProvider:
+    def _select(self, request: ModelRequest) -> _RegisteredProvider:
         if request.provider_id:
             provider = self._providers.get(request.provider_id)
             if provider is None:
@@ -367,6 +536,15 @@ class ModelGateway:
             entity_id=request.request_id,
             payload=payload,
         )
+
+
+def _is_canonical_identity(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value == value.strip()
+        and not any(ord(char) < 32 or ord(char) == 127 for char in value)
+    )
 
 
 def model_identity_fingerprint(model: str | None) -> str:
