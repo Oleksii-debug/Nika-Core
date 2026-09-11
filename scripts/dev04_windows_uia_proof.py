@@ -54,31 +54,28 @@ def focus_until_verified(
     attempts: int = 20,
     delay_seconds: float = 0.05,
 ) -> None:
-    """Boundedly re-observe the exact semantic identity until UIA reports focus.
+    """Issue one focus effect, then boundedly re-observe the exact identity.
 
-    WinForms can acknowledge SetFocus before the provider's focused-state property
-    catches up. Every retry re-resolves the same role/name and requires the same
-    RuntimeId/generation-derived node_id, so replacement or ambiguity still fails
-    closed rather than turning the wait into a name-based fallback.
+    Production ``focus`` already waits read-only for exact RuntimeId/generation
+    acknowledgement.  This proof deliberately never reissues the effect: its
+    outer loop only confirms that the same semantic identity is observable as
+    focused after provider state propagation.
     """
 
-    last_error: Exception | None = None
-    for _ in range(attempts):
-        try:
-            adapter.focus(node)
-            snapshot = adapter.observe()
-            current = _resolve(snapshot, role=node.role, name=node.name)
-            if current.node_id != node.node_id:
-                raise StaleSnapshotError(
-                    "focus target identity changed during bounded verification"
-                )
-            if current.focused and adapter.capture_focus() == node.node_id:
-                return
-        except StaleSnapshotError as exc:
-            last_error = exc
-        time.sleep(delay_seconds)
+    adapter.focus(node)
+    for attempt in range(attempts):
+        snapshot = adapter.observe()
+        current = _resolve(snapshot, role=node.role, name=node.name)
+        if current.node_id != node.node_id:
+            raise StaleSnapshotError(
+                "focus target identity changed during bounded verification"
+            )
+        if current.focused and adapter.capture_focus() == node.node_id:
+            return
+        if attempt + 1 < attempts:
+            time.sleep(delay_seconds)
     raise AssertionError(
-        f"exact UIA focus did not become observable within {attempts} attempts: {last_error!r}"
+        f"exact UIA focus did not remain observable within {attempts} read-only attempts"
     )
 
 
@@ -215,6 +212,7 @@ def main() -> None:
                     "coordinates_used": False,
                     "stale_replacement_rejected": True,
                     "bounded_exact_focus_verification": True,
+                    "single_focus_effect_per_verification": True,
                     "human_tested": False,
                     "nvda_verified": False,
                 },
