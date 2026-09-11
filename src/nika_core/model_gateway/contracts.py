@@ -59,7 +59,7 @@ def _require_canonical_identifier(
         raise ValueError(f"{name} must not be empty")
     if stripped != value:
         raise ValueError(f"{name} must not contain surrounding whitespace")
-    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+    if any(not char.isprintable() for char in value):
         raise ValueError(f"{name} must not contain control characters")
     return value
 
