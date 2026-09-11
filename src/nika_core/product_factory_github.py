@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Protocol
 
 from nika_core.product_factory_orchestration import RepositoryRef
 from nika_core.product_factory_verification import CheckState as VerificationCheckState
@@ -102,6 +103,42 @@ class GitHubPullRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class GitHubIntegrationEvidence:
+    """Producer-native proof binding one frozen candidate to one integration identity."""
+
+    pull_request_number: int
+    candidate_sha: str
+    integration_sha: str
+    evidence_ref: str
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.pull_request_number, bool)
+            or not isinstance(self.pull_request_number, int)
+            or self.pull_request_number < 1
+        ):
+            raise GitHubFactoryError("integration evidence requires a positive pull request number")
+        _validate_sha(self.candidate_sha, "integration candidate sha")
+        _validate_sha(self.integration_sha, "integration sha")
+        if not isinstance(self.evidence_ref, str) or not self.evidence_ref.strip():
+            raise GitHubFactoryError("integration evidence reference must not be empty")
+
+
+class GitHubIntegrationEvidencePort(Protocol):
+    """Trusted provider seam that proves candidate-to-integration identity."""
+
+    def prove_integration(
+        self,
+        *,
+        repository_full_name: str,
+        pull_request_number: int,
+        candidate_sha: str,
+        integration_sha: str,
+    ) -> GitHubIntegrationEvidence:
+        """Return producer-native evidence for the exact requested relation."""
+
+
+@dataclass(frozen=True, slots=True)
 class GitHubRepositoryObservation:
     owner: str
     name: str
@@ -169,10 +206,18 @@ class GitHubFactoryBinding:
     checks_state: CheckState | None
     integrated: bool
     integration_sha: str | None
+    integration_evidence_ref: str | None
 
 
 class GitHubFactoryAdapter:
     """Bind live GitHub observations to an existing ProductRepositoryGraph reference."""
+
+    def __init__(
+        self,
+        *,
+        integration_evidence_port: GitHubIntegrationEvidencePort | None = None,
+    ) -> None:
+        self._integration_evidence_port = integration_evidence_port
 
     def bind(
         self,
@@ -195,6 +240,7 @@ class GitHubFactoryAdapter:
         pr = observation.pull_request
         candidate_sha = observation.candidate_sha
         candidate_branch = observation.candidate_branch
+        integration_evidence: GitHubIntegrationEvidence | None = None
         if pr is not None:
             if candidate_sha is None or candidate_branch is None:
                 raise GitHubFactoryError("pull request requires explicit candidate identity")
@@ -215,6 +261,28 @@ class GitHubFactoryAdapter:
                     raise GitHubFactoryError(
                         "pull request merge sha is not contained in default branch history"
                     )
+                if pr.merge_sha == pr.base_sha:
+                    raise GitHubFactoryError("pull request merge sha must differ from base sha")
+                if self._integration_evidence_port is None:
+                    raise GitHubFactoryError(
+                        "merged pull request requires trusted candidate integration evidence"
+                    )
+                integration_evidence = self._integration_evidence_port.prove_integration(
+                    repository_full_name=observed,
+                    pull_request_number=pr.number,
+                    candidate_sha=candidate_sha,
+                    integration_sha=pr.merge_sha,
+                )
+                if type(integration_evidence) is not GitHubIntegrationEvidence:
+                    raise GitHubFactoryError(
+                        "integration evidence port must return GitHubIntegrationEvidence"
+                    )
+                if integration_evidence.pull_request_number != pr.number:
+                    raise GitHubFactoryError("integration evidence pull request does not match")
+                if integration_evidence.candidate_sha != candidate_sha:
+                    raise GitHubFactoryError("integration evidence candidate sha does not match")
+                if integration_evidence.integration_sha != pr.merge_sha:
+                    raise GitHubFactoryError("integration evidence sha does not match pull request")
             elif pr.base_sha != observation.default_branch_sha:
                 raise GitHubFactoryError("pull request base sha does not match default branch sha")
 
@@ -245,8 +313,9 @@ class GitHubFactoryAdapter:
                 for check in observation.checks
             )
 
-        integrated = pr is not None and pr.state is PullRequestState.MERGED
-        integration_sha = pr.merge_sha if integrated else None
+        integrated = integration_evidence is not None
+        integration_sha = integration_evidence.integration_sha if integrated else None
+        integration_evidence_ref = integration_evidence.evidence_ref if integrated else None
         return GitHubFactoryBinding(
             repository_id=repository.repository_id,
             repository_full_name=observed,
@@ -262,6 +331,7 @@ class GitHubFactoryAdapter:
             checks_state=checks_state,
             integrated=integrated,
             integration_sha=integration_sha,
+            integration_evidence_ref=integration_evidence_ref,
         )
 
 
