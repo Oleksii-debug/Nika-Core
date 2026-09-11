@@ -113,6 +113,7 @@ class GitHubIntegrationEvidence:
     candidate_sha: str
     integration_sha: str
     evidence_ref: str
+    candidate_repository_full_name: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -125,6 +126,8 @@ class GitHubIntegrationEvidence:
         _validate_sha(self.integration_sha, "integration sha")
         if not isinstance(self.evidence_ref, str) or not self.evidence_ref.strip():
             raise GitHubFactoryError("integration evidence reference must not be empty")
+        if self.candidate_repository_full_name is not None:
+            _normalize_full_name(self.candidate_repository_full_name)
 
 
 class GitHubIntegrationEvidencePort(Protocol):
@@ -318,6 +321,15 @@ class GitHubFactoryAdapter:
                     raise GitHubFactoryError("integration evidence pull request does not match")
                 if integration_evidence.candidate_sha != candidate_sha:
                     raise GitHubFactoryError("integration evidence candidate sha does not match")
+                integration_candidate_repository = (
+                    _normalize_full_name(integration_evidence.candidate_repository_full_name)
+                    if integration_evidence.candidate_repository_full_name is not None
+                    else observed
+                )
+                if integration_candidate_repository != candidate_repository_full_name:
+                    raise GitHubFactoryError(
+                        "integration evidence candidate repository does not match"
+                    )
                 if integration_evidence.integration_sha != pr.merge_sha:
                     raise GitHubFactoryError("integration evidence sha does not match pull request")
             elif pr.base_sha != observation.default_branch_sha:
