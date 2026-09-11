@@ -134,17 +134,18 @@ class DriftAfterFocusBackend:
 
 
 @pytest.mark.parametrize(
-    "drift",
+    ("drift", "focus_rejects"),
     [
-        {"enabled": False},
-        {"visible": False},
-        {"patterns": ()},
-        {"name": "Delete account"},
-        {"role": "menuitem"},
+        ({"enabled": False}, True),
+        ({"visible": False}, True),
+        ({"patterns": ()}, False),
+        ({"name": "Delete account"}, True),
+        ({"role": "menuitem"}, True),
     ],
 )
 def test_action_revalidates_live_semantic_authority_after_focus(
     drift: dict[str, object],
+    focus_rejects: bool,
 ) -> None:
     backend = DriftAfterFocusBackend(drift)
     adapter = WindowsUIAInteractionAdapter(
@@ -154,13 +155,19 @@ def test_action_revalidates_live_semantic_authority_after_focus(
     )
 
     validated = adapter.observe().controls[0]
-    adapter.focus(validated)
-    assert adapter.capture_focus() == validated.node_id
-
-    with pytest.raises(
-        (StaleSnapshotError, UnsupportedInteractionError),
-        match="stale|changed|disabled|hidden|pattern|semantic|authority",
-    ):
-        adapter.act(validated, InteractionAction.INVOKE, None)
+    if focus_rejects:
+        with pytest.raises(
+            (StaleSnapshotError, UnsupportedInteractionError),
+            match="stale|changed|disabled|hidden|semantic|authority",
+        ):
+            adapter.focus(validated)
+    else:
+        adapter.focus(validated)
+        assert adapter.capture_focus() == validated.node_id
+        with pytest.raises(
+            (StaleSnapshotError, UnsupportedInteractionError),
+            match="stale|changed|disabled|hidden|pattern|semantic|authority",
+        ):
+            adapter.act(validated, InteractionAction.INVOKE, None)
 
     assert backend.invoked is False
