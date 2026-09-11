@@ -33,8 +33,10 @@ by Nika after the score.
 
 A knowledge artifact is identified by `(workspace_id, artifact_key)`. `artifact_key` is a stable
 source/artifact identity supplied by the approved ingestion caller; it is not derived from mutable
-content. Each changed ingestion creates an immutable integer version. The current version is stored
-on `knowledge_artifacts` and is switched in the same `BEGIN IMMEDIATE` transaction that writes the
+content. The `legacy:` artifact-key namespace is reserved exclusively for the ordered migration of
+pre-DEV24 `corpus_documents`; normal `KnowledgeIngestRequest` ingestion rejects that prefix. Each
+changed ingestion creates an immutable integer version. The current version is stored on
+`knowledge_artifacts` and is switched in the same `BEGIN IMMEDIATE` transaction that writes the
 version, chunks and ACL, replaces the artifact's FTS projection, and advances the current pointer.
 Historical version/chunk rows remain immutable audit state; historical FTS rows do not remain in the
 search index.
@@ -52,28 +54,32 @@ corpus does not pretend it recomputed a hash for bytes it did not receive.
 
 ## Approved ingestion and provenance
 
-Every new version records:
+Every normal ingestion requires a non-empty durable `source_id`. Before any corpus row is written,
+that ID is resolved across the authoritative Universal Research local and HTTP source registries.
+Exactly one durable source identity must exist, it must belong to the same workspace, and its stored
+locator must exactly match the request's `source_locator`. Cross-workspace source reuse fails with
+`PermissionError`; missing, ambiguous, or locator-mismatched identity fails with `ValueError`.
+There is no normal-ingestion fallback to a caller-controlled opaque locator. This keeps provenance
+bound to existing source authority without importing DEV23 implementation or creating a second
+source registry.
+
+Every new normal version records:
 
 - workspace and stable artifact identity;
 - normalized SHA-256 and optional upstream raw SHA-256;
 - title/media type;
-- source ID and source locator;
+- durable source ID and exact registered source locator;
 - parser/extractor name and version;
 - system-owned normalization algorithm version;
 - system-owned chunker algorithm version and exact max/overlap policy;
 - `approved_by` authority reference;
 - normalized text and immutable creation time.
 
-When `source_id` is supplied, ingestion validates it against the authoritative Universal Research
-source registries before any corpus row is written. Exactly one durable source identity must exist,
-it must belong to the same workspace, and its durable locator must match the requested locator.
-Cross-workspace source reuse fails with `PermissionError`; missing, ambiguous, or locator-mismatched
-source identity fails with `ValueError`. This closes the AUD03 cross-workspace provenance attack
-without importing DEV23 implementation or creating a second source registry.
-
-A handoff may omit `source_id` when it has no registered Universal Research source identity, but it
-must still provide an approved opaque `source_locator`. That locator is provenance only; it is not a
-filesystem/network authority grant.
+Legacy rows are the sole compatibility exception. Migration v2 may project old `corpus_documents`
+whose historical schema did not contain a durable source ID; those migrated rows can retain
+`source_id=NULL` and receive `legacy:<document_id>` artifact keys. They can only be created by the
+ordered schema migration path, never by `KnowledgeIngestRequest`, so a caller cannot forge legacy
+identity to enter the compatibility authorization path.
 
 Each chunk records deterministic ordinal, exact `[start_char, end_char)` boundaries, chunk SHA-256
 and a deterministic chunk ID framed from workspace/artifact/version/ordinal/hash. Result provenance
@@ -131,12 +137,19 @@ Migration v2 non-destructively projects legacy v9 `corpus_documents` into artifa
 `legacy:<document_id>`. The old tables are retained. Because legacy rows did not persist reliable
 character offsets for every historical chunk, each migrated legacy document is represented by one
 exact full-document chunk with boundaries `[0, len(normalized_text))`. Existing source locator/ID is
-retained when present. New ingestions use bounded overlapping chunks with exact offsets.
+retained when present. Normal post-migration ingestions require registered durable source identity
+and use bounded overlapping chunks with exact offsets.
 
 Migration v3 rebuilds `knowledge_fts` from each artifact's durable `current_version`. It preserves
 all immutable `knowledge_versions` and `knowledge_chunks`, removes historical index rows from prior
 DEV24 candidate databases, and fails closed if an artifact points to a missing current version.
 This makes the BM25/current-authority repair restart-safe rather than relying only on future writes.
+
+The canonical legacy-database adopter treats `knowledge_schema_migrations` and empty FTS5 backing
+bookkeeping as schema metadata, not user content. Real knowledge rows remain user data and therefore
+continue to block automatic overwrite. This lets an initialized empty packaged target adopt one
+valid legacy database without weakening the recovery guard for a target that already contains a
+knowledge corpus.
 
 Every canonical `SQLiteStore.initialize()` also runs SQLite `PRAGMA foreign_key_check` and rejects
 violations whose child table belongs to the knowledge schema. This closes a corruption class that
