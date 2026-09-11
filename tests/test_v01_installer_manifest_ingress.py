@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import collections.abc
 import json
 import os
 import shutil
 import subprocess
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -75,7 +75,10 @@ def _duplicate_file_member(raw: str) -> str:
     return raw.replace(marker, '      "path": "ignored.exe",\n' + marker, 1)
 
 
-def _rewrite_object(raw: str, mutate: Callable[[dict[str, object]], None]) -> str:
+def _rewrite_object(
+    raw: str,
+    mutate: collections.abc.Callable[[dict[str, object]], None],
+) -> str:
     payload = json.loads(raw)
     mutate(payload)
     return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
@@ -94,7 +97,7 @@ def test_installer_manifest_ingress_declares_strict_object_authority() -> None:
 @pytest.mark.parametrize("mutate_raw", [_duplicate_top_level, _duplicate_file_member])
 def test_duplicate_json_members_fail_before_install_mutation(
     tmp_path: Path,
-    mutate_raw: Callable[[str], str],
+    mutate_raw: collections.abc.Callable[[str], str],
 ) -> None:
     shell = _powershell()
     if shell is None:
@@ -144,7 +147,7 @@ def _missing_version(payload: dict[str, object]) -> None:
 )
 def test_noncanonical_manifest_shape_fails_before_install_mutation(
     tmp_path: Path,
-    mutate: Callable[[dict[str, object]], None],
+    mutate: collections.abc.Callable[[dict[str, object]], None],
 ) -> None:
     shell = _powershell()
     if shell is None:
