@@ -31,6 +31,7 @@ class RuntimeErrorCode(StrEnum):
     TIMEOUT = "timeout"
     TRANSIENT = "transient"
     INVALID_RESUME = "invalid_resume"
+    RESUME_UNAVAILABLE = "resume_unavailable"
     DUPLICATE_ACTIVE = "duplicate_active"
     INTERNAL = "internal"
 
@@ -38,6 +39,16 @@ class RuntimeErrorCode(StrEnum):
 class RuntimeResumeMode(StrEnum):
     CONTINUE = "continue"
     APPROVAL = "approval"
+
+
+class RuntimeResumeProbeStatus(StrEnum):
+    """Framework-neutral durability verdict for one persisted resume cursor."""
+
+    READY = "ready"
+    MISSING = "missing"
+    UNREADABLE = "unreadable"
+    UNVERIFIABLE = "unverifiable"
+    INVALID = "invalid"
 
 
 class RuntimeUnsupportedError(RuntimeError):
@@ -83,6 +94,32 @@ class RuntimeResumeRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeResumeProbe:
+    """Nika-owned verdict proving whether a persisted runtime cursor is safe to resume."""
+
+    status: RuntimeResumeProbeStatus
+    reason: str
+    checkpoint_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.reason.strip():
+            raise ValueError("resume probe reason must not be empty")
+        if self.checkpoint_id is not None:
+            if not isinstance(self.checkpoint_id, str):
+                raise TypeError("checkpoint_id must be a string when provided")
+            if not self.checkpoint_id.strip():
+                raise ValueError("checkpoint_id must not be empty")
+            if self.checkpoint_id != self.checkpoint_id.strip():
+                raise ValueError("checkpoint_id must not have surrounding whitespace")
+        if self.status == RuntimeResumeProbeStatus.READY and self.checkpoint_id is None:
+            raise ValueError("ready resume probe requires checkpoint_id")
+
+    @property
+    def can_resume(self) -> bool:
+        return self.status == RuntimeResumeProbeStatus.READY
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeEvent:
     sequence: int
     event_type: str
@@ -105,10 +142,17 @@ class RuntimeResult:
     error_code: RuntimeErrorCode | None = None
 
     def __post_init__(self) -> None:
-        if self.outcome == RuntimeOutcome.WAITING_APPROVAL and not self.resume_token:
-            raise ValueError("waiting approval requires a resume token")
+        if not isinstance(self.outcome, RuntimeOutcome):
+            raise TypeError("outcome must be a RuntimeOutcome")
+        if (
+            self.outcome in {RuntimeOutcome.WAITING_APPROVAL, RuntimeOutcome.PAUSED}
+            and (not isinstance(self.resume_token, str) or not self.resume_token.strip())
+        ):
+            raise ValueError("resumable outcome requires a usable resume token")
         if self.outcome == RuntimeOutcome.FAILED and not self.error:
             raise ValueError("failed outcome requires an error")
+        if self.error_code is not None and not isinstance(self.error_code, RuntimeErrorCode):
+            raise TypeError("error_code must be a RuntimeErrorCode when provided")
         if self.outcome != RuntimeOutcome.FAILED and self.error_code is not None:
             raise ValueError("error_code is only valid for failed outcomes")
 
@@ -126,3 +170,16 @@ class AgentRuntimePort(Protocol):
     async def resume(self, request: RuntimeResumeRequest) -> RuntimeResult: ...
 
     async def cancel(self, *, task_id: str, thread_id: str) -> bool: ...
+
+
+@runtime_checkable
+class RuntimeResumeProbePort(Protocol):
+    """Optional durability extension used before automatic or framework resume."""
+
+    async def probe_resume(
+        self,
+        *,
+        task_id: str,
+        thread_id: str,
+        resume_token: str,
+    ) -> RuntimeResumeProbe: ...
