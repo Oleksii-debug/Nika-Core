@@ -556,6 +556,25 @@ class V01BoundModelRuntimeFactory:
             raise ModelSetupError("Збережений маршрут моделі не має типу постачальника.")
 
         gateway = ModelGateway(audit_log=AuditLog(self._store))
+        mode = {
+            "foundry_local": IntelligenceMode.EMBEDDED_LOCAL,
+            "ollama": IntelligenceMode.EXTERNAL_LOCAL,
+            "openai_compatible": IntelligenceMode.EXTERNAL_API,
+        }[selection.route_kind]
+        try:
+            policy_route = IntelligenceModeRouter(
+                gateway=gateway,
+                policy=self._intelligence_policy,
+            ).resolve(mode)
+        except IntelligenceModeError:
+            raise ModelSetupError(
+                "Вибраний режим інтелекту заборонено політикою Nika."
+            ) from None
+        if policy_route.provider_id != provider_id:
+            raise ModelSetupError(
+                "Вибраний постачальник не дозволений політикою Nika."
+            )
+
         if selection.route_kind == "foundry_local":
             gateway.register(
                 FoundryLocalProvider(
@@ -578,19 +597,6 @@ class V01BoundModelRuntimeFactory:
             )
         else:
             base_url = self._required_text(selection.base_url, field="base_url")
-            try:
-                policy_route = IntelligenceModeRouter(
-                    gateway=gateway,
-                    policy=self._intelligence_policy,
-                ).resolve(IntelligenceMode.EXTERNAL_API)
-            except IntelligenceModeError:
-                raise ModelSetupError(
-                    "Зовнішній API-доступ заборонено політикою Nika."
-                ) from None
-            if policy_route.provider_id != provider_id:
-                raise ModelSetupError(
-                    "Вибраний API-постачальник не дозволений політикою Nika."
-                )
             if selection.credential_ref is None:
                 raise ModelSetupError("Збережена API-модель не має посилання на облікові дані.")
             gateway.register(
