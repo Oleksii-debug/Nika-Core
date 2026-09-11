@@ -43,9 +43,17 @@ credential material.
 
 ### SQLite
 
-Health opens the configured SQLite database using URI `mode=ro` and `PRAGMA query_only=ON`.
-It never calls `SQLiteStore.initialize()`, never creates a missing database, and never runs a
-migration. Checks include database integrity, foreign keys, and exact supported migration history.
+Health never opens the configured source database through SQLite. It copies a stable snapshot of the
+main database file plus an active WAL, if present, into a private temporary directory after checking
+file identity before/during/after the copy. SQLite opens only that temporary snapshot using URI
+`mode=ro` and `PRAGMA query_only=ON`, so health cannot create or modify the source database's
+`-wal`/`-shm` family. Concurrent source changes fail the observation closed rather than producing a
+trusted PASS.
+
+Checks include database integrity, foreign keys, exact supported migration history, and canonical
+schema shape. Required schema shape is derived from a private temporary database initialized by the
+existing `SQLiteStore` migration authority; health does not keep a second hard-coded table/column
+schema or run migrations against the observed source database.
 
 ### Resources
 
@@ -61,12 +69,14 @@ Local model health is explicitly decomposed into five independent facts:
 2. `reachable`: the local provider answered a lightweight metadata request.
 3. `model_present`: the exact selected model identity appears in the provider catalog.
 4. `model_ready`: the provider supplies positive runtime-readiness evidence for that exact model.
-5. `inference_proven`: separate trusted evidence says that exact provider/model previously completed
-   inference successfully.
+5. `inference_proven`: separate trusted evidence says that exact provider/model/route previously
+   completed inference successfully.
 
 Each fact is `yes`, `no`, or `unknown`. The dependency invariant is fail-closed: `model_ready=yes`
-requires `configured=yes`, `reachable=yes`, and `model_present=yes`. A server/TCP response therefore
-cannot by itself become model readiness.
+requires `configured=yes`, `reachable=yes`, and `model_present=yes`; `inference_proven=yes` also
+requires a valid configured target. A server/TCP response therefore cannot by itself become model
+readiness, and evidence from one local endpoint cannot be reused for another endpoint that happens to
+share the same provider/model labels.
 
 The Ollama adapter uses only metadata endpoints: model catalog (`/api/tags`) and running-model
 inventory (`/api/ps`). It disables redirect following, performs no chat/generate call, never pulls a
@@ -75,9 +85,10 @@ not reported as running has `model_ready=unknown`, because absence from the runn
 proof that it cannot be loaded.
 
 `inference_proven` is deliberately separate from readiness. Health itself never runs an inference to
-obtain that proof. A caller may supply a `ModelInferenceEvidencePort`; without trusted prior evidence,
-the result remains `unknown`. This keeps health cheap and prevents diagnostics from becoming an
-implicit benchmark, model download, or expensive warm-up path.
+obtain that proof. A caller may supply a `ModelInferenceEvidencePort`; the evidence lookup is scoped
+to the validated provider, exact model, and canonical local route identity. Without trusted prior
+evidence for that exact route, the result remains `unknown`. This keeps health cheap and prevents
+diagnostics from becoming an implicit benchmark, model download, or expensive warm-up path.
 
 `ModelHealthSnapshot.as_dict()` contains only Nika-owned fact names/states. It contains no URL, HTTP
 payload, SDK object, provider diagnostics, or model content. `to_health_check()` maps the snapshot
@@ -86,14 +97,14 @@ is FAIL; partial/unknown readiness or proof is WARN; all five proven facts is PA
 
 ## REUSE -> ADAPT -> CUSTOM(thin)
 
-- **REUSE:** canonical `AppConfig`; SQLite schema constants; existing `HealthCheck`/`HealthStatus`;
-  existing `ResourceObserverPort`; installed HTTPX transport.
+- **REUSE:** canonical `AppConfig`; canonical `SQLiteStore` migration authority; existing
+  `HealthCheck`/`HealthStatus`; existing `ResourceObserverPort`; installed HTTPX transport.
 - **ADAPT:** local provider metadata into a five-fact provider-neutral `ModelHealthSnapshot`.
-- **CUSTOM(thin):** fact invariants, bounded severity projection, metadata-only Ollama probe, and
-  deterministic evidence-port seam.
+- **CUSTOM(thin):** fact invariants, bounded severity projection, metadata-only Ollama probe,
+  deterministic route-bound evidence-port seam, and source-write-free SQLite snapshot observation.
 
-No new dependency, database/schema, scheduler, inference call, model acquisition, telemetry backend,
-approval surface, permission expansion, or second health/resource framework is introduced.
+No new dependency, database/schema authority, scheduler, inference call, model acquisition, telemetry
+backend, approval surface, permission expansion, or second health/resource framework is introduced.
 
 ## Accessibility boundary
 
