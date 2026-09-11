@@ -347,6 +347,15 @@ class ModelGateway:
                     invalid = True
                     break
 
+        if not invalid and total_tokens is not None:
+            known_component_tokens = sum(
+                value
+                for value in (input_tokens, output_tokens)
+                if value is not None
+            )
+            if total_tokens < known_component_tokens:
+                invalid = True
+
         if not invalid and latency_ms is not None:
             if type(latency_ms) not in (int, float):
                 invalid = True
