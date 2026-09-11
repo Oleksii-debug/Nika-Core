@@ -311,6 +311,27 @@ class DurableDeploymentFabric(DeploymentFabric):
             )
         return uncertain
 
+    def _durable_snapshot(self) -> DeploymentFabricSnapshot:
+        snapshot = self.snapshot()
+        if not self._rollback_health_by_intent:
+            return snapshot
+        return replace(
+            snapshot,
+            records=tuple(
+                replace(
+                    record,
+                    health=self._rollback_health_by_intent[record.intent.intent_id],
+                )
+                if (
+                    record.state is DeploymentState.UNCERTAIN
+                    and record.health is None
+                    and record.intent.intent_id in self._rollback_health_by_intent
+                )
+                else record
+                for record in snapshot.records
+            ),
+        )
+
     def _save(self, record: DeploymentRecord) -> DeploymentRecord:
         if record.intent.project_id != self._deployment_project_id:
             raise ProductFactoryDeploymentCheckpointError(
@@ -339,7 +360,7 @@ class DurableDeploymentFabric(DeploymentFabric):
             self._deployment_checkpoint_host.save(
                 host_task_id=self._deployment_host_task_id,
                 project_id=self._deployment_project_id,
-                snapshot=self.snapshot(),
+                snapshot=self._durable_snapshot(),
             )
             if (
                 saved.state is DeploymentState.UNCERTAIN
