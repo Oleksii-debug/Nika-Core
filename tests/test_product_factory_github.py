@@ -11,6 +11,7 @@ from nika_core.product_factory_github import (
     GitHubCheck,
     GitHubFactoryAdapter,
     GitHubFactoryError,
+    GitHubIntegrationEvidence,
     GitHubIssueRef,
     GitHubPullRequest,
     GitHubRepositoryObservation,
@@ -27,6 +28,23 @@ MAIN_SHA = "1" * 40
 CANDIDATE_SHA = "2" * 40
 MERGE_SHA = "3" * 40
 DESCENDANT_SHA = "4" * 40
+
+
+class _IntegrationEvidencePort:
+    def __init__(self, evidence: GitHubIntegrationEvidence | object | None = None) -> None:
+        self.evidence = evidence
+        self.calls: list[dict[str, object]] = []
+
+    def prove_integration(self, **kwargs: object) -> GitHubIntegrationEvidence:
+        self.calls.append(dict(kwargs))
+        if self.evidence is not None:
+            return self.evidence  # type: ignore[return-value]
+        return GitHubIntegrationEvidence(
+            pull_request_number=int(kwargs["pull_request_number"]),
+            candidate_sha=str(kwargs["candidate_sha"]),
+            integration_sha=str(kwargs["integration_sha"]),
+            evidence_ref="github:compare/candidate-to-integration",
+        )
 
 
 def _repository(**overrides: object) -> RepositoryRef:
@@ -100,6 +118,7 @@ def test_binds_exact_repository_candidate_pr_and_checks() -> None:
     assert all(item.required is False for item in binding.check_evidence)
     assert binding.integrated is False
     assert binding.integration_sha is None
+    assert binding.integration_evidence_ref is None
 
 
 def test_rejects_repository_locator_substitution() -> None:
@@ -207,40 +226,139 @@ def test_pending_check_prevents_green_projection() -> None:
     assert binding.checks_state is CheckState.PENDING
 
 
-def test_merged_pr_projects_exact_integration_identity_from_branch_history() -> None:
-    merged_pr = GitHubPullRequest(
+def _merged_pr(
+    *,
+    base_sha: str = MAIN_SHA,
+    merge_sha: str = MERGE_SHA,
+) -> GitHubPullRequest:
+    return GitHubPullRequest(
         number=720,
         head_branch="automation/dev04",
         head_sha=CANDIDATE_SHA,
         base_branch="main",
-        base_sha=MAIN_SHA,
+        base_sha=base_sha,
         state=PullRequestState.MERGED,
-        merge_sha=MERGE_SHA,
+        merge_sha=merge_sha,
     )
-    binding = GitHubFactoryAdapter().bind(
+
+
+def test_merged_pr_projects_only_trusted_candidate_integration_identity() -> None:
+    port = _IntegrationEvidencePort()
+    binding = GitHubFactoryAdapter(integration_evidence_port=port).bind(
         _repository(),
         _observation(
-            pull_request=merged_pr,
+            pull_request=_merged_pr(),
             default_branch_sha=DESCENDANT_SHA,
             default_branch_ancestor_shas=(MAIN_SHA, MERGE_SHA),
         ),
     )
+
     assert binding.integrated is True
     assert binding.integration_sha == MERGE_SHA
+    assert binding.integration_evidence_ref == "github:compare/candidate-to-integration"
     assert binding.default_branch_sha == DESCENDANT_SHA
     assert binding.default_branch_ancestor_shas == (MAIN_SHA, MERGE_SHA)
+    assert port.calls == [
+        {
+            "repository_full_name": "oleksii-debug/nika-core",
+            "pull_request_number": 720,
+            "candidate_sha": CANDIDATE_SHA,
+            "integration_sha": MERGE_SHA,
+        }
+    ]
+
+
+def test_generic_merged_observation_cannot_mint_integration_truth() -> None:
+    with pytest.raises(GitHubFactoryError, match="trusted candidate integration evidence"):
+        GitHubFactoryAdapter().bind(
+            _repository(),
+            _observation(
+                pull_request=_merged_pr(),
+                default_branch_sha=DESCENDANT_SHA,
+                default_branch_ancestor_shas=(MAIN_SHA, MERGE_SHA),
+            ),
+        )
+
+
+def test_merged_pr_rejects_unrelated_provider_integration_evidence() -> None:
+    foreign = GitHubIntegrationEvidence(
+        pull_request_number=720,
+        candidate_sha="5" * 40,
+        integration_sha=MERGE_SHA,
+        evidence_ref="github:compare/foreign-candidate",
+    )
+    port = _IntegrationEvidencePort(foreign)
+
+    with pytest.raises(GitHubFactoryError, match="candidate sha does not match"):
+        GitHubFactoryAdapter(integration_evidence_port=port).bind(
+            _repository(),
+            _observation(
+                pull_request=_merged_pr(),
+                default_branch_sha=DESCENDANT_SHA,
+                default_branch_ancestor_shas=(MAIN_SHA, MERGE_SHA),
+            ),
+        )
+
+
+def test_merged_pr_rejects_foreign_integration_sha_evidence() -> None:
+    foreign = GitHubIntegrationEvidence(
+        pull_request_number=720,
+        candidate_sha=CANDIDATE_SHA,
+        integration_sha="5" * 40,
+        evidence_ref="github:compare/foreign-integration",
+    )
+    port = _IntegrationEvidencePort(foreign)
+
+    with pytest.raises(GitHubFactoryError, match="sha does not match pull request"):
+        GitHubFactoryAdapter(integration_evidence_port=port).bind(
+            _repository(),
+            _observation(
+                pull_request=_merged_pr(),
+                default_branch_sha=DESCENDANT_SHA,
+                default_branch_ancestor_shas=(MAIN_SHA, MERGE_SHA),
+            ),
+        )
+
+
+def test_merged_pr_rejects_base_sha_as_fake_merge_identity() -> None:
+    port = _IntegrationEvidencePort()
+    aliased_pr = _merged_pr(merge_sha=MAIN_SHA)
+
+    with pytest.raises(GitHubFactoryError, match="must differ from base sha"):
+        GitHubFactoryAdapter(integration_evidence_port=port).bind(
+            _repository(),
+            _observation(
+                pull_request=aliased_pr,
+                default_branch_sha=DESCENDANT_SHA,
+                default_branch_ancestor_shas=(MAIN_SHA,),
+            ),
+        )
+    assert port.calls == []
+
+
+def test_merged_pr_requires_canonical_integration_evidence_type() -> None:
+    port = _IntegrationEvidencePort(
+        SimpleNamespace(
+            pull_request_number=720,
+            candidate_sha=CANDIDATE_SHA,
+            integration_sha=MERGE_SHA,
+            evidence_ref="github:compare/structural-only",
+        )
+    )
+
+    with pytest.raises(GitHubFactoryError, match="GitHubIntegrationEvidence"):
+        GitHubFactoryAdapter(integration_evidence_port=port).bind(
+            _repository(),
+            _observation(
+                pull_request=_merged_pr(),
+                default_branch_sha=DESCENDANT_SHA,
+                default_branch_ancestor_shas=(MAIN_SHA, MERGE_SHA),
+            ),
+        )
 
 
 def test_merged_pr_requires_historical_base_in_default_branch_history() -> None:
-    merged_pr = GitHubPullRequest(
-        number=720,
-        head_branch="automation/dev04",
-        head_sha=CANDIDATE_SHA,
-        base_branch="main",
-        base_sha=DESCENDANT_SHA,
-        state=PullRequestState.MERGED,
-        merge_sha=MERGE_SHA,
-    )
+    merged_pr = _merged_pr(base_sha=DESCENDANT_SHA)
 
     with pytest.raises(GitHubFactoryError, match="base sha is not contained"):
         GitHubFactoryAdapter().bind(
@@ -254,15 +372,7 @@ def test_merged_pr_requires_historical_base_in_default_branch_history() -> None:
 
 
 def test_merged_pr_requires_merge_commit_in_default_branch_history() -> None:
-    merged_pr = GitHubPullRequest(
-        number=720,
-        head_branch="automation/dev04",
-        head_sha=CANDIDATE_SHA,
-        base_branch="main",
-        base_sha=MAIN_SHA,
-        state=PullRequestState.MERGED,
-        merge_sha=MERGE_SHA,
-    )
+    merged_pr = _merged_pr()
 
     with pytest.raises(GitHubFactoryError, match="merge sha is not contained"):
         GitHubFactoryAdapter().bind(
