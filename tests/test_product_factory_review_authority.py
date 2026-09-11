@@ -8,8 +8,8 @@ from nika_core.product_factory_coordinator import (
     CoordinatorError,
     ProductFactoryCoordinator,
     ReviewDecision,
-    WorkerResultEnvelope,
     WorkState,
+    WorkerResultEnvelope,
 )
 from nika_core.product_factory_orchestration import (
     ProductComponent,
