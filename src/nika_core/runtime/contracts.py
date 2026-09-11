@@ -142,10 +142,17 @@ class RuntimeResult:
     error_code: RuntimeErrorCode | None = None
 
     def __post_init__(self) -> None:
-        if self.outcome == RuntimeOutcome.WAITING_APPROVAL and not self.resume_token:
-            raise ValueError("waiting approval requires a resume token")
+        if not isinstance(self.outcome, RuntimeOutcome):
+            raise TypeError("outcome must be a RuntimeOutcome")
+        if (
+            self.outcome in {RuntimeOutcome.WAITING_APPROVAL, RuntimeOutcome.PAUSED}
+            and (not isinstance(self.resume_token, str) or not self.resume_token.strip())
+        ):
+            raise ValueError("resumable outcome requires a usable resume token")
         if self.outcome == RuntimeOutcome.FAILED and not self.error:
             raise ValueError("failed outcome requires an error")
+        if self.error_code is not None and not isinstance(self.error_code, RuntimeErrorCode):
+            raise TypeError("error_code must be a RuntimeErrorCode when provided")
         if self.outcome != RuntimeOutcome.FAILED and self.error_code is not None:
             raise ValueError("error_code is only valid for failed outcomes")
 
