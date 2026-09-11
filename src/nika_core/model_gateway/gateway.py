@@ -180,7 +180,7 @@ class ModelGateway:
                 self._audit_failure(request, capabilities.provider_id, error)
                 raise error
 
-            response_error = self._validate_success_response(
+            canonical_response, response_error = self._snapshot_success_response(
                 response=response,
                 request=request,
                 trusted_provider_id=capabilities.provider_id,
@@ -193,21 +193,23 @@ class ModelGateway:
                     response_error,
                 )
                 raise response_error
+            if canonical_response is None:
+                raise AssertionError("validated model response snapshot is unavailable")
 
             self._audit(
                 event_type="model.completed",
                 request=request,
                 payload={
-                    "provider_id": response.provider_id,
-                    "model_fingerprint": model_identity_fingerprint(response.model),
-                    "input_tokens": response.usage.input_tokens,
-                    "output_tokens": response.usage.output_tokens,
-                    "total_tokens": response.usage.total_tokens,
-                    "latency_ms": response.latency_ms,
+                    "provider_id": canonical_response.provider_id,
+                    "model_fingerprint": model_identity_fingerprint(canonical_response.model),
+                    "input_tokens": canonical_response.usage.input_tokens,
+                    "output_tokens": canonical_response.usage.output_tokens,
+                    "total_tokens": canonical_response.usage.total_tokens,
+                    "latency_ms": canonical_response.latency_ms,
                     "attempt": index + 1,
                 },
             )
-            return response
+            return canonical_response
 
         raise ModelGatewayError(
             ModelErrorCode.UNAVAILABLE,
@@ -255,58 +257,86 @@ class ModelGateway:
     def _snapshot_capabilities(provider: ModelProvider) -> ProviderCapabilities:
         try:
             capabilities = provider.capabilities
+            if not isinstance(capabilities, ProviderCapabilities):
+                raise TypeError("model provider capabilities must be ProviderCapabilities")
+            provider_id = capabilities.provider_id
+            kind = capabilities.kind
+            supports_private_data = capabilities.supports_private_data
+            supports_tools = capabilities.supports_tools
+            supports_streaming = capabilities.supports_streaming
+            supports_hard_cancellation = capabilities.supports_hard_cancellation
+        except (TypeError, ValueError):
+            raise
         except Exception:  # noqa: BLE001 - provider implementations are untrusted
             raise ValueError("model provider capabilities are invalid") from None
-        if not isinstance(capabilities, ProviderCapabilities):
-            raise TypeError("model provider capabilities must be ProviderCapabilities")
-        if not _is_canonical_identity(capabilities.provider_id):
+
+        if not _is_canonical_identity(provider_id):
             raise ValueError("model provider_id must be canonical text")
-        if not isinstance(capabilities.kind, ProviderKind):
+        if not isinstance(kind, ProviderKind):
             raise TypeError("model provider kind must be ProviderKind")
         for value in (
-            capabilities.supports_private_data,
-            capabilities.supports_tools,
-            capabilities.supports_streaming,
-            capabilities.supports_hard_cancellation,
+            supports_private_data,
+            supports_tools,
+            supports_streaming,
+            supports_hard_cancellation,
         ):
             if not isinstance(value, bool):
                 raise TypeError("model provider capability flags must be bool")
-        return capabilities
+        return ProviderCapabilities(
+            provider_id=provider_id,
+            kind=kind,
+            supports_private_data=supports_private_data,
+            supports_tools=supports_tools,
+            supports_streaming=supports_streaming,
+            supports_hard_cancellation=supports_hard_cancellation,
+        )
 
     @staticmethod
-    def _validate_success_response(
+    def _snapshot_success_response(
         *,
         response: object,
         request: ModelRequest,
         trusted_provider_id: str,
         trusted_provider_kind: ProviderKind,
-    ) -> ModelGatewayError | None:
+    ) -> tuple[ModelResponse | None, ModelGatewayError | None]:
+        invalid_error = ModelGatewayError(
+            ModelErrorCode.PROVIDER_ERROR,
+            "model provider returned an invalid success response",
+            provider_id=trusted_provider_id,
+            retryable=False,
+            failure_effect=ModelFailureEffect.UNKNOWN,
+        )
         if not isinstance(response, ModelResponse):
-            return ModelGatewayError(
-                ModelErrorCode.PROVIDER_ERROR,
-                "model provider returned an invalid success response",
-                provider_id=trusted_provider_id,
-                retryable=False,
-                failure_effect=ModelFailureEffect.UNKNOWN,
-            )
+            return None, invalid_error
+
+        try:
+            request_id = response.request_id
+            provider_id = response.provider_id
+            provider_kind = response.provider_kind
+            text = response.text
+            model = response.model
+            raw_usage = response.usage
+            latency_ms = response.latency_ms
+            if not isinstance(raw_usage, ModelUsage):
+                return None, invalid_error
+            input_tokens = raw_usage.input_tokens
+            output_tokens = raw_usage.output_tokens
+            total_tokens = raw_usage.total_tokens
+        except Exception:  # noqa: BLE001 - provider DTOs are untrusted
+            return None, invalid_error
 
         invalid = (
-            response.request_id != request.request_id
-            or response.provider_id != trusted_provider_id
-            or response.provider_kind is not trusted_provider_kind
-            or not isinstance(response.text, str)
-            or not isinstance(response.model, str)
-            or not response.model
-            or (request.model is None and not _is_canonical_identity(response.model))
-            or (request.model is not None and response.model != request.model)
-            or not isinstance(response.usage, ModelUsage)
+            request_id != request.request_id
+            or provider_id != trusted_provider_id
+            or provider_kind is not trusted_provider_kind
+            or not isinstance(text, str)
+            or not isinstance(model, str)
+            or not model
+            or (request.model is None and not _is_canonical_identity(model))
+            or (request.model is not None and model != request.model)
         )
         if not invalid:
-            for value in (
-                response.usage.input_tokens,
-                response.usage.output_tokens,
-                response.usage.total_tokens,
-            ):
+            for value in (input_tokens, output_tokens, total_tokens):
                 if value is not None and (
                     isinstance(value, bool)
                     or not isinstance(value, int)
@@ -316,26 +346,35 @@ class ModelGateway:
                     invalid = True
                     break
 
-        if not invalid and response.latency_ms is not None:
-            latency = response.latency_ms
-            if isinstance(latency, bool) or not isinstance(latency, (int, float)):
+        if not invalid and latency_ms is not None:
+            if isinstance(latency_ms, bool) or not isinstance(latency_ms, (int, float)):
                 invalid = True
             else:
                 try:
-                    finite_latency = isfinite(float(latency))
+                    finite_latency = isfinite(float(latency_ms))
                 except OverflowError:
                     finite_latency = False
-                if not finite_latency or latency < 0:
+                if not finite_latency or latency_ms < 0:
                     invalid = True
 
-        if not invalid:
-            return None
-        return ModelGatewayError(
-            ModelErrorCode.PROVIDER_ERROR,
-            "model provider returned an invalid success response",
-            provider_id=trusted_provider_id,
-            retryable=False,
-            failure_effect=ModelFailureEffect.UNKNOWN,
+        if invalid:
+            return None, invalid_error
+        usage = ModelUsage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+        )
+        return (
+            ModelResponse(
+                request_id=request_id,
+                text=text,
+                provider_id=provider_id,
+                provider_kind=provider_kind,
+                model=model,
+                usage=usage,
+                latency_ms=latency_ms,
+            ),
+            None,
         )
 
     @staticmethod
