@@ -16,10 +16,10 @@ from nika_core.packaging.release import (
     write_release_manifest,
 )
 from nika_core.packaging.windows import default_windows_plan
-from nika_core.product_factory_packaged_planning import TEAM_PLAN_REF_PREFIX
 
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _PF11_EVIDENCE_NAME = "pf11-packaged-product-journey.json"
+_PF11_TEAM_PLAN_EVIDENCE_NAME = "pf11-packaged-team-planning.json"
 
 
 def project_version(project_root: Path) -> str:
@@ -116,35 +116,17 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
     project_id = first.get("project_id")
     if (
         first.get("route") != "product_project"
-        or first.get("spec_version") != 2
+        or first.get("spec_version") != 1
         or not isinstance(project_id, str)
         or not project_id.strip()
-        or first.get("pre_plan_current_command_proven") is not True
         or first.get("command_center_state_proven") is not True
-        or first.get("current_command_proven") is not True
-        or first.get("current_command_focus_proven") is not True
         or first.get("bounded_projection_proven") is not True
         or first.get("bridge_state_project_id") != project_id
-        or first.get("bridge_state_spec_version") != 2
-        or first.get("team_plan_persisted_proven") is not True
-        or first.get("team_plan_worker_dispatch_started") is not False
+        or first.get("bridge_state_spec_version") != 1
     ):
         raise RuntimeError("packaged PF11 ProductProject proof returned invalid route evidence")
     status_count = _require_exact_nonnegative_int(first, "bridge_state_status_count")
     decision_count = _require_exact_nonnegative_int(first, "bridge_state_decision_count")
-    role_count = _require_exact_nonnegative_int(first, "team_plan_role_count")
-    review_count = _require_exact_nonnegative_int(
-        first,
-        "team_plan_independent_review_count",
-    )
-    team_plan_id = _require_nonempty_string(first, "team_plan_id")
-    team_plan_binding_ref = _require_nonempty_string(first, "team_plan_binding_ref")
-    if not team_plan_binding_ref.startswith(TEAM_PLAN_REF_PREFIX):
-        raise RuntimeError("packaged PF11 proof returned an unrecognized team-plan binding")
-    if role_count < 1 or review_count < 1 or review_count > role_count:
-        raise RuntimeError("packaged PF11 proof returned invalid team-plan role counts")
-    if first.get("team_plan_permission_ceiling") != ["read_project"]:
-        raise RuntimeError("packaged PF11 proof exceeded the planning-only permission ceiling")
     for forbidden_true in (
         "human_tested",
         "nvda_verified",
@@ -155,26 +137,130 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
 
     target = bundle_dir / _PF11_EVIDENCE_NAME
     evidence = {
-        "schema_version": 3,
+        "schema_version": 2,
         "source_sha": source_sha,
         "route": first["route"],
         "product_project_id": project_id,
         "product_project_spec_version": first["spec_version"],
         "product_project_state": first.get("state"),
-        "pre_plan_current_command_proven": True,
         "product_command_center_proven": True,
         "packaged_bridge_state_proven": True,
         "bounded_projection_proven": True,
         "bridge_state_status_count": status_count,
         "bridge_state_decision_count": decision_count,
-        "team_plan_id": team_plan_id,
-        "team_plan_binding_ref": team_plan_binding_ref,
+        "packaged_executable_proven": True,
+        "restart_replay_proven": True,
+        "human_tested": False,
+        "nvda_verified": False,
+        "production_release_ready": False,
+    }
+    target.write_text(
+        json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return target
+
+
+def prove_packaged_product_planning_journey(bundle_dir: Path, *, source_sha: str) -> Path:
+    """Prove packaged PF2 planning additively without redefining the baseline PF11 proof."""
+    executable = bundle_dir / "NikaCore.exe"
+    if not executable.is_file():
+        raise RuntimeError(f"packaged PF11 team-plan executable is missing: {executable}")
+    if not _FULL_SHA_RE.fullmatch(source_sha):
+        raise ValueError("packaged PF11 team-plan proof requires exact source SHA")
+
+    with tempfile.TemporaryDirectory(prefix="nika-pf11-team-plan-") as temporary:
+        root = Path(temporary)
+        database = root / "team-planning.db"
+        outputs: list[dict[str, object]] = []
+        environment = dict(os.environ)
+        environment["NIKA_DB_PATH"] = str(database)
+        for attempt in (1, 2):
+            output = root / f"team-plan-proof-{attempt}.json"
+            completed = subprocess.run(
+                [
+                    str(executable),
+                    "--pf11-team-plan-proof",
+                    "--pf11-team-plan-proof-output",
+                    str(output),
+                ],
+                check=False,
+                env=environment,
+                timeout=60,
+            )
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    f"packaged PF11 team-plan proof failed on attempt {attempt}: "
+                    f"exit {completed.returncode}"
+                )
+            try:
+                payload = json.loads(output.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    "packaged PF11 team-plan proof did not emit valid JSON evidence"
+                ) from exc
+            if not isinstance(payload, dict):
+                raise TypeError("packaged PF11 team-plan proof evidence must be a JSON object")
+            outputs.append(payload)
+
+    first, second = outputs
+    if first != second:
+        raise RuntimeError("packaged PF11 team-plan restart replay changed durable identity")
+    project_id = first.get("project_id")
+    plan_id = _require_nonempty_string(first, "team_plan_id")
+    binding_ref = _require_nonempty_string(first, "team_plan_binding_ref")
+    role_count = _require_exact_nonnegative_int(first, "team_plan_role_count")
+    review_count = _require_exact_nonnegative_int(first, "team_plan_independent_review_count")
+    status_count = _require_exact_nonnegative_int(first, "bridge_state_status_count")
+    decision_count = _require_exact_nonnegative_int(first, "bridge_state_decision_count")
+    if (
+        first.get("route") != "product_project"
+        or first.get("spec_version") != 2
+        or not isinstance(project_id, str)
+        or not project_id.strip()
+        or not binding_ref.startswith("pf-team-plan:v1:")
+        or role_count < 1
+        or review_count < 1
+        or review_count > role_count
+        or first.get("team_plan_permission_ceiling") != ["read_project"]
+        or first.get("team_plan_persisted_proven") is not True
+        or first.get("team_plan_worker_dispatch_started") is not False
+        or first.get("command_center_state_proven") is not True
+        or first.get("current_command_proven") is not True
+        or first.get("current_command_focus_proven") is not True
+        or first.get("bounded_projection_proven") is not True
+        or first.get("bridge_state_project_id") != project_id
+        or first.get("bridge_state_spec_version") != 2
+    ):
+        raise RuntimeError("packaged PF11 team-plan proof returned invalid evidence")
+    for forbidden_true in (
+        "human_tested",
+        "nvda_verified",
+        "production_release_ready",
+    ):
+        if first.get(forbidden_true) is not False:
+            raise RuntimeError(f"packaged PF11 team-plan proof may not set {forbidden_true}=true")
+
+    target = bundle_dir / _PF11_TEAM_PLAN_EVIDENCE_NAME
+    evidence = {
+        "schema_version": 1,
+        "source_sha": source_sha,
+        "route": first["route"],
+        "product_project_id": project_id,
+        "product_project_spec_version": 2,
+        "product_project_state": first.get("state"),
+        "team_plan_id": plan_id,
+        "team_plan_binding_ref": binding_ref,
         "team_plan_role_count": role_count,
         "team_plan_independent_review_count": review_count,
         "team_plan_permission_ceiling": ["read_project"],
         "team_plan_persisted_proven": True,
-        "team_plan_restart_recovery_proven": True,
         "team_plan_worker_dispatch_started": False,
+        "product_command_center_proven": True,
+        "packaged_bridge_state_proven": True,
+        "bounded_projection_proven": True,
+        "bridge_state_status_count": status_count,
+        "bridge_state_decision_count": decision_count,
         "packaged_executable_proven": True,
         "restart_replay_proven": True,
         "human_tested": False,
@@ -201,6 +287,7 @@ def build(
     PyInstaller.__main__.run(list(plan.pyinstaller_args()))
 
     prove_packaged_product_journey(plan.bundle_dir, source_sha=exact_source_sha)
+    prove_packaged_product_planning_journey(plan.bundle_dir, source_sha=exact_source_sha)
     build_third_party_notices(plan.bundle_dir)
     notice_findings = verify_third_party_notices(plan.bundle_dir)
     if notice_findings:
