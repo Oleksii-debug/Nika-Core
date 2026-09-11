@@ -62,9 +62,7 @@ class BehavioralCapabilities(ProviderCapabilities):
                     return "spoofed-cloud"
                 if name == "kind":
                     return ProviderKind.CLOUD
-                if name == "supports_private_data":
-                    return False
-                return True
+                return name != "supports_private_data"
             return value
         return object.__getattribute__(self, name)
 
