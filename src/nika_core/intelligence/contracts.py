@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
+from unicodedata import normalize
 
 
 class DeterministicErrorCode(StrEnum):
@@ -40,13 +42,47 @@ class DeterministicPlanningError(RuntimeError):
         self.code = code
 
 
+def _canonical_identifier(value: object, *, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string")
+    canonical = normalize("NFC", value).strip()
+    if not canonical:
+        raise ValueError(f"{field_name} must not be empty")
+    return canonical
+
+
+def _canonical_facts(
+    values: object,
+    *,
+    field_name: str,
+    reject_duplicates: bool,
+) -> frozenset[str]:
+    if isinstance(values, (str, bytes)) or not isinstance(values, Iterable):
+        raise TypeError(f"{field_name} must be an iterable of strings")
+
+    canonical: set[str] = set()
+    for value in values:
+        fact = _canonical_identifier(value, field_name=f"{field_name} fact")
+        if reject_duplicates and fact in canonical:
+            raise ValueError(f"duplicate {field_name} constraint: {fact}")
+        canonical.add(fact)
+    return frozenset(canonical)
+
+
 @dataclass(frozen=True, slots=True)
 class WorldState:
     facts: frozenset[str] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
-        if any(not fact.strip() for fact in self.facts):
-            raise ValueError("state facts must not be empty")
+        object.__setattr__(
+            self,
+            "facts",
+            _canonical_facts(
+                self.facts,
+                field_name="state",
+                reject_duplicates=False,
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,10 +91,20 @@ class DeterministicGoal:
     forbidden: frozenset[str] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
-        if self.required & self.forbidden:
+        required = _canonical_facts(
+            self.required,
+            field_name="goal required",
+            reject_duplicates=True,
+        )
+        forbidden = _canonical_facts(
+            self.forbidden,
+            field_name="goal forbidden",
+            reject_duplicates=True,
+        )
+        if required & forbidden:
             raise ValueError("goal cannot require and forbid the same fact")
-        if any(not fact.strip() for fact in self.required | self.forbidden):
-            raise ValueError("goal facts must not be empty")
+        object.__setattr__(self, "required", required)
+        object.__setattr__(self, "forbidden", forbidden)
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,17 +118,74 @@ class DeterministicAction:
     arguments: dict[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not self.action_id.strip():
-            raise ValueError("action_id must not be empty")
-        if self.requires & self.forbids:
+        action_id = _canonical_identifier(self.action_id, field_name="action_id")
+        requires = _canonical_facts(
+            self.requires,
+            field_name="action requires",
+            reject_duplicates=True,
+        )
+        forbids = _canonical_facts(
+            self.forbids,
+            field_name="action forbids",
+            reject_duplicates=True,
+        )
+        adds = _canonical_facts(
+            self.adds,
+            field_name="action adds",
+            reject_duplicates=True,
+        )
+        removes = _canonical_facts(
+            self.removes,
+            field_name="action removes",
+            reject_duplicates=True,
+        )
+        if requires & forbids:
             raise ValueError("action cannot require and forbid the same fact")
-        if self.adds & self.removes:
+        if adds & removes:
             raise ValueError("action cannot add and remove the same fact")
-        facts = self.requires | self.forbids | self.adds | self.removes
-        if any(not fact.strip() for fact in facts):
-            raise ValueError("action facts must not be empty")
-        if self.tool_id is not None and not self.tool_id.strip():
-            raise ValueError("tool_id must not be empty")
+        if self.tool_id is None:
+            tool_id = None
+        else:
+            tool_id = _canonical_identifier(self.tool_id, field_name="tool_id")
+        if not isinstance(self.arguments, dict):
+            raise TypeError("action arguments must be a dictionary")
+        if any(not isinstance(key, str) for key in self.arguments):
+            raise TypeError("action argument names must be strings")
+
+        object.__setattr__(self, "action_id", action_id)
+        object.__setattr__(self, "requires", requires)
+        object.__setattr__(self, "forbids", forbids)
+        object.__setattr__(self, "adds", adds)
+        object.__setattr__(self, "removes", removes)
+        object.__setattr__(self, "tool_id", tool_id)
+        object.__setattr__(self, "arguments", dict(self.arguments))
+
+
+def canonicalize_planner_inputs(
+    *,
+    state: WorldState,
+    goal: DeterministicGoal,
+    actions: tuple[DeterministicAction, ...],
+) -> tuple[WorldState, DeterministicGoal, tuple[DeterministicAction, ...]]:
+    """Validate and order Nika-owned symbolic inputs before deterministic planning."""
+    if not isinstance(state, WorldState):
+        raise TypeError("planner state must be WorldState")
+    if not isinstance(goal, DeterministicGoal):
+        raise TypeError("planner goal must be DeterministicGoal")
+    if not goal.required and not goal.forbidden:
+        raise ValueError("planner goal must contain at least one constraint")
+    if isinstance(actions, (str, bytes)) or not isinstance(actions, Iterable):
+        raise TypeError("planner capabilities must be an iterable of DeterministicAction records")
+
+    capability_records = tuple(actions)
+    if any(not isinstance(action, DeterministicAction) for action in capability_records):
+        raise TypeError("planner capability records must be DeterministicAction instances")
+
+    action_ids = [action.action_id for action in capability_records]
+    if len(set(action_ids)) != len(action_ids):
+        raise ValueError("duplicate deterministic action_id")
+
+    return state, goal, tuple(sorted(capability_records, key=lambda action: action.action_id))
 
 
 @dataclass(frozen=True, slots=True)
