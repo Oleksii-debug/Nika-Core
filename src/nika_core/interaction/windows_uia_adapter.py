@@ -16,6 +16,7 @@ from .domain import (
     ControlNode,
     InteractionAction,
     StaleSnapshotError,
+    TargetNotFoundError,
     UnsupportedInteractionError,
 )
 from .windows_uia_adapter_impl import (
@@ -96,6 +97,29 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
 
         return hwnd, runtime_id, generation
 
+    def _exact_live_focus_match(
+        self,
+        *,
+        hwnd: int,
+        runtime_id: tuple[int, ...],
+        generation: int,
+    ) -> UIAControlRecord:
+        matches = [
+            record
+            for record in self.backend.enumerate_controls(hwnd, self.view)
+            if record.runtime_id == runtime_id
+            and record.element_generation == generation
+        ]
+        if not matches:
+            raise StaleSnapshotError(
+                "UIA focus authority is stale: RuntimeId/generation is no longer live"
+            )
+        if len(matches) != 1:
+            raise AmbiguousTargetError(
+                "UIA focus authority is ambiguous for the exact RuntimeId/generation"
+            )
+        return matches[0]
+
     def _await_focus_acknowledgement(
         self,
         node: ControlNode,
@@ -119,21 +143,11 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
                 raise StaleSnapshotError(
                     "UIA focus authority is stale: target window identity changed"
                 )
-            matches = [
-                record
-                for record in self.backend.enumerate_controls(hwnd, self.view)
-                if record.runtime_id == runtime_id
-                and record.element_generation == generation
-            ]
-            if not matches:
-                raise StaleSnapshotError(
-                    "UIA focus authority is stale: RuntimeId/generation is no longer live"
-                )
-            if len(matches) != 1:
-                raise AmbiguousTargetError(
-                    "UIA focus authority is ambiguous for the exact RuntimeId/generation"
-                )
-            live = matches[0]
+            live = self._exact_live_focus_match(
+                hwnd=hwnd,
+                runtime_id=runtime_id,
+                generation=generation,
+            )
             if live.role != node.role or live.name != node.name:
                 raise StaleSnapshotError(
                     "UIA focus authority changed: accessible role/name drifted"
@@ -158,6 +172,66 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
             f"RuntimeId/generation acknowledgement; last focused identity={last_focused!r}"
         )
 
+    def focus(self, node: ControlNode) -> None:
+        """Issue exactly one SetFocus effect and await exact provider acknowledgement."""
+
+        hwnd, runtime_id, generation = self._revalidate_action_authority(
+            node,
+            InteractionAction.FOCUS,
+        )
+        self.backend.focus(hwnd, runtime_id, generation)
+        self._await_focus_acknowledgement(
+            node,
+            hwnd=hwnd,
+            runtime_id=runtime_id,
+            generation=generation,
+        )
+
+    def restore_focus(self, node_id: str | None) -> bool:
+        """Restore one exact prior identity with bounded read-only acknowledgement."""
+
+        if node_id is None:
+            return True
+        identity = self._identity_by_node.get(node_id)
+        if identity is None:
+            return False
+        runtime_id, generation = identity
+        try:
+            hwnd = self._live_hwnd()
+            live = self._exact_live_focus_match(
+                hwnd=hwnd,
+                runtime_id=runtime_id,
+                generation=generation,
+            )
+        except (TargetNotFoundError, StaleSnapshotError, AmbiguousTargetError):
+            return False
+        if not live.enabled or not live.visible:
+            return False
+
+        try:
+            self.backend.focus(hwnd, runtime_id, generation)
+        except (TargetNotFoundError, StaleSnapshotError):
+            return False
+
+        for attempt in range(_FOCUS_ACK_ATTEMPTS):
+            try:
+                if self._live_hwnd() != hwnd:
+                    return False
+                live = self._exact_live_focus_match(
+                    hwnd=hwnd,
+                    runtime_id=runtime_id,
+                    generation=generation,
+                )
+            except (TargetNotFoundError, StaleSnapshotError, AmbiguousTargetError):
+                return False
+            if not live.enabled or not live.visible:
+                return False
+            if self.backend.focused_identity(hwnd) == identity:
+                return True
+            if attempt + 1 < _FOCUS_ACK_ATTEMPTS:
+                time.sleep(_FOCUS_ACK_DELAY_SECONDS)
+        return False
+
     def act(
         self,
         node: ControlNode,
@@ -166,21 +240,14 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
     ) -> None:
         if action is InteractionAction.SET_VALUE and value is None:
             raise ValueError("SET_VALUE requires a value")
+        if action is InteractionAction.FOCUS:
+            self.focus(node)
+            return
 
         hwnd, runtime_id, generation = self._revalidate_action_authority(
             node,
             action,
         )
-        if action is InteractionAction.FOCUS:
-            self.backend.focus(hwnd, runtime_id, generation)
-            self._await_focus_acknowledgement(
-                node,
-                hwnd=hwnd,
-                runtime_id=runtime_id,
-                generation=generation,
-            )
-            return
-
         method = {
             InteractionAction.INVOKE: self.backend.invoke,
             InteractionAction.SET_VALUE: self.backend.set_value,
