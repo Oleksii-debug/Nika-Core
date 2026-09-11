@@ -3,8 +3,12 @@ from __future__ import annotations
 from nika_core.product_factory_coordinator import ComponentWorkRequest
 from nika_core.product_factory_toolsmith_state_impl import (
     ComponentCapabilityBinding,
-    ComponentCapabilityBindingState as _ComponentCapabilityBindingState,
     ProductFactoryToolsmithBindingError,
+)
+from nika_core.product_factory_toolsmith_state_impl import (
+    ComponentCapabilityBindingState as _ComponentCapabilityBindingState,
+)
+from nika_core.product_factory_toolsmith_state_impl import (
     ProductFactoryToolsmithBindingRepository as _BindingRepository,
 )
 
