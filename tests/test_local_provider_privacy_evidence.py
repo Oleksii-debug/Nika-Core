@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.intelligence.modes import IntelligenceMode, IntelligenceModeRouter
 from nika_core.kernel.audit import AuditEvent, AuditLog
