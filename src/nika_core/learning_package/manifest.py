@@ -58,13 +58,13 @@ class LearningDataSplit(StrEnum):
 
 
 def _require_token(value: object, *, field: str) -> str:
-    if not isinstance(value, str) or not _TOKEN_RE.fullmatch(value):
+    if type(value) is not str or not _TOKEN_RE.fullmatch(value):
         raise LearningPackageValidationError(f"{field} must be a bounded machine token")
     return value
 
 
 def _require_sha256(value: object, *, field: str) -> str:
-    if not isinstance(value, str) or not _SHA256_RE.fullmatch(value):
+    if type(value) is not str or not _SHA256_RE.fullmatch(value):
         raise LearningPackageValidationError(f"{field} must be lowercase SHA-256")
     return value
 
