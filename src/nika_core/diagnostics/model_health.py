@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -199,9 +200,7 @@ class OllamaModelHealthProbe:
             or not self._base_url.strip()
             or not isinstance(self._provider_id, str)
             or not self._provider_id.strip()
-            or isinstance(self._timeout_seconds, bool)
-            or not isinstance(self._timeout_seconds, (int, float))
-            or self._timeout_seconds <= 0
+            or not self._valid_timeout(self._timeout_seconds)
         ):
             return ModelHealthFact.NO
         try:
@@ -221,6 +220,15 @@ class OllamaModelHealthProbe:
         ):
             return ModelHealthFact.NO
         return ModelHealthFact.YES
+
+    @staticmethod
+    def _valid_timeout(value: object) -> bool:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        try:
+            return math.isfinite(value) and value > 0
+        except OverflowError:
+            return False
 
     def _route_identity(self) -> str:
         parsed = urlsplit(self._base_url)
