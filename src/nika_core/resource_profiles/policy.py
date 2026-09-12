@@ -199,27 +199,21 @@ def _valid_snapshot(snapshot: ResourceSnapshot) -> bool:
 
 
 def _is_percentage(value: object, *, allow_zero: bool) -> bool:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return False
-    if isinstance(value, float) and not isfinite(value):
-        return False
-    return (0 <= value <= 100) if allow_zero else (0 < value <= 100)
+    if type(value) is int:
+        return (0 <= value <= 100) if allow_zero else (0 < value <= 100)
+    if type(value) is float:
+        if not isfinite(value):
+            return False
+        return (0 <= value <= 100) if allow_zero else (0 < value <= 100)
+    return False
 
 
 def _is_nonnegative_int(value: object) -> bool:
-    return (
-        isinstance(value, int)
-        and not isinstance(value, bool)
-        and 0 <= value <= _MAX_SIGNED_64
-    )
+    return type(value) is int and 0 <= value <= _MAX_SIGNED_64
 
 
 def _is_positive_int(value: object) -> bool:
-    return (
-        isinstance(value, int)
-        and not isinstance(value, bool)
-        and 0 < value <= _MAX_SIGNED_64
-    )
+    return type(value) is int and 0 < value <= _MAX_SIGNED_64
 
 
 def _coerce_profile(value: ResourceProfileName | str) -> ResourceProfileName | None:
