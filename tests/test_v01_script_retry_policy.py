@@ -422,14 +422,5 @@ def test_retry_intent_rejects_untyped_condition_and_float_version() -> None:
 
 
 def test_non_finite_policy_backoff_fails_closed() -> None:
-    decision = plan_script_retry(
-        RetryPolicy(max_retries=1, base_delay_seconds=0, max_delay_seconds=float("inf")),
-        operation_id="op",
-        condition=ScriptRetryCondition.TEMPORARY_BUSY,
-        retries_used=0,
-        now=NOW,
-        replay_safe=True,
-    )
-
-    assert decision.disposition == ScriptRetryDisposition.BACKOFF_LIMIT_EXCEEDED
-    assert decision.intent is None
+    with pytest.raises(ValueError, match="max_delay_seconds"):
+        RetryPolicy(max_retries=1, base_delay_seconds=0, max_delay_seconds=float("inf"))
