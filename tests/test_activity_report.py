@@ -123,7 +123,7 @@ def test_report_uses_half_open_window_and_never_synthesizes_missing_activity(tmp
     ("start", "end", "message"),
     [
         (
-            datetime(2026, 9, 12),
+            datetime(2026, 9, 12, tzinfo=UTC).replace(tzinfo=None),
             datetime(2026, 9, 13, tzinfo=UTC),
             "start must be timezone-aware",
         ),
