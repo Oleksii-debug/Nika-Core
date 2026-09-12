@@ -112,6 +112,44 @@ class MemoryComparisonResult:
         }
 
 
+def _canonical_evidence_ref(
+    value: object,
+    *,
+    expected_kind: ComparisonEvidenceKind,
+) -> ComparisonEvidenceRef:
+    if type(value) is not ComparisonEvidenceRef:
+        raise TypeError("comparison evidence must be the canonical exact type")
+    try:
+        canonical = ComparisonEvidenceRef(
+            kind=value.kind,
+            source_namespace_sha256=value.source_namespace_sha256,
+            source_id_sha256=value.source_id_sha256,
+            evidence_sha256=value.evidence_sha256,
+        )
+    except AttributeError as exc:
+        raise TypeError("comparison evidence is missing canonical fields") from exc
+    if canonical.kind is not expected_kind:
+        raise ValueError(f"comparison evidence kind must be {expected_kind.name}")
+    return canonical
+
+
+def _canonical_memory_result(value: object) -> MemoryComparisonResult:
+    if type(value) is not MemoryComparisonResult:
+        raise TypeError("memory_results must contain MemoryComparisonResult values")
+    try:
+        memory = _canonical_evidence_ref(
+            value.memory,
+            expected_kind=ComparisonEvidenceKind.MEMORY,
+        )
+        return MemoryComparisonResult(
+            memory=memory,
+            relation=value.relation,
+            relation_evidence_sha256=value.relation_evidence_sha256,
+        )
+    except AttributeError as exc:
+        raise TypeError("memory comparison result is missing canonical fields") from exc
+
+
 def _memory_sort_key(result: MemoryComparisonResult) -> tuple[str, str, str]:
     memory = result.memory
     return (
@@ -126,10 +164,9 @@ def _canonical_memory_results(value: object) -> tuple[MemoryComparisonResult, ..
         raise TypeError("memory_results must be an immutable tuple")
     if not 1 <= len(value) <= _MAX_MEMORY_RESULTS:
         raise ValueError("memory_results count is outside the supported bound")
-    if any(type(item) is not MemoryComparisonResult for item in value):
-        raise TypeError("memory_results must contain MemoryComparisonResult values")
 
-    ordered = tuple(sorted(value, key=_memory_sort_key))
+    canonical = tuple(_canonical_memory_result(item) for item in value)
+    ordered = tuple(sorted(canonical, key=_memory_sort_key))
     logical_ids = tuple(
         (item.memory.source_namespace_sha256, item.memory.source_id_sha256)
         for item in ordered
@@ -168,10 +205,10 @@ class ExperienceMemoryComparison:
         comparison_id = _require_token(comparison_id, field="comparison_id")
         workspace_id = _require_token(workspace_id, field="workspace_id")
         agent_id = _require_token(agent_id, field="agent_id")
-        if type(experience) is not ComparisonEvidenceRef:
-            raise TypeError("experience must be a ComparisonEvidenceRef")
-        if experience.kind is not ComparisonEvidenceKind.EXPERIENCE:
-            raise ValueError("experience evidence kind must be EXPERIENCE")
+        canonical_experience = _canonical_evidence_ref(
+            experience,
+            expected_kind=ComparisonEvidenceKind.EXPERIENCE,
+        )
         canonical_results = _canonical_memory_results(memory_results)
 
         proposed_comparator = _require_sha256(
@@ -199,11 +236,45 @@ class ExperienceMemoryComparison:
         object.__setattr__(instance, "comparison_id", comparison_id)
         object.__setattr__(instance, "workspace_id", workspace_id)
         object.__setattr__(instance, "agent_id", agent_id)
-        object.__setattr__(instance, "experience", experience)
+        object.__setattr__(instance, "experience", canonical_experience)
         object.__setattr__(instance, "memory_results", canonical_results)
         object.__setattr__(instance, "comparator_sha256", proposed_comparator)
         object.__setattr__(instance, "comparison_policy_sha256", proposed_policy)
         return instance
+
+    @classmethod
+    def revalidate(
+        cls,
+        value: object,
+        *,
+        expected_comparator_sha256: str,
+        expected_comparison_policy_sha256: str,
+    ) -> ExperienceMemoryComparison:
+        """Return a canonical trusted copy after rechecking every authority invariant.
+
+        Exact Python runtime type is not construction-history proof: callers can use
+        ``object.__new__`` / ``object.__setattr__``. Consumers that receive an
+        existing comparison object must cross this boundary with externally trusted
+        comparator and policy identities before treating it as canonical evidence.
+        """
+        if cls is not ExperienceMemoryComparison:
+            raise TypeError("comparison revalidation must use the canonical type")
+        if type(value) is not ExperienceMemoryComparison:
+            raise TypeError("comparison must be the canonical exact type")
+        try:
+            return cls.create(
+                comparison_id=value.comparison_id,
+                workspace_id=value.workspace_id,
+                agent_id=value.agent_id,
+                experience=value.experience,
+                memory_results=value.memory_results,
+                comparator_sha256=value.comparator_sha256,
+                comparison_policy_sha256=value.comparison_policy_sha256,
+                expected_comparator_sha256=expected_comparator_sha256,
+                expected_comparison_policy_sha256=expected_comparison_policy_sha256,
+            )
+        except AttributeError as exc:
+            raise TypeError("comparison is missing canonical fields") from exc
 
     def reportable_payload(self) -> dict[str, Any]:
         return {
