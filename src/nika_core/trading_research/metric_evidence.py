@@ -154,7 +154,7 @@ def _definition_sha256(metric_name: str) -> str:
     definition = _DEFINITIONS.get(metric_name)
     if definition is None:
         raise TradingResearchError("metric_name must identify a canonical DEV26 metric")
-    payload = "|".join((_DEFINITION_SCHEMA, metric_name, definition))
+    payload = f"{_DEFINITION_SCHEMA}|{metric_name}|{definition}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
