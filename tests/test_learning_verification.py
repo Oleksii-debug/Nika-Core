@@ -49,6 +49,16 @@ def _verified_receipt() -> CandidateDatasetVerification:
     )
 
 
+class _OversizeStr(str):
+    def encode(self, *args: object, **kwargs: object) -> bytes:
+        raise AssertionError("oversize str must be rejected before UTF-8 encoding")
+
+
+class _OversizeBytes(bytes):
+    def decode(self, *args: object, **kwargs: object) -> str:
+        raise AssertionError("oversize bytes must be rejected before UTF-8 decoding")
+
+
 def test_create_canonicalizes_required_checks_and_evidence() -> None:
     receipt = _verified_receipt()
 
@@ -332,6 +342,37 @@ def test_invalid_utf8_bytes_fail_closed() -> None:
         match="not valid UTF-8",
     ):
         CandidateDatasetVerification.from_json(b"\xff")
+
+
+def test_oversize_str_is_rejected_before_encoding() -> None:
+    raw = _OversizeStr("x" * 1_048_577)
+
+    with pytest.raises(
+        LearningVerificationIntegrityError,
+        match="size is invalid",
+    ):
+        CandidateDatasetVerification.from_json(raw)
+
+
+def test_oversize_bytes_are_rejected_before_decoding() -> None:
+    raw = _OversizeBytes(b"x" * 1_048_577)
+
+    with pytest.raises(
+        LearningVerificationIntegrityError,
+        match="size is invalid",
+    ):
+        CandidateDatasetVerification.from_json(raw)
+
+
+def test_multibyte_str_enforces_utf8_byte_bound_after_bounded_encode() -> None:
+    raw = "é" * 524_289
+    assert len(raw) <= 1_048_576
+
+    with pytest.raises(
+        LearningVerificationIntegrityError,
+        match="size is invalid",
+    ):
+        CandidateDatasetVerification.from_json(raw)
 
 
 def test_empty_required_check_set_is_rejected() -> None:

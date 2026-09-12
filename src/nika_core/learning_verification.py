@@ -276,6 +276,10 @@ class CandidateDatasetVerification:
         expected_receipt_sha256: str | None = None,
     ) -> CandidateDatasetVerification:
         if isinstance(raw, str):
+            if not raw or len(raw) > _MAX_RECEIPT_BYTES:
+                raise LearningVerificationIntegrityError(
+                    "serialized receipt size is invalid"
+                )
             decoded = raw
             try:
                 encoded = raw.encode("utf-8")
@@ -283,7 +287,15 @@ class CandidateDatasetVerification:
                 raise LearningVerificationIntegrityError(
                     "serialized receipt is not valid UTF-8"
                 ) from exc
+            if len(encoded) > _MAX_RECEIPT_BYTES:
+                raise LearningVerificationIntegrityError(
+                    "serialized receipt size is invalid"
+                )
         elif isinstance(raw, bytes):
+            if not raw or len(raw) > _MAX_RECEIPT_BYTES:
+                raise LearningVerificationIntegrityError(
+                    "serialized receipt size is invalid"
+                )
             encoded = raw
             try:
                 decoded = raw.decode("utf-8")
@@ -294,10 +306,6 @@ class CandidateDatasetVerification:
         else:
             raise LearningVerificationIntegrityError(
                 "serialized receipt must be str or bytes"
-            )
-        if not encoded or len(encoded) > _MAX_RECEIPT_BYTES:
-            raise LearningVerificationIntegrityError(
-                "serialized receipt size is invalid"
             )
         try:
             parsed = json.loads(decoded, object_pairs_hook=_reject_duplicate_keys)
