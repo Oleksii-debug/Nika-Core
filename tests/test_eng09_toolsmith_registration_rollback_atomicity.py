@@ -146,6 +146,68 @@ def test_rollback_wins_before_registry_write_without_active_capability_leak(
     assert resume is None
 
 
+def test_rollback_wins_after_resume_preflight_without_ready_binding_resurrection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, repository, service, gap, verified_version = _verified_candidate(tmp_path)
+    service.register(
+        gap=gap,
+        expected_version=verified_version,
+        manifest=_manifest(),
+    )
+    original_get = repository.get_escalation
+    rollback_injected = False
+
+    def get_with_resume_rollback(*, task_id: str, capability_id: str) -> dict[str, object] | None:
+        nonlocal rollback_injected
+        row = original_get(task_id=task_id, capability_id=capability_id)
+        if (
+            row is not None
+            and not rollback_injected
+            and row["state"] == CandidateState.REGISTERED.value
+        ):
+            rollback_injected = True
+            registered_version = int(row["row_version"])
+            repository.transition(
+                task_id=task_id,
+                capability_id=capability_id,
+                expected_version=registered_version,
+                target=CandidateState.ROLLED_BACK,
+                evidence={"reason": "concurrent rollback after resume preflight"},
+            )
+            repository.rollback_registration(task_id=task_id, capability_id=capability_id)
+        return row
+
+    monkeypatch.setattr(repository, "get_escalation", get_with_resume_rollback)
+
+    with pytest.raises(StaleTransitionError):
+        repository.mark_resume_ready(
+            task_id=gap.task_id,
+            capability_id=gap.requested_capability,
+        )
+
+    assert rollback_injected
+    row = original_get(task_id=gap.task_id, capability_id=gap.requested_capability)
+    assert row is not None
+    assert row["state"] == CandidateState.ROLLED_BACK.value
+
+    with store.connection() as conn:
+        active = conn.execute(
+            "SELECT digest FROM capability_registry "
+            "WHERE capability_id = ? AND version = ? AND active = 1",
+            (CAPABILITY_ID, "1.0.0"),
+        ).fetchone()
+        resume = conn.execute(
+            "SELECT status FROM capability_resume_bindings "
+            "WHERE task_id = ? AND capability_id = ?",
+            (gap.task_id, CAPABILITY_ID),
+        ).fetchone()
+
+    assert active is None
+    assert resume is None, "ROLLED_BACK escalation must not regain a ready resume binding"
+
+
 def test_exact_verified_registration_remains_healthy_without_rollback(tmp_path: Path) -> None:
     store, repository, service, gap, verified_version = _verified_candidate(tmp_path)
 
