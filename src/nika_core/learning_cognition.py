@@ -39,6 +39,10 @@ def _digest_payload(payload: object) -> str:
     return hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()
 
 
+def _digest_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 def _require_token(value: object, *, field: str) -> str:
     if not isinstance(value, str):
         raise TypeError(f"{field} must be a string")
@@ -72,6 +76,10 @@ def _evidence_sort_key(value: CognitionEvidenceRef) -> tuple[str, str, str]:
     return (value.source_type, value.source_id, value.evidence_sha256)
 
 
+def _requirement_sort_key(value: CognitionVerificationRequirement) -> str:
+    return value.check_id
+
+
 def _check_sort_key(value: CognitionVerificationCheck) -> str:
     return value.check_id
 
@@ -90,7 +98,7 @@ class CognitionEvidenceRef:
     def canonical_payload(self) -> dict[str, str]:
         return {
             "evidence_sha256": self.evidence_sha256,
-            "source_id": self.source_id,
+            "source_id_sha256": _digest_text(self.source_id),
             "source_type": self.source_type,
         }
 
@@ -152,22 +160,38 @@ class CognitionCandidate:
 
     @property
     def statement_sha256(self) -> str:
-        return hashlib.sha256(self.statement.encode("utf-8")).hexdigest()
+        return _digest_text(self.statement)
 
     def reportable_payload(self) -> dict[str, Any]:
         return {
-            "agent_id": self.agent_id,
-            "candidate_id": self.candidate_id,
+            "agent_id_sha256": _digest_text(self.agent_id),
+            "candidate_id_sha256": _digest_text(self.candidate_id),
             "evidence": [item.canonical_payload() for item in self.evidence],
             "kind": self.kind.value,
             "statement_char_count": len(self.statement),
             "statement_sha256": self.statement_sha256,
-            "workspace_id": self.workspace_id,
+            "workspace_id_sha256": _digest_text(self.workspace_id),
         }
 
     @property
     def candidate_sha256(self) -> str:
         return _digest_payload(self.reportable_payload())
+
+
+@dataclass(frozen=True, slots=True)
+class CognitionVerificationRequirement:
+    check_id: str
+    verifier_sha256: str
+
+    def __post_init__(self) -> None:
+        _require_token(self.check_id, field="check_id")
+        _require_sha256(self.verifier_sha256, field="verifier_sha256")
+
+    def canonical_payload(self) -> dict[str, str]:
+        return {
+            "check_id": self.check_id,
+            "verifier_sha256": self.verifier_sha256,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,21 +220,24 @@ class CognitionVerificationCheck:
 @dataclass(frozen=True, slots=True)
 class CognitionVerification:
     candidate_sha256: str
-    required_check_ids: tuple[str, ...]
+    verification_policy_sha256: str
+    requirements: tuple[CognitionVerificationRequirement, ...]
     checks: tuple[CognitionVerificationCheck, ...]
 
     def __post_init__(self) -> None:
         _require_sha256(self.candidate_sha256, field="candidate_sha256")
-        if type(self.required_check_ids) is not tuple:
-            raise TypeError("required_check_ids must be an immutable tuple")
-        if not 1 <= len(self.required_check_ids) <= _MAX_REQUIRED_CHECKS:
-            raise ValueError("required check count is outside the supported bound")
-        for check_id in self.required_check_ids:
-            _require_token(check_id, field="required_check_id")
-        if self.required_check_ids != tuple(sorted(self.required_check_ids)):
-            raise ValueError("required check ids are not in canonical order")
-        if len(set(self.required_check_ids)) != len(self.required_check_ids):
-            raise ValueError("required check ids must be unique")
+        _require_sha256(self.verification_policy_sha256, field="verification_policy_sha256")
+        if type(self.requirements) is not tuple:
+            raise TypeError("requirements must be an immutable tuple")
+        if not 1 <= len(self.requirements) <= _MAX_REQUIRED_CHECKS:
+            raise ValueError("requirement count is outside the supported bound")
+        if any(type(item) is not CognitionVerificationRequirement for item in self.requirements):
+            raise TypeError("requirements must contain CognitionVerificationRequirement values")
+        if self.requirements != tuple(sorted(self.requirements, key=_requirement_sort_key)):
+            raise ValueError("verification requirements are not in canonical order")
+        requirement_ids = tuple(item.check_id for item in self.requirements)
+        if len(set(requirement_ids)) != len(requirement_ids):
+            raise ValueError("verification requirement ids must be unique")
         if type(self.checks) is not tuple:
             raise TypeError("checks must be an immutable tuple")
         if any(type(item) is not CognitionVerificationCheck for item in self.checks):
@@ -220,28 +247,37 @@ class CognitionVerification:
         check_ids = tuple(item.check_id for item in self.checks)
         if len(set(check_ids)) != len(check_ids):
             raise ValueError("verification check ids must be unique")
-        if check_ids != self.required_check_ids:
+        if check_ids != requirement_ids:
             raise ValueError("verification checks must exactly match the required check set")
+        for requirement, check in zip(self.requirements, self.checks, strict=True):
+            if check.verifier_sha256 != requirement.verifier_sha256:
+                raise ValueError("verification check does not match the required verifier")
 
     @classmethod
     def create(
         cls,
         *,
         candidate: CognitionCandidate,
-        required_check_ids: tuple[str, ...],
+        verification_policy_sha256: str,
+        requirements: tuple[CognitionVerificationRequirement, ...],
         checks: tuple[CognitionVerificationCheck, ...],
     ) -> CognitionVerification:
         if type(candidate) is not CognitionCandidate:
             raise TypeError("candidate must be a CognitionCandidate")
-        if type(required_check_ids) is not tuple:
-            raise TypeError("required_check_ids must be an immutable tuple")
+        if type(requirements) is not tuple:
+            raise TypeError("requirements must be an immutable tuple")
         if type(checks) is not tuple:
             raise TypeError("checks must be an immutable tuple")
         return cls(
             candidate_sha256=candidate.candidate_sha256,
-            required_check_ids=tuple(sorted(required_check_ids)),
+            verification_policy_sha256=verification_policy_sha256,
+            requirements=tuple(sorted(requirements, key=_requirement_sort_key)),
             checks=tuple(sorted(checks, key=_check_sort_key)),
         )
+
+    @property
+    def required_check_ids(self) -> tuple[str, ...]:
+        return tuple(item.check_id for item in self.requirements)
 
     @property
     def decision(self) -> CognitionVerificationDecision:
@@ -254,7 +290,8 @@ class CognitionVerification:
             "candidate_sha256": self.candidate_sha256,
             "checks": [check.canonical_payload() for check in self.checks],
             "decision": self.decision.value,
-            "required_check_ids": list(self.required_check_ids),
+            "requirements": [item.canonical_payload() for item in self.requirements],
+            "verification_policy_sha256": self.verification_policy_sha256,
         }
 
     @property
