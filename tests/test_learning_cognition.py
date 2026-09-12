@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
+import nika_core.learning_cognition as learning_cognition
 from nika_core.learning_cognition import (
     CognitionCandidate,
     CognitionCandidateKind,
@@ -66,6 +68,31 @@ def _check(
         verifier_sha256=verifier_char * 64,
         evidence_sha256=digest_char * 64,
         passed=passed,
+    )
+
+
+def _verification(
+    *,
+    candidate: CognitionCandidate,
+    requirements: tuple[CognitionVerificationRequirement, ...],
+    checks: tuple[CognitionVerificationCheck, ...],
+    verification_policy_sha256: str = _POLICY_SHA,
+    expected_verification_policy_sha256: str | None = None,
+    expected_requirements: tuple[CognitionVerificationRequirement, ...] | None = None,
+) -> CognitionVerification:
+    trusted_policy = (
+        verification_policy_sha256
+        if expected_verification_policy_sha256 is None
+        else expected_verification_policy_sha256
+    )
+    trusted_requirements = requirements if expected_requirements is None else expected_requirements
+    return CognitionVerification.create(
+        candidate=candidate,
+        verification_policy_sha256=verification_policy_sha256,
+        requirements=requirements,
+        checks=checks,
+        expected_verification_policy_sha256=trusted_policy,
+        expected_requirements=trusted_requirements,
     )
 
 
@@ -137,6 +164,22 @@ def test_statement_bounds_and_control_characters_fail_closed() -> None:
         _candidate(statement="unsafe\x00statement")
 
 
+def test_oversized_statement_is_rejected_before_unicode_normalization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_if_called(*args: object, **kwargs: object) -> str:
+        raise AssertionError("unicode normalization must not run for oversized raw input")
+
+    monkeypatch.setattr(
+        learning_cognition,
+        "unicodedata",
+        SimpleNamespace(normalize=fail_if_called),
+    )
+
+    with pytest.raises(ValueError, match="pre-normalization bound"):
+        _candidate(statement="x" * (16_384 * 8 + 1))
+
+
 def test_verification_is_exact_set_bound_and_order_independent_at_creation() -> None:
     candidate = _candidate()
     requirement_a = _requirement("causality")
@@ -144,15 +187,13 @@ def test_verification_is_exact_set_bound_and_order_independent_at_creation() -> 
     check_a = _check("causality", passed=True, digest_char="1")
     check_b = _check("replay", passed=True, digest_char="2")
 
-    verification_a = CognitionVerification.create(
+    verification_a = _verification(
         candidate=candidate,
-        verification_policy_sha256=_POLICY_SHA,
         requirements=(requirement_b, requirement_a),
         checks=(check_b, check_a),
     )
-    verification_b = CognitionVerification.create(
+    verification_b = _verification(
         candidate=candidate,
-        verification_policy_sha256=_POLICY_SHA,
         requirements=(requirement_a, requirement_b),
         checks=(check_a, check_b),
     )
@@ -164,9 +205,8 @@ def test_verification_is_exact_set_bound_and_order_independent_at_creation() -> 
 
 def test_failed_required_check_rejects_candidate_without_losing_evidence() -> None:
     candidate = _candidate()
-    verification = CognitionVerification.create(
+    verification = _verification(
         candidate=candidate,
-        verification_policy_sha256=_POLICY_SHA,
         requirements=(
             _requirement("causality"),
             _requirement("replay"),
@@ -188,16 +228,14 @@ def test_missing_or_extra_verification_check_fails_closed() -> None:
     check = _check("causality", passed=True, digest_char="1")
 
     with pytest.raises(ValueError, match="exactly match"):
-        CognitionVerification.create(
+        _verification(
             candidate=candidate,
-            verification_policy_sha256=_POLICY_SHA,
             requirements=(requirement, _requirement("replay")),
             checks=(check,),
         )
     with pytest.raises(ValueError, match="exactly match"):
-        CognitionVerification.create(
+        _verification(
             candidate=candidate,
-            verification_policy_sha256=_POLICY_SHA,
             requirements=(requirement,),
             checks=(
                 check,
@@ -210,9 +248,8 @@ def test_substituted_verifier_fails_closed_even_under_same_check_id() -> None:
     candidate = _candidate()
 
     with pytest.raises(ValueError, match="required verifier"):
-        CognitionVerification.create(
+        _verification(
             candidate=candidate,
-            verification_policy_sha256=_POLICY_SHA,
             requirements=(_requirement("causality", verifier_char="a"),),
             checks=(
                 _check(
@@ -231,9 +268,8 @@ def test_duplicate_requirement_id_is_rejected() -> None:
     check = _check("causality", passed=True, digest_char="1")
 
     with pytest.raises(ValueError, match="requirement ids must be unique"):
-        CognitionVerification(
-            candidate_sha256=candidate.candidate_sha256,
-            verification_policy_sha256=_POLICY_SHA,
+        _verification(
+            candidate=candidate,
             requirements=(requirement, requirement),
             checks=(check,),
         )
@@ -276,3 +312,75 @@ def test_authority_strings_reject_str_subclasses() -> None:
         )
     with pytest.raises(TypeError, match="exact string"):
         _candidate(statement=ForgedString("forged hypothesis"))
+
+
+def test_caller_selected_policy_digest_cannot_be_verified_against_trusted_policy() -> None:
+    candidate = _candidate()
+    attacker_requirement = _requirement("only-check")
+    attacker_check = _check("only-check", passed=True, digest_char="1")
+    trusted_requirements = (
+        _requirement("causality"),
+        _requirement("replay"),
+    )
+
+    with pytest.raises(ValueError, match="trusted expectation"):
+        _verification(
+            candidate=candidate,
+            verification_policy_sha256="9" * 64,
+            requirements=(attacker_requirement,),
+            checks=(attacker_check,),
+            expected_verification_policy_sha256="8" * 64,
+            expected_requirements=trusted_requirements,
+        )
+
+
+def test_caller_selected_check_set_cannot_replace_trusted_requirements() -> None:
+    candidate = _candidate()
+    attacker_requirement = _requirement("only-check")
+    attacker_check = _check("only-check", passed=True, digest_char="1")
+    trusted_requirements = (
+        _requirement("causality"),
+        _requirement("replay"),
+    )
+
+    with pytest.raises(ValueError, match="trusted policy"):
+        _verification(
+            candidate=candidate,
+            requirements=(attacker_requirement,),
+            checks=(attacker_check,),
+            expected_requirements=trusted_requirements,
+        )
+
+
+def test_oversized_collections_fail_before_canonical_sort(monkeypatch: pytest.MonkeyPatch) -> None:
+    evidence = _evidence("event-1", "a")
+    requirement = _requirement("causality")
+    check = _check("causality", passed=True, digest_char="1")
+    candidate = _candidate()
+
+    def fail_sort_key(value: object) -> object:
+        raise AssertionError("sort key must not run for oversized collections")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(learning_cognition, "_evidence_sort_key", fail_sort_key)
+        with pytest.raises(ValueError, match="evidence count"):
+            _candidate(evidence=(evidence,) * 65)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(learning_cognition, "_requirement_sort_key", fail_sort_key)
+        with pytest.raises(ValueError, match="requirements count"):
+            _verification(
+                candidate=candidate,
+                requirements=(requirement,) * 33,
+                checks=(check,),
+                expected_requirements=(requirement,),
+            )
+
+    with monkeypatch.context() as patch:
+        patch.setattr(learning_cognition, "_check_sort_key", fail_sort_key)
+        with pytest.raises(ValueError, match="checks count"):
+            _verification(
+                candidate=candidate,
+                requirements=(requirement,),
+                checks=(check,) * 33,
+            )

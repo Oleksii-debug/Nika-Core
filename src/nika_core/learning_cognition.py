@@ -87,6 +87,20 @@ def _check_sort_key(value: CognitionVerificationCheck) -> str:
     return value.check_id
 
 
+def _require_bounded_tuple(
+    value: object,
+    *,
+    field: str,
+    minimum: int,
+    maximum: int,
+) -> tuple[Any, ...]:
+    if type(value) is not tuple:
+        raise TypeError(f"{field} must be an immutable tuple")
+    if not minimum <= len(value) <= maximum:
+        raise ValueError(f"{field} count is outside the supported bound")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class CognitionEvidenceRef:
     source_type: str
@@ -123,10 +137,12 @@ class CognitionCandidate:
             raise TypeError("kind must be a CognitionCandidateKind")
         if self.statement != _normalized_statement(self.statement):
             raise ValueError("statement must use NFC normalization")
-        if type(self.evidence) is not tuple:
-            raise TypeError("evidence must be an immutable tuple")
-        if not 1 <= len(self.evidence) <= _MAX_EVIDENCE_REFS:
-            raise ValueError("evidence count is outside the supported bound")
+        _require_bounded_tuple(
+            self.evidence,
+            field="evidence",
+            minimum=1,
+            maximum=_MAX_EVIDENCE_REFS,
+        )
         if any(type(item) is not CognitionEvidenceRef for item in self.evidence):
             raise TypeError("evidence must contain CognitionEvidenceRef values")
         if self.evidence != tuple(sorted(self.evidence, key=_evidence_sort_key)):
@@ -150,8 +166,14 @@ class CognitionCandidate:
         statement: str,
         evidence: tuple[CognitionEvidenceRef, ...],
     ) -> CognitionCandidate:
-        if type(evidence) is not tuple:
-            raise TypeError("evidence must be an immutable tuple")
+        _require_bounded_tuple(
+            evidence,
+            field="evidence",
+            minimum=1,
+            maximum=_MAX_EVIDENCE_REFS,
+        )
+        if any(type(item) is not CognitionEvidenceRef for item in evidence):
+            raise TypeError("evidence must contain CognitionEvidenceRef values")
         return cls(
             candidate_id=candidate_id,
             workspace_id=workspace_id,
@@ -220,41 +242,48 @@ class CognitionVerificationCheck:
         }
 
 
-@dataclass(frozen=True, slots=True)
+def _canonical_requirements(
+    value: object,
+    *,
+    field: str,
+) -> tuple[CognitionVerificationRequirement, ...]:
+    bounded = _require_bounded_tuple(
+        value,
+        field=field,
+        minimum=1,
+        maximum=_MAX_REQUIRED_CHECKS,
+    )
+    if any(type(item) is not CognitionVerificationRequirement for item in bounded):
+        raise TypeError(f"{field} must contain CognitionVerificationRequirement values")
+    ordered = tuple(sorted(bounded, key=_requirement_sort_key))
+    requirement_ids = tuple(item.check_id for item in ordered)
+    if len(set(requirement_ids)) != len(requirement_ids):
+        raise ValueError("verification requirement ids must be unique")
+    return ordered
+
+
+def _canonical_checks(value: object) -> tuple[CognitionVerificationCheck, ...]:
+    bounded = _require_bounded_tuple(
+        value,
+        field="checks",
+        minimum=0,
+        maximum=_MAX_REQUIRED_CHECKS,
+    )
+    if any(type(item) is not CognitionVerificationCheck for item in bounded):
+        raise TypeError("checks must contain CognitionVerificationCheck values")
+    ordered = tuple(sorted(bounded, key=_check_sort_key))
+    check_ids = tuple(item.check_id for item in ordered)
+    if len(set(check_ids)) != len(check_ids):
+        raise ValueError("verification check ids must be unique")
+    return ordered
+
+
+@dataclass(frozen=True, slots=True, init=False)
 class CognitionVerification:
     candidate_sha256: str
     verification_policy_sha256: str
     requirements: tuple[CognitionVerificationRequirement, ...]
     checks: tuple[CognitionVerificationCheck, ...]
-
-    def __post_init__(self) -> None:
-        _require_sha256(self.candidate_sha256, field="candidate_sha256")
-        _require_sha256(self.verification_policy_sha256, field="verification_policy_sha256")
-        if type(self.requirements) is not tuple:
-            raise TypeError("requirements must be an immutable tuple")
-        if not 1 <= len(self.requirements) <= _MAX_REQUIRED_CHECKS:
-            raise ValueError("requirement count is outside the supported bound")
-        if any(type(item) is not CognitionVerificationRequirement for item in self.requirements):
-            raise TypeError("requirements must contain CognitionVerificationRequirement values")
-        if self.requirements != tuple(sorted(self.requirements, key=_requirement_sort_key)):
-            raise ValueError("verification requirements are not in canonical order")
-        requirement_ids = tuple(item.check_id for item in self.requirements)
-        if len(set(requirement_ids)) != len(requirement_ids):
-            raise ValueError("verification requirement ids must be unique")
-        if type(self.checks) is not tuple:
-            raise TypeError("checks must be an immutable tuple")
-        if any(type(item) is not CognitionVerificationCheck for item in self.checks):
-            raise TypeError("checks must contain CognitionVerificationCheck values")
-        if self.checks != tuple(sorted(self.checks, key=_check_sort_key)):
-            raise ValueError("verification checks are not in canonical order")
-        check_ids = tuple(item.check_id for item in self.checks)
-        if len(set(check_ids)) != len(check_ids):
-            raise ValueError("verification check ids must be unique")
-        if check_ids != requirement_ids:
-            raise ValueError("verification checks must exactly match the required check set")
-        for requirement, check in zip(self.requirements, self.checks, strict=True):
-            if check.verifier_sha256 != requirement.verifier_sha256:
-                raise ValueError("verification check does not match the required verifier")
 
     @classmethod
     def create(
@@ -264,19 +293,53 @@ class CognitionVerification:
         verification_policy_sha256: str,
         requirements: tuple[CognitionVerificationRequirement, ...],
         checks: tuple[CognitionVerificationCheck, ...],
+        expected_verification_policy_sha256: str,
+        expected_requirements: tuple[CognitionVerificationRequirement, ...],
     ) -> CognitionVerification:
         if type(candidate) is not CognitionCandidate:
             raise TypeError("candidate must be a CognitionCandidate")
-        if type(requirements) is not tuple:
-            raise TypeError("requirements must be an immutable tuple")
-        if type(checks) is not tuple:
-            raise TypeError("checks must be an immutable tuple")
-        return cls(
-            candidate_sha256=candidate.candidate_sha256,
-            verification_policy_sha256=verification_policy_sha256,
-            requirements=tuple(sorted(requirements, key=_requirement_sort_key)),
-            checks=tuple(sorted(checks, key=_check_sort_key)),
+
+        proposed_policy_sha256 = _require_sha256(
+            verification_policy_sha256,
+            field="verification_policy_sha256",
         )
+        trusted_policy_sha256 = _require_sha256(
+            expected_verification_policy_sha256,
+            field="expected_verification_policy_sha256",
+        )
+        proposed_requirements = _canonical_requirements(
+            requirements,
+            field="requirements",
+        )
+        trusted_requirements = _canonical_requirements(
+            expected_requirements,
+            field="expected_requirements",
+        )
+        canonical_checks = _canonical_checks(checks)
+
+        if proposed_policy_sha256 != trusted_policy_sha256:
+            raise ValueError("verification policy does not match the trusted expectation")
+        if proposed_requirements != trusted_requirements:
+            raise ValueError("verification requirements do not match the trusted policy")
+
+        requirement_ids = tuple(item.check_id for item in trusted_requirements)
+        check_ids = tuple(item.check_id for item in canonical_checks)
+        if check_ids != requirement_ids:
+            raise ValueError("verification checks must exactly match the required check set")
+        for requirement, check in zip(trusted_requirements, canonical_checks, strict=True):
+            if check.verifier_sha256 != requirement.verifier_sha256:
+                raise ValueError("verification check does not match the required verifier")
+
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "candidate_sha256", candidate.candidate_sha256)
+        object.__setattr__(
+            instance,
+            "verification_policy_sha256",
+            trusted_policy_sha256,
+        )
+        object.__setattr__(instance, "requirements", trusted_requirements)
+        object.__setattr__(instance, "checks", canonical_checks)
+        return instance
 
     @property
     def required_check_ids(self) -> tuple[str, ...]:
