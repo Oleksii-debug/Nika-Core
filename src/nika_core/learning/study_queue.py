@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import StrEnum
-from hashlib import sha256
-from hmac import compare_digest
-from json import dumps
-from string import hexdigits
-from urllib.parse import parse_qsl, unquote, urlsplit
+import dataclasses
+import enum
+import hashlib
+import hmac
+import json
+import string
+import urllib.parse
 
-from nika_core.kernel.task_queue import TaskQueue, TaskRecord
-from nika_core.kernel.task_state import TaskState
+import nika_core.kernel.task_queue as task_queue
+import nika_core.kernel.task_state as task_state
 
 
 _STUDY_PAYLOAD_KIND = "study_material_v1"
@@ -43,7 +43,7 @@ _SECRET_TEXT_MARKERS = (
 )
 
 
-class StudyMaterialKind(StrEnum):
+class StudyMaterialKind(enum.StrEnum):
     BOOK = "book"
     DOCUMENT = "document"
     WEB = "web"
@@ -51,7 +51,7 @@ class StudyMaterialKind(StrEnum):
     VIDEO = "video"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class StudyMaterial:
     material_id: str
     title: str
@@ -74,12 +74,12 @@ class StudyMaterial:
         _reject_secret_bearing_reference(self.source_ref)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class StudyTask:
     task_id: str
     workspace_id: str
     agent_id: str
-    state: TaskState
+    state: task_state.TaskState
     material: StudyMaterial
 
 
@@ -91,8 +91,8 @@ class StudyQueue:
     prompts, model responses, credentials, or a second scheduler/queue state.
     """
 
-    def __init__(self, task_queue: TaskQueue) -> None:
-        self._tasks = task_queue
+    def __init__(self, task_queue_service: task_queue.TaskQueue) -> None:
+        self._tasks = task_queue_service
 
     def enqueue(
         self,
@@ -108,7 +108,7 @@ class StudyQueue:
             agent_id=agent_id,
             payload=_material_payload(material),
         )
-        self._tasks.transition(record.task_id, TaskState.READY)
+        self._tasks.transition(record.task_id, task_state.TaskState.READY)
         return self.get(record.task_id)
 
     def get(self, task_id: str) -> StudyTask:
@@ -152,40 +152,40 @@ class StudyQueue:
         """
         recovered: list[StudyTask] = []
         for task in self.list_recent(limit=limit):
-            if task.state is TaskState.CREATED:
-                self._tasks.transition(task.task_id, TaskState.READY)
+            if task.state is task_state.TaskState.CREATED:
+                self._tasks.transition(task.task_id, task_state.TaskState.READY)
                 recovered.append(self.get(task.task_id))
         return tuple(recovered)
 
     def start(self, task_id: str) -> StudyTask:
-        return self._transition(task_id, TaskState.RUNNING)
+        return self._transition(task_id, task_state.TaskState.RUNNING)
 
     def pause(self, task_id: str) -> StudyTask:
-        return self._transition(task_id, TaskState.PAUSED)
+        return self._transition(task_id, task_state.TaskState.PAUSED)
 
     def resume(self, task_id: str) -> StudyTask:
         task = self.get(task_id)
         if task.state in {
-            TaskState.CREATED,
-            TaskState.PAUSED,
-            TaskState.BLOCKED,
-            TaskState.FAILED,
+            task_state.TaskState.CREATED,
+            task_state.TaskState.PAUSED,
+            task_state.TaskState.BLOCKED,
+            task_state.TaskState.FAILED,
         }:
-            self._tasks.transition(task_id, TaskState.READY)
+            self._tasks.transition(task_id, task_state.TaskState.READY)
         else:
             raise ValueError(f"study task cannot resume from {task.state.value}")
         return self.get(task_id)
 
     def complete(self, task_id: str) -> StudyTask:
-        return self._transition(task_id, TaskState.COMPLETED)
+        return self._transition(task_id, task_state.TaskState.COMPLETED)
 
     def fail(self, task_id: str) -> StudyTask:
-        return self._transition(task_id, TaskState.FAILED)
+        return self._transition(task_id, task_state.TaskState.FAILED)
 
     def cancel(self, task_id: str) -> StudyTask:
-        return self._transition(task_id, TaskState.CANCELLED)
+        return self._transition(task_id, task_state.TaskState.CANCELLED)
 
-    def _transition(self, task_id: str, target: TaskState) -> StudyTask:
+    def _transition(self, task_id: str, target: task_state.TaskState) -> StudyTask:
         self.get(task_id)
         self._tasks.transition(task_id, target)
         return self.get(task_id)
@@ -210,13 +210,13 @@ def _semantic_payload(material: StudyMaterial) -> dict[str, object]:
 
 
 def _payload_fingerprint(material: StudyMaterial) -> str:
-    encoded = dumps(
+    encoded = json.dumps(
         _semantic_payload(material),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    return sha256(encoded).hexdigest()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _material_payload(material: StudyMaterial) -> dict[str, object]:
@@ -225,7 +225,7 @@ def _material_payload(material: StudyMaterial) -> dict[str, object]:
     return payload
 
 
-def _study_task_from_record(record: TaskRecord) -> StudyTask:
+def _study_task_from_record(record: task_queue.TaskRecord) -> StudyTask:
     payload = record.payload
     if payload.get("nika_kind") != _STUDY_PAYLOAD_KIND:
         raise ValueError("task is not a study task")
@@ -250,7 +250,7 @@ def _study_task_from_record(record: TaskRecord) -> StudyTask:
             content_sha256=content_sha256,
             learning_goal=learning_goal,
         )
-        if not compare_digest(fingerprint, _payload_fingerprint(material)):
+        if not hmac.compare_digest(fingerprint, _payload_fingerprint(material)):
             raise ValueError("study payload fingerprint mismatch")
     except (TypeError, ValueError) as exc:
         raise ValueError("invalid durable study task payload") from exc
@@ -289,7 +289,11 @@ def _require_text(value: str, name: str, *, maximum: int) -> None:
 
 
 def _validate_sha256(value: str, name: str) -> None:
-    if len(value) != 64 or any(char not in hexdigits for char in value) or value != value.lower():
+    if (
+        len(value) != 64
+        or any(char not in string.hexdigits for char in value)
+        or value != value.lower()
+    ):
         raise ValueError(f"{name} must be a lowercase SHA-256 hex digest")
 
 
@@ -297,12 +301,12 @@ def _decoded_views(value: str) -> tuple[str, ...]:
     views = [value]
     current = value
     for _ in range(5):
-        decoded = unquote(current)
+        decoded = urllib.parse.unquote(current)
         if decoded == current:
             return tuple(views)
         views.append(decoded)
         current = decoded
-    if unquote(current) != current:
+    if urllib.parse.unquote(current) != current:
         raise ValueError("source_ref encoding depth exceeds safety limit")
     return tuple(views)
 
@@ -312,10 +316,10 @@ def _reject_secret_bearing_reference(value: str) -> None:
         lowered = view.casefold()
         if any(marker in lowered for marker in _SECRET_TEXT_MARKERS):
             raise ValueError("source_ref must not contain credential material")
-        parsed = urlsplit(view)
+        parsed = urllib.parse.urlsplit(view)
         if parsed.scheme.casefold() in {"http", "https"}:
             if parsed.username is not None or parsed.password is not None:
                 raise ValueError("source_ref must not contain URL credentials")
-            for key, _ in parse_qsl(parsed.query, keep_blank_values=True):
+            for key, _ in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
                 if key.casefold() in _SECRET_QUERY_KEYS:
                     raise ValueError("source_ref must not contain credential query fields")
