@@ -193,9 +193,9 @@ class CandidateDatasetVerification:
             raise LearningVerificationValidationError(
                 "verification check count is outside the supported bound"
             )
-        if not all(isinstance(item, VerificationCheckEvidence) for item in self.checks):
+        if not all(type(item) is VerificationCheckEvidence for item in self.checks):
             raise LearningVerificationValidationError(
-                "checks must contain VerificationCheckEvidence values"
+                "checks must contain exact VerificationCheckEvidence values"
             )
         if self.checks != _canonical_checks(self.checks):
             raise LearningVerificationValidationError(
