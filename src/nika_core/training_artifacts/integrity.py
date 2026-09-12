@@ -126,7 +126,7 @@ def _windows_final_path(file_descriptor: int) -> str:
         get_final_path = kernel32.GetFinalPathNameByHandleW
         get_final_path.argtypes = [
             ctypes.c_void_p,
-            ctypes.c_wchar_p,
+            ctypes.POINTER(ctypes.c_wchar),
             ctypes.c_uint32,
             ctypes.c_uint32,
         ]
@@ -225,7 +225,7 @@ def _open_contained_read_only(path: Path, root: Path) -> tuple[int, os.stat_resu
     file_descriptor = _open_read_only(path)
     try:
         _require_windows_handle_within_root(file_descriptor, root)
-    except Exception:
+    except CandidateArtifactIntegrityError:
         try:
             os.close(file_descriptor)
         except OSError:
