@@ -107,7 +107,20 @@ def test_registry_rejects_descriptor_subclasses(tmp_path) -> None:
     store.initialize()
     registry = ModelArtifactRegistry(store)
     canonical = _descriptor()
-    subclass = DescriptorSubclass(**canonical.as_dict())  # type: ignore[arg-type]
+    subclass = DescriptorSubclass(
+        kind=canonical.kind,
+        provider_id=canonical.provider_id,
+        model_id=canonical.model_id,
+        model_version=canonical.model_version,
+        source_reference=canonical.source_reference,
+        license_reference=canonical.license_reference,
+        integrity_basis=canonical.integrity_basis,
+        sha256=canonical.sha256,
+        size_bytes=canonical.size_bytes,
+        capabilities=canonical.capabilities,
+        resources=canonical.resources,
+        schema_version=canonical.schema_version,
+    )
 
     with pytest.raises(TypeError, match="exact ModelArtifactDescriptor"):
         registry.register(subclass)
