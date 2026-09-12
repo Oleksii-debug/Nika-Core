@@ -16,6 +16,7 @@ from nika_core.intelligence.contracts import (
     WorldState,
     WorldStateObserver,
 )
+from nika_core.intelligence.plan_provenance import seal_plan_provenance
 from nika_core.tools import ToolCall, ToolExecutor, ToolRisk, ToolSpec
 
 
@@ -130,7 +131,13 @@ class DeterministicBrain:
                 unresolved = journal.unresolved_operation_keys(task_id=task_id)
             except Exception as exc:  # noqa: BLE001 - fail closed before planning or effects.
                 return self._failure(
-                    plan=DeterministicPlan(steps=()),
+                    plan=self._seal_plan(
+                        DeterministicPlan(steps=()),
+                        state=current_state,
+                        goal=goal,
+                        actions=actions,
+                        planner_invoked=False,
+                    ),
                     completed=completed,
                     state=current_state,
                     history=history,
@@ -143,7 +150,13 @@ class DeterministicBrain:
                 )
             if unresolved:
                 return self._failure(
-                    plan=DeterministicPlan(steps=()),
+                    plan=self._seal_plan(
+                        DeterministicPlan(steps=()),
+                        state=current_state,
+                        goal=goal,
+                        actions=actions,
+                        planner_invoked=False,
+                    ),
                     completed=completed,
                     state=current_state,
                     history=history,
@@ -161,8 +174,19 @@ class DeterministicBrain:
         while True:
             remaining_steps = max_steps - executed_steps
             if remaining_steps <= 0:
+                plan = (
+                    history[-1]
+                    if history
+                    else self._seal_plan(
+                        DeterministicPlan(steps=()),
+                        state=current_state,
+                        goal=goal,
+                        actions=actions,
+                        planner_invoked=False,
+                    )
+                )
                 return self._failure(
-                    plan=history[-1] if history else DeterministicPlan(steps=()),
+                    plan=plan,
                     completed=completed,
                     state=current_state,
                     history=history,
@@ -179,6 +203,14 @@ class DeterministicBrain:
                 goal=goal,
                 actions=available_actions,
                 planning_deadline=planning_deadline,
+            )
+            # Treat planner-provided provenance as untrusted input. Recompute it from Nika-owned
+            # state/goal/rule contracts and the exact returned steps before validation/execution.
+            plan = self._seal_plan(
+                plan,
+                state=current_state,
+                goal=goal,
+                actions=actions,
             )
             history.append(plan)
 
@@ -356,6 +388,24 @@ class DeterministicBrain:
                 code=DeterministicErrorCode.GOAL_UNSATISFIED,
                 message="plan completed without satisfying the goal",
             )
+
+    def _seal_plan(
+        self,
+        plan: DeterministicPlan,
+        *,
+        state: WorldState,
+        goal: DeterministicGoal,
+        actions: tuple[DeterministicAction, ...],
+        planner_invoked: bool = True,
+    ) -> DeterministicPlan:
+        return seal_plan_provenance(
+            plan,
+            state=state,
+            goal=goal,
+            actions=actions,
+            planner=self._planner,
+            planner_invoked=planner_invoked,
+        )
 
     async def _execute_tool_action(
         self,
