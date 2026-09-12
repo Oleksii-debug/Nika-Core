@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from enum import StrEnum
 import json
+from enum import StrEnum
 from typing import Any
 
 import httpx
 import pytest
-
 from nika_core.model_gateway.contracts import (
     ModelErrorCode,
     ModelFailureEffect,
