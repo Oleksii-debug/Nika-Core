@@ -24,7 +24,6 @@ from nika_core.research.source_identity import (
     canonical_http_locator,
 )
 
-
 _FINALIZED_ATTEMPT_PREFIX = "finalized:"
 _pending_attempt: ContextVar[tuple[str, str] | None] = ContextVar(
     "research_http_pending_attempt",
