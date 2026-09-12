@@ -36,6 +36,14 @@ class _DecodeBomb(bytes):
         raise AssertionError("oversized bytes must be rejected before decode")
 
 
+class _PayloadSpoofingShard(LearningShard):
+    def canonical_payload(self) -> dict[str, object]:
+        payload = super().canonical_payload()
+        payload["artifact_sha256"] = F
+        payload["record_count"] = self.record_count + 1
+        return payload
+
+
 def _shard(
     split: LearningDataSplit,
     artifact: str,
@@ -318,6 +326,40 @@ def test_direct_constructor_rejects_noncanonical_shard_order() -> None:
             verification_sha256=I,
             evaluation_set_sha256=J,
             shards=(validation, training),
+        )
+
+
+def test_package_rejects_learning_shard_subclasses_before_digest_trust() -> None:
+    spoofed_training = _PayloadSpoofingShard(
+        split=LearningDataSplit.TRAINING,
+        artifact_sha256=A,
+        provenance_sha256=C,
+        license_evidence_sha256=E,
+        record_count=10,
+        byte_count=100,
+    )
+    validation = _shard(LearningDataSplit.VALIDATION, B, D, K)
+
+    with pytest.raises(LearningPackageValidationError, match="exact LearningShard"):
+        FrozenLearningPackage.freeze(
+            package_id="candidate",
+            package_version="v1",
+            base_artifact_sha256=G,
+            selection_policy_sha256=H,
+            verification_sha256=I,
+            evaluation_set_sha256=J,
+            shards=(spoofed_training, validation),
+        )
+
+    with pytest.raises(LearningPackageValidationError, match="exact LearningShard"):
+        FrozenLearningPackage(
+            package_id="candidate",
+            package_version="v1",
+            base_artifact_sha256=G,
+            selection_policy_sha256=H,
+            verification_sha256=I,
+            evaluation_set_sha256=J,
+            shards=(spoofed_training, validation),
         )
 
 
