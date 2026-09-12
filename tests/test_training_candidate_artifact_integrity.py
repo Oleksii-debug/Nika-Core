@@ -53,15 +53,46 @@ def test_matching_regular_file_produces_descriptor_bound_minimized_evidence(
 
     verified = verify_candidate_artifact(candidate, descriptor, allowed_root=root)
 
-    assert verified == VerifiedCandidateArtifact(
-        descriptor_digest=descriptor.descriptor_digest,
-        registry_key=descriptor.registry_key,
-        sha256=descriptor.sha256,
-        size_bytes=descriptor.size_bytes,
-    )
+    assert type(verified) is VerifiedCandidateArtifact
+    assert verified.descriptor_digest == descriptor.descriptor_digest
+    assert verified.registry_key == descriptor.registry_key
+    assert verified.sha256 == descriptor.sha256
+    assert verified.size_bytes == descriptor.size_bytes
     assert not hasattr(verified, "path")
     assert not hasattr(verified, "source_reference")
     assert not hasattr(verified, "license_reference")
+
+
+def test_verified_candidate_artifact_cannot_be_minted_directly() -> None:
+    with pytest.raises(TypeError, match="only be minted by verify_candidate_artifact"):
+        VerifiedCandidateArtifact(
+            descriptor_digest="a" * 64,
+            registry_key="b" * 64,
+            sha256="c" * 64,
+            size_bytes=1,
+        )
+
+
+def test_verified_candidate_artifact_cannot_be_subclassed() -> None:
+    with pytest.raises(TypeError, match="cannot be subclassed"):
+        type("ForgedVerifiedCandidateArtifact", (VerifiedCandidateArtifact,), {})
+
+
+def test_verified_candidate_factory_validates_authority_fields() -> None:
+    with pytest.raises(ValueError, match="descriptor_digest"):
+        integrity._mint_verified_candidate_artifact(
+            descriptor_digest="not-a-digest",
+            registry_key="b" * 64,
+            sha256="c" * 64,
+            size_bytes=1,
+        )
+    with pytest.raises(ValueError, match="size_bytes"):
+        integrity._mint_verified_candidate_artifact(
+            descriptor_digest="a" * 64,
+            registry_key="b" * 64,
+            sha256="c" * 64,
+            size_bytes=True,
+        )
 
 
 def test_same_bytes_under_different_canonical_identity_get_distinct_evidence(
