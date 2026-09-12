@@ -183,7 +183,7 @@ def test_evidence_domains_cannot_be_swapped() -> None:
             relation_evidence_sha256=RELATION_EVIDENCE,
         )
 
-    with pytest.raises(ValueError, match="experience evidence kind"):
+    with pytest.raises(ValueError, match="EXPERIENCE"):
         _comparison(
             (_result("1" * 64),),
             experience=_memory("9" * 64),
@@ -269,6 +269,70 @@ def test_subclass_cannot_inherit_guarded_factory_authority() -> None:
             memory_results=(_result("1" * 64),),
             comparator_sha256=COMPARATOR,
             comparison_policy_sha256=POLICY,
+            expected_comparator_sha256=COMPARATOR,
+            expected_comparison_policy_sha256=POLICY,
+        )
+
+
+def test_create_revalidates_exact_type_forged_nested_evidence() -> None:
+    forged_memory = object.__new__(ComparisonEvidenceRef)
+    object.__setattr__(forged_memory, "kind", ComparisonEvidenceKind.MEMORY)
+    object.__setattr__(forged_memory, "source_namespace_sha256", MEMORY_NAMESPACE)
+    object.__setattr__(forged_memory, "source_id_sha256", "1" * 64)
+    object.__setattr__(forged_memory, "evidence_sha256", "not-a-digest")
+
+    forged_result = object.__new__(MemoryComparisonResult)
+    object.__setattr__(forged_result, "memory", forged_memory)
+    object.__setattr__(forged_result, "relation", MemoryRelation.SUPPORTS)
+    object.__setattr__(
+        forged_result,
+        "relation_evidence_sha256",
+        RELATION_EVIDENCE,
+    )
+
+    with pytest.raises(ValueError, match="lowercase SHA-256"):
+        _comparison((forged_result,))
+
+
+def test_revalidate_rejects_exact_type_forged_comparator_authority() -> None:
+    forged = object.__new__(ExperienceMemoryComparison)
+    object.__setattr__(forged, "comparison_id", "comparison-1")
+    object.__setattr__(forged, "workspace_id", "workspace-1")
+    object.__setattr__(forged, "agent_id", "agent-1")
+    object.__setattr__(forged, "experience", _experience())
+    object.__setattr__(forged, "memory_results", (_result("1" * 64),))
+    object.__setattr__(forged, "comparator_sha256", "9" * 64)
+    object.__setattr__(forged, "comparison_policy_sha256", POLICY)
+
+    with pytest.raises(ValueError, match="comparator identity"):
+        ExperienceMemoryComparison.revalidate(
+            forged,
+            expected_comparator_sha256=COMPARATOR,
+            expected_comparison_policy_sha256=POLICY,
+        )
+
+
+def test_revalidate_reconstructs_a_fresh_canonical_copy() -> None:
+    comparison = _comparison((_result("1" * 64),))
+
+    revalidated = ExperienceMemoryComparison.revalidate(
+        comparison,
+        expected_comparator_sha256=COMPARATOR,
+        expected_comparison_policy_sha256=POLICY,
+    )
+
+    assert revalidated is not comparison
+    assert revalidated.reportable_payload() == comparison.reportable_payload()
+    assert revalidated.comparison_sha256 == comparison.comparison_sha256
+
+
+def test_revalidate_rejects_exact_type_with_missing_canonical_fields() -> None:
+    forged = object.__new__(ExperienceMemoryComparison)
+    object.__setattr__(forged, "comparison_id", "comparison-1")
+
+    with pytest.raises(TypeError, match="missing canonical fields"):
+        ExperienceMemoryComparison.revalidate(
+            forged,
             expected_comparator_sha256=COMPARATOR,
             expected_comparison_policy_sha256=POLICY,
         )
