@@ -114,7 +114,10 @@ class ExperienceLedger:
             return None
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise TypeError(f"{name} must be an int or float")
-        number = float(value)
+        try:
+            number = float(value)
+        except OverflowError as exc:
+            raise ValueError(f"{name} must be finite and non-negative") from exc
         if number < 0 or not math.isfinite(number):
             raise ValueError(f"{name} must be finite and non-negative")
         return number
