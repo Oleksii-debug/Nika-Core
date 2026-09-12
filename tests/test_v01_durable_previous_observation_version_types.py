@@ -74,6 +74,6 @@ def test_fractional_sqlite_history_versions_fail_closed(
     )
 
     with pytest.raises(PreviousObservationError) as caught:
-        loader._validate_history_identity(row, expected)  # noqa: SLF001
+        loader._validate_history_identity(row, expected)
 
     assert caught.value.code is PreviousObservationErrorCode.CORRUPT_BASELINE
