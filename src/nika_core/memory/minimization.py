@@ -49,15 +49,18 @@ def _redact_secrets(value: Any) -> Any:
             # Mapping keys at this boundary can be dynamic model/tool content as
             # well as schema field names. If key text itself needed redaction, it
             # is content-bearing and must not reinterpret an otherwise benign
-            # associated value as a secret field. Likewise nested structures are
-            # recursively minimized instead of being collapsed solely because an
-            # untrusted parent key happens to be named "authorization"/"token".
-            # Canonical redact_mapping field semantics remain authoritative for
-            # unchanged string keys with scalar values (api_key/password/etc.).
+            # associated value as a secret field. Unchanged canonical secret keys
+            # remain fail-closed even for structured values; preserve their shape
+            # while redacting scalar leaves under the canonical secret context.
             structured_item = isinstance(item, (Mapping, list, tuple))
-            if isinstance(key, str) and safe_key == key and not structured_item:
-                redacted_item = redact_mapping({key: item})[key]
-                result[safe_key] = _redact_secrets(redacted_item)
+            if isinstance(key, str) and safe_key == key:
+                if structured_item and _uses_canonical_secret_field_semantics(key):
+                    result[safe_key] = _redact_secret_structure(item)
+                elif structured_item:
+                    result[safe_key] = _redact_secrets(item)
+                else:
+                    redacted_item = redact_mapping({key: item})[key]
+                    result[safe_key] = _redact_secrets(redacted_item)
             else:
                 result[safe_key] = _redact_secrets(item)
         return result
@@ -66,6 +69,32 @@ def _redact_secrets(value: Any) -> Any:
     if isinstance(value, tuple):
         return tuple(_redact_secrets(item) for item in value)
     return value
+
+
+def _uses_canonical_secret_field_semantics(key: str) -> bool:
+    probe = object()
+    return redact_mapping({key: probe})[key] is not probe
+
+
+def _redact_secret_structure(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        result: dict[Any, Any] = {}
+        for key, item in value.items():
+            safe_key = redact_text(key) if isinstance(key, str) else key
+            _require_unique_key(result, safe_key)
+            if isinstance(key, str) and safe_key != key:
+                # A dynamic key can itself carry the credential. Redact that key
+                # text but keep normal minimization for its associated data so a
+                # benign value is not destroyed solely by an untrusted key label.
+                result[safe_key] = _redact_secrets(item)
+            else:
+                result[safe_key] = _redact_secret_structure(item)
+        return result
+    if isinstance(value, list):
+        return [_redact_secret_structure(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_secret_structure(item) for item in value)
+    return "[REDACTED]"
 
 
 def _redact_local_paths(value: Any) -> Any:
