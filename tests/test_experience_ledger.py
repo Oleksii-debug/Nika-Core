@@ -174,7 +174,7 @@ def test_numeric_evidence_rejects_non_typed_runtime_values(tmp_path) -> None:
     store.initialize()
     ledger = ExperienceLedger(store)
 
-    with pytest.raises(ValueError, match="attempt must be an integer"):
+    with pytest.raises(TypeError, match="attempt must be an integer"):
         ledger.record(
             event_key="task-5:attempt:float",
             task_id="task-5",
@@ -183,7 +183,7 @@ def test_numeric_evidence_rejects_non_typed_runtime_values(tmp_path) -> None:
             reason_code="retry_pending",
             attempt=1.5,  # type: ignore[arg-type]
         )
-    with pytest.raises(ValueError, match="finite and non-negative"):
+    with pytest.raises(TypeError, match="int or float"):
         ledger.record(
             event_key="task-5:delay:bool",
             task_id="task-5",
