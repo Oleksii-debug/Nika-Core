@@ -564,6 +564,17 @@ class NetworkResearchRepository:
         prepared = [(hit, self.evidence_for_document(hit.document_id)) for hit in hits]
         items: list[ResearchResultItem] = []
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for hit, _evidence in prepared:
+                document = conn.execute(
+                    "SELECT workspace_id FROM corpus_documents WHERE document_id=?",
+                    (hit.document_id,),
+                ).fetchone()
+                if document is None or document["workspace_id"] != workspace_id:
+                    raise ResearchSourceIdentityError(
+                        "result_workspace_conflict",
+                        "research result document does not belong to the result-set workspace",
+                    )
             conn.execute(
                 """INSERT INTO research_result_sets(result_set_id, workspace_id, query, created_at)
                 VALUES (?, ?, ?, ?)""",
@@ -629,14 +640,25 @@ class NetworkResearchRepository:
                 (result_set_id,),
             ).fetchone()
             rows = conn.execute(
-                """SELECT * FROM research_result_items
-                WHERE result_set_id=? ORDER BY ordinal""",
+                """SELECT item.*, document.workspace_id AS document_workspace_id
+                FROM research_result_items AS item
+                LEFT JOIN corpus_documents AS document
+                  ON document.document_id=item.document_id
+                WHERE item.result_set_id=? ORDER BY item.ordinal""",
                 (result_set_id,),
             ).fetchall()
         if header is None:
             raise KeyError(f"unknown research result set: {result_set_id}")
         items: list[ResearchResultItem] = []
         for row in rows:
+            if (
+                row["document_workspace_id"] is None
+                or row["document_workspace_id"] != header["workspace_id"]
+            ):
+                raise ResearchSourceIdentityError(
+                    "result_identity_corrupt",
+                    "stored research result document does not belong to the result-set workspace",
+                )
             raw_evidence = json.loads(row["evidence_json"])
             evidence_items: list[ResearchEvidence] = []
             for item in raw_evidence:

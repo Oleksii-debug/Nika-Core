@@ -14,6 +14,7 @@ from nika_core.research.models import (
     SourceKind,
 )
 from nika_core.research.network_repository import NetworkResearchRepository
+from nika_core.research.source_identity import ResearchSourceIdentityError
 
 
 def _now() -> str:
@@ -101,6 +102,17 @@ class ScopedResearchResultWriter:
         created_at = _now()
         items: list[ResearchResultItem] = []
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for hit, _evidence in prepared:
+                document = conn.execute(
+                    "SELECT workspace_id FROM corpus_documents WHERE document_id=?",
+                    (hit.document_id,),
+                ).fetchone()
+                if document is None or document["workspace_id"] != workspace_id:
+                    raise ResearchSourceIdentityError(
+                        "result_workspace_conflict",
+                        "research result document does not belong to the result-set workspace",
+                    )
             conn.execute(
                 """INSERT INTO research_result_sets(
                     result_set_id, workspace_id, query, created_at
