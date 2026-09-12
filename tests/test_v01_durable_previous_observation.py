@@ -11,6 +11,7 @@ from nika_core.kernel.checkpoint import CheckpointService
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.task_state import TaskState
 from nika_core.research.models import (
+    BlobArtifact,
     ExtractedDocument,
     FreshnessState,
     RefreshDisposition,
@@ -389,7 +390,11 @@ def test_previous_observation_task_payload_must_pin_exact_versions(tmp_path: Pat
     assert caught.value.code is PreviousObservationErrorCode.IDENTITY_MISMATCH
 
 
-def _http_baseline(path: Path):
+def _http_baseline(
+    path: Path,
+    *,
+    alternate_final_url: str | None = None,
+):
     store = SQLiteStore(path)
     store.initialize()
     repository = ResearchRepository(store)
@@ -397,7 +402,24 @@ def _http_baseline(path: Path):
     network = NetworkResearchRepository(store)
     declared_url = "https://declared-a.test/source"
     final_url = "https://cdn-a.test/final"
-    network.register_source(SourceSpec("web-a", "ws", SourceKind.HTTP, declared_url))
+    source = SourceSpec("web-a", "ws", SourceKind.HTTP, declared_url)
+    network.register_source(source)
+    ingested = repository.ingest_document(
+        source,
+        ExtractedDocument("HTTP result", "grant", "text/html"),
+    )
+    artifact = repository.record_artifact(
+        source,
+        BlobArtifact(
+            artifact_id="http-artifact",
+            workspace_id="ws",
+            raw_sha256="a" * 64,
+            byte_size=1,
+            storage_relpath="research/http-artifact.bin",
+        ),
+        media_type="text/html",
+        original_name="source.html",
+    )
 
     profiles = ResearchProfileRepository(store)
     profiles.save_source_set(
@@ -448,6 +470,35 @@ def _http_baseline(path: Path):
         retryable=False,
         task_id=task.task_id,
     )
+    if alternate_final_url is not None:
+        network.record_attempt(
+            source_id="web-a",
+            attempt_number=2,
+            disposition=RefreshDisposition.CHANGED,
+            requested_url=declared_url,
+            final_url=alternate_final_url,
+            status_code=200,
+            error_code=None,
+            error_message="",
+            retryable=False,
+            task_id=task.task_id,
+        )
+    snapshot_id = network.record_snapshot(
+        source_id="web-a",
+        artifact_id=artifact.artifact_id,
+        raw_sha256=artifact.raw_sha256,
+        media_type="text/html",
+        etag=None,
+        last_modified=None,
+        extraction_id=None,
+        document_id=ingested.document.document_id,
+    )
+    network.link_document_origin(
+        document_id=ingested.document.document_id,
+        source_id="web-a",
+        snapshot_id=snapshot_id,
+        locator=final_url,
+    )
     created_at = datetime.now(UTC).isoformat()
     result_set_id = "http-result"
     evidence = [
@@ -473,7 +524,7 @@ def _http_baseline(path: Path):
             (
                 result_set_id,
                 0,
-                "doc-http",
+                ingested.document.document_id,
                 "HTTP result",
                 "grant",
                 1.0,
@@ -513,6 +564,32 @@ def test_http_baseline_accepts_historical_redirect_provenance(tmp_path: Path) ->
 
     assert loaded.result_set.result_set_id == "http-result"
     assert loaded.result_set.items[0].evidence[0].locator == "https://cdn-a.test/final"
+
+
+def test_http_baseline_rejects_same_task_final_url_substitution(tmp_path: Path) -> None:
+    alternate_final_url = "https://cdn-b.test/final"
+    store, _, _, _ = _http_baseline(
+        tmp_path / "http-substitution.db",
+        alternate_final_url=alternate_final_url,
+    )
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT ordinal, evidence_json FROM research_result_items "
+            "WHERE result_set_id='http-result' ORDER BY ordinal LIMIT 1"
+        ).fetchone()
+        assert row is not None
+        evidence = json.loads(row["evidence_json"])
+        evidence[0]["locator"] = alternate_final_url
+        conn.execute(
+            "UPDATE research_result_items SET evidence_json=? "
+            "WHERE result_set_id='http-result' AND ordinal=?",
+            (json.dumps(evidence), row["ordinal"]),
+        )
+
+    with pytest.raises(PreviousObservationError) as caught:
+        _loader(store).load(_expected())
+
+    assert caught.value.code is PreviousObservationErrorCode.IDENTITY_MISMATCH
 
 
 def test_http_baseline_rejects_attempt_from_different_task(tmp_path: Path) -> None:
