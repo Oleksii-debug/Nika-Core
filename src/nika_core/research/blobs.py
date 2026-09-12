@@ -27,7 +27,7 @@ def _sha256_file(path: Path) -> str:
 
 def _workspace_key(workspace_id: str) -> str:
     if type(workspace_id) is not str:
-        raise TypeError("workspace_id must be text")
+        raise TypeError("workspace_id must be exact text")
     if not workspace_id or workspace_id != workspace_id.strip():
         raise ValueError("workspace_id must be non-empty without surrounding whitespace")
     if any(ord(character) < 32 or ord(character) == 127 for character in workspace_id):
@@ -81,12 +81,12 @@ class ContentAddressedBlobStore:
         *,
         max_bytes: int,
     ) -> BlobArtifact:
-        if not workspace_id.strip():
-            raise ValueError("workspace_id is required")
-        if max_bytes < 1:
-            raise ValueError("max_bytes must be positive")
+        _workspace_key(workspace_id)
+        if type(max_bytes) is not int:
+            raise TypeError("max_bytes must be an exact integer")
+        if max_bytes < 1 or max_bytes > _MAX_SIGNED_64:
+            raise ValueError("max_bytes must be in the signed 64-bit positive range")
 
-        workspace_key = hashlib.sha256(workspace_id.encode()).hexdigest()
         temp_dir = self.root / ".tmp"
         temp_dir.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256()
@@ -104,26 +104,18 @@ class ContentAddressedBlobStore:
                 temp.flush()
                 os.fsync(temp.fileno())
 
-            raw_sha256 = digest.hexdigest()
-            relative = Path(workspace_key) / raw_sha256[:2] / raw_sha256
-            destination = self.root / relative
+            artifact = _canonical_blob_artifact(workspace_id, digest.hexdigest(), total)
+            destination = self.root / artifact.storage_relpath
             destination.parent.mkdir(parents=True, exist_ok=True)
             if destination.exists():
                 if destination.stat().st_size != total:
                     raise BlobStoreError("existing content-addressed blob has unexpected size")
-                if _sha256_file(destination) != raw_sha256:
+                if _sha256_file(destination) != artifact.raw_sha256:
                     raise BlobStoreError("existing content-addressed blob failed digest verification")
                 temp_path.unlink(missing_ok=True)
             else:
                 os.replace(temp_path, destination)
-            artifact_id = hashlib.sha256(f"{workspace_id}\0{raw_sha256}".encode()).hexdigest()
-            return BlobArtifact(
-                artifact_id=artifact_id,
-                workspace_id=workspace_id,
-                raw_sha256=raw_sha256,
-                byte_size=total,
-                storage_relpath=relative.as_posix(),
-            )
+            return artifact
         except Exception:
             if temp_path is not None:
                 temp_path.unlink(missing_ok=True)
