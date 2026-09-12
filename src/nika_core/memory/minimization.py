@@ -15,12 +15,13 @@ _WINDOWS_LOCAL_USER_FILE_PATH = re.compile(
     r"[^\\/\r\n\"'<>]*?\.[A-Za-z0-9]{1,16}"
     r"(?=$|[\s,;:!?()\[\]{}])"
 )
+# After the precise extension-bearing matcher has run, an extensionless Windows
+# profile path embedded in prose has no reliable whitespace boundary: spaces may
+# belong to the username/final path component or to following prose. Fail closed
+# to the next hard delimiter/end instead of persisting a private path suffix.
 _WINDOWS_LOCAL_USER_PATH = re.compile(
     r"(?i)(?<![A-Za-z0-9])[A-Z]:[\\/]Users[\\/]"
-    r"[^\\/\r\n\"'<>]+(?=[\\/])[\\/]"
-    r"(?:[^\\/\r\n\"'<>]+(?=[\\/])[\\/])*"
-    r"(?:[^\\/\r\n\"'<>]*?\.[A-Za-z0-9]{1,16}"
-    r"(?=$|[\s,;:!?()\[\]{}])|[^\s\\/\r\n\"'<>]+)"
+    r"[^,;:!?()\[\]{}\r\n\"'<>]+"
 )
 _POSIX_LOCAL_USER_PATH_FULL = re.compile(
     r"/(?:home|Users)/[^/\r\n\"'<>]+(?:/[^\r\n\"'<>]*)?"
@@ -45,7 +46,16 @@ def _redact_secrets(value: Any) -> Any:
         for key, item in value.items():
             safe_key = redact_text(key) if isinstance(key, str) else key
             _require_unique_key(result, safe_key)
-            if isinstance(key, str):
+            # Mapping keys at this boundary can be dynamic model/tool content as
+            # well as schema field names. If key text itself needed redaction, it
+            # is content-bearing and must not reinterpret an otherwise benign
+            # associated value as a secret field. Likewise nested structures are
+            # recursively minimized instead of being collapsed solely because an
+            # untrusted parent key happens to be named "authorization"/"token".
+            # Canonical redact_mapping field semantics remain authoritative for
+            # unchanged string keys with scalar values (api_key/password/etc.).
+            structured_item = isinstance(item, (Mapping, list, tuple))
+            if isinstance(key, str) and safe_key == key and not structured_item:
                 redacted_item = redact_mapping({key: item})[key]
                 result[safe_key] = _redact_secrets(redacted_item)
             else:

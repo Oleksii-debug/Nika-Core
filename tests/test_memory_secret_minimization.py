@@ -120,9 +120,9 @@ def test_memory_persistence_minimizes_model_and_tool_secrets_across_restart(
         "windows_slash": {"[LOCAL_PATH]": "windows-slash"},
         "signed_url": {
             "https://example.test/result?signature=[REDACTED]"
-            "&expires=[REDACTED]&page=1": "[REDACTED]"
+            "&expires=[REDACTED]&page=1": "cached"
         },
-        "authorization": "[REDACTED]",
+        "authorization": {"Authorization: [REDACTED]": "upstream"},
     }
     assert durable["benign"] == value["benign"]
 
@@ -156,6 +156,11 @@ def test_memory_persistence_redacts_embedded_windows_paths_across_restart(
         "spaced_file": (
             r"Opened C:\Users\Alice Smith\Private Data\final result.txt successfully"
         ),
+        "extensionless_backslash": (
+            r"Opened C:\Users\Alice Smith\Private Data successfully"
+        ),
+        "extensionless_slash": "Opened C:/Users/Alice Smith/Secret Notes now",
+        "extensionless_mixed": r"Opened C:\Users/Alice Smith\Private Data now",
     }
 
     memory.put(
@@ -167,13 +172,20 @@ def test_memory_persistence_redacts_embedded_windows_paths_across_restart(
     )
 
     raw_before_restart = _raw_memory_value(first_store, key="embedded-windows-paths")
-    for fragment in ("Alice Smith", "Private Data", "result.txt"):
+    for fragment in ("Alice Smith", "Private Data", "Secret Notes", "result.txt"):
         assert fragment not in raw_before_restart
 
     durable = json.loads(raw_before_restart)
     assert durable == {
-        name: "Opened [LOCAL_PATH] successfully"
-        for name in messages
+        "backslash": "Opened [LOCAL_PATH] successfully",
+        "slash": "Opened [LOCAL_PATH] successfully",
+        "mixed": "Opened [LOCAL_PATH] successfully",
+        "spaced_file": "Opened [LOCAL_PATH] successfully",
+        # Extensionless components with spaces are syntactically ambiguous in
+        # prose, so the minimizer deliberately fails closed through end-of-text.
+        "extensionless_backslash": "Opened [LOCAL_PATH]",
+        "extensionless_slash": "Opened [LOCAL_PATH]",
+        "extensionless_mixed": "Opened [LOCAL_PATH]",
     }
 
     restarted_store = _store(db_path)
