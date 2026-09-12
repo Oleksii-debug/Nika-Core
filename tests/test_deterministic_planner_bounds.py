@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Self
 
 import pytest
 
@@ -105,6 +106,11 @@ def test_large_linear_fixture_stays_within_expansion_bound() -> None:
     )
 
 
+def test_solver_timeout_rejects_huge_integer_without_overflow() -> None:
+    with pytest.raises(ValueError, match="finite positive"):
+        UnifiedPlanningAdapter(solver_timeout_seconds=10**10_000)
+
+
 class _FakeFluent:
     def __init__(self, name: str, *_args: object) -> None:
         self.name = name
@@ -147,7 +153,7 @@ class _FakePlanner:
     def __init__(self, record: dict[str, object]) -> None:
         self._record = record
 
-    def __enter__(self) -> _FakePlanner:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_args: object) -> bool:
