@@ -181,6 +181,54 @@ def _windows_final_path(file_descriptor: int) -> str:
     return _normalize_windows_final_path(buffer.value)
 
 
+def _windows_file_identity(file_descriptor: int) -> tuple[int, int, int]:
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        class ByHandleFileInformation(ctypes.Structure):
+            _fields_ = [
+                ("dwFileAttributes", wintypes.DWORD),
+                ("ftCreationTime", wintypes.FILETIME),
+                ("ftLastAccessTime", wintypes.FILETIME),
+                ("ftLastWriteTime", wintypes.FILETIME),
+                ("dwVolumeSerialNumber", wintypes.DWORD),
+                ("nFileSizeHigh", wintypes.DWORD),
+                ("nFileSizeLow", wintypes.DWORD),
+                ("nNumberOfLinks", wintypes.DWORD),
+                ("nFileIndexHigh", wintypes.DWORD),
+                ("nFileIndexLow", wintypes.DWORD),
+            ]
+
+        handle = msvcrt.get_osfhandle(file_descriptor)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_file_information = kernel32.GetFileInformationByHandle
+        get_file_information.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ByHandleFileInformation),
+        ]
+        get_file_information.restype = wintypes.BOOL
+        information = ByHandleFileInformation()
+        success = get_file_information(
+            ctypes.c_void_p(handle),
+            ctypes.byref(information),
+        )
+    except (AttributeError, ImportError, OSError, ValueError) as exc:
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact Windows file identity could not be verified"
+        ) from exc
+    if not success:
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact Windows file identity could not be verified"
+        )
+    return (
+        int(information.dwVolumeSerialNumber),
+        int(information.nFileIndexHigh),
+        int(information.nFileIndexLow),
+    )
+
+
 def _require_windows_handle_matches_path(file_descriptor: int, path: Path) -> None:
     expected_path = _normalize_windows_final_path(ntpath.abspath(str(path)))
     if _windows_final_path(file_descriptor) != expected_path:
@@ -204,17 +252,12 @@ def _require_windows_handle_within_root(file_descriptor: int, root: Path) -> Non
         )
 
 
-def _require_windows_path_still_targets_open_file(
+def _require_windows_current_path_identity(
     path: Path,
-    file_descriptor: int,
-    opened_identity: tuple[int, int, int, int, int, int],
+    expected_identity: tuple[int, int, int],
     *,
     root: Path | None,
 ) -> None:
-    _require_windows_handle_matches_path(file_descriptor, path)
-    if root is not None:
-        _require_windows_handle_within_root(file_descriptor, root)
-
     current_descriptor = _open_read_only(path)
     try:
         _require_windows_handle_matches_path(current_descriptor, path)
@@ -227,7 +270,7 @@ def _require_windows_path_still_targets_open_file(
                 "candidate artifact metadata could not be re-read"
             ) from exc
         _require_regular(current)
-        if _stat_identity(current) != opened_identity:
+        if _windows_file_identity(current_descriptor) != expected_identity:
             raise CandidateArtifactIntegrityError(
                 "candidate artifact path changed during verification"
             )
@@ -236,6 +279,27 @@ def _require_windows_path_still_targets_open_file(
             os.close(current_descriptor)
         except OSError:
             pass
+
+
+def _require_windows_path_still_targets_open_file(
+    path: Path,
+    file_descriptor: int,
+    expected_identity: tuple[int, int, int],
+    *,
+    root: Path | None,
+) -> None:
+    _require_windows_handle_matches_path(file_descriptor, path)
+    if root is not None:
+        _require_windows_handle_within_root(file_descriptor, root)
+    if _windows_file_identity(file_descriptor) != expected_identity:
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact changed during verification"
+        )
+    _require_windows_current_path_identity(
+        path,
+        expected_identity,
+        root=root,
+    )
 
 
 def _open_posix_contained(path: Path, root: Path) -> tuple[int, os.stat_result]:
@@ -348,6 +412,7 @@ def verify_candidate_artifact(
     else:
         file_descriptor, before_path = _open_contained_read_only(candidate, resolved_root)
     before_identity = _stat_identity(before_path)
+    windows_identity: tuple[int, int, int] | None = None
 
     try:
         try:
@@ -362,6 +427,7 @@ def verify_candidate_artifact(
             _require_windows_handle_matches_path(file_descriptor, candidate)
             if resolved_root is not None:
                 _require_windows_handle_within_root(file_descriptor, resolved_root)
+            windows_identity = _windows_file_identity(file_descriptor)
         elif opened_identity != before_identity:
             raise CandidateArtifactIntegrityError(
                 "candidate artifact changed before verification"
@@ -412,10 +478,14 @@ def verify_candidate_artifact(
                 "candidate artifact changed during verification"
             )
         if os.name == "nt":
+            if windows_identity is None:
+                raise CandidateArtifactIntegrityError(
+                    "candidate artifact Windows file identity is unavailable"
+                )
             _require_windows_path_still_targets_open_file(
                 candidate,
                 file_descriptor,
-                opened_identity,
+                windows_identity,
                 root=resolved_root,
             )
         actual_sha256 = digest.hexdigest()
@@ -424,6 +494,17 @@ def verify_candidate_artifact(
             os.close(file_descriptor)
         except OSError:
             pass
+
+    if os.name == "nt":
+        if windows_identity is None:
+            raise CandidateArtifactIntegrityError(
+                "candidate artifact Windows file identity is unavailable"
+            )
+        _require_windows_current_path_identity(
+            candidate,
+            windows_identity,
+            root=resolved_root,
+        )
 
     after_path = _safe_lstat(candidate)
     _require_regular(after_path)
