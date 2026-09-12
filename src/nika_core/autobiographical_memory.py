@@ -183,7 +183,8 @@ class AutobiographicalMemory:
             raise AutobiographicalMemoryIntegrityError(
                 "autobiographical memory record has invalid schema"
             )
-        if type(value.get("schema_version")) is not int or value["schema_version"] != _SCHEMA_VERSION:
+        schema_version = value.get("schema_version")
+        if type(schema_version) is not int or schema_version != _SCHEMA_VERSION:
             raise AutobiographicalMemoryIntegrityError(
                 "autobiographical memory record has unsupported schema"
             )
@@ -251,7 +252,9 @@ def _canonical_audit_payload(value: Any) -> str:
     except (TypeError, json.JSONDecodeError) as exc:
         raise AutobiographicalMemoryIntegrityError("audit payload is invalid JSON") from exc
     if not isinstance(parsed, dict):
-        raise AutobiographicalMemoryIntegrityError("audit payload must be a JSON object")
+        raise AutobiographicalMemoryIntegrityError(
+            "audit payload must be a JSON object"
+        )
     canonical = json.dumps(
         parsed,
         ensure_ascii=False,
@@ -272,7 +275,9 @@ def _required_timestamp(value: Any) -> str:
     except ValueError as exc:
         raise AutobiographicalMemoryIntegrityError("audit timestamp is invalid") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise AutobiographicalMemoryIntegrityError("audit timestamp must be timezone-aware")
+        raise AutobiographicalMemoryIntegrityError(
+            "audit timestamp must be timezone-aware"
+        )
     return value
 
 
