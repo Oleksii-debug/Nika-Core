@@ -149,6 +149,54 @@ def _windows_final_path(file_descriptor: int) -> str:
     return _normalize_windows_final_path(buffer.value)
 
 
+def _windows_file_identity(file_descriptor: int) -> tuple[int, int, int]:
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        class ByHandleFileInformation(ctypes.Structure):
+            _fields_ = [
+                ("dwFileAttributes", wintypes.DWORD),
+                ("ftCreationTime", wintypes.FILETIME),
+                ("ftLastAccessTime", wintypes.FILETIME),
+                ("ftLastWriteTime", wintypes.FILETIME),
+                ("dwVolumeSerialNumber", wintypes.DWORD),
+                ("nFileSizeHigh", wintypes.DWORD),
+                ("nFileSizeLow", wintypes.DWORD),
+                ("nNumberOfLinks", wintypes.DWORD),
+                ("nFileIndexHigh", wintypes.DWORD),
+                ("nFileIndexLow", wintypes.DWORD),
+            ]
+
+        handle = msvcrt.get_osfhandle(file_descriptor)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_file_information = kernel32.GetFileInformationByHandle
+        get_file_information.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ByHandleFileInformation),
+        ]
+        get_file_information.restype = wintypes.BOOL
+        information = ByHandleFileInformation()
+        success = get_file_information(
+            ctypes.c_void_p(handle),
+            ctypes.byref(information),
+        )
+    except (AttributeError, ImportError, OSError, ValueError) as exc:
+        raise TrainingMaterialResolutionError(
+            "resolved training material Windows file identity could not be verified"
+        ) from exc
+    if not success:
+        raise TrainingMaterialResolutionError(
+            "resolved training material Windows file identity could not be verified"
+        )
+    return (
+        int(information.dwVolumeSerialNumber),
+        int(information.nFileIndexHigh),
+        int(information.nFileIndexLow),
+    )
+
+
 def _require_windows_handle_matches_path(file_descriptor: int, path: Path) -> None:
     expected_path = _normalize_windows_final_path(ntpath.abspath(str(path)))
     if _windows_final_path(file_descriptor) != expected_path:
@@ -157,12 +205,10 @@ def _require_windows_handle_matches_path(file_descriptor: int, path: Path) -> No
         )
 
 
-def _require_windows_path_still_targets_open_file(
+def _require_windows_current_path_identity(
     path: Path,
-    file_descriptor: int,
-    opened_identity: tuple[int, int, int, int, int, int],
+    expected_identity: tuple[int, int, int],
 ) -> None:
-    _require_windows_handle_matches_path(file_descriptor, path)
     current_descriptor = _open_read_only(path)
     try:
         _require_windows_handle_matches_path(current_descriptor, path)
@@ -173,7 +219,7 @@ def _require_windows_path_still_targets_open_file(
                 "resolved training material metadata could not be re-read"
             ) from exc
         _require_regular_material(current)
-        if _stat_identity(current) != opened_identity:
+        if _windows_file_identity(current_descriptor) != expected_identity:
             raise TrainingMaterialResolutionError(
                 "resolved training material path changed during verification"
             )
@@ -182,6 +228,19 @@ def _require_windows_path_still_targets_open_file(
             os.close(current_descriptor)
         except OSError:
             pass
+
+
+def _require_windows_path_still_targets_open_file(
+    path: Path,
+    file_descriptor: int,
+    expected_identity: tuple[int, int, int],
+) -> None:
+    _require_windows_handle_matches_path(file_descriptor, path)
+    if _windows_file_identity(file_descriptor) != expected_identity:
+        raise TrainingMaterialResolutionError(
+            "resolved training material changed during verification"
+        )
+    _require_windows_current_path_identity(path, expected_identity)
 
 
 def _verify_resolved_material(material: ResolvedTrainingMaterial) -> None:
@@ -197,6 +256,7 @@ def _verify_resolved_material(material: ResolvedTrainingMaterial) -> None:
         )
 
     file_descriptor = _open_read_only(path)
+    windows_identity: tuple[int, int, int] | None = None
     try:
         try:
             opened = os.fstat(file_descriptor)
@@ -208,6 +268,7 @@ def _verify_resolved_material(material: ResolvedTrainingMaterial) -> None:
         opened_identity = _stat_identity(opened)
         if os.name == "nt":
             _require_windows_handle_matches_path(file_descriptor, path)
+            windows_identity = _windows_file_identity(file_descriptor)
         elif opened_identity != before_identity:
             raise TrainingMaterialResolutionError(
                 "resolved training material changed before verification"
@@ -258,10 +319,14 @@ def _verify_resolved_material(material: ResolvedTrainingMaterial) -> None:
                 "resolved training material changed during verification"
             )
         if os.name == "nt":
+            if windows_identity is None:
+                raise TrainingMaterialResolutionError(
+                    "resolved training material Windows file identity is unavailable"
+                )
             _require_windows_path_still_targets_open_file(
                 path,
                 file_descriptor,
-                opened_identity,
+                windows_identity,
             )
         actual_sha256 = digest.hexdigest()
     finally:
@@ -269,6 +334,13 @@ def _verify_resolved_material(material: ResolvedTrainingMaterial) -> None:
             os.close(file_descriptor)
         except OSError:
             pass
+
+    if os.name == "nt":
+        if windows_identity is None:
+            raise TrainingMaterialResolutionError(
+                "resolved training material Windows file identity is unavailable"
+            )
+        _require_windows_current_path_identity(path, windows_identity)
 
     after_path = _safe_lstat(path)
     _require_regular_material(after_path)
