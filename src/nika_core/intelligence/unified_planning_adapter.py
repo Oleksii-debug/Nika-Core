@@ -33,18 +33,30 @@ class UnifiedPlanningAdapter:
             or max_expansions <= 0
         ):
             raise ValueError("max_expansions must be a positive integer")
-        if solver_timeout_seconds is not None and (
-            isinstance(solver_timeout_seconds, bool)
-            or not isinstance(solver_timeout_seconds, (int, float))
-            or not isfinite(float(solver_timeout_seconds))
-            or solver_timeout_seconds <= 0
-        ):
-            raise ValueError("solver_timeout_seconds must be a finite positive number")
+        normalized_solver_timeout: float | None = None
+        if solver_timeout_seconds is not None:
+            if isinstance(solver_timeout_seconds, bool) or not isinstance(
+                solver_timeout_seconds, (int, float)
+            ):
+                raise ValueError(
+                    "solver_timeout_seconds must be a finite positive number"
+                )
+            try:
+                normalized_solver_timeout = float(solver_timeout_seconds)
+            except (OverflowError, ValueError):
+                raise ValueError(
+                    "solver_timeout_seconds must be a finite positive number"
+                ) from None
+            if (
+                not isfinite(normalized_solver_timeout)
+                or normalized_solver_timeout <= 0
+            ):
+                raise ValueError(
+                    "solver_timeout_seconds must be a finite positive number"
+                )
         self._engine_name = engine_name
         self._max_expansions = max_expansions
-        self._solver_timeout_seconds = (
-            None if solver_timeout_seconds is None else float(solver_timeout_seconds)
-        )
+        self._solver_timeout_seconds = normalized_solver_timeout
 
     def plan(
         self,
