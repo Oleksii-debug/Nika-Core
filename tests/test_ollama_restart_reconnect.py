@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 import pytest
+
 from nika_core.model_gateway.contracts import (
     ModelErrorCode,
     ModelFailureEffect,
@@ -19,7 +20,6 @@ from nika_core.model_gateway.contracts import (
 )
 from nika_core.model_gateway.gateway import ModelGateway
 from nika_core.model_gateway.providers import OllamaProvider
-
 
 _MODEL = "fixture-model"
 
