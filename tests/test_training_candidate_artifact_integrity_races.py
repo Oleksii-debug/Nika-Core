@@ -148,33 +148,19 @@ def test_path_replacement_after_hashing_fails_final_identity_check(
     candidate.write_bytes(b"original-bytes")
     descriptor = _descriptor(candidate)
     displaced = tmp_path / "displaced.bin"
+    original_close = os.close
+    close_count = 0
+    replace_after_close = 2 if os.name == "nt" else 1
 
-    if os.name == "nt":
-        original_open = integrity._open_read_only
-        open_count = 0
+    def replacing_verified_handle_close(file_descriptor: int) -> None:
+        nonlocal close_count
+        close_count += 1
+        original_close(file_descriptor)
+        if close_count == replace_after_close:
+            candidate.rename(displaced)
+            candidate.write_bytes(b"replacement-xx")
 
-        def replacing_second_open(path: Path) -> int:
-            nonlocal open_count
-            open_count += 1
-            if open_count == 2:
-                candidate.rename(displaced)
-                candidate.write_bytes(b"replacement-xx")
-            return original_open(path)
-
-        monkeypatch.setattr(integrity, "_open_read_only", replacing_second_open)
-    else:
-        original_close = os.close
-        replaced = False
-
-        def replacing_close(file_descriptor: int) -> None:
-            nonlocal replaced
-            original_close(file_descriptor)
-            if not replaced:
-                replaced = True
-                candidate.rename(displaced)
-                candidate.write_bytes(b"replacement-xx")
-
-        monkeypatch.setattr(integrity.os, "close", replacing_close)
+    monkeypatch.setattr(integrity.os, "close", replacing_verified_handle_close)
 
     with pytest.raises(CandidateArtifactIntegrityError, match="path changed"):
         verify_candidate_artifact(candidate, descriptor)
