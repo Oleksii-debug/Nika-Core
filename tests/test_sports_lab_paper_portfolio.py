@@ -45,14 +45,14 @@ def _quote(
 def test_parlay_settlement_and_bankroll_are_exact_decimal() -> None:
     ticket = PaperTicket(
         ticket_id="ticket-1",
-        stake=Decimal("100"),
+        stake=Decimal(100),
         placed_at=_at(),
         legs=(
             PaperLeg(_quote("q1", "e1", "m1", "a", "2.00")),
             PaperLeg(_quote("q2", "e2", "m2", "b", "3.00")),
         ),
     )
-    portfolio = PaperPortfolio(Decimal("1000"), (ticket,))
+    portfolio = PaperPortfolio(Decimal(1000), (ticket,))
     report = evaluate_scenario(
         portfolio,
         ScenarioOutcome("all-win", {"m1": "a", "m2": "b"}),
@@ -61,7 +61,7 @@ def test_parlay_settlement_and_bankroll_are_exact_decimal() -> None:
 
     assert ticket.kind == "parlay"
     assert ticket.combined_decimal_odds == Decimal("6.00")
-    assert portfolio.committed_stake == Decimal("100")
+    assert portfolio.committed_stake == Decimal(100)
     assert report.final_bankroll == Decimal("1500.00")
     assert report.profit_loss == Decimal("500.00")
 
@@ -69,7 +69,7 @@ def test_parlay_settlement_and_bankroll_are_exact_decimal() -> None:
 def test_one_losing_leg_zeroes_parlay_payout() -> None:
     ticket = PaperTicket(
         ticket_id="ticket-1",
-        stake=Decimal("100"),
+        stake=Decimal(100),
         placed_at=_at(),
         legs=(
             PaperLeg(_quote("q1", "e1", "m1", "a", "2.00")),
@@ -77,29 +77,29 @@ def test_one_losing_leg_zeroes_parlay_payout() -> None:
         ),
     )
     report = evaluate_scenario(
-        PaperPortfolio(Decimal("1000"), (ticket,)),
+        PaperPortfolio(Decimal(1000), (ticket,)),
         ScenarioOutcome("one-loss", {"m1": "other", "m2": "b"}),
         settled_at=_at() + timedelta(hours=1),
     )
 
-    assert report.final_bankroll == Decimal("900")
-    assert report.profit_loss == Decimal("-100")
+    assert report.final_bankroll == Decimal(900)
+    assert report.profit_loss == Decimal(-100)
 
 
 def test_portfolio_envelope_finds_worst_and_best_case() -> None:
     ticket_a = PaperTicket(
         "ticket-a",
-        Decimal("50"),
+        Decimal(50),
         _at(),
         (PaperLeg(_quote("q1", "e1", "m1", "a", "2.00")),),
     )
     ticket_b = PaperTicket(
         "ticket-b",
-        Decimal("50"),
+        Decimal(50),
         _at(),
         (PaperLeg(_quote("q2", "e2", "m2", "b", "4.00")),),
     )
-    portfolio = PaperPortfolio(Decimal("1000"), (ticket_a, ticket_b))
+    portfolio = PaperPortfolio(Decimal(1000), (ticket_a, ticket_b))
     scenarios = enumerate_market_scenarios(
         {"m1": ("a", "other-a"), "m2": ("b", "other-b")}
     )
@@ -111,8 +111,8 @@ def test_portfolio_envelope_finds_worst_and_best_case() -> None:
     )
 
     assert len(envelope.reports) == 4
-    assert envelope.worst_case_profit_loss == Decimal("-100")
-    assert envelope.best_case_profit_loss == Decimal("200")
+    assert envelope.worst_case_profit_loss == Decimal(-100)
+    assert envelope.best_case_profit_loss == Decimal(200)
 
 
 def test_future_quote_cannot_be_used_in_paper_ticket() -> None:
@@ -130,7 +130,7 @@ def test_future_quote_cannot_be_used_in_paper_ticket() -> None:
     with pytest.raises(SportsLabPaperError, match="availability"):
         PaperTicket(
             "ticket",
-            Decimal("10"),
+            Decimal(10),
             _at() + timedelta(seconds=10),
             (PaperLeg(quote),),
         )
@@ -168,10 +168,10 @@ def test_exact_enumeration_fails_closed_before_combinatorial_explosion() -> None
 def test_virtual_bankroll_cannot_be_overcommitted() -> None:
     ticket = PaperTicket(
         "ticket",
-        Decimal("101"),
+        Decimal(101),
         _at(),
         (PaperLeg(_quote("q", "e", "m", "s", "2.00")),),
     )
 
     with pytest.raises(SportsLabPaperError, match="virtual bankroll"):
-        PaperPortfolio(Decimal("100"), (ticket,))
+        PaperPortfolio(Decimal(100), (ticket,))
