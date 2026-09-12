@@ -2,56 +2,91 @@ from __future__ import annotations
 
 import hashlib
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-import nika_core.training_artifacts.integrity as integrity
+from nika_core.model_artifacts import (
+    ModelArtifactDescriptor,
+    ModelArtifactKind,
+    ModelIntegrityBasis,
+)
+from nika_core.training_artifacts import integrity
 from nika_core.training_artifacts import (
     CandidateArtifactIntegrityError,
-    ExpectedCandidateArtifact,
     VerifiedCandidateArtifact,
     verify_candidate_artifact,
 )
 
 
-def _expected(path: Path, *, artifact_ref: str = "models/candidate/job-1") -> ExpectedCandidateArtifact:
+def _descriptor(
+    path: Path,
+    *,
+    model_id: str = "candidate-job-1",
+    sha256: str | None = None,
+    size_bytes: int | None = None,
+) -> ModelArtifactDescriptor:
     data = path.read_bytes()
-    return ExpectedCandidateArtifact(
-        artifact_ref=artifact_ref,
-        sha256=hashlib.sha256(data).hexdigest(),
-        size_bytes=len(data),
+    return ModelArtifactDescriptor(
+        kind=ModelArtifactKind.EMBEDDED,
+        provider_id="training-runtime",
+        model_id=model_id,
+        model_version="candidate-1",
+        source_reference="https://models.example.test/training/candidate",
+        license_reference="https://licenses.example.test/training/candidate",
+        integrity_basis=ModelIntegrityBasis.SHA256,
+        sha256=sha256 if sha256 is not None else hashlib.sha256(data).hexdigest(),
+        size_bytes=size_bytes if size_bytes is not None else len(data),
+        capabilities=("text",),
     )
 
 
-def test_matching_regular_file_produces_minimized_evidence(tmp_path: Path) -> None:
+def test_matching_regular_file_produces_descriptor_bound_minimized_evidence(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "artifacts"
     root.mkdir()
     candidate = root / "candidate.bin"
     candidate.write_bytes(b"candidate-model-weights")
-    expected = _expected(candidate)
+    descriptor = _descriptor(candidate)
 
-    verified = verify_candidate_artifact(candidate, expected, allowed_root=root)
+    verified = verify_candidate_artifact(candidate, descriptor, allowed_root=root)
 
     assert verified == VerifiedCandidateArtifact(
-        artifact_ref=expected.artifact_ref,
-        sha256=expected.sha256,
-        size_bytes=expected.size_bytes,
+        descriptor_digest=descriptor.descriptor_digest,
+        registry_key=descriptor.registry_key,
+        sha256=descriptor.sha256,
+        size_bytes=descriptor.size_bytes,
     )
     assert not hasattr(verified, "path")
+    assert not hasattr(verified, "source_reference")
+    assert not hasattr(verified, "license_reference")
+
+
+def test_same_bytes_under_different_canonical_identity_get_distinct_evidence(
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path / "candidate.bin"
+    candidate.write_bytes(b"candidate-model-weights")
+    first = _descriptor(candidate, model_id="candidate-job-1")
+    second = _descriptor(candidate, model_id="candidate-job-2")
+
+    first_evidence = verify_candidate_artifact(candidate, first)
+    second_evidence = verify_candidate_artifact(candidate, second)
+
+    assert first_evidence.sha256 == second_evidence.sha256
+    assert first_evidence.descriptor_digest != second_evidence.descriptor_digest
+    assert first_evidence.registry_key != second_evidence.registry_key
 
 
 def test_digest_mismatch_fails_closed_without_exposing_path(tmp_path: Path) -> None:
     candidate = tmp_path / "private-model-name.bin"
     candidate.write_bytes(b"candidate")
-    expected = ExpectedCandidateArtifact(
-        artifact_ref="models/candidate/job-1",
-        sha256="0" * 64,
-        size_bytes=candidate.stat().st_size,
-    )
+    descriptor = _descriptor(candidate, sha256="0" * 64)
 
     with pytest.raises(CandidateArtifactIntegrityError) as exc_info:
-        verify_candidate_artifact(candidate, expected)
+        verify_candidate_artifact(candidate, descriptor)
 
     assert "digest does not match" in str(exc_info.value)
     assert str(candidate) not in str(exc_info.value)
@@ -62,11 +97,7 @@ def test_expected_size_mismatch_fails_before_hashing(
 ) -> None:
     candidate = tmp_path / "candidate.bin"
     candidate.write_bytes(b"123456")
-    expected = ExpectedCandidateArtifact(
-        artifact_ref="models/candidate/job-1",
-        sha256=hashlib.sha256(b"123456").hexdigest(),
-        size_bytes=5,
-    )
+    descriptor = _descriptor(candidate, size_bytes=5)
     read_called = False
     original_read = integrity.os.read
 
@@ -78,20 +109,18 @@ def test_expected_size_mismatch_fails_before_hashing(
     monkeypatch.setattr(integrity.os, "read", observing_read)
 
     with pytest.raises(CandidateArtifactIntegrityError, match="size does not match"):
-        verify_candidate_artifact(candidate, expected)
+        verify_candidate_artifact(candidate, descriptor)
 
     assert read_called is False
 
 
 def test_directory_is_not_a_candidate_artifact(tmp_path: Path) -> None:
-    expected = ExpectedCandidateArtifact(
-        artifact_ref="models/candidate/job-1",
-        sha256=hashlib.sha256(b"").hexdigest(),
-        size_bytes=0,
-    )
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"candidate")
+    descriptor = _descriptor(source)
 
     with pytest.raises(CandidateArtifactIntegrityError, match="regular file"):
-        verify_candidate_artifact(tmp_path, expected)
+        verify_candidate_artifact(tmp_path, descriptor)
 
 
 def test_final_symbolic_link_is_rejected(tmp_path: Path) -> None:
@@ -104,7 +133,7 @@ def test_final_symbolic_link_is_rejected(tmp_path: Path) -> None:
         pytest.skip("symbolic links are unavailable in this environment")
 
     with pytest.raises(CandidateArtifactIntegrityError, match="symbolic link"):
-        verify_candidate_artifact(link, _expected(target))
+        verify_candidate_artifact(link, _descriptor(target))
 
 
 def test_candidate_outside_allowed_root_is_rejected(tmp_path: Path) -> None:
@@ -114,7 +143,7 @@ def test_candidate_outside_allowed_root_is_rejected(tmp_path: Path) -> None:
     outside.write_bytes(b"candidate")
 
     with pytest.raises(CandidateArtifactIntegrityError, match="outside the allowed root"):
-        verify_candidate_artifact(outside, _expected(outside), allowed_root=root)
+        verify_candidate_artifact(outside, _descriptor(outside), allowed_root=root)
 
 
 def test_nested_candidate_inside_allowed_root_passes(tmp_path: Path) -> None:
@@ -124,48 +153,54 @@ def test_nested_candidate_inside_allowed_root_passes(tmp_path: Path) -> None:
     candidate = nested / "candidate.bin"
     candidate.write_bytes(b"candidate")
 
-    verified = verify_candidate_artifact(candidate, _expected(candidate), allowed_root=root)
+    verified = verify_candidate_artifact(
+        candidate,
+        _descriptor(candidate),
+        allowed_root=root,
+    )
 
     assert verified.size_bytes == len(b"candidate")
 
 
-def test_relative_candidate_path_is_rejected() -> None:
-    expected = ExpectedCandidateArtifact(
-        artifact_ref="models/candidate/job-1",
-        sha256="0" * 64,
-        size_bytes=0,
-    )
+def test_relative_candidate_path_is_rejected(tmp_path: Path) -> None:
+    candidate = tmp_path / "candidate.bin"
+    candidate.write_bytes(b"candidate")
 
     with pytest.raises(ValueError, match="must be absolute"):
-        verify_candidate_artifact(Path("candidate.bin"), expected)
+        verify_candidate_artifact(Path("candidate.bin"), _descriptor(candidate))
 
 
-@pytest.mark.parametrize(
-    ("artifact_ref", "sha256", "size_bytes", "error_type"),
-    [
-        ("", "0" * 64, 0, ValueError),
-        (" candidate ", "0" * 64, 0, ValueError),
-        ("candidate\nname", "0" * 64, 0, ValueError),
-        ("candidate", "A" * 64, 0, ValueError),
-        ("candidate", "0" * 63, 0, ValueError),
-        ("candidate", "0" * 64, -1, ValueError),
-        ("candidate", "0" * 64, True, ValueError),
-        ("candidate", "0" * 64, 1 << 63, ValueError),
-        (1, "0" * 64, 0, TypeError),
-    ],
-)
-def test_expected_artifact_contract_is_strict(
-    artifact_ref: object,
-    sha256: object,
-    size_bytes: object,
-    error_type: type[Exception],
+def test_provider_identity_descriptor_is_not_physical_byte_authority(tmp_path: Path) -> None:
+    candidate = tmp_path / "candidate.bin"
+    candidate.write_bytes(b"candidate")
+    descriptor = replace(
+        _descriptor(candidate),
+        integrity_basis=ModelIntegrityBasis.PROVIDER_IDENTITY,
+        sha256=None,
+    )
+
+    with pytest.raises(CandidateArtifactIntegrityError, match="canonical SHA-256"):
+        verify_candidate_artifact(candidate, descriptor)
+
+
+def test_sha_descriptor_without_exact_size_is_rejected_before_file_access(
+    tmp_path: Path,
 ) -> None:
-    with pytest.raises(error_type):
-        ExpectedCandidateArtifact(
-            artifact_ref=artifact_ref,  # type: ignore[arg-type]
-            sha256=sha256,  # type: ignore[arg-type]
-            size_bytes=size_bytes,  # type: ignore[arg-type]
-        )
+    candidate = tmp_path / "candidate.bin"
+    candidate.write_bytes(b"candidate")
+    descriptor = replace(_descriptor(candidate), size_bytes=None)
+    candidate.unlink()
+
+    with pytest.raises(CandidateArtifactIntegrityError, match="exact digest and size"):
+        verify_candidate_artifact(candidate, descriptor)
+
+
+def test_descriptor_object_must_be_canonical_type(tmp_path: Path) -> None:
+    candidate = tmp_path / "candidate.bin"
+    candidate.write_bytes(b"candidate")
+
+    with pytest.raises(TypeError, match="ModelArtifactDescriptor"):
+        verify_candidate_artifact(candidate, object())  # type: ignore[arg-type]
 
 
 def test_hashing_is_streamed_in_bounded_chunks(
@@ -173,7 +208,7 @@ def test_hashing_is_streamed_in_bounded_chunks(
 ) -> None:
     candidate = tmp_path / "large.bin"
     candidate.write_bytes(b"x" * (integrity._READ_CHUNK_BYTES * 2 + 123))
-    expected = _expected(candidate)
+    descriptor = _descriptor(candidate)
     requested_sizes: list[int] = []
     original_read = integrity.os.read
 
@@ -183,7 +218,7 @@ def test_hashing_is_streamed_in_bounded_chunks(
 
     monkeypatch.setattr(integrity.os, "read", bounded_read)
 
-    verify_candidate_artifact(candidate, expected)
+    verify_candidate_artifact(candidate, descriptor)
 
     assert requested_sizes
     assert max(requested_sizes) <= integrity._READ_CHUNK_BYTES
@@ -195,7 +230,7 @@ def test_growth_during_hashing_is_rejected(
 ) -> None:
     candidate = tmp_path / "candidate.bin"
     candidate.write_bytes(b"a" * (integrity._READ_CHUNK_BYTES + 128))
-    expected = _expected(candidate)
+    descriptor = _descriptor(candidate)
     original_read = integrity.os.read
     mutated = False
 
@@ -211,7 +246,7 @@ def test_growth_during_hashing_is_rejected(
     monkeypatch.setattr(integrity.os, "read", mutating_read)
 
     with pytest.raises(CandidateArtifactIntegrityError, match="grew during verification"):
-        verify_candidate_artifact(candidate, expected)
+        verify_candidate_artifact(candidate, descriptor)
 
 
 def test_metadata_change_during_hashing_is_rejected(
@@ -219,7 +254,7 @@ def test_metadata_change_during_hashing_is_rejected(
 ) -> None:
     candidate = tmp_path / "candidate.bin"
     candidate.write_bytes(b"candidate")
-    expected = _expected(candidate)
+    descriptor = _descriptor(candidate)
     original_fstat = integrity.os.fstat
     calls = 0
 
@@ -236,12 +271,4 @@ def test_metadata_change_during_hashing_is_rejected(
     monkeypatch.setattr(integrity.os, "fstat", unstable_fstat)
 
     with pytest.raises(CandidateArtifactIntegrityError, match="changed during verification"):
-        verify_candidate_artifact(candidate, expected)
-
-
-def test_expected_object_must_be_canonical_type(tmp_path: Path) -> None:
-    candidate = tmp_path / "candidate.bin"
-    candidate.write_bytes(b"candidate")
-
-    with pytest.raises(TypeError, match="ExpectedCandidateArtifact"):
-        verify_candidate_artifact(candidate, object())  # type: ignore[arg-type]
+        verify_candidate_artifact(candidate, descriptor)
