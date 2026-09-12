@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from nika_core.model_gateway.contracts import PrivacyClass
+from nika_core.model_gateway.contracts import PrivacyClass, ProviderKind
 from nika_core.speech_to_text import (
     SpeechAudio,
     SpeechAudioFormat,
@@ -20,6 +20,8 @@ from nika_core.speech_to_text import (
 
 
 class _RecordingAdapter:
+    provider_kind = ProviderKind.LOCAL
+
     def __init__(self, response: SpeechToTextAdapterResponse) -> None:
         self.response = response
         self.calls: list[SpeechToTextRequest] = []
@@ -29,13 +31,21 @@ class _RecordingAdapter:
         return self.response
 
 
+class _CloudRecordingAdapter(_RecordingAdapter):
+    provider_kind = ProviderKind.CLOUD
+
+
 class _ExplodingAdapter:
+    provider_kind = ProviderKind.LOCAL
+
     async def transcribe(self, request: SpeechToTextRequest) -> SpeechToTextAdapterResponse:
         del request
         raise RuntimeError("synthetic provider diagnostic must not escape")
 
 
 class _TypedFailureAdapter:
+    provider_kind = ProviderKind.LOCAL
+
     def __init__(self, code: SpeechToTextFailureCode, *, retryable: bool) -> None:
         self.code = code
         self.retryable = retryable
@@ -50,6 +60,8 @@ class _TypedFailureAdapter:
 
 
 class _BlockedAdapter:
+    provider_kind = ProviderKind.LOCAL
+
     def __init__(self) -> None:
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
@@ -121,7 +133,26 @@ def test_local_success_returns_text_but_evidence_contains_no_audio_or_transcript
     assert "text" not in durable
 
 
-def test_audio_bound_fails_before_adapter_call() -> None:
+def test_nonlocal_adapter_is_rejected_before_audio_is_sent() -> None:
+    request = _request()
+    adapter = _CloudRecordingAdapter(
+        SpeechToTextAdapterResponse(
+            request_id=request.request_id,
+            provider_id=request.provider_id,
+            model=request.model,
+            text="must not run",
+        )
+    )
+
+    result = asyncio.run(SpeechToTextService(adapter).transcribe(request))
+
+    assert result.text is None
+    assert result.evidence.status is SpeechToTextStatus.FAILED
+    assert result.evidence.error_code is SpeechToTextFailureCode.PROVIDER_ERROR
+    assert adapter.calls == []
+
+
+def test_audio_bound_fails_before_adapter_call_and_full_digest() -> None:
     request = _request(
         audio=_audio(b"12345"),
         policy=SpeechToTextPolicy(max_audio_bytes=4),
@@ -140,6 +171,7 @@ def test_audio_bound_fails_before_adapter_call() -> None:
     assert result.text is None
     assert result.evidence.status is SpeechToTextStatus.FAILED
     assert result.evidence.error_code is SpeechToTextFailureCode.RESOURCE_LIMIT
+    assert result.evidence.audio_sha256 is None
     assert adapter.calls == []
 
 
