@@ -15,12 +15,16 @@ def budget_for_profile(
 ) -> ResourceBudget:
     """Project a named profile onto the existing lower-level ResourceBudget contract."""
 
-    if not scope.strip():
-        raise ValueError("scope must not be empty")
-    if not owner_id.strip():
-        raise ValueError("owner_id must not be empty")
-    if max_concurrent <= 0:
-        raise ValueError("max_concurrent must be greater than zero")
+    if not isinstance(scope, str) or not scope.strip():
+        raise ValueError("scope must be a non-empty string")
+    if not isinstance(owner_id, str) or not owner_id.strip():
+        raise ValueError("owner_id must be a non-empty string")
+    if (
+        isinstance(max_concurrent, bool)
+        or not isinstance(max_concurrent, int)
+        or max_concurrent <= 0
+    ):
+        raise ValueError("max_concurrent must be a positive integer")
 
     selected_policy = ResourceProfilePolicy() if policy is None else policy
     spec = selected_policy.profile_spec(profile)

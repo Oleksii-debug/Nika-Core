@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from math import nan
 
 import pytest
@@ -92,6 +93,9 @@ def test_available_memory_floor_is_enforced() -> None:
         (_snapshot(cpu=nan), "invalid_resource_snapshot"),
         (_snapshot(memory=101.0), "invalid_resource_snapshot"),
         (_snapshot(available=-1), "invalid_resource_snapshot"),
+        (_snapshot(cpu=True), "invalid_resource_snapshot"),
+        (_snapshot(memory=True), "invalid_resource_snapshot"),
+        (_snapshot(available=True), "invalid_resource_snapshot"),
     ],
 )
 def test_invalid_telemetry_fails_closed(snapshot: ResourceSnapshot, reason: str) -> None:
@@ -103,6 +107,23 @@ def test_invalid_telemetry_fails_closed(snapshot: ResourceSnapshot, reason: str)
 
     assert decision.allowed is False
     assert decision.reason == reason
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("max_cpu_percent", True),
+        ("max_memory_percent", True),
+        ("min_available_memory_bytes", True),
+        ("max_simultaneous_heavy_workloads", True),
+    ],
+)
+def test_boolean_profile_limits_are_rejected(field_name: str, value: object) -> None:
+    baseline = ResourceProfilePolicy().profile_spec(ResourceProfileName.NORMAL)
+    malformed = replace(baseline, **{field_name: value})
+
+    with pytest.raises(ValueError):
+        ResourceProfilePolicy({ResourceProfileName.NORMAL: malformed})
 
 
 def test_unknown_profile_and_workload_fail_closed() -> None:
@@ -154,6 +175,9 @@ def test_profile_projects_to_existing_resource_budget_contract() -> None:
         {"scope": "", "owner_id": "project-1", "max_concurrent": 1},
         {"scope": "workspace", "owner_id": " ", "max_concurrent": 1},
         {"scope": "workspace", "owner_id": "project-1", "max_concurrent": 0},
+        {"scope": "workspace", "owner_id": "project-1", "max_concurrent": True},
+        {"scope": 1, "owner_id": "project-1", "max_concurrent": 1},
+        {"scope": "workspace", "owner_id": 1, "max_concurrent": 1},
     ],
 )
 def test_budget_adapter_rejects_invalid_identity_or_concurrency(kwargs: dict[str, object]) -> None:

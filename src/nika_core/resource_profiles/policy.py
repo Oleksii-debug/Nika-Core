@@ -175,24 +175,38 @@ def _validate_profile(name: ResourceProfileName, spec: ResourceProfileSpec) -> N
         ("max_cpu_percent", spec.max_cpu_percent),
         ("max_memory_percent", spec.max_memory_percent),
     ):
-        if not isfinite(value) or not 0 < value <= 100:
-            raise ValueError(f"{field_name} must be finite and in the range (0, 100]")
-    if spec.min_available_memory_bytes < 0:
-        raise ValueError("min_available_memory_bytes must not be negative")
-    if spec.max_simultaneous_heavy_workloads <= 0:
-        raise ValueError("max_simultaneous_heavy_workloads must be greater than zero")
+        if not _is_percentage(value, allow_zero=False):
+            raise ValueError(f"{field_name} must be a finite number in the range (0, 100]")
+    if not _is_nonnegative_int(spec.min_available_memory_bytes):
+        raise ValueError("min_available_memory_bytes must be a non-negative integer")
+    if not _is_positive_int(spec.max_simultaneous_heavy_workloads):
+        raise ValueError("max_simultaneous_heavy_workloads must be a positive integer")
     if not spec.allowed_workloads:
         raise ValueError("allowed_workloads must not be empty")
 
 
 def _valid_snapshot(snapshot: ResourceSnapshot) -> bool:
     return (
-        isfinite(snapshot.cpu_percent)
-        and 0 <= snapshot.cpu_percent <= 100
-        and isfinite(snapshot.memory_percent)
-        and 0 <= snapshot.memory_percent <= 100
-        and snapshot.available_memory_bytes >= 0
+        _is_percentage(snapshot.cpu_percent, allow_zero=True)
+        and _is_percentage(snapshot.memory_percent, allow_zero=True)
+        and _is_nonnegative_int(snapshot.available_memory_bytes)
     )
+
+
+def _is_percentage(value: object, *, allow_zero: bool) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    if not isfinite(value):
+        return False
+    return (0 <= value <= 100) if allow_zero else (0 < value <= 100)
+
+
+def _is_nonnegative_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _is_positive_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
 def _coerce_profile(value: ResourceProfileName | str) -> ResourceProfileName | None:
