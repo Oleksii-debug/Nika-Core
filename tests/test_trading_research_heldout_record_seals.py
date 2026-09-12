@@ -1,5 +1,4 @@
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 
 import pytest
 
@@ -14,11 +13,11 @@ from nika_core.trading_research.heldout import (
     bind_held_out_test,
     select_validation_candidate,
 )
+from trading_research_metric_evidence_helpers import total_return_evidence
 
 BASE = datetime(2026, 1, 1, tzinfo=UTC)
 DATASET = "a" * 64
 UNIVERSE = "b" * 64
-METRIC = "c" * 64
 QUALITY = "d" * 64
 ALGORITHM = "e" * 64
 CONFIG = "f" * 64
@@ -58,17 +57,19 @@ def artifact() -> StrategyArtifactFingerprint:
 
 
 def score() -> CandidateScore:
+    evidence = total_return_evidence(BASE, "1.25")
     return CandidateScore(
         artifact(),
         Partition.VALIDATION,
-        "sharpe",
-        METRIC,
-        Decimal("1.25"),
+        evidence.metric_name,
+        evidence.definition_sha256,
+        evidence.value,
         DATASET,
         CLEAN,
         UNIVERSE,
         BASE + timedelta(days=9),
         BASE + timedelta(days=15),
+        metric_evidence=evidence,
     )
 
 
@@ -81,17 +82,19 @@ def selection(p: HeldOutProtocol):
 
 
 def result(p: HeldOutProtocol, selected) -> PartitionResult:
+    evidence = total_return_evidence(BASE, "0.75")
     return PartitionResult(
         selected.strategy_artifact,
         Partition.TEST,
-        selected.metric_name,
-        selected.metric_fingerprint,
-        Decimal("0.75"),
+        evidence.metric_name,
+        evidence.definition_sha256,
+        evidence.value,
         selected.dataset_semantic_hash,
         CLEAN,
         selected.universe_fingerprint,
         selected.universe_cutoff_at,
         p.test.end_at,
+        metric_evidence=evidence,
     )
 
 
