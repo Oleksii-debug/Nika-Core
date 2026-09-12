@@ -187,26 +187,23 @@ time.sleep(10)
         worker.step(spec=_spec(), step_index=0, resume_state={})
 
 
-def test_oversized_response_is_rejected(tmp_path: Path) -> None:
+def test_oversized_response_is_rejected_during_execution(tmp_path: Path) -> None:
     trainer = _script(
         tmp_path,
         """
-import json
 import sys
 
-request = json.loads(sys.stdin.buffer.read())
-response = {
-    "candidate_sha256": None,
-    "completed": False,
-    "protocol_version": 1,
-    "resume_state": {"payload": "x" * 4096},
-    "step_id": request["step_id"],
-}
-sys.stdout.write(json.dumps(response))
+sys.stdin.buffer.read()
+chunk = b"x" * 65536
+while True:
+    sys.stdout.buffer.write(chunk)
+    sys.stdout.buffer.flush()
 """.strip(),
     )
     worker = SubprocessTrainingWorker(
-        (sys.executable, str(trainer)), max_response_bytes=1024
+        (sys.executable, str(trainer)),
+        max_response_bytes=1024,
+        timeout_seconds=5,
     )
 
     with pytest.raises(TrainingSubprocessError, match="response exceeds"):
@@ -341,7 +338,7 @@ sys.stdout.write(json.dumps(response))
 
 
 def test_command_must_not_be_a_shell_string() -> None:
-    with pytest.raises(ValueError, match="not a shell string"):
+    with pytest.raises(TypeError, match="not a shell string"):
         SubprocessTrainingWorker("python trainer.py")
 
 
@@ -354,3 +351,11 @@ def test_training_executable_must_be_absolute() -> None:
 def test_invalid_timeout_is_rejected(timeout: object) -> None:
     with pytest.raises(ValueError, match="timeout_seconds"):
         SubprocessTrainingWorker((os.path.abspath(sys.executable),), timeout_seconds=timeout)  # type: ignore[arg-type]
+
+
+def test_huge_integer_timeout_is_rejected_without_overflow() -> None:
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        SubprocessTrainingWorker(
+            (os.path.abspath(sys.executable),),
+            timeout_seconds=10**10000,  # type: ignore[arg-type]
+        )
