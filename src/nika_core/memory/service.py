@@ -120,12 +120,13 @@ class MemoryService:
         namespace: str,
         now: datetime | None = None,
     ) -> tuple[MemoryRecord, ...]:
-        self.purge_expired(now=now)
+        current = _as_utc(now) if now else datetime.now(UTC)
         with self._store.connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM memory_records WHERE scope = ? AND owner_id = ? "
-                "AND namespace = ? ORDER BY memory_key",
-                (scope.value, owner_id, namespace),
+                "AND namespace = ? AND (expires_at IS NULL OR expires_at > ?) "
+                "ORDER BY memory_key",
+                (scope.value, owner_id, namespace, current.isoformat()),
             ).fetchall()
         return tuple(_record_from_row(row) for row in rows)
 
