@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import pytest
 
@@ -126,6 +129,45 @@ def test_first_anchor_rolls_back_if_checkpoint_insert_fails(tmp_path) -> None:
     payload = _task_payload(store, task_id)
     assert payload["trusted_plan_fingerprint"] == coordinator.trusted_plan_fingerprint
     assert saved.checkpoint.coordinator == coordinator.snapshot()
+
+
+def test_borrowed_write_transaction_owns_checkpoint_commit_and_rollback(tmp_path) -> None:
+    store, binding, coordinator, task_id = _setup(tmp_path)
+
+    class BorrowedStore:
+        @contextmanager
+        def connection(self) -> Iterator[sqlite3.Connection]:
+            yield connection
+
+    with pytest.raises(RuntimeError, match="outer transaction rolled back"):
+        with store.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            borrowed_host = ProductFactoryCheckpointHost(BorrowedStore())
+            saved = borrowed_host.save(
+                host_task_id=task_id,
+                checkpoint=binding.checkpoint(coordinator),
+            )
+            assert connection.in_transaction
+            assert saved.checkpoint_id
+            assert connection.execute(
+                "SELECT COUNT(*) FROM checkpoints WHERE task_id = ?", (task_id,)
+            ).fetchone()[0] == 1
+            raise RuntimeError("outer transaction rolled back")
+
+    with store.connection() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM checkpoints WHERE task_id = ?", (task_id,)
+        ).fetchone()[0] == 0
+    assert "product_factory_checkpoint_head" not in _task_payload(store, task_id)
+    assert "trusted_plan_fingerprint" not in _task_payload(store, task_id)
+
+    saved = ProductFactoryCheckpointHost(store).save(
+        host_task_id=task_id,
+        checkpoint=binding.checkpoint(coordinator),
+    )
+    assert ProductFactoryCheckpointHost(SQLiteStore(store.path)).load(
+        saved.checkpoint_id, host_task_id=task_id
+    ).checkpoint_id == saved.checkpoint_id
 
 
 def test_checkpoint_without_durable_host_authority_fails_closed_as_legacy_state(tmp_path) -> None:

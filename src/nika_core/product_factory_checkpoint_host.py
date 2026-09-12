@@ -110,7 +110,11 @@ class ProductFactoryCheckpointHost:
             # The host task already owns independent trusted-plan authority. Commit the
             # exact admitted checkpoint head there as well so restart authority never
             # depends on candidate-created wall-clock ordering or public row hashes alone.
-            conn.execute("BEGIN IMMEDIATE")
+            # ProductFactoryProgramHost may lend its already-fenced write transaction
+            # through a borrowed SQLiteStore. The outer host owns its commit/rollback;
+            # starting a second transaction here would reject the real dispatch path.
+            if not conn.in_transaction:
+                conn.execute("BEGIN IMMEDIATE")
             host_payload = self._require_host_task(
                 conn,
                 host_task_id=host_task_id,
