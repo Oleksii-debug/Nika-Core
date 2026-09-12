@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from urllib.parse import quote
 
 import pytest
 
@@ -100,23 +101,21 @@ def test_interrupted_enqueue_created_state_is_recovered_without_touching_other_t
     tmp_path,
 ) -> None:
     _, tasks, queue = _services(tmp_path)
-    interrupted = tasks.create(
+    interrupted = queue.enqueue(
         workspace_id="study",
         agent_id="reader",
-        payload={
-            "nika_kind": "study_material_v1",
-            "material_id": "recover-me",
-            "title": "Матеріал після збою",
-            "material_kind": "document",
-            "source_ref": r"D:\Навчання\матеріал.txt",
-            "evidence_policy": "source_bound_v1",
-        },
+        material=_material(material_id="recover-me", title="Матеріал після збою"),
     )
     ordinary = tasks.create(
         workspace_id="study",
         agent_id="worker",
         payload={"kind": "ordinary"},
     )
+    with tasks.store.connection() as conn:
+        conn.execute(
+            "UPDATE tasks SET state = ? WHERE task_id = ?",
+            (TaskState.CREATED.value, interrupted.task_id),
+        )
 
     recovered = queue.recover_created()
 
@@ -140,7 +139,16 @@ def test_source_reference_rejects_credential_material(source_ref: str) -> None:
         _material(source_ref=source_ref)
 
 
-def test_durable_payload_corruption_fails_closed_on_read(tmp_path) -> None:
+def test_source_reference_fails_closed_when_percent_decoding_exceeds_bound() -> None:
+    source_ref = "https://example.test/book.pdf?token=secret"
+    for _ in range(7):
+        source_ref = quote(source_ref, safe="")
+
+    with pytest.raises(ValueError, match="encoding depth"):
+        _material(source_ref=source_ref)
+
+
+def test_durable_payload_semantic_tamper_fails_closed_on_read(tmp_path) -> None:
     _, tasks, queue = _services(tmp_path)
     task = queue.enqueue(
         workspace_id="study",
@@ -153,7 +161,7 @@ def test_durable_payload_corruption_fails_closed_on_read(tmp_path) -> None:
             (task.task_id,),
         ).fetchone()
         payload = json.loads(row["payload_json"])
-        payload["content_sha256"] = "not-a-digest"
+        payload["title"] = "Підмінений, але структурно валідний заголовок"
         conn.execute(
             "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
             (json.dumps(payload, ensure_ascii=False, sort_keys=True), task.task_id),
@@ -174,6 +182,7 @@ def test_payload_is_reference_only_and_does_not_capture_document_or_prompt_text(
     payload = tasks.get(task.task_id).payload
 
     assert payload["evidence_policy"] == "source_bound_v1"
+    assert len(payload["study_fingerprint"]) == 64
     assert "content" not in payload
     assert "document_text" not in payload
     assert "prompt" not in payload
