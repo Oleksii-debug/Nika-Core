@@ -171,12 +171,12 @@ class WindowsPowerShellSpeechBackend:
             shell=False,
             creationflags=creationflags,
         )
-        result: list[tuple[bytes, None] | BaseException] = []
+        result: list[tuple[bytes, None] | Exception] = []
 
         def communicate() -> None:
             try:
                 result.append(process.communicate(input=stdin_bytes))
-            except BaseException as exc:  # pragma: no cover - defensive thread boundary
+            except Exception as exc:  # pragma: no cover - defensive thread boundary
                 result.append(exc)
 
         worker = threading.Thread(target=communicate, daemon=True)
@@ -212,7 +212,7 @@ class WindowsPowerShellSpeechBackend:
             raise failure
         if not result:
             raise SpeechError(SpeechErrorCode.PROCESS_FAILED, "speech process returned no result")
-        if isinstance(result[0], BaseException):
+        if isinstance(result[0], Exception):
             raise SpeechError(
                 SpeechErrorCode.PROCESS_FAILED,
                 "speech process communication failed",
