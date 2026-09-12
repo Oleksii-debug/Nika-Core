@@ -83,7 +83,7 @@ class VoiceActivityDetector:
 
     def __init__(self, config: VoiceActivityConfig | None = None) -> None:
         resolved = VoiceActivityConfig() if config is None else config
-        if not isinstance(resolved, VoiceActivityConfig):
+        if type(resolved) is not VoiceActivityConfig:
             raise TypeError("config must be VoiceActivityConfig")
         self._config = resolved
         self.reset()
@@ -140,14 +140,18 @@ class VoiceActivityDetector:
 def _bounded_pcm16_bytes(value: Buffer, *, maximum: int) -> bytes:
     if not isinstance(value, (bytes, bytearray, memoryview)):
         raise TypeError("pcm16le must be bytes-like")
-    raw = bytes(value)
-    if not raw:
+    try:
+        view = memoryview(value)
+        byte_count = view.nbytes
+    except (TypeError, ValueError) as exc:
+        raise ValueError("pcm16le buffer is unavailable") from exc
+    if byte_count == 0:
         raise ValueError("pcm16le must not be empty")
-    if len(raw) % 2:
+    if byte_count % 2:
         raise ValueError("pcm16le must contain complete 16-bit samples")
-    if len(raw) > maximum:
+    if byte_count > maximum:
         raise ValueError("pcm16le exceeds configured frame bound")
-    return raw
+    return view.tobytes()
 
 
 def _normalized_rms(raw: bytes) -> tuple[float, int]:
