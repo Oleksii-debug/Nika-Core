@@ -98,6 +98,20 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _canonical_shard_order(shards: Iterable[LearningShard]) -> tuple[LearningShard, ...]:
+    return tuple(
+        sorted(
+            shards,
+            key=lambda shard: (
+                shard.split.value,
+                shard.artifact_sha256,
+                shard.provenance_sha256,
+                shard.license_evidence_sha256,
+            ),
+        )
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class LearningShard:
     split: LearningDataSplit
@@ -177,6 +191,8 @@ class FrozenLearningPackage:
             raise LearningPackageValidationError("shard count is outside the supported bound")
         if not all(isinstance(shard, LearningShard) for shard in self.shards):
             raise LearningPackageValidationError("shards must contain LearningShard values")
+        if self.shards != _canonical_shard_order(self.shards):
+            raise LearningPackageValidationError("learning-package shard order is not canonical")
 
         identities = [shard.artifact_sha256 for shard in self.shards]
         if len(set(identities)) != len(identities):
@@ -213,17 +229,6 @@ class FrozenLearningPackage:
         shard_values = tuple(shards)
         if not all(isinstance(shard, LearningShard) for shard in shard_values):
             raise LearningPackageValidationError("shards must contain LearningShard values")
-        frozen_shards = tuple(
-            sorted(
-                shard_values,
-                key=lambda shard: (
-                    shard.split.value,
-                    shard.artifact_sha256,
-                    shard.provenance_sha256,
-                    shard.license_evidence_sha256,
-                ),
-            )
-        )
         return cls(
             package_id=package_id,
             package_version=package_version,
@@ -231,7 +236,7 @@ class FrozenLearningPackage:
             selection_policy_sha256=selection_policy_sha256,
             verification_sha256=verification_sha256,
             evaluation_set_sha256=evaluation_set_sha256,
-            shards=frozen_shards,
+            shards=_canonical_shard_order(shard_values),
         )
 
     def candidate_dataset_payload(self) -> dict[str, object]:
@@ -277,17 +282,25 @@ class FrozenLearningPackage:
         *,
         expected_manifest_sha256: str | None = None,
     ) -> FrozenLearningPackage:
-        try:
-            encoded = raw.encode("utf-8") if isinstance(raw, str) else raw
-        except UnicodeEncodeError as exc:
-            raise LearningPackageIntegrityError("serialized package is not valid UTF-8") from exc
-        if not isinstance(encoded, bytes):
+        if isinstance(raw, str):
+            decoded = raw
+            try:
+                encoded = raw.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise LearningPackageIntegrityError("serialized package is not valid UTF-8") from exc
+        elif isinstance(raw, bytes):
+            encoded = raw
+            try:
+                decoded = raw.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise LearningPackageIntegrityError("serialized package is not valid UTF-8") from exc
+        else:
             raise LearningPackageIntegrityError("serialized package must be str or bytes")
         if not encoded or len(encoded) > _MAX_MANIFEST_BYTES:
             raise LearningPackageIntegrityError("serialized package size is invalid")
         try:
-            parsed = json.loads(encoded, object_pairs_hook=_reject_duplicate_keys)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            parsed = json.loads(decoded, object_pairs_hook=_reject_duplicate_keys)
+        except json.JSONDecodeError as exc:
             raise LearningPackageIntegrityError("serialized package is not valid JSON") from exc
         if not isinstance(parsed, dict) or frozenset(parsed) != _ENVELOPE_KEYS:
             raise LearningPackageIntegrityError("learning-package envelope keys are invalid")
@@ -331,18 +344,6 @@ class FrozenLearningPackage:
 
         if manifest.get("candidate_dataset_sha256") != package.candidate_dataset_sha256:
             raise LearningPackageIntegrityError("candidate dataset digest mismatch")
-
-        canonical_order = tuple(
-            sorted(
-                package.shards,
-                key=lambda shard: (
-                    shard.split.value,
-                    shard.artifact_sha256,
-                    shard.provenance_sha256,
-                    shard.license_evidence_sha256,
-                ),
-            )
-        )
-        if package.shards != canonical_order:
-            raise LearningPackageIntegrityError("learning-package shard order is not canonical")
+        if decoded != package.to_json():
+            raise LearningPackageIntegrityError("learning-package serialization is not canonical")
         return package

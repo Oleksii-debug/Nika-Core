@@ -293,3 +293,35 @@ def test_aggregate_counts_fail_closed_before_signed_64_overflow() -> None:
             evaluation_set_sha256=J,
             shards=(training, validation),
         )
+
+
+def test_direct_constructor_rejects_noncanonical_shard_order() -> None:
+    training = _shard(LearningDataSplit.TRAINING, A, C, E)
+    validation = _shard(LearningDataSplit.VALIDATION, B, D, F)
+
+    with pytest.raises(LearningPackageValidationError, match="shard order is not canonical"):
+        FrozenLearningPackage(
+            package_id="candidate",
+            package_version="v1",
+            base_artifact_sha256=G,
+            selection_policy_sha256=H,
+            verification_sha256=I,
+            evaluation_set_sha256=J,
+            shards=(validation, training),
+        )
+
+
+def test_serialized_manifest_rejects_non_utf8_byte_encoding() -> None:
+    package = _package()
+
+    with pytest.raises(LearningPackageIntegrityError, match="not valid UTF-8"):
+        FrozenLearningPackage.from_json(package.to_json().encode("utf-16"))
+
+
+def test_serialized_manifest_rejects_noncanonical_json_representation() -> None:
+    package = _package()
+    envelope = json.loads(package.to_json())
+    noncanonical = json.dumps(envelope, indent=2)
+
+    with pytest.raises(LearningPackageIntegrityError, match="serialization is not canonical"):
+        FrozenLearningPackage.from_json(noncanonical)
