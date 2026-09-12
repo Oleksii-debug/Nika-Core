@@ -296,7 +296,11 @@ class FrozenLearningPackage:
         *,
         expected_manifest_sha256: str | None = None,
     ) -> FrozenLearningPackage:
-        if isinstance(raw, str):
+        if type(raw) is not str and type(raw) is not bytes:
+            raise LearningPackageIntegrityError(
+                "serialized package size is invalid; input must be exact str or bytes"
+            )
+        if type(raw) is str:
             if not raw or len(raw) > _MAX_MANIFEST_BYTES:
                 raise LearningPackageIntegrityError("serialized package size is invalid")
             decoded = raw
@@ -306,7 +310,7 @@ class FrozenLearningPackage:
                 raise LearningPackageIntegrityError("serialized package is not valid UTF-8") from exc
             if len(encoded) > _MAX_MANIFEST_BYTES:
                 raise LearningPackageIntegrityError("serialized package size is invalid")
-        elif isinstance(raw, bytes):
+        else:
             if not raw or len(raw) > _MAX_MANIFEST_BYTES:
                 raise LearningPackageIntegrityError("serialized package size is invalid")
             encoded = raw
@@ -314,8 +318,6 @@ class FrozenLearningPackage:
                 decoded = raw.decode("utf-8")
             except UnicodeDecodeError as exc:
                 raise LearningPackageIntegrityError("serialized package is not valid UTF-8") from exc
-        else:
-            raise LearningPackageIntegrityError("serialized package must be str or bytes")
         try:
             parsed = json.loads(decoded, object_pairs_hook=_reject_duplicate_keys)
         except json.JSONDecodeError as exc:
