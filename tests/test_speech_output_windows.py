@@ -198,12 +198,12 @@ def test_adapter_rejects_overlapping_speech_without_second_effect() -> None:
     first_adapter = WindowsSystemSpeechAdapter(backend)
     second_backend = FakeBackend()
     second_adapter = WindowsSystemSpeechAdapter(second_backend)
-    failures: list[Exception] = []
+    failures: list[SpeechError] = []
 
     def first_speech() -> None:
         try:
             first_adapter.speak(SpeechRequest("first"))
-        except Exception as exc:  # pragma: no cover - asserted below
+        except SpeechError as exc:  # pragma: no cover - asserted below
             failures.append(exc)
 
     worker = threading.Thread(target=first_speech)
