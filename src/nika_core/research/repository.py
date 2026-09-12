@@ -67,6 +67,7 @@ class ResearchRepository:
             raise ValueError("source_id, workspace_id and locator are required")
         now = _now()
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             http_collision = conn.execute(
                 "SELECT 1 FROM research_http_sources WHERE source_id=?",
                 (source.source_id,),
