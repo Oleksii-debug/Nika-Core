@@ -25,6 +25,7 @@ _MAX_JSON_DEPTH = 12
 _MAX_JSON_NODES = 4096
 _STREAM_JOIN_TIMEOUT_SECONDS = 1.0
 _READ_CHUNK_BYTES = 64 * 1024
+_HEX_DIGITS = frozenset("0123456789abcdef")
 
 
 class TrainingSubprocessError(RuntimeError):
@@ -91,6 +92,16 @@ def _strict_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
             raise ValueError(f"duplicate JSON key: {key}")
         result[key] = value
     return result
+
+
+def _validate_sha256(value: object, *, name: str) -> str:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in _HEX_DIGITS for character in value)
+    ):
+        raise ValueError(f"{name} must be a lowercase 64-character SHA-256 digest")
+    return value
 
 
 def _validate_positive_byte_limit(value: object, *, name: str) -> int:
@@ -178,29 +189,34 @@ def _job_fingerprint(spec: TrainingJobSpec) -> str:
     return hashlib.sha256(b"nika-training-job-v1\x00" + identity).hexdigest()
 
 
-def _step_id(job_fingerprint: str, step_index: int) -> str:
-    material = f"nika-training-step-v1\x00{job_fingerprint}\x00{step_index}".encode()
+def _step_id(job_fingerprint: str, trainer_sha256: str, step_index: int) -> str:
+    material = (
+        f"nika-training-step-v1\x00{job_fingerprint}\x00{trainer_sha256}\x00{step_index}"
+    ).encode()
     return hashlib.sha256(material).hexdigest()
 
 
 class SubprocessTrainingWorker:
-    """Shell-free TrainingWorkerPort adapter for an explicitly configured local trainer.
+    """Shell-free TrainingWorkerPort adapter for one exact local trainer artifact.
 
     The subprocess receives one canonical JSON request on stdin and must return one
     strict JSON response on stdout. The adapter does not inherit the parent process
-    environment by default and never includes raw subprocess output in raised errors.
+    environment by default, binds restart state to the exact trainer artifact digest,
+    and never includes raw subprocess output in raised errors.
     """
 
     def __init__(
         self,
         command: Sequence[str],
         *,
+        trainer_sha256: str,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
         environment: Mapping[str, str] | None = None,
         max_request_bytes: int = _DEFAULT_MAX_REQUEST_BYTES,
         max_response_bytes: int = _DEFAULT_MAX_RESPONSE_BYTES,
     ) -> None:
         self._command = _validate_command(command)
+        self._trainer_sha256 = _validate_sha256(trainer_sha256, name="trainer_sha256")
         self._timeout_seconds = _validate_timeout(timeout_seconds)
         self._environment = _validate_environment(environment)
         self._max_request_bytes = _validate_positive_byte_limit(
@@ -228,7 +244,7 @@ class SubprocessTrainingWorker:
             job_fingerprint=job_fingerprint,
             step_index=step_index,
         )
-        current_step_id = _step_id(job_fingerprint, step_index)
+        current_step_id = _step_id(job_fingerprint, self._trainer_sha256, step_index)
         request = {
             "job": _job_identity(spec),
             "job_fingerprint": job_fingerprint,
@@ -237,6 +253,7 @@ class SubprocessTrainingWorker:
             "resume_state": trainer_state,
             "step_id": current_step_id,
             "step_index": step_index,
+            "trainer_sha256": self._trainer_sha256,
         }
         request_bytes = _canonical_json_bytes(
             request,
@@ -258,6 +275,7 @@ class SubprocessTrainingWorker:
                 "job_fingerprint": job_fingerprint,
                 "last_step_id": current_step_id,
                 "protocol_version": _PROTOCOL_VERSION,
+                "trainer_sha256": self._trainer_sha256,
                 "trainer_state": trainer_resume_state,
             }
         }
@@ -298,6 +316,7 @@ class SubprocessTrainingWorker:
             "job_fingerprint",
             "last_step_id",
             "protocol_version",
+            "trainer_sha256",
             "trainer_state",
         }
         if set(envelope) != expected_keys:
@@ -308,8 +327,14 @@ class SubprocessTrainingWorker:
             raise TrainingSubprocessError("training resume state uses an unsupported protocol")
         if envelope["job_fingerprint"] != job_fingerprint:
             raise TrainingSubprocessError("training resume state does not match the current job")
+        if envelope["trainer_sha256"] != self._trainer_sha256:
+            raise TrainingSubprocessError(
+                "training resume state does not match the trainer artifact"
+            )
 
-        expected_previous_step_id = _step_id(job_fingerprint, step_index - 1)
+        expected_previous_step_id = _step_id(
+            job_fingerprint, self._trainer_sha256, step_index - 1
+        )
         if envelope["last_step_id"] != expected_previous_step_id:
             raise TrainingSubprocessError("training resume state does not match the previous step")
         trainer_state = envelope["trainer_state"]
