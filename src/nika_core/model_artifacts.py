@@ -7,7 +7,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
@@ -24,6 +24,7 @@ _CREDENTIAL_ASSIGNMENT = re.compile(
     r"\s*[:=]",
     re.IGNORECASE,
 )
+_BEARER_CREDENTIAL = re.compile(r"\bbearer\s+\S+", re.IGNORECASE)
 _DESCRIPTOR_KEYS = {
     "schema_version",
     "kind",
@@ -395,12 +396,27 @@ def _clean_text(name: str, value: str, *, label: bool = False) -> str:
     return value
 
 
+def _contains_credential_material(value: str) -> bool:
+    candidate = value
+    for _ in range(4):
+        if (
+            _CREDENTIAL_ASSIGNMENT.search(candidate) is not None
+            or _BEARER_CREDENTIAL.search(candidate) is not None
+        ):
+            return True
+        decoded = unquote(candidate)
+        if decoded == candidate:
+            break
+        candidate = decoded
+    return False
+
+
 def _public_reference(name: str, value: str) -> str:
     text = _clean_text(name, value)
     lowered = text.lower()
     if lowered.startswith(("env:", "credential:", "secret:")):
         raise ValueError(f"{name} must be public provenance, not a credential reference")
-    if _CREDENTIAL_ASSIGNMENT.search(text) is not None:
+    if _contains_credential_material(text):
         raise ValueError(f"{name} must be public provenance, not credential material")
     if (
         text.startswith(("/", "\\"))
