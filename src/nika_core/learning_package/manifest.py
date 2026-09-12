@@ -189,8 +189,8 @@ class FrozenLearningPackage:
             raise LearningPackageValidationError("shards must be an immutable tuple")
         if not 1 <= len(self.shards) <= _MAX_SHARDS:
             raise LearningPackageValidationError("shard count is outside the supported bound")
-        if not all(isinstance(shard, LearningShard) for shard in self.shards):
-            raise LearningPackageValidationError("shards must contain LearningShard values")
+        if not all(type(shard) is LearningShard for shard in self.shards):
+            raise LearningPackageValidationError("shards must contain exact LearningShard values")
         if self.shards != _canonical_shard_order(self.shards):
             raise LearningPackageValidationError("learning-package shard order is not canonical")
 
@@ -227,8 +227,8 @@ class FrozenLearningPackage:
         shards: Iterable[LearningShard],
     ) -> FrozenLearningPackage:
         shard_values = tuple(shards)
-        if not all(isinstance(shard, LearningShard) for shard in shard_values):
-            raise LearningPackageValidationError("shards must contain LearningShard values")
+        if not all(type(shard) is LearningShard for shard in shard_values):
+            raise LearningPackageValidationError("shards must contain exact LearningShard values")
         return cls(
             package_id=package_id,
             package_version=package_version,
