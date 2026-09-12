@@ -10,6 +10,8 @@ from nika_core.research.blobs import BlobStoreError, ContentAddressedBlobStore
 
 _SCHEMA_VERSION = 1
 _MAX_WORKSPACE_BYTES = 4096
+_MAX_SIGNED_64 = (1 << 63) - 1
+_HEX_DIGITS = frozenset("0123456789abcdef")
 
 
 class TrainingMaterialResolutionError(RuntimeError):
@@ -25,6 +27,22 @@ def _sha256_payload(payload: object) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _require_sha256(name: str, value: object) -> str:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in _HEX_DIGITS for character in value)
+    ):
+        raise ValueError(f"{name} must be an exact lowercase SHA-256 digest")
+    return value
+
+
+def _require_positive_int(name: str, value: object) -> int:
+    if type(value) is not int or not 1 <= value <= _MAX_SIGNED_64:
+        raise ValueError(f"{name} must be a positive signed-64 integer")
+    return value
 
 
 def _workspace_fingerprint(workspace_id: str) -> str:
@@ -50,6 +68,15 @@ class TrainingMaterialEvidence:
     license_evidence_sha256: str
     record_count: int
     byte_count: int
+
+    def __post_init__(self) -> None:
+        if type(self.split) is not LearningDataSplit:
+            raise TypeError("split must be an exact LearningDataSplit")
+        _require_sha256("artifact_sha256", self.artifact_sha256)
+        _require_sha256("provenance_sha256", self.provenance_sha256)
+        _require_sha256("license_evidence_sha256", self.license_evidence_sha256)
+        _require_positive_int("record_count", self.record_count)
+        _require_positive_int("byte_count", self.byte_count)
 
     @classmethod
     def from_shard(cls, shard: LearningShard) -> TrainingMaterialEvidence:
@@ -86,6 +113,27 @@ class TrainingMaterialSetEvidence:
     materials: tuple[TrainingMaterialEvidence, ...]
     schema_version: int = _SCHEMA_VERSION
 
+    def __post_init__(self) -> None:
+        if type(self.schema_version) is not int or self.schema_version != _SCHEMA_VERSION:
+            raise ValueError("unsupported training material evidence schema")
+        _require_sha256("workspace_sha256", self.workspace_sha256)
+        _require_sha256("package_manifest_sha256", self.package_manifest_sha256)
+        _require_sha256("candidate_dataset_sha256", self.candidate_dataset_sha256)
+        _require_sha256("evaluation_set_sha256", self.evaluation_set_sha256)
+        if type(self.materials) is not tuple or not self.materials:
+            raise ValueError("materials must be a non-empty immutable tuple")
+        if not all(type(material) is TrainingMaterialEvidence for material in self.materials):
+            raise TypeError("materials must contain exact TrainingMaterialEvidence values")
+        identities = [material.artifact_sha256 for material in self.materials]
+        if len(set(identities)) != len(identities):
+            raise ValueError("resolved training artifact identities must be unique")
+        if self.evaluation_set_sha256 in identities:
+            raise ValueError("held-out evaluation material must not be training input")
+        if not any(material.split is LearningDataSplit.TRAINING for material in self.materials):
+            raise ValueError("resolved materials require at least one training shard")
+        if not any(material.split is LearningDataSplit.VALIDATION for material in self.materials):
+            raise ValueError("resolved materials require at least one validation shard")
+
     def canonical_payload(self) -> dict[str, object]:
         return {
             "candidate_dataset_sha256": self.candidate_dataset_sha256,
@@ -108,6 +156,12 @@ class ResolvedTrainingMaterial:
     evidence: TrainingMaterialEvidence
     path: Path
 
+    def __post_init__(self) -> None:
+        if type(self.evidence) is not TrainingMaterialEvidence:
+            raise TypeError("evidence must be exact TrainingMaterialEvidence")
+        if type(self.path) is not Path or not self.path.is_absolute():
+            raise ValueError("resolved training path must be an absolute Path")
+
 
 @dataclass(frozen=True, slots=True)
 class ResolvedTrainingPackage:
@@ -115,6 +169,16 @@ class ResolvedTrainingPackage:
 
     evidence: TrainingMaterialSetEvidence
     materials: tuple[ResolvedTrainingMaterial, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.evidence) is not TrainingMaterialSetEvidence:
+            raise TypeError("evidence must be exact TrainingMaterialSetEvidence")
+        if type(self.materials) is not tuple or not self.materials:
+            raise ValueError("materials must be a non-empty immutable tuple")
+        if not all(type(material) is ResolvedTrainingMaterial for material in self.materials):
+            raise TypeError("materials must contain exact ResolvedTrainingMaterial values")
+        if tuple(material.evidence for material in self.materials) != self.evidence.materials:
+            raise ValueError("resolved paths do not match durable material evidence")
 
     @property
     def training_material_sha256(self) -> str:
