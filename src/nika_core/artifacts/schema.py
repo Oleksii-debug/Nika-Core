@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime
 
 from nika_core.data.sqlite import SQLiteStore
@@ -40,6 +41,85 @@ _ARTIFACT_REGISTRY_MIGRATIONS: dict[int, tuple[str, ...]] = {
     ),
 }
 
+_MIGRATION_COLUMNS = {
+    "version": ("INTEGER", 0, 1),
+    "applied_at": ("TEXT", 1, 0),
+}
+_RECORD_COLUMNS = {
+    "artifact_id": ("TEXT", 0, 1),
+    "workspace_id": ("TEXT", 1, 0),
+    "idempotency_key": ("TEXT", 1, 0),
+    "kind": ("TEXT", 1, 0),
+    "sha256": ("TEXT", 1, 0),
+    "size_bytes": ("INTEGER", 1, 0),
+    "location_kind": ("TEXT", 1, 0),
+    "producer_id": ("TEXT", 0, 0),
+    "record_json": ("TEXT", 1, 0),
+    "created_at": ("TEXT", 1, 0),
+}
+_VERIFICATION_COLUMNS = {
+    "verification_id": ("TEXT", 0, 1),
+    "artifact_id": ("TEXT", 1, 0),
+    "state": ("TEXT", 1, 0),
+    "verification_json": ("TEXT", 1, 0),
+    "checked_at": ("TEXT", 1, 0),
+}
+
+
+def _stored_schema_version(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise RuntimeError("artifact registry schema version must be stored as SQLite INTEGER")
+    return value
+
+
+def _table_columns(
+    conn: sqlite3.Connection,
+    table_name: str,
+) -> dict[str, tuple[str, int, int]]:
+    if table_name == "artifact_registry_schema_migrations":
+        rows = conn.execute(
+            "PRAGMA table_info(artifact_registry_schema_migrations)"
+        ).fetchall()
+    elif table_name == "artifact_registry_records":
+        rows = conn.execute("PRAGMA table_info(artifact_registry_records)").fetchall()
+    elif table_name == "artifact_registry_verifications":
+        rows = conn.execute(
+            "PRAGMA table_info(artifact_registry_verifications)"
+        ).fetchall()
+    else:
+        raise ValueError("unsupported Artifact Registry table")
+    return {
+        str(row["name"]): (
+            str(row["type"]).upper(),
+            int(row["notnull"]),
+            int(row["pk"]),
+        )
+        for row in rows
+    }
+
+
+def _validate_table(
+    conn: sqlite3.Connection,
+    *,
+    table_name: str,
+    expected: dict[str, tuple[str, int, int]],
+) -> None:
+    if _table_columns(conn, table_name) != expected:
+        raise RuntimeError(f"artifact registry table schema mismatch: {table_name}")
+
+
+def _validate_owned_schema(conn: sqlite3.Connection) -> None:
+    _validate_table(
+        conn,
+        table_name="artifact_registry_records",
+        expected=_RECORD_COLUMNS,
+    )
+    _validate_table(
+        conn,
+        table_name="artifact_registry_verifications",
+        expected=_VERIFICATION_COLUMNS,
+    )
+
 
 def initialize_artifact_registry_schema(store: SQLiteStore) -> None:
     """Apply Artifact Registry-owned ordered migrations in the canonical SQLite database."""
@@ -50,10 +130,16 @@ def initialize_artifact_registry_schema(store: SQLiteStore) -> None:
                 applied_at TEXT NOT NULL
             )"""
         )
+        _validate_table(
+            conn,
+            table_name="artifact_registry_schema_migrations",
+            expected=_MIGRATION_COLUMNS,
+        )
         row = conn.execute(
             "SELECT MAX(version) AS version FROM artifact_registry_schema_migrations"
         ).fetchone()
-        current = int(row["version"] or 0)
+        raw_current = row["version"] if row is not None else None
+        current = 0 if raw_current is None else _stored_schema_version(raw_current)
         if current > ARTIFACT_REGISTRY_SCHEMA_VERSION:
             raise RuntimeError(
                 "artifact registry schema "
@@ -66,6 +152,8 @@ def initialize_artifact_registry_schema(store: SQLiteStore) -> None:
             for statement in statements:
                 conn.execute(statement)
             conn.execute(
-                "INSERT INTO artifact_registry_schema_migrations(version, applied_at) VALUES (?, ?)",
+                "INSERT INTO artifact_registry_schema_migrations(version, applied_at) "
+                "VALUES (?, ?)",
                 (version, datetime.now(UTC).isoformat()),
             )
+        _validate_owned_schema(conn)

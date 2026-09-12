@@ -5,6 +5,7 @@ import hmac
 import json
 import os
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -85,7 +86,9 @@ class SQLiteRecoveryManager:
         self._store = store
         self._audit = audit or AuditLog(store)
 
-    def create_backup(self, backup_path: Path | str) -> BackupArtifact:
+    def create_backup(
+        self, backup_path: Path | str, *, record_audit: bool = True
+    ) -> BackupArtifact:
         self._ensure_no_interrupted_restore()
         source = self._store.path.resolve()
         destination = Path(backup_path).resolve()
@@ -136,15 +139,16 @@ class SQLiteRecoveryManager:
             schema_version=schema,
             created_at=created_at,
         )
-        self._audit_if_possible(
-            "reliability.backup_created",
-            {
-                "backup_file": destination.name,
-                "sha256": digest,
-                "size_bytes": size,
-                "schema_version": schema,
-            },
-        )
+        if record_audit:
+            self._audit_if_possible(
+                "reliability.backup_created",
+                {
+                    "backup_file": destination.name,
+                    "sha256": digest,
+                    "size_bytes": size,
+                    "schema_version": schema,
+                },
+            )
         return artifact
 
     def verify_backup(self, backup_path: Path | str) -> BackupArtifact:
@@ -251,6 +255,7 @@ class SQLiteRecoveryManager:
         *,
         confirmation_fingerprint: str,
         allow_replace_unrecoverable_current: bool = False,
+        target_guard: Callable[[sqlite3.Connection], None] | None = None,
     ) -> RestoreResult:
         self._ensure_no_interrupted_restore()
         if not self._equal(confirmation_fingerprint, plan.confirmation_fingerprint):
@@ -300,7 +305,12 @@ class SQLiteRecoveryManager:
                 )
                 copy_completed = True
             else:
-                self._copy_database(staged, target, overwrite=current_exists)
+                if target_guard is None:
+                    self._copy_database(staged, target, overwrite=current_exists)
+                else:
+                    self._copy_database(
+                        staged, target, overwrite=current_exists, target_guard=target_guard
+                    )
                 copy_completed = True
 
             if self._validate_database(target, require_supported=True) != SCHEMA_VERSION:
@@ -316,7 +326,7 @@ class SQLiteRecoveryManager:
                     raise RestoreSafetyError(
                         "restore failed and rollback from the safety backup also failed"
                     ) from rollback_exc
-            elif not current_exists and target.exists():
+            elif not current_exists and target.exists() and target_guard is None:
                 target.unlink(missing_ok=True)
             self._audit_if_possible(
                 "reliability.restore_failed",
@@ -741,7 +751,8 @@ class SQLiteRecoveryManager:
 
     @staticmethod
     def _copy_database(
-        source: Path, destination: Path, *, overwrite: bool = False
+        source: Path, destination: Path, *, overwrite: bool = False,
+        target_guard: Callable[[sqlite3.Connection], None] | None = None,
     ) -> None:
         if not source.is_file():
             raise FileNotFoundError(f"SQLite source does not exist: {source}")
@@ -750,10 +761,23 @@ class SQLiteRecoveryManager:
         if destination.exists() and not overwrite:
             raise FileExistsError(f"SQLite destination already exists: {destination}")
         destination.parent.mkdir(parents=True, exist_ok=True)
+        if target_guard is not None and not overwrite:
+            # Reserve the absent destination before SQLite connect can open it.
+            try:
+                with destination.open("xb"):
+                    pass
+            except FileExistsError:
+                raise RestorePlanStaleError("restore target appeared after preview") from None
         source_conn = sqlite3.connect(source, timeout=5.0)
         target_conn = sqlite3.connect(destination, timeout=5.0)
         try:
             source_conn.execute("PRAGMA query_only = ON")
+            if target_guard is not None:
+                # Retain the exclusive write lock from guard through backup.
+                target_conn.execute("PRAGMA locking_mode = EXCLUSIVE")
+                target_conn.execute("BEGIN EXCLUSIVE")
+                target_guard(target_conn)
+                target_conn.commit()
             source_conn.backup(target_conn, pages=128, sleep=0.05)
         finally:
             target_conn.close()

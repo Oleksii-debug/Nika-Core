@@ -232,7 +232,7 @@ class ArtifactRegistry:
             return self._repository.put_verification(verification)
 
         path = Path(record.locator)
-        if not path.is_file():
+        if not path.exists():
             verification = self._build_verification(
                 record=record,
                 checked_at=checked_at,
@@ -240,9 +240,31 @@ class ArtifactRegistry:
                 detail="registered local artifact is missing",
             )
             return self._repository.put_verification(verification)
+        if not self._local_file_roots:
+            raise ArtifactRegistryError(
+                "local file verification is disabled until an allowed root is configured"
+            )
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError as exc:
+            raise ArtifactRegistryError("registered local artifact could not be resolved") from exc
+        if resolved != path:
+            raise ArtifactRegistryError(
+                "registered local artifact path changed through a link or substitution"
+            )
+        if not any(resolved.is_relative_to(root) for root in self._local_file_roots):
+            raise ArtifactRegistryError("registered local artifact escapes configured read roots")
+        if not resolved.is_file():
+            verification = self._build_verification(
+                record=record,
+                checked_at=checked_at,
+                state=ArtifactVerificationState.MISSING,
+                detail="registered local artifact is not a regular file",
+            )
+            return self._repository.put_verification(verification)
 
         try:
-            actual_sha256, actual_size = _hash_open_file(path)
+            actual_sha256, actual_size = _hash_open_file(resolved)
         except ArtifactRegistryError:
             verification = self._build_verification(
                 record=record,
