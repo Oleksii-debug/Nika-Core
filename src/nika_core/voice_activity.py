@@ -23,18 +23,38 @@ class VoiceActivityConfig:
     max_frame_ms: int = 100
 
     def __post_init__(self) -> None:
-        _require_int_range(self.sample_rate_hz, "sample_rate_hz", minimum=8_000, maximum=192_000)
-        _require_finite_unit(self.start_rms, "start_rms")
-        _require_finite_unit(self.stop_rms, "stop_rms")
+        _require_int_range(
+            self.sample_rate_hz,
+            "sample_rate_hz",
+            minimum=8_000,
+            maximum=192_000,
+        )
+        _require_positive_unit(self.start_rms, "start_rms")
+        _require_positive_unit(self.stop_rms, "stop_rms")
         if self.stop_rms > self.start_rms:
             raise ValueError("stop_rms must be less than or equal to start_rms")
-        _require_int_range(self.attack_frames, "attack_frames", minimum=1, maximum=1_000)
-        _require_int_range(self.release_frames, "release_frames", minimum=1, maximum=1_000)
-        _require_int_range(self.max_frame_ms, "max_frame_ms", minimum=1, maximum=1_000)
+        _require_int_range(
+            self.attack_frames,
+            "attack_frames",
+            minimum=1,
+            maximum=1_000,
+        )
+        _require_int_range(
+            self.release_frames,
+            "release_frames",
+            minimum=1,
+            maximum=1_000,
+        )
+        _require_int_range(
+            self.max_frame_ms,
+            "max_frame_ms",
+            minimum=1,
+            maximum=1_000,
+        )
 
     @property
     def max_frame_bytes(self) -> int:
-        max_samples = math.ceil(self.sample_rate_hz * self.max_frame_ms / 1_000)
+        max_samples = self.sample_rate_hz * self.max_frame_ms // 1_000
         return max_samples * 2
 
 
@@ -62,9 +82,10 @@ class VoiceActivityDetector:
     """
 
     def __init__(self, config: VoiceActivityConfig | None = None) -> None:
-        self._config = config or VoiceActivityConfig()
-        if not isinstance(self._config, VoiceActivityConfig):
+        resolved = VoiceActivityConfig() if config is None else config
+        if not isinstance(resolved, VoiceActivityConfig):
             raise TypeError("config must be VoiceActivityConfig")
+        self._config = resolved
         self.reset()
 
     @property
@@ -143,9 +164,9 @@ def _require_int_range(value: int, name: str, *, minimum: int, maximum: int) -> 
         raise ValueError(f"{name} must be an integer between {minimum} and {maximum}")
 
 
-def _require_finite_unit(value: float, name: str) -> None:
+def _require_positive_unit(value: float, name: str) -> None:
     if type(value) not in {int, float}:
-        raise ValueError(f"{name} must be a finite number between 0 and 1")
+        raise ValueError(f"{name} must be a finite number greater than 0 and at most 1")
     numeric = float(value)
-    if not math.isfinite(numeric) or not 0 <= numeric <= 1:
-        raise ValueError(f"{name} must be a finite number between 0 and 1")
+    if not math.isfinite(numeric) or not 0 < numeric <= 1:
+        raise ValueError(f"{name} must be a finite number greater than 0 and at most 1")
