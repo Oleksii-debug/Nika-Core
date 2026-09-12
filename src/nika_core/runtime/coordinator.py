@@ -36,7 +36,7 @@ from nika_core.runtime.recovery_claims import (
     recovery_claim_metadata,
     write_pending_recovery_claim,
 )
-from nika_core.runtime.retry import RetryPolicy
+from nika_core.runtime.retry import RetryPolicy, usable_resume_token
 from nika_core.runtime.session_store import (
     RuntimeSessionRecord,
     RuntimeSessionStore,
@@ -153,7 +153,8 @@ class TaskRuntimeCoordinator:
         resume_claim: _RuntimeResumeClaim | None = None
         resume_claim_started = False
         while policy.should_retry(result, retries_used=retries_used):
-            if resume_claim is not None and result.resume_token is None:
+            resume_token = usable_resume_token(result.resume_token)
+            if resume_claim is not None and resume_token is None:
                 self._audit.append(
                     event_type="runtime.retry_blocked_unsafe_fresh_replay",
                     entity_type="task",
@@ -182,7 +183,7 @@ class TaskRuntimeCoordinator:
                     "delay_seconds": delay,
                     "error": result.error,
                     "error_code": result.error_code.value if result.error_code else None,
-                    "resume_token": result.resume_token,
+                    "resume_token": resume_token,
                 },
             )
             if delay:
@@ -196,14 +197,14 @@ class TaskRuntimeCoordinator:
                     "runtime_id": runtime.runtime_id,
                     "thread_id": request.thread_id,
                     "retry_number": retries_used,
-                    "resume": result.resume_token is not None,
+                    "resume": resume_token is not None,
                 },
             )
-            if result.resume_token is not None:
+            if resume_token is not None:
                 resume_request = RuntimeResumeRequest(
                     task_id=request.task_id,
                     thread_id=request.thread_id,
-                    resume_token=result.resume_token,
+                    resume_token=resume_token,
                     mode=RuntimeResumeMode.CONTINUE,
                     max_steps=request.max_steps,
                     timeout_seconds=request.timeout_seconds,
@@ -222,7 +223,7 @@ class TaskRuntimeCoordinator:
                         )
                     if record.thread_id != request.thread_id:
                         raise ValueError("retry thread does not match persisted runtime session")
-                    if record.resume_token != result.resume_token:
+                    if record.resume_token != resume_token:
                         raise ValueError("retry token does not match persisted runtime session")
                     task_state = self._task_state(request.task_id)
                     resume_claim = await self._acquire_resume_claim(
@@ -302,6 +303,10 @@ class TaskRuntimeCoordinator:
             raise ValueError("Persisted approval wait requires explicit resume_saved_approval()")
 
         task_state = self._task_state(task_id)
+        if record.is_active and task_state == TaskState.RETRYING:
+            raise ValueError(
+                "Persisted RETRYING runtime session lacks durable retry attempt/backoff authority"
+            )
         claim = await self._acquire_resume_claim(
             runtime,
             record,
@@ -421,6 +426,8 @@ class TaskRuntimeCoordinator:
                 raise ValueError("Paused task does not belong to the supplied runtime/thread")
             if record.outcome is not RuntimeOutcome.PAUSED:
                 raise ValueError("Paused task does not have a confirmed paused runtime cursor")
+            if usable_resume_token(record.resume_token) is None:
+                raise ValueError("Paused task does not have a usable runtime resume token")
             return True
         if current is not TaskState.RUNNING:
             raise ValueError(f"Task {task_id} cannot be paused from state {current.value}")
@@ -436,6 +443,8 @@ class TaskRuntimeCoordinator:
             )
         if record.thread_id != thread_id:
             raise ValueError("Pause request thread does not match persisted runtime session")
+        if usable_resume_token(record.resume_token) is None:
+            raise ValueError("Safe active pause requires a usable durable resume token")
 
         with self._queue.store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -533,6 +542,7 @@ class TaskRuntimeCoordinator:
                     or current_record.runtime_id != runtime.runtime_id
                     or current_record.thread_id != thread_id
                     or current_record.outcome is not RuntimeOutcome.PAUSED
+                    or usable_resume_token(current_record.resume_token) is None
                 ):
                     if operation_status is IdempotencyStatus.PENDING:
                         self._idempotency.mark_uncertain_with_connection(conn, operation_key)
@@ -565,7 +575,11 @@ class TaskRuntimeCoordinator:
                     ),
                 )
                 paused_record = self._sessions.get_with_connection(conn, task_id)
-                if paused_record is None or paused_record.outcome is not RuntimeOutcome.PAUSED:
+                if (
+                    paused_record is None
+                    or paused_record.outcome is not RuntimeOutcome.PAUSED
+                    or usable_resume_token(paused_record.resume_token) is None
+                ):
                     if operation_status is IdempotencyStatus.PENDING:
                         self._idempotency.mark_uncertain_with_connection(conn, operation_key)
                     reconcile_error = ValueError(
@@ -672,6 +686,7 @@ class TaskRuntimeCoordinator:
                 and current_record.runtime_id == runtime.runtime_id
                 and current_record.thread_id == thread_id
                 and current_record.outcome is RuntimeOutcome.PAUSED
+                and usable_resume_token(current_record.resume_token) is not None
                 and self._completed_pause_matches_session_with_connection(
                     conn,
                     task_id=task_id,
@@ -818,8 +833,10 @@ class TaskRuntimeCoordinator:
         if not callable(token_factory):
             self._queue.transition(request.task_id, TaskState.RUNNING)
             return False
-        resume_token = token_factory(task_id=request.task_id, thread_id=request.thread_id)
-        if not resume_token:
+        resume_token = usable_resume_token(
+            token_factory(task_id=request.task_id, thread_id=request.thread_id)
+        )
+        if resume_token is None:
             self._queue.transition(request.task_id, TaskState.RUNNING)
             return False
 
@@ -830,7 +847,7 @@ class TaskRuntimeCoordinator:
                 task_id=request.task_id,
                 runtime_id=runtime.runtime_id,
                 thread_id=request.thread_id,
-                resume_token=str(resume_token),
+                resume_token=resume_token,
             )
         return True
 
@@ -841,6 +858,10 @@ class TaskRuntimeCoordinator:
     ) -> RuntimeResumeMode:
         if record.is_active:
             current = self._task_state(task_id)
+            if current == TaskState.RETRYING:
+                raise ValueError(
+                    "Persisted RETRYING runtime session lacks durable retry attempt/backoff authority"
+                )
             if current == TaskState.RUNNING:
                 self._queue.transition(task_id, TaskState.PAUSED)
             elif current not in {TaskState.PAUSED, TaskState.FAILED}:
@@ -871,6 +892,8 @@ class TaskRuntimeCoordinator:
         task_state: TaskState,
         mode: RuntimeResumeMode,
     ) -> _RuntimeResumeClaim:
+        if usable_resume_token(record.resume_token) is None:
+            raise ValueError("persisted runtime session has no usable resume token")
         checkpoint_id = await self._resume_checkpoint_identity(runtime, record)
         session_fingerprint = self._resume_session_fingerprint(record)
         claim_fingerprint = self._resume_claim_fingerprint(
@@ -1326,6 +1349,9 @@ class TaskRuntimeCoordinator:
                     pause_token = current_record.resume_token
                     pause_operation_key = candidate_key
             if pause_won:
+                pause_token = usable_resume_token(pause_token)
+                if pause_token is None:
+                    raise ValueError("runtime pause lost its usable durable resume token")
                 result = RuntimeResult(
                     outcome=RuntimeOutcome.PAUSED,
                     events=result.events,
@@ -1333,6 +1359,7 @@ class TaskRuntimeCoordinator:
                     resume_token=pause_token,
                 )
 
+            resume_token = usable_resume_token(result.resume_token)
             preserve_confirmed_pause_generation = (
                 pause_won
                 and current is TaskState.PAUSED
@@ -1346,7 +1373,7 @@ class TaskRuntimeCoordinator:
             )
             if cancellation_won:
                 self._sessions.delete_with_connection(conn, task_id)
-            elif result.outcome in _RESUMABLE_OUTCOMES and result.resume_token:
+            elif result.outcome in _RESUMABLE_OUTCOMES and resume_token is not None:
                 if not preserve_confirmed_pause_generation:
                     self._sessions.record_result_with_connection(
                         conn,
@@ -1390,6 +1417,7 @@ class TaskRuntimeCoordinator:
                         if (
                             paused_record is None
                             or paused_record.outcome is not RuntimeOutcome.PAUSED
+                            or usable_resume_token(paused_record.resume_token) is None
                         ):
                             raise ValueError(
                                 "Confirmed runtime pause is missing its durable session generation"
@@ -1488,7 +1516,7 @@ class TaskRuntimeCoordinator:
                     "thread_id": thread_id,
                     "outcome": effective_outcome.value,
                     "runtime_reported_outcome": reported_outcome.value,
-                    "resume_token": result.resume_token,
+                    "resume_token": resume_token,
                     "error": result.error,
                     "error_code": result.error_code.value if result.error_code else None,
                 },
