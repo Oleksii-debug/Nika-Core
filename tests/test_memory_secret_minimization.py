@@ -122,7 +122,7 @@ def test_memory_persistence_minimizes_model_and_tool_secrets_across_restart(
             "https://example.test/result?signature=[REDACTED]"
             "&expires=[REDACTED]&page=1": "cached"
         },
-        "authorization": {"Authorization: [REDACTED]": "upstream"},
+        "authorization": {"Authorization: [REDACTED]": "[REDACTED]"},
     }
     assert durable["benign"] == value["benign"]
 
