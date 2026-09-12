@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import math
 import re
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 
+from nika_core.data.experience_ledger_schema import EXPERIENCE_LEDGER_SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
 
 _REASON_CODE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,95}$")
@@ -52,6 +54,10 @@ class ExperienceConflictError(RuntimeError):
     """The same durable event key was reused for materially different evidence."""
 
 
+class ExperienceLedgerUnavailableError(RuntimeError):
+    """The canonical Experience Ledger schema is unavailable or unsupported."""
+
+
 class ExperienceLedger:
     """Privacy-safe V0.1 continuity outcome ledger.
 
@@ -61,27 +67,22 @@ class ExperienceLedger:
 
     def __init__(self, store: SQLiteStore) -> None:
         self._store = store
-        self._ensure_schema()
 
-    def _ensure_schema(self) -> None:
-        with self._store.connection() as conn:
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS continuity_experience_events ("
-                "event_key TEXT PRIMARY KEY,"
-                "task_id TEXT,"
-                "kind TEXT NOT NULL,"
-                "outcome TEXT NOT NULL,"
-                "reason_code TEXT NOT NULL,"
-                "occurred_at TEXT NOT NULL,"
-                "attempt INTEGER,"
-                "delay_seconds REAL,"
-                "clock_jump_seconds REAL,"
-                "fingerprint TEXT NOT NULL"
-                ")"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_continuity_experience_task_time "
-                "ON continuity_experience_events(task_id, occurred_at)"
+    @staticmethod
+    def _assert_schema_ready(conn: sqlite3.Connection) -> None:
+        try:
+            row = conn.execute(
+                "SELECT MAX(version) AS version FROM experience_ledger_schema_migrations"
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise ExperienceLedgerUnavailableError(
+                "experience ledger schema is unavailable; initialize SQLiteStore first"
+            ) from exc
+        current = int(row["version"] or 0)
+        if current != EXPERIENCE_LEDGER_SCHEMA_VERSION:
+            raise ExperienceLedgerUnavailableError(
+                "experience ledger schema "
+                f"{current} does not match supported schema {EXPERIENCE_LEDGER_SCHEMA_VERSION}"
             )
 
     @staticmethod
@@ -197,6 +198,7 @@ class ExperienceLedger:
         )
 
         with self._store.connection() as conn:
+            self._assert_schema_ready(conn)
             conn.execute(
                 "INSERT INTO continuity_experience_events("
                 "event_key, task_id, kind, outcome, reason_code, occurred_at, attempt, "
@@ -244,6 +246,7 @@ class ExperienceLedger:
     def get(self, event_key: str) -> ExperienceEvent | None:
         event_key = self._validate_event_key(event_key)
         with self._store.connection() as conn:
+            self._assert_schema_ready(conn)
             row = conn.execute(
                 "SELECT * FROM continuity_experience_events WHERE event_key = ?",
                 (event_key,),
@@ -259,6 +262,7 @@ class ExperienceLedger:
         if limit < 1 or limit > 1000:
             raise ValueError("limit must be between 1 and 1000")
         with self._store.connection() as conn:
+            self._assert_schema_ready(conn)
             rows = conn.execute(
                 "SELECT * FROM continuity_experience_events WHERE task_id = ? "
                 "ORDER BY occurred_at, event_key LIMIT ?",
