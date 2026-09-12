@@ -25,6 +25,11 @@ DIGEST = "d" * 64
 PERMISSIONS = frozenset({"read_source", "write_source", "run_tests"})
 
 
+class _AllowReviewAuthority:
+    def verify(self, subject, evidence_refs):
+        return bool(subject.fingerprint and evidence_refs)
+
+
 def _graph() -> ProductRepositoryGraph:
     return ProductRepositoryGraph(
         project_id="project-1",
@@ -56,7 +61,7 @@ def _graph() -> ProductRepositoryGraph:
 
 
 def _coordinator() -> ProductFactoryCoordinator:
-    coordinator = ProductFactoryCoordinator(_graph())
+    coordinator = ProductFactoryCoordinator(_graph(), review_authority=_AllowReviewAuthority())
     coordinator.plan(
         base_shas={"repo-1": SHA_A},
         goals={"core": "build core", "ui": "build ui", "docs": "write docs"},
@@ -77,6 +82,7 @@ def _success(request, *, base_sha=SHA_A) -> WorkerResultEnvelope:
             job_id=request.work_id,
             test_evidence=(TestEvidence(("pytest",), 0, "ok"),),
         ),
+        producer_actor_id="builder-1",
     )
 
 
