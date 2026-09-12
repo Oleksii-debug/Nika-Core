@@ -120,14 +120,14 @@ def _actions() -> tuple[DeterministicAction, DeterministicAction]:
         DeterministicAction(
             action_id="01-prepare",
             adds=frozenset({"prepared"}),
-            tool_id="browser.inspect",
+            tool_id="local.prepare",
             arguments={"phase": "prepare"},
         ),
         DeterministicAction(
             action_id="02-finish",
             requires=frozenset({"prepared"}),
             adds=frozenset({"done"}),
-            tool_id="browser.inspect",
+            tool_id="browser.finish",
             arguments={"phase": "finish"},
         ),
     )
@@ -169,7 +169,7 @@ def _grant(
         scope=StandingPermissionScope(
             subject_id="agent-dev47",
             context=context,
-            action_class="browser.inspect",
+            action_class="browser.finish",
             targets=("target:restart-proof",),
             sites=("example.test",),
             resources=("resource:restart-proof",),
@@ -210,8 +210,16 @@ def _tools(
     )
     executor.register(
         ToolSpec(
-            tool_id="browser.inspect",
-            description="DEV47 restart proof",
+            tool_id="local.prepare",
+            description="DEV47 restart-local durable effect proof",
+            risk=ToolRisk.LOCAL_WRITE,
+        ),
+        handler,
+    )
+    executor.register(
+        ToolSpec(
+            tool_id="browser.finish",
+            description="DEV47 restart external reauthorization proof",
             risk=ToolRisk.EXTERNAL_SIDE_EFFECT,
         ),
         handler,
