@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import sqlite3
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
 
 import pytest
 
@@ -161,3 +164,94 @@ def test_compare_and_put_can_replace_logically_expired_record(tmp_path: Path) ->
 
     assert replacement.value == {"mode": "replacement"}
     assert replacement.expires_at is None
+
+
+class _GatedCursor:
+    def __init__(self, cursor: sqlite3.Cursor, selected: Event, writer_done: Event) -> None:
+        self._cursor = cursor
+        self._selected = selected
+        self._writer_done = writer_done
+
+    def fetchone(self) -> sqlite3.Row | None:
+        row = self._cursor.fetchone()
+        self._cursor.fetchall()
+        self._selected.set()
+        if not self._writer_done.wait(timeout=5):
+            raise AssertionError("concurrent memory renewal did not reach its barrier")
+        return row
+
+
+class _GatedConnection:
+    def __init__(self, conn: sqlite3.Connection, selected: Event, writer_done: Event) -> None:
+        self._conn = conn
+        self._selected = selected
+        self._writer_done = writer_done
+
+    def execute(
+        self,
+        sql: str,
+        parameters: tuple[object, ...] = (),
+    ) -> sqlite3.Cursor | _GatedCursor:
+        cursor = self._conn.execute(sql, parameters)
+        if sql.lstrip().startswith("SELECT * FROM memory_records WHERE scope = ?"):
+            return _GatedCursor(cursor, self._selected, self._writer_done)
+        return cursor
+
+
+class _GatedStore:
+    def __init__(self, store: SQLiteStore, selected: Event, writer_done: Event) -> None:
+        self._store = store
+        self._selected = selected
+        self._writer_done = writer_done
+
+    @contextmanager
+    def connection(self) -> Iterator[_GatedConnection]:
+        with self._store.connection() as conn:
+            yield _GatedConnection(conn, self._selected, self._writer_done)
+
+
+def test_stale_expiry_cleanup_cannot_delete_concurrent_renewal(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    memory = MemoryService(store)
+    memory.put(
+        **_identity(),
+        value={"generation": "expired"},
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    with store.connection() as conn:
+        cursor = conn.execute(
+            "UPDATE memory_records SET expires_at = ? "
+            "WHERE scope = ? AND owner_id = ? AND namespace = ? AND memory_key = ?",
+            (
+                (datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
+                MemoryScope.WORKSPACE.value,
+                "research",
+                "policy",
+                "ranking",
+            ),
+        )
+        assert cursor.rowcount == 1
+
+    selected = Event()
+    writer_done = Event()
+    stale_reader = MemoryService(_GatedStore(store, selected, writer_done))  # type: ignore[arg-type]
+    writer = MemoryService(store)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        stale_read = pool.submit(stale_reader.get, **_identity())
+        assert selected.wait(timeout=5), "expired read never reached its deterministic barrier"
+        try:
+            renewed = writer.put(
+                **_identity(),
+                value={"generation": "renewed"},
+                expires_at=datetime.now(UTC) + timedelta(hours=2),
+            )
+        finally:
+            writer_done.set()
+
+        assert renewed.value == {"generation": "renewed"}
+        assert stale_read.result(timeout=5) is None
+
+    durable = MemoryService(store).get(**_identity())
+    assert durable == renewed
+    assert durable is not None and durable.value == {"generation": "renewed"}
