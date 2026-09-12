@@ -27,7 +27,7 @@ def _decimal(
     positive: bool = False,
     minimum: Decimal | None = None,
 ) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
+    if isinstance(value, (bool, float)):
         raise SportsLabPaperError(f"{field_name} must use exact decimal input")
     try:
         result = Decimal(value)
@@ -121,7 +121,7 @@ class PaperTicket:
 
     @property
     def combined_decimal_odds(self) -> Decimal:
-        value = Decimal("1")
+        value = Decimal(1)
         for leg in self.legs:
             value *= leg.quote.decimal_odds
         return value
@@ -162,7 +162,7 @@ def settle_ticket(
     ticket: PaperTicket,
     settlements: Mapping[str, PaperSettlement],
 ) -> TicketSettlement:
-    payout_multiplier = Decimal("1")
+    payout_multiplier = Decimal(1)
     settled_times: list[datetime] = []
     for leg in ticket.legs:
         settlement = settlements.get(leg.leg_key)
@@ -176,7 +176,7 @@ def settle_ticket(
             raise SportsLabPaperError("settlement must not precede paper placement")
         settled_times.append(settlement.settled_at)
         if settlement.result is PaperLegResult.LOSS:
-            payout_multiplier = Decimal("0")
+            payout_multiplier = Decimal(0)
             continue
         if settlement.result is PaperLegResult.WIN:
             payout_multiplier *= leg.quote.decimal_odds
@@ -196,12 +196,12 @@ class PaperPortfolio:
     tickets: tuple[PaperTicket, ...]
 
     def __post_init__(self) -> None:
-        bankroll = _decimal(self.initial_bankroll, "initial_bankroll", minimum=Decimal("0"))
+        bankroll = _decimal(self.initial_bankroll, "initial_bankroll", minimum=Decimal(0))
         tickets = tuple(self.tickets)
         ids = [ticket.ticket_id for ticket in tickets]
         if len(set(ids)) != len(ids):
             raise SportsLabPaperError("paper ticket identities must be unique")
-        committed = sum((ticket.stake for ticket in tickets), Decimal("0"))
+        committed = sum((ticket.stake for ticket in tickets), Decimal(0))
         if committed > bankroll:
             raise SportsLabPaperError("paper stakes exceed virtual bankroll")
         object.__setattr__(self, "initial_bankroll", bankroll)
@@ -209,7 +209,7 @@ class PaperPortfolio:
 
     @property
     def committed_stake(self) -> Decimal:
-        return sum((ticket.stake for ticket in self.tickets), Decimal("0"))
+        return sum((ticket.stake for ticket in self.tickets), Decimal(0))
 
     @property
     def cash_after_stakes(self) -> Decimal:
@@ -218,9 +218,9 @@ class PaperPortfolio:
     def settle(
         self,
         settlements: Mapping[str, PaperSettlement],
-    ) -> "PaperPortfolioResult":
+    ) -> PaperPortfolioResult:
         ticket_results = tuple(settle_ticket(ticket, settlements) for ticket in self.tickets)
-        total_payout = sum((result.payout for result in ticket_results), Decimal("0"))
+        total_payout = sum((result.payout for result in ticket_results), Decimal(0))
         final_bankroll = self.cash_after_stakes + total_payout
         return PaperPortfolioResult(
             initial_bankroll=self.initial_bankroll,
