@@ -15,7 +15,10 @@ from nika_core.model_gateway.contracts import (
     PrivacyClass,
     ProviderKind,
 )
-from nika_core.model_gateway.gateway import ModelGateway, model_identity_fingerprint
+from nika_core.model_gateway.gateway import (
+    ModelGateway,
+    model_identity_fingerprint,
+)
 
 
 _MAX_ID_UTF8_BYTES = 256
