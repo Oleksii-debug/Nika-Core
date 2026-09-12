@@ -11,6 +11,7 @@ from nika_core.kernel.task_queue import TaskQueue
 from nika_core.product_factory_checkpoint_host import (
     ProductFactoryCheckpointHost,
     ProductFactoryCheckpointIntegrityError,
+    ProductFactoryRecoveryDisposition,
     ProductFactoryTrustedPlanAuthorityError,
 )
 from nika_core.product_factory_coordinator import (
@@ -43,6 +44,56 @@ PERMISSIONS = frozenset({"read_source", "write_source", "run_tests"})
 CHECKPOINT_STAGE = "product_factory.coordinator.v1"
 TRUSTED_PLAN_KEY = "trusted_plan_fingerprint"
 CHECKPOINT_HEAD_KEY = "product_factory_checkpoint_head"
+
+
+@pytest.mark.parametrize("operation", ["latest", "load", "inspect", "restore"])
+@pytest.mark.parametrize("mutation", ["advance", "clear"])
+def test_reader_keeps_one_snapshot_while_another_connection_changes_lineage(
+    tmp_path, monkeypatch, operation, mutation,
+) -> None:
+    store, binding, coordinator, task_id = _setup(tmp_path)
+    # WAL allows the second connection to commit while the reader holds its snapshot.
+    with store.connection() as conn:
+        assert conn.execute("PRAGMA journal_mode = WAL").fetchone()[0] == "wal"
+    writer = ProductFactoryCheckpointHost(SQLiteStore(store.path))
+    initial = writer.save(host_task_id=task_id, checkpoint=binding.checkpoint(coordinator))
+    coordinator.start("core")
+    successor = binding.checkpoint(coordinator)
+    reader = ProductFactoryCheckpointHost(SQLiteStore(store.path))
+    require_host = reader._require_host_task
+    committed = []
+
+    def read_anchor_then_commit_change(conn, **kwargs):
+        payload = require_host(conn, **kwargs)
+        if not committed:
+            if mutation == "advance":
+                committed.append(writer.save(host_task_id=task_id, checkpoint=successor))
+            else:
+                committed.append(writer.clear(host_task_id=task_id, project_id=PROJECT_ID))
+        return payload
+
+    monkeypatch.setattr(reader, "_require_host_task", read_anchor_then_commit_change)
+    if operation == "latest":
+        observed = reader.latest(host_task_id=task_id, project_id=PROJECT_ID)
+        assert observed.checkpoint_id == initial.checkpoint_id
+    elif operation == "load":
+        observed = reader.load(initial.checkpoint_id, host_task_id=task_id)
+        assert observed.checkpoint_id == initial.checkpoint_id
+    elif operation == "inspect":
+        observed = reader.inspect_latest(host_task_id=task_id, binding=binding)
+        assert observed.disposition is ProductFactoryRecoveryDisposition.RESUMABLE
+        assert observed.checkpoint_id == initial.checkpoint_id
+    else:
+        observed = reader.restore_latest(host_task_id=task_id, binding=binding)
+        assert observed.snapshot() == initial.checkpoint.coordinator
+
+    assert len(committed) == 1
+    current = writer.latest(host_task_id=task_id, project_id=PROJECT_ID)
+    if mutation == "advance":
+        assert current.checkpoint_id == committed[0].checkpoint_id
+    else:
+        assert committed == [1]
+        assert current is None
 
 
 def _canonical(value: object) -> str:

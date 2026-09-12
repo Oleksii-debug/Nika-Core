@@ -258,6 +258,7 @@ class ProductFactoryCheckpointHost:
         host_task_id: str | None = None,
     ) -> PersistedProductFactoryCheckpoint:
         with self._store.connection() as conn:
+            conn.execute("BEGIN")
             row = conn.execute(
                 """
                 SELECT checkpoint_id, task_id, stage, payload_json, checksum_sha256, created_at
@@ -286,13 +287,17 @@ class ProductFactoryCheckpointHost:
                 raise ProductFactoryCheckpointIntegrityError(
                     "durable Product Factory checkpoint lineage has no canonical host-task head"
                 )
-            self._validated_committed_head(
+            committed = self._validated_committed_head(
                 conn,
                 host_task_id=record.host_task_id,
                 project_id=record.checkpoint.project_id,
                 host_payload=host_payload,
             )
-        return record
+            if record.checkpoint_id != committed.checkpoint_id:
+                raise ProductFactoryCheckpointIntegrityError(
+                    "requested checkpoint is not the canonical committed host-task head"
+                )
+        return committed
 
     def latest(
         self,
@@ -300,7 +305,22 @@ class ProductFactoryCheckpointHost:
         host_task_id: str,
         project_id: str,
     ) -> PersistedProductFactoryCheckpoint | None:
+        admitted = self._latest_with_authority(
+            host_task_id=host_task_id,
+            project_id=project_id,
+        )
+        return None if admitted is None else admitted[0]
+
+    def _latest_with_authority(
+        self,
+        *,
+        host_task_id: str,
+        project_id: str,
+    ) -> tuple[PersistedProductFactoryCheckpoint, str] | None:
         with self._store.connection() as conn:
+            # SELECT alone does not open a Python sqlite3 read transaction. Keep
+            # the host anchors and every checkpoint row in one committed snapshot.
+            conn.execute("BEGIN")
             host_payload = self._require_host_task(
                 conn,
                 host_task_id=host_task_id,
@@ -315,12 +335,13 @@ class ProductFactoryCheckpointHost:
                         "explicit reconciliation is required"
                     )
                 return None
-            return self._validated_committed_head(
+            record = self._validated_committed_head(
                 conn,
                 host_task_id=host_task_id,
                 project_id=project_id,
                 host_payload=host_payload,
             )
+            return record, _host_task_trusted_plan(host_payload, required=True)
 
     def inspect_latest(
         self,
@@ -330,7 +351,10 @@ class ProductFactoryCheckpointHost:
     ) -> ProductFactoryRecoveryCandidate:
         project_id = binding.project.project_id
         try:
-            record = self.latest(host_task_id=host_task_id, project_id=project_id)
+            admitted = self._latest_with_authority(
+                host_task_id=host_task_id,
+                project_id=project_id,
+            )
         except ProductFactoryTrustedPlanAuthorityError as exc:
             return ProductFactoryRecoveryCandidate(
                 host_task_id,
@@ -355,7 +379,7 @@ class ProductFactoryCheckpointHost:
                 ProductFactoryRecoveryDisposition.INVALID_HOST_TASK,
                 str(exc),
             )
-        if record is None:
+        if admitted is None:
             return ProductFactoryRecoveryCandidate(
                 host_task_id,
                 project_id,
@@ -363,11 +387,8 @@ class ProductFactoryCheckpointHost:
                 ProductFactoryRecoveryDisposition.MISSING,
                 "no durable Product Factory checkpoint exists for host task",
             )
+        record, authority = admitted
         try:
-            authority = self._read_host_trusted_plan(
-                host_task_id=host_task_id,
-                project_id=project_id,
-            )
             binding.restore(
                 record.checkpoint,
                 trusted_plan_fingerprint=authority,
@@ -411,18 +432,15 @@ class ProductFactoryCheckpointHost:
         binding: ProductProjectCoordinatorBinding,
     ) -> ProductFactoryCoordinator:
         project_id = binding.project.project_id
-        record = self.latest(
+        admitted = self._latest_with_authority(
             host_task_id=host_task_id,
             project_id=project_id,
         )
-        if record is None:
+        if admitted is None:
             raise ProductFactoryCheckpointError(
                 "no durable Product Factory checkpoint exists for host task"
             )
-        authority = self._read_host_trusted_plan(
-            host_task_id=host_task_id,
-            project_id=project_id,
-        )
+        record, authority = admitted
         try:
             return binding.restore(
                 record.checkpoint,
@@ -578,15 +596,6 @@ class ProductFactoryCheckpointHost:
             checksum_sha256=checksum,
             created_at=str(row["created_at"]),
         )
-
-    def _read_host_trusted_plan(self, *, host_task_id: str, project_id: str) -> str:
-        with self._store.connection() as conn:
-            payload = self._require_host_task(
-                conn,
-                host_task_id=host_task_id,
-                project_id=project_id,
-            )
-            return _host_task_trusted_plan(payload, required=True)
 
     @staticmethod
     def _require_host_task(
@@ -847,6 +856,24 @@ def _validate_checkpoint_transition(
                 raise ProductFactoryCheckpointIntegrityError(
                     "checkpoint work state regressed or is not legally forward-reachable"
                 )
+            # The coordinator records a result/review only once per attempt.
+            # Explicit block() may discard evidence; forward review or unchanged
+            # state cannot replace already admitted result/reviewer identity.
+            if current_record.state is not WorkState.BLOCKED:
+                if (
+                    previous_record.result is not None
+                    and current_record.result != previous_record.result
+                ):
+                    raise ProductFactoryCheckpointIntegrityError(
+                        "durable result evidence changed inside the same work attempt"
+                    )
+                if (
+                    previous_record.review is not None
+                    and current_record.review != previous_record.review
+                ):
+                    raise ProductFactoryCheckpointIntegrityError(
+                        "durable review evidence changed inside the same work attempt"
+                    )
             continue
 
         if attempt_delta != 1:

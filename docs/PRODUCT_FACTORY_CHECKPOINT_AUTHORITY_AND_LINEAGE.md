@@ -23,6 +23,8 @@ The checkpoint head is not a second store or signer. It is a thin extension of t
 
 Every later save first resolves the exact host-committed head and validates the proposed transition from that admitted predecessor. Every restart resolves the exact same head instead of selecting authority by wall-clock metadata. A legacy checkpoint lineage that has durable PF checkpoint rows but no committed host head fails closed and requires explicit reconciliation.
 
+Exact-ID reads use the same authority boundary. `ProductFactoryCheckpointHost.load(checkpoint_id)` is not a historical checkpoint browser: the requested ID must equal the exact checkpoint committed in the current host-task head. An internally canonical older row, including a row whose payload/checksum/checkpoint ID were recomputed by a candidate, cannot acquire authority merely because a valid later head exists. Historical forensic access belongs to lower-level evidence/storage tooling and does not become resumable Product Factory state through this API.
+
 The same live proof is reused at the next security-significant authority boundary: the first durable checkpoint of every new repair generation. This does not create a second authority system. It prevents a candidate from manufacturing attempt `N + 1` by choosing a different repair goal or repository base and recomputing its work ID/checkpoint identity. A legitimate host-mediated repair may still select a newer `base_sha`; `ProductProjectCoordinatorBinding.checkpoint()` authenticates that exact new `ready` snapshot before it becomes durable, and the transaction then advances the committed host head to that exact admitted row.
 
 The process-ephemeral proof is a host-process capability, not a Python sandbox. Its trust assumption is that untrusted Product Factory workers execute behind the worker port and do not execute arbitrary code inside the authority-owning Nika host process. If arbitrary hostile code already executes in that trusted process, Python module privacy or an in-memory key is not a security boundary; stronger process isolation belongs to the worker/sandbox lanes.
@@ -36,6 +38,7 @@ The predecessor contract is:
 - project ID, ProductProject spec version, and ProductProject row version do not drift inside one host-task lineage;
 - component identity is stable;
 - within one attempt, the complete work request is immutable;
+- already durable result and review evidence cannot be replaced within the same attempt; the coordinator's explicit `block()` transition may discard evidence;
 - same-attempt work state may skip intermediate in-memory states only when the resulting state is transitively forward-reachable through the legal coordinator state machine;
 - accepted and blocked terminal states cannot be recomputed backwards into executable states;
 - an attempt may advance by exactly one generation;
@@ -52,11 +55,26 @@ The durable-head reader additionally fails closed when:
 - the committed checkpoint ID is missing;
 - committed checksum or revision disagrees with the referenced row;
 - two durable rows claim the same coordinator revision with different identities;
-- any durable row claims a revision beyond the independently committed head.
+- any durable row claims a revision beyond the independently committed head;
+- an exact-ID read requests any PF checkpoint other than the committed host head.
 
 `created_at` remains evidence metadata only. It is not predecessor or restart authority, so system-clock rollback cannot promote an older valid checkpoint above a later host-admitted revision.
 
 Ordinary progress does not require a database write after every pure in-memory coordinator call. For example, `ready -> running -> review_required -> accepted` may be persisted as one later accepted checkpoint within the same already-durable attempt. Security-significant repair-generation creation is stricter: the prior failed attempt must already exist durably as `repair_required`, the exact new generation must carry a valid live host proof, and it must itself cross the durable boundary as `ready` before any `running` or later state is accepted.
+
+## Durable worker and review evidence
+
+Runtime worker diagnostics can be richer than durable checkpoint authority. Before a checkpoint is signed or serialized, the ProductProject binding projects worker evidence to the minimum information required to reproduce Product Factory authority:
+
+- opaque recovery tokens are removed;
+- free-form worker failure diagnostics are replaced by the stable durable omission marker;
+- `CodingResult.test_evidence` retains only entries whose observed command matches an immutable `WorkRecord.request.acceptance_commands` entry under the coordinator's existing command-equivalence policy;
+- extra passing worker test entries are not durable acceptance authority and are omitted even when their exit code is zero;
+- reviewer reason/evidence credential material is omitted or one-way projected while ordinary safe evidence identity remains stable across restart.
+
+The test-evidence filter does not mutate the live coordinator result. It narrows only the checkpoint projection, so host-side diagnostics remain available in memory while irrelevant worker-controlled argv cannot become durable checkpoint bytes. The immutable acceptance-command list and canonical command-equivalence implementation are reused rather than introducing a second test-evidence policy. Equivalent `pytest`/`python -m pytest` invocations, Windows target separators, and the already accepted full-suite command retain their actual observed argv and digest; the checkpoint does not relabel them as a command that was not run.
+
+Review credential classification reuses the existing evidence-reference safety policy and the PF12 fail-closed boundary. Common API/password/cookie/session/cloud credential assignments are recognized explicitly. Percent-encoded key names are decoded to a bounded fixed point before classification so nested encoding cannot bypass the durable boundary. Ordinary references such as `tests://...` and `artifact-sha256:...` are preserved exactly.
 
 ## Clear and re-anchor semantics
 
@@ -67,7 +85,9 @@ Ordinary progress does not require a database write after every pure in-memory c
 3. preserves unrelated host-task payload fields and checkpoints owned by foreign stages;
 4. writes the clear audit event.
 
-If revoking the host-task anchors fails, checkpoint deletion rolls back with it. Repeated clear is idempotent. After a successful clear there is no retained PF authority from the old lineage, so the next first checkpoint must again carry a genuine process-ephemeral live proof. A legacy state created by the historical row-only clear behavior cannot silently become a new candidate-created lineage.
+If revoking the host-task anchors fails, checkpoint deletion rolls back with it. Repeated clear is idempotent. After a successful clear there is no retained **durable restart or re-anchor authority** from the old lineage, so the next first checkpoint must again carry a genuine process-ephemeral live proof. A legacy state created by the historical row-only clear behavior cannot silently become a new candidate-created lineage.
+
+The scope of that revocation is deliberately precise. `clear()` cannot retroactively revoke a Python `ProductFactoryCoordinator` object that a reader already reconstructed from a SQLite snapshot which began before the clear committed. Such an object is snapshot state, **not fresh post-clear execution authority**. It must not be used for new worker dispatch/resume after revocation unless the canonical execution layer revalidates a current durable execution fence. PF12 therefore does not claim that checkpoint-row/head revocation by itself cancels already-issued in-process consumers. The required consumption fence belongs at the existing Product Factory execution boundary, reusing the canonical work-ownership/fencing authority rather than creating a second checkpoint lease. Until that dispatch-time fence is integrated and proven, global PF12/Product Factory release clearance remains false.
 
 ## Crash and restart semantics
 
@@ -86,6 +106,8 @@ No recovery path is allowed to infer a missing repair-generation boundary from c
 ## Concurrency and idempotency
 
 Checkpoint saves acquire a SQLite `BEGIN IMMEDIATE` writer reservation before reading the current host anchors and exact committed predecessor. This serializes competing writers at the exact read-validate-insert-head-update boundary. Two independent connections starting from the same predecessor cannot both commit different bytes for the same coordinator revision: one commits, and the later writer re-reads that committed head and fails closed on the conflicting same-revision state.
+
+Checkpoint reads explicitly open a read transaction before inspecting either rows or host anchors. Exact-ID reads, latest-state inspection, and restore therefore validate one committed database snapshot even when another connection advances the head during validation. Restore uses the trusted-plan authority captured in that same read, without a second connection that could observe a clear/re-anchor. A concurrent writer may make the returned snapshot older than the newest committed head; it cannot make a healthy lineage appear corrupt by mixing two versions. This includes a reader whose snapshot started before a concurrent `clear()` commit: the read may finish with the pre-clear snapshot, but that result is not post-clear dispatch authority. A separate current execution-fence check is required before external effects. This uses the adopted SQLite store and [SQLite transaction isolation](https://www.sqlite.org/isolation.html); it adds no cache or recovery engine.
 
 Checkpoint insertion, trusted-plan first binding when needed, exact checkpoint-head advancement, and audit are one transaction. A failure before commit cannot leave a durable checkpoint row without its corresponding host-head authority or advance host authority without the exact row.
 
@@ -109,6 +131,8 @@ Focused tests introduced or extended with this contract:
   - repair without a prior durable `repair_required` checkpoint is rejected;
   - skipped attempt generations are rejected;
   - recomputed same-attempt state rollback is rejected;
+  - already durable result SHA, diff/test digests, reviewer identity and review references cannot be replaced at a higher revision in the same attempt;
+  - explicit blocking after a failed result still discards evidence and survives restart;
   - sparse legal `ready -> accepted` checkpoint progress remains supported;
   - conflicting writers over two independent SQLite connections serialize to one durable next revision;
   - a legitimate failure-to-repair sequence survives process restart;
@@ -124,14 +148,22 @@ Focused tests introduced or extended with this contract:
   - a legitimate newer repair base remains supported and becomes durable only with the host-authenticated generation boundary.
 - `tests/test_product_factory_checkpoint_head_authority.py`
   - reverse `created_at` ordering cannot change restart authority away from the committed higher revision;
+  - real independent SQLite connections interleaved during `latest`, `load`, `inspect_latest` and `restore_latest` preserve one committed read snapshot;
   - clear atomically revokes plan/head authority, preserves unrelated task payload and foreign checkpoint stages, requires a fresh live proof, and remains idempotent;
   - an injected SQLite failure during anchor revocation rolls back checkpoint deletion;
   - a canonical raw-row `N + 1` rewrite with recomputed checksum/checkpoint ID cannot replace the independently admitted host head after restart;
   - durable rows without a host head and a tampered host-head checksum fail closed.
+- `tests/test_product_factory_checkpoint_exact_id_authority.py`
+  - the current committed exact checkpoint ID loads before and after store restart;
+  - an older admitted exact ID is rejected once a newer host head exists, making arbitrary candidate-created historical exact IDs non-authoritative by contract.
+- `tests/test_product_factory_worker_evidence_minimization.py`
+  - exact required acceptance evidence remains durable while an extra passing credential-bearing worker command is absent from raw SQLite and restored state;
+  - canonically equivalent passing commands survive save/restart with their observed identity while unrelated private argv is omitted;
+  - nested percent-encoded API-key names and AWS credential assignments are minimized while an adjacent safe review ref keeps exact identity.
 - existing `tests/test_product_factory_scale_recovery.py`
   - 100 components complete across ten restart waves; this is the regression that guards legal sparse checkpointing at scale.
 
-Repository-wide qualification remains the responsibility of exact-head Core CI and the relevant pre-human gate. An AUD02 BLOCK remains unresolved until the independent auditor replays its authority oracle against the repaired exact head. This document is not itself acceptance credit and does not claim global PF12 closure.
+Repository-wide qualification remains the responsibility of exact-head Core CI and the relevant pre-human gate. Prior AUD02 classification is lineage only after source movement; the surviving exact head requires independent replay of applicable authority and durable-evidence oracles. This document is not itself acceptance credit and does not claim global PF12 closure.
 
 HUMAN_TESTED=false
 

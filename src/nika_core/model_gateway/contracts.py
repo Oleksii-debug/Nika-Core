@@ -28,6 +28,17 @@ class ModelErrorCode(StrEnum):
     PROVIDER_ERROR = "provider_error"
 
 
+class ModelFailureEffect(StrEnum):
+    """Effect certainty attached to a typed model-provider failure.
+
+    NO_EFFECT is positive adapter evidence that the failed attempt did not
+    start or commit a provider-side model effect. UNKNOWN remains fail-closed.
+    """
+
+    UNKNOWN = "unknown"
+    NO_EFFECT = "no_effect"
+
+
 @dataclass(frozen=True, slots=True)
 class ModelMessage:
     role: str
@@ -170,11 +181,13 @@ class ModelGatewayError(RuntimeError):
         *,
         provider_id: str | None = None,
         retryable: bool = False,
+        failure_effect: ModelFailureEffect = ModelFailureEffect.UNKNOWN,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.provider_id = provider_id
         self.retryable = retryable
+        self.failure_effect = failure_effect
 
 
 class ModelProvider(Protocol):

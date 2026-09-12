@@ -16,6 +16,7 @@ from nika_core.product_factory_coordinator import (
     CoordinatorSnapshot,
     ProductFactoryCoordinator,
     WorkRecord,
+    _commands_equivalent,
 )
 from nika_core.product_factory_coordinator import (
     trusted_plan_fingerprint as compute_trusted_plan_fingerprint,
@@ -27,13 +28,17 @@ _LIVE_AUTHORITY_SCHEMA = "nika-product-factory-live-plan-authority-v2"
 _LIVE_AUTHORITY_KEY = secrets.token_bytes(32)
 _DURABLE_WORKER_DIAGNOSTIC_OMITTED = "worker diagnostic omitted from durable checkpoint"
 _DURABLE_REVIEW_REASON_OMITTED = "review rationale omitted from durable checkpoint"
+_DURABLE_BLOCKER_REASON_OMITTED = "blocker rationale omitted from durable checkpoint"
+_DURABLE_REFERENCE_SCAN_MAX_BYTES = 4096
+_DURABLE_REFERENCE_DECODE_MAX_PASSES = 16
 _DURABLE_REVIEW_CREDENTIAL_ASSIGNMENT = re.compile(
-    r"(?:^|[\s?&#;,{\[(])['\"]?"
+    r"(?:^|[\s/?&#;,{\[(])['\"]?"
     r"(?:"
     r"x[-_]?api[-_]?key|api[-_]?key|subscription[-_]?key|"
     r"client[-_]?secret|password|passwd|secret|auth|authorization|"
     r"access[-_]?token|refresh[-_]?token|oauth(?:[-_]?token)?|"
     r"cookie|set[-_]?cookie|session(?:[-_]?(?:id|token))?|"
+    r"aws[-_]?secret[-_]?access[-_]?key|aws[-_]?access[-_]?key[-_]?id|"
     r"awsaccesskeyid|x[-_]?amz[-_]?signature"
     r")[\'\"]?\s*(?:=|:)",
     re.IGNORECASE,
@@ -250,12 +255,27 @@ def _minimize_durable_worker_diagnostics(
 def _minimize_durable_work_record(record: WorkRecord) -> WorkRecord:
     result = record.result
     if result is None:
-        return record
+        if record.blocker is None:
+            return record
+        safe_blocker = _durable_blocker_reason(record.blocker)
+        return record if safe_blocker == record.blocker else replace(record, blocker=safe_blocker)
 
     coding_result = result.coding_result
     recovery = coding_result.recovery_state
     failure = coding_result.failure
     review = record.review
+    safe_test_evidence = tuple(
+        evidence
+        for evidence in coding_result.test_evidence
+        if any(
+            _commands_equivalent(
+                evidence.command,
+                declared,
+                component_id=record.request.component_id,
+            )
+            for declared in record.request.acceptance_commands
+        )
+    )
     safe_recovery = (
         None if recovery is None else replace(recovery, opaque_token=None)
     )
@@ -282,7 +302,8 @@ def _minimize_durable_work_record(record: WorkRecord) -> WorkRecord:
     else:
         safe_blocker = record.blocker
     if (
-        safe_recovery == recovery
+        safe_test_evidence == coding_result.test_evidence
+        and safe_recovery == recovery
         and safe_failure == failure
         and safe_review == review
         and safe_blocker == record.blocker
@@ -291,6 +312,7 @@ def _minimize_durable_work_record(record: WorkRecord) -> WorkRecord:
 
     safe_coding_result = replace(
         coding_result,
+        test_evidence=safe_test_evidence,
         recovery_state=safe_recovery,
         failure=safe_failure,
     )
@@ -303,12 +325,25 @@ def _minimize_durable_work_record(record: WorkRecord) -> WorkRecord:
 
 
 def _durable_review_reason(value: str) -> str:
+    return _durable_free_text_reason(
+        value,
+        omitted=_DURABLE_REVIEW_REASON_OMITTED,
+    )
+
+
+def _durable_blocker_reason(value: str) -> str:
+    return _durable_free_text_reason(
+        value,
+        omitted=_DURABLE_BLOCKER_REASON_OMITTED,
+    )
+
+
+def _durable_free_text_reason(value: str, *, omitted: str) -> str:
     if (
         safe_evidence_reference(value) != value
-        or _reference_has_credential_assignment(value)
-        or _reference_has_url_userinfo(value)
+        or _reference_has_sensitive_encoded_shape(value)
     ):
-        return _DURABLE_REVIEW_REASON_OMITTED
+        return omitted
     return value
 
 
@@ -316,21 +351,48 @@ def _durable_review_evidence_ref(value: str) -> str:
     safe_reference = safe_evidence_reference(value)
     if safe_reference != value:
         return safe_reference
-    if not (_reference_has_credential_assignment(value) or _reference_has_url_userinfo(value)):
+    if not _reference_has_sensitive_encoded_shape(value):
         return value
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
 
 
-def _reference_has_credential_assignment(value: str) -> bool:
-    return _DURABLE_REVIEW_CREDENTIAL_ASSIGNMENT.search(unquote(value)) is not None
+def _fully_decode_reference_for_secret_scan(value: str) -> str | None:
+    """Bounded fixed-point percent decoding for durable secret classification.
+
+    ``None`` means the input exceeded a resource bound or did not reach a fixed
+    point. Callers must treat that as sensitive rather than persist ambiguous text.
+    """
+
+    decoded = value
+    if len(decoded.encode("utf-8")) > _DURABLE_REFERENCE_SCAN_MAX_BYTES:
+        return None
+    for _ in range(_DURABLE_REFERENCE_DECODE_MAX_PASSES):
+        next_decoded = unquote(decoded)
+        if next_decoded == decoded:
+            return decoded
+        if len(next_decoded.encode("utf-8")) > _DURABLE_REFERENCE_SCAN_MAX_BYTES:
+            return None
+        decoded = next_decoded
+    return None
 
 
-def _reference_has_url_userinfo(value: str) -> bool:
-    if "://" not in value:
+def _reference_has_sensitive_encoded_shape(value: str) -> bool:
+    decoded = _fully_decode_reference_for_secret_scan(value)
+    if decoded is None:
+        return True
+    return (
+        safe_evidence_reference(decoded) != decoded
+        or _DURABLE_REVIEW_CREDENTIAL_ASSIGNMENT.search(decoded) is not None
+        or _decoded_reference_has_url_userinfo(decoded)
+    )
+
+
+def _decoded_reference_has_url_userinfo(decoded: str) -> bool:
+    if "://" not in decoded:
         return False
     try:
-        parsed = urlsplit(value)
+        parsed = urlsplit(decoded)
     except ValueError:
         return True
     return parsed.username is not None or parsed.password is not None

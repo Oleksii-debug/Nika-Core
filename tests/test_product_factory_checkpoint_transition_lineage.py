@@ -372,3 +372,63 @@ def test_twenty_five_repair_generations_survive_repeated_process_style_restarts(
 
     assert coordinator.snapshot().records[0].request.attempt == 25
     assert coordinator.snapshot().records[0].state is WorkState.REPAIR_REQUIRED
+
+
+@pytest.mark.parametrize("changed", ["result_sha", "diff_digest", "tests", "reviewer", "review_refs"])
+def test_same_attempt_cannot_replace_already_durable_evidence(tmp_path, changed) -> None:
+    store, binding, coordinator, task_id = _setup(tmp_path)
+    host = ProductFactoryCheckpointHost(store)
+    _accept_ready(coordinator)
+    admitted = host.save(host_task_id=task_id, checkpoint=binding.checkpoint(coordinator))
+    snapshot = admitted.checkpoint.coordinator
+    record = snapshot.records[0]
+    assert record.result is not None and record.review is not None
+    if changed == "result_sha":
+        forged_record = replace(record, result=replace(record.result, result_sha="c" * 40))
+    elif changed == "diff_digest":
+        forged_record = replace(record, result=replace(record.result, diff_digest="e" * 64))
+    elif changed == "tests":
+        evidence = record.result.coding_result.test_evidence[0]
+        forged_record = replace(
+            record,
+            result=replace(
+                record.result,
+                coding_result=replace(
+                    record.result.coding_result,
+                    test_evidence=(replace(evidence, output_digest="f" * 64),),
+                ),
+            ),
+        )
+    elif changed == "reviewer":
+        forged_record = replace(record, review=replace(record.review, reviewer_id="another-qa"))
+    else:
+        forged_record = replace(
+            record, review=replace(record.review, evidence_refs=("tests://replacement",))
+        )
+    candidate = replace(
+        admitted.checkpoint,
+        coordinator=replace(snapshot, revision=snapshot.revision + 1, records=(forged_record,)),
+    )
+
+    with pytest.raises(ProductFactoryCheckpointIntegrityError, match="durable.*evidence"):
+        host.save(host_task_id=task_id, checkpoint=candidate)
+
+    _, _, restarted_host, restored = _restart(store, task_id)
+    assert restored.snapshot() == snapshot
+    assert restarted_host.latest(host_task_id=task_id, project_id="p1").checkpoint_id == (
+        admitted.checkpoint_id
+    )
+
+
+def test_explicit_block_can_discard_failed_attempt_evidence(tmp_path) -> None:
+    store, binding, coordinator, task_id = _setup(tmp_path)
+    host = ProductFactoryCheckpointHost(store)
+    coordinator.start("core")
+    _fail_running(coordinator)
+    host.save(host_task_id=task_id, checkpoint=binding.checkpoint(coordinator))
+
+    coordinator.block("core", "stop this failed attempt")
+    host.save(host_task_id=task_id, checkpoint=binding.checkpoint(coordinator))
+    _, _, _, restored = _restart(store, task_id)
+    assert restored.snapshot().records[0].state is WorkState.BLOCKED
+    assert restored.snapshot().records[0].result is None
