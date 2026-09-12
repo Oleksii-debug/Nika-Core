@@ -1,0 +1,22 @@
+{
+  "source_id": "web-freshness",
+  "url": "https://example.com/research-feed",
+  "versions": [
+    {
+      "name": "stale-v1",
+      "etag": "\"nika-v1\"",
+      "last_modified": "Mon, 01 Jun 2026 10:00:00 GMT",
+      "body": "nika freshness fixture historical-version-only alpha"
+    },
+    {
+      "name": "new-v2",
+      "etag": "\"nika-v2\"",
+      "last_modified": "Tue, 02 Jun 2026 10:00:00 GMT",
+      "body": "nika freshness fixture current-version-only beta"
+    }
+  ],
+  "undated": {
+    "name": "undated-cache",
+    "body": "nika freshness fixture undated-cache-only gamma"
+  }
+}
