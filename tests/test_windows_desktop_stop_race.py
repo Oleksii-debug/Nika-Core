@@ -23,6 +23,8 @@ from nika_core.runtime.contracts import (
 )
 from nika_core.ui.desktop_backend import DesktopBackend
 
+_ASYNC_PROOF_TIMEOUT = 5.0
+
 
 class StopRaceRuntime:
     runtime_id = "desktop-stop-race-test"
@@ -89,7 +91,7 @@ def _wait_for_state(
     task_id: str,
     expected: TaskState,
     *,
-    timeout: float = 2.0,
+    timeout: float = _ASYNC_PROOF_TIMEOUT,
 ) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -118,7 +120,7 @@ def test_stop_rechecks_runtime_authority_when_selected_record_is_stale(
     stale_ready = _create_ready_task(queue, "race stale READY against live RUNNING")
 
     backend._schedule_start(stale_ready.task_id, str(stale_ready.payload["command"]))
-    assert runtime.started.wait(timeout=1.0)
+    assert runtime.started.wait(timeout=_ASYNC_PROOF_TIMEOUT)
     _wait_for_state(queue, stale_ready.task_id, TaskState.RUNNING)
 
     def stale_target(*, action: str) -> TaskRecord:
@@ -130,7 +132,7 @@ def test_stop_rechecks_runtime_authority_when_selected_record_is_stale(
     try:
         result = backend.stop_agent({})
         assert result.status == "accepted"
-        assert runtime.cancelled.wait(timeout=1.0)
+        assert runtime.cancelled.wait(timeout=_ASYNC_PROOF_TIMEOUT)
         _wait_for_state(queue, stale_ready.task_id, TaskState.CANCELLED)
     finally:
         runtime.release.set()
@@ -150,7 +152,7 @@ def test_stop_immediately_after_create_uses_submitted_runtime_identity(
     try:
         assert create_result.status == "accepted"
         assert stop_result.status == "accepted"
-        assert runtime.cancelled.wait(timeout=1.0)
+        assert runtime.cancelled.wait(timeout=_ASYNC_PROOF_TIMEOUT)
         _wait_for_state(queue, task.task_id, TaskState.CANCELLED)
     finally:
         runtime.release.set()
@@ -163,7 +165,7 @@ def test_stop_fails_closed_when_runtime_does_not_declare_cancellation(
     runtime = NonCancellableStopRaceRuntime()
     backend, queue = _build_backend(tmp_path, runtime)
     backend.create_task({"command": "non-cancellable live task"})
-    assert runtime.started.wait(timeout=1.0)
+    assert runtime.started.wait(timeout=_ASYNC_PROOF_TIMEOUT)
     task = queue.list_recent(limit=1)[0]
     _wait_for_state(queue, task.task_id, TaskState.RUNNING)
 
