@@ -3,9 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Iterable
+from typing import Any
 
 _SCHEMA_VERSION = 1
 _MAX_MANIFEST_BYTES = 1024 * 1024
