@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 
-from nika_core.model_gateway.contracts import PrivacyClass
+from nika_core.model_gateway.contracts import PrivacyClass, ProviderKind
 
 _MAX_ID_UTF8_BYTES = 256
 _TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}\Z")
@@ -126,7 +126,7 @@ class SpeechToTextEvidence:
     status: SpeechToTextStatus
     privacy: PrivacyClass
     audio_format: SpeechAudioFormat
-    audio_sha256: str
+    audio_sha256: str | None
     audio_bytes: int
     sample_rate_hz: int
     channels: int
@@ -168,11 +168,15 @@ class SpeechToTextResult:
 
 
 class SpeechToTextAdapter(Protocol):
+    provider_kind: ProviderKind
+
     async def transcribe(self, request: SpeechToTextRequest) -> SpeechToTextAdapterResponse: ...
 
 
 class UnavailableSpeechToTextAdapter:
     """Explicit no-STT adapter used when no local speech engine is configured."""
+
+    provider_kind = ProviderKind.LOCAL
 
     async def transcribe(self, request: SpeechToTextRequest) -> SpeechToTextAdapterResponse:
         raise SpeechToTextAdapterError(
@@ -195,11 +199,18 @@ class SpeechToTextService:
         self._adapter = adapter
 
     async def transcribe(self, request: SpeechToTextRequest) -> SpeechToTextResult:
+        if self._adapter.provider_kind is not ProviderKind.LOCAL:
+            return self._failure(
+                request,
+                code=SpeechToTextFailureCode.PROVIDER_ERROR,
+                retryable=False,
+            )
         if len(request.audio.data) > request.policy.max_audio_bytes:
             return self._failure(
                 request,
                 code=SpeechToTextFailureCode.RESOURCE_LIMIT,
                 retryable=False,
+                include_audio_digest=False,
             )
 
         try:
@@ -299,6 +310,7 @@ class SpeechToTextService:
         code: SpeechToTextFailureCode,
         retryable: bool,
         status: SpeechToTextStatus = SpeechToTextStatus.FAILED,
+        include_audio_digest: bool = True,
     ) -> SpeechToTextResult:
         return SpeechToTextResult(
             text=None,
@@ -311,6 +323,7 @@ class SpeechToTextService:
                 latency_ms=None,
                 error_code=code,
                 retryable=retryable,
+                include_audio_digest=include_audio_digest,
             ),
         )
 
@@ -325,7 +338,9 @@ class SpeechToTextService:
         latency_ms: float | None,
         error_code: SpeechToTextFailureCode | None = None,
         retryable: bool | None = None,
+        include_audio_digest: bool = True,
     ) -> SpeechToTextEvidence:
+        audio_sha256 = _sha256_bytes(request.audio.data) if include_audio_digest else None
         return SpeechToTextEvidence(
             request_id=request.request_id,
             provider_id=request.provider_id,
@@ -333,7 +348,7 @@ class SpeechToTextService:
             status=status,
             privacy=request.privacy,
             audio_format=request.audio.audio_format,
-            audio_sha256=_sha256_bytes(request.audio.data),
+            audio_sha256=audio_sha256,
             audio_bytes=len(request.audio.data),
             sample_rate_hz=request.audio.sample_rate_hz,
             channels=request.audio.channels,
