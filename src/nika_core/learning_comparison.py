@@ -12,6 +12,11 @@ _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}\Z")
 
 
+class ComparisonEvidenceKind(StrEnum):
+    EXPERIENCE = "experience"
+    MEMORY = "memory"
+
+
 class MemoryRelation(StrEnum):
     SUPPORTS = "supports"
     CONTRADICTS = "contradicts"
@@ -57,20 +62,27 @@ def _require_sha256(value: object, *, field: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class ComparisonEvidenceRef:
-    source_type: str
-    source_id: str
+    kind: ComparisonEvidenceKind
+    source_namespace_sha256: str
+    source_id_sha256: str
     evidence_sha256: str
 
     def __post_init__(self) -> None:
-        _require_token(self.source_type, field="source_type")
-        _require_token(self.source_id, field="source_id")
+        if type(self.kind) is not ComparisonEvidenceKind:
+            raise TypeError("kind must be a ComparisonEvidenceKind")
+        _require_sha256(
+            self.source_namespace_sha256,
+            field="source_namespace_sha256",
+        )
+        _require_sha256(self.source_id_sha256, field="source_id_sha256")
         _require_sha256(self.evidence_sha256, field="evidence_sha256")
 
     def reportable_payload(self) -> dict[str, str]:
         return {
             "evidence_sha256": self.evidence_sha256,
-            "source_id_sha256": _digest_text(self.source_id),
-            "source_type": self.source_type,
+            "kind": self.kind.value,
+            "source_id_sha256": self.source_id_sha256,
+            "source_namespace_sha256": self.source_namespace_sha256,
         }
 
 
@@ -83,6 +95,8 @@ class MemoryComparisonResult:
     def __post_init__(self) -> None:
         if type(self.memory) is not ComparisonEvidenceRef:
             raise TypeError("memory must be a ComparisonEvidenceRef")
+        if self.memory.kind is not ComparisonEvidenceKind.MEMORY:
+            raise ValueError("memory evidence kind must be MEMORY")
         if type(self.relation) is not MemoryRelation:
             raise TypeError("relation must be a MemoryRelation")
         _require_sha256(
@@ -100,7 +114,11 @@ class MemoryComparisonResult:
 
 def _memory_sort_key(result: MemoryComparisonResult) -> tuple[str, str, str]:
     memory = result.memory
-    return (memory.source_type, memory.source_id, memory.evidence_sha256)
+    return (
+        memory.source_namespace_sha256,
+        memory.source_id_sha256,
+        memory.evidence_sha256,
+    )
 
 
 def _canonical_memory_results(value: object) -> tuple[MemoryComparisonResult, ...]:
@@ -112,7 +130,10 @@ def _canonical_memory_results(value: object) -> tuple[MemoryComparisonResult, ..
         raise TypeError("memory_results must contain MemoryComparisonResult values")
 
     ordered = tuple(sorted(value, key=_memory_sort_key))
-    logical_ids = tuple((item.memory.source_type, item.memory.source_id) for item in ordered)
+    logical_ids = tuple(
+        (item.memory.source_namespace_sha256, item.memory.source_id_sha256)
+        for item in ordered
+    )
     if len(set(logical_ids)) != len(logical_ids):
         raise ValueError("duplicate logical memory references are not allowed")
     return ordered
@@ -147,6 +168,8 @@ class ExperienceMemoryComparison:
         agent_id = _require_token(agent_id, field="agent_id")
         if type(experience) is not ComparisonEvidenceRef:
             raise TypeError("experience must be a ComparisonEvidenceRef")
+        if experience.kind is not ComparisonEvidenceKind.EXPERIENCE:
+            raise ValueError("experience evidence kind must be EXPERIENCE")
         canonical_results = _canonical_memory_results(memory_results)
 
         proposed_comparator = _require_sha256(
