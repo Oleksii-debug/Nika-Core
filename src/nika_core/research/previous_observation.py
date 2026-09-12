@@ -125,9 +125,9 @@ class DurablePreviousObservationLoader:
             task_id=latest["task_id"],
             series_id=latest["series_id"],
             profile_id=latest["profile_id"],
-            profile_version=int(latest["profile_version"]),
+            profile_version=latest["profile_version"],
             source_set_id=latest["source_set_id"],
-            source_set_version=int(latest["source_set_version"]),
+            source_set_version=latest["source_set_version"],
             result_set=result_set,
             created_at=latest["created_at"],
         )
@@ -153,10 +153,16 @@ class DurablePreviousObservationLoader:
                 PreviousObservationErrorCode.IDENTITY_MISMATCH,
                 "durable previous observation profile/source-set identity does not match request",
             )
-        try:
-            profile_version = int(row["profile_version"])
-            source_set_version = int(row["source_set_version"])
-        except (TypeError, ValueError):
+        profile_version = row["profile_version"]
+        source_set_version = row["source_set_version"]
+        if (
+            not isinstance(profile_version, int)
+            or isinstance(profile_version, bool)
+            or profile_version < 1
+            or not isinstance(source_set_version, int)
+            or isinstance(source_set_version, bool)
+            or source_set_version < 1
+        ):
             self._fail(
                 PreviousObservationErrorCode.CORRUPT_BASELINE,
                 "durable previous observation contains invalid version fields",
