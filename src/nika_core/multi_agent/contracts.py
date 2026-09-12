@@ -20,6 +20,7 @@ class MemberState(StrEnum):
     SPAWNED = "spawned"
     RUNNING = "running"
     WAITING_APPROVAL = "waiting_approval"
+    PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -64,6 +65,17 @@ class TeamMember:
     tool_grants: tuple[ToolGrant, ...]
     state: MemberState = MemberState.SPAWNED
     resume_token: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StoredMemberResult:
+    outcome: str
+    payload: dict[str, Any]
+    error: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.outcome.strip():
+            raise ValueError("stored member result outcome must not be empty")
 
 
 @dataclass(frozen=True, slots=True)
