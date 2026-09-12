@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 from dataclasses import dataclass
 from enum import StrEnum
 from string import hexdigits
@@ -10,6 +13,7 @@ from nika_core.kernel.task_state import TaskState
 
 
 _STUDY_PAYLOAD_KIND = "study_material_v1"
+_EVIDENCE_POLICY = "source_bound_v1"
 _SECRET_QUERY_KEYS = frozenset(
     {
         "api_key",
@@ -66,7 +70,7 @@ class StudyMaterial:
         if self.learning_goal is not None:
             _require_text(self.learning_goal, "learning_goal", maximum=2000)
         if self.content_sha256 is not None:
-            _validate_sha256(self.content_sha256)
+            _validate_sha256(self.content_sha256, "content_sha256")
         _reject_secret_bearing_reference(self.source_ref)
 
 
@@ -186,14 +190,14 @@ class StudyQueue:
         return self.get(task_id)
 
 
-def _material_payload(material: StudyMaterial) -> dict[str, object]:
+def _semantic_payload(material: StudyMaterial) -> dict[str, object]:
     payload: dict[str, object] = {
         "nika_kind": _STUDY_PAYLOAD_KIND,
         "material_id": material.material_id,
         "title": material.title,
         "material_kind": material.kind.value,
         "source_ref": material.source_ref,
-        "evidence_policy": "source_bound_v1",
+        "evidence_policy": _EVIDENCE_POLICY,
     }
     if material.source_version is not None:
         payload["source_version"] = material.source_version
@@ -201,6 +205,22 @@ def _material_payload(material: StudyMaterial) -> dict[str, object]:
         payload["content_sha256"] = material.content_sha256
     if material.learning_goal is not None:
         payload["learning_goal"] = material.learning_goal
+    return payload
+
+
+def _payload_fingerprint(material: StudyMaterial) -> str:
+    encoded = json.dumps(
+        _semantic_payload(material),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _material_payload(material: StudyMaterial) -> dict[str, object]:
+    payload = _semantic_payload(material)
+    payload["study_fingerprint"] = _payload_fingerprint(material)
     return payload
 
 
@@ -216,7 +236,9 @@ def _study_task_from_record(record: TaskRecord) -> StudyTask:
         source_version = _optional_payload_text(payload, "source_version")
         content_sha256 = _optional_payload_text(payload, "content_sha256")
         learning_goal = _optional_payload_text(payload, "learning_goal")
-        if payload.get("evidence_policy") != "source_bound_v1":
+        fingerprint = _required_payload_text(payload, "study_fingerprint")
+        _validate_sha256(fingerprint, "study_fingerprint")
+        if payload.get("evidence_policy") != _EVIDENCE_POLICY:
             raise ValueError("unsupported evidence policy")
         material = StudyMaterial(
             material_id=material_id,
@@ -227,6 +249,8 @@ def _study_task_from_record(record: TaskRecord) -> StudyTask:
             content_sha256=content_sha256,
             learning_goal=learning_goal,
         )
+        if not hmac.compare_digest(fingerprint, _payload_fingerprint(material)):
+            raise ValueError("study payload fingerprint mismatch")
     except (TypeError, ValueError) as exc:
         raise ValueError("invalid durable study task payload") from exc
     return StudyTask(
@@ -263,19 +287,27 @@ def _require_text(value: str, name: str, *, maximum: int) -> None:
         raise ValueError(f"{name} contains an invalid character")
 
 
-def _validate_sha256(value: str) -> None:
+def _validate_sha256(value: str, name: str) -> None:
     if len(value) != 64 or any(char not in hexdigits for char in value) or value != value.lower():
-        raise ValueError("content_sha256 must be a lowercase SHA-256 hex digest")
+        raise ValueError(f"{name} must be a lowercase SHA-256 hex digest")
+
+
+def _decoded_views(value: str) -> tuple[str, ...]:
+    views = [value]
+    current = value
+    for _ in range(5):
+        decoded = unquote(current)
+        if decoded == current:
+            return tuple(views)
+        views.append(decoded)
+        current = decoded
+    if unquote(current) != current:
+        raise ValueError("source_ref encoding depth exceeds safety limit")
+    return tuple(views)
 
 
 def _reject_secret_bearing_reference(value: str) -> None:
-    views = [value]
-    for _ in range(3):
-        decoded = unquote(views[-1])
-        if decoded == views[-1]:
-            break
-        views.append(decoded)
-    for view in views:
+    for view in _decoded_views(value):
         lowered = view.casefold()
         if any(marker in lowered for marker in _SECRET_TEXT_MARKERS):
             raise ValueError("source_ref must not contain credential material")
