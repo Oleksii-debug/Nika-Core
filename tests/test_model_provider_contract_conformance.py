@@ -28,7 +28,6 @@ from nika_core.model_gateway.foundry_local import FoundryLocalProvider
 from nika_core.model_gateway.gateway import ModelGateway
 from nika_core.model_gateway.providers import OllamaProvider, OpenAICompatibleProvider
 
-
 _CANARY = "NIKA-CONFORMANCE-SECRET-DO-NOT-LEAK"
 _MODEL = "conformance-model"
 _MESSAGES = (
@@ -208,9 +207,8 @@ class _FoundryModel:
                 if model._started is not None:
                     model._started.set()
                 try:
-                    if model._release is not None:
-                        if not model._release.wait(timeout=1.0):
-                            raise RuntimeError("conformance release barrier timed out")
+                    if model._release is not None and not model._release.wait(timeout=1.0):
+                        raise RuntimeError("conformance release barrier timed out")
                     if model._mode == "invalid":
                         return SimpleNamespace(
                             choices=[SimpleNamespace(message=SimpleNamespace(content=None))],
