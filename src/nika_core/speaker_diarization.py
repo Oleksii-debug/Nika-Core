@@ -64,12 +64,18 @@ class DiarizerCapabilities:
                 DiarizationErrorCode.INVALID_REQUEST,
                 "supports_overlap must be bool",
             )
-        if type(self.max_speakers) is not int or not 1 <= self.max_speakers <= MAX_SPEAKERS:
+        if (
+            type(self.max_speakers) is not int
+            or not 1 <= self.max_speakers <= MAX_SPEAKERS
+        ):
             raise DiarizationError(
                 DiarizationErrorCode.INVALID_REQUEST,
                 f"max_speakers must be 1..{MAX_SPEAKERS}",
             )
-        if not isinstance(self.kind, DiarizerKind) or self.kind is not DiarizerKind.LOCAL:
+        if (
+            not isinstance(self.kind, DiarizerKind)
+            or self.kind is not DiarizerKind.LOCAL
+        ):
             raise DiarizationError(
                 DiarizationErrorCode.INVALID_REQUEST,
                 "speaker diarization boundary supports local adapters only",
@@ -258,21 +264,18 @@ class SpeakerDiarizationService:
         *,
         policy: DiarizationPolicy | None = None,
     ) -> None:
-        capabilities = _validated_capabilities(adapter.capabilities)
+        capabilities = _read_capabilities(
+            adapter,
+            error_code=DiarizationErrorCode.INVALID_REQUEST,
+        )
         if policy is not None and not isinstance(policy, DiarizationPolicy):
             raise DiarizationError(
                 DiarizationErrorCode.INVALID_REQUEST,
                 "diarization policy must use the canonical type",
             )
-        selected_policy = policy if policy is not None else DiarizationPolicy()
-        if selected_policy.max_speakers > capabilities.max_speakers:
-            raise DiarizationError(
-                DiarizationErrorCode.INVALID_REQUEST,
-                "policy max_speakers exceeds adapter capability",
-            )
         self._adapter = adapter
         self._capabilities = capabilities
-        self._policy = selected_policy
+        self._policy = policy if policy is not None else DiarizationPolicy()
 
     @property
     def capabilities(self) -> DiarizerCapabilities:
@@ -304,8 +307,8 @@ class SpeakerDiarizationService:
                 "speaker diarization exceeded its deadline",
                 retryable=True,
             ) from None
-        except DiarizationError:
-            raise
+        except DiarizationError as error:
+            raise _normalized_adapter_error(error) from None
         except Exception:  # noqa: BLE001 - provider diagnostics stay behind this boundary
             raise DiarizationError(
                 DiarizationErrorCode.ADAPTER_FAILURE,
@@ -313,7 +316,10 @@ class SpeakerDiarizationService:
             ) from None
 
         self._assert_route_unchanged("during diarization")
-        segments, overlap_detected, latency_ms = self._validate_response(response, request)
+        segments, overlap_detected, latency_ms = self._validate_response(
+            response,
+            request,
+        )
         timeline_sha256 = _timeline_sha256(segments)
         return DiarizationResult(
             segments=segments,
@@ -334,7 +340,10 @@ class SpeakerDiarizationService:
         )
 
     def _assert_route_unchanged(self, phase: str) -> None:
-        current = _validated_capabilities(self._adapter.capabilities)
+        current = _read_capabilities(
+            self._adapter,
+            error_code=DiarizationErrorCode.ROUTE_MISMATCH,
+        )
         if current != self._capabilities:
             raise DiarizationError(
                 DiarizationErrorCode.ROUTE_MISMATCH,
@@ -360,7 +369,10 @@ class SpeakerDiarizationService:
                 DiarizationErrorCode.ROUTE_MISMATCH,
                 "speaker diarizer response identity does not match configured route",
             )
-        digest = _sha256(response.source_audio_sha256, field="source_audio_sha256")
+        digest = _sha256(
+            response.source_audio_sha256,
+            field="source_audio_sha256",
+        )
         if digest != request.audio_sha256:
             raise DiarizationError(
                 DiarizationErrorCode.INVALID_RESPONSE,
@@ -378,11 +390,16 @@ class SpeakerDiarizationService:
             )
 
         duration_ms = _duration_ms(request)
+        speaker_limit = min(
+            self._policy.max_speakers,
+            self._capabilities.max_speakers,
+        )
         raw_labels: dict[str, int] = {}
         normalized: list[SpeakerSegment] = []
         previous_start = -1
-        previous_end = -1
+        running_max_end = -1
         overlap_detected = False
+
         for raw in response.segments:
             if not isinstance(raw, DiarizerSegment):
                 raise DiarizationError(
@@ -390,20 +407,18 @@ class SpeakerDiarizationService:
                     "speaker diarizer returned an invalid segment type",
                 )
             _validate_segment(raw, duration_ms=duration_ms)
-            if raw.start_ms < previous_start or (
-                raw.start_ms == previous_start and raw.end_ms < previous_end
-            ):
+            if raw.start_ms < previous_start:
                 raise DiarizationError(
                     DiarizationErrorCode.INVALID_RESPONSE,
-                    "speaker diarizer segments must use stable chronological ordering",
+                    "speaker diarizer segments must use chronological ordering",
                 )
-            if previous_end >= 0 and raw.start_ms < previous_end:
+            if running_max_end >= 0 and raw.start_ms < running_max_end:
                 overlap_detected = True
             previous_start = raw.start_ms
-            previous_end = max(previous_end, raw.end_ms)
+            running_max_end = max(running_max_end, raw.end_ms)
 
             if raw.speaker_label not in raw_labels:
-                if len(raw_labels) >= self._policy.max_speakers:
+                if len(raw_labels) >= speaker_limit:
                     raise DiarizationError(
                         DiarizationErrorCode.RESOURCE_LIMIT,
                         "speaker diarizer returned too many distinct speakers",
@@ -423,34 +438,81 @@ class SpeakerDiarizationService:
                 DiarizationErrorCode.INVALID_RESPONSE,
                 "speaker diarizer returned overlap without declaring overlap support",
             )
-        latency_ms = _optional_non_negative_number(response.latency_ms, field="latency_ms")
+        latency_ms = _optional_non_negative_number(
+            response.latency_ms,
+            field="latency_ms",
+        )
         return tuple(normalized), overlap_detected, latency_ms
 
 
-def _validated_capabilities(value: object) -> DiarizerCapabilities:
+def _read_capabilities(
+    adapter: object,
+    *,
+    error_code: DiarizationErrorCode,
+) -> DiarizerCapabilities:
+    try:
+        value = adapter.capabilities  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - adapter diagnostics stay private
+        raise DiarizationError(
+            error_code,
+            "speaker diarizer capabilities are unavailable or invalid",
+        ) from None
+    return _validated_capabilities(value, error_code=error_code)
+
+
+def _validated_capabilities(
+    value: object,
+    *,
+    error_code: DiarizationErrorCode,
+) -> DiarizerCapabilities:
     if not isinstance(value, DiarizerCapabilities):
         raise DiarizationError(
-            DiarizationErrorCode.INVALID_REQUEST,
+            error_code,
             "speaker diarizer capabilities must use the canonical type",
         )
-    _safe_id(value.provider_id, field="provider_id")
-    _safe_id(value.model_id, field="model_id")
+    _safe_id(value.provider_id, field="provider_id", error_code=error_code)
+    _safe_id(value.model_id, field="model_id", error_code=error_code)
     if type(value.supports_overlap) is not bool:
         raise DiarizationError(
-            DiarizationErrorCode.INVALID_REQUEST,
+            error_code,
             "speaker diarizer overlap capability must be bool",
         )
-    if type(value.max_speakers) is not int or not 1 <= value.max_speakers <= MAX_SPEAKERS:
+    if (
+        type(value.max_speakers) is not int
+        or not 1 <= value.max_speakers <= MAX_SPEAKERS
+    ):
         raise DiarizationError(
-            DiarizationErrorCode.INVALID_REQUEST,
+            error_code,
             "speaker diarizer max_speakers capability is invalid",
         )
-    if not isinstance(value.kind, DiarizerKind) or value.kind is not DiarizerKind.LOCAL:
+    if (
+        not isinstance(value.kind, DiarizerKind)
+        or value.kind is not DiarizerKind.LOCAL
+    ):
         raise DiarizationError(
-            DiarizationErrorCode.INVALID_REQUEST,
+            error_code,
             "speaker diarizer must declare local execution",
         )
     return value
+
+
+def _normalized_adapter_error(error: DiarizationError) -> DiarizationError:
+    if error.code is DiarizationErrorCode.ADAPTER_UNAVAILABLE:
+        return DiarizationError(
+            DiarizationErrorCode.ADAPTER_UNAVAILABLE,
+            "local speaker diarization is unavailable",
+            retryable=error.retryable,
+        )
+    if error.code is DiarizationErrorCode.ADAPTER_TIMEOUT:
+        return DiarizationError(
+            DiarizationErrorCode.ADAPTER_TIMEOUT,
+            "speaker diarization adapter timed out",
+            retryable=True,
+        )
+    return DiarizationError(
+        DiarizationErrorCode.ADAPTER_FAILURE,
+        "speaker diarization adapter failed",
+    )
 
 
 def _validate_segment(segment: DiarizerSegment, *, duration_ms: int) -> None:
@@ -469,17 +531,29 @@ def _validate_segment(segment: DiarizerSegment, *, duration_ms: int) -> None:
             DiarizationErrorCode.INVALID_RESPONSE,
             "segment exceeds source audio duration",
         )
-    try:
-        _safe_id(segment.speaker_label, field="speaker_label", response=True)
-        _optional_confidence(segment.confidence)
-    except DiarizationError:
-        raise
+    _safe_id(
+        segment.speaker_label,
+        field="speaker_label",
+        error_code=DiarizationErrorCode.INVALID_RESPONSE,
+    )
+    _optional_confidence(segment.confidence)
 
 
-def _safe_id(value: object, *, field: str, response: bool = False) -> str:
-    if type(value) is not str or len(value) > MAX_ID_CHARS or not _SAFE_ID_RE.fullmatch(value):
-        code = DiarizationErrorCode.INVALID_RESPONSE if response else DiarizationErrorCode.INVALID_REQUEST
-        raise DiarizationError(code, f"{field} must be a bounded safe identifier")
+def _safe_id(
+    value: object,
+    *,
+    field: str,
+    error_code: DiarizationErrorCode = DiarizationErrorCode.INVALID_REQUEST,
+) -> str:
+    if (
+        type(value) is not str
+        or len(value) > MAX_ID_CHARS
+        or not _SAFE_ID_RE.fullmatch(value)
+    ):
+        raise DiarizationError(
+            error_code,
+            f"{field} must be a bounded safe identifier",
+        )
     return value
 
 
