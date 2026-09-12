@@ -12,20 +12,84 @@ from nika_core.model_artifacts import ModelArtifactDescriptor, ModelIntegrityBas
 
 _READ_CHUNK_BYTES = 1024 * 1024
 _WINDOWS_FINAL_PATH_BUFFER = 32768
+_MAX_SIGNED_64 = (1 << 63) - 1
+_HEX_DIGITS = frozenset("0123456789abcdef")
+_VERIFIED_CANDIDATE_MINT_TOKEN = object()
 
 
 class CandidateArtifactIntegrityError(RuntimeError):
     """Safe failure from the candidate-model artifact integrity boundary."""
 
 
-@dataclass(frozen=True, slots=True)
+def _require_evidence_sha256(name: str, value: object) -> str:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in _HEX_DIGITS for character in value)
+    ):
+        raise ValueError(f"{name} must be an exact lowercase SHA-256 digest")
+    return value
+
+
+def _require_evidence_size(value: object) -> int:
+    if type(value) is not int or not 1 <= value <= _MAX_SIGNED_64:
+        raise ValueError("size_bytes must be a positive signed-64 integer")
+    return value
+
+
+@dataclass(frozen=True, slots=True, init=False)
 class VerifiedCandidateArtifact:
-    """Minimized proof that physical bytes matched one canonical descriptor."""
+    """Minimized proof minted only by the canonical physical verifier."""
 
     descriptor_digest: str
     registry_key: str
     sha256: str
     size_bytes: int
+
+    def __init__(
+        self,
+        *,
+        descriptor_digest: str,
+        registry_key: str,
+        sha256: str,
+        size_bytes: int,
+        _mint_token: object | None = None,
+    ) -> None:
+        if _mint_token is not _VERIFIED_CANDIDATE_MINT_TOKEN:
+            raise TypeError(
+                "VerifiedCandidateArtifact can only be minted by verify_candidate_artifact"
+            )
+        object.__setattr__(
+            self,
+            "descriptor_digest",
+            _require_evidence_sha256("descriptor_digest", descriptor_digest),
+        )
+        object.__setattr__(
+            self,
+            "registry_key",
+            _require_evidence_sha256("registry_key", registry_key),
+        )
+        object.__setattr__(self, "sha256", _require_evidence_sha256("sha256", sha256))
+        object.__setattr__(self, "size_bytes", _require_evidence_size(size_bytes))
+
+    def __init_subclass__(cls, **_: object) -> None:
+        raise TypeError("VerifiedCandidateArtifact cannot be subclassed")
+
+
+def _mint_verified_candidate_artifact(
+    *,
+    descriptor_digest: str,
+    registry_key: str,
+    sha256: str,
+    size_bytes: int,
+) -> VerifiedCandidateArtifact:
+    return VerifiedCandidateArtifact(
+        descriptor_digest=descriptor_digest,
+        registry_key=registry_key,
+        sha256=sha256,
+        size_bytes=size_bytes,
+        _mint_token=_VERIFIED_CANDIDATE_MINT_TOKEN,
+    )
 
 
 def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
@@ -411,7 +475,7 @@ def verify_candidate_artifact(
             "candidate artifact digest does not match provenance"
         )
 
-    return VerifiedCandidateArtifact(
+    return _mint_verified_candidate_artifact(
         descriptor_digest=descriptor.descriptor_digest,
         registry_key=descriptor.registry_key,
         sha256=expected_sha256,
