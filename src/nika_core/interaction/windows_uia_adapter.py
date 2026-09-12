@@ -2,13 +2,14 @@
 
 The incumbent implementation lives in ``windows_uia_adapter_impl`` unchanged so its
 RuntimeId + generation identity and pywinauto tracking remain reviewable. This
-module adds the action-boundary fail-closed contract and a provider-native focus
-read that maps UIA ``GetFocusedElement`` back to the incumbent exact identity.
+module adds the action-boundary fail-closed contract and provider/OS-native focus
+reads that map the authoritative keyboard-focus element back to exact Nika identity.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import time
 from types import SimpleNamespace
 
@@ -52,37 +53,17 @@ _FOCUS_ACK_DELAY_SECONDS = 0.05
 class PywinautoUIABackend(_BasePywinautoUIABackend):
     """Incumbent backend with provider-native exact focus observation."""
 
-    def focused_identity(
+    def _bind_focused_element_info(
         self,
         hwnd: int,
+        focused_info,
     ) -> tuple[tuple[int, ...], int] | None:
-        """Map UIA GetFocusedElement to the exact live Nika identity.
+        """Bind one provider element to exactly one tracked RuntimeId/generation."""
 
-        Tree-wide ``CurrentHasKeyboardFocus`` can lag or be omitted by a provider
-        after successful ``SetFocus``. UIA exposes the actual input-focus element
-        directly. This remains read-only: the focused element is accepted only
-        when UIA CompareElements binds it to exactly one current tracked
-        RuntimeId/generation. No name, bounds, coordinates, or RuntimeId-only
-        fallback is used.
-        """
-
-        try:
-            window = self._window(hwnd)
-            get_active = getattr(type(window.element_info), "get_active", None)
-            if not callable(get_active):
-                logger.debug(
-                    "UIA element-info provider exposes no get_active() focus query"
-                )
-                return None
-            focused_info = get_active()
-            if focused_info is None:
-                return None
-            focused_wrapper = SimpleNamespace(element_info=focused_info)
-        except Exception as exc:  # noqa: BLE001 - transient provider focus query
-            logger.debug("UIA GetFocusedElement unavailable: %r", exc)
+        if focused_info is None:
             return None
-
-        focused_runtime_id = self._runtime_id(focused_wrapper.element_info)
+        focused_wrapper = SimpleNamespace(element_info=focused_info)
+        focused_runtime_id = self._runtime_id(focused_info)
         matches: list[UIAControlRecord] = []
         for wrapper, record in self._pairs(hwnd, "control"):
             same = self._same_element(wrapper, focused_wrapper)
@@ -103,6 +84,91 @@ class PywinautoUIABackend(_BasePywinautoUIABackend):
         if record.runtime_id is None:
             return None
         return record.runtime_id, record.element_generation
+
+    @staticmethod
+    def _native_focused_element_info(hwnd: int, element_info_type):
+        """Read target GUI-thread keyboard focus and expose it through UIA.
+
+        This is a read-only fallback for providers whose GetFocusedElement result
+        cannot be rebound on hosted Windows. It never accepts an HWND as Nika
+        identity: the returned UIA element must still pass CompareElements against
+        the tracked RuntimeId/generation before it can acknowledge focus.
+        """
+
+        if os.name != "nt":
+            return None
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class GUITHREADINFO(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", wintypes.DWORD),
+                    ("flags", wintypes.DWORD),
+                    ("hwndActive", wintypes.HWND),
+                    ("hwndFocus", wintypes.HWND),
+                    ("hwndCapture", wintypes.HWND),
+                    ("hwndMenuOwner", wintypes.HWND),
+                    ("hwndMoveSize", wintypes.HWND),
+                    ("hwndCaret", wintypes.HWND),
+                    ("rcCaret", wintypes.RECT),
+                ]
+
+            user32 = ctypes.windll.user32
+            thread_id = int(user32.GetWindowThreadProcessId(hwnd, None) or 0)
+            if not thread_id:
+                return None
+            info = GUITHREADINFO()
+            info.cbSize = ctypes.sizeof(info)
+            if not user32.GetGUIThreadInfo(thread_id, ctypes.byref(info)):
+                return None
+            focused_hwnd = int(info.hwndFocus or 0)
+            if not focused_hwnd:
+                return None
+            return element_info_type(focused_hwnd)
+        except Exception as exc:  # noqa: BLE001 - provider/OS focus query is fail-closed
+            logger.debug("native HWND focus query unavailable: %r", exc)
+            return None
+
+    def focused_identity(
+        self,
+        hwnd: int,
+    ) -> tuple[tuple[int, ...], int] | None:
+        """Map authoritative keyboard focus to the exact live Nika identity.
+
+        Tree-wide ``CurrentHasKeyboardFocus`` can lag or be omitted by a provider
+        after successful ``SetFocus``. First use pywinauto's UIA GetFocusedElement.
+        If that result cannot be bound, query the exact target window's GUI thread
+        for its keyboard-focus HWND, create a UIA element through the same live
+        pywinauto element-info provider, and bind it with UIA CompareElements.
+        No name, bounds, coordinates, or RuntimeId-only fallback is used.
+        """
+
+        try:
+            window = self._window(hwnd)
+        except Exception as exc:  # noqa: BLE001 - transient provider focus query
+            logger.debug("UIA target window unavailable for focus query: %r", exc)
+            return None
+
+        element_info_type = type(window.element_info)
+        try:
+            get_active = getattr(element_info_type, "get_active", None)
+            if callable(get_active):
+                focused_info = get_active()
+                identity = self._bind_focused_element_info(hwnd, focused_info)
+                if identity is not None:
+                    return identity
+            else:
+                logger.debug(
+                    "UIA element-info provider exposes no get_active() focus query"
+                )
+        except AmbiguousTargetError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - transient provider focus query
+            logger.debug("UIA GetFocusedElement unavailable: %r", exc)
+
+        focused_info = self._native_focused_element_info(hwnd, element_info_type)
+        return self._bind_focused_element_info(hwnd, focused_info)
 
 
 class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):

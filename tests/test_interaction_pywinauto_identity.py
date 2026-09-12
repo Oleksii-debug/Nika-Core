@@ -117,6 +117,79 @@ def test_provider_native_focus_compare_failure_fails_closed(
         backend.focused_identity(100)
 
 
+def test_native_focus_hwnd_fallback_binds_only_by_compare_elements(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = PywinautoUIABackend()
+    target = FakeWrapper(FakeElementInfo((4, 2), "addressable-control"))
+    _focus_tree(monkeypatch, backend, target=target)
+    foreign = FakeElementInfo((8, 8), "foreign-focused-element")
+    native_target = FakeElementInfo((4, 2), "addressable-control")
+    monkeypatch.setattr(
+        FakeElementInfo,
+        "get_active",
+        classmethod(lambda _cls: foreign),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        backend,
+        "_native_focused_element_info",
+        lambda _hwnd, _element_info_type: native_target,
+    )
+
+    assert backend.focused_identity(100) == ((4, 2), 1)
+
+
+def test_native_focus_hwnd_fallback_rejects_foreign_element(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = PywinautoUIABackend()
+    target = FakeWrapper(FakeElementInfo((4, 2), "addressable-control"))
+    _focus_tree(monkeypatch, backend, target=target)
+    foreign = FakeElementInfo((8, 8), "foreign-focused-element")
+    monkeypatch.setattr(
+        FakeElementInfo,
+        "get_active",
+        classmethod(lambda _cls: None),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        backend,
+        "_native_focused_element_info",
+        lambda _hwnd, _element_info_type: foreign,
+    )
+
+    assert backend.focused_identity(100) is None
+
+
+def test_native_focus_hwnd_fallback_compare_failure_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = PywinautoUIABackend()
+    target = FakeWrapper(
+        FakeElementInfo((4, 2), "addressable-control", compare_raises=True)
+    )
+    _focus_tree(monkeypatch, backend, target=target)
+    native_target = FakeElementInfo((4, 2), "addressable-control")
+    monkeypatch.setattr(
+        FakeElementInfo,
+        "get_active",
+        classmethod(lambda _cls: None),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        backend,
+        "_native_focused_element_info",
+        lambda _hwnd, _element_info_type: native_target,
+    )
+
+    with pytest.raises(
+        AmbiguousTargetError,
+        match="cannot bind provider focused element",
+    ):
+        backend.focused_identity(100)
+
+
 def test_same_automation_element_is_deduplicated_by_compare_elements() -> None:
     backend = PywinautoUIABackend()
     first = FakeWrapper(FakeElementInfo((1, 2, 3), "same-live-element"))
