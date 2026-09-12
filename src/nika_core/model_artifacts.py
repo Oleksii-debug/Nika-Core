@@ -91,10 +91,10 @@ class ModelArtifactResources:
             raise ValueError(
                 "recommended_memory_bytes must not be below min_system_memory_bytes"
             )
-        if not isinstance(self.cpu_architectures, tuple) or not all(
-            isinstance(value, str) for value in self.cpu_architectures
+        if type(self.cpu_architectures) is not tuple or not all(
+            type(value) is str for value in self.cpu_architectures
         ):
-            raise TypeError("cpu_architectures must be a tuple of text labels")
+            raise TypeError("cpu_architectures must be a tuple of exact text labels")
         architectures = tuple(sorted(set(self.cpu_architectures)))
         if any(_ARCH.fullmatch(value) is None for value in architectures):
             raise ValueError("cpu_architectures contains an invalid architecture label")
@@ -138,10 +138,10 @@ class ModelArtifactDescriptor:
             or self.schema_version != MODEL_ARTIFACT_SCHEMA_VERSION
         ):
             raise ValueError("unsupported model artifact schema_version")
-        if not isinstance(self.kind, ModelArtifactKind):
-            raise TypeError("kind must be ModelArtifactKind")
-        if not isinstance(self.integrity_basis, ModelIntegrityBasis):
-            raise TypeError("integrity_basis must be ModelIntegrityBasis")
+        if type(self.kind) is not ModelArtifactKind:
+            raise TypeError("kind must be exact ModelArtifactKind")
+        if type(self.integrity_basis) is not ModelIntegrityBasis:
+            raise TypeError("integrity_basis must be exact ModelIntegrityBasis")
         _clean_text("provider_id", self.provider_id, label=True)
         _clean_text("model_id", self.model_id)
         _public_reference("source_reference", self.source_reference)
@@ -149,22 +149,25 @@ class ModelArtifactDescriptor:
         if self.model_version is not None:
             _clean_text("model_version", self.model_version)
         if self.integrity_basis is ModelIntegrityBasis.SHA256:
-            if self.sha256 is None or _SHA256.fullmatch(self.sha256) is None:
+            if (
+                type(self.sha256) is not str
+                or _SHA256.fullmatch(self.sha256) is None
+            ):
                 raise ValueError("sha256 integrity requires an exact lowercase SHA-256")
         elif self.sha256 is not None:
             raise ValueError("provider_identity integrity must not claim a content SHA-256")
         if self.size_bytes is not None:
             _bounded_positive_int("size_bytes", self.size_bytes)
-        if not isinstance(self.capabilities, tuple) or not all(
-            isinstance(value, str) for value in self.capabilities
+        if type(self.capabilities) is not tuple or not all(
+            type(value) is str for value in self.capabilities
         ):
-            raise TypeError("capabilities must be a tuple of text labels")
+            raise TypeError("capabilities must be a tuple of exact text labels")
         capabilities = tuple(sorted(set(self.capabilities)))
         if any(_LABEL.fullmatch(value) is None for value in capabilities):
             raise ValueError("capabilities contains an invalid capability label")
         object.__setattr__(self, "capabilities", capabilities)
-        if not isinstance(self.resources, ModelArtifactResources):
-            raise TypeError("resources must be ModelArtifactResources")
+        if type(self.resources) is not ModelArtifactResources:
+            raise TypeError("resources must be exact ModelArtifactResources")
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -201,23 +204,25 @@ class ModelArtifactDescriptor:
 
     @classmethod
     def from_json(cls, body: str) -> ModelArtifactDescriptor:
+        if type(body) is not str:
+            raise ModelArtifactRegistryError("stored model artifact JSON is invalid")
         try:
             raw = json.loads(body)
         except (json.JSONDecodeError, TypeError) as exc:
             raise ModelArtifactRegistryError("stored model artifact JSON is invalid") from exc
-        if not isinstance(raw, dict) or set(raw) != _DESCRIPTOR_KEYS:
+        if type(raw) is not dict or set(raw) != _DESCRIPTOR_KEYS:
             raise ModelArtifactRegistryError("stored model artifact schema is invalid")
         resources = raw.get("resources")
         capabilities = raw.get("capabilities")
-        if not isinstance(resources, dict) or set(resources) != _RESOURCE_KEYS:
+        if type(resources) is not dict or set(resources) != _RESOURCE_KEYS:
             raise ModelArtifactRegistryError("stored model artifact resource schema is invalid")
-        if not isinstance(capabilities, list) or not all(
-            isinstance(value, str) for value in capabilities
+        if type(capabilities) is not list or not all(
+            type(value) is str for value in capabilities
         ):
             raise ModelArtifactRegistryError("stored model artifact capabilities are invalid")
         architectures = resources.get("cpu_architectures")
-        if not isinstance(architectures, list) or not all(
-            isinstance(value, str) for value in architectures
+        if type(architectures) is not list or not all(
+            type(value) is str for value in architectures
         ):
             raise ModelArtifactRegistryError(
                 "stored model artifact cpu architectures are invalid"
@@ -255,8 +260,8 @@ class ModelArtifactRegistry:
         self._audit = AuditLog(store)
 
     def register(self, descriptor: ModelArtifactDescriptor) -> str:
-        if not isinstance(descriptor, ModelArtifactDescriptor):
-            raise TypeError("descriptor must be ModelArtifactDescriptor")
+        if type(descriptor) is not ModelArtifactDescriptor:
+            raise TypeError("descriptor must be exact ModelArtifactDescriptor")
         body = descriptor.canonical_json()
         digest = descriptor.descriptor_digest
         try:
@@ -358,10 +363,10 @@ class ModelArtifactRegistry:
         digest: object,
     ) -> ModelArtifactDescriptor:
         if (
-            not isinstance(row_provider_id, str)
-            or not isinstance(row_model_id, str)
-            or not isinstance(body, str)
-            or not isinstance(digest, str)
+            type(row_provider_id) is not str
+            or type(row_model_id) is not str
+            or type(body) is not str
+            or type(digest) is not str
         ):
             raise ModelArtifactRegistryError("stored model artifact row is invalid")
         calculated = hashlib.sha256(body.encode()).hexdigest()
@@ -381,15 +386,15 @@ class ModelArtifactRegistry:
 def _bounded_positive_int(name: str, value: int | None) -> None:
     if value is None:
         return
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise TypeError(f"{name} must be an integer")
+    if type(value) is not int:
+        raise TypeError(f"{name} must be an exact integer")
     if value <= 0 or value > _MAX_MACHINE_INT:
         raise ValueError(f"{name} must be in the range 1..{_MAX_MACHINE_INT}")
 
 
 def _clean_text(name: str, value: str, *, label: bool = False) -> str:
-    if not isinstance(value, str):
-        raise TypeError(f"{name} must be text")
+    if type(value) is not str:
+        raise TypeError(f"{name} must be exact text")
     if not value or value != value.strip() or len(value) > _MAX_TEXT:
         raise ValueError(f"{name} is empty, unbounded, or ambiguously padded")
     if any(ord(char) < 32 or ord(char) == 127 for char in value):
