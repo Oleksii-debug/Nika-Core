@@ -124,6 +124,52 @@ def test_interrupted_enqueue_created_state_is_recovered_without_touching_other_t
     assert tasks.get(ordinary.task_id).state is TaskState.CREATED
 
 
+def test_listing_and_recovery_are_not_starved_by_500_newer_ordinary_tasks(
+    tmp_path,
+) -> None:
+    path, tasks, queue = _services(tmp_path)
+    older_ready = queue.enqueue(
+        workspace_id="study",
+        agent_id="reader",
+        material=_material(material_id="older-ready", title="Старіший матеріал"),
+    )
+    interrupted = queue.enqueue(
+        workspace_id="study",
+        agent_id="reader",
+        material=_material(material_id="recover-old", title="Перерване навчання"),
+    )
+    with tasks.store.connection() as conn:
+        conn.execute(
+            "UPDATE tasks SET state = ? WHERE task_id = ?",
+            (TaskState.CREATED.value, interrupted.task_id),
+        )
+    for _ in range(501):
+        tasks.create(
+            workspace_id="noise",
+            agent_id="ordinary-worker",
+            payload={"kind": "ordinary"},
+        )
+
+    fresh_store = SQLiteStore(path)
+    fresh_store.initialize()
+    fresh = StudyQueue(TaskQueue(fresh_store))
+
+    selected = fresh.list_recent(workspace_id="study", agent_id="reader", limit=2)
+    recovered = fresh.recover_created()
+
+    assert [item.task_id for item in selected] == [interrupted.task_id, older_ready.task_id]
+    assert [item.task_id for item in recovered] == [interrupted.task_id]
+    assert fresh.get(interrupted.task_id).state is TaskState.READY
+
+
+def test_material_requires_an_immutable_source_identity() -> None:
+    with pytest.raises(ValueError, match="immutable study identity"):
+        _material(source_version=None, content_sha256=None)
+
+    assert _material(content_sha256=None).source_version == "edition-1"
+    assert _material(source_version=None).content_sha256 == "a" * 64
+
+
 @pytest.mark.parametrize(
     "source_ref",
     [
