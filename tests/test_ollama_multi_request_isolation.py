@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 import pytest
+
 from nika_core.model_gateway.contracts import (
     ModelErrorCode,
     ModelGatewayError,
