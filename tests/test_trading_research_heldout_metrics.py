@@ -24,11 +24,15 @@ from nika_core.trading_research.metrics import (
     max_drawdown,
     returns_from_equity,
 )
+from trading_research_metric_evidence_helpers import (
+    sharpe_two_evidence,
+    total_return_evidence,
+    unavailable_sharpe_evidence,
+)
 
 BASE = datetime(2026, 1, 1, tzinfo=UTC)
 HASH = "a" * 64
 UNIVERSE = "b" * 64
-METRIC = "c" * 64
 QUALITY = "d" * 64
 ALGORITHM = "e" * 64
 CONFIG = "f" * 64
@@ -98,23 +102,32 @@ def score(
     value: str | None,
     *,
     partition: Partition = Partition.VALIDATION,
-    metric_fingerprint: str = METRIC,
+    metric_fingerprint: str | None = None,
     data_quality: ReplayDataQuality = CLEAN,
     universe: str = UNIVERSE,
     universe_cutoff_at: datetime | None = None,
     strategy_artifact: StrategyArtifactFingerprint | None = None,
+    metric_evidence=None,
 ) -> CandidateScore:
+    evidence = metric_evidence
+    if evidence is None:
+        evidence = (
+            unavailable_sharpe_evidence(BASE)
+            if value is None
+            else total_return_evidence(BASE, value)
+        )
     return CandidateScore(
         strategy_artifact or artifact(strategy_id),
         partition,
-        "sharpe",
-        metric_fingerprint,
-        None if value is None else Decimal(value),
+        evidence.metric_name,
+        metric_fingerprint or evidence.definition_sha256,
+        evidence.value,
         HASH,
         data_quality,
         universe,
         universe_cutoff_at or BASE + timedelta(days=9),
         BASE + timedelta(days=15),
+        metric_evidence=evidence,
     )
 
 
@@ -128,19 +141,28 @@ def result_for(
     universe: str | None = None,
     universe_cutoff_at: datetime | None = None,
     evaluated_at: datetime | None = None,
+    metric_evidence=None,
 ) -> PartitionResult:
     p = protocol()
+    evidence = metric_evidence
+    if evidence is None:
+        evidence = (
+            unavailable_sharpe_evidence(BASE)
+            if metric_value is None
+            else total_return_evidence(BASE, metric_value)
+        )
     return PartitionResult(
         strategy_artifact or selection.strategy_artifact,
         Partition.TEST,
         selection.metric_name,
         metric_fingerprint or selection.metric_fingerprint,
-        None if metric_value is None else Decimal(metric_value),
+        evidence.value,
         selection.dataset_semantic_hash,
         data_quality,
         universe or selection.universe_fingerprint,
         universe_cutoff_at or selection.universe_cutoff_at,
         evaluated_at or p.test.end_at,
+        metric_evidence=evidence,
     )
 
 
@@ -475,17 +497,19 @@ def test_refit_policy_seals_train_validation_refit_without_test_leakage() -> Non
         p.validation.end_at,
         p.validation.end_at + timedelta(hours=1),
     )
+    test_evidence = total_return_evidence(BASE, "0.5")
     result = PartitionResult(
         refit,
         Partition.TEST,
-        selected.metric_name,
-        selected.metric_fingerprint,
-        Decimal("0.5"),
+        test_evidence.metric_name,
+        test_evidence.definition_sha256,
+        test_evidence.value,
         selected.dataset_semantic_hash,
         CLEAN,
         selected.universe_fingerprint,
         selected.universe_cutoff_at,
         p.test.end_at,
+        metric_evidence=test_evidence,
     )
     assert bind_held_out_test(p, selected, result).require_promotion_metric() == Decimal("0.5")
 
@@ -507,14 +531,15 @@ def test_refit_policy_seals_train_validation_refit_without_test_leakage() -> Non
             PartitionResult(
                 future_refit,
                 Partition.TEST,
-                selected.metric_name,
-                selected.metric_fingerprint,
-                Decimal("0.5"),
+                test_evidence.metric_name,
+                test_evidence.definition_sha256,
+                test_evidence.value,
                 selected.dataset_semantic_hash,
                 CLEAN,
                 selected.universe_fingerprint,
                 selected.universe_cutoff_at,
                 p.test.end_at,
+                metric_evidence=test_evidence,
             ),
         )
 
@@ -560,39 +585,43 @@ def test_heldout_rejects_metric_quality_universe_and_future_evidence_changes() -
 
 def test_unavailable_heldout_metric_cannot_promote() -> None:
     p = protocol()
+    validation_evidence = sharpe_two_evidence(BASE)
     selected = select_validation_candidate(
         p,
-        (score("chosen", "1"),),
+        (score("chosen", "2", metric_evidence=validation_evidence),),
         selected_at=p.validation.end_at,
     )
+    test_evidence = unavailable_sharpe_evidence(BASE)
     assessment = bind_held_out_test(
         p,
         selected,
-        result_for(selected, metric_value=None),
+        result_for(selected, metric_value=None, metric_evidence=test_evidence),
     )
     with pytest.raises(TradingResearchError, match="promotion"):
         assessment.require_promotion_metric()
 
 
 def test_nonfinite_candidate_and_result_metrics_are_rejected() -> None:
-    with pytest.raises(TradingResearchError, match="finite Decimal"):
-        score("nan", "NaN")
+    with pytest.raises(TradingResearchError):
+        total_return_evidence(BASE, "NaN")
     p = protocol()
     selected = select_validation_candidate(
         p,
         (score("chosen", "1"),),
         selected_at=p.validation.end_at,
     )
-    with pytest.raises(TradingResearchError, match="finite Decimal"):
+    evidence = total_return_evidence(BASE, "0.5")
+    with pytest.raises(TradingResearchError, match="metric value"):
         PartitionResult(
             selected.strategy_artifact,
             Partition.TEST,
-            selected.metric_name,
-            selected.metric_fingerprint,
+            evidence.metric_name,
+            evidence.definition_sha256,
             Decimal("Infinity"),
             HASH,
             CLEAN,
             UNIVERSE,
             selected.universe_cutoff_at,
             p.test.end_at,
+            metric_evidence=evidence,
         )
