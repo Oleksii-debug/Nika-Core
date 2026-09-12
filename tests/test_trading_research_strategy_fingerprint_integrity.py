@@ -1,6 +1,5 @@
 import hashlib
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 
 import pytest
 
@@ -13,6 +12,7 @@ from nika_core.trading_research.heldout import (
     StrategyArtifactFingerprint,
     select_validation_candidate,
 )
+from trading_research_metric_evidence_helpers import total_return_evidence
 
 BASE = datetime(2026, 1, 1, tzinfo=UTC)
 DIGEST_A = "a" * 64
@@ -70,17 +70,19 @@ def protocol() -> HeldOutProtocol:
 
 
 def score(strategy_artifact: StrategyArtifactFingerprint) -> CandidateScore:
+    evidence = total_return_evidence(BASE, "1.25")
     return CandidateScore(
         strategy_artifact,
         Partition.VALIDATION,
-        "sharpe",
-        "e" * 64,
-        Decimal(5) / Decimal(4),
+        evidence.metric_name,
+        evidence.definition_sha256,
+        evidence.value,
         "f" * 64,
         ReplayDataQuality(0, 0, 0, "1" * 64),
         "2" * 64,
         BASE + timedelta(days=9),
         BASE + timedelta(days=15),
+        metric_evidence=evidence,
     )
 
 
