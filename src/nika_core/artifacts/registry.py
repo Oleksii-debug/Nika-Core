@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import mimetypes
 import os
+import stat
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -60,25 +61,90 @@ def _read_clock(clock: Clock) -> datetime:
     return value.astimezone(UTC)
 
 
-def _hash_open_file(path: Path) -> tuple[str, int]:
-    digest = hashlib.sha256()
+def _is_reparse_point(snapshot: os.stat_result) -> bool:
+    attributes = int(getattr(snapshot, "st_file_attributes", 0))
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    return bool(attributes & reparse_flag)
+
+
+def _file_identity(snapshot: os.stat_result) -> tuple[int, int]:
+    identity = (int(snapshot.st_dev), int(snapshot.st_ino))
+    if identity[1] == 0:
+        raise ArtifactRegistryError("artifact file identity is unavailable")
+    return identity
+
+
+def _authorized_path_snapshot(
+    path: Path,
+    allowed_roots: tuple[Path, ...],
+) -> os.stat_result:
     try:
-        with path.open("rb") as handle:
-            before = os.fstat(handle.fileno())
+        resolved = path.resolve(strict=True)
+        snapshot = path.lstat()
+    except OSError as exc:
+        raise ArtifactRegistryError("artifact file could not be resolved safely") from exc
+
+    if resolved != path:
+        raise ArtifactRegistryError("artifact file path changed through a link or substitution")
+    if not any(resolved.is_relative_to(root) for root in allowed_roots):
+        raise ArtifactRegistryError("artifact file escapes configured local file roots")
+    if stat.S_ISLNK(snapshot.st_mode) or _is_reparse_point(snapshot):
+        raise ArtifactRegistryError("artifact file path is a link or reparse point")
+    if not stat.S_ISREG(snapshot.st_mode):
+        raise ArtifactRegistryError("artifact file is not a regular file")
+    return snapshot
+
+
+def _hash_open_file(path: Path, allowed_roots: tuple[Path, ...]) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    descriptor: int | None = None
+    try:
+        authorized = _authorized_path_snapshot(path, allowed_roots)
+        authorized_identity = _file_identity(authorized)
+
+        flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+        flags |= int(getattr(os, "O_NOFOLLOW", 0))
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise ArtifactRegistryError("artifact opened object is not a regular file")
+        if _file_identity(opened) != authorized_identity:
+            raise ArtifactRegistryError(
+                "artifact file identity changed between authorization and open"
+            )
+
+        current = _authorized_path_snapshot(path, allowed_roots)
+        if _file_identity(current) != authorized_identity:
+            raise ArtifactRegistryError("artifact file path changed before hashing")
+
+        with os.fdopen(descriptor, "rb", closefd=True) as handle:
+            descriptor = None
             total = 0
             while chunk := handle.read(1024 * 1024):
                 total += len(chunk)
                 digest.update(chunk)
             after = os.fstat(handle.fileno())
+
+        before_mtime_ns = getattr(opened, "st_mtime_ns", None)
+        after_mtime_ns = getattr(after, "st_mtime_ns", None)
+        if _file_identity(after) != authorized_identity:
+            raise ArtifactRegistryError("artifact file identity changed while it was being hashed")
+        if opened.st_size != after.st_size or before_mtime_ns != after_mtime_ns:
+            raise ArtifactRegistryError("artifact file changed while it was being hashed")
+        if total != after.st_size:
+            raise ArtifactRegistryError("artifact file size changed while it was being hashed")
+
+        final_path = _authorized_path_snapshot(path, allowed_roots)
+        if _file_identity(final_path) != authorized_identity:
+            raise ArtifactRegistryError("artifact file path changed after hashing")
+    except ArtifactRegistryError:
+        raise
     except OSError as exc:
         raise ArtifactRegistryError("artifact file could not be read") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
-    before_mtime_ns = getattr(before, "st_mtime_ns", None)
-    after_mtime_ns = getattr(after, "st_mtime_ns", None)
-    if before.st_size != after.st_size or before_mtime_ns != after_mtime_ns:
-        raise ArtifactRegistryError("artifact file changed while it was being hashed")
-    if total != after.st_size:
-        raise ArtifactRegistryError("artifact file size changed while it was being hashed")
     return digest.hexdigest(), total
 
 
@@ -138,7 +204,7 @@ class ArtifactRegistry:
         if not any(resolved.is_relative_to(root) for root in self._local_file_roots):
             raise ArtifactRegistryError("artifact source escapes configured local file roots")
 
-        sha256, size_bytes = _hash_open_file(resolved)
+        sha256, size_bytes = _hash_open_file(resolved, self._local_file_roots)
         inferred_media_type = mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
         record = self._build_record(
             workspace_id=workspace_id,
@@ -264,7 +330,7 @@ class ArtifactRegistry:
             return self._repository.put_verification(verification)
 
         try:
-            actual_sha256, actual_size = _hash_open_file(resolved)
+            actual_sha256, actual_size = _hash_open_file(resolved, self._local_file_roots)
         except ArtifactRegistryError:
             verification = self._build_verification(
                 record=record,

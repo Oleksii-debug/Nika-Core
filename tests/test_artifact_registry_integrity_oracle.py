@@ -80,7 +80,7 @@ def test_migration_history_rejects_non_integer_storage_type(tmp_path: Path) -> N
             (1.5,),
         )
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(TypeError):
         initialize_artifact_registry_schema(store)
 
 

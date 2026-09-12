@@ -68,7 +68,7 @@ _VERIFICATION_COLUMNS = {
 
 def _stored_schema_version(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
-        raise RuntimeError("artifact registry schema version must be stored as SQLite INTEGER")
+        raise TypeError("artifact registry schema version must be stored as SQLite INTEGER")
     return value
 
 
