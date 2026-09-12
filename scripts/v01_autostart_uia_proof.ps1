@@ -27,7 +27,32 @@ try {
     & $pwsh -NoProfile -File $proof -ExePath $ExePath -WindowTitle $WindowTitle -AutostartPhase Observe
     if ($LASTEXITCODE -ne 0) { throw 'Packaged autostart persistence after process restart failed.' }
     & $pwsh -NoProfile -File $proof -ExePath $ExePath -WindowTitle $WindowTitle -AutostartPhase Disable
-    if ($LASTEXITCODE -ne 0) { throw 'Packaged autostart disable phase failed.' }
+    if ($LASTEXITCODE -ne 0) {
+        # A hosted WebView2 provider can occasionally drop the keyboard activation
+        # while leaving focus on the exact Save button. Replaying an unknown write is
+        # forbidden. Retry the whole fresh-process phase at most once only when the
+        # OS proves that the failed attempt made no registration mutation at all.
+        $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($keyPath)
+        try {
+            $afterFailedDisable = if ($null -eq $key) {
+                $null
+            } else {
+                $key.GetValue('NikaCore', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            }
+        } finally { if ($null -ne $key) { $key.Dispose() } }
+
+        if ($afterFailedDisable -ceq $expectedCommand) {
+            Write-Host 'Autostart disable attempt made no OS registration mutation; retrying once in a fresh process.'
+            & $pwsh -NoProfile -File $proof -ExePath $ExePath -WindowTitle $WindowTitle -AutostartPhase Disable
+            if ($LASTEXITCODE -ne 0) {
+                throw 'Packaged autostart disable phase failed after the single zero-mutation retry.'
+            }
+        } elseif ($null -eq $afterFailedDisable) {
+            throw 'Packaged autostart disable phase failed after changing OS registration; refusing to replay the mutation.'
+        } else {
+            throw 'Packaged autostart disable phase failed with unexpected OS registration; refusing to replay the mutation.'
+        }
+    }
     Write-Host 'Autostart UI -> registration -> fresh process -> persisted UI -> disable verified. Windows login execution and human NVDA remain unverified.'
 } finally {
     # Remove only our exact test-owned value if a later phase failed. Preserve any
