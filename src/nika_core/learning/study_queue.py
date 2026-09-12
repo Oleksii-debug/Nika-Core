@@ -63,6 +63,10 @@ class StudyMaterial:
         _require_text(self.material_id, "material_id", maximum=256)
         _require_text(self.title, "title", maximum=512)
         _require_text(self.source_ref, "source_ref", maximum=4096)
+        if self.source_version is None and self.content_sha256 is None:
+            raise ValueError(
+                "source_version or content_sha256 is required for immutable study identity"
+            )
         if self.source_version is not None:
             _require_text(self.source_version, "source_version", maximum=256)
         if self.learning_goal is not None:
@@ -120,39 +124,38 @@ class StudyQueue:
         agent_id: str | None = None,
         limit: int = 50,
     ) -> tuple[StudyTask, ...]:
-        if limit < 1 or limit > 100:
-            raise ValueError("limit must be between 1 and 100")
+        _validate_limit(limit)
         if workspace_id is not None:
             _require_text(workspace_id, "workspace_id", maximum=256)
         if agent_id is not None:
             _require_text(agent_id, "agent_id", maximum=256)
 
-        scan_limit = min(500, max(limit * 5, limit))
-        selected: list[StudyTask] = []
-        for record in self._tasks.list_recent(limit=scan_limit):
-            if record.payload.get("nika_kind") != _STUDY_PAYLOAD_KIND:
-                continue
-            if workspace_id is not None and record.workspace_id != workspace_id:
-                continue
-            if agent_id is not None and record.agent_id != agent_id:
-                continue
-            selected.append(_study_task_from_record(record))
-            if len(selected) >= limit:
-                break
-        return tuple(selected)
+        task_ids = self._matching_task_ids(
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            state=None,
+            limit=limit,
+        )
+        return tuple(self.get(task_id) for task_id in task_ids)
 
     def recover_created(self, *, limit: int = 100) -> tuple[StudyTask, ...]:
         """Move interrupted enqueue operations from CREATED to READY.
 
-        Task creation and READY transition are intentionally ordinary canonical
-        TaskQueue operations. If a process dies between them, this bounded
-        recovery pass resumes only study tasks and does not touch other work.
+        Recovery scans the canonical TaskQueue SQLite authority for study tasks
+        in CREATED state instead of sampling a fixed global recent-task window.
+        Thus unrelated task volume cannot permanently hide interrupted study work.
         """
+        _validate_limit(limit)
+        task_ids = self._matching_task_ids(
+            workspace_id=None,
+            agent_id=None,
+            state=task_state.TaskState.CREATED,
+            limit=limit,
+        )
         recovered: list[StudyTask] = []
-        for task in self.list_recent(limit=limit):
-            if task.state is task_state.TaskState.CREATED:
-                self._tasks.transition(task.task_id, task_state.TaskState.READY)
-                recovered.append(self.get(task.task_id))
+        for task_id in task_ids:
+            self._tasks.transition(task_id, task_state.TaskState.READY)
+            recovered.append(self.get(task_id))
         return tuple(recovered)
 
     def start(self, task_id: str) -> StudyTask:
@@ -187,6 +190,48 @@ class StudyQueue:
         self.get(task_id)
         self._tasks.transition(task_id, target)
         return self.get(task_id)
+
+    def _matching_task_ids(
+        self,
+        *,
+        workspace_id: str | None,
+        agent_id: str | None,
+        state: task_state.TaskState | None,
+        limit: int,
+    ) -> tuple[str, ...]:
+        clauses: list[str] = []
+        parameters: list[str] = []
+        if workspace_id is not None:
+            clauses.append("workspace_id = ?")
+            parameters.append(workspace_id)
+        if agent_id is not None:
+            clauses.append("agent_id = ?")
+            parameters.append(agent_id)
+        if state is not None:
+            clauses.append("state = ?")
+            parameters.append(state.value)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        query = (
+            "SELECT task_id, payload_json FROM tasks"
+            f"{where} ORDER BY updated_at DESC, created_at DESC, task_id DESC"
+        )
+
+        selected: list[str] = []
+        with self._tasks.store.connection() as conn:
+            rows = conn.execute(query, tuple(parameters))
+            for row in rows:
+                try:
+                    payload = json.loads(row["payload_json"])
+                except (TypeError, json.JSONDecodeError) as exc:
+                    raise ValueError("invalid canonical task payload") from exc
+                if not isinstance(payload, dict):
+                    raise ValueError("invalid canonical task payload")
+                if payload.get("nika_kind") != _STUDY_PAYLOAD_KIND:
+                    continue
+                selected.append(row["task_id"])
+                if len(selected) >= limit:
+                    break
+        return tuple(selected)
 
 
 def _semantic_payload(material: StudyMaterial) -> dict[str, object]:
@@ -275,6 +320,11 @@ def _optional_payload_text(payload: dict[str, object], key: str) -> str | None:
     if type(value) is not str:
         raise TypeError(f"{key} must be text")
     return value
+
+
+def _validate_limit(limit: int) -> None:
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("limit must be between 1 and 100")
 
 
 def _require_text(value: str, name: str, *, maximum: int) -> None:
