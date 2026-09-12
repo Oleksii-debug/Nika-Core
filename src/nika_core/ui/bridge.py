@@ -70,7 +70,7 @@ class UIActionBridge:
                 status="rejected",
                 message=str(exc),
             ).model_dump()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - final pywebview transport boundary
             # This is the final pywebview boundary. Keep unexpected backend failures inside
             # a serializable result without swallowing process-shutdown BaseException signals.
             logger.error(
@@ -106,7 +106,7 @@ class UIActionBridge:
             state = dict(self._state_provider())
         except (KeyError, TypeError, ValueError) as exc:
             return {"ok": False, "message": str(exc)}
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - final pywebview transport boundary
             logger.error(
                 "Desktop state provider failed: exception_type=%s",
                 type(exc).__name__,

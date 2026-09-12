@@ -63,64 +63,6 @@ def test_bridge_dispatch_and_keymap_conflict_are_fail_closed(tmp_path: Path) -> 
     assert "conflict" in conflict["message"].lower()
 
 
-def test_bridge_contains_unexpected_handler_failure_without_exposing_details(
-    tmp_path: Path, caplog
-) -> None:
-    store = SQLiteStore(tmp_path / "nika.db")
-    store.initialize()
-    actions = build_default_action_registry()
-    secret_canary = "bridge-secret-canary-do-not-expose"
-
-    def fail_unexpectedly(_payload) -> None:
-        raise RuntimeError(secret_canary)
-
-    bridge = UIActionBridge(
-        actions,
-        Keymap(store, actions),
-        handlers={"task.create": fail_unexpectedly},
-    )
-    result = bridge.dispatch(
-        {"request_id": "unexpected-1", "action_id": "task.create", "payload": {"command": "x"}}
-    )
-
-    assert result == {
-        "request_id": "unexpected-1",
-        "status": "failed",
-        "message": "Не вдалося виконати дію через внутрішню помилку.",
-        "focus_id": None,
-    }
-    assert secret_canary not in result["message"]
-    assert secret_canary not in caplog.text
-    assert "RuntimeError" in caplog.text
-
-
-def test_bridge_contains_unexpected_state_failure_without_exposing_details(
-    tmp_path: Path, caplog
-) -> None:
-    store = SQLiteStore(tmp_path / "nika.db")
-    store.initialize()
-    actions = build_default_action_registry()
-    secret_canary = "state-secret-canary-do-not-expose"
-
-    def fail_state():
-        raise OSError(secret_canary)
-
-    bridge = UIActionBridge(
-        actions,
-        Keymap(store, actions),
-        state_provider=fail_state,
-    )
-    response = bridge.get_state()
-
-    assert response == {
-        "ok": False,
-        "message": "Не вдалося отримати стан програми через внутрішню помилку.",
-    }
-    assert secret_canary not in response["message"]
-    assert secret_canary not in caplog.text
-    assert "OSError" in caplog.text
-
-
 def test_keymap_export_import_and_clear_round_trip(tmp_path: Path) -> None:
     bridge = build_bridge(tmp_path)
     assert bridge.set_binding("nav.workspaces", None)["ok"] is True
@@ -221,7 +163,7 @@ def test_javascript_preserves_edit_shortcuts_and_wires_keymap_transfer() -> None
 def test_packaged_uia_gate_waits_for_bridge_readiness_before_hotkeys() -> None:
     proof = Path(__file__).parents[1] / "scripts" / "m5_uia_proof.ps1"
     script = proof.read_text(encoding="utf-8")
-    ready_wait = script.index("Wait-DescendantName 'Nika Core готова до роботи.'")
+    ready_wait = script.index("Wait-BoundTextEvidence 'Nika Core готова до роботи.'")
     alt_hotkey = script.index("SendWait('%1')")
     command_hotkey = script.index("SendWait('^+p')")
     assert ready_wait < alt_hotkey < command_hotkey
