@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,6 +15,8 @@ _SCHEMA_VERSION = 1
 _MAX_WORKSPACE_BYTES = 4096
 _MAX_SIGNED_64 = (1 << 63) - 1
 _HEX_DIGITS = frozenset("0123456789abcdef")
+_READ_CHUNK_BYTES = 1024 * 1024
+_PLATFORM_PATH_TYPE = type(Path())
 
 
 class TrainingMaterialResolutionError(RuntimeError):
@@ -56,6 +61,124 @@ def _workspace_fingerprint(workspace_id: str) -> str:
     if len(encoded) > _MAX_WORKSPACE_BYTES:
         raise ValueError("workspace_id exceeds the configured byte limit")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _safe_lstat(path: Path) -> os.stat_result:
+    try:
+        return os.lstat(path)
+    except OSError as exc:
+        raise TrainingMaterialResolutionError("resolved training material is not accessible") from exc
+
+
+def _require_regular_material(value: os.stat_result) -> None:
+    if stat.S_ISLNK(value.st_mode):
+        raise TrainingMaterialResolutionError("resolved training material must not be a symbolic link")
+    if not stat.S_ISREG(value.st_mode):
+        raise TrainingMaterialResolutionError("resolved training material must be a regular file")
+
+
+def _verify_resolved_material(material: ResolvedTrainingMaterial) -> None:
+    """Bind one transient path to the exact evidence bytes at the point of use."""
+    path = material.path
+    evidence = material.evidence
+    before = _safe_lstat(path)
+    _require_regular_material(before)
+    before_identity = _stat_identity(before)
+    if before.st_size != evidence.byte_count:
+        raise TrainingMaterialResolutionError(
+            "resolved training material size does not match frozen evidence"
+        )
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        file_descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise TrainingMaterialResolutionError(
+            "resolved training material could not be opened safely"
+        ) from exc
+
+    try:
+        try:
+            opened = os.fstat(file_descriptor)
+        except OSError as exc:
+            raise TrainingMaterialResolutionError(
+                "resolved training material metadata could not be read"
+            ) from exc
+        _require_regular_material(opened)
+        opened_identity = _stat_identity(opened)
+        if opened_identity != before_identity:
+            raise TrainingMaterialResolutionError(
+                "resolved training material changed before verification"
+            )
+
+        digest = hashlib.sha256()
+        total_bytes = 0
+        while True:
+            remaining_with_sentinel = evidence.byte_count + 1 - total_bytes
+            if remaining_with_sentinel <= 0:
+                raise TrainingMaterialResolutionError(
+                    "resolved training material grew during verification"
+                )
+            try:
+                chunk = os.read(
+                    file_descriptor,
+                    min(_READ_CHUNK_BYTES, remaining_with_sentinel),
+                )
+            except OSError as exc:
+                raise TrainingMaterialResolutionError(
+                    "resolved training material could not be read"
+                ) from exc
+            if not chunk:
+                break
+            total_bytes += len(chunk)
+            if total_bytes > evidence.byte_count:
+                raise TrainingMaterialResolutionError(
+                    "resolved training material grew during verification"
+                )
+            digest.update(chunk)
+
+        if total_bytes != evidence.byte_count:
+            raise TrainingMaterialResolutionError(
+                "resolved training material size changed during verification"
+            )
+        try:
+            after_open = os.fstat(file_descriptor)
+        except OSError as exc:
+            raise TrainingMaterialResolutionError(
+                "resolved training material metadata could not be re-read"
+            ) from exc
+        if _stat_identity(after_open) != opened_identity:
+            raise TrainingMaterialResolutionError(
+                "resolved training material changed during verification"
+            )
+        actual_sha256 = digest.hexdigest()
+    finally:
+        try:
+            os.close(file_descriptor)
+        except OSError:
+            pass
+
+    after_path = _safe_lstat(path)
+    _require_regular_material(after_path)
+    if _stat_identity(after_path) != before_identity:
+        raise TrainingMaterialResolutionError(
+            "resolved training material path changed during verification"
+        )
+    if not hmac.compare_digest(actual_sha256, evidence.artifact_sha256):
+        raise TrainingMaterialResolutionError(
+            "resolved training material digest does not match frozen evidence"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,8 +337,8 @@ class ResolvedTrainingMaterial:
     def __post_init__(self) -> None:
         if type(self.evidence) is not TrainingMaterialEvidence:
             raise TypeError("evidence must be exact TrainingMaterialEvidence")
-        if type(self.path) is not Path or not self.path.is_absolute():
-            raise ValueError("resolved training path must be an absolute Path")
+        if type(self.path) is not _PLATFORM_PATH_TYPE or not self.path.is_absolute():
+            raise ValueError("resolved training path must be an absolute canonical platform Path")
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,10 +357,16 @@ class ResolvedTrainingPackage:
             raise TypeError("materials must contain exact ResolvedTrainingMaterial values")
         if tuple(material.evidence for material in self.materials) != self.evidence.materials:
             raise ValueError("resolved paths do not match durable material evidence")
+        self.reverify()
 
     @property
     def training_material_sha256(self) -> str:
         return self.evidence.training_material_sha256
+
+    def reverify(self) -> None:
+        """Re-bind every transient path to frozen byte evidence before a trainer effect."""
+        for material in self.materials:
+            _verify_resolved_material(material)
 
 
 def resolve_training_materials(
