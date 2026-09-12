@@ -10,7 +10,7 @@ _AUTH_OPAQUE = "opaque-authorization-secret-canary"
 _TOKEN_OPAQUE = "opaque-token-secret-canary"
 _NESTED_OPAQUE = "opaque-nested-secret-canary"
 _DYNAMIC_BEARER = "dynamic-key-secret-canary"
-_BENIGN_DYNAMIC_VALUE = "upstream"
+_DYNAMIC_ASSOCIATED_OPAQUE = "opaque-dynamic-associated-secret-canary"
 _BENIGN_OPAQUE_VALUE = "opaque-benign-value"
 
 
@@ -42,7 +42,7 @@ def test_structured_canonical_secret_fields_fail_closed_across_restart(
         "authorization": {
             "credential": _AUTH_OPAQUE,
             "metadata": {"scheme": "Bearer", "attempt": 3},
-            dynamic_authorization_key: _BENIGN_DYNAMIC_VALUE,
+            dynamic_authorization_key: _DYNAMIC_ASSOCIATED_OPAQUE,
         },
         "token": [
             _TOKEN_OPAQUE,
@@ -65,6 +65,7 @@ def test_structured_canonical_secret_fields_fail_closed_across_restart(
         _TOKEN_OPAQUE,
         _NESTED_OPAQUE,
         _DYNAMIC_BEARER,
+        _DYNAMIC_ASSOCIATED_OPAQUE,
     ):
         assert secret not in raw_before_restart
 
@@ -72,7 +73,7 @@ def test_structured_canonical_secret_fields_fail_closed_across_restart(
     assert durable["authorization"] == {
         "credential": "[REDACTED]",
         "metadata": {"scheme": "[REDACTED]", "attempt": "[REDACTED]"},
-        "Authorization: [REDACTED]": _BENIGN_DYNAMIC_VALUE,
+        "Authorization: [REDACTED]": "[REDACTED]",
     }
     assert durable["token"] == [
         "[REDACTED]",
