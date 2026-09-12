@@ -131,7 +131,9 @@ def test_rms_uses_signed_pcm16_full_scale() -> None:
         {"sample_rate_hz": True},
         {"sample_rate_hz": 7_999},
         {"start_rms": float("nan")},
+        {"start_rms": 0.0},
         {"start_rms": 1.1},
+        {"stop_rms": 0.0},
         {"stop_rms": 0.2, "start_rms": 0.1},
         {"attack_frames": 0},
         {"release_frames": False},
@@ -143,6 +145,7 @@ def test_invalid_configuration_fails_closed(kwargs) -> None:
         VoiceActivityConfig(**kwargs)
 
 
-def test_config_object_type_is_required() -> None:
+@pytest.mark.parametrize("config", [object(), 0, False, "config"])
+def test_config_object_type_is_required(config) -> None:
     with pytest.raises(TypeError, match="VoiceActivityConfig"):
-        VoiceActivityDetector(config=object())
+        VoiceActivityDetector(config=config)
