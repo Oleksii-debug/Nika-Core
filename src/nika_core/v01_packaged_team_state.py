@@ -5,6 +5,11 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.intelligence.provenance import (
+    IntelligenceProvenance,
+    IntelligenceResultStatus,
+)
+from nika_core.model_gateway.gateway import model_identity_fingerprint
 from nika_core.multi_agent.checker import V01CheckerAgent
 from nika_core.multi_agent.contracts import AgentHandoff, HandoffKind
 from nika_core.multi_agent.research_results import SourceInspectionAssignment
@@ -14,6 +19,7 @@ _UNAVAILABLE_MESSAGE = "Стан командного завдання недо�
 _ALLOWED_STAGES = frozenset({"worker", "checker", "source_worker"})
 _TERMINAL_TEAM_STATES = frozenset({"completed", "failed", "cancelled"})
 _TERMINAL_MEMBER_STATES = frozenset({"completed", "failed", "cancelled"})
+_MAX_MODEL_ANALYSIS_CHARS = 2000
 
 
 class V01PackagedTeamStateProvider:
@@ -355,6 +361,67 @@ class V01PackagedTeamStateProvider:
         return events
 
     @staticmethod
+    def _valid_persisted_checker_payload(
+        persisted: object,
+        *,
+        expected: Mapping[str, Any],
+        shared_task_id: str,
+        team_id: str,
+        root_id: str,
+    ) -> bool:
+        if not isinstance(persisted, Mapping):
+            return False
+        keys = set(persisted)
+        if keys == {"checker_summary"}:
+            return persisted.get("checker_summary") == expected
+        if keys != {
+            "checker_summary",
+            "model_analysis",
+            "model_analysis_provenance",
+        }:
+            return False
+        if persisted.get("checker_summary") != expected:
+            return False
+
+        analysis = persisted.get("model_analysis")
+        raw_provenance = persisted.get("model_analysis_provenance")
+        if not isinstance(analysis, Mapping) or not isinstance(raw_provenance, Mapping):
+            return False
+        if set(analysis) != {"text", "provider_id", "provider_kind", "model"}:
+            return False
+
+        text = analysis.get("text")
+        provider_id = analysis.get("provider_id")
+        provider_kind = analysis.get("provider_kind")
+        model = analysis.get("model")
+        if (
+            not isinstance(text, str)
+            or not text
+            or text != text.strip()
+            or "\x00" in text
+            or len(text) > _MAX_MODEL_ANALYSIS_CHARS
+            or not isinstance(provider_id, str)
+            or not isinstance(provider_kind, str)
+            or not isinstance(model, str)
+        ):
+            return False
+
+        try:
+            provenance = IntelligenceProvenance.from_payload(raw_provenance)
+        except (KeyError, TypeError, ValueError):
+            return False
+        if provenance.status is not IntelligenceResultStatus.SUCCEEDED:
+            return False
+        if provenance.provider_id != provider_id:
+            return False
+        if provenance.provider_kind.value != provider_kind:
+            return False
+        if provenance.model_fingerprint != model_identity_fingerprint(model):
+            return False
+        expected_correlation = f"{shared_task_id}:v01:{team_id}:{root_id}"
+        return provenance.request_correlation_id == expected_correlation
+
+    @staticmethod
     def _comparison_view(
         conn: Any,
         *,
@@ -466,7 +533,13 @@ class V01PackagedTeamStateProvider:
             if checker_row["outcome"] != "completed" or checker_row["error"] is not None:
                 return invalid
             persisted = json.loads(checker_row["payload_json"])
-            if persisted != {"checker_summary": expected}:
+            if not V01PackagedTeamStateProvider._valid_persisted_checker_payload(
+                persisted,
+                expected=expected,
+                shared_task_id=shared_task_id,
+                team_id=team_id,
+                root_id=root_id,
+            ):
                 return invalid
 
             sources = expected.get("sources")
