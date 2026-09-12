@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from enum import StrEnum
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -26,22 +27,20 @@ class ArtifactVerificationState(StrEnum):
 _FORBIDDEN_SECRET_KEYS = {
     "api_key",
     "apikey",
+    "api_token",
     "authorization",
+    "client_secret",
     "cookie",
     "password",
     "secret",
     "token",
+    "x_api_key",
 }
-_FORBIDDEN_LOCATOR_MARKERS = (
-    "api_key=",
-    "apikey=",
-    "authorization=",
-    "authorization:",
-    "bearer ",
-    "cookie=",
-    "password=",
-    "secret=",
-    "token=",
+_CREDENTIAL_ASSIGNMENT = re.compile(
+    r"(?:^|[?&;,\s])"
+    r"(?:api[_-]?key|api[_-]?token|authorization|client[_-]?secret|cookie|"
+    r"password|secret|token|x[_-]?api[_-]?key)\s*[:=]",
+    re.IGNORECASE,
 )
 
 
@@ -51,9 +50,18 @@ def _validate_utc(value: datetime, field_name: str) -> datetime:
     return value.astimezone(UTC)
 
 
+def _normalize_secret_key(value: str) -> str:
+    decoded = unquote(value).strip().lower()
+    return re.sub(r"[^a-z0-9]+", "_", decoded).strip("_")
+
+
+def _contains_credential_assignment(value: str) -> bool:
+    decoded = unquote(value)
+    return bool(_CREDENTIAL_ASSIGNMENT.search(decoded)) or "bearer " in decoded.lower()
+
+
 def _reject_secret_locator(value: str) -> str:
-    lowered = value.lower()
-    if any(marker in lowered for marker in _FORBIDDEN_LOCATOR_MARKERS):
+    if _contains_credential_assignment(value):
         raise ValueError("artifact locator must not contain credential material")
     parsed = urlsplit(value)
     if parsed.scheme and (parsed.username is not None or parsed.password is not None):
@@ -93,15 +101,14 @@ class ArtifactRecord(FrozenModel):
     @classmethod
     def reject_secret_metadata(cls, value: dict[str, str]) -> dict[str, str]:
         for key, item in value.items():
-            normalized = key.strip().lower().replace("-", "_")
+            normalized = _normalize_secret_key(key)
             if normalized in _FORBIDDEN_SECRET_KEYS:
                 raise ValueError(f"artifact metadata key is reserved for secret material: {key}")
             if len(key) > 120:
                 raise ValueError("artifact metadata keys must be at most 120 characters")
             if len(item) > 4096:
                 raise ValueError("artifact metadata values must be at most 4096 characters")
-            lowered_item = item.lower()
-            if any(marker in lowered_item for marker in _FORBIDDEN_LOCATOR_MARKERS):
+            if _contains_credential_assignment(item):
                 raise ValueError("artifact metadata values must not contain credential material")
         return value
 
