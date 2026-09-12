@@ -1,15 +1,26 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.task_state import TaskState
-from nika_core.runtime.contracts import RuntimeOutcome, RuntimeResult
+from nika_core.runtime.contracts import (
+    RuntimeOutcome,
+    RuntimeResult,
+    RuntimeResumeProbe,
+    RuntimeResumeProbePort,
+    RuntimeResumeProbeStatus,
+)
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
 from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
+from nika_core.runtime.recovery_claims import (
+    RECOVERY_RESUME_OPERATION_TYPE,
+    recovery_claim_is_reclaimable,
+)
 from nika_core.runtime.registry import RuntimeRegistry
+from nika_core.runtime.retry import usable_resume_token
 from nika_core.runtime.session_store import RuntimeSessionRecord, RuntimeSessionStore
 
 
@@ -20,6 +31,7 @@ class RecoveryDisposition(StrEnum):
     WAITING_APPROVAL = "waiting_approval"
     MANUAL_RESUME = "manual_resume"
     RECONCILE_SIDE_EFFECTS = "reconcile_side_effects"
+    CHECKPOINT_UNAVAILABLE = "checkpoint_unavailable"
     MISSING_RUNTIME = "missing_runtime"
     INCONSISTENT_STATE = "inconsistent_state"
 
@@ -52,8 +64,13 @@ class RuntimeRecoveryService:
 
     Startup recovery is intentionally conservative. Only an ACTIVE session left in RUNNING
     state by abrupt process loss is eligible for automatic continuation, and only when no
-    unresolved external side-effect reservation exists. Approval waits, deliberate pauses,
-    failed runs, missing runtimes and inconsistent state are surfaced for explicit handling.
+    unresolved external side-effect reservation exists. RETRYING is fail-closed because the
+    canonical runtime session does not durably encode retry number or not-before authority;
+    replaying it after restart could reset bounded backoff or retry budget. A recovery claim
+    abandoned before its runtime effect starts is reclaimable only after its durable activation
+    lease expires. Once effect_started is persisted, restart remains fail-closed until
+    reconciliation. Before any execution, the registered runtime must also prove that the
+    persisted resume cursor resolves to a readable durable checkpoint.
     """
 
     def __init__(
@@ -78,8 +95,32 @@ class RuntimeRecoveryService:
         self._idempotency = idempotency or IdempotencyLedger(queue.store)
 
     def inspect(self) -> tuple[RecoveryCandidate, ...]:
-        """Return deterministic recovery decisions for every persisted runtime session."""
-        candidates = tuple(self._classify(record) for record in self._sessions.list_resumable())
+        """Return deterministic recovery decisions for every persisted runtime session.
+
+        ACTIVE/RUNNING candidates are provisional until ``resume_safe_crash_sessions`` performs
+        the runtime-specific async checkpoint preflight. ACTIVE/RETRYING candidates remain
+        fail-closed until canonical durable retry attempt + not-before authority exists.
+        The sync inventory deliberately never touches third-party checkpoint objects.
+
+        Generic external-effect reservations left PENDING across process recreation have unknown
+        outcomes and are promoted to UNCERTAIN. Canonical runtime recovery claims are excluded:
+        their CLAIMED/EFFECT_STARTED metadata and lease determine whether recovery is reclaimable
+        or must remain fail-closed.
+        """
+        records = self._sessions.list_resumable()
+        promoted_operation_keys: list[str] = []
+        for task_id in dict.fromkeys(record.task_id for record in records):
+            pending = self._idempotency.list_for_task(
+                task_id,
+                status=IdempotencyStatus.PENDING,
+            )
+            for operation in pending:
+                if operation.operation_type == RECOVERY_RESUME_OPERATION_TYPE:
+                    continue
+                self._idempotency.mark_uncertain(operation.operation_key)
+                promoted_operation_keys.append(operation.operation_key)
+
+        candidates = tuple(self._classify(record) for record in records)
         self._audit.append(
             event_type="runtime.recovery_inventory",
             entity_type="runtime_recovery",
@@ -98,11 +139,13 @@ class RuntimeRecoveryService:
                     item.disposition
                     in {
                         RecoveryDisposition.RECONCILE_SIDE_EFFECTS,
+                        RecoveryDisposition.CHECKPOINT_UNAVAILABLE,
                         RecoveryDisposition.MISSING_RUNTIME,
                         RecoveryDisposition.INCONSISTENT_STATE,
                     }
                     for item in candidates
                 ),
+                "pending_promoted_count": len(promoted_operation_keys),
             },
         )
         return candidates
@@ -114,7 +157,7 @@ class RuntimeRecoveryService:
         max_steps: int = 64,
         timeout_seconds: float | None = None,
     ) -> tuple[RecoveryExecution, ...]:
-        """Resume only crash-left ACTIVE/RUNNING sessions proven safe for automatic replay."""
+        """Resume only crash-left ACTIVE/RUNNING sessions with readable durable checkpoints."""
         if max_count <= 0:
             raise ValueError("max_count must be positive")
         eligible = [
@@ -126,6 +169,26 @@ class RuntimeRecoveryService:
         for candidate in eligible:
             try:
                 runtime = self._runtimes.get(candidate.runtime_id)
+                checked, probe = await self._checkpoint_preflight(candidate, runtime)
+                if checked.disposition != RecoveryDisposition.AUTO_RESUME_CRASH:
+                    self._audit.append(
+                        event_type="runtime.recovery_checkpoint_blocked",
+                        entity_type="task",
+                        entity_id=candidate.task_id,
+                        payload={
+                            "runtime_id": candidate.runtime_id,
+                            "thread_id": candidate.thread_id,
+                            "disposition": checked.disposition.value,
+                            "reason": checked.reason,
+                            "probe_status": probe.status.value if probe else None,
+                            "checkpoint_id": probe.checkpoint_id if probe else None,
+                        },
+                    )
+                    executions.append(
+                        RecoveryExecution(candidate=checked, result=None, error=checked.reason)
+                    )
+                    continue
+
                 self._audit.append(
                     event_type="runtime.recovery_auto_resume_requested",
                     entity_type="task",
@@ -133,6 +196,7 @@ class RuntimeRecoveryService:
                     payload={
                         "runtime_id": candidate.runtime_id,
                         "thread_id": candidate.thread_id,
+                        "checkpoint_id": probe.checkpoint_id if probe else None,
                     },
                 )
                 result = await self._coordinator.resume_saved(
@@ -141,7 +205,7 @@ class RuntimeRecoveryService:
                     max_steps=max_steps,
                     timeout_seconds=timeout_seconds,
                 )
-                executions.append(RecoveryExecution(candidate=candidate, result=result))
+                executions.append(RecoveryExecution(candidate=checked, result=result))
             except Exception as exc:  # noqa: BLE001 - isolate one failed startup recovery item
                 self._audit.append(
                     event_type="runtime.recovery_auto_resume_failed",
@@ -158,12 +222,100 @@ class RuntimeRecoveryService:
                 )
         return tuple(executions)
 
+    async def _checkpoint_preflight(
+        self,
+        candidate: RecoveryCandidate,
+        runtime,
+    ) -> tuple[RecoveryCandidate, RuntimeResumeProbe | None]:
+        record = self._sessions.get(candidate.task_id)
+        if record is None:
+            return (
+                replace(
+                    candidate,
+                    disposition=RecoveryDisposition.INCONSISTENT_STATE,
+                    reason="runtime session disappeared before checkpoint preflight",
+                ),
+                None,
+            )
+        if record.runtime_id != candidate.runtime_id or record.thread_id != candidate.thread_id:
+            return (
+                replace(
+                    candidate,
+                    disposition=RecoveryDisposition.INCONSISTENT_STATE,
+                    reason="runtime session changed before checkpoint preflight",
+                ),
+                None,
+            )
+        if usable_resume_token(record.resume_token) is None:
+            return (
+                replace(
+                    candidate,
+                    disposition=RecoveryDisposition.INCONSISTENT_STATE,
+                    reason="persisted runtime session has no usable resume token",
+                ),
+                None,
+            )
+        if not isinstance(runtime, RuntimeResumeProbePort):
+            return (
+                replace(
+                    candidate,
+                    disposition=RecoveryDisposition.CHECKPOINT_UNAVAILABLE,
+                    reason="runtime cannot prove persisted checkpoint readability",
+                ),
+                None,
+            )
+
+        try:
+            probe = await runtime.probe_resume(
+                task_id=record.task_id,
+                thread_id=record.thread_id,
+                resume_token=record.resume_token,
+            )
+        except Exception:  # noqa: BLE001 - provider diagnostics are untrusted at this boundary
+            probe = RuntimeResumeProbe(
+                status=RuntimeResumeProbeStatus.UNREADABLE,
+                reason="checkpoint lookup failed",
+            )
+
+        current = self._sessions.get(candidate.task_id)
+        if current != record:
+            return (
+                replace(
+                    candidate,
+                    disposition=RecoveryDisposition.INCONSISTENT_STATE,
+                    reason="runtime session changed during checkpoint preflight",
+                ),
+                probe,
+            )
+
+        if not probe.can_resume:
+            return (
+                replace(
+                    candidate,
+                    disposition=RecoveryDisposition.CHECKPOINT_UNAVAILABLE,
+                    reason=(
+                        "runtime resume checkpoint is not readable: "
+                        f"{probe.status.value}"
+                    ),
+                ),
+                probe,
+            )
+        return candidate, probe
+
     def _classify(self, record: RuntimeSessionRecord) -> RecoveryCandidate:
         task_state = self._task_state(record.task_id)
-        unresolved = tuple(
-            item.operation_key
+        unresolved_records = tuple(
+            item
             for item in self._idempotency.list_for_task(record.task_id)
             if item.status in {IdempotencyStatus.PENDING, IdempotencyStatus.UNCERTAIN}
+        )
+        unresolved = tuple(
+            item.operation_key
+            for item in unresolved_records
+            if not (
+                item.status is IdempotencyStatus.PENDING
+                and recovery_claim_is_reclaimable(item)
+            )
         )
 
         if unresolved:
@@ -193,20 +345,39 @@ class RuntimeRecoveryService:
                 "persisted runtime session references a missing Nika task",
             )
 
+        if usable_resume_token(record.resume_token) is None:
+            return self._candidate(
+                record,
+                task_state,
+                RecoveryDisposition.INCONSISTENT_STATE,
+                "persisted runtime session has no usable resume token",
+            )
+
         if record.is_active:
+            if task_state == TaskState.RETRYING:
+                return self._candidate(
+                    record,
+                    task_state,
+                    RecoveryDisposition.INCONSISTENT_STATE,
+                    "crash-left RETRYING session has no durable retry attempt/not-before "
+                    "authority; automatic resume would reset bounded retry semantics",
+                )
             if task_state == TaskState.RUNNING:
                 return self._candidate(
                     record,
                     task_state,
                     RecoveryDisposition.AUTO_RESUME_CRASH,
-                    "active session with stale RUNNING state indicates abrupt process loss",
+                    "active session with stale RUNNING state indicates abrupt process loss; "
+                    "checkpoint preflight and durable recovery claim are required before "
+                    "automatic resume",
                 )
             if task_state in {TaskState.PAUSED, TaskState.FAILED}:
                 return self._candidate(
                     record,
                     task_state,
                     RecoveryDisposition.MANUAL_RESUME,
-                    "active session is recoverable but task state requires explicit operator intent",
+                    "active session is recoverable but task state requires explicit "
+                    "operator intent",
                 )
             return self._candidate(
                 record,
