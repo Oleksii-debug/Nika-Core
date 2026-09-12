@@ -19,10 +19,7 @@ from nika_core.research.models import (
     SourceKind,
     SourceSpec,
 )
-from nika_core.research.source_identity import (
-    ResearchSourceIdentityError,
-    canonical_http_locator,
-)
+from nika_core.research.source_identity import ResearchSourceIdentityError, canonical_http_locator
 
 
 _FINALIZED_ATTEMPT_PREFIX = "finalized:"
