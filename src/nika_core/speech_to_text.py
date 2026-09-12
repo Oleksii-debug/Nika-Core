@@ -11,6 +11,7 @@ from typing import Protocol
 from nika_core.model_gateway.contracts import PrivacyClass, ProviderKind
 
 _MAX_ID_UTF8_BYTES = 256
+_MAX_LANGUAGE_CHARS = 64
 _TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}\Z")
 _LANGUAGE_RE = re.compile(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*\Z")
 
@@ -100,7 +101,11 @@ class SpeechToTextRequest:
         if not isinstance(self.audio, SpeechAudio):
             raise TypeError("audio must be SpeechAudio")
         if self.language is not None:
-            if type(self.language) is not str or not _LANGUAGE_RE.fullmatch(self.language):
+            if (
+                type(self.language) is not str
+                or len(self.language) > _MAX_LANGUAGE_CHARS
+                or not _LANGUAGE_RE.fullmatch(self.language)
+            ):
                 raise ValueError("language must be a bounded BCP-47-like tag or None")
         if not isinstance(self.privacy, PrivacyClass):
             raise TypeError("privacy must be PrivacyClass")
@@ -276,6 +281,7 @@ class SpeechToTextService:
         if response.detected_language is not None:
             if (
                 type(response.detected_language) is not str
+                or len(response.detected_language) > _MAX_LANGUAGE_CHARS
                 or not _LANGUAGE_RE.fullmatch(response.detected_language)
             ):
                 return self._failure(
