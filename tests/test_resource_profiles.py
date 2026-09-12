@@ -14,6 +14,8 @@ from nika_core.resource_profiles import (
 from nika_core.resources.contracts import ResourceSnapshot
 
 _GIB = 1024 * 1024 * 1024
+_HUGE_INT = 10**1000
+_TOO_LARGE_SIGNED_INT = 1 << 63
 
 
 def _snapshot(
@@ -96,6 +98,9 @@ def test_available_memory_floor_is_enforced() -> None:
         (_snapshot(cpu=True), "invalid_resource_snapshot"),
         (_snapshot(memory=True), "invalid_resource_snapshot"),
         (_snapshot(available=True), "invalid_resource_snapshot"),
+        (_snapshot(cpu=_HUGE_INT), "invalid_resource_snapshot"),
+        (_snapshot(memory=_HUGE_INT), "invalid_resource_snapshot"),
+        (_snapshot(available=_TOO_LARGE_SIGNED_INT), "invalid_resource_snapshot"),
     ],
 )
 def test_invalid_telemetry_fails_closed(snapshot: ResourceSnapshot, reason: str) -> None:
@@ -116,11 +121,51 @@ def test_invalid_telemetry_fails_closed(snapshot: ResourceSnapshot, reason: str)
         ("max_memory_percent", True),
         ("min_available_memory_bytes", True),
         ("max_simultaneous_heavy_workloads", True),
+        ("max_cpu_percent", _HUGE_INT),
+        ("max_memory_percent", _HUGE_INT),
+        ("min_available_memory_bytes", _TOO_LARGE_SIGNED_INT),
+        ("max_simultaneous_heavy_workloads", _TOO_LARGE_SIGNED_INT),
     ],
 )
-def test_boolean_profile_limits_are_rejected(field_name: str, value: object) -> None:
+def test_malformed_or_unbounded_profile_limits_are_rejected(
+    field_name: str, value: object
+) -> None:
     baseline = ResourceProfilePolicy().profile_spec(ResourceProfileName.NORMAL)
     malformed = replace(baseline, **{field_name: value})
+
+    with pytest.raises(ValueError):
+        ResourceProfilePolicy({ResourceProfileName.NORMAL: malformed})
+
+
+@pytest.mark.parametrize(
+    "allowed_workloads",
+    [
+        {WorkloadClass.GENERAL},
+        frozenset({"general"}),
+    ],
+)
+def test_profile_workload_authority_requires_exact_immutable_enum_set(
+    allowed_workloads: object,
+) -> None:
+    baseline = ResourceProfilePolicy().profile_spec(ResourceProfileName.NORMAL)
+    malformed = replace(baseline, allowed_workloads=allowed_workloads)
+
+    with pytest.raises(ValueError):
+        ResourceProfilePolicy({ResourceProfileName.NORMAL: malformed})
+
+
+def test_accepted_profile_workload_authority_cannot_be_mutated() -> None:
+    policy = ResourceProfilePolicy()
+    allowed = policy.profile_spec(ResourceProfileName.NORMAL).allowed_workloads
+
+    assert type(allowed) is frozenset
+    with pytest.raises(AttributeError):
+        allowed.add(WorkloadClass.LOCAL_MODEL)  # type: ignore[attr-defined]
+
+
+def test_profile_recommendation_flag_requires_boolean() -> None:
+    baseline = ResourceProfilePolicy().profile_spec(ResourceProfileName.NORMAL)
+    malformed = replace(baseline, recommend_idle_model_unload=1)
 
     with pytest.raises(ValueError):
         ResourceProfilePolicy({ResourceProfileName.NORMAL: malformed})
