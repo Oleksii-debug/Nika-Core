@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
 
 _WEB_ROOT = Path(__file__).parents[1] / "src" / "nika_core" / "ui" / "web"
 _NODE = shutil.which("node")
+_NODE_PROCESS_TIMEOUT_SECONDS = 30
 
 
 def _source() -> str:
@@ -91,10 +93,21 @@ def _state_failure_snapshot(mode: str) -> dict[str, object]:
         pytest.skip("Node.js is required for the state failure canary regression")
 
     canary = "STATE_FAILURE_CANARY_SECRET_PATH_TOKEN"
-    harness = f"""
+    with tempfile.TemporaryDirectory(prefix="nika-pp492-") as temp_dir:
+        phase_path = Path(temp_dir) / "state-failure.phase"
+        harness = f"""
 const fs = require("fs");
 const MODE = {json.dumps(mode)};
 const CANARY = {json.dumps(canary)};
+const PHASE_PATH = process.argv[2];
+function markPhase(value) {{
+  fs.writeFileSync(PHASE_PATH, value + "\\n", "utf8");
+}}
+markPhase("NODE_START");
+let stateFailureResolve;
+const stateFailureRendered = new Promise((resolve) => {{
+  stateFailureResolve = resolve;
+}});
 
 class Element {{}}
 class HTMLElement extends Element {{
@@ -103,7 +116,22 @@ class HTMLElement extends Element {{
     this.id = id;
     this.hidden = false;
     this.textContent = "";
-    this.dataset = {{}};
+    this.dataset = id === "documentElement"
+      ? new Proxy({{}}, {{
+          set(target, key, value) {{
+            target[key] = String(value);
+            if (
+              key === "nikaReady"
+              && target[key] === "false"
+              && elements["product-project-summary"]?.hidden === true
+              && elements["product-project-empty"]?.textContent === "Стан поточного ProductProject недоступний."
+            ) {{
+              stateFailureResolve();
+            }}
+            return true;
+          }},
+        }})
+      : {{}};
     this.attributes = {{}};
     this.children = [];
     this.isContentEditable = false;
@@ -155,9 +183,19 @@ global.pywebview = {{
   }},
 }};
 
+markPhase("PRE_EVAL");
 eval(fs.readFileSync(process.argv[1], "utf8"));
+markPhase("POST_EVAL");
 
-setTimeout(() => {{
+const watchdog = setTimeout(() => {{
+  markPhase("WITNESS_TIMEOUT");
+  fs.writeSync(2, "state failure completion witness timed out\\n");
+  process.exit(2);
+}}, 2000);
+
+stateFailureRendered.then(() => {{
+  clearTimeout(watchdog);
+  markPhase("WITNESS_RESOLVED");
   const logText = element("activity-log").children.map((node) => node.textContent).join("\\n");
   const renderedText = [
     element("app-status").textContent,
@@ -166,24 +204,40 @@ setTimeout(() => {{
     element("product-project-state").textContent,
     logText,
   ].join("\\n");
-  console.log(JSON.stringify({{
+  const snapshot = JSON.stringify({{
     ready: document.documentElement.dataset.nikaReady || null,
     summary_hidden: element("product-project-summary").hidden,
     project_id: element("product-project-id").textContent,
     state: element("product-project-state").textContent,
     rendered_text: renderedText,
-  }}));
-}}, 50);
+  }});
+  markPhase("BEFORE_EXIT");
+  fs.writeSync(1, snapshot + "\\n");
+  process.exit(0);
+}});
 """
-    result = subprocess.run(
-        (_NODE, "-e", harness, str(_WEB_ROOT / "app.js")),
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=10,
-    )
+        try:
+            result = subprocess.run(
+                (_NODE, "-e", harness, str(_WEB_ROOT / "app.js"), str(phase_path)),
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=_NODE_PROCESS_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            last_phase = (
+                phase_path.read_text(encoding="utf-8", errors="replace").strip()
+                if phase_path.exists()
+                else "PROCESS_NOT_STARTED"
+            )
+            pytest.fail(
+                "Node state failure harness exceeded the bounded process deadline; "
+                f"last_phase={last_phase}",
+                pytrace=False,
+            )
+
     assert result.returncode == 0, result.stderr
     lines = [line for line in result.stdout.splitlines() if line.strip()]
     assert lines, "Node harness produced no state failure snapshot"
