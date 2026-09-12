@@ -578,6 +578,10 @@ def test_new_gap_on_resumed_attempt_takes_precedence_over_consumed_predecessor(
             ),
         )
     )
+    ProductFactoryCheckpointHost(store).save(
+        host_task_id=host_task_id,
+        checkpoint=binding.checkpoint(coordinator),
+    )
 
     second = bridge.begin_durable_gap(
         second_request,
