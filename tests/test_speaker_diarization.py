@@ -474,3 +474,97 @@ def test_caller_cancellation_propagates() -> None:
             await task
 
     asyncio.run(scenario())
+
+
+def test_response_identity_cannot_use_custom_equality_to_bypass_binding() -> None:
+    class AlwaysEqual:
+        def __eq__(self, other: object) -> bool:
+            del other
+            return True
+
+    class ForgingAdapter(_Adapter):
+        async def diarize(self, request: DiarizationRequest) -> DiarizerResponse:
+            return DiarizerResponse(
+                request_id=AlwaysEqual(),  # type: ignore[arg-type]
+                provider_id=self.current_capabilities.provider_id,
+                model_id=self.current_capabilities.model_id,
+                source_audio_sha256=request.audio_sha256,
+                segments=(),
+            )
+
+    with pytest.raises(DiarizationError) as captured:
+        asyncio.run(SpeakerDiarizationService(ForgingAdapter()).diarize(_request()))
+
+    assert captured.value.code is DiarizationErrorCode.INVALID_RESPONSE
+
+
+def test_response_subclass_cannot_cross_canonical_adapter_boundary() -> None:
+    class ForgedResponse(DiarizerResponse):
+        pass
+
+    class ForgingAdapter(_Adapter):
+        async def diarize(self, request: DiarizationRequest) -> DiarizerResponse:
+            return ForgedResponse(
+                request_id=request.request_id,
+                provider_id=self.current_capabilities.provider_id,
+                model_id=self.current_capabilities.model_id,
+                source_audio_sha256=request.audio_sha256,
+                segments=(),
+            )
+
+    with pytest.raises(DiarizationError) as captured:
+        asyncio.run(SpeakerDiarizationService(ForgingAdapter()).diarize(_request()))
+
+    assert captured.value.code is DiarizationErrorCode.INVALID_RESPONSE
+
+
+def test_segment_subclass_cannot_cross_canonical_adapter_boundary() -> None:
+    class ForgedSegment(DiarizerSegment):
+        pass
+
+    adapter = _Adapter(segments=(ForgedSegment(0, 100, "speaker"),))
+
+    with pytest.raises(DiarizationError) as captured:
+        asyncio.run(SpeakerDiarizationService(adapter).diarize(_request()))
+
+    assert captured.value.code is DiarizationErrorCode.INVALID_RESPONSE
+
+
+def test_capabilities_subclass_cannot_define_route_identity() -> None:
+    class ForgedCapabilities(DiarizerCapabilities):
+        pass
+
+    adapter = _Adapter()
+    adapter.current_capabilities = ForgedCapabilities(
+        provider_id="local-diarizer",
+        model_id="diarizer-v1",
+        supports_overlap=False,
+        max_speakers=8,
+    )
+
+    with pytest.raises(DiarizationError) as captured:
+        SpeakerDiarizationService(adapter)
+
+    assert captured.value.code is DiarizationErrorCode.INVALID_REQUEST
+
+
+def test_request_and_policy_subclasses_are_not_canonical_authority() -> None:
+    class ForgedRequest(DiarizationRequest):
+        pass
+
+    class ForgedPolicy(DiarizationPolicy):
+        pass
+
+    with pytest.raises(DiarizationError) as policy_error:
+        SpeakerDiarizationService(_Adapter(), policy=ForgedPolicy())
+    assert policy_error.value.code is DiarizationErrorCode.INVALID_REQUEST
+
+    request = ForgedRequest(
+        request_id="req-1",
+        pcm_s16le=_audio(),
+        sample_rate_hz=16_000,
+    )
+    service = SpeakerDiarizationService(_Adapter())
+    with pytest.raises(DiarizationError) as request_error:
+        asyncio.run(service.diarize(request))
+    assert request_error.value.code is DiarizationErrorCode.INVALID_REQUEST
