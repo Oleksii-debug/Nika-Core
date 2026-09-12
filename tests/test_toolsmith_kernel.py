@@ -364,7 +364,8 @@ def test_exact_version_collision_with_new_digest_is_rejected(tmp_path: Path) -> 
             (gap.requested_capability, datetime.now(UTC).isoformat()),
         )
         conn.execute(
-            "UPDATE capability_escalations SET state='registering', row_version=1 WHERE task_id=? AND requested_capability=?",
+            "UPDATE capability_escalations SET state='registering', row_version=1, "
+            "pinned_digest='sha256:new' WHERE task_id=? AND requested_capability=?",
             (gap.task_id, gap.requested_capability),
         )
     manifest = CapabilityManifestV1(

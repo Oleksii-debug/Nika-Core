@@ -220,15 +220,55 @@ class ToolsmithRepository:
         return expected_version + 1
 
     def record_search_candidate(self, *, task_id: str, candidate: ReuseCandidate) -> None:
-        row = self.get_escalation(task_id=task_id, capability_id=candidate.capability_id)
-        if row is None:
-            raise KeyError((task_id, candidate.capability_id))
-        ceiling = frozenset(json.loads(str(row["permission_ceiling_json"])))
-        if not candidate.permissions.issubset(ceiling):
-            raise PermissionError("candidate permissions exceed original task ceiling")
+        permissions_json = _json(sorted(candidate.permissions))
+        metadata_json = _json(candidate.metadata)
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            escalation = conn.execute(
+                "SELECT permission_ceiling_json FROM capability_escalations "
+                "WHERE task_id = ? AND requested_capability = ?",
+                (task_id, candidate.capability_id),
+            ).fetchone()
+            if escalation is None:
+                raise KeyError((task_id, candidate.capability_id))
+            ceiling = frozenset(json.loads(str(escalation["permission_ceiling_json"])))
+            if not candidate.permissions.issubset(ceiling):
+                raise PermissionError("candidate permissions exceed original task ceiling")
+
+            existing = conn.execute(
+                "SELECT digest, permissions_json, metadata_json "
+                "FROM capability_search_candidates "
+                "WHERE task_id = ? AND capability_id = ? AND version = ? AND source = ? "
+                "ORDER BY candidate_id",
+                (
+                    task_id,
+                    candidate.capability_id,
+                    candidate.version,
+                    candidate.source,
+                ),
+            ).fetchall()
+            if existing:
+                exact_identity = (
+                    candidate.digest,
+                    permissions_json,
+                    metadata_json,
+                )
+                if len(existing) != 1 or any(
+                    (
+                        str(row["digest"]),
+                        str(row["permissions_json"]),
+                        str(row["metadata_json"]),
+                    )
+                    != exact_identity
+                    for row in existing
+                ):
+                    raise RuntimeError(
+                        "candidate source/version conflicts with prior durable search identity"
+                    )
+                return
+
             conn.execute(
-                "INSERT OR IGNORE INTO capability_search_candidates("
+                "INSERT INTO capability_search_candidates("
                 "task_id, capability_id, version, source, digest, permissions_json, metadata_json, "
                 "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
@@ -237,22 +277,42 @@ class ToolsmithRepository:
                     candidate.version,
                     candidate.source,
                     candidate.digest,
-                    _json(sorted(candidate.permissions)),
-                    _json(candidate.metadata),
+                    permissions_json,
+                    metadata_json,
                     _now(),
                 ),
             )
 
     def register_exact(self, *, task_id: str, manifest: CapabilityManifestV1) -> None:
+        # Keep the preflight read for fast diagnostics, but never use it as commit authority.
+        # A rollback may win after this read, so publication must revalidate the escalation
+        # under the same SQLite write transaction that creates the active registry row.
         row = self.get_escalation(task_id=task_id, capability_id=manifest.capability_id)
         if row is None:
             raise KeyError((task_id, manifest.capability_id))
         if CandidateState(str(row["state"])) is not CandidateState.REGISTERING:
             raise InvalidTransitionError("capability must be REGISTERING before exact registration")
-        ceiling = frozenset(json.loads(str(row["permission_ceiling_json"])))
-        if not manifest.permissions.issubset(ceiling):
-            raise PermissionError("registered capability permissions exceed original task ceiling")
+
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            authoritative = conn.execute(
+                "SELECT state, permission_ceiling_json, pinned_digest "
+                "FROM capability_escalations "
+                "WHERE task_id = ? AND requested_capability = ?",
+                (task_id, manifest.capability_id),
+            ).fetchone()
+            if authoritative is None:
+                raise KeyError((task_id, manifest.capability_id))
+            if CandidateState(str(authoritative["state"])) is not CandidateState.REGISTERING:
+                raise StaleTransitionError("candidate changed before exact registry publication")
+            ceiling = frozenset(json.loads(str(authoritative["permission_ceiling_json"])))
+            if not manifest.permissions.issubset(ceiling):
+                raise PermissionError("registered capability permissions exceed original task ceiling")
+            verified_digest = authoritative["pinned_digest"]
+            if verified_digest is None or str(verified_digest) != manifest.digest:
+                raise StaleTransitionError(
+                    "verified candidate identity changed before exact registry publication"
+                )
             conflicting = conn.execute(
                 "SELECT digest FROM capability_registry WHERE capability_id = ? AND version = ?",
                 (manifest.capability_id, manifest.version),
@@ -288,17 +348,30 @@ class ToolsmithRepository:
                 },
             )
 
-    def mark_resume_ready(self, *, task_id: str, capability_id: str) -> None:
+    def mark_resume_ready(self, *, task_id: str, capability_id: str) -> dict[str, str]:
+        # Keep this read for fast diagnostics only. A rollback can win immediately after it,
+        # so it must never authorize durable resume publication.
         row = self.get_escalation(task_id=task_id, capability_id=capability_id)
         if row is None:
             raise KeyError((task_id, capability_id))
         if CandidateState(str(row["state"])) is not CandidateState.REGISTERED:
             raise InvalidTransitionError("original task may resume only after REGISTERED")
-        version = row["pinned_version"]
-        digest = row["pinned_digest"]
-        if not version or not digest:
-            raise RuntimeError("registered escalation is missing exact pinned capability identity")
+
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            authoritative = conn.execute(
+                "SELECT state, pinned_version, pinned_digest FROM capability_escalations "
+                "WHERE task_id = ? AND requested_capability = ?",
+                (task_id, capability_id),
+            ).fetchone()
+            if authoritative is None:
+                raise KeyError((task_id, capability_id))
+            if CandidateState(str(authoritative["state"])) is not CandidateState.REGISTERED:
+                raise StaleTransitionError("candidate changed before resume binding publication")
+            version = authoritative["pinned_version"]
+            digest = authoritative["pinned_digest"]
+            if not version or not digest:
+                raise RuntimeError("registered escalation is missing exact pinned capability identity")
             conn.execute(
                 "INSERT INTO capability_resume_bindings("
                 "task_id, capability_id, version, digest, status, updated_at) "
@@ -315,6 +388,12 @@ class ToolsmithRepository:
                 entity_id=task_id,
                 payload={"capability_id": capability_id, "version": version, "digest": digest},
             )
+        return {
+            "task_id": task_id,
+            "capability_id": capability_id,
+            "version": str(version),
+            "digest": str(digest),
+        }
 
     def rollback_registration(self, *, task_id: str, capability_id: str) -> None:
         row = self.get_escalation(task_id=task_id, capability_id=capability_id)

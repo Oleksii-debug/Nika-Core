@@ -260,17 +260,15 @@ class CapabilityEscalationService:
         row = self._repository.get_escalation(task_id=task_id, capability_id=capability_id)
         if row is None or CandidateState(str(row["state"])) is not CandidateState.REGISTERED:
             return None
-        version = row.get("pinned_version")
-        digest = row.get("pinned_digest")
-        if not version or not digest:
-            raise RuntimeError("registered escalation lost exact pinned capability identity")
-        self._repository.mark_resume_ready(task_id=task_id, capability_id=capability_id)
-        return {
-            "task_id": task_id,
-            "capability_id": capability_id,
-            "version": str(version),
-            "digest": str(digest),
-        }
+        try:
+            return self._repository.mark_resume_ready(
+                task_id=task_id,
+                capability_id=capability_id,
+            )
+        except (InvalidTransitionError, StaleTransitionError):
+            # A concurrent rollback may win after the reconciliation preflight. The repository
+            # is the publication authority; never return identity from the stale read above.
+            return None
 
     def _checkpoint_block(self, gap: CapabilityGap, reason: str) -> None:
         self._checkpoints.save(
