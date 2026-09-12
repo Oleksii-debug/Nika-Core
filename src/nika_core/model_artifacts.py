@@ -396,28 +396,30 @@ def _clean_text(name: str, value: str, *, label: bool = False) -> str:
     return value
 
 
-def _contains_credential_material(value: str) -> bool:
+def _decoded_views(value: str) -> tuple[str, ...]:
+    views: list[str] = []
     candidate = value
-    for _ in range(4):
-        if (
-            _CREDENTIAL_ASSIGNMENT.search(candidate) is not None
-            or _BEARER_CREDENTIAL.search(candidate) is not None
-        ):
-            return True
+    for _ in range(5):
+        views.append(candidate)
         decoded = unquote(candidate)
         if decoded == candidate:
             break
         candidate = decoded
-    return False
+    return tuple(views)
 
 
-def _public_reference(name: str, value: str) -> str:
-    text = _clean_text(name, value)
+def _contains_credential_material(value: str) -> bool:
+    return any(
+        _CREDENTIAL_ASSIGNMENT.search(candidate) is not None
+        or _BEARER_CREDENTIAL.search(candidate) is not None
+        for candidate in _decoded_views(value)
+    )
+
+
+def _validate_public_reference_view(name: str, text: str) -> None:
     lowered = text.lower()
     if lowered.startswith(("env:", "credential:", "secret:")):
         raise ValueError(f"{name} must be public provenance, not a credential reference")
-    if _contains_credential_material(text):
-        raise ValueError(f"{name} must be public provenance, not credential material")
     if (
         text.startswith(("/", "\\"))
         or re.match(r"^[A-Za-z]:[\\/]", text) is not None
@@ -436,6 +438,19 @@ def _public_reference(name: str, value: str) -> str:
             or parsed.fragment
         ):
             raise ValueError(f"{name} must be a public secret-free URL reference")
+
+
+def _public_reference(name: str, value: str) -> str:
+    text = _clean_text(name, value)
+    views = _decoded_views(text)
+    if any(
+        _CREDENTIAL_ASSIGNMENT.search(candidate) is not None
+        or _BEARER_CREDENTIAL.search(candidate) is not None
+        for candidate in views
+    ):
+        raise ValueError(f"{name} must be public provenance, not credential material")
+    for candidate in views:
+        _validate_public_reference_view(name, candidate)
     return text
 
 
