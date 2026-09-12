@@ -111,6 +111,8 @@ class ExperienceLedger:
     def _validate_optional_number(name: str, value: float | None) -> float | None:
         if value is None:
             return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{name} must be finite and non-negative")
         number = float(value)
         if number < 0 or not math.isfinite(number):
             raise ValueError(f"{name} must be finite and non-negative")
@@ -120,7 +122,7 @@ class ExperienceLedger:
     def _validate_attempt(attempt: int | None) -> int | None:
         if attempt is None:
             return None
-        if isinstance(attempt, bool) or attempt < 0 or attempt > 1_000_000:
+        if type(attempt) is not int or attempt < 0 or attempt > 1_000_000:
             raise ValueError("attempt must be an integer between 0 and 1000000")
         return attempt
 
@@ -173,6 +175,7 @@ class ExperienceLedger:
         clock_jump_seconds = self._validate_optional_number(
             "clock_jump_seconds", clock_jump_seconds
         )
+        generated_occurrence = occurred_at is None
         when = occurred_at or datetime.now(UTC)
         if when.tzinfo is None or when.utcoffset() is None:
             raise ValueError("occurred_at must be timezone-aware")
@@ -189,21 +192,12 @@ class ExperienceLedger:
         )
 
         with self._store.connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM continuity_experience_events WHERE event_key = ?",
-                (event_key,),
-            ).fetchone()
-            if row is not None:
-                if row["fingerprint"] != fingerprint:
-                    raise ExperienceConflictError(
-                        "continuity experience event key conflicts with existing durable evidence"
-                    )
-                return self._from_row(row)
             conn.execute(
                 "INSERT INTO continuity_experience_events("
                 "event_key, task_id, kind, outcome, reason_code, occurred_at, attempt, "
                 "delay_seconds, clock_jump_seconds, fingerprint"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(event_key) DO NOTHING",
                 (
                     event_key,
                     task_id,
@@ -221,8 +215,24 @@ class ExperienceLedger:
                 "SELECT * FROM continuity_experience_events WHERE event_key = ?",
                 (event_key,),
             ).fetchone()
-        if row is None:
-            raise RuntimeError("continuity experience event did not persist")
+            if row is None:
+                raise RuntimeError("continuity experience event did not persist")
+            expected_fingerprint = fingerprint
+            if generated_occurrence:
+                expected_fingerprint = self._fingerprint_payload(
+                    task_id=task_id,
+                    kind=kind,
+                    outcome=outcome,
+                    reason_code=reason_code,
+                    occurred_at=row["occurred_at"],
+                    attempt=attempt,
+                    delay_seconds=delay_seconds,
+                    clock_jump_seconds=clock_jump_seconds,
+                )
+            if row["fingerprint"] != expected_fingerprint:
+                raise ExperienceConflictError(
+                    "continuity experience event key conflicts with existing durable evidence"
+                )
         return self._from_row(row)
 
     def get(self, event_key: str) -> ExperienceEvent | None:
@@ -238,7 +248,7 @@ class ExperienceLedger:
         task_id = self._validate_task_id(task_id)
         if task_id is None:
             raise ValueError("task_id is required")
-        if isinstance(limit, bool) or limit < 1 or limit > 1000:
+        if type(limit) is not int or limit < 1 or limit > 1000:
             raise ValueError("limit must be between 1 and 1000")
         with self._store.connection() as conn:
             rows = conn.execute(
