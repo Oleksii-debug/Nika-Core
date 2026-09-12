@@ -253,3 +253,26 @@ def test_verification_check_requires_real_bool_and_strict_hashes() -> None:
             source_id="event-1",
             evidence_sha256="A" * 64,
         )
+
+
+def test_authority_strings_reject_str_subclasses() -> None:
+    class ForgedString(str):
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        def encode(self, *args: object, **kwargs: object) -> bytes:
+            return b"forged"
+
+    with pytest.raises(TypeError, match="exact string"):
+        CognitionEvidenceRef(
+            source_type="audit_event",
+            source_id=ForgedString("event-1"),
+            evidence_sha256="a" * 64,
+        )
+    with pytest.raises(TypeError, match="exact string"):
+        CognitionVerificationRequirement(
+            check_id="causality",
+            verifier_sha256=ForgedString("a" * 64),
+        )
+    with pytest.raises(TypeError, match="exact string"):
+        _candidate(statement=ForgedString("forged hypothesis"))
