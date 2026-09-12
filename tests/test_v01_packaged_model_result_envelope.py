@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 
 import pytest
-
 from nika_core.model_gateway.gateway import model_identity_fingerprint
 from nika_core.v01_packaged_team_state import V01PackagedTeamStateProvider
 
