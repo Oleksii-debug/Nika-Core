@@ -8,7 +8,11 @@ import pytest
 from nika_core.learning_package import FrozenLearningPackage, LearningDataSplit, LearningShard
 from nika_core.research.blobs import BlobStoreError, ContentAddressedBlobStore
 from nika_core.training_materials import (
+    ResolvedTrainingMaterial,
+    ResolvedTrainingPackage,
+    TrainingMaterialEvidence,
     TrainingMaterialResolutionError,
+    TrainingMaterialSetEvidence,
     resolve_training_materials,
 )
 
@@ -79,6 +83,41 @@ def _stored_package(
         license_evidence=b"validation-license",
     )
     return store, _package(training, validation), training_body, validation_body
+
+
+def _material(
+    *,
+    split: LearningDataSplit,
+    artifact_sha256: str,
+    byte_count: int = 7,
+) -> TrainingMaterialEvidence:
+    return TrainingMaterialEvidence(
+        split=split,
+        artifact_sha256=artifact_sha256,
+        provenance_sha256=_sha256(b"provenance" + artifact_sha256.encode()),
+        license_evidence_sha256=_sha256(b"license" + artifact_sha256.encode()),
+        record_count=1,
+        byte_count=byte_count,
+    )
+
+
+def _material_set(
+    training: TrainingMaterialEvidence,
+    validation: TrainingMaterialEvidence,
+    *,
+    evaluation_set_sha256: str | None = None,
+) -> TrainingMaterialSetEvidence:
+    return TrainingMaterialSetEvidence(
+        workspace_sha256=_sha256(b"workspace-alpha"),
+        package_manifest_sha256=_sha256(b"manifest"),
+        candidate_dataset_sha256=_sha256(b"dataset"),
+        evaluation_set_sha256=(
+            evaluation_set_sha256
+            if evaluation_set_sha256 is not None
+            else _sha256(b"held-out")
+        ),
+        materials=(training, validation),
+    )
 
 
 def test_resolves_exact_frozen_shard_bytes_and_minimizes_durable_evidence(
@@ -308,3 +347,104 @@ def test_blob_store_resolve_digest_validates_canonical_identity(tmp_path: Path) 
         store.resolve_digest("workspace-alpha", artifact.raw_sha256, -1)
     with pytest.raises(BlobStoreError, match="size does not match"):
         store.resolve_digest("workspace-alpha", artifact.raw_sha256, artifact.byte_size + 1)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("artifact_sha256", "A" * 64),
+        ("provenance_sha256", "x"),
+        ("license_evidence_sha256", object()),
+        ("record_count", 0),
+        ("record_count", True),
+        ("byte_count", 0),
+    ],
+)
+def test_material_evidence_rejects_forged_authority_fields(
+    field: str,
+    value: object,
+) -> None:
+    values: dict[str, object] = {
+        "split": LearningDataSplit.TRAINING,
+        "artifact_sha256": _sha256(b"artifact"),
+        "provenance_sha256": _sha256(b"provenance"),
+        "license_evidence_sha256": _sha256(b"license"),
+        "record_count": 1,
+        "byte_count": 1,
+    }
+    values[field] = value
+
+    with pytest.raises((TypeError, ValueError)):
+        TrainingMaterialEvidence(**values)  # type: ignore[arg-type]
+
+
+def test_material_set_rejects_duplicate_artifact_identity() -> None:
+    digest = _sha256(b"same-artifact")
+    training = _material(split=LearningDataSplit.TRAINING, artifact_sha256=digest)
+    validation = _material(split=LearningDataSplit.VALIDATION, artifact_sha256=digest)
+
+    with pytest.raises(ValueError, match="must be unique"):
+        _material_set(training, validation)
+
+
+def test_material_set_rejects_held_out_as_training_input() -> None:
+    training = _material(
+        split=LearningDataSplit.TRAINING,
+        artifact_sha256=_sha256(b"training"),
+    )
+    validation = _material(
+        split=LearningDataSplit.VALIDATION,
+        artifact_sha256=_sha256(b"validation"),
+    )
+
+    with pytest.raises(ValueError, match="held-out"):
+        _material_set(
+            training,
+            validation,
+            evaluation_set_sha256=training.artifact_sha256,
+        )
+
+
+def test_material_set_requires_training_and_validation() -> None:
+    first = _material(
+        split=LearningDataSplit.TRAINING,
+        artifact_sha256=_sha256(b"one"),
+    )
+    second = _material(
+        split=LearningDataSplit.TRAINING,
+        artifact_sha256=_sha256(b"two"),
+    )
+
+    with pytest.raises(ValueError, match="validation"):
+        _material_set(first, second)
+
+
+def test_resolved_package_rejects_path_list_not_bound_to_evidence(tmp_path: Path) -> None:
+    training = _material(
+        split=LearningDataSplit.TRAINING,
+        artifact_sha256=_sha256(b"training"),
+    )
+    validation = _material(
+        split=LearningDataSplit.VALIDATION,
+        artifact_sha256=_sha256(b"validation"),
+    )
+    evidence = _material_set(training, validation)
+    path = (tmp_path / "candidate.bin").resolve()
+    path.write_bytes(b"candidate")
+    forged_materials = (
+        ResolvedTrainingMaterial(evidence=validation, path=path),
+        ResolvedTrainingMaterial(evidence=training, path=path),
+    )
+
+    with pytest.raises(ValueError, match="do not match"):
+        ResolvedTrainingPackage(evidence=evidence, materials=forged_materials)
+
+
+def test_resolved_material_requires_absolute_path() -> None:
+    material = _material(
+        split=LearningDataSplit.TRAINING,
+        artifact_sha256=_sha256(b"training"),
+    )
+
+    with pytest.raises(ValueError, match="absolute Path"):
+        ResolvedTrainingMaterial(evidence=material, path=Path("relative.bin"))
