@@ -15,7 +15,7 @@ from nika_core.diagnostics import ModelHealthFact, OllamaModelHealthProbe
     ],
 )
 def test_invalid_timeout_fails_closed_before_health_transport(
-    timeout_seconds: int | float,
+    timeout_seconds: float,
     case_id: str,
 ) -> None:
     client_factory_calls: list[dict[str, object]] = []
