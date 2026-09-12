@@ -91,6 +91,16 @@ class TrainingMaterialEvidence:
             byte_count=shard.byte_count,
         )
 
+    def to_learning_shard(self) -> LearningShard:
+        return LearningShard(
+            split=self.split,
+            artifact_sha256=self.artifact_sha256,
+            provenance_sha256=self.provenance_sha256,
+            license_evidence_sha256=self.license_evidence_sha256,
+            record_count=self.record_count,
+            byte_count=self.byte_count,
+        )
+
     def canonical_payload(self) -> dict[str, object]:
         return {
             "artifact_sha256": self.artifact_sha256,
@@ -104,12 +114,18 @@ class TrainingMaterialEvidence:
 
 @dataclass(frozen=True, slots=True)
 class TrainingMaterialSetEvidence:
-    """Durable-safe evidence for the exact bytes resolved toward one training job."""
+    """Self-verifying durable evidence for exact bytes resolved toward one training job."""
 
     workspace_sha256: str
-    package_manifest_sha256: str
-    candidate_dataset_sha256: str
+    package_id: str
+    package_version: str
+    package_schema_version: int
+    base_artifact_sha256: str
+    selection_policy_sha256: str
+    verification_sha256: str
     evaluation_set_sha256: str
+    candidate_dataset_sha256: str
+    package_manifest_sha256: str
     materials: tuple[TrainingMaterialEvidence, ...]
     schema_version: int = _SCHEMA_VERSION
 
@@ -117,30 +133,69 @@ class TrainingMaterialSetEvidence:
         if type(self.schema_version) is not int or self.schema_version != _SCHEMA_VERSION:
             raise ValueError("unsupported training material evidence schema")
         _require_sha256("workspace_sha256", self.workspace_sha256)
-        _require_sha256("package_manifest_sha256", self.package_manifest_sha256)
-        _require_sha256("candidate_dataset_sha256", self.candidate_dataset_sha256)
+        _require_sha256("base_artifact_sha256", self.base_artifact_sha256)
+        _require_sha256("selection_policy_sha256", self.selection_policy_sha256)
+        _require_sha256("verification_sha256", self.verification_sha256)
         _require_sha256("evaluation_set_sha256", self.evaluation_set_sha256)
+        _require_sha256("candidate_dataset_sha256", self.candidate_dataset_sha256)
+        _require_sha256("package_manifest_sha256", self.package_manifest_sha256)
         if type(self.materials) is not tuple or not self.materials:
             raise ValueError("materials must be a non-empty immutable tuple")
         if not all(type(material) is TrainingMaterialEvidence for material in self.materials):
             raise TypeError("materials must contain exact TrainingMaterialEvidence values")
-        identities = [material.artifact_sha256 for material in self.materials]
-        if len(set(identities)) != len(identities):
-            raise ValueError("resolved training artifact identities must be unique")
-        if self.evaluation_set_sha256 in identities:
-            raise ValueError("held-out evaluation material must not be training input")
-        if not any(material.split is LearningDataSplit.TRAINING for material in self.materials):
-            raise ValueError("resolved materials require at least one training shard")
-        if not any(material.split is LearningDataSplit.VALIDATION for material in self.materials):
-            raise ValueError("resolved materials require at least one validation shard")
+
+        reconstructed = FrozenLearningPackage(
+            package_id=self.package_id,
+            package_version=self.package_version,
+            base_artifact_sha256=self.base_artifact_sha256,
+            selection_policy_sha256=self.selection_policy_sha256,
+            verification_sha256=self.verification_sha256,
+            evaluation_set_sha256=self.evaluation_set_sha256,
+            shards=tuple(material.to_learning_shard() for material in self.materials),
+            schema_version=self.package_schema_version,
+        )
+        if reconstructed.candidate_dataset_sha256 != self.candidate_dataset_sha256:
+            raise ValueError("candidate dataset digest does not match resolved materials")
+        if reconstructed.manifest_sha256 != self.package_manifest_sha256:
+            raise ValueError("package manifest digest does not match resolved materials")
+
+    @classmethod
+    def from_package(
+        cls,
+        package: FrozenLearningPackage,
+        *,
+        workspace_sha256: str,
+        materials: tuple[TrainingMaterialEvidence, ...],
+    ) -> TrainingMaterialSetEvidence:
+        if type(package) is not FrozenLearningPackage:
+            raise TypeError("package must be an exact FrozenLearningPackage")
+        return cls(
+            workspace_sha256=workspace_sha256,
+            package_id=package.package_id,
+            package_version=package.package_version,
+            package_schema_version=package.schema_version,
+            base_artifact_sha256=package.base_artifact_sha256,
+            selection_policy_sha256=package.selection_policy_sha256,
+            verification_sha256=package.verification_sha256,
+            evaluation_set_sha256=package.evaluation_set_sha256,
+            candidate_dataset_sha256=package.candidate_dataset_sha256,
+            package_manifest_sha256=package.manifest_sha256,
+            materials=materials,
+        )
 
     def canonical_payload(self) -> dict[str, object]:
         return {
+            "base_artifact_sha256": self.base_artifact_sha256,
             "candidate_dataset_sha256": self.candidate_dataset_sha256,
             "evaluation_set_sha256": self.evaluation_set_sha256,
             "materials": [material.canonical_payload() for material in self.materials],
+            "package_id": self.package_id,
             "package_manifest_sha256": self.package_manifest_sha256,
+            "package_schema_version": self.package_schema_version,
+            "package_version": self.package_version,
             "schema_version": self.schema_version,
+            "selection_policy_sha256": self.selection_policy_sha256,
+            "verification_sha256": self.verification_sha256,
             "workspace_sha256": self.workspace_sha256,
         }
 
@@ -224,11 +279,9 @@ def resolve_training_materials(
         evidence_items.append(item_evidence)
         resolved.append(ResolvedTrainingMaterial(evidence=item_evidence, path=path))
 
-    material_set_evidence = TrainingMaterialSetEvidence(
+    material_set_evidence = TrainingMaterialSetEvidence.from_package(
+        package,
         workspace_sha256=workspace_sha256,
-        package_manifest_sha256=package.manifest_sha256,
-        candidate_dataset_sha256=package.candidate_dataset_sha256,
-        evaluation_set_sha256=package.evaluation_set_sha256,
         materials=tuple(evidence_items),
     )
     return ResolvedTrainingPackage(
