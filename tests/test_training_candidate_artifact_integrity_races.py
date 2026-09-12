@@ -11,8 +11,11 @@ from nika_core.model_artifacts import (
     ModelArtifactKind,
     ModelIntegrityBasis,
 )
-from nika_core.training_artifacts import CandidateArtifactIntegrityError, integrity
-from nika_core.training_artifacts import verify_candidate_artifact
+from nika_core.training_artifacts import (
+    CandidateArtifactIntegrityError,
+    integrity,
+    verify_candidate_artifact,
+)
 
 
 def _descriptor(path: Path) -> ModelArtifactDescriptor:
