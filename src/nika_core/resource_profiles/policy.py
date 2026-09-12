@@ -14,6 +14,7 @@ from nika_core.resources.contracts import ResourceSnapshot
 
 _MIB = 1024 * 1024
 _GIB = 1024 * _MIB
+_MAX_SIGNED_64 = (1 << 63) - 1
 _ALL_WORKLOADS = frozenset(WorkloadClass)
 _HEAVY_WORKLOADS = frozenset(
     {
@@ -178,11 +179,15 @@ def _validate_profile(name: ResourceProfileName, spec: ResourceProfileSpec) -> N
         if not _is_percentage(value, allow_zero=False):
             raise ValueError(f"{field_name} must be a finite number in the range (0, 100]")
     if not _is_nonnegative_int(spec.min_available_memory_bytes):
-        raise ValueError("min_available_memory_bytes must be a non-negative integer")
+        raise ValueError("min_available_memory_bytes must be a bounded non-negative integer")
     if not _is_positive_int(spec.max_simultaneous_heavy_workloads):
-        raise ValueError("max_simultaneous_heavy_workloads must be a positive integer")
-    if not spec.allowed_workloads:
-        raise ValueError("allowed_workloads must not be empty")
+        raise ValueError("max_simultaneous_heavy_workloads must be a bounded positive integer")
+    if type(spec.allowed_workloads) is not frozenset or not spec.allowed_workloads:
+        raise ValueError("allowed_workloads must be a non-empty immutable frozenset")
+    if any(type(workload) is not WorkloadClass for workload in spec.allowed_workloads):
+        raise ValueError("allowed_workloads must contain only WorkloadClass values")
+    if type(spec.recommend_idle_model_unload) is not bool:
+        raise ValueError("recommend_idle_model_unload must be a boolean")
 
 
 def _valid_snapshot(snapshot: ResourceSnapshot) -> bool:
@@ -196,17 +201,25 @@ def _valid_snapshot(snapshot: ResourceSnapshot) -> bool:
 def _is_percentage(value: object, *, allow_zero: bool) -> bool:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
-    if not isfinite(value):
+    if isinstance(value, float) and not isfinite(value):
         return False
     return (0 <= value <= 100) if allow_zero else (0 < value <= 100)
 
 
 def _is_nonnegative_int(value: object) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value <= _MAX_SIGNED_64
+    )
 
 
 def _is_positive_int(value: object) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 < value <= _MAX_SIGNED_64
+    )
 
 
 def _coerce_profile(value: ResourceProfileName | str) -> ResourceProfileName | None:
