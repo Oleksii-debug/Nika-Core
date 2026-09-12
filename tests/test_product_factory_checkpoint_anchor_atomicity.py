@@ -139,20 +139,22 @@ def test_borrowed_write_transaction_owns_checkpoint_commit_and_rollback(tmp_path
         def connection(self) -> Iterator[sqlite3.Connection]:
             yield connection
 
-    with pytest.raises(RuntimeError, match="outer transaction rolled back"):
-        with store.connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            borrowed_host = ProductFactoryCheckpointHost(BorrowedStore())
-            saved = borrowed_host.save(
-                host_task_id=task_id,
-                checkpoint=binding.checkpoint(coordinator),
-            )
-            assert connection.in_transaction
-            assert saved.checkpoint_id
-            assert connection.execute(
-                "SELECT COUNT(*) FROM checkpoints WHERE task_id = ?", (task_id,)
-            ).fetchone()[0] == 1
-            raise RuntimeError("outer transaction rolled back")
+    with (
+        pytest.raises(RuntimeError, match="outer transaction rolled back"),
+        store.connection() as connection,
+    ):
+        connection.execute("BEGIN IMMEDIATE")
+        borrowed_host = ProductFactoryCheckpointHost(BorrowedStore())
+        saved = borrowed_host.save(
+            host_task_id=task_id,
+            checkpoint=binding.checkpoint(coordinator),
+        )
+        assert connection.in_transaction
+        assert saved.checkpoint_id
+        assert connection.execute(
+            "SELECT COUNT(*) FROM checkpoints WHERE task_id = ?", (task_id,)
+        ).fetchone()[0] == 1
+        raise RuntimeError("outer transaction rolled back")
 
     with store.connection() as connection:
         assert connection.execute(
