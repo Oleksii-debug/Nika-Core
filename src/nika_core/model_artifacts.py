@@ -14,6 +14,7 @@ from nika_core.kernel.audit import AuditLog
 
 _MAX_TEXT = 2048
 _MAX_MACHINE_INT = (1 << 63) - 1
+_SCHEMA_VERSION = 1
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _LABEL = re.compile(r"[A-Za-z0-9_.:+-]{1,128}")
 _ARCH = re.compile(r"[A-Za-z0-9_.+-]{1,64}")
