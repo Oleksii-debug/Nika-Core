@@ -14,8 +14,10 @@ workflow. Those remain separate product/policy capabilities.
 
 `SpeakerVerificationService` binds one adapter-owned `provider_id`, `model_id`, and LOCAL execution
 kind at construction. The route is revalidated before and after every adapter effect, and a response
-must match the bound provider, model, and requested enrolled-profile identity. Caller-controlled
-route labels therefore cannot manufacture successful evidence.
+must match the bound provider/model, requested logical profile ID, and exact immutable enrollment
+revision digest supplied by the enrollment authority. Caller-controlled route labels or stale
+logical profile IDs therefore cannot manufacture reusable successful evidence for a different
+voiceprint revision.
 
 Input is transient mono signed-16-bit little-endian PCM:
 
@@ -23,6 +25,7 @@ Input is transient mono signed-16-bit little-endian PCM:
 - 0.25 through 30 seconds;
 - exact complete 16-bit samples;
 - bounded request/profile identifiers;
+- a required lowercase 64-hex SHA-256 digest identifying the exact enrollment revision;
 - bounded timeout and pre-effect cancellation.
 
 The adapter returns a finite confidence in `0..1`. The default deterministic policy is:
@@ -37,18 +40,22 @@ any configured confirmation policy.
 
 ## Privacy and evidence
 
-Raw PCM and the raw enrolled-profile identifier are not copied into result evidence. Evidence keeps
-only bounded route/model identity, confidence/outcome, audio size/timing metadata, a SHA-256 binding
-of the transient audio, and a SHA-256 fingerprint of the profile identifier. Unknown adapter errors
-are converted to a Nika-owned bounded message rather than exposing provider diagnostics.
+Raw PCM, raw voiceprint material, and the raw enrolled-profile identifier are not copied into result
+evidence. Evidence keeps only bounded route/model identity, confidence/outcome, audio size/timing
+metadata, a SHA-256 binding of the transient audio, a SHA-256 hash of the logical profile ID, and the
+privacy-safe immutable enrollment-revision SHA-256 supplied by the enrollment authority. The adapter
+must echo that exact revision and any mismatch or malformed digest fails closed. Unknown adapter
+errors are converted to a Nika-owned bounded message rather than exposing provider diagnostics.
 
 No cloud fallback, network transport, model download, dependency, second memory store, scheduler,
 ModelGateway, STT/TTS implementation, or UI is introduced by this slice.
 
 ## Next adapter work
 
-A production adapter may later wrap an evaluated local speaker-embedding/verifier engine. That
-adapter must own its provider/model identity and must preserve this service boundary; selecting a
+A production adapter may later wrap an evaluated local speaker-embedding/verifier engine. The
+enrollment authority must expose a stable privacy-safe revision/artifact digest that changes whenever
+the enrolled voiceprint material changes; the verifier must bind each result to that exact revision.
+The adapter must also own its provider/model identity and preserve this service boundary. Selecting a
 specific vendor/model requires measured Windows/privacy/Ukrainian practicality evidence rather than
 hard-coding one here.
 

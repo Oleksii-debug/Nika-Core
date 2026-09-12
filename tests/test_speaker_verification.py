@@ -18,6 +18,8 @@ from nika_core.speaker_verification import (
     UnavailableSpeakerVerifierAdapter,
 )
 
+_PROFILE_REVISION_SHA256 = "a" * 64
+
 
 def _pcm(seconds: float = 1.0, sample_rate_hz: int = 16_000) -> bytes:
     return b"\x00\x00" * int(seconds * sample_rate_hz)
@@ -39,6 +41,7 @@ class FakeVerifier:
         self.response_provider_id: str | None = None
         self.response_model_id: str | None = None
         self.response_profile_id: str | None = None
+        self.response_profile_revision_sha256: str | None = None
         self.failure: BaseException | None = None
         self.seen_timeout: float | None = None
 
@@ -62,18 +65,29 @@ class FakeVerifier:
         assert cancel_event is None or not cancel_event.is_set()
         if self.failure is not None:
             raise self.failure
+        profile_revision_sha256 = (
+            self.response_profile_revision_sha256
+            if self.response_profile_revision_sha256 is not None
+            else request.profile_revision_sha256
+        )
         return SpeakerVerifierResponse(
             provider_id=self.response_provider_id or self.capabilities.provider_id,
             model_id=self.response_model_id or self.capabilities.model_id,
             profile_id=self.response_profile_id or request.profile_id,
+            profile_revision_sha256=profile_revision_sha256,
             confidence=self.confidence,
         )
 
 
-def _request(*, profile_id: str = "owner-profile") -> SpeakerVerificationRequest:
+def _request(
+    *,
+    profile_id: str = "owner-profile",
+    profile_revision_sha256: str = _PROFILE_REVISION_SHA256,
+) -> SpeakerVerificationRequest:
     return SpeakerVerificationRequest(
         request_id="voice-req-1",
         profile_id=profile_id,
+        profile_revision_sha256=profile_revision_sha256,
         pcm_s16le=_pcm(),
     )
 
@@ -91,10 +105,12 @@ def test_match_returns_privacy_minimized_route_bound_evidence() -> None:
     assert evidence.model_id == "speaker-model-v1"
     assert evidence.audio_byte_count == len(request.pcm_s16le)
     assert len(evidence.audio_sha256) == 64
-    assert len(evidence.profile_fingerprint_sha256) == 64
+    assert len(evidence.profile_id_sha256) == 64
+    assert evidence.profile_revision_sha256 == _PROFILE_REVISION_SHA256
     assert "owner-profile" not in repr(evidence)
     assert not hasattr(evidence, "pcm_s16le")
     assert not hasattr(evidence, "profile_id")
+    assert not hasattr(evidence, "profile_fingerprint_sha256")
     assert adapter.seen_timeout == 4.0
 
 
@@ -133,6 +149,18 @@ def test_noncanonical_policy_is_rejected_before_adapter_effect() -> None:
     assert adapter.calls == 0
 
 
+def test_invalid_profile_revision_is_rejected_before_adapter_effect() -> None:
+    adapter = FakeVerifier()
+    service = SpeakerVerificationService(adapter)
+
+    with pytest.raises(SpeakerVerificationError) as error:
+        _request(profile_revision_sha256="NOT-A-LOWERCASE-SHA256")
+
+    assert error.value.code is SpeakerVerificationErrorCode.INVALID_REQUEST
+    assert adapter.calls == 0
+    assert service.capabilities.provider_id == "local-speaker-engine"
+
+
 def test_audio_bounds_are_enforced_before_adapter_effect() -> None:
     adapter = FakeVerifier()
     service = SpeakerVerificationService(adapter)
@@ -141,6 +169,7 @@ def test_audio_bounds_are_enforced_before_adapter_effect() -> None:
         SpeakerVerificationRequest(
             request_id="too-long",
             profile_id="owner-profile",
+            profile_revision_sha256=_PROFILE_REVISION_SHA256,
             pcm_s16le=_pcm(MAX_AUDIO_SECONDS + 0.1),
         )
 
@@ -195,6 +224,28 @@ def test_response_route_mismatch_never_becomes_match(field: str) -> None:
 def test_response_profile_mismatch_fails_closed() -> None:
     adapter = FakeVerifier(confidence=0.99)
     adapter.response_profile_id = "someone-else"
+    service = SpeakerVerificationService(adapter)
+
+    with pytest.raises(SpeakerVerificationError) as error:
+        service.verify(_request())
+
+    assert error.value.code is SpeakerVerificationErrorCode.INVALID_RESPONSE
+
+
+def test_response_profile_revision_mismatch_fails_closed() -> None:
+    adapter = FakeVerifier(confidence=0.99)
+    adapter.response_profile_revision_sha256 = "b" * 64
+    service = SpeakerVerificationService(adapter)
+
+    with pytest.raises(SpeakerVerificationError) as error:
+        service.verify(_request(profile_id="owner-profile"))
+
+    assert error.value.code is SpeakerVerificationErrorCode.INVALID_RESPONSE
+
+
+def test_invalid_response_profile_revision_format_fails_closed() -> None:
+    adapter = FakeVerifier(confidence=0.99)
+    adapter.response_profile_revision_sha256 = "A" * 64
     service = SpeakerVerificationService(adapter)
 
     with pytest.raises(SpeakerVerificationError) as error:

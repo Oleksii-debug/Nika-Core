@@ -15,6 +15,7 @@ MAX_SAMPLE_RATE_HZ = 48_000
 MAX_ID_CHARS = 128
 _MAX_TIMEOUT_SECONDS = 300.0
 _SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 
 class SpeakerVerificationErrorCode(StrEnum):
@@ -90,12 +91,14 @@ class SpeakerVerificationPolicy:
 class SpeakerVerificationRequest:
     request_id: str
     profile_id: str
+    profile_revision_sha256: str
     pcm_s16le: bytes
     sample_rate_hz: int = 16_000
 
     def __post_init__(self) -> None:
         _require_safe_id(self.request_id, field="request_id")
         _require_safe_id(self.profile_id, field="profile_id")
+        _require_sha256(self.profile_revision_sha256, field="profile_revision_sha256")
         if type(self.pcm_s16le) is not bytes or not self.pcm_s16le:
             raise SpeakerVerificationError(
                 SpeakerVerificationErrorCode.INVALID_REQUEST,
@@ -132,6 +135,7 @@ class SpeakerVerifierResponse:
     provider_id: str
     model_id: str
     profile_id: str
+    profile_revision_sha256: str
     confidence: float
 
 
@@ -140,7 +144,8 @@ class SpeakerVerificationEvidence:
     request_id: str
     provider_id: str
     model_id: str
-    profile_fingerprint_sha256: str
+    profile_id_sha256: str
+    profile_revision_sha256: str
     audio_sha256: str
     audio_byte_count: int
     sample_rate_hz: int
@@ -267,7 +272,8 @@ class SpeakerVerificationService:
             request_id=request.request_id,
             provider_id=self._bound_capabilities.provider_id,
             model_id=self._bound_capabilities.model_id,
-            profile_fingerprint_sha256=_sha256_text(request.profile_id),
+            profile_id_sha256=_sha256_text(request.profile_id),
+            profile_revision_sha256=request.profile_revision_sha256,
             audio_sha256=hashlib.sha256(request.pcm_s16le).hexdigest(),
             audio_byte_count=len(request.pcm_s16le),
             sample_rate_hz=request.sample_rate_hz,
@@ -298,6 +304,16 @@ class SpeakerVerificationService:
             raise SpeakerVerificationError(
                 SpeakerVerificationErrorCode.INVALID_RESPONSE,
                 "speaker verifier response profile does not match the request",
+            )
+        response_revision = _require_sha256(
+            response.profile_revision_sha256,
+            field="profile_revision_sha256",
+            response=True,
+        )
+        if response_revision != request.profile_revision_sha256:
+            raise SpeakerVerificationError(
+                SpeakerVerificationErrorCode.INVALID_RESPONSE,
+                "speaker verifier response profile revision does not match the request",
             )
         return _confidence(response.confidence, field="confidence", response=True)
 
@@ -365,6 +381,17 @@ def _require_safe_id(value: object, *, field: str) -> str:
             SpeakerVerificationErrorCode.INVALID_REQUEST,
             f"{field} must be a bounded safe identifier",
         )
+    return value
+
+
+def _require_sha256(value: object, *, field: str, response: bool = False) -> str:
+    code = (
+        SpeakerVerificationErrorCode.INVALID_RESPONSE
+        if response
+        else SpeakerVerificationErrorCode.INVALID_REQUEST
+    )
+    if type(value) is not str or not _SHA256_RE.fullmatch(value):
+        raise SpeakerVerificationError(code, f"{field} must be a lowercase SHA-256 digest")
     return value
 
 
