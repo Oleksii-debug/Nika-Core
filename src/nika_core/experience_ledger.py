@@ -112,7 +112,7 @@ class ExperienceLedger:
         if value is None:
             return None
         if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError(f"{name} must be finite and non-negative")
+            raise TypeError(f"{name} must be an int or float")
         number = float(value)
         if number < 0 or not math.isfinite(number):
             raise ValueError(f"{name} must be finite and non-negative")
@@ -122,8 +122,10 @@ class ExperienceLedger:
     def _validate_attempt(attempt: int | None) -> int | None:
         if attempt is None:
             return None
-        if type(attempt) is not int or attempt < 0 or attempt > 1_000_000:
-            raise ValueError("attempt must be an integer between 0 and 1000000")
+        if type(attempt) is not int:
+            raise TypeError("attempt must be an integer")
+        if attempt < 0 or attempt > 1_000_000:
+            raise ValueError("attempt must be between 0 and 1000000")
         return attempt
 
     @staticmethod
@@ -248,7 +250,9 @@ class ExperienceLedger:
         task_id = self._validate_task_id(task_id)
         if task_id is None:
             raise ValueError("task_id is required")
-        if type(limit) is not int or limit < 1 or limit > 1000:
+        if type(limit) is not int:
+            raise TypeError("limit must be an integer")
+        if limit < 1 or limit > 1000:
             raise ValueError("limit must be between 1 and 1000")
         with self._store.connection() as conn:
             rows = conn.execute(
