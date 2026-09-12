@@ -37,7 +37,7 @@ _SNAPSHOT_COLUMNS = {
 
 def _require_stored_integer(value: object, *, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
-        raise RuntimeError(f"{field} must be stored as SQLite INTEGER")
+        raise TypeError(f"{field} must be stored as SQLite INTEGER")
     return value
 
 

@@ -58,7 +58,7 @@ def test_load_rejects_fractional_storage_row_version(tmp_path) -> None:
             (snapshot.objective.objective_id,),
         )
 
-    with pytest.raises(RuntimeError, match="SQLite INTEGER"):
+    with pytest.raises(TypeError, match="SQLite INTEGER"):
         repository.load(snapshot.objective.objective_id)
 
 
