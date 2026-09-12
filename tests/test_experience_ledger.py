@@ -289,3 +289,33 @@ def test_invalid_durable_event_shape_fails_closed_on_readback(tmp_path) -> None:
     reopened = ExperienceLedger(SQLiteStore(path))
     with pytest.raises(ExperienceConflictError, match="invalid durable evidence"):
         reopened.get("task-8:recovery:1")
+
+
+def test_tampered_durable_event_key_fails_closed_on_get_and_list(tmp_path) -> None:
+    path = tmp_path / "Користувач Ніка" / "identity.db"
+    store = SQLiteStore(path)
+    store.initialize()
+    ledger = ExperienceLedger(store)
+    original_key = "task-9:recovery:1"
+    forged_key = "task-9:recovery:forged"
+    ledger.record(
+        event_key=original_key,
+        task_id="task-9",
+        kind=ContinuityKind.RECOVERY,
+        outcome=ContinuityOutcome.PRESERVED,
+        reason_code="checkpoint_verified",
+        occurred_at=datetime(2026, 9, 12, 9, 0, tzinfo=UTC),
+    )
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE continuity_experience_events SET event_key = ? WHERE event_key = ?",
+            (forged_key, original_key),
+        )
+
+    reopened = ExperienceLedger(SQLiteStore(path))
+    assert reopened.get(original_key) is None
+    with pytest.raises(ExperienceConflictError, match="integrity"):
+        reopened.get(forged_key)
+    with pytest.raises(ExperienceConflictError, match="integrity"):
+        reopened.list_for_task("task-9")
