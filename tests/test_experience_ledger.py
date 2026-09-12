@@ -236,3 +236,56 @@ def test_naive_timestamp_is_rejected(tmp_path) -> None:
             reason_code="state_restored",
             occurred_at=naive_timestamp,
         )
+
+
+def test_tampered_durable_event_fails_closed_on_get_and_list(tmp_path) -> None:
+    path = tmp_path / "Користувач Ніка" / "ledger.db"
+    store = SQLiteStore(path)
+    store.initialize()
+    ledger = ExperienceLedger(store)
+    ledger.record(
+        event_key="task-7:recovery:1",
+        task_id="task-7",
+        kind=ContinuityKind.RECOVERY,
+        outcome=ContinuityOutcome.WAITING,
+        reason_code="checkpoint_pending",
+        occurred_at=datetime(2026, 9, 12, 8, 0, tzinfo=UTC),
+        attempt=1,
+    )
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE continuity_experience_events SET outcome = ? WHERE event_key = ?",
+            (ContinuityOutcome.COMPLETED.value, "task-7:recovery:1"),
+        )
+
+    reopened = ExperienceLedger(SQLiteStore(path))
+    with pytest.raises(ExperienceConflictError, match="integrity"):
+        reopened.get("task-7:recovery:1")
+    with pytest.raises(ExperienceConflictError, match="integrity"):
+        reopened.list_for_task("task-7")
+
+
+def test_invalid_durable_event_shape_fails_closed_on_readback(tmp_path) -> None:
+    path = tmp_path / "nika.db"
+    store = SQLiteStore(path)
+    store.initialize()
+    ledger = ExperienceLedger(store)
+    ledger.record(
+        event_key="task-8:recovery:1",
+        task_id="task-8",
+        kind=ContinuityKind.RECOVERY,
+        outcome=ContinuityOutcome.PRESERVED,
+        reason_code="checkpoint_verified",
+        occurred_at=datetime(2026, 9, 12, 8, 30, tzinfo=UTC),
+    )
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE continuity_experience_events SET kind = ? WHERE event_key = ?",
+            ("unknown_kind", "task-8:recovery:1"),
+        )
+
+    reopened = ExperienceLedger(SQLiteStore(path))
+    with pytest.raises(ExperienceConflictError, match="invalid durable evidence"):
+        reopened.get("task-8:recovery:1")

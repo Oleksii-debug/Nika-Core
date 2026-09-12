@@ -262,16 +262,56 @@ class ExperienceLedger:
             ).fetchall()
         return tuple(self._from_row(row) for row in rows)
 
-    @staticmethod
-    def _from_row(row) -> ExperienceEvent:  # type: ignore[no-untyped-def]
+    @classmethod
+    def _from_row(cls, row) -> ExperienceEvent:  # type: ignore[no-untyped-def]
+        try:
+            event_key = cls._validate_event_key(row["event_key"])
+            task_id = cls._validate_task_id(row["task_id"])
+            kind = ContinuityKind(row["kind"])
+            outcome = ContinuityOutcome(row["outcome"])
+            reason_code = cls._validate_reason_code(row["reason_code"])
+            occurred_at = row["occurred_at"]
+            if not isinstance(occurred_at, str):
+                raise TypeError("occurred_at must be text")
+            when = datetime.fromisoformat(occurred_at)
+            if when.tzinfo is None or when.utcoffset() is None:
+                raise ValueError("occurred_at must be timezone-aware")
+            if when.astimezone(UTC).isoformat() != occurred_at:
+                raise ValueError("occurred_at must use canonical UTC serialization")
+            attempt = cls._validate_attempt(row["attempt"])
+            delay_seconds = cls._validate_optional_number(
+                "delay_seconds", row["delay_seconds"]
+            )
+            clock_jump_seconds = cls._validate_optional_number(
+                "clock_jump_seconds", row["clock_jump_seconds"]
+            )
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ExperienceConflictError(
+                "continuity experience event contains invalid durable evidence"
+            ) from exc
+
+        expected_fingerprint = cls._fingerprint_payload(
+            task_id=task_id,
+            kind=kind,
+            outcome=outcome,
+            reason_code=reason_code,
+            occurred_at=occurred_at,
+            attempt=attempt,
+            delay_seconds=delay_seconds,
+            clock_jump_seconds=clock_jump_seconds,
+        )
+        if row["fingerprint"] != expected_fingerprint:
+            raise ExperienceConflictError(
+                "continuity experience event durable evidence failed integrity check"
+            )
         return ExperienceEvent(
-            event_key=row["event_key"],
-            task_id=row["task_id"],
-            kind=ContinuityKind(row["kind"]),
-            outcome=ContinuityOutcome(row["outcome"]),
-            reason_code=row["reason_code"],
-            occurred_at=row["occurred_at"],
-            attempt=row["attempt"],
-            delay_seconds=row["delay_seconds"],
-            clock_jump_seconds=row["clock_jump_seconds"],
+            event_key=event_key,
+            task_id=task_id,
+            kind=kind,
+            outcome=outcome,
+            reason_code=reason_code,
+            occurred_at=occurred_at,
+            attempt=attempt,
+            delay_seconds=delay_seconds,
+            clock_jump_seconds=clock_jump_seconds,
         )
