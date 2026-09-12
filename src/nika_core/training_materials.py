@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import ntpath
 import os
 import stat
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ _MAX_SIGNED_64 = (1 << 63) - 1
 _HEX_DIGITS = frozenset("0123456789abcdef")
 _READ_CHUNK_BYTES = 1024 * 1024
 _PLATFORM_PATH_TYPE = type(Path())
+_WINDOWS_FINAL_PATH_BUFFER = 32768
 
 
 class TrainingMaterialResolutionError(RuntimeError):
@@ -81,11 +83,105 @@ def _safe_lstat(path: Path) -> os.stat_result:
         raise TrainingMaterialResolutionError("resolved training material is not accessible") from exc
 
 
+def _is_reparse_point(value: os.stat_result) -> bool:
+    attributes = int(getattr(value, "st_file_attributes", 0))
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    return bool(attributes & reparse_flag)
+
+
 def _require_regular_material(value: os.stat_result) -> None:
-    if stat.S_ISLNK(value.st_mode):
-        raise TrainingMaterialResolutionError("resolved training material must not be a symbolic link")
+    if stat.S_ISLNK(value.st_mode) or _is_reparse_point(value):
+        raise TrainingMaterialResolutionError(
+            "resolved training material must not be a symbolic link or reparse point"
+        )
     if not stat.S_ISREG(value.st_mode):
         raise TrainingMaterialResolutionError("resolved training material must be a regular file")
+
+
+def _open_read_only(path: Path) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        return os.open(path, flags)
+    except OSError as exc:
+        raise TrainingMaterialResolutionError(
+            "resolved training material could not be opened safely"
+        ) from exc
+
+
+def _normalize_windows_final_path(raw_path: str) -> str:
+    if raw_path.startswith("\\\\?\\UNC\\"):
+        raw_path = "\\\\" + raw_path[8:]
+    elif raw_path.startswith("\\\\?\\"):
+        raw_path = raw_path[4:]
+    return ntpath.normcase(ntpath.normpath(raw_path))
+
+
+def _windows_final_path(file_descriptor: int) -> str:
+    try:
+        import ctypes
+        import msvcrt
+
+        handle = msvcrt.get_osfhandle(file_descriptor)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_final_path = kernel32.GetFinalPathNameByHandleW
+        get_final_path.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_wchar),
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+        ]
+        get_final_path.restype = ctypes.c_uint32
+        buffer = ctypes.create_unicode_buffer(_WINDOWS_FINAL_PATH_BUFFER)
+        length = get_final_path(
+            ctypes.c_void_p(handle),
+            buffer,
+            len(buffer),
+            0,
+        )
+    except (ImportError, OSError, ValueError) as exc:
+        raise TrainingMaterialResolutionError(
+            "resolved training material handle path could not be verified"
+        ) from exc
+    if length == 0 or length >= len(buffer):
+        raise TrainingMaterialResolutionError(
+            "resolved training material handle path could not be verified"
+        )
+    return _normalize_windows_final_path(buffer.value)
+
+
+def _require_windows_handle_matches_path(file_descriptor: int, path: Path) -> None:
+    expected_path = _normalize_windows_final_path(ntpath.abspath(str(path)))
+    if _windows_final_path(file_descriptor) != expected_path:
+        raise TrainingMaterialResolutionError(
+            "resolved training material path changed before verification"
+        )
+
+
+def _require_windows_path_still_targets_open_file(
+    path: Path,
+    file_descriptor: int,
+    opened_identity: tuple[int, int, int, int, int, int],
+) -> None:
+    _require_windows_handle_matches_path(file_descriptor, path)
+    current_descriptor = _open_read_only(path)
+    try:
+        _require_windows_handle_matches_path(current_descriptor, path)
+        try:
+            current = os.fstat(current_descriptor)
+        except OSError as exc:
+            raise TrainingMaterialResolutionError(
+                "resolved training material metadata could not be re-read"
+            ) from exc
+        _require_regular_material(current)
+        if _stat_identity(current) != opened_identity:
+            raise TrainingMaterialResolutionError(
+                "resolved training material path changed during verification"
+            )
+    finally:
+        try:
+            os.close(current_descriptor)
+        except OSError:
+            pass
 
 
 def _verify_resolved_material(material: ResolvedTrainingMaterial) -> None:
@@ -100,14 +196,7 @@ def _verify_resolved_material(material: ResolvedTrainingMaterial) -> None:
             "resolved training material size does not match frozen evidence"
         )
 
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        file_descriptor = os.open(path, flags)
-    except OSError as exc:
-        raise TrainingMaterialResolutionError(
-            "resolved training material could not be opened safely"
-        ) from exc
-
+    file_descriptor = _open_read_only(path)
     try:
         try:
             opened = os.fstat(file_descriptor)
@@ -117,9 +206,15 @@ def _verify_resolved_material(material: ResolvedTrainingMaterial) -> None:
             ) from exc
         _require_regular_material(opened)
         opened_identity = _stat_identity(opened)
-        if opened_identity != before_identity:
+        if os.name == "nt":
+            _require_windows_handle_matches_path(file_descriptor, path)
+        elif opened_identity != before_identity:
             raise TrainingMaterialResolutionError(
                 "resolved training material changed before verification"
+            )
+        if opened.st_size != evidence.byte_count:
+            raise TrainingMaterialResolutionError(
+                "resolved training material size does not match frozen evidence"
             )
 
         digest = hashlib.sha256()
@@ -162,6 +257,12 @@ def _verify_resolved_material(material: ResolvedTrainingMaterial) -> None:
             raise TrainingMaterialResolutionError(
                 "resolved training material changed during verification"
             )
+        if os.name == "nt":
+            _require_windows_path_still_targets_open_file(
+                path,
+                file_descriptor,
+                opened_identity,
+            )
         actual_sha256 = digest.hexdigest()
     finally:
         try:
@@ -171,7 +272,11 @@ def _verify_resolved_material(material: ResolvedTrainingMaterial) -> None:
 
     after_path = _safe_lstat(path)
     _require_regular_material(after_path)
-    if _stat_identity(after_path) != before_identity:
+    if after_path.st_size != evidence.byte_count:
+        raise TrainingMaterialResolutionError(
+            "resolved training material path changed during verification"
+        )
+    if os.name != "nt" and _stat_identity(after_path) != before_identity:
         raise TrainingMaterialResolutionError(
             "resolved training material path changed during verification"
         )
