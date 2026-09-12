@@ -92,8 +92,8 @@ def _redact_local_path_text(value: str) -> str:
     ):
         return "[LOCAL_PATH]"
     redacted = _WINDOWS_LOCAL_USER_FILE_PATH.sub("[LOCAL_PATH]", value)
-    redacted = _POSIX_LOCAL_USER_PATH.sub("[LOCAL_PATH]", redacted)
-    return _WINDOWS_LOCAL_USER_PATH.sub("[LOCAL_PATH]", redacted)
+    redacted = _WINDOWS_LOCAL_USER_PATH.sub("[LOCAL_PATH]", redacted)
+    return _POSIX_LOCAL_USER_PATH.sub("[LOCAL_PATH]", redacted)
 
 
 def _require_unique_key(result: Mapping[Any, Any], key: Any) -> None:
