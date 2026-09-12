@@ -44,24 +44,24 @@ def _digest_text(value: str) -> str:
 
 
 def _require_token(value: object, *, field: str) -> str:
-    if not isinstance(value, str):
-        raise TypeError(f"{field} must be a string")
+    if type(value) is not str:
+        raise TypeError(f"{field} must be an exact string")
     if not _TOKEN_RE.fullmatch(value):
         raise ValueError(f"{field} must be a bounded machine token")
     return value
 
 
 def _require_sha256(value: object, *, field: str) -> str:
-    if not isinstance(value, str):
-        raise TypeError(f"{field} must be a string")
+    if type(value) is not str:
+        raise TypeError(f"{field} must be an exact string")
     if not _SHA256_RE.fullmatch(value):
         raise ValueError(f"{field} must be lowercase SHA-256")
     return value
 
 
 def _normalized_statement(value: object) -> str:
-    if not isinstance(value, str):
-        raise TypeError("statement must be a string")
+    if type(value) is not str:
+        raise TypeError("statement must be an exact string")
     normalized = unicodedata.normalize("NFC", value)
     if not normalized.strip():
         raise ValueError("statement must not be empty")
