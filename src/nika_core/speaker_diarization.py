@@ -268,7 +268,7 @@ class SpeakerDiarizationService:
             adapter,
             error_code=DiarizationErrorCode.INVALID_REQUEST,
         )
-        if policy is not None and not isinstance(policy, DiarizationPolicy):
+        if policy is not None and type(policy) is not DiarizationPolicy:
             raise DiarizationError(
                 DiarizationErrorCode.INVALID_REQUEST,
                 "diarization policy must use the canonical type",
@@ -282,7 +282,7 @@ class SpeakerDiarizationService:
         return self._capabilities
 
     async def diarize(self, request: DiarizationRequest) -> DiarizationResult:
-        if not isinstance(request, DiarizationRequest):
+        if type(request) is not DiarizationRequest:
             raise DiarizationError(
                 DiarizationErrorCode.INVALID_REQUEST,
                 "request must be a DiarizationRequest",
@@ -355,15 +355,30 @@ class SpeakerDiarizationService:
         response: object,
         request: DiarizationRequest,
     ) -> tuple[tuple[SpeakerSegment, ...], bool, float | None]:
-        if not isinstance(response, DiarizerResponse):
+        if type(response) is not DiarizerResponse:
             raise DiarizationError(
                 DiarizationErrorCode.INVALID_RESPONSE,
                 "speaker diarizer returned an invalid response type",
             )
+        response_request_id = _safe_id(
+            response.request_id,
+            field="response request_id",
+            error_code=DiarizationErrorCode.INVALID_RESPONSE,
+        )
+        response_provider_id = _safe_id(
+            response.provider_id,
+            field="response provider_id",
+            error_code=DiarizationErrorCode.INVALID_RESPONSE,
+        )
+        response_model_id = _safe_id(
+            response.model_id,
+            field="response model_id",
+            error_code=DiarizationErrorCode.INVALID_RESPONSE,
+        )
         if (
-            response.request_id != request.request_id
-            or response.provider_id != self._capabilities.provider_id
-            or response.model_id != self._capabilities.model_id
+            response_request_id != request.request_id
+            or response_provider_id != self._capabilities.provider_id
+            or response_model_id != self._capabilities.model_id
         ):
             raise DiarizationError(
                 DiarizationErrorCode.ROUTE_MISMATCH,
@@ -401,7 +416,7 @@ class SpeakerDiarizationService:
         overlap_detected = False
 
         for raw in response.segments:
-            if not isinstance(raw, DiarizerSegment):
+            if type(raw) is not DiarizerSegment:
                 raise DiarizationError(
                     DiarizationErrorCode.INVALID_RESPONSE,
                     "speaker diarizer returned an invalid segment type",
@@ -465,7 +480,7 @@ def _validated_capabilities(
     *,
     error_code: DiarizationErrorCode,
 ) -> DiarizerCapabilities:
-    if not isinstance(value, DiarizerCapabilities):
+    if type(value) is not DiarizerCapabilities:
         raise DiarizationError(
             error_code,
             "speaker diarizer capabilities must use the canonical type",
