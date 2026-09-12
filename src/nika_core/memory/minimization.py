@@ -82,13 +82,11 @@ def _redact_secret_structure(value: Any) -> Any:
         for key, item in value.items():
             safe_key = redact_text(key) if isinstance(key, str) else key
             _require_unique_key(result, safe_key)
-            if isinstance(key, str) and safe_key != key:
-                # A dynamic key can itself carry the credential. Redact that key
-                # text but keep normal minimization for its associated data so a
-                # benign value is not destroyed solely by an untrusted key label.
-                result[safe_key] = _redact_secrets(item)
-            else:
-                result[safe_key] = _redact_secret_structure(item)
+            # Once a canonical parent field established secret context, that
+            # authority must survive every descendant. Sanitizing a dynamic key
+            # must not downgrade its associated value back to ordinary content,
+            # because an opaque second secret could otherwise persist unchanged.
+            result[safe_key] = _redact_secret_structure(item)
         return result
     if isinstance(value, list):
         return [_redact_secret_structure(item) for item in value]
