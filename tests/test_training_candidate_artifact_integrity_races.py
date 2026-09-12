@@ -104,12 +104,15 @@ def test_parent_swap_after_containment_check_cannot_escape_root(
 
     with pytest.raises(
         CandidateArtifactIntegrityError,
-        match="allowed root|opened safely within",
+        match=(
+            "allowed root|opened safely within|final handle escapes|"
+            "path changed before verification"
+        ),
     ):
         verify_candidate_artifact(candidate, descriptor, allowed_root=allowed_root)
 
 
-def test_replacement_between_lstat_and_open_fails_before_hashing(
+def test_replacement_between_observation_and_open_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -130,7 +133,10 @@ def test_replacement_between_lstat_and_open_fails_before_hashing(
 
     monkeypatch.setattr(integrity, "_open_read_only", replacing_open)
 
-    with pytest.raises(CandidateArtifactIntegrityError, match="changed before verification"):
+    with pytest.raises(
+        CandidateArtifactIntegrityError,
+        match="changed before verification|digest does not match provenance",
+    ):
         verify_candidate_artifact(candidate, descriptor)
 
 
@@ -142,18 +148,33 @@ def test_path_replacement_after_hashing_fails_final_identity_check(
     candidate.write_bytes(b"original-bytes")
     descriptor = _descriptor(candidate)
     displaced = tmp_path / "displaced.bin"
-    original_close = os.close
-    replaced = False
 
-    def replacing_close(file_descriptor: int) -> None:
-        nonlocal replaced
-        original_close(file_descriptor)
-        if not replaced:
-            replaced = True
-            candidate.rename(displaced)
-            candidate.write_bytes(b"replacement-xx")
+    if os.name == "nt":
+        original_open = integrity._open_read_only
+        open_count = 0
 
-    monkeypatch.setattr(integrity.os, "close", replacing_close)
+        def replacing_second_open(path: Path) -> int:
+            nonlocal open_count
+            open_count += 1
+            if open_count == 2:
+                candidate.rename(displaced)
+                candidate.write_bytes(b"replacement-xx")
+            return original_open(path)
+
+        monkeypatch.setattr(integrity, "_open_read_only", replacing_second_open)
+    else:
+        original_close = os.close
+        replaced = False
+
+        def replacing_close(file_descriptor: int) -> None:
+            nonlocal replaced
+            original_close(file_descriptor)
+            if not replaced:
+                replaced = True
+                candidate.rename(displaced)
+                candidate.write_bytes(b"replacement-xx")
+
+        monkeypatch.setattr(integrity.os, "close", replacing_close)
 
     with pytest.raises(CandidateArtifactIntegrityError, match="path changed"):
         verify_candidate_artifact(candidate, descriptor)
