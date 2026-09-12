@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from nika_core import training_materials as training_materials_module
+from nika_core import training_materials
 from nika_core.learning_package import FrozenLearningPackage, LearningDataSplit
 from nika_core.training_materials import (
     ResolvedTrainingMaterial,
@@ -156,7 +156,7 @@ def test_same_size_replacement_after_verified_handle_close_is_rejected(
             training_path.write_bytes(b"X" * len(training_body))
 
     monkeypatch.setattr(
-        training_materials_module.os,
+        training_materials.os,
         "close",
         replacing_verified_handle_close,
     )
