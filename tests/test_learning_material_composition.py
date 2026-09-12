@@ -26,6 +26,7 @@ H = "1" * 64
 I = "2" * 64
 J = "3" * 64
 K = "4" * 64
+L = "5" * 64
 
 
 def _shard(
@@ -55,17 +56,20 @@ def _receipt(
     material_sha256: str,
     *,
     outcome: VerificationOutcome = VerificationOutcome.PASS,
+    verification_policy_sha256: str = K,
+    check_id: str = "integrity",
+    checker_sha256: str = I,
 ) -> CandidateDatasetVerification:
     evidence = VerificationCheckEvidence(
-        check_id="integrity",
-        checker_sha256=I,
+        check_id=check_id,
+        checker_sha256=checker_sha256,
         evidence_sha256=J,
         outcome=outcome,
     )
     return CandidateDatasetVerification.create(
         candidate_material_sha256=material_sha256,
-        verification_policy_sha256=K,
-        required_check_ids=("integrity",),
+        verification_policy_sha256=verification_policy_sha256,
+        required_check_ids=(check_id,),
         checks=(evidence,),
     )
 
@@ -75,15 +79,19 @@ def _freeze(
     *,
     shards: tuple[LearningShard, ...] | None = None,
     selection_policy_sha256: str = H,
+    expected_verification_policy_sha256: str = K,
+    expected_required_checkers: tuple[tuple[str, str], ...] = (("integrity", I),),
 ):
     return freeze_verified_learning_package(
         package_id="candidate",
         package_version="v1",
         base_artifact_sha256=G,
         selection_policy_sha256=selection_policy_sha256,
-        evaluation_set_sha256=K,
+        evaluation_set_sha256=L,
         shards=_shards() if shards is None else shards,
         verification=verification,
+        expected_verification_policy_sha256=expected_verification_policy_sha256,
+        expected_required_checkers=expected_required_checkers,
     )
 
 
@@ -208,3 +216,102 @@ def test_composition_rejects_receipt_subclass_before_trust() -> None:
         match="exact CandidateDatasetVerification",
     ):
         _freeze(receipt)
+
+
+def test_caller_selected_verification_policy_cannot_authorize_freeze() -> None:
+    material = candidate_material_sha256(
+        selection_policy_sha256=H,
+        shards=_shards(),
+    )
+    receipt = _receipt(
+        material,
+        verification_policy_sha256=J,
+    )
+
+    with pytest.raises(
+        LearningMaterialCompositionError,
+        match="verification policy does not match",
+    ):
+        _freeze(receipt)
+
+
+def test_caller_selected_checker_cannot_authorize_freeze() -> None:
+    material = candidate_material_sha256(
+        selection_policy_sha256=H,
+        shards=_shards(),
+    )
+    receipt = _receipt(
+        material,
+        checker_sha256=J,
+    )
+
+    with pytest.raises(
+        LearningMaterialCompositionError,
+        match="checker authority does not match",
+    ):
+        _freeze(receipt)
+
+
+def test_spoofable_receipt_sha_string_is_rejected_before_comparison() -> None:
+    class _ForgedString(str):
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        def __ne__(self, other: object) -> bool:
+            return False
+
+    material = candidate_material_sha256(
+        selection_policy_sha256=H,
+        shards=_shards(),
+    )
+    receipt = _receipt(_ForgedString(A))
+
+    with pytest.raises(
+        LearningMaterialCompositionError,
+        match="candidate_material_sha256 must be an exact",
+    ):
+        _freeze(receipt)
+
+
+def test_spoofable_shard_sha_string_is_rejected_before_canonicalization() -> None:
+    class _ForgedString(str):
+        pass
+
+    forged = LearningShard(
+        split=LearningDataSplit.TRAINING,
+        artifact_sha256=_ForgedString(A),
+        provenance_sha256=C,
+        license_evidence_sha256=E,
+        record_count=10,
+        byte_count=100,
+    )
+    shards = (
+        forged,
+        _shard(LearningDataSplit.VALIDATION, B, D, F),
+    )
+
+    with pytest.raises(
+        LearningMaterialCompositionError,
+        match="shard artifact_sha256 must be an exact",
+    ):
+        candidate_material_sha256(
+            selection_policy_sha256=H,
+            shards=shards,
+        )
+
+
+def test_expected_checker_authority_must_be_exact_and_bounded() -> None:
+    material = candidate_material_sha256(
+        selection_policy_sha256=H,
+        shards=_shards(),
+    )
+    receipt = _receipt(material)
+
+    with pytest.raises(
+        LearningMaterialCompositionError,
+        match="immutable tuple",
+    ):
+        _freeze(
+            receipt,
+            expected_required_checkers=[("integrity", I)],  # type: ignore[arg-type]
+        )
