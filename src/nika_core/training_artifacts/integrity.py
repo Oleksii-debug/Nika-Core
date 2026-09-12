@@ -47,7 +47,9 @@ def _is_reparse_point(value: os.stat_result) -> bool:
 
 def _require_regular(value: os.stat_result) -> None:
     if stat.S_ISLNK(value.st_mode) or _is_reparse_point(value):
-        raise CandidateArtifactIntegrityError("candidate artifact must not be a link or reparse point")
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact must not be a symbolic link or reparse point"
+        )
     if not stat.S_ISREG(value.st_mode):
         raise CandidateArtifactIntegrityError("candidate artifact must be a regular file")
 
@@ -86,7 +88,9 @@ def _resolve_candidate_path(
 
     root_lstat = _safe_lstat(root)
     if stat.S_ISLNK(root_lstat.st_mode) or _is_reparse_point(root_lstat):
-        raise CandidateArtifactIntegrityError("allowed_root must not be a link or reparse point")
+        raise CandidateArtifactIntegrityError(
+            "allowed_root must not be a symbolic link or reparse point"
+        )
     if not stat.S_ISDIR(root_lstat.st_mode):
         raise CandidateArtifactIntegrityError("allowed_root must be a directory")
     try:
