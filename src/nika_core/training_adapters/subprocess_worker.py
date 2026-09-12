@@ -5,6 +5,7 @@ import json
 import math
 import os
 import subprocess
+import threading
 from collections.abc import Mapping, Sequence
 from typing import NoReturn
 
@@ -22,6 +23,8 @@ _MAX_ENVIRONMENT_ENTRIES = 128
 _MAX_ENVIRONMENT_FIELD_BYTES = 16 * 1024
 _MAX_JSON_DEPTH = 12
 _MAX_JSON_NODES = 4096
+_STREAM_JOIN_TIMEOUT_SECONDS = 1.0
+_READ_CHUNK_BYTES = 64 * 1024
 
 
 class TrainingSubprocessError(RuntimeError):
@@ -97,17 +100,20 @@ def _validate_positive_byte_limit(value: object, *, name: str) -> int:
 
 
 def _validate_timeout(value: object) -> float:
-    if type(value) not in (int, float):
+    if type(value) is int:
+        if value <= 0 or value > _MAX_TIMEOUT_SECONDS:
+            raise ValueError("timeout_seconds must be greater than 0 and at most 3600")
+        return float(value)
+    if type(value) is not float:
         raise ValueError("timeout_seconds must be a finite positive number")
-    numeric = float(value)
-    if not math.isfinite(numeric) or numeric <= 0 or numeric > _MAX_TIMEOUT_SECONDS:
+    if not math.isfinite(value) or value <= 0 or value > _MAX_TIMEOUT_SECONDS:
         raise ValueError("timeout_seconds must be greater than 0 and at most 3600")
-    return numeric
+    return value
 
 
 def _validate_command(command: Sequence[str]) -> tuple[str, ...]:
     if isinstance(command, (str, bytes)):
-        raise ValueError("command must be a sequence of arguments, not a shell string")
+        raise TypeError("command must be a sequence of arguments, not a shell string")
     normalized = tuple(command)
     if not normalized:
         raise ValueError("command must not be empty")
@@ -311,20 +317,32 @@ class SubprocessTrainingWorker:
             raise TrainingSubprocessError("trainer resume state must be a JSON object")
         return trainer_state, expected_previous_step_id
 
+    @staticmethod
+    def _kill_process(process: subprocess.Popen[bytes]) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            process.kill()
+        except OSError:
+            return
+
+    @staticmethod
+    def _close_pipe(pipe: object) -> None:
+        try:
+            pipe.close()  # type: ignore[attr-defined]
+        except (OSError, ValueError):
+            return
+
     def _execute(self, request_bytes: bytes) -> bytes:
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 self._command,
-                check=False,
                 env=dict(self._environment),
-                input=request_bytes,
                 shell=False,
+                stdin=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
-                timeout=self._timeout_seconds,
             )
-        except subprocess.TimeoutExpired as exc:
-            raise TrainingSubprocessError("training subprocess timed out") from exc
         except FileNotFoundError as exc:
             raise TrainingSubprocessError("training subprocess executable was not found") from exc
         except PermissionError as exc:
@@ -332,13 +350,90 @@ class SubprocessTrainingWorker:
         except OSError as exc:
             raise TrainingSubprocessError("training subprocess could not be started") from exc
 
-        if completed.returncode != 0:
-            raise TrainingSubprocessError(
-                f"training subprocess exited unsuccessfully ({completed.returncode})"
-            )
-        if len(completed.stdout) > self._max_response_bytes:
+        if process.stdin is None or process.stdout is None:
+            self._kill_process(process)
+            raise TrainingSubprocessError("training subprocess streams are unavailable")
+
+        stdin = process.stdin
+        stdout = process.stdout
+        captured = bytearray()
+        overflow = threading.Event()
+        read_failed = threading.Event()
+        write_failed = threading.Event()
+
+        def read_stdout() -> None:
+            try:
+                while True:
+                    remaining = self._max_response_bytes + 1 - len(captured)
+                    if remaining <= 0:
+                        overflow.set()
+                        self._kill_process(process)
+                        return
+                    chunk = stdout.read(min(_READ_CHUNK_BYTES, remaining))
+                    if not chunk:
+                        return
+                    captured.extend(chunk)
+                    if len(captured) > self._max_response_bytes:
+                        overflow.set()
+                        self._kill_process(process)
+                        return
+            except (OSError, ValueError):
+                read_failed.set()
+                self._kill_process(process)
+
+        def write_stdin() -> None:
+            try:
+                stdin.write(request_bytes)
+                stdin.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                write_failed.set()
+            finally:
+                self._close_pipe(stdin)
+
+        reader = threading.Thread(target=read_stdout, name="nika-training-stdout", daemon=True)
+        writer = threading.Thread(target=write_stdin, name="nika-training-stdin", daemon=True)
+        reader.start()
+        writer.start()
+
+        timed_out: subprocess.TimeoutExpired | None = None
+        try:
+            returncode = process.wait(timeout=self._timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            timed_out = exc
+            self._kill_process(process)
+            try:
+                returncode = process.wait(timeout=_STREAM_JOIN_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                returncode = process.returncode
+
+        reader.join(timeout=_STREAM_JOIN_TIMEOUT_SECONDS)
+        writer.join(timeout=_STREAM_JOIN_TIMEOUT_SECONDS)
+
+        if reader.is_alive():
+            self._close_pipe(stdout)
+            reader.join(timeout=_STREAM_JOIN_TIMEOUT_SECONDS)
+        if writer.is_alive():
+            self._close_pipe(stdin)
+            writer.join(timeout=_STREAM_JOIN_TIMEOUT_SECONDS)
+
+        self._close_pipe(stdout)
+
+        if timed_out is not None:
+            raise TrainingSubprocessError("training subprocess timed out") from timed_out
+        if reader.is_alive() or writer.is_alive():
+            self._kill_process(process)
+            raise TrainingSubprocessError("training subprocess streams did not close")
+        if overflow.is_set():
             raise TrainingSubprocessError("training subprocess response exceeds the byte limit")
-        return completed.stdout
+        if read_failed.is_set():
+            raise TrainingSubprocessError("training subprocess response could not be read")
+        if returncode != 0:
+            raise TrainingSubprocessError(
+                f"training subprocess exited unsuccessfully ({returncode})"
+            )
+        if write_failed.is_set():
+            raise TrainingSubprocessError("training subprocess did not accept the request")
+        return bytes(captured)
 
     def _parse_response(
         self, raw_response: bytes, *, expected_step_id: str
