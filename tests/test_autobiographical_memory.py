@@ -24,7 +24,7 @@ def _runtime(tmp_path):
     return store, audit, memory, autobiography
 
 
-def test_remembered_audit_evidence_survives_restart_without_copying_payload(tmp_path) -> None:
+def test_remembered_evidence_survives_restart_without_copying_payload(tmp_path) -> None:
     store, audit, _, autobiography = _runtime(tmp_path)
     event_id = audit.append(
         event_type="learning.lesson.accepted",
@@ -139,7 +139,27 @@ def test_missing_or_tampered_audit_evidence_fails_closed(tmp_path) -> None:
         autobiography.list_entries(agent_id="agent-1")
 
 
-def test_tampered_memory_schema_and_evidence_digest_fail_closed(tmp_path) -> None:
+def test_nonfinite_or_noncanonical_audit_payload_fails_closed(tmp_path) -> None:
+    _, audit, _, autobiography = _runtime(tmp_path)
+    event_id = audit.append(
+        event_type="experiment.measured",
+        entity_type="experiment",
+        entity_id="exp-2",
+        payload={"score": float("nan")},
+    )
+
+    with pytest.raises(
+        AutobiographicalMemoryIntegrityError,
+        match="unsupported JSON values",
+    ):
+        autobiography.remember_audit_event(
+            agent_id="agent-1",
+            category=AutobiographicalCategory.OUTCOME,
+            audit_event_id=event_id,
+        )
+
+
+def test_tampered_memory_schema_fails_closed(tmp_path) -> None:
     store, audit, _, autobiography = _runtime(tmp_path)
     event_id = audit.append(
         event_type="decision.recorded",
@@ -222,7 +242,19 @@ def test_agent_id_is_a_bounded_machine_token(agent_id: str, tmp_path) -> None:
         )
 
 
-def test_category_and_event_id_are_strict_types(tmp_path) -> None:
+@pytest.mark.parametrize("event_id", [True, 0, -1, 1 << 63])
+def test_event_id_is_a_positive_signed_64_integer(event_id: object, tmp_path) -> None:
+    _, _, _, autobiography = _runtime(tmp_path)
+
+    with pytest.raises(AutobiographicalMemoryError, match="audit_event_id"):
+        autobiography.remember_audit_event(
+            agent_id="agent-1",
+            category=AutobiographicalCategory.LESSON,
+            audit_event_id=event_id,
+        )
+
+
+def test_category_is_strictly_typed(tmp_path) -> None:
     _, audit, _, autobiography = _runtime(tmp_path)
     event_id = audit.append(
         event_type="lesson.generated",
@@ -235,10 +267,4 @@ def test_category_and_event_id_are_strict_types(tmp_path) -> None:
             agent_id="agent-1",
             category="lesson",
             audit_event_id=event_id,
-        )
-    with pytest.raises(AutobiographicalMemoryError, match="audit_event_id"):
-        autobiography.remember_audit_event(
-            agent_id="agent-1",
-            category=AutobiographicalCategory.LESSON,
-            audit_event_id=True,
         )
