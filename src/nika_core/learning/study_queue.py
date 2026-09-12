@@ -225,7 +225,7 @@ class StudyQueue:
                 except (TypeError, json.JSONDecodeError) as exc:
                     raise ValueError("invalid canonical task payload") from exc
                 if not isinstance(payload, dict):
-                    raise ValueError("invalid canonical task payload")
+                    raise TypeError("invalid canonical task payload")
                 if payload.get("nika_kind") != _STUDY_PAYLOAD_KIND:
                     continue
                 selected.append(row["task_id"])
