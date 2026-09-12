@@ -140,9 +140,6 @@ def test_empty_and_oversized_memory_sets_are_rejected() -> None:
 
 def test_mutable_memory_collection_is_rejected() -> None:
     with pytest.raises(TypeError, match="immutable tuple"):
-        _comparison(()) .create  # pragma: no cover
-
-    with pytest.raises(TypeError, match="immutable tuple"):
         ExperienceMemoryComparison.create(
             comparison_id="comparison-1",
             workspace_id="workspace-1",
@@ -197,9 +194,7 @@ def test_relation_and_relation_evidence_change_comparison_identity() -> None:
     contradicting = _comparison(
         (_result("memory-a", relation=MemoryRelation.CONTRADICTS),)
     )
-    new_evidence = _comparison(
-        (_result("memory-a", relation_sha256=SHA_B),)
-    )
+    new_evidence = _comparison((_result("memory-a", relation_sha256=SHA_B),))
 
     assert supporting.comparison_sha256 != contradicting.comparison_sha256
     assert supporting.comparison_sha256 != new_evidence.comparison_sha256
