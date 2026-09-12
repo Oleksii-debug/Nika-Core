@@ -11,7 +11,10 @@ from nika_core.learning_cognition import (
     CognitionVerification,
     CognitionVerificationCheck,
     CognitionVerificationDecision,
+    CognitionVerificationRequirement,
 )
+
+_POLICY_SHA = "9" * 64
 
 
 def _evidence(
@@ -33,20 +36,34 @@ def _candidate(
     evidence: tuple[CognitionEvidenceRef, ...] | None = None,
     kind: CognitionCandidateKind = CognitionCandidateKind.HYPOTHESIS,
 ) -> CognitionCandidate:
+    selected_evidence = evidence if evidence is not None else (_evidence("event-1", "a"),)
     return CognitionCandidate.create(
-        candidate_id="candidate-1",
-        workspace_id="workspace-1",
-        agent_id="agent-1",
+        candidate_id="candidate-private-1",
+        workspace_id="workspace-private-1",
+        agent_id="agent-private-1",
         kind=kind,
         statement=statement,
-        evidence=evidence or (_evidence("event-1", "a"),),
+        evidence=selected_evidence,
     )
 
 
-def _check(check_id: str, *, passed: bool, digest_char: str) -> CognitionVerificationCheck:
+def _requirement(check_id: str, verifier_char: str = "f") -> CognitionVerificationRequirement:
+    return CognitionVerificationRequirement(
+        check_id=check_id,
+        verifier_sha256=verifier_char * 64,
+    )
+
+
+def _check(
+    check_id: str,
+    *,
+    passed: bool,
+    digest_char: str,
+    verifier_char: str = "f",
+) -> CognitionVerificationCheck:
     return CognitionVerificationCheck(
         check_id=check_id,
-        verifier_sha256="f" * 64,
+        verifier_sha256=verifier_char * 64,
         evidence_sha256=digest_char * 64,
         passed=passed,
     )
@@ -66,7 +83,7 @@ def test_candidate_identity_is_stable_for_equivalent_evidence_order_and_unicode(
     assert candidate_a.evidence == (first, second)
 
 
-def test_candidate_reportable_evidence_never_contains_raw_statement() -> None:
+def test_candidate_reportable_evidence_minimizes_raw_text_and_identifiers() -> None:
     secret_text = "transient hypothesis with private canary SECRET-CANARY-42"
     candidate = _candidate(statement=secret_text)
 
@@ -74,8 +91,11 @@ def test_candidate_reportable_evidence_never_contains_raw_statement() -> None:
 
     assert secret_text not in serialized
     assert "SECRET-CANARY-42" not in serialized
+    assert candidate.candidate_id not in serialized
+    assert candidate.workspace_id not in serialized
+    assert candidate.agent_id not in serialized
+    assert candidate.evidence[0].source_id not in serialized
     assert candidate.statement_sha256 in serialized
-    assert candidate.candidate_sha256 not in serialized
 
 
 def test_candidate_identity_changes_when_bound_evidence_changes() -> None:
@@ -119,17 +139,21 @@ def test_statement_bounds_and_control_characters_fail_closed() -> None:
 
 def test_verification_is_exact_set_bound_and_order_independent_at_creation() -> None:
     candidate = _candidate()
+    requirement_a = _requirement("causality")
+    requirement_b = _requirement("replay")
     check_a = _check("causality", passed=True, digest_char="1")
     check_b = _check("replay", passed=True, digest_char="2")
 
     verification_a = CognitionVerification.create(
         candidate=candidate,
-        required_check_ids=("replay", "causality"),
+        verification_policy_sha256=_POLICY_SHA,
+        requirements=(requirement_b, requirement_a),
         checks=(check_b, check_a),
     )
     verification_b = CognitionVerification.create(
         candidate=candidate,
-        required_check_ids=("causality", "replay"),
+        verification_policy_sha256=_POLICY_SHA,
+        requirements=(requirement_a, requirement_b),
         checks=(check_a, check_b),
     )
 
@@ -142,7 +166,11 @@ def test_failed_required_check_rejects_candidate_without_losing_evidence() -> No
     candidate = _candidate()
     verification = CognitionVerification.create(
         candidate=candidate,
-        required_check_ids=("causality", "replay"),
+        verification_policy_sha256=_POLICY_SHA,
+        requirements=(
+            _requirement("causality"),
+            _requirement("replay"),
+        ),
         checks=(
             _check("causality", passed=True, digest_char="1"),
             _check("replay", passed=False, digest_char="2"),
@@ -156,18 +184,21 @@ def test_failed_required_check_rejects_candidate_without_losing_evidence() -> No
 
 def test_missing_or_extra_verification_check_fails_closed() -> None:
     candidate = _candidate()
+    requirement = _requirement("causality")
     check = _check("causality", passed=True, digest_char="1")
 
     with pytest.raises(ValueError, match="exactly match"):
         CognitionVerification.create(
             candidate=candidate,
-            required_check_ids=("causality", "replay"),
+            verification_policy_sha256=_POLICY_SHA,
+            requirements=(requirement, _requirement("replay")),
             checks=(check,),
         )
     with pytest.raises(ValueError, match="exactly match"):
         CognitionVerification.create(
             candidate=candidate,
-            required_check_ids=("causality",),
+            verification_policy_sha256=_POLICY_SHA,
+            requirements=(requirement,),
             checks=(
                 check,
                 _check("replay", passed=True, digest_char="2"),
@@ -175,14 +206,35 @@ def test_missing_or_extra_verification_check_fails_closed() -> None:
         )
 
 
-def test_duplicate_required_check_id_is_rejected() -> None:
+def test_substituted_verifier_fails_closed_even_under_same_check_id() -> None:
     candidate = _candidate()
+
+    with pytest.raises(ValueError, match="required verifier"):
+        CognitionVerification.create(
+            candidate=candidate,
+            verification_policy_sha256=_POLICY_SHA,
+            requirements=(_requirement("causality", verifier_char="a"),),
+            checks=(
+                _check(
+                    "causality",
+                    passed=True,
+                    digest_char="1",
+                    verifier_char="b",
+                ),
+            ),
+        )
+
+
+def test_duplicate_requirement_id_is_rejected() -> None:
+    candidate = _candidate()
+    requirement = _requirement("causality")
     check = _check("causality", passed=True, digest_char="1")
 
-    with pytest.raises(ValueError, match="required check ids must be unique"):
+    with pytest.raises(ValueError, match="requirement ids must be unique"):
         CognitionVerification(
             candidate_sha256=candidate.candidate_sha256,
-            required_check_ids=("causality", "causality"),
+            verification_policy_sha256=_POLICY_SHA,
+            requirements=(requirement, requirement),
             checks=(check,),
         )
 
