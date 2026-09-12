@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import hashlib
-import hmac
-import json
 from dataclasses import dataclass
 from enum import StrEnum
+from hashlib import sha256
+from hmac import compare_digest
+from json import dumps
 from string import hexdigits
 from urllib.parse import parse_qsl, unquote, urlsplit
 
@@ -165,11 +165,12 @@ class StudyQueue:
 
     def resume(self, task_id: str) -> StudyTask:
         task = self.get(task_id)
-        if task.state is TaskState.CREATED:
-            self._tasks.transition(task_id, TaskState.READY)
-        elif task.state is TaskState.PAUSED:
-            self._tasks.transition(task_id, TaskState.READY)
-        elif task.state in {TaskState.BLOCKED, TaskState.FAILED}:
+        if task.state in {
+            TaskState.CREATED,
+            TaskState.PAUSED,
+            TaskState.BLOCKED,
+            TaskState.FAILED,
+        }:
             self._tasks.transition(task_id, TaskState.READY)
         else:
             raise ValueError(f"study task cannot resume from {task.state.value}")
@@ -209,13 +210,13 @@ def _semantic_payload(material: StudyMaterial) -> dict[str, object]:
 
 
 def _payload_fingerprint(material: StudyMaterial) -> str:
-    encoded = json.dumps(
+    encoded = dumps(
         _semantic_payload(material),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return sha256(encoded).hexdigest()
 
 
 def _material_payload(material: StudyMaterial) -> dict[str, object]:
@@ -249,7 +250,7 @@ def _study_task_from_record(record: TaskRecord) -> StudyTask:
             content_sha256=content_sha256,
             learning_goal=learning_goal,
         )
-        if not hmac.compare_digest(fingerprint, _payload_fingerprint(material)):
+        if not compare_digest(fingerprint, _payload_fingerprint(material)):
             raise ValueError("study payload fingerprint mismatch")
     except (TypeError, ValueError) as exc:
         raise ValueError("invalid durable study task payload") from exc
