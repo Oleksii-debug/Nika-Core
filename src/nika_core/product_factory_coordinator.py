@@ -13,11 +13,12 @@ from nika_core.product_factory_orchestration import (
 )
 from nika_core.toolsmith.contracts import CodingResult, TestEvidence
 
+_MAX_DURABLE_TEXT_UTF8_BYTES = 4096
 _MAX_EVIDENCE_REF_UTF8_BYTES = 4096
 _MAX_REVIEW_EVIDENCE_REFS = 32
 _MAX_REVIEW_EVIDENCE_UTF8_BYTES = 16384
-_MAX_REPAIR_REASON_UTF8_BYTES = 4096
-_MAX_CANCELLATION_REASON_UTF8_BYTES = 4096
+_MAX_REPAIR_REASON_UTF8_BYTES = _MAX_DURABLE_TEXT_UTF8_BYTES
+_MAX_CANCELLATION_REASON_UTF8_BYTES = _MAX_DURABLE_TEXT_UTF8_BYTES
 
 
 class CoordinatorError(ValueError):
@@ -90,18 +91,7 @@ class ReviewDecision:
     evidence_refs: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if type(self.accepted) is not bool:
-            raise CoordinatorError("review acceptance must be an exact boolean")
-        if not self.reviewer_id.strip() or not self.reason.strip() or not self.evidence_refs:
-            raise CoordinatorError("independent review requires reviewer, reason and evidence")
-        if (
-            type(self.evidence_refs) is not tuple
-            or len(self.evidence_refs) > _MAX_REVIEW_EVIDENCE_REFS
-            or any(not _canonical_evidence_ref(reference) for reference in self.evidence_refs)
-            or sum(len(reference.encode("utf-8")) for reference in self.evidence_refs)
-            > _MAX_REVIEW_EVIDENCE_UTF8_BYTES
-        ):
-            raise CoordinatorError("independent review evidence refs must be canonical text")
+        _validate_review_decision(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,8 +251,7 @@ class ProductFactoryCoordinator:
         return request
 
     def block(self, component_id: str, reason: str) -> WorkRecord:
-        if not reason.strip():
-            raise CoordinatorError("blocker reason must not be empty")
+        reason = _canonical_durable_text(reason, label="blocker reason")
         record = self._record(component_id)
         if record.state in {WorkState.ACCEPTED, WorkState.DONE, WorkState.CANCELLED}:
             raise CoordinatorError(f"{record.state.value} component cannot be blocked")
@@ -337,6 +326,8 @@ class ProductFactoryCoordinator:
         request, result, review, blocker = record.request, record.result, record.review, record.blocker
         if result is not None:
             self._validate_result_identity(request, result)
+        if review is not None:
+            _validate_review_decision(review)
         if record.state in {WorkState.PLANNED, WorkState.READY, WorkState.RUNNING}:
             if result is not None or review is not None or blocker is not None:
                 raise CoordinatorError("pre-result snapshot work contains terminal evidence")
@@ -376,8 +367,9 @@ class ProductFactoryCoordinator:
                 raise CoordinatorError("worker-failed repair snapshot cannot contain review evidence")
             return
         if record.state is WorkState.BLOCKED:
-            if result is not None or review is not None or not blocker:
+            if result is not None or review is not None or blocker is None:
                 raise CoordinatorError("blocked snapshot work requires blocker without terminal evidence")
+            _canonical_durable_text(blocker, label="blocker reason")
             return
         raise CoordinatorError("snapshot contains unknown work state")
 
@@ -512,6 +504,40 @@ def _valid_repair_goal(initial_goal: str, current_goal: str, attempt: int) -> bo
         return False
 
 
+def _validate_review_decision(decision: ReviewDecision) -> None:
+    if type(decision.accepted) is not bool:
+        raise CoordinatorError("review acceptance must be an exact boolean")
+    _canonical_durable_text(decision.reviewer_id, label="reviewer id")
+    _canonical_durable_text(decision.reason, label="review reason")
+    if not decision.evidence_refs:
+        raise CoordinatorError("independent review requires reviewer, reason and evidence")
+    if (
+        type(decision.evidence_refs) is not tuple
+        or len(decision.evidence_refs) > _MAX_REVIEW_EVIDENCE_REFS
+        or any(not _canonical_evidence_ref(reference) for reference in decision.evidence_refs)
+        or sum(len(reference.encode("utf-8")) for reference in decision.evidence_refs)
+        > _MAX_REVIEW_EVIDENCE_UTF8_BYTES
+    ):
+        raise CoordinatorError("independent review evidence refs must be canonical text")
+
+
+def _canonical_durable_text(
+    value: object,
+    *,
+    label: str,
+    max_utf8_bytes: int = _MAX_DURABLE_TEXT_UTF8_BYTES,
+) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or len(value.encode("utf-8")) > max_utf8_bytes
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise CoordinatorError(f"{label} must be canonical single-line text")
+    return value
+
+
 def _canonical_evidence_ref(value: object) -> bool:
     return (
         type(value) is str
@@ -523,28 +549,22 @@ def _canonical_evidence_ref(value: object) -> bool:
 
 
 def _canonical_repair_reason(value: object) -> str:
-    if (
-        type(value) is not str
-        or not value
-        or value != value.strip()
-        or len(value.encode("utf-8")) > _MAX_REPAIR_REASON_UTF8_BYTES
-        or "\nRepair: " in value
-        or any(ord(character) < 32 or ord(character) == 127 for character in value)
-    ):
+    value = _canonical_durable_text(
+        value,
+        label="repair reason",
+        max_utf8_bytes=_MAX_REPAIR_REASON_UTF8_BYTES,
+    )
+    if "\nRepair: " in value:
         raise CoordinatorError("repair reason must be canonical single-line text")
     return value
 
 
 def _canonical_cancellation_reason(value: object) -> str:
-    if (
-        type(value) is not str
-        or not value
-        or value != value.strip()
-        or len(value.encode("utf-8")) > _MAX_CANCELLATION_REASON_UTF8_BYTES
-        or any(ord(character) < 32 or ord(character) == 127 for character in value)
-    ):
-        raise CoordinatorError("cancellation reason must be canonical single-line text")
-    return value
+    return _canonical_durable_text(
+        value,
+        label="cancellation reason",
+        max_utf8_bytes=_MAX_CANCELLATION_REASON_UTF8_BYTES,
+    )
 
 
 def _commands_equivalent(observed: tuple[str, ...], declared: tuple[str, ...], *, component_id: str) -> bool:
