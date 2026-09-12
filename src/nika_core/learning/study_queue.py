@@ -8,8 +8,7 @@ import json
 import string
 import urllib.parse
 
-import nika_core.kernel.task_queue as task_queue
-import nika_core.kernel.task_state as task_state
+from nika_core.kernel import task_queue, task_state
 
 
 _STUDY_PAYLOAD_KIND = "study_material_v1"
