@@ -153,6 +153,14 @@ def _windows_final_path(file_descriptor: int) -> str:
     return _normalize_windows_final_path(buffer.value)
 
 
+def _require_windows_handle_matches_path(file_descriptor: int, path: Path) -> None:
+    expected_path = _normalize_windows_final_path(ntpath.abspath(str(path)))
+    if _windows_final_path(file_descriptor) != expected_path:
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact path changed before verification"
+        )
+
+
 def _require_windows_handle_within_root(file_descriptor: int, root: Path) -> None:
     final_path = _windows_final_path(file_descriptor)
     normalized_root = _normalize_windows_final_path(str(root))
@@ -166,6 +174,40 @@ def _require_windows_handle_within_root(file_descriptor: int, root: Path) -> Non
         raise CandidateArtifactIntegrityError(
             "candidate artifact final handle escapes the allowed root"
         )
+
+
+def _require_windows_path_still_targets_open_file(
+    path: Path,
+    file_descriptor: int,
+    opened_identity: tuple[int, int, int, int, int, int],
+    *,
+    root: Path | None,
+) -> None:
+    _require_windows_handle_matches_path(file_descriptor, path)
+    if root is not None:
+        _require_windows_handle_within_root(file_descriptor, root)
+
+    current_descriptor = _open_read_only(path)
+    try:
+        _require_windows_handle_matches_path(current_descriptor, path)
+        if root is not None:
+            _require_windows_handle_within_root(current_descriptor, root)
+        try:
+            current = os.fstat(current_descriptor)
+        except OSError as exc:
+            raise CandidateArtifactIntegrityError(
+                "candidate artifact metadata could not be re-read"
+            ) from exc
+        _require_regular(current)
+        if _stat_identity(current) != opened_identity:
+            raise CandidateArtifactIntegrityError(
+                "candidate artifact path changed during verification"
+            )
+    finally:
+        try:
+            os.close(current_descriptor)
+        except OSError:
+            pass
 
 
 def _open_posix_contained(path: Path, root: Path) -> tuple[int, os.stat_result]:
@@ -228,6 +270,7 @@ def _open_contained_read_only(path: Path, root: Path) -> tuple[int, os.stat_resu
     _require_regular(before)
     file_descriptor = _open_read_only(path)
     try:
+        _require_windows_handle_matches_path(file_descriptor, path)
         _require_windows_handle_within_root(file_descriptor, root)
     except CandidateArtifactIntegrityError:
         try:
@@ -286,7 +329,11 @@ def verify_candidate_artifact(
             ) from exc
         _require_regular(opened)
         opened_identity = _stat_identity(opened)
-        if opened_identity != before_identity:
+        if os.name == "nt":
+            _require_windows_handle_matches_path(file_descriptor, candidate)
+            if resolved_root is not None:
+                _require_windows_handle_within_root(file_descriptor, resolved_root)
+        elif opened_identity != before_identity:
             raise CandidateArtifactIntegrityError(
                 "candidate artifact changed before verification"
             )
@@ -335,8 +382,13 @@ def verify_candidate_artifact(
             raise CandidateArtifactIntegrityError(
                 "candidate artifact changed during verification"
             )
-        if resolved_root is not None and os.name == "nt":
-            _require_windows_handle_within_root(file_descriptor, resolved_root)
+        if os.name == "nt":
+            _require_windows_path_still_targets_open_file(
+                candidate,
+                file_descriptor,
+                opened_identity,
+                root=resolved_root,
+            )
         actual_sha256 = digest.hexdigest()
     finally:
         try:
@@ -346,7 +398,11 @@ def verify_candidate_artifact(
 
     after_path = _safe_lstat(candidate)
     _require_regular(after_path)
-    if _stat_identity(after_path) != before_identity:
+    if after_path.st_size != expected_size:
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact path changed during verification"
+        )
+    if os.name != "nt" and _stat_identity(after_path) != before_identity:
         raise CandidateArtifactIntegrityError(
             "candidate artifact path changed during verification"
         )
