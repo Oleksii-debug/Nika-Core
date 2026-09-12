@@ -28,6 +28,19 @@ _CANDIDATE_STATUS_KINDS = frozenset(
         ProductStatusKind.RELEASE,
     }
 )
+_COMPONENT_SCOPED_STATUS_KINDS = frozenset(
+    {
+        ProductStatusKind.COMPONENT,
+        ProductStatusKind.BUILD,
+        ProductStatusKind.QA,
+    }
+)
+_PROJECT_INTEGRATION_STATUS_KINDS = frozenset(
+    {
+        ProductStatusKind.DEPLOYMENT,
+        ProductStatusKind.RELEASE,
+    }
+)
 _TERMINAL_CANDIDATE_STATUS_KINDS = frozenset(
     {
         ProductStatusKind.BUILD,
@@ -78,13 +91,18 @@ def project_operator_status(detail: ProductProjectDetail) -> FactoryOperatorProj
     integration_entries = tuple(
         entry
         for entry in current_work_entries
-        if entry.kind in {ProductStatusKind.RELEASE, ProductStatusKind.DEPLOYMENT}
+        if entry.kind in _PROJECT_INTEGRATION_STATUS_KINDS
     )
 
+    owner_entries = tuple(
+        entry
+        for entry in current_work_entries
+        if entry.kind in _COMPONENT_SCOPED_STATUS_KINDS
+    )
     owners = tuple(
         dict.fromkeys(
             entry.owner.strip()
-            for entry in detail.statuses
+            for entry in owner_entries
             if entry.owner is not None and entry.owner.strip()
         )
     )
@@ -233,16 +251,35 @@ def _single_component_candidate_entries(
     scoped_stages = tuple(
         entry
         for entry in candidate_entries
-        if entry.kind is not ProductStatusKind.COMPONENT
+        if entry.kind in {ProductStatusKind.BUILD, ProductStatusKind.QA}
         and entry.item_id.startswith(prefix)
     )
     if not scoped_stages:
         return None
 
-    # Explicit item_id correlation is canonical evidence for this bounded
-    # projection. Once present, unrelated unscoped/historical stage rows must not
-    # contaminate the current component candidate identity.
+    # BUILD/QA item_id correlation is emitted by the canonical coordinator surface.
+    # Project-level deployment/release adapters use their own identifiers, so they
+    # must not be reinterpreted as component-scoped candidate authority here.
     return (component, *scoped_stages)
+
+
+def _single_component_projection_entries(
+    component: ProductStatusEntry,
+    current_work_entries: tuple[ProductStatusEntry, ...],
+) -> tuple[ProductStatusEntry, ...]:
+    prefix = f"{component.item_id}:"
+    scoped_component_stages = tuple(
+        entry
+        for entry in current_work_entries
+        if entry.kind in {ProductStatusKind.BUILD, ProductStatusKind.QA}
+        and entry.item_id.startswith(prefix)
+    )
+    project_integration = tuple(
+        entry
+        for entry in current_work_entries
+        if entry.kind in _PROJECT_INTEGRATION_STATUS_KINDS
+    )
+    return (component, *scoped_component_stages, *project_integration)
 
 
 def _single_component_current_work_entries(
@@ -250,23 +287,13 @@ def _single_component_current_work_entries(
 ) -> tuple[ProductStatusEntry, ...] | None:
     components = _entries_of_kind(current_work_entries, ProductStatusKind.COMPONENT)
     if len(components) == 1:
-        if not _is_terminal_success(components[0]):
-            return None
-        return _single_component_candidate_entries(current_work_entries)
+        return _single_component_projection_entries(components[0], current_work_entries)
 
     active_components = _incomplete(components)
     if len(active_components) != 1:
         return None
 
-    current_component = active_components[0]
-    prefix = f"{current_component.item_id}:"
-    scoped_stages = tuple(
-        entry
-        for entry in current_work_entries
-        if entry.kind is not ProductStatusKind.COMPONENT
-        and entry.item_id.startswith(prefix)
-    )
-    return (current_component, *scoped_stages)
+    return _single_component_projection_entries(active_components[0], current_work_entries)
 
 
 def _active_candidate_entries(
@@ -285,9 +312,9 @@ def _active_candidate_entries(
         # whichever incomplete stage happens to appear first.
         return tuple(entry for entry in candidate_entries if _has_candidate_evidence(entry))
 
-    scoped_single_component = _single_component_candidate_entries(candidate_entries)
-    if scoped_single_component is not None:
-        candidate_entries = scoped_single_component
+    if len(components) == 1:
+        scoped_single_component = _single_component_candidate_entries(candidate_entries)
+        candidate_entries = scoped_single_component or components
 
     active_entries = _incomplete(candidate_entries)
 
