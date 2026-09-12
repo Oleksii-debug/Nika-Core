@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import time
+from types import SimpleNamespace
 
 from .domain import (
     AmbiguousTargetError,
@@ -66,10 +67,17 @@ class PywinautoUIABackend(_BasePywinautoUIABackend):
         """
 
         try:
-            from pywinauto.controls.uiawrapper import UIAWrapper
-            from pywinauto.windows.uia_element_info import UIAElementInfo
-
-            focused_wrapper = UIAWrapper(UIAElementInfo.get_active())
+            window = self._window(hwnd)
+            get_active = getattr(type(window.element_info), "get_active", None)
+            if not callable(get_active):
+                logger.debug(
+                    "UIA element-info provider exposes no get_active() focus query"
+                )
+                return None
+            focused_info = get_active()
+            if focused_info is None:
+                return None
+            focused_wrapper = SimpleNamespace(element_info=focused_info)
         except Exception as exc:  # noqa: BLE001 - transient provider focus query
             logger.debug("UIA GetFocusedElement unavailable: %r", exc)
             return None

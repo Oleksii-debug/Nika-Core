@@ -53,6 +53,70 @@ def _record(runtime_id: tuple[int, ...] | None) -> UIAControlRecord:
     )
 
 
+def _focus_tree(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: PywinautoUIABackend,
+    *,
+    target: FakeWrapper,
+) -> FakeTreeWrapper:
+    root = FakeTreeWrapper(
+        FakeElementInfo(None, "window-root"),
+        (target,),
+    )
+    records = {
+        id(root): _record(None),
+        id(target): _record(target.element_info.runtime_id),
+    }
+    monkeypatch.setattr(backend, "_window", lambda _hwnd: root)
+    monkeypatch.setattr(
+        backend,
+        "_deduplicate_same_elements",
+        lambda wrappers: tuple(wrappers),
+    )
+    monkeypatch.setattr(backend, "_record", lambda wrapper: records[id(wrapper)])
+    return root
+
+
+def test_provider_native_focus_read_binds_exact_runtime_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = PywinautoUIABackend()
+    target = FakeWrapper(FakeElementInfo((4, 2), "addressable-control"))
+    _focus_tree(monkeypatch, backend, target=target)
+    focused = FakeElementInfo((4, 2), "addressable-control")
+    monkeypatch.setattr(
+        FakeElementInfo,
+        "get_active",
+        classmethod(lambda _cls: focused),
+        raising=False,
+    )
+
+    assert backend.focused_identity(100) == ((4, 2), 1)
+
+
+def test_provider_native_focus_compare_failure_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = PywinautoUIABackend()
+    target = FakeWrapper(
+        FakeElementInfo((4, 2), "addressable-control", compare_raises=True)
+    )
+    _focus_tree(monkeypatch, backend, target=target)
+    focused = FakeElementInfo((4, 2), "addressable-control")
+    monkeypatch.setattr(
+        FakeElementInfo,
+        "get_active",
+        classmethod(lambda _cls: focused),
+        raising=False,
+    )
+
+    with pytest.raises(
+        AmbiguousTargetError,
+        match="cannot bind provider focused element",
+    ):
+        backend.focused_identity(100)
+
+
 def test_same_automation_element_is_deduplicated_by_compare_elements() -> None:
     backend = PywinautoUIABackend()
     first = FakeWrapper(FakeElementInfo((1, 2, 3), "same-live-element"))
