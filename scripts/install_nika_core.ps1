@@ -20,6 +20,21 @@ function Get-NikaFullPath {
     )
 }
 
+function Test-NikaFullyQualifiedWindowsPath {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+
+    # Accept normal drive-rooted paths (C:\... / C:/...) and normal UNC
+    # paths (\\server\share\...). Reject drive-relative/bare-drive,
+    # root-relative and Win32 device-namespace spellings so GetFullPath cannot
+    # inject process/current-drive state into installer data authority.
+    if ($Path -match '^[A-Za-z]:[\\/]') { return $true }
+    if ($Path -match '^[\\/]{2}(?![?.][\\/])[^\\/]+[\\/][^\\/]+(?:[\\/].*)?$') {
+        return $true
+    }
+    return $false
+}
+
 function Test-NikaPathWithin {
     param(
         [Parameter(Mandatory=$true)][string]$Path,
@@ -42,10 +57,13 @@ function Get-NikaCanonicalDataRoot {
         if ([string]::IsNullOrWhiteSpace($localAppData)) {
             throw "LOCALAPPDATA is required to resolve the canonical Nika Core data root."
         }
+        if (-not (Test-NikaFullyQualifiedWindowsPath -Path $localAppData)) {
+            throw "LOCALAPPDATA must be a fully qualified local or UNC path."
+        }
         $databasePath = Join-Path (Join-Path $localAppData "NikaCore") "nika_core.db"
     }
-    elseif (-not [System.IO.Path]::IsPathRooted($databasePath)) {
-        throw "Configured Nika Core database path must be absolute."
+    elseif (-not (Test-NikaFullyQualifiedWindowsPath -Path $databasePath)) {
+        throw "Configured Nika Core database path must be fully qualified."
     }
 
     $canonicalDatabase = Get-NikaFullPath $databasePath
@@ -507,6 +525,9 @@ function Resolve-NikaInterruptedUpdate {
 if ([string]::IsNullOrWhiteSpace($Destination)) {
     if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
         throw "LOCALAPPDATA is required when Destination is omitted."
+    }
+    if (-not (Test-NikaFullyQualifiedWindowsPath -Path $env:LOCALAPPDATA)) {
+        throw "LOCALAPPDATA must be a fully qualified local or UNC path."
     }
     $Destination = Join-Path $env:LOCALAPPDATA "Programs\NikaCore"
 }
