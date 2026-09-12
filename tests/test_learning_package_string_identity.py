@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Self
+
 import pytest
 
 from nika_core.learning_package import (
@@ -22,7 +24,7 @@ J = "3" * 64
 
 
 class _IdentitySpoof(str):
-    def __new__(cls, value: str, marker: int) -> _IdentitySpoof:
+    def __new__(cls, value: str, marker: int) -> Self:
         instance = super().__new__(cls, value)
         instance.marker = marker
         return instance
