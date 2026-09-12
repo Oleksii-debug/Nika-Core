@@ -11,6 +11,7 @@ from typing import Any
 _MAX_EVIDENCE_REFS = 64
 _MAX_REQUIRED_CHECKS = 32
 _MAX_STATEMENT_CHARS = 16_384
+_MAX_STATEMENT_RAW_CHARS = _MAX_STATEMENT_CHARS * 8
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}\Z")
 
@@ -62,6 +63,8 @@ def _require_sha256(value: object, *, field: str) -> str:
 def _normalized_statement(value: object) -> str:
     if type(value) is not str:
         raise TypeError("statement must be an exact string")
+    if len(value) > _MAX_STATEMENT_RAW_CHARS:
+        raise ValueError("statement exceeds the pre-normalization bound")
     normalized = unicodedata.normalize("NFC", value)
     if not normalized.strip():
         raise ValueError("statement must not be empty")
