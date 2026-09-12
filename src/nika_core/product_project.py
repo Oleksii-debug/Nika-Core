@@ -521,6 +521,7 @@ class ProductProjectRepository:
         ).hexdigest()
         now = _now()
         with self.store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
                 "SELECT project_id, input_fingerprint FROM product_project_idempotency "
                 "WHERE operation_key = ?",
