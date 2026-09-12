@@ -14,7 +14,6 @@ from nika_core.speaker_verification import (
     SpeakerVerificationRequest,
     SpeakerVerificationService,
     SpeakerVerifierCapabilities,
-    SpeakerVerifierKind,
     SpeakerVerifierResponse,
     UnavailableSpeakerVerifierAdapter,
 )
