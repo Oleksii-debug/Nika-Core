@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -111,7 +112,7 @@ class ExperienceLedger:
         if value is None:
             return None
         number = float(value)
-        if number < 0 or number == float("inf") or number != number:
+        if number < 0 or not math.isfinite(number):
             raise ValueError(f"{name} must be finite and non-negative")
         return number
 
