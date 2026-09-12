@@ -104,6 +104,12 @@ $status.Left = 20
 $status.Top = 365
 $form.Controls.Add($status)
 
+$check.Add_CheckedChanged({
+    $state = if ($check.Checked) { 'Checked' } else { 'Unchecked' }
+    $status.Text = 'Toggle state: ' + $state
+    $status.AccessibleName = $status.Text
+}.GetNewClosure())
+
 $apply.Add_Click({
     $status.Text = 'Applied: ' + $input.Text
     $status.AccessibleName = $status.Text
