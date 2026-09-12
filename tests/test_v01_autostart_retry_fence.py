@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "v01_autostart_uia_proof.ps1"
 
 
