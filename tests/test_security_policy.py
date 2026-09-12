@@ -5,6 +5,7 @@ import pytest
 
 from nika_core.security import (
     ActionIntent,
+    ApprovalAuthority,
     ApprovalEvidence,
     ApprovalLedger,
     ExecutionBudget,
@@ -15,8 +16,10 @@ from nika_core.security import (
 )
 from nika_core.tools import ToolRisk
 
+NOW = datetime(2026, 8, 18, 19, 0, tzinfo=UTC)
 
-def _policy(tmp_path: Path) -> SecurityPolicy:
+
+def _policy(tmp_path: Path, authority: ApprovalAuthority | None = None) -> SecurityPolicy:
     return SecurityPolicy(
         granted_tools=frozenset({"files.write", "browser.read", "process.test", "danger.execute"}),
         sandbox=SandboxPolicy(
@@ -30,17 +33,25 @@ def _policy(tmp_path: Path) -> SecurityPolicy:
             max_network_calls=2,
             max_process_launches=1,
         ),
+        approval_verifier=None if authority is None else authority.verifier(),
     )
 
 
-def _approval(intent: ActionIntent, *, approval_id: str = "approval-1") -> ApprovalEvidence:
-    now = datetime(2026, 8, 18, 19, 0, tzinfo=UTC)
-    return ApprovalEvidence(
-        approval_id=approval_id,
-        action_fingerprint=intent.approval_fingerprint,
-        approved_at=now - timedelta(minutes=1),
-        expires_at=now + timedelta(minutes=4),
+def _danger_intent(*, action_id: str = "danger-1", target: str = "named operation") -> ActionIntent:
+    return ActionIntent(
+        action_id=action_id,
+        tool_id="danger.execute",
+        risk=ToolRisk.HIGH_IMPACT,
+        target=target,
+        task_id="task-security",
+        project_id="project-nika-core",
+        effect_id=action_id,
     )
+
+
+def _approval(authority: ApprovalAuthority, intent: ActionIntent) -> ApprovalEvidence:
+    request = authority.request(intent, now=NOW - timedelta(minutes=1))
+    return authority.approve(request.request_id, now=NOW - timedelta(seconds=30))
 
 
 def test_workspace_write_is_confined_and_budgeted(tmp_path: Path) -> None:
@@ -119,51 +130,40 @@ def test_network_and_process_require_explicit_allowlist(tmp_path: Path) -> None:
 
 
 def test_high_impact_approval_is_exact_expiring_and_single_use(tmp_path: Path) -> None:
-    policy = _policy(tmp_path)
-    intent = ActionIntent(
-        action_id="danger-1",
-        tool_id="danger.execute",
-        risk=ToolRisk.HIGH_IMPACT,
-        target="named operation",
-    )
+    authority = ApprovalAuthority(issuer_id="test-host", secret=b"x" * 32)
+    policy = _policy(tmp_path, authority)
+    intent = _danger_intent()
     ledger = ExecutionBudgetLedger(policy.budget)
     approvals = ApprovalLedger()
-    now = datetime(2026, 8, 18, 19, 0, tzinfo=UTC)
 
     with pytest.raises(PermissionError, match="explicit approval"):
-        authorize_action(intent, policy, ledger, approvals, now=now)
+        authorize_action(intent, policy, ledger, approvals, now=NOW)
 
-    evidence = _approval(intent)
-    authorize_action(intent, policy, ledger, approvals, approval=evidence, now=now)
+    evidence = _approval(authority, intent)
+    authorize_action(intent, policy, ledger, approvals, approval=evidence, now=NOW)
     with pytest.raises(PermissionError, match="already used"):
-        authorize_action(intent, policy, ledger, approvals, approval=evidence, now=now)
+        authorize_action(intent, policy, ledger, approvals, approval=evidence, now=NOW)
 
-    other = ActionIntent(
-        action_id="danger-2",
-        tool_id="danger.execute",
-        risk=ToolRisk.HIGH_IMPACT,
-        target="different operation",
-    )
+    other = _danger_intent(action_id="danger-2", target="different operation")
+    authority2 = ApprovalAuthority(issuer_id="test-host-2", secret=b"y" * 32)
+    evidence2 = _approval(authority2, intent)
     with pytest.raises(PermissionError, match="exact action"):
         authorize_action(
             other,
-            policy,
+            _policy(tmp_path, authority2),
             ExecutionBudgetLedger(policy.budget),
             ApprovalLedger(),
-            approval=_approval(intent, approval_id="approval-2"),
-            now=now,
+            approval=evidence2,
+            now=NOW,
         )
 
 
 def test_expired_approval_is_rejected(tmp_path: Path) -> None:
-    policy = _policy(tmp_path)
-    intent = ActionIntent(
-        action_id="danger-expired",
-        tool_id="danger.execute",
-        risk=ToolRisk.HIGH_IMPACT,
-        target="operation",
-    )
-    approval = _approval(intent)
+    authority = ApprovalAuthority(issuer_id="test-host", secret=b"z" * 32)
+    policy = _policy(tmp_path, authority)
+    intent = _danger_intent(action_id="danger-expired", target="operation")
+    request = authority.request(intent, now=NOW - timedelta(minutes=6), ttl=timedelta(minutes=5))
+    approval = authority.approve(request.request_id, now=NOW - timedelta(minutes=5, seconds=30))
     with pytest.raises(PermissionError, match="not currently valid"):
         authorize_action(
             intent,

@@ -23,6 +23,53 @@ BUSINESS_FACTORY_MIGRATIONS = {
     ),
 }
 
+_MIGRATION_COLUMNS = {
+    "version": ("INTEGER", 0, 1),
+    "applied_at": ("TEXT", 1, 0),
+}
+_SNAPSHOT_COLUMNS = {
+    "objective_id": ("TEXT", 0, 1),
+    "row_version": ("INTEGER", 1, 0),
+    "payload_json": ("TEXT", 1, 0),
+    "updated_at": ("TEXT", 1, 0),
+}
+
+
+def _require_stored_integer(value: object, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise RuntimeError(f"{field} must be stored as SQLite INTEGER")
+    return value
+
+
+def _table_schema(conn: Any, table_name: str) -> dict[str, tuple[str, int, int]]:
+    if table_name == "business_factory_schema_migrations":
+        rows = conn.execute(
+            "PRAGMA table_info(business_factory_schema_migrations)"
+        ).fetchall()
+    elif table_name == "business_factory_snapshots":
+        rows = conn.execute("PRAGMA table_info(business_factory_snapshots)").fetchall()
+    else:
+        raise ValueError("unsupported PF9 table name")
+    return {
+        str(row["name"]): (
+            str(row["type"]).upper(),
+            int(row["notnull"]),
+            int(row["pk"]),
+        )
+        for row in rows
+    }
+
+
+def _validate_table(
+    conn: Any,
+    *,
+    table_name: str,
+    expected: dict[str, tuple[str, int, int]],
+) -> None:
+    actual = _table_schema(conn, table_name)
+    if actual != expected:
+        raise RuntimeError(f"business factory table schema mismatch: {table_name}")
+
 
 class BusinessFactoryRepository:
     """PF9 durable aggregate store using Nika's canonical SQLiteStore connection boundary."""
@@ -36,10 +83,23 @@ class BusinessFactoryRepository:
                 "CREATE TABLE IF NOT EXISTS business_factory_schema_migrations ("
                 "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
             )
+            _validate_table(
+                conn,
+                table_name="business_factory_schema_migrations",
+                expected=_MIGRATION_COLUMNS,
+            )
             row = conn.execute(
                 "SELECT MAX(version) AS version FROM business_factory_schema_migrations"
             ).fetchone()
-            current = int(row["version"] or 0)
+            raw_current = row["version"] if row is not None else None
+            current = (
+                0
+                if raw_current is None
+                else _require_stored_integer(
+                    raw_current,
+                    field="business factory schema version",
+                )
+            )
             if current > BUSINESS_FACTORY_SCHEMA_VERSION:
                 raise RuntimeError(
                     "business factory database schema "
@@ -56,6 +116,12 @@ class BusinessFactoryRepository:
                     "VALUES (?, ?)",
                     (version, datetime.now(UTC).isoformat()),
                 )
+            # A current marker is not proof that the owned table still exists or is intact.
+            _validate_table(
+                conn,
+                table_name="business_factory_snapshots",
+                expected=_SNAPSHOT_COLUMNS,
+            )
 
     def save(
         self,
@@ -88,7 +154,13 @@ class BusinessFactoryRepository:
                         "WHERE objective_id = ?",
                         (objective_id,),
                     ).fetchone()
-                    current = "missing" if row is None else str(int(row["row_version"]))
+                    if row is None:
+                        current: str | int = "missing"
+                    else:
+                        current = _require_stored_integer(
+                            row["row_version"],
+                            field="business aggregate row version",
+                        )
                     raise StaleBusinessStateError(
                         "business aggregate row version changed: "
                         f"{current} != {expected_row_version}"
@@ -115,7 +187,10 @@ class BusinessFactoryRepository:
                         raise StaleBusinessStateError(
                             "business aggregate does not exist at expected row version"
                         )
-                    current = int(row["row_version"])
+                    current = _require_stored_integer(
+                        row["row_version"],
+                        field="business aggregate row version",
+                    )
                     raise StaleBusinessStateError(
                         "business aggregate row version changed: "
                         f"{current} != {expected_row_version}"
@@ -133,9 +208,13 @@ class BusinessFactoryRepository:
             ).fetchone()
         if row is None:
             return None
+        stored_row_version = _require_stored_integer(
+            row["row_version"],
+            field="business aggregate row version",
+        )
         snapshot = load_business_snapshot(str(row["payload_json"]))
         if snapshot.objective.objective_id != objective_id:
             raise RuntimeError("business snapshot objective identity does not match storage key")
-        if snapshot.row_version != int(row["row_version"]):
+        if snapshot.row_version != stored_row_version:
             raise RuntimeError("business snapshot row version does not match storage metadata")
         return snapshot
