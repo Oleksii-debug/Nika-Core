@@ -288,7 +288,10 @@ def test_policy_segment_ceiling_is_enforced() -> None:
         DiarizerSegment(0, 100, "unsafe\nspeaker"),
         DiarizerSegment(0, 100, "speaker", float("nan")),
         DiarizerSegment(0, 100, "speaker", float("inf")),
-        DiarizerSegment(0, 100, "speaker", 10**10_000),
+        pytest.param(
+            DiarizerSegment(0, 100, "speaker", 10**10_000),
+            id="huge-confidence",
+        ),
     ],
 )
 def test_malformed_segments_fail_with_owned_invalid_response(
@@ -348,7 +351,15 @@ def test_declared_overlap_is_preserved_as_evidence() -> None:
     assert result.evidence.speaker_count == 2
 
 
-@pytest.mark.parametrize("latency", [float("nan"), float("inf"), -1.0, 10**10_000])
+@pytest.mark.parametrize(
+    "latency",
+    [
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(float("inf"), id="positive-inf"),
+        pytest.param(-1.0, id="negative"),
+        pytest.param(10**10_000, id="huge-int"),
+    ],
+)
 def test_invalid_latency_fails_closed(latency: object) -> None:
     adapter = _Adapter(latency_ms=latency)  # type: ignore[arg-type]
 
@@ -360,7 +371,15 @@ def test_invalid_latency_fails_closed(latency: object) -> None:
 
 @pytest.mark.parametrize(
     "timeout",
-    [float("nan"), float("inf"), float("-inf"), 0, -1, 10**10_000, True],
+    [
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(float("inf"), id="positive-inf"),
+        pytest.param(float("-inf"), id="negative-inf"),
+        pytest.param(0, id="zero"),
+        pytest.param(-1, id="negative"),
+        pytest.param(10**10_000, id="huge-int"),
+        pytest.param(True, id="bool"),
+    ],
 )
 def test_invalid_timeout_policy_fails_without_float_overflow(timeout: object) -> None:
     with pytest.raises(DiarizationError) as captured:
