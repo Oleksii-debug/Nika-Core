@@ -11,7 +11,22 @@ from itertools import pairwise
 from .contracts import TradingResearchError, require_aware_utc
 
 _METRIC_CONTEXT = Context(prec=34, rounding=ROUND_HALF_EVEN)
-_SAMPLING_SCHEMA = "nika-trader-sampling-v1"
+_SAMPLING_SCHEMA = "nika-trader-sampling-v2"
+_DAY = timedelta(days=1)
+_CANONICAL_REGULAR_RULES: dict[tuple[str, timedelta], Decimal] = {
+    ("continuous-utc-daily-v1", _DAY): Decimal("252"),
+    ("synthetic-one-period-year-v1", _DAY): Decimal("1"),
+}
+_LEGACY_REGULAR_RULE_ALIASES: dict[
+    tuple[str, timedelta, Decimal],
+    tuple[str, Decimal],
+] = {
+    (
+        "continuous-utc-daily-v1",
+        _DAY,
+        Decimal("1"),
+    ): ("synthetic-one-period-year-v1", Decimal("1")),
+}
 
 
 class RatioUnavailableReason(StrEnum):
@@ -67,7 +82,28 @@ class SamplingSpec:
                     "regular sampling periods_per_year must be a finite positive Decimal"
                 )
             with localcontext(_METRIC_CONTEXT):
-                object.__setattr__(self, "periods_per_year", +value)
+                normalized_value = +value
+            alias = _LEGACY_REGULAR_RULE_ALIASES.get(
+                (self.calendar_id, self.cadence, normalized_value)
+            )
+            if alias is not None:
+                canonical_calendar_id, canonical_periods = alias
+                object.__setattr__(self, "calendar_id", canonical_calendar_id)
+                object.__setattr__(self, "periods_per_year", canonical_periods)
+            else:
+                expected = _CANONICAL_REGULAR_RULES.get(
+                    (self.calendar_id, self.cadence)
+                )
+                if expected is None:
+                    raise TradingResearchError(
+                        "regular sampling calendar/cadence is not a supported canonical rule"
+                    )
+                if normalized_value != expected:
+                    raise TradingResearchError(
+                        "regular sampling periods_per_year does not match the canonical "
+                        "calendar/cadence rule"
+                    )
+                object.__setattr__(self, "periods_per_year", expected)
         else:
             if self.calendar_id is not None:
                 raise TradingResearchError(
@@ -184,6 +220,8 @@ def _validate_sampling(
 ) -> None:
     if not isinstance(sampling, SamplingSpec):
         raise TradingResearchError("sampling must be SamplingSpec evidence")
+    if _sampling_fingerprint(sampling) != sampling.fingerprint:
+        raise TradingResearchError("sampling evidence changed after construction")
     validated = SamplingSpec(
         sampling.mode,
         sampling.calendar_id,
