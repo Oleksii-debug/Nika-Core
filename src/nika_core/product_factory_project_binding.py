@@ -11,6 +11,7 @@ from nika_core.product_factory_orchestration import ProductRepositoryGraph, Team
 from nika_core.product_factory_review_authority import (
     ProductFactoryReviewAuthorityPort,
     TeamPlanReviewAuthority,
+    team_plan_fingerprint_ref,
 )
 from nika_core.product_project import ProductProject
 
@@ -38,10 +39,12 @@ class ProductProjectCoordinatorBinding:
 
     PF1 remains the durable owner of ProductProject state. A project that persists one or
     more ``team_refs`` may only expose independent review through the exact persisted
-    ``TeamPlan`` plus a host-owned evidence authority. Caller supplied reviewer ids never
-    become authority by themselves. Legacy projects without a persisted team assignment
-    remain plan/recovery compatible, but they have no review authority and therefore fail
-    closed if an ACCEPTED transition is attempted or restored.
+    ``TeamPlan`` plus a host-owned evidence authority. The durable project must bind both
+    the historical plan id and a semantic fingerprint of the exact TeamPlan content, so
+    reusing one plan id with attacker-chosen role content cannot manufacture authority.
+    Legacy projects without a persisted team assignment remain plan/recovery compatible,
+    but they have no review authority and therefore fail closed if an ACCEPTED transition
+    is attempted or restored.
     """
 
     project: ProductProject
@@ -156,6 +159,11 @@ class ProductProjectCoordinatorBinding:
         if self.team_plan.plan_id not in team_refs:
             raise ProductProjectBindingError(
                 "TeamPlan identity is not persisted by ProductProject team_refs"
+            )
+        expected_plan_ref = team_plan_fingerprint_ref(self.team_plan)
+        if expected_plan_ref not in team_refs:
+            raise ProductProjectBindingError(
+                "TeamPlan content fingerprint is not persisted by ProductProject team_refs"
             )
         component_ids = {component.component_id for component in self.graph.components}
         assigned_ids = {
