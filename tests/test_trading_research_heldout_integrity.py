@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from trading_research_metric_evidence_helpers import total_return_evidence
 
 from nika_core.trading_research import heldout, metric_evidence, metrics
 from nika_core.trading_research.contracts import CausalityViolation, Partition, TradingResearchError
@@ -21,7 +22,6 @@ from nika_core.trading_research.heldout import (
     bind_held_out_test,
     select_validation_candidate,
 )
-from trading_research_metric_evidence_helpers import total_return_evidence
 
 BASE = datetime(2026, 1, 1, tzinfo=UTC)
 HASH = "a" * 64
