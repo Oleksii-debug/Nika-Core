@@ -137,6 +137,9 @@ def main() -> None:
         checkbox_after = _resolve(
             after_toggle, role="checkbox", name="Verify semantic target"
         )
+        toggle_status = _resolve(after_toggle, role="text", name="Toggle state: Checked")
+        assert checkbox_after.node_id == checkbox.node_id
+        assert toggle_status.visible
         assert after_toggle.revision != after_value.revision
         assert "Toggle" in adapter.pattern_capabilities(checkbox_after)
 
@@ -210,6 +213,7 @@ def main() -> None:
                     ],
                     "provider_anomaly_contract_proven_by_deterministic_tests": True,
                     "moved_resized_identity_stable": True,
+                    "toggle_effect_semantically_observed": True,
                     "dpi_position_used_for_targeting": False,
                     "coordinates_used": False,
                     "stale_replacement_rejected": True,
