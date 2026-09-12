@@ -313,6 +313,7 @@ def test_registered_gap_survives_process_restart_and_checkpoints_exact_repair(
         host_task_id=host_task_id,
         capability_id="toml-editor",
         reason="missing capability",
+        attempted_methods=("registry-search",),
     )
     _register(service, checkpoint)
 
@@ -366,6 +367,7 @@ def test_checkpoint_failure_leaves_prepared_binding_and_restart_retries_same_att
         host_task_id=host_task_id,
         capability_id="toml-editor",
         reason="missing capability",
+        attempted_methods=("registry-search",),
     )
     _register(service, checkpoint)
 
@@ -422,6 +424,7 @@ def test_checkpoint_committed_before_binding_finalization_reconciles_without_att
         host_task_id=host_task_id,
         capability_id="toml-editor",
         reason="missing capability",
+        attempted_methods=("registry-search",),
     )
     _register(service, checkpoint)
 
@@ -513,6 +516,7 @@ def test_old_gap_cannot_be_consumed_after_component_advances_to_another_attempt(
         host_task_id=host_task_id,
         capability_id="toml-editor",
         reason="missing capability",
+        attempted_methods=("registry-search",),
     )
     _register(service, checkpoint)
     bridge.worker_adapter.prepare_safe_repair(
@@ -544,6 +548,7 @@ def test_new_gap_on_resumed_attempt_takes_precedence_over_consumed_predecessor(
         host_task_id=host_task_id,
         capability_id="toml-editor",
         reason="missing TOML capability",
+        attempted_methods=("registry-search",),
     )
     _register(service, first)
     resumed = bridge.resume_durable_registered_gap(
