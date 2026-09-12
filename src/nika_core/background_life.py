@@ -109,7 +109,6 @@ def decide_background_work(
         raise TypeError("owner_presence must be OwnerPresence")
     if type(work_kind) is not BackgroundWorkKind:
         raise TypeError("work_kind must be BackgroundWorkKind")
-    status = _validate_capacity(capacity)
 
     if owner_presence is OwnerPresence.ACTIVE:
         return BackgroundDecision(
@@ -123,6 +122,8 @@ def decide_background_work(
             work_kind=work_kind,
             reason="owner_presence_unknown",
         )
+
+    status = _validate_capacity(capacity)
     if status.under_pressure:
         return BackgroundDecision(
             action=BackgroundAction.DEFER,
