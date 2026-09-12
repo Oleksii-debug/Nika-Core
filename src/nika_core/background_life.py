@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from math import isfinite
 
 from nika_core.resources.contracts import (
     ResourceBudget,
@@ -10,6 +11,7 @@ from nika_core.resources.contracts import (
 )
 
 _BACKGROUND_SCOPE = "background_life"
+_MAX_SIGNED_64 = (1 << 63) - 1
 
 
 class OwnerPresence(StrEnum):
@@ -66,6 +68,61 @@ class BackgroundDecision:
         return self.action is BackgroundAction.RUN
 
 
+def _require_nonempty_exact_str(value: object, name: str) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{name} must be exact built-in str")
+    if not value or value != value.strip():
+        raise ValueError(f"{name} must be non-empty without surrounding whitespace")
+    return value
+
+
+def _require_bounded_int(value: object, name: str, *, minimum: int) -> int:
+    if type(value) is not int:
+        raise TypeError(f"{name} must be exact built-in int")
+    if not minimum <= value <= _MAX_SIGNED_64:
+        raise ValueError(f"{name} is outside the supported integer range")
+    return value
+
+
+def _require_percent(
+    value: object,
+    name: str,
+    *,
+    allow_none: bool,
+    lower_inclusive: bool,
+) -> int | float | None:
+    if value is None:
+        if allow_none:
+            return None
+        raise TypeError(f"{name} must be a finite number")
+    if type(value) not in (int, float):
+        raise TypeError(f"{name} must be exact built-in int or float")
+    if type(value) is float and not isfinite(value):
+        raise ValueError(f"{name} must be finite")
+    lower_ok = value >= 0 if lower_inclusive else value > 0
+    if not lower_ok or value > 100:
+        bracket = "[0, 100]" if lower_inclusive else "(0, 100]"
+        raise ValueError(f"{name} must be in {bracket}")
+    return value
+
+
+def _require_headroom(
+    value: object,
+    expected: int | float | None,
+    name: str,
+) -> None:
+    if expected is None:
+        if value is not None:
+            raise ValueError(f"{name} must be None when no limit is configured")
+        return
+    if type(value) not in (int, float):
+        raise TypeError(f"{name} must be exact built-in int or float")
+    if type(value) is float and not isfinite(value):
+        raise ValueError(f"{name} must be finite")
+    if value != expected:
+        raise ValueError(f"{name} is inconsistent with canonical ResourceManager status")
+
+
 def _validate_capacity(capacity: object) -> ResourceCapacityStatus:
     if type(capacity) is not ResourceCapacityStatus:
         raise TypeError("capacity must be exact ResourceCapacityStatus")
@@ -73,27 +130,91 @@ def _validate_capacity(capacity: object) -> ResourceCapacityStatus:
         raise TypeError("capacity.budget must be exact ResourceBudget")
     if type(capacity.snapshot) is not ResourceSnapshot:
         raise TypeError("capacity.snapshot must be exact ResourceSnapshot")
-    if type(capacity.budget.scope) is not str:
-        raise TypeError("capacity budget scope must be exact built-in str")
-    if capacity.budget.scope != _BACKGROUND_SCOPE:
+
+    budget = capacity.budget
+    snapshot = capacity.snapshot
+
+    scope = _require_nonempty_exact_str(budget.scope, "capacity budget scope")
+    if scope != _BACKGROUND_SCOPE:
         raise ValueError(f"capacity budget scope must be {_BACKGROUND_SCOPE!r}")
-    for name, value in (
-        ("active_count", capacity.active_count),
-        ("queued_count", capacity.queued_count),
-        ("concurrency_headroom", capacity.concurrency_headroom),
-    ):
-        if type(value) is not int:
-            raise TypeError(f"{name} must be exact built-in int")
-        if value < 0:
-            raise ValueError(f"{name} must not be negative")
+    _require_nonempty_exact_str(budget.owner_id, "capacity budget owner_id")
+    max_concurrent = _require_bounded_int(
+        budget.max_concurrent,
+        "capacity budget max_concurrent",
+        minimum=1,
+    )
+    max_cpu = _require_percent(
+        budget.max_cpu_percent,
+        "capacity budget max_cpu_percent",
+        allow_none=True,
+        lower_inclusive=False,
+    )
+    max_memory = _require_percent(
+        budget.max_memory_percent,
+        "capacity budget max_memory_percent",
+        allow_none=True,
+        lower_inclusive=False,
+    )
+    cpu = _require_percent(
+        snapshot.cpu_percent,
+        "capacity snapshot cpu_percent",
+        allow_none=False,
+        lower_inclusive=True,
+    )
+    memory = _require_percent(
+        snapshot.memory_percent,
+        "capacity snapshot memory_percent",
+        allow_none=False,
+        lower_inclusive=True,
+    )
+    _require_bounded_int(
+        snapshot.available_memory_bytes,
+        "capacity snapshot available_memory_bytes",
+        minimum=0,
+    )
+    if snapshot.power_plugged is not None and type(snapshot.power_plugged) is not bool:
+        raise TypeError("power_plugged must be exact built-in bool or None")
+
+    active_count = _require_bounded_int(capacity.active_count, "active_count", minimum=0)
+    _require_bounded_int(capacity.queued_count, "queued_count", minimum=0)
+    concurrency_headroom = _require_bounded_int(
+        capacity.concurrency_headroom,
+        "concurrency_headroom",
+        minimum=0,
+    )
+    expected_concurrency_headroom = max(0, max_concurrent - active_count)
+    if concurrency_headroom != expected_concurrency_headroom:
+        raise ValueError(
+            "concurrency_headroom is inconsistent with canonical ResourceManager status"
+        )
+
+    expected_cpu_headroom = None if max_cpu is None else max_cpu - cpu
+    expected_memory_headroom = None if max_memory is None else max_memory - memory
+    _require_headroom(
+        capacity.cpu_headroom_percent,
+        expected_cpu_headroom,
+        "cpu_headroom_percent",
+    )
+    _require_headroom(
+        capacity.memory_headroom_percent,
+        expected_memory_headroom,
+        "memory_headroom_percent",
+    )
+
+    expected_reasons: list[str] = []
+    if active_count >= max_concurrent:
+        expected_reasons.append("concurrency_limit")
+    if max_cpu is not None and cpu > max_cpu:
+        expected_reasons.append("cpu_limit")
+    if max_memory is not None and memory > max_memory:
+        expected_reasons.append("memory_limit")
+
     if type(capacity.pressure_reasons) is not tuple:
         raise TypeError("pressure_reasons must be exact tuple")
-    for reason in capacity.pressure_reasons:
-        if type(reason) is not str or not reason or reason != reason.strip():
-            raise ValueError("pressure_reasons must contain canonical non-empty strings")
-    if capacity.snapshot.power_plugged is not None:
-        if type(capacity.snapshot.power_plugged) is not bool:
-            raise TypeError("power_plugged must be exact built-in bool or None")
+    if capacity.pressure_reasons != tuple(expected_reasons):
+        raise ValueError(
+            "pressure_reasons are inconsistent with canonical ResourceManager status"
+        )
     return capacity
 
 
