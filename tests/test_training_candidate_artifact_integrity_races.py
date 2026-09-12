@@ -45,7 +45,7 @@ def test_symbolic_link_allowed_root_is_rejected(tmp_path: Path) -> None:
     except OSError:
         pytest.skip("symbolic links are unavailable in this environment")
 
-    with pytest.raises(CandidateArtifactIntegrityError, match="allowed_root.*symbolic link"):
+    with pytest.raises(CandidateArtifactIntegrityError, match="allowed_root.*link"):
         verify_candidate_artifact(candidate, _descriptor(candidate), allowed_root=linked_root)
 
 
@@ -68,6 +68,45 @@ def test_symlinked_parent_cannot_escape_allowed_root(tmp_path: Path) -> None:
             _descriptor(candidate),
             allowed_root=allowed_root,
         )
+
+
+def test_parent_swap_after_containment_check_cannot_escape_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    allowed_root = tmp_path / "allowed"
+    allowed_root.mkdir()
+    inner = allowed_root / "inner"
+    inner.mkdir()
+    candidate = inner / "candidate.bin"
+    candidate.write_bytes(b"same-trusted-bytes")
+    descriptor = _descriptor(candidate)
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "candidate.bin").write_bytes(b"same-trusted-bytes")
+    displaced = allowed_root / "inner-original"
+    original_open = integrity._open_contained_read_only
+    swapped = False
+
+    def swapping_open(path: Path, root: Path) -> tuple[int, os.stat_result]:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            inner.rename(displaced)
+            try:
+                inner.symlink_to(outside, target_is_directory=True)
+            except OSError:
+                pytest.skip("symbolic links are unavailable in this environment")
+        return original_open(path, root)
+
+    monkeypatch.setattr(integrity, "_open_contained_read_only", swapping_open)
+
+    with pytest.raises(
+        CandidateArtifactIntegrityError,
+        match="allowed root|opened safely within",
+    ):
+        verify_candidate_artifact(candidate, descriptor, allowed_root=allowed_root)
 
 
 def test_replacement_between_lstat_and_open_fails_before_hashing(
