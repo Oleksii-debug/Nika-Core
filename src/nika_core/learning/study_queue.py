@@ -12,6 +12,7 @@ from nika_core.kernel import task_queue, task_state
 
 _STUDY_PAYLOAD_KIND = "study_material_v1"
 _EVIDENCE_POLICY = "source_bound_v1"
+_TASK_SCAN_PAGE_SIZE = 128
 _SECRET_QUERY_KEYS = frozenset(
     {
         "api_key",
@@ -199,37 +200,67 @@ class StudyQueue:
         state: task_state.TaskState | None,
         limit: int,
     ) -> tuple[str, ...]:
-        clauses: list[str] = []
-        parameters: list[str] = []
+        base_clauses: list[str] = []
+        base_parameters: list[object] = []
         if workspace_id is not None:
-            clauses.append("workspace_id = ?")
-            parameters.append(workspace_id)
+            base_clauses.append("workspace_id = ?")
+            base_parameters.append(workspace_id)
         if agent_id is not None:
-            clauses.append("agent_id = ?")
-            parameters.append(agent_id)
+            base_clauses.append("agent_id = ?")
+            base_parameters.append(agent_id)
         if state is not None:
-            clauses.append("state = ?")
-            parameters.append(state.value)
-        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        query = (
-            "SELECT task_id, payload_json FROM tasks"
-            f"{where} ORDER BY updated_at DESC, created_at DESC, task_id DESC"
-        )
+            base_clauses.append("state = ?")
+            base_parameters.append(state.value)
 
         selected: list[str] = []
+        cursor: tuple[str, str, str] | None = None
         with self._tasks.store.connection() as conn:
-            rows = conn.execute(query, tuple(parameters))
-            for row in rows:
-                try:
-                    payload = json.loads(row["payload_json"])
-                except (TypeError, json.JSONDecodeError) as exc:
-                    raise ValueError("invalid canonical task payload") from exc
-                if not isinstance(payload, dict):
-                    raise TypeError("invalid canonical task payload")
-                if payload.get("nika_kind") != _STUDY_PAYLOAD_KIND:
-                    continue
-                selected.append(row["task_id"])
-                if len(selected) >= limit:
+            while len(selected) < limit:
+                clauses = list(base_clauses)
+                parameters = list(base_parameters)
+                if cursor is not None:
+                    updated_at, created_at, task_id = cursor
+                    clauses.append(
+                        "(updated_at < ? OR "
+                        "(updated_at = ? AND created_at < ?) OR "
+                        "(updated_at = ? AND created_at = ? AND task_id < ?))"
+                    )
+                    parameters.extend(
+                        [
+                            updated_at,
+                            updated_at,
+                            created_at,
+                            updated_at,
+                            created_at,
+                            task_id,
+                        ]
+                    )
+                where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+                query = (
+                    "SELECT task_id, payload_json, updated_at, created_at FROM tasks"
+                    f"{where} ORDER BY updated_at DESC, created_at DESC, task_id DESC LIMIT ?"
+                )
+                parameters.append(_TASK_SCAN_PAGE_SIZE)
+                rows = conn.execute(query, tuple(parameters)).fetchall()
+                if not rows:
+                    break
+
+                for row in rows:
+                    try:
+                        payload = json.loads(row["payload_json"])
+                    except (TypeError, json.JSONDecodeError) as exc:
+                        raise ValueError("invalid canonical task payload") from exc
+                    if not isinstance(payload, dict):
+                        raise TypeError("invalid canonical task payload")
+                    if payload.get("nika_kind") != _STUDY_PAYLOAD_KIND:
+                        continue
+                    selected.append(row["task_id"])
+                    if len(selected) >= limit:
+                        break
+
+                last = rows[-1]
+                cursor = (last["updated_at"], last["created_at"], last["task_id"])
+                if len(rows) < _TASK_SCAN_PAGE_SIZE:
                     break
         return tuple(selected)
 
