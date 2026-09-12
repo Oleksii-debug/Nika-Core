@@ -362,6 +362,17 @@ class DurablePreviousObservationLoader:
                             "durable previous local evidence locator no longer matches "
                             f"source identity: {evidence.source_id!r}",
                         )
+                elif not self._http_evidence_matches_document_origin(
+                    document_id=item.document_id,
+                    source_id=evidence.source_id,
+                    evidence_locator=evidence.locator,
+                    result_created_at=result_set.created_at,
+                ):
+                    self._fail(
+                        PreviousObservationErrorCode.IDENTITY_MISMATCH,
+                        "durable previous HTTP evidence locator is not bound to the "
+                        f"result document origin: {evidence.source_id!r}",
+                    )
                 elif not self._http_evidence_belongs_to_declared_source(
                     source_id=evidence.source_id,
                     baseline_task_id=baseline_task_id,
@@ -374,6 +385,40 @@ class DurablePreviousObservationLoader:
                         "durable previous HTTP evidence locator is not bound to the "
                         f"current declared source: {evidence.source_id!r}",
                     )
+
+    def _http_evidence_matches_document_origin(
+        self,
+        *,
+        document_id: str,
+        source_id: str,
+        evidence_locator: str,
+        result_created_at: str,
+    ) -> bool:
+        if not isinstance(evidence_locator, str) or not evidence_locator.strip():
+            return False
+        with self._store.connection() as conn:
+            row = conn.execute(
+                """SELECT 1
+                FROM corpus_http_origins AS origin
+                JOIN research_http_snapshots AS snapshot
+                  ON snapshot.snapshot_id=origin.snapshot_id
+                 AND snapshot.source_id=origin.source_id
+                WHERE origin.document_id=?
+                  AND origin.source_id=?
+                  AND origin.locator=?
+                  AND origin.observed_at<=?
+                  AND snapshot.observed_at<=?
+                  AND (snapshot.document_id IS NULL OR snapshot.document_id=origin.document_id)
+                LIMIT 1""",
+                (
+                    document_id,
+                    source_id,
+                    evidence_locator,
+                    result_created_at,
+                    result_created_at,
+                ),
+            ).fetchone()
+        return row is not None
 
     def _http_evidence_belongs_to_declared_source(
         self,
