@@ -254,3 +254,21 @@ def test_direct_comparison_construction_cannot_bypass_trusted_factory() -> None:
             comparator_sha256=COMPARATOR,
             comparison_policy_sha256=POLICY,
         )
+
+
+def test_subclass_cannot_inherit_guarded_factory_authority() -> None:
+    class SpoofComparison(ExperienceMemoryComparison):
+        pass
+
+    with pytest.raises(TypeError, match="canonical type"):
+        SpoofComparison.create(
+            comparison_id="comparison-1",
+            workspace_id="workspace-1",
+            agent_id="agent-1",
+            experience=_experience(),
+            memory_results=(_result("1" * 64),),
+            comparator_sha256=COMPARATOR,
+            comparison_policy_sha256=POLICY,
+            expected_comparator_sha256=COMPARATOR,
+            expected_comparison_policy_sha256=POLICY,
+        )
