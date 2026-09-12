@@ -25,6 +25,7 @@ class MicrophoneCaptureStatus(StrEnum):
 class MicrophoneCaptureFailureCode(StrEnum):
     UNAVAILABLE = "unavailable"
     TIMEOUT = "timeout"
+    CLEANUP_PENDING = "cleanup_pending"
     RESOURCE_LIMIT = "resource_limit"
     ADAPTER_ERROR = "adapter_error"
     ROUTE_MISMATCH = "route_mismatch"
@@ -152,6 +153,7 @@ class MicrophoneCaptureEvidence:
     latency_ms: float | None
     error_code: MicrophoneCaptureFailureCode | None = None
     retryable: bool | None = None
+    cleanup_pending: bool = False
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -167,6 +169,7 @@ class MicrophoneCaptureEvidence:
             "latency_ms": self.latency_ms,
             "error_code": self.error_code.value if self.error_code else None,
             "retryable": self.retryable,
+            "cleanup_pending": self.cleanup_pending,
         }
 
 
@@ -217,10 +220,24 @@ class MicrophoneCaptureService:
 
     def __init__(self, adapter: MicrophoneCaptureAdapter) -> None:
         self._adapter = adapter
+        self._cleanup_tasks: set[asyncio.Task[MicrophoneCaptureResponse]] = set()
+
+    @property
+    def cleanup_pending(self) -> bool:
+        self._reap_cleanup_tasks()
+        return bool(self._cleanup_tasks)
 
     async def capture(self, request: MicrophoneCaptureRequest) -> MicrophoneCaptureResult:
         if type(request) is not MicrophoneCaptureRequest:
             raise TypeError("request must be an exact MicrophoneCaptureRequest")
+
+        if self.cleanup_pending:
+            return self._failure(
+                request,
+                code=MicrophoneCaptureFailureCode.CLEANUP_PENDING,
+                retryable=True,
+                cleanup_pending=True,
+            )
 
         try:
             before = self._read_capabilities()
@@ -245,18 +262,38 @@ class MicrophoneCaptureService:
                 retryable=False,
             )
 
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + float(request.policy.timeout_seconds)
+        capture_task = asyncio.create_task(self._adapter.capture(request))
         try:
-            response = await asyncio.wait_for(
-                self._adapter.capture(request),
+            done, _ = await asyncio.wait(
+                {capture_task},
                 timeout=float(request.policy.timeout_seconds),
+                return_when=asyncio.FIRST_COMPLETED,
             )
         except asyncio.CancelledError:
+            capture_task.cancel()
+            self._track_cleanup(capture_task)
             raise
-        except TimeoutError:
+
+        if capture_task not in done or loop.time() >= deadline:
+            capture_task.cancel()
+            cleanup_pending = not capture_task.done()
+            self._track_cleanup(capture_task)
             return self._failure(
                 request,
                 code=MicrophoneCaptureFailureCode.TIMEOUT,
                 retryable=True,
+                cleanup_pending=cleanup_pending,
+            )
+
+        try:
+            response = capture_task.result()
+        except asyncio.CancelledError:
+            return self._failure(
+                request,
+                code=MicrophoneCaptureFailureCode.ADAPTER_ERROR,
+                retryable=False,
             )
         except MicrophoneCaptureAdapterError as error:
             status = (
@@ -338,6 +375,20 @@ class MicrophoneCaptureService:
         )
         return MicrophoneCaptureResult(pcm_s16le=audio, evidence=evidence)
 
+    def _track_cleanup(self, task: asyncio.Task[MicrophoneCaptureResponse]) -> None:
+        self._cleanup_tasks.add(task)
+        task.add_done_callback(self._on_cleanup_done)
+
+    def _on_cleanup_done(self, task: asyncio.Task[MicrophoneCaptureResponse]) -> None:
+        self._cleanup_tasks.discard(task)
+        _consume_task_result(task)
+
+    def _reap_cleanup_tasks(self) -> None:
+        done = tuple(task for task in self._cleanup_tasks if task.done())
+        for task in done:
+            self._cleanup_tasks.discard(task)
+            _consume_task_result(task)
+
     def _read_capabilities(self) -> MicrophoneCaptureCapabilities:
         try:
             capabilities = self._adapter.capabilities
@@ -407,6 +458,7 @@ class MicrophoneCaptureService:
         code: MicrophoneCaptureFailureCode,
         retryable: bool,
         status: MicrophoneCaptureStatus = MicrophoneCaptureStatus.FAILED,
+        cleanup_pending: bool = False,
     ) -> MicrophoneCaptureResult:
         evidence = MicrophoneCaptureEvidence(
             request_id=request.request_id,
@@ -420,8 +472,18 @@ class MicrophoneCaptureService:
             latency_ms=None,
             error_code=code,
             retryable=retryable,
+            cleanup_pending=cleanup_pending,
         )
         return MicrophoneCaptureResult(pcm_s16le=None, evidence=evidence)
+
+
+def _consume_task_result(task: asyncio.Task[MicrophoneCaptureResponse]) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception:  # noqa: BLE001 - late adapter result is intentionally discarded
+        pass
 
 
 def _bounded_token(value: object, *, field: str) -> str:
