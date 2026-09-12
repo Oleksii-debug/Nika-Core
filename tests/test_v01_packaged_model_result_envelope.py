@@ -7,6 +7,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+
 from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
