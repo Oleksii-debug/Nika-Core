@@ -77,6 +77,24 @@ def test_owner_presence_pauses_before_resource_or_power_decisions(presence, reas
     assert result.reason == reason
 
 
+@pytest.mark.parametrize(
+    ("presence", "reason"),
+    [
+        (OwnerPresence.ACTIVE, "owner_active"),
+        (OwnerPresence.UNKNOWN, "owner_presence_unknown"),
+    ],
+)
+def test_owner_presence_pause_does_not_depend_on_capacity_evidence(presence, reason):
+    result = decide_background_work(
+        owner_presence=presence,
+        work_kind=BackgroundWorkKind.SELF_TEST,
+        capacity=None,  # type: ignore[arg-type]
+    )
+
+    assert result.action is BackgroundAction.PAUSE
+    assert result.reason == reason
+
+
 def test_resource_pressure_defers_owner_away_work():
     result = decide_background_work(
         owner_presence=OwnerPresence.AWAY,
