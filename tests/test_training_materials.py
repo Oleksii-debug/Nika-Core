@@ -513,5 +513,5 @@ def test_resolved_material_requires_absolute_path() -> None:
         artifact_sha256=_sha256(b"training"),
     )
 
-    with pytest.raises(ValueError, match="absolute Path"):
+    with pytest.raises(ValueError, match="absolute canonical platform Path"):
         ResolvedTrainingMaterial(evidence=material, path=Path("relative.bin"))
