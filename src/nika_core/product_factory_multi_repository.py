@@ -414,6 +414,7 @@ class MultiRepositoryProductFactoryHost:
         )
 
         with self.store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             host_payload = self._require_host_task(
                 conn,
                 host_task_id=host_task_id,
@@ -653,6 +654,7 @@ class MultiRepositoryProductFactoryHost:
         canonical = _canonical(payload)
         checksum = _sha256(canonical)
         with self.store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             self._require_host_task(
                 conn,
                 host_task_id=host_task_id,
