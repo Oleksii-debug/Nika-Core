@@ -9,13 +9,14 @@ from enum import StrEnum
 
 from .contracts import CausalityViolation, Partition, TradingResearchError, require_aware_utc
 from .dataset import ValidationReport
+from .metric_evidence import MetricEvidence, validate_metric_evidence
 
 _HELDOUT_SCHEMA = "nika-trader-heldout-v2"
 _STRATEGY_ARTIFACT_SCHEMA = "nika-trader-strategy-artifact-v2"
 _QUALITY_SCHEMA = "nika-trader-data-quality-v1"
-_CANDIDATE_SCHEMA = "nika-trader-candidate-score-v1"
-_SELECTION_SCHEMA = "nika-trader-selection-v1"
-_RESULT_SCHEMA = "nika-trader-partition-result-v1"
+_CANDIDATE_SCHEMA = "nika-trader-candidate-score-v2"
+_SELECTION_SCHEMA = "nika-trader-selection-v2"
+_RESULT_SCHEMA = "nika-trader-partition-result-v2"
 _ASSESSMENT_SCHEMA = "nika-trader-heldout-assessment-v1"
 
 
@@ -199,6 +200,7 @@ class CandidateScore:
     universe_fingerprint: str
     universe_cutoff_at: datetime
     evaluated_at: datetime
+    metric_evidence: MetricEvidence | None = None
     _artifact_fingerprint: str = field(init=False, repr=False)
     _evidence_fingerprint: str = field(init=False, repr=False)
 
@@ -206,9 +208,12 @@ class CandidateScore:
         artifact = _validated_strategy_artifact(self.strategy_artifact)
         if not isinstance(self.partition, Partition):
             raise TradingResearchError("candidate partition must be a Partition")
-        _require_identity(self.metric_name, "metric_name")
-        _require_digest(self.metric_fingerprint, "metric_fingerprint")
-        _require_metric(self.metric_value, "candidate metric", allow_none=True)
+        evidence = _validated_metric_binding(
+            self.metric_evidence,
+            metric_name=self.metric_name,
+            metric_fingerprint=self.metric_fingerprint,
+            metric_value=self.metric_value,
+        )
         _require_digest(self.dataset_semantic_hash, "dataset_semantic_hash")
         _require_data_quality(self.data_quality)
         _require_digest(self.universe_fingerprint, "universe_fingerprint")
@@ -218,6 +223,7 @@ class CandidateScore:
         )
         evaluated_at = _require_aware_utc(self.evaluated_at, "evaluated_at")
         object.__setattr__(self, "strategy_artifact", artifact)
+        object.__setattr__(self, "metric_evidence", evidence)
         object.__setattr__(self, "universe_cutoff_at", universe_cutoff_at)
         object.__setattr__(self, "evaluated_at", evaluated_at)
         object.__setattr__(self, "_artifact_fingerprint", artifact.fingerprint)
@@ -239,6 +245,7 @@ class SelectionDecision:
     metric_name: str
     metric_fingerprint: str
     metric_value: Decimal
+    metric_evidence: MetricEvidence
     dataset_semantic_hash: str
     data_quality: ReplayDataQuality
     universe_fingerprint: str
@@ -259,9 +266,7 @@ class SelectionDecision:
         cls,
         *,
         strategy_artifact: StrategyArtifactFingerprint,
-        metric_name: str,
-        metric_fingerprint: str,
-        metric_value: Decimal,
+        metric_evidence: MetricEvidence,
         dataset_semantic_hash: str,
         data_quality: ReplayDataQuality,
         universe_fingerprint: str,
@@ -271,13 +276,17 @@ class SelectionDecision:
         higher_is_better: bool,
     ) -> SelectionDecision:
         artifact = _validated_strategy_artifact(strategy_artifact)
+        evidence = validate_metric_evidence(metric_evidence)
+        if evidence.value is None:
+            raise TradingResearchError("selection metric evidence must contain a value")
         obj = object.__new__(cls)
         values = {
             "strategy_artifact": artifact,
             "strategy_artifact_fingerprint": artifact.fingerprint,
-            "metric_name": metric_name,
-            "metric_fingerprint": metric_fingerprint,
-            "metric_value": metric_value,
+            "metric_name": evidence.metric_name,
+            "metric_fingerprint": evidence.definition_sha256,
+            "metric_value": evidence.value,
+            "metric_evidence": evidence,
             "dataset_semantic_hash": dataset_semantic_hash,
             "data_quality": _copy_quality(data_quality),
             "universe_fingerprint": universe_fingerprint,
@@ -313,6 +322,7 @@ class PartitionResult:
     universe_fingerprint: str
     universe_cutoff_at: datetime
     evaluated_at: datetime
+    metric_evidence: MetricEvidence | None = None
     _artifact_fingerprint: str = field(init=False, repr=False)
     _evidence_fingerprint: str = field(init=False, repr=False)
 
@@ -320,9 +330,12 @@ class PartitionResult:
         artifact = _validated_strategy_artifact(self.strategy_artifact)
         if not isinstance(self.partition, Partition):
             raise TradingResearchError("result partition must be a Partition")
-        _require_identity(self.metric_name, "metric_name")
-        _require_digest(self.metric_fingerprint, "metric_fingerprint")
-        _require_metric(self.metric_value, "partition metric", allow_none=True)
+        evidence = _validated_metric_binding(
+            self.metric_evidence,
+            metric_name=self.metric_name,
+            metric_fingerprint=self.metric_fingerprint,
+            metric_value=self.metric_value,
+        )
         _require_digest(self.dataset_semantic_hash, "dataset_semantic_hash")
         _require_data_quality(self.data_quality)
         _require_digest(self.universe_fingerprint, "universe_fingerprint")
@@ -332,6 +345,7 @@ class PartitionResult:
         )
         evaluated_at = _require_aware_utc(self.evaluated_at, "evaluated_at")
         object.__setattr__(self, "strategy_artifact", artifact)
+        object.__setattr__(self, "metric_evidence", evidence)
         object.__setattr__(self, "universe_cutoff_at", universe_cutoff_at)
         object.__setattr__(self, "evaluated_at", evaluated_at)
         object.__setattr__(self, "_artifact_fingerprint", artifact.fingerprint)
@@ -414,6 +428,7 @@ def select_validation_candidate(
     first = _validate_candidate_score(scores[0])
     metric_name = first.metric_name
     metric_fingerprint = first.metric_fingerprint
+    first_evidence = validate_metric_evidence(first.metric_evidence)
     dataset_hash = first.dataset_semantic_hash
     data_quality = first.data_quality
     universe_fingerprint = first.universe_fingerprint
@@ -430,6 +445,7 @@ def select_validation_candidate(
             raise TradingResearchError("candidate scores must use one metric name")
         if score.metric_fingerprint != metric_fingerprint:
             raise TradingResearchError("candidate scores must use one metric definition")
+        _require_same_metric_contract(first_evidence, score.metric_evidence)
         if score.dataset_semantic_hash != dataset_hash:
             raise TradingResearchError("candidate scores must use one dataset version")
         if score.data_quality != data_quality:
@@ -474,9 +490,7 @@ def select_validation_candidate(
     )
     return SelectionDecision._create(
         strategy_artifact=best.strategy_artifact,
-        metric_name=metric_name,
-        metric_fingerprint=metric_fingerprint,
-        metric_value=best_value,
+        metric_evidence=best.metric_evidence,
         dataset_semantic_hash=dataset_hash,
         data_quality=data_quality,
         universe_fingerprint=universe_fingerprint,
@@ -522,6 +536,7 @@ def _validate_test_identity(
         raise TradingResearchError("held-out result uses a different metric name")
     if result.metric_fingerprint != selection.metric_fingerprint:
         raise TradingResearchError("held-out result uses a different metric definition")
+    _require_same_metric_contract(selection.metric_evidence, result.metric_evidence)
     if result.dataset_semantic_hash != selection.dataset_semantic_hash:
         raise TradingResearchError("held-out result uses a different dataset version")
     if not result.data_quality.is_clean:
@@ -640,15 +655,53 @@ def _validated_strategy_artifact(
     )
 
 
+def _validated_metric_binding(
+    evidence: MetricEvidence | None,
+    *,
+    metric_name: str,
+    metric_fingerprint: str,
+    metric_value: Decimal | None,
+) -> MetricEvidence:
+    if evidence is None:
+        raise TradingResearchError("canonical metric_evidence is required")
+    validated = validate_metric_evidence(evidence)
+    if metric_name != validated.metric_name:
+        raise TradingResearchError("metric name does not match canonical metric evidence")
+    if metric_fingerprint != validated.definition_sha256:
+        raise TradingResearchError("metric definition does not match canonical metric evidence")
+    if metric_value != validated.value:
+        raise TradingResearchError("metric value does not match canonical metric evidence")
+    return validated
+
+
+def _require_same_metric_contract(left: MetricEvidence, right: MetricEvidence) -> None:
+    first = validate_metric_evidence(left)
+    second = validate_metric_evidence(right)
+    if first.metric_name != second.metric_name or first.definition_sha256 != second.definition_sha256:
+        raise TradingResearchError("metric evidence uses a different metric definition")
+    if first.sampling_fingerprint != second.sampling_fingerprint:
+        raise TradingResearchError("metric evidence uses a different sampling contract")
+    if first.risk_free_rate_per_period != second.risk_free_rate_per_period:
+        raise TradingResearchError("metric evidence changes risk-free assumptions")
+    if (
+        first.minimum_acceptable_return_per_period
+        != second.minimum_acceptable_return_per_period
+    ):
+        raise TradingResearchError("metric evidence changes minimum-return assumptions")
+
+
 def _validate_candidate_score(score: CandidateScore) -> CandidateScore:
     if not isinstance(score, CandidateScore):
         raise TradingResearchError("candidate score must be CandidateScore evidence")
     artifact = _validated_strategy_artifact(score.strategy_artifact)
     if artifact.fingerprint != score._artifact_fingerprint:
         raise TradingResearchError("candidate strategy artifact changed after construction")
-    _require_identity(score.metric_name, "metric_name")
-    _require_digest(score.metric_fingerprint, "metric_fingerprint")
-    _require_metric(score.metric_value, "candidate metric", allow_none=True)
+    _validated_metric_binding(
+        score.metric_evidence,
+        metric_name=score.metric_name,
+        metric_fingerprint=score.metric_fingerprint,
+        metric_value=score.metric_value,
+    )
     _require_digest(score.dataset_semantic_hash, "dataset_semantic_hash")
     _require_data_quality(score.data_quality)
     _require_digest(score.universe_fingerprint, "universe_fingerprint")
@@ -667,9 +720,14 @@ def _validate_selection_identity(
     artifact = _validated_strategy_artifact(selection.strategy_artifact)
     if artifact.fingerprint != selection.strategy_artifact_fingerprint:
         raise TradingResearchError("selected strategy artifact identity changed")
-    _require_identity(selection.metric_name, "metric_name")
-    _require_digest(selection.metric_fingerprint, "metric_fingerprint")
-    _require_metric(selection.metric_value, "selection metric")
+    evidence = _validated_metric_binding(
+        selection.metric_evidence,
+        metric_name=selection.metric_name,
+        metric_fingerprint=selection.metric_fingerprint,
+        metric_value=selection.metric_value,
+    )
+    if evidence.value is None:
+        raise TradingResearchError("selection metric evidence must contain a value")
     _require_digest(selection.dataset_semantic_hash, "dataset_semantic_hash")
     _require_digest(selection.universe_fingerprint, "universe_fingerprint")
     _require_digest(selection.protocol_fingerprint, "protocol_fingerprint")
@@ -696,9 +754,12 @@ def _validate_partition_result_identity(result: PartitionResult) -> None:
     artifact = _validated_strategy_artifact(result.strategy_artifact)
     if artifact.fingerprint != result._artifact_fingerprint:
         raise TradingResearchError("result strategy artifact changed after construction")
-    _require_identity(result.metric_name, "metric_name")
-    _require_digest(result.metric_fingerprint, "metric_fingerprint")
-    _require_metric(result.metric_value, "partition metric", allow_none=True)
+    _validated_metric_binding(
+        result.metric_evidence,
+        metric_name=result.metric_name,
+        metric_fingerprint=result.metric_fingerprint,
+        metric_value=result.metric_value,
+    )
     _require_digest(result.dataset_semantic_hash, "dataset_semantic_hash")
     _require_digest(result.universe_fingerprint, "universe_fingerprint")
     _require_data_quality(result.data_quality)
@@ -712,9 +773,7 @@ def _copy_selection(selection: SelectionDecision) -> SelectionDecision:
     _validate_selection_identity(selection)
     return SelectionDecision._create(
         strategy_artifact=selection.strategy_artifact,
-        metric_name=selection.metric_name,
-        metric_fingerprint=selection.metric_fingerprint,
-        metric_value=selection.metric_value,
+        metric_evidence=selection.metric_evidence,
         dataset_semantic_hash=selection.dataset_semantic_hash,
         data_quality=selection.data_quality,
         universe_fingerprint=selection.universe_fingerprint,
@@ -738,6 +797,7 @@ def _copy_result(result: PartitionResult) -> PartitionResult:
         universe_fingerprint=result.universe_fingerprint,
         universe_cutoff_at=result.universe_cutoff_at,
         evaluated_at=result.evaluated_at,
+        metric_evidence=result.metric_evidence,
     )
 
 
@@ -763,15 +823,13 @@ def _protocol_fingerprint(protocol: HeldOutProtocol) -> str:
 
 
 def _candidate_fingerprint(score: CandidateScore) -> str:
-    metric_value = "none" if score.metric_value is None else str(score.metric_value)
+    assert score.metric_evidence is not None
     payload = "|".join(
         (
             _CANDIDATE_SCHEMA,
             score._artifact_fingerprint,
             score.partition.value,
-            score.metric_name,
-            score.metric_fingerprint,
-            metric_value,
+            score.metric_evidence.evidence_sha256,
             score.dataset_semantic_hash,
             _quality_fingerprint(score.data_quality),
             score.universe_fingerprint,
@@ -799,14 +857,11 @@ def _assessment_fingerprint(
 
 
 def _selection_fingerprint(selection: SelectionDecision) -> str:
-    value = selection.metric_value
     payload = "|".join(
         (
             _SELECTION_SCHEMA,
             selection.strategy_artifact_fingerprint,
-            selection.metric_name,
-            selection.metric_fingerprint,
-            str(value),
+            selection.metric_evidence.evidence_sha256,
             selection.dataset_semantic_hash,
             _quality_fingerprint(selection.data_quality),
             selection.universe_fingerprint,
@@ -821,15 +876,13 @@ def _selection_fingerprint(selection: SelectionDecision) -> str:
 
 
 def _result_fingerprint(result: PartitionResult) -> str:
-    metric_value = "none" if result.metric_value is None else str(result.metric_value)
+    assert result.metric_evidence is not None
     payload = "|".join(
         (
             _RESULT_SCHEMA,
             result._artifact_fingerprint,
             result.partition.value,
-            result.metric_name,
-            result.metric_fingerprint,
-            metric_value,
+            result.metric_evidence.evidence_sha256,
             result.dataset_semantic_hash,
             _quality_fingerprint(result.data_quality),
             result.universe_fingerprint,
