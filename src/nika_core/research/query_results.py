@@ -108,7 +108,7 @@ class ScopedResearchResultWriter:
                     "SELECT workspace_id FROM corpus_documents WHERE document_id=?",
                     (hit.document_id,),
                 ).fetchone()
-                if document is None or document["workspace_id"] != workspace_id:
+                if document is not None and document["workspace_id"] != workspace_id:
                     raise ResearchSourceIdentityError(
                         "result_workspace_conflict",
                         "research result document does not belong to the result-set workspace",
