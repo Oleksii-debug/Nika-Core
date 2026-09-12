@@ -26,6 +26,16 @@ J = "3" * 64
 K = "4" * 64
 
 
+class _EncodeBomb(str):
+    def encode(self, encoding: str = "utf-8", errors: str = "strict") -> bytes:
+        raise AssertionError("oversized str must be rejected before encode")
+
+
+class _DecodeBomb(bytes):
+    def decode(self, encoding: str = "utf-8", errors: str = "strict") -> str:
+        raise AssertionError("oversized bytes must be rejected before decode")
+
+
 def _shard(
     split: LearningDataSplit,
     artifact: str,
@@ -325,3 +335,24 @@ def test_serialized_manifest_rejects_noncanonical_json_representation() -> None:
 
     with pytest.raises(LearningPackageIntegrityError, match="serialization is not canonical"):
         FrozenLearningPackage.from_json(noncanonical)
+
+
+def test_oversized_string_rejects_before_utf8_encode() -> None:
+    oversized = _EncodeBomb("x" * (1024 * 1024 + 1))
+
+    with pytest.raises(LearningPackageIntegrityError, match="size is invalid"):
+        FrozenLearningPackage.from_json(oversized)
+
+
+def test_oversized_bytes_reject_before_utf8_decode() -> None:
+    oversized = _DecodeBomb(b"x" * (1024 * 1024 + 1))
+
+    with pytest.raises(LearningPackageIntegrityError, match="size is invalid"):
+        FrozenLearningPackage.from_json(oversized)
+
+
+def test_multibyte_string_enforces_post_encode_byte_bound() -> None:
+    oversized_utf8 = "€" * 400_000
+
+    with pytest.raises(LearningPackageIntegrityError, match="size is invalid"):
+        FrozenLearningPackage.from_json(oversized_utf8)
