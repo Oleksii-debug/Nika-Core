@@ -226,9 +226,23 @@ class FrozenLearningPackage:
         evaluation_set_sha256: str,
         shards: Iterable[LearningShard],
     ) -> FrozenLearningPackage:
-        shard_values = tuple(shards)
-        if not all(type(shard) is LearningShard for shard in shard_values):
-            raise LearningPackageValidationError("shards must contain exact LearningShard values")
+        try:
+            shard_iterator = iter(shards)
+        except TypeError as exc:
+            raise LearningPackageValidationError("shards must be iterable") from exc
+
+        shard_values_list: list[LearningShard] = []
+        for shard in shard_iterator:
+            if len(shard_values_list) >= _MAX_SHARDS:
+                raise LearningPackageValidationError(
+                    "shard count is outside the supported bound"
+                )
+            if type(shard) is not LearningShard:
+                raise LearningPackageValidationError(
+                    "shards must contain exact LearningShard values"
+                )
+            shard_values_list.append(shard)
+        shard_values = tuple(shard_values_list)
         return cls(
             package_id=package_id,
             package_version=package_version,
