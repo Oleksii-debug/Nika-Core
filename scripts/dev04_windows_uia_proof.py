@@ -54,12 +54,14 @@ def focus_until_verified(
     attempts: int = 20,
     delay_seconds: float = 0.05,
 ) -> None:
-    """Issue one focus effect, then boundedly re-observe the exact identity.
+    """Issue one focus effect, then boundedly re-observe exact authority.
 
-    Production ``focus`` already waits read-only for exact RuntimeId/generation
-    acknowledgement.  This proof deliberately never reissues the effect: its
-    outer loop only confirms that the same semantic identity is observable as
-    focused after provider state propagation.
+    Production ``focus`` already waits read-only for the authoritative focused
+    AutomationElement to bind to the exact RuntimeId/generation. Hosted providers
+    may omit ``CurrentHasKeyboardFocus`` from tree snapshots even after successful
+    ``SetFocus``. This outer proof therefore re-observes the semantic identity and
+    independently requires ``capture_focus()`` to keep resolving that same exact
+    identity; it never reissues the effect or treats a tree focus flag as authority.
     """
 
     adapter.focus(node)
@@ -70,7 +72,7 @@ def focus_until_verified(
             raise StaleSnapshotError(
                 "focus target identity changed during bounded verification"
             )
-        if current.focused and adapter.capture_focus() == node.node_id:
+        if adapter.capture_focus() == node.node_id:
             return
         if attempt + 1 < attempts:
             time.sleep(delay_seconds)
