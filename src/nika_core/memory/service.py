@@ -178,8 +178,16 @@ class MemoryService:
             if expires_at is not None and expires_at <= current:
                 conn.execute(
                     "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
-                    "AND namespace = ? AND memory_key = ?",
-                    (scope.value, owner_id, namespace, key),
+                    "AND namespace = ? AND memory_key = ? AND updated_at = ? "
+                    "AND expires_at = ?",
+                    (
+                        scope.value,
+                        owner_id,
+                        namespace,
+                        key,
+                        row["updated_at"],
+                        row["expires_at"],
+                    ),
                 )
                 return None
         return _record_from_row(row)
