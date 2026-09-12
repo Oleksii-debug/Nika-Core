@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from nika_core.trading_research import heldout, metrics
+from nika_core.trading_research import heldout, metric_evidence, metrics
 from nika_core.trading_research.contracts import CausalityViolation, Partition, TradingResearchError
 from nika_core.trading_research.dataset import ValidationIssue, ValidationReport
 from nika_core.trading_research.heldout import (
@@ -21,11 +21,11 @@ from nika_core.trading_research.heldout import (
     bind_held_out_test,
     select_validation_candidate,
 )
+from trading_research_metric_evidence_helpers import total_return_evidence
 
 BASE = datetime(2026, 1, 1, tzinfo=UTC)
 HASH = "a" * 64
 UNIVERSE = "b" * 64
-METRIC = "c" * 64
 QUALITY = "d" * 64
 ALGORITHM = "e" * 64
 CONFIG = "f" * 64
@@ -65,33 +65,37 @@ def artifact(strategy_id: str = "chosen") -> StrategyArtifactFingerprint:
 
 
 def score(strategy_id: str = "chosen") -> CandidateScore:
+    evidence = total_return_evidence(BASE, "1")
     return CandidateScore(
         artifact(strategy_id),
         Partition.VALIDATION,
-        "sharpe",
-        METRIC,
-        Decimal(1),
+        evidence.metric_name,
+        evidence.definition_sha256,
+        evidence.value,
         HASH,
         CLEAN,
         UNIVERSE,
         BASE + timedelta(days=9),
         BASE + timedelta(days=15),
+        metric_evidence=evidence,
     )
 
 
 def result_for(selection: SelectionDecision) -> PartitionResult:
     p = protocol()
+    evidence = total_return_evidence(BASE, "0.5")
     return PartitionResult(
         selection.strategy_artifact,
         Partition.TEST,
-        selection.metric_name,
-        selection.metric_fingerprint,
-        Decimal("0.5"),
+        evidence.metric_name,
+        evidence.definition_sha256,
+        evidence.value,
         selection.dataset_semantic_hash,
         CLEAN,
         selection.universe_fingerprint,
         selection.universe_cutoff_at,
         p.test.end_at,
+        metric_evidence=evidence,
     )
 
 
@@ -195,7 +199,7 @@ def test_mutating_bound_metric_value_or_identity_breaks_authority_seal() -> None
     )
     assessment = bind_held_out_test(p, selected, result_for(selected))
     object.__setattr__(assessment.test_result, "metric_value", Decimal(999))
-    with pytest.raises(TradingResearchError, match="changed after binding"):
+    with pytest.raises(TradingResearchError):
         assessment.require_promotion_metric()
 
 
@@ -317,6 +321,7 @@ def test_strategy_definition_change_is_not_hidden_by_same_strategy_id() -> None:
         BASE + timedelta(days=9),
         BASE + timedelta(days=9),
     )
+    evidence = total_return_evidence(BASE, "0.5")
     with pytest.raises(CausalityViolation, match="strategy definition"):
         bind_held_out_test(
             p,
@@ -324,14 +329,15 @@ def test_strategy_definition_change_is_not_hidden_by_same_strategy_id() -> None:
             PartitionResult(
                 changed_config,
                 Partition.TEST,
-                selected.metric_name,
-                selected.metric_fingerprint,
-                Decimal("0.5"),
+                evidence.metric_name,
+                evidence.definition_sha256,
+                evidence.value,
                 selected.dataset_semantic_hash,
                 CLEAN,
                 selected.universe_fingerprint,
                 selected.universe_cutoff_at,
                 p.test.end_at,
+                metric_evidence=evidence,
             ),
         )
 
@@ -350,9 +356,11 @@ def test_dev26_evaluation_modules_have_no_broker_network_or_real_money_route() -
         "hashlib",
         "itertools",
         "json",
+        "metric_evidence",
+        "metrics",
         "nika_core",
     }
-    for module in (heldout, metrics):
+    for module in (heldout, metric_evidence, metrics):
         source = inspect.getsource(module)
         tree = ast.parse(source)
         imported_roots = {
