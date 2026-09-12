@@ -12,10 +12,10 @@ from nika_core.model_artifacts import (
     ModelArtifactKind,
     ModelIntegrityBasis,
 )
-from nika_core.training_artifacts import integrity
 from nika_core.training_artifacts import (
     CandidateArtifactIntegrityError,
     VerifiedCandidateArtifact,
+    integrity,
     verify_candidate_artifact,
 )
 
