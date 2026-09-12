@@ -36,10 +36,18 @@ class WorkspaceRegistry:
         return int(row["count"])
 
     def register(self, definition: WorkspaceDefinition) -> None:
-        current = self._latest(definition.workspace_id)
-        if current is not None and definition.version <= current.version:
-            raise ValueError("workspace version must increase")
         with self._store.connection() as conn:
+            # Serialize the version check and insert across independent registry instances.
+            # A deferred transaction would still allow multiple writers to observe the same
+            # previous version before one of them commits.
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT version FROM workspaces WHERE workspace_id = ? "
+                "ORDER BY version DESC LIMIT 1",
+                (definition.workspace_id,),
+            ).fetchone()
+            if row is not None and definition.version <= int(row["version"]):
+                raise ValueError("workspace version must increase")
             conn.execute(
                 "INSERT INTO workspaces(workspace_id, version, name, description, enabled, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
