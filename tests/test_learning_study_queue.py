@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from urllib.parse import quote
 
 import pytest
@@ -160,6 +161,55 @@ def test_listing_and_recovery_are_not_starved_by_500_newer_ordinary_tasks(
     assert [item.task_id for item in selected] == [interrupted.task_id, older_ready.task_id]
     assert [item.task_id for item in recovered] == [interrupted.task_id]
     assert fresh.get(interrupted.task_id).state is TaskState.READY
+
+
+def test_sparse_recovery_uses_fixed_size_keyset_pages(tmp_path) -> None:
+    path, tasks, queue = _services(tmp_path)
+    interrupted = queue.enqueue(
+        workspace_id="study",
+        agent_id="reader",
+        material=_material(material_id="paged-recovery", title="Старий матеріал"),
+    )
+    with tasks.store.connection() as conn:
+        conn.execute(
+            "UPDATE tasks SET state = ? WHERE task_id = ?",
+            (TaskState.CREATED.value, interrupted.task_id),
+        )
+    for _ in range(300):
+        tasks.create(
+            workspace_id="noise",
+            agent_id="ordinary-worker",
+            payload={"kind": "ordinary"},
+        )
+
+    class TracingSQLiteStore(SQLiteStore):
+        def __init__(self, db_path) -> None:
+            super().__init__(db_path)
+            self.statements: list[str] = []
+
+        @contextmanager
+        def connection(self):
+            with super().connection() as conn:
+                conn.set_trace_callback(self.statements.append)
+                yield conn
+
+    fresh_store = TracingSQLiteStore(path)
+    fresh_store.initialize()
+    fresh_store.statements.clear()
+    fresh = StudyQueue(TaskQueue(fresh_store))
+
+    recovered = fresh.recover_created(limit=1)
+    scan_statements = [
+        statement
+        for statement in fresh_store.statements
+        if statement.startswith(
+            "SELECT task_id, payload_json, updated_at, created_at FROM tasks"
+        )
+    ]
+
+    assert [item.task_id for item in recovered] == [interrupted.task_id]
+    assert len(scan_statements) >= 3
+    assert all(" LIMIT 128" in statement for statement in scan_statements)
 
 
 def test_material_requires_an_immutable_source_identity() -> None:
