@@ -11,10 +11,10 @@ from urllib.parse import unquote, urlsplit
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
+from nika_core.model_artifact_schema import MODEL_ARTIFACT_SCHEMA_VERSION
 
 _MAX_TEXT = 2048
 _MAX_MACHINE_INT = (1 << 63) - 1
-_SCHEMA_VERSION = 1
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _LABEL = re.compile(r"[A-Za-z0-9_.:+-]{1,128}")
 _ARCH = re.compile(r"[A-Za-z0-9_.+-]{1,64}")
@@ -130,10 +130,13 @@ class ModelArtifactDescriptor:
     size_bytes: int | None = None
     capabilities: tuple[str, ...] = ()
     resources: ModelArtifactResources = field(default_factory=ModelArtifactResources)
-    schema_version: int = _SCHEMA_VERSION
+    schema_version: int = MODEL_ARTIFACT_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        if type(self.schema_version) is not int or self.schema_version != _SCHEMA_VERSION:
+        if (
+            type(self.schema_version) is not int
+            or self.schema_version != MODEL_ARTIFACT_SCHEMA_VERSION
+        ):
             raise ValueError("unsupported model artifact schema_version")
         if not isinstance(self.kind, ModelArtifactKind):
             raise TypeError("kind must be ModelArtifactKind")
