@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -10,12 +11,23 @@ from nika_core.research.models import (
     FreshnessState,
     HttpSourceState,
     RefreshDisposition,
+    RefreshResult,
     ResearchEvidence,
     ResearchResultItem,
     ResearchResultSet,
     SearchHit,
     SourceKind,
     SourceSpec,
+)
+from nika_core.research.source_identity import (
+    ResearchSourceIdentityError,
+    canonical_http_locator,
+)
+
+_FINALIZED_ATTEMPT_PREFIX = "finalized:"
+_pending_attempt: ContextVar[tuple[str, str] | None] = ContextVar(
+    "research_http_pending_attempt",
+    default=None,
 )
 
 
@@ -27,6 +39,47 @@ def _snapshot_id(source_id: str, raw_sha256: str) -> str:
     return hashlib.sha256(f"{source_id}\0{raw_sha256}".encode()).hexdigest()
 
 
+def _freshness_for(
+    disposition: RefreshDisposition,
+    *,
+    current_raw_sha256: str | None,
+) -> FreshnessState:
+    if disposition in {
+        RefreshDisposition.CHANGED,
+        RefreshDisposition.UNCHANGED,
+        RefreshDisposition.NOT_MODIFIED,
+        RefreshDisposition.DYNAMIC_REQUIRED,
+    }:
+        return FreshnessState.CURRENT
+    if disposition is RefreshDisposition.REMOVED:
+        return FreshnessState.REMOVED
+    if disposition is RefreshDisposition.BLOCKED:
+        return FreshnessState.BLOCKED
+    if current_raw_sha256 is not None:
+        return FreshnessState.STALE
+    return FreshnessState.ERROR
+
+
+def _canonical_stored_locator(locator: str) -> str:
+    try:
+        return canonical_http_locator(locator)
+    except ResearchSourceIdentityError as exc:
+        raise ResearchSourceIdentityError(
+            "source_identity_corrupt",
+            "stored HTTP source identity is invalid and cannot be used",
+        ) from exc
+
+
+def _canonical_stored_origin_locator(locator: str) -> str:
+    try:
+        return canonical_http_locator(locator)
+    except ResearchSourceIdentityError as exc:
+        raise ResearchSourceIdentityError(
+            "origin_identity_corrupt",
+            "stored HTTP provenance identity is invalid and cannot be used",
+        ) from exc
+
+
 class NetworkResearchRepository:
     def __init__(self, store: SQLiteStore) -> None:
         self._store = store
@@ -36,18 +89,38 @@ class NetworkResearchRepository:
             raise ValueError("network repository only accepts HTTP sources")
         if not source.source_id.strip() or not source.workspace_id.strip() or not source.locator.strip():
             raise ValueError("source_id, workspace_id and URL are required")
+
+        locator = canonical_http_locator(source.locator)
         now = _now()
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             collision = conn.execute(
                 "SELECT 1 FROM research_sources WHERE source_id=?",
                 (source.source_id,),
             ).fetchone()
             if collision is not None:
-                raise ValueError("source_id is already owned by a local source")
+                raise ResearchSourceIdentityError(
+                    "source_kind_conflict",
+                    "source_id is already owned by a local source",
+                )
+
             existing = conn.execute(
-                "SELECT url FROM research_http_sources WHERE source_id=?",
+                "SELECT workspace_id, url FROM research_http_sources WHERE source_id=?",
                 (source.source_id,),
             ).fetchone()
+            candidates = conn.execute(
+                """SELECT source_id, url FROM research_http_sources
+                WHERE workspace_id=? AND source_id<>?""",
+                (source.workspace_id, source.source_id),
+            ).fetchall()
+            for candidate in candidates:
+                candidate_locator = _canonical_stored_locator(candidate["url"])
+                if candidate_locator == locator:
+                    raise ResearchSourceIdentityError(
+                        "source_duplicate",
+                        "HTTP source locator is already registered in this workspace",
+                    )
+
             if existing is None:
                 conn.execute(
                     """INSERT INTO research_http_sources(
@@ -56,33 +129,28 @@ class NetworkResearchRepository:
                     (
                         source.source_id,
                         source.workspace_id,
-                        source.locator,
+                        locator,
                         FreshnessState.UNKNOWN.value,
                         now,
                         now,
                     ),
-                )
-            elif existing["url"] == source.locator:
-                conn.execute(
-                    """UPDATE research_http_sources
-                    SET workspace_id=?, updated_at=? WHERE source_id=?""",
-                    (source.workspace_id, now, source.source_id),
                 )
             else:
+                if existing["workspace_id"] != source.workspace_id:
+                    raise ResearchSourceIdentityError(
+                        "source_workspace_conflict",
+                        "HTTP source_id is permanently bound to its original workspace",
+                    )
+                existing_locator = _canonical_stored_locator(existing["url"])
+                if existing_locator != locator:
+                    raise ResearchSourceIdentityError(
+                        "source_locator_conflict",
+                        "HTTP source_id is permanently bound to its original locator; use a new source_id",
+                    )
                 conn.execute(
-                    """UPDATE research_http_sources SET
-                        workspace_id=?, url=?, final_url=NULL, etag=NULL, last_modified=NULL,
-                        current_raw_sha256=NULL, freshness=?, last_attempt_at=NULL,
-                        last_success_at=NULL, last_status_code=NULL, last_error_code=NULL,
-                        last_error_message=NULL, updated_at=?
-                    WHERE source_id=?""",
-                    (
-                        source.workspace_id,
-                        source.locator,
-                        FreshnessState.UNKNOWN.value,
-                        now,
-                        source.source_id,
-                    ),
+                    """UPDATE research_http_sources
+                    SET url=?, updated_at=? WHERE source_id=?""",
+                    (locator, now, source.source_id),
                 )
         return self.get_source(source.source_id)
 
@@ -94,6 +162,7 @@ class NetworkResearchRepository:
             ).fetchone()
         if row is None:
             raise KeyError(f"unknown HTTP source: {source_id}")
+        _canonical_stored_locator(row["url"])
         return HttpSourceState(
             source_id=row["source_id"],
             workspace_id=row["workspace_id"],
@@ -170,6 +239,11 @@ class NetworkResearchRepository:
                     _now(),
                 ),
             )
+        # HttpResearchService calls finalize_source immediately after the workflow-terminal
+        # attempt. Intermediate retry attempts are simply superseded by the next attempt in
+        # this execution context. Only finalize_source can turn this opaque row into durable
+        # completion evidence, in the same SQLite transaction as the source state update.
+        _pending_attempt.set((source_id, attempt_id))
         return attempt_id
 
     def finalize_source(
@@ -185,51 +259,118 @@ class NetworkResearchRepository:
         error_code: str | None = None,
         error_message: str = "",
     ) -> HttpSourceState:
-        current = self.get_source(source_id)
-        now = _now()
-        success = disposition in {
-            RefreshDisposition.CHANGED,
-            RefreshDisposition.UNCHANGED,
-            RefreshDisposition.NOT_MODIFIED,
-            RefreshDisposition.DYNAMIC_REQUIRED,
-        }
-        if success:
-            freshness = FreshnessState.CURRENT
-        elif disposition is RefreshDisposition.REMOVED:
-            freshness = FreshnessState.REMOVED
-        elif disposition is RefreshDisposition.BLOCKED:
-            freshness = FreshnessState.BLOCKED
-        elif current.current_raw_sha256 is not None:
-            freshness = FreshnessState.STALE
-        else:
-            freshness = FreshnessState.ERROR
-        with self._store.connection() as conn:
-            conn.execute(
-                """UPDATE research_http_sources SET
-                    final_url=?, etag=?, last_modified=?, current_raw_sha256=?,
-                    freshness=?, last_attempt_at=?, last_success_at=?, last_status_code=?,
-                    last_error_code=?, last_error_message=?, updated_at=?
-                WHERE source_id=?""",
-                (
-                    final_url or current.final_url,
-                    etag if etag is not None else current.etag,
-                    last_modified if last_modified is not None else current.last_modified,
+        pending = _pending_attempt.get()
+        pending_attempt_id = pending[1] if pending is not None and pending[0] == source_id else None
+        try:
+            now = _now()
+            with self._store.connection() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                current = conn.execute(
+                    "SELECT * FROM research_http_sources WHERE source_id=?",
+                    (source_id,),
+                ).fetchone()
+                if current is None:
+                    raise KeyError(f"unknown HTTP source: {source_id}")
+                freshness = _freshness_for(
+                    disposition,
+                    current_raw_sha256=current["current_raw_sha256"],
+                )
+                success = freshness is FreshnessState.CURRENT
+                conn.execute(
+                    """UPDATE research_http_sources SET
+                        final_url=?, etag=?, last_modified=?, current_raw_sha256=?,
+                        freshness=?, last_attempt_at=?, last_success_at=?, last_status_code=?,
+                        last_error_code=?, last_error_message=?, updated_at=?
+                    WHERE source_id=?""",
                     (
-                        current_raw_sha256
-                        if current_raw_sha256 is not None
-                        else current.current_raw_sha256
+                        final_url or current["final_url"],
+                        etag if etag is not None else current["etag"],
+                        last_modified if last_modified is not None else current["last_modified"],
+                        (
+                            current_raw_sha256
+                            if current_raw_sha256 is not None
+                            else current["current_raw_sha256"]
+                        ),
+                        freshness.value,
+                        now,
+                        now if success else current["last_success_at"],
+                        status_code,
+                        error_code,
+                        error_message,
+                        now,
+                        source_id,
                     ),
-                    freshness.value,
-                    now,
-                    now if success else current.last_success_at,
-                    status_code,
-                    error_code,
-                    error_message,
-                    now,
-                    source_id,
-                ),
-            )
+                )
+                if pending_attempt_id is not None:
+                    finalized_attempt_id = f"{_FINALIZED_ATTEMPT_PREFIX}{pending_attempt_id}"
+                    cursor = conn.execute(
+                        """UPDATE research_http_attempts
+                        SET attempt_id=?
+                        WHERE attempt_id=? AND source_id=?""",
+                        (finalized_attempt_id, pending_attempt_id, source_id),
+                    )
+                    if cursor.rowcount != 1:
+                        raise RuntimeError("terminal HTTP attempt disappeared before source finalization")
+        finally:
+            if pending_attempt_id is not None:
+                _pending_attempt.set(None)
         return self.get_source(source_id)
+
+    def task_attempt_count(self, *, task_id: str, source_id: str) -> int:
+        with self._store.connection() as conn:
+            row = conn.execute(
+                """SELECT COUNT(*) AS count FROM research_http_attempts
+                WHERE task_id=? AND source_id=?""",
+                (task_id, source_id),
+            ).fetchone()
+        return int(row["count"])
+
+    def durable_task_result_after(
+        self,
+        *,
+        task_id: str,
+        source_id: str,
+        attempts_before: int,
+    ) -> RefreshResult | None:
+        """Return task-bound terminal evidence only after atomic source finalization.
+
+        Attempt rows are intentionally insufficient on their own. ``finalize_source``
+        rewrites exactly the attempt from the current execution context to a
+        ``finalized:`` identity in the same transaction that updates the durable source.
+        Legacy rows, interrupted pending attempts, and attempts owned by another task are
+        therefore fail-closed recovery inputs.
+        """
+        if attempts_before < 0:
+            raise ValueError("Research refresh attempt baseline cannot be negative")
+        with self._store.connection() as conn:
+            source = conn.execute(
+                "SELECT 1 FROM research_http_sources WHERE source_id=?",
+                (source_id,),
+            ).fetchone()
+            if source is None:
+                raise KeyError(f"unknown HTTP source: {source_id}")
+            rows = conn.execute(
+                """SELECT attempt_id, attempt_number, disposition, status_code,
+                    error_code, error_message
+                FROM research_http_attempts
+                WHERE task_id=? AND source_id=?
+                ORDER BY observed_at, rowid
+                LIMIT -1 OFFSET ?""",
+                (task_id, source_id, attempts_before),
+            ).fetchall()
+        if not rows:
+            return None
+        row = rows[-1]
+        if not str(row["attempt_id"]).startswith(_FINALIZED_ATTEMPT_PREFIX):
+            return None
+        return RefreshResult(
+            source_id=source_id,
+            disposition=RefreshDisposition(row["disposition"]),
+            attempts=int(row["attempt_number"]),
+            status_code=row["status_code"],
+            error_code=row["error_code"],
+            message=row["error_message"],
+        )
 
     def record_snapshot(
         self,
@@ -290,13 +431,55 @@ class NetworkResearchRepository:
         snapshot_id: str,
         locator: str,
     ) -> None:
+        canonical_locator = canonical_http_locator(locator)
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            chain = conn.execute(
+                """SELECT d.workspace_id AS document_workspace_id,
+                    s.workspace_id AS source_workspace_id, s.url AS source_url,
+                    h.source_id AS snapshot_source_id,
+                    h.document_id AS snapshot_document_id
+                FROM corpus_documents d
+                JOIN research_http_sources s ON s.source_id=?
+                JOIN research_http_snapshots h ON h.snapshot_id=?
+                WHERE d.document_id=?""",
+                (source_id, snapshot_id, document_id),
+            ).fetchone()
+            if chain is None:
+                raise ResearchSourceIdentityError(
+                    "origin_identity_conflict",
+                    "HTTP provenance chain cannot be bound to the requested identities",
+                )
+            _canonical_stored_locator(chain["source_url"])
+            if (
+                chain["document_workspace_id"] != chain["source_workspace_id"]
+                or chain["snapshot_source_id"] != source_id
+                or chain["snapshot_document_id"] != document_id
+            ):
+                raise ResearchSourceIdentityError(
+                    "origin_identity_conflict",
+                    "HTTP provenance chain crosses a durable identity boundary",
+                )
+
+            existing = conn.execute(
+                """SELECT locator FROM corpus_http_origins
+                WHERE document_id=? AND source_id=? AND snapshot_id=?""",
+                (document_id, source_id, snapshot_id),
+            ).fetchone()
+            if existing is not None:
+                existing_locator = _canonical_stored_origin_locator(existing["locator"])
+                if existing_locator != canonical_locator:
+                    raise ResearchSourceIdentityError(
+                        "origin_locator_conflict",
+                        "HTTP provenance edge is permanently bound to its original locator",
+                    )
+                return
+
             conn.execute(
                 """INSERT INTO corpus_http_origins(
                     document_id, source_id, snapshot_id, locator, observed_at
-                ) VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(document_id, source_id, snapshot_id) DO NOTHING""",
-                (document_id, source_id, snapshot_id, locator, _now()),
+                ) VALUES (?, ?, ?, ?, ?)""",
+                (document_id, source_id, snapshot_id, canonical_locator, _now()),
             )
 
     def evidence_for_document(self, document_id: str) -> tuple[ResearchEvidence, ...]:
@@ -308,9 +491,15 @@ class NetworkResearchRepository:
                 (document_id,),
             ).fetchall()
             http_rows = conn.execute(
-                """SELECT o.source_id, o.locator, o.observed_at, s.freshness
+                """SELECT o.source_id, o.snapshot_id, o.locator, o.observed_at,
+                    d.workspace_id AS document_workspace_id,
+                    s.workspace_id AS source_workspace_id, s.url AS source_url, s.freshness,
+                    h.source_id AS snapshot_source_id,
+                    h.document_id AS snapshot_document_id
                 FROM corpus_http_origins o
-                JOIN research_http_sources s ON s.source_id=o.source_id
+                LEFT JOIN corpus_documents d ON d.document_id=o.document_id
+                LEFT JOIN research_http_sources s ON s.source_id=o.source_id
+                LEFT JOIN research_http_snapshots h ON h.snapshot_id=o.snapshot_id
                 WHERE o.document_id=? ORDER BY o.observed_at, o.source_id, o.locator""",
                 (document_id,),
             ).fetchall()
@@ -324,16 +513,33 @@ class NetworkResearchRepository:
             )
             for row in local_rows
         ]
-        evidence.extend(
-            ResearchEvidence(
-                source_id=row["source_id"],
-                source_kind=SourceKind.HTTP,
-                locator=row["locator"],
-                observed_at=row["observed_at"],
-                freshness=FreshnessState(row["freshness"]),
+        for row in http_rows:
+            if (
+                row["document_workspace_id"] is None
+                or row["source_workspace_id"] is None
+                or row["source_url"] is None
+                or row["freshness"] is None
+                or row["snapshot_source_id"] is None
+                or row["snapshot_document_id"] is None
+                or row["document_workspace_id"] != row["source_workspace_id"]
+                or row["snapshot_source_id"] != row["source_id"]
+                or row["snapshot_document_id"] != document_id
+            ):
+                raise ResearchSourceIdentityError(
+                    "origin_identity_corrupt",
+                    "stored HTTP provenance identity is invalid and cannot be used",
+                )
+            _canonical_stored_locator(row["source_url"])
+            canonical_locator = _canonical_stored_origin_locator(row["locator"])
+            evidence.append(
+                ResearchEvidence(
+                    source_id=row["source_id"],
+                    source_kind=SourceKind.HTTP,
+                    locator=canonical_locator,
+                    observed_at=row["observed_at"],
+                    freshness=FreshnessState(row["freshness"]),
+                )
             )
-            for row in http_rows
-        )
         return tuple(
             sorted(
                 evidence,
@@ -355,12 +561,20 @@ class NetworkResearchRepository:
     ) -> ResearchResultSet:
         result_set_id = uuid4().hex
         created_at = _now()
-        prepared = [
-            (hit, self.evidence_for_document(hit.document_id))
-            for hit in hits
-        ]
+        prepared = [(hit, self.evidence_for_document(hit.document_id)) for hit in hits]
         items: list[ResearchResultItem] = []
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for hit, _evidence in prepared:
+                document = conn.execute(
+                    "SELECT workspace_id FROM corpus_documents WHERE document_id=?",
+                    (hit.document_id,),
+                ).fetchone()
+                if document is None or document["workspace_id"] != workspace_id:
+                    raise ResearchSourceIdentityError(
+                        "result_workspace_conflict",
+                        "research result document does not belong to the result-set workspace",
+                    )
             conn.execute(
                 """INSERT INTO research_result_sets(result_set_id, workspace_id, query, created_at)
                 VALUES (?, ?, ?, ?)""",
@@ -426,29 +640,46 @@ class NetworkResearchRepository:
                 (result_set_id,),
             ).fetchone()
             rows = conn.execute(
-                """SELECT * FROM research_result_items
-                WHERE result_set_id=? ORDER BY ordinal""",
+                """SELECT item.*, document.workspace_id AS document_workspace_id
+                FROM research_result_items AS item
+                LEFT JOIN corpus_documents AS document
+                  ON document.document_id=item.document_id
+                WHERE item.result_set_id=? ORDER BY item.ordinal""",
                 (result_set_id,),
             ).fetchall()
         if header is None:
             raise KeyError(f"unknown research result set: {result_set_id}")
         items: list[ResearchResultItem] = []
         for row in rows:
-            raw_evidence = json.loads(row["evidence_json"])
-            evidence = tuple(
-                ResearchEvidence(
-                    source_id=item["source_id"],
-                    source_kind=SourceKind(item["source_kind"]),
-                    locator=item["locator"],
-                    observed_at=item["observed_at"],
-                    freshness=(
-                        FreshnessState(item["freshness"])
-                        if item.get("freshness") is not None
-                        else None
-                    ),
+            if (
+                row["document_workspace_id"] is None
+                or row["document_workspace_id"] != header["workspace_id"]
+            ):
+                raise ResearchSourceIdentityError(
+                    "result_identity_corrupt",
+                    "stored research result document does not belong to the result-set workspace",
                 )
-                for item in raw_evidence
-            )
+            raw_evidence = json.loads(row["evidence_json"])
+            evidence_items: list[ResearchEvidence] = []
+            for item in raw_evidence:
+                source_kind = SourceKind(item["source_kind"])
+                locator = item["locator"]
+                if source_kind is SourceKind.HTTP:
+                    locator = _canonical_stored_origin_locator(locator)
+                evidence_items.append(
+                    ResearchEvidence(
+                        source_id=item["source_id"],
+                        source_kind=source_kind,
+                        locator=locator,
+                        observed_at=item["observed_at"],
+                        freshness=(
+                            FreshnessState(item["freshness"])
+                            if item.get("freshness") is not None
+                            else None
+                        ),
+                    )
+                )
+            evidence = tuple(evidence_items)
             items.append(
                 ResearchResultItem(
                     ordinal=row["ordinal"],
