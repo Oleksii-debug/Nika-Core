@@ -7,10 +7,9 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
-_MAX_ARTIFACT_REF_BYTES = 4096
-_MAX_SIZE_BYTES = (1 << 63) - 1
+from nika_core.model_artifacts import ModelArtifactDescriptor, ModelIntegrityBasis
+
 _READ_CHUNK_BYTES = 1024 * 1024
-_HEX_DIGITS = frozenset("0123456789abcdef")
 
 
 class CandidateArtifactIntegrityError(RuntimeError):
@@ -18,45 +17,11 @@ class CandidateArtifactIntegrityError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
-class ExpectedCandidateArtifact:
-    """Trusted identity expected from bounded training evidence."""
-
-    artifact_ref: str
-    sha256: str
-    size_bytes: int
-
-    def __post_init__(self) -> None:
-        if type(self.artifact_ref) is not str:
-            raise TypeError("artifact_ref must be text")
-        if not self.artifact_ref or self.artifact_ref != self.artifact_ref.strip():
-            raise ValueError("artifact_ref must be non-empty without surrounding whitespace")
-        if any(ord(character) < 32 or ord(character) == 127 for character in self.artifact_ref):
-            raise ValueError("artifact_ref must not contain control characters")
-        try:
-            encoded_ref = self.artifact_ref.encode("utf-8")
-        except UnicodeEncodeError as exc:
-            raise ValueError("artifact_ref must be valid UTF-8 text") from exc
-        if len(encoded_ref) > _MAX_ARTIFACT_REF_BYTES:
-            raise ValueError("artifact_ref exceeds the configured byte limit")
-        if (
-            type(self.sha256) is not str
-            or len(self.sha256) != 64
-            or any(character not in _HEX_DIGITS for character in self.sha256)
-        ):
-            raise ValueError("sha256 must be a lowercase 64-character digest")
-        if (
-            type(self.size_bytes) is not int
-            or self.size_bytes < 0
-            or self.size_bytes > _MAX_SIZE_BYTES
-        ):
-            raise ValueError("size_bytes must be an integer from 0 through signed 64-bit max")
-
-
-@dataclass(frozen=True, slots=True)
 class VerifiedCandidateArtifact:
-    """Minimized evidence that one stable physical artifact matched trusted identity."""
+    """Minimized proof that physical bytes matched one canonical descriptor."""
 
-    artifact_ref: str
+    descriptor_digest: str
+    registry_key: str
     sha256: str
     size_bytes: int
 
@@ -130,24 +95,39 @@ def _open_read_only(path: Path) -> int:
     try:
         return os.open(path, flags)
     except OSError as exc:
-        raise CandidateArtifactIntegrityError("candidate artifact could not be opened safely") from exc
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact could not be opened safely"
+        ) from exc
+
+
+def _require_physical_descriptor(descriptor: ModelArtifactDescriptor) -> tuple[str, int]:
+    if type(descriptor) is not ModelArtifactDescriptor:
+        raise TypeError("descriptor must be a ModelArtifactDescriptor")
+    if descriptor.integrity_basis is not ModelIntegrityBasis.SHA256:
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact requires canonical SHA-256 integrity provenance"
+        )
+    if descriptor.sha256 is None or descriptor.size_bytes is None:
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact descriptor requires exact digest and size"
+        )
+    return descriptor.sha256, descriptor.size_bytes
 
 
 def verify_candidate_artifact(
     path: str | os.PathLike[str],
-    expected: ExpectedCandidateArtifact,
+    descriptor: ModelArtifactDescriptor,
     *,
     allowed_root: str | os.PathLike[str] | None = None,
 ) -> VerifiedCandidateArtifact:
-    """Verify one immutable training candidate before it may enter evaluation.
+    """Verify physical candidate bytes against canonical model provenance.
 
-    The file is hashed incrementally from one opened descriptor. A pre-open lstat,
-    descriptor fstat, post-read fstat and final lstat must agree, preventing ordinary
-    path replacement or in-place mutation from being credited as stable evidence.
-    Physical paths and file contents are intentionally absent from returned evidence.
+    The canonical descriptor is owned by ``nika_core.model_artifacts``. This adapter
+    owns only physical byte verification. It hashes one opened descriptor in bounded
+    reads and requires pre-open, opened, post-read and final path identity to agree.
+    Paths and model bytes are deliberately absent from returned evidence.
     """
-    if type(expected) is not ExpectedCandidateArtifact:
-        raise TypeError("expected must be an ExpectedCandidateArtifact")
+    expected_sha256, expected_size = _require_physical_descriptor(descriptor)
 
     candidate = _resolve_candidate_path(path, allowed_root=allowed_root)
     before_path = _safe_lstat(candidate)
@@ -165,14 +145,18 @@ def verify_candidate_artifact(
         _require_regular(opened)
         opened_identity = _stat_identity(opened)
         if opened_identity != before_identity:
-            raise CandidateArtifactIntegrityError("candidate artifact changed before verification")
-        if opened.st_size != expected.size_bytes:
-            raise CandidateArtifactIntegrityError("candidate artifact size does not match evidence")
+            raise CandidateArtifactIntegrityError(
+                "candidate artifact changed before verification"
+            )
+        if opened.st_size != expected_size:
+            raise CandidateArtifactIntegrityError(
+                "candidate artifact size does not match provenance"
+            )
 
         digest = hashlib.sha256()
         total_bytes = 0
         while True:
-            remaining_with_sentinel = expected.size_bytes + 1 - total_bytes
+            remaining_with_sentinel = expected_size + 1 - total_bytes
             if remaining_with_sentinel <= 0:
                 raise CandidateArtifactIntegrityError(
                     "candidate artifact grew during verification"
@@ -189,14 +173,16 @@ def verify_candidate_artifact(
             if not chunk:
                 break
             total_bytes += len(chunk)
-            if total_bytes > expected.size_bytes:
+            if total_bytes > expected_size:
                 raise CandidateArtifactIntegrityError(
                     "candidate artifact grew during verification"
                 )
             digest.update(chunk)
 
-        if total_bytes != expected.size_bytes:
-            raise CandidateArtifactIntegrityError("candidate artifact size changed during verification")
+        if total_bytes != expected_size:
+            raise CandidateArtifactIntegrityError(
+                "candidate artifact size changed during verification"
+            )
         try:
             after_open = os.fstat(file_descriptor)
         except OSError as exc:
@@ -204,7 +190,9 @@ def verify_candidate_artifact(
                 "candidate artifact metadata could not be re-read"
             ) from exc
         if _stat_identity(after_open) != opened_identity:
-            raise CandidateArtifactIntegrityError("candidate artifact changed during verification")
+            raise CandidateArtifactIntegrityError(
+                "candidate artifact changed during verification"
+            )
         actual_sha256 = digest.hexdigest()
     finally:
         try:
@@ -215,12 +203,17 @@ def verify_candidate_artifact(
     after_path = _safe_lstat(candidate)
     _require_regular(after_path)
     if _stat_identity(after_path) != before_identity:
-        raise CandidateArtifactIntegrityError("candidate artifact path changed during verification")
-    if not hmac.compare_digest(actual_sha256, expected.sha256):
-        raise CandidateArtifactIntegrityError("candidate artifact digest does not match evidence")
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact path changed during verification"
+        )
+    if not hmac.compare_digest(actual_sha256, expected_sha256):
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact digest does not match provenance"
+        )
 
     return VerifiedCandidateArtifact(
-        artifact_ref=expected.artifact_ref,
-        sha256=expected.sha256,
-        size_bytes=expected.size_bytes,
+        descriptor_digest=descriptor.descriptor_digest,
+        registry_key=descriptor.registry_key,
+        sha256=expected_sha256,
+        size_bytes=expected_size,
     )
