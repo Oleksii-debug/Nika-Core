@@ -15,6 +15,7 @@ class DeterministicErrorCode(StrEnum):
     PLANNER_FAILURE = "planner_failure"
     PLAN_TOO_LONG = "plan_too_long"
     INVALID_PLAN = "invalid_plan"
+    RULE_CONFLICT = "rule_conflict"
     REPLAN_LIMIT = "replan_limit"
     ACTION_UNAVAILABLE = "action_unavailable"
     STATE_OBSERVATION_TIMEOUT = "state_observation_timeout"

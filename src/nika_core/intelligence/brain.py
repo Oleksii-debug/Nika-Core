@@ -174,6 +174,23 @@ class DeterministicBrain:
             available_actions = tuple(
                 action for action in actions if action.action_id not in completed_set
             )
+            if not self._goal_satisfied(current_state, goal):
+                conflict_failure = self._rule_conflict_failure(
+                    actions=available_actions,
+                    state=current_state,
+                    unavailable_action_ids=set(),
+                )
+                if conflict_failure is not None:
+                    return self._failure(
+                        plan=DeterministicPlan(steps=()),
+                        completed=completed,
+                        state=current_state,
+                        history=history,
+                        replans=replans,
+                        code=conflict_failure.code,
+                        message=conflict_failure.message,
+                    )
+
             plan = await self._plan(
                 state=current_state,
                 goal=goal,
@@ -619,6 +636,7 @@ class DeterministicBrain:
 
         simulated = state
         seen: set[str] = set()
+        all_actions = tuple(action_map.values())
         for step in plan.steps:
             action = action_map.get(step.action_id)
             if action is None:
@@ -641,6 +659,15 @@ class DeterministicBrain:
                     DeterministicErrorCode.INVALID_PLAN,
                     f"planned action preconditions are not true: {action.action_id}",
                 )
+
+            conflict_failure = cls._rule_conflict_failure(
+                actions=all_actions,
+                state=simulated,
+                unavailable_action_ids=completed_action_ids | seen,
+            )
+            if conflict_failure is not None:
+                return conflict_failure
+
             next_state = cls._apply(action, simulated)
             if next_state == simulated:
                 return _PlanValidationFailure(
@@ -656,6 +683,40 @@ class DeterministicBrain:
                 "planner returned a plan that does not satisfy the declared goal",
             )
         return None
+
+    @classmethod
+    def _rule_conflict_failure(
+        cls,
+        *,
+        actions: tuple[DeterministicAction, ...],
+        state: WorldState,
+        unavailable_action_ids: set[str],
+    ) -> _PlanValidationFailure | None:
+        adders: dict[str, list[str]] = {}
+        removers: dict[str, list[str]] = {}
+        for action in actions:
+            if (
+                action.action_id in unavailable_action_ids
+                or not cls._action_applicable(action, state)
+            ):
+                continue
+            for fact in action.adds:
+                adders.setdefault(fact, []).append(action.action_id)
+            for fact in action.removes:
+                removers.setdefault(fact, []).append(action.action_id)
+
+        conflicting_facts = sorted(adders.keys() & removers.keys())
+        if not conflicting_facts:
+            return None
+
+        fact = conflicting_facts[0]
+        add_action_id = min(adders[fact])
+        remove_action_id = min(removers[fact])
+        return _PlanValidationFailure(
+            DeterministicErrorCode.RULE_CONFLICT,
+            "deterministic rule conflict: "
+            f"fact={fact}; add_action={add_action_id}; remove_action={remove_action_id}",
+        )
 
     @staticmethod
     def _action_applicable(action: DeterministicAction, state: WorldState) -> bool:
