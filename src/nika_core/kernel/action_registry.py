@@ -181,11 +181,7 @@ class Keymap:
         rows = conn.execute("SELECT action_id, binding FROM keymap_overrides").fetchall()
         overrides = {str(row["action_id"]): row["binding"] for row in rows}
         return {
-            action.action_id: (
-                overrides[action.action_id]
-                if action.action_id in overrides
-                else action.default_binding
-            )
+            action.action_id: overrides.get(action.action_id, action.default_binding)
             for action in self._actions.all()
         }
 
