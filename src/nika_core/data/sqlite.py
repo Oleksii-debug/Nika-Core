@@ -6,6 +6,10 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+from nika_core.data.experience_ledger_schema import (
+    EXPERIENCE_LEDGER_MIGRATIONS,
+    EXPERIENCE_LEDGER_SCHEMA_VERSION,
+)
 from nika_core.data.multi_agent_state_schema import (
     MULTI_AGENT_STATE_MIGRATIONS,
     MULTI_AGENT_STATE_SCHEMA_VERSION,
@@ -58,8 +62,37 @@ class SQLiteStore:
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (version, datetime.now(UTC).isoformat()),
                 )
+            self._initialize_experience_ledger_schema(conn)
             self._initialize_multi_agent_state_schema(conn)
             self._initialize_product_project_schema(conn)
+
+    @staticmethod
+    def _initialize_experience_ledger_schema(conn: sqlite3.Connection) -> None:
+        """Apply continuity Experience Ledger migrations through the canonical store."""
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS experience_ledger_schema_migrations ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        row = conn.execute(
+            "SELECT MAX(version) AS version FROM experience_ledger_schema_migrations"
+        ).fetchone()
+        current = int(row["version"] or 0)
+        if current > EXPERIENCE_LEDGER_SCHEMA_VERSION:
+            raise RuntimeError(
+                "experience ledger database schema "
+                f"{current} is newer than supported schema {EXPERIENCE_LEDGER_SCHEMA_VERSION}"
+            )
+        for version in range(current + 1, EXPERIENCE_LEDGER_SCHEMA_VERSION + 1):
+            statements = EXPERIENCE_LEDGER_MIGRATIONS.get(version)
+            if statements is None:
+                raise RuntimeError(f"missing experience ledger migration {version}")
+            for statement in statements:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO experience_ledger_schema_migrations(version, applied_at) "
+                "VALUES (?, ?)",
+                (version, datetime.now(UTC).isoformat()),
+            )
 
     @staticmethod
     def _initialize_multi_agent_state_schema(conn: sqlite3.Connection) -> None:
