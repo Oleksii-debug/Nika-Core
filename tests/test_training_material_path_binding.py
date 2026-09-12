@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from nika_core.learning_package import FrozenLearningPackage, LearningDataSplit, LearningShard
+from nika_core.learning_package import FrozenLearningPackage, LearningDataSplit
 from nika_core.training_materials import (
     ResolvedTrainingMaterial,
     ResolvedTrainingPackage,
