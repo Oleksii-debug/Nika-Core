@@ -176,7 +176,7 @@ class WindowsPowerShellSpeechBackend:
         def communicate() -> None:
             try:
                 result.append(process.communicate(input=stdin_bytes))
-            except Exception as exc:  # pragma: no cover - defensive thread boundary
+            except (OSError, ValueError) as exc:  # pragma: no cover - OS/process boundary
                 result.append(exc)
 
         worker = threading.Thread(target=communicate, daemon=True)
