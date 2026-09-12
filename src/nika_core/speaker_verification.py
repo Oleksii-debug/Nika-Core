@@ -244,7 +244,7 @@ class SpeakerVerificationService:
                 "speaker verification exceeded its deadline",
                 retryable=True,
             ) from None
-        except Exception:
+        except Exception:  # noqa: BLE001 - provider boundary minimizes unknown adapter diagnostics
             raise SpeakerVerificationError(
                 SpeakerVerificationErrorCode.ADAPTER_FAILURE,
                 "speaker verification adapter failed",
