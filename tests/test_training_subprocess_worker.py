@@ -9,6 +9,8 @@ import pytest
 from nika_core.training_adapters import SubprocessTrainingWorker, TrainingSubprocessError
 from nika_core.training_runtime import ArtifactIdentity, TrainingJobSpec
 
+_TRAINER_SHA256 = "c" * 64
+
 
 def _script(tmp_path: Path, body: str) -> Path:
     path = tmp_path / "trainer.py"
@@ -47,7 +49,9 @@ response = {
 sys.stdout.write(json.dumps(response))
 """.strip(),
     )
-    worker = SubprocessTrainingWorker((sys.executable, str(trainer)))
+    worker = SubprocessTrainingWorker(
+        (sys.executable, str(trainer)), trainer_sha256=_TRAINER_SHA256
+    )
 
     first = worker.step(spec=_spec(), step_index=0, resume_state={})
     assert first.completed is False
@@ -76,7 +80,9 @@ response = {
 sys.stdout.write(json.dumps(response))
 """.strip(),
     )
-    worker = SubprocessTrainingWorker((sys.executable, str(trainer)))
+    worker = SubprocessTrainingWorker(
+        (sys.executable, str(trainer)), trainer_sha256=_TRAINER_SHA256
+    )
 
     first = worker.step(spec=_spec(), step_index=0, resume_state={})
     replay = worker.step(spec=_spec(), step_index=0, resume_state={})
@@ -86,6 +92,43 @@ sys.stdout.write(json.dumps(response))
     assert isinstance(first_envelope, dict)
     assert isinstance(replay_envelope, dict)
     assert first_envelope["last_step_id"] == replay_envelope["last_step_id"]
+    assert first_envelope["trainer_sha256"] == _TRAINER_SHA256
+
+
+def test_resume_rejects_different_trainer_artifact_before_process_effect(tmp_path: Path) -> None:
+    second_step_marker = tmp_path / "second-step-started"
+    trainer = _script(
+        tmp_path,
+        f"""
+import json
+import sys
+from pathlib import Path
+
+request = json.loads(sys.stdin.buffer.read())
+if request["step_index"] == 1:
+    Path({str(second_step_marker)!r}).write_text("started", encoding="utf-8")
+response = {{
+    "candidate_sha256": None,
+    "completed": False,
+    "protocol_version": 1,
+    "resume_state": {{"next_epoch": request["step_index"] + 1}},
+    "step_id": request["step_id"],
+}}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    original = SubprocessTrainingWorker(
+        (sys.executable, str(trainer)), trainer_sha256=_TRAINER_SHA256
+    )
+    first = original.step(spec=_spec(), step_index=0, resume_state={})
+    replacement = SubprocessTrainingWorker(
+        (sys.executable, str(trainer)), trainer_sha256="d" * 64
+    )
+
+    with pytest.raises(TrainingSubprocessError, match="trainer artifact"):
+        replacement.step(spec=_spec(), step_index=1, resume_state=first.resume_state)
+
+    assert not second_step_marker.exists()
 
 
 def test_parent_environment_is_not_inherited_by_default(
@@ -110,7 +153,9 @@ response = {
 sys.stdout.write(json.dumps(response))
 """.strip(),
     )
-    worker = SubprocessTrainingWorker((sys.executable, str(trainer)))
+    worker = SubprocessTrainingWorker(
+        (sys.executable, str(trainer)), trainer_sha256=_TRAINER_SHA256
+    )
 
     result = worker.step(spec=_spec(), step_index=0, resume_state={})
 
@@ -141,7 +186,9 @@ sys.stdout.write(json.dumps(response))
 """.strip(),
     )
     worker = SubprocessTrainingWorker(
-        (sys.executable, str(trainer)), environment={"NIKA_ALLOWED": "yes"}
+        (sys.executable, str(trainer)),
+        trainer_sha256=_TRAINER_SHA256,
+        environment={"NIKA_ALLOWED": "yes"},
     )
 
     result = worker.step(spec=_spec(), step_index=0, resume_state={})
@@ -162,7 +209,9 @@ sys.stderr.write("TOP-SECRET-TRAINING-DATA")
 raise SystemExit(9)
 """.strip(),
     )
-    worker = SubprocessTrainingWorker((sys.executable, str(trainer)))
+    worker = SubprocessTrainingWorker(
+        (sys.executable, str(trainer)), trainer_sha256=_TRAINER_SHA256
+    )
 
     with pytest.raises(TrainingSubprocessError) as exc_info:
         worker.step(spec=_spec(), step_index=0, resume_state={})
@@ -180,7 +229,9 @@ time.sleep(10)
 """.strip(),
     )
     worker = SubprocessTrainingWorker(
-        (sys.executable, str(trainer)), timeout_seconds=0.1
+        (sys.executable, str(trainer)),
+        trainer_sha256=_TRAINER_SHA256,
+        timeout_seconds=0.1,
     )
 
     with pytest.raises(TrainingSubprocessError, match="timed out"):
@@ -202,6 +253,7 @@ while True:
     )
     worker = SubprocessTrainingWorker(
         (sys.executable, str(trainer)),
+        trainer_sha256=_TRAINER_SHA256,
         max_response_bytes=1024,
         timeout_seconds=5,
     )
@@ -227,7 +279,9 @@ response = {
 sys.stdout.write(json.dumps(response))
 """.strip(),
     )
-    worker = SubprocessTrainingWorker((sys.executable, str(trainer)))
+    worker = SubprocessTrainingWorker(
+        (sys.executable, str(trainer)), trainer_sha256=_TRAINER_SHA256
+    )
 
     with pytest.raises(TrainingSubprocessError, match="wrong step identity"):
         worker.step(spec=_spec(), step_index=0, resume_state={})
@@ -252,7 +306,9 @@ response = {
 sys.stdout.write(json.dumps(response))
 """.strip(),
     )
-    worker = SubprocessTrainingWorker((sys.executable, str(trainer)))
+    worker = SubprocessTrainingWorker(
+        (sys.executable, str(trainer)), trainer_sha256=_TRAINER_SHA256
+    )
 
     with pytest.raises(TrainingSubprocessError, match="unexpected fields"):
         worker.step(spec=_spec(), step_index=0, resume_state={})
@@ -276,7 +332,9 @@ response = {
 sys.stdout.write(json.dumps(response))
 """.strip(),
     )
-    worker = SubprocessTrainingWorker((sys.executable, str(trainer)))
+    worker = SubprocessTrainingWorker(
+        (sys.executable, str(trainer)), trainer_sha256=_TRAINER_SHA256
+    )
 
     with pytest.raises(TrainingSubprocessError, match="invalid result evidence"):
         worker.step(spec=_spec(), step_index=0, resume_state={})
@@ -291,7 +349,9 @@ from pathlib import Path
 Path({str(marker)!r}).write_text("started", encoding="utf-8")
 """.strip(),
     )
-    worker = SubprocessTrainingWorker((sys.executable, str(trainer)))
+    worker = SubprocessTrainingWorker(
+        (sys.executable, str(trainer)), trainer_sha256=_TRAINER_SHA256
+    )
 
     with pytest.raises(TrainingSubprocessError, match="non-JSON"):
         worker.step(
@@ -321,7 +381,9 @@ response = {
 sys.stdout.write(json.dumps(response))
 """.strip(),
     )
-    worker = SubprocessTrainingWorker((sys.executable, str(trainer)))
+    worker = SubprocessTrainingWorker(
+        (sys.executable, str(trainer)), trainer_sha256=_TRAINER_SHA256
+    )
     first = worker.step(spec=_spec(), step_index=0, resume_state={})
     changed = TrainingJobSpec(
         job_id="job-2",
@@ -339,23 +401,39 @@ sys.stdout.write(json.dumps(response))
 
 def test_command_must_not_be_a_shell_string() -> None:
     with pytest.raises(TypeError, match="not a shell string"):
-        SubprocessTrainingWorker("python trainer.py")
+        SubprocessTrainingWorker(
+            "python trainer.py", trainer_sha256=_TRAINER_SHA256
+        )
 
 
 def test_training_executable_must_be_absolute() -> None:
     with pytest.raises(ValueError, match="absolute path"):
-        SubprocessTrainingWorker(("python", "trainer.py"))
+        SubprocessTrainingWorker(
+            ("python", "trainer.py"), trainer_sha256=_TRAINER_SHA256
+        )
+
+
+def test_trainer_identity_must_be_exact_sha256() -> None:
+    with pytest.raises(ValueError, match="trainer_sha256"):
+        SubprocessTrainingWorker(
+            (os.path.abspath(sys.executable),), trainer_sha256="not-a-digest"
+        )
 
 
 @pytest.mark.parametrize("timeout", [float("nan"), float("inf"), -1.0, 0.0, True])
 def test_invalid_timeout_is_rejected(timeout: object) -> None:
     with pytest.raises(ValueError, match="timeout_seconds"):
-        SubprocessTrainingWorker((os.path.abspath(sys.executable),), timeout_seconds=timeout)  # type: ignore[arg-type]
+        SubprocessTrainingWorker(
+            (os.path.abspath(sys.executable),),
+            trainer_sha256=_TRAINER_SHA256,
+            timeout_seconds=timeout,  # type: ignore[arg-type]
+        )
 
 
 def test_huge_integer_timeout_is_rejected_without_overflow() -> None:
     with pytest.raises(ValueError, match="timeout_seconds"):
         SubprocessTrainingWorker(
             (os.path.abspath(sys.executable),),
+            trainer_sha256=_TRAINER_SHA256,
             timeout_seconds=10**10000,  # type: ignore[arg-type]
         )
