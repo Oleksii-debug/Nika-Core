@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from urllib.parse import quote
+
 import pytest
 
 from nika_core.model_artifacts import (
@@ -20,6 +22,12 @@ def _descriptor(reference: str) -> ModelArtifactDescriptor:
     )
 
 
+def _encode_reference(reference: str, rounds: int) -> str:
+    for _ in range(rounds):
+        reference = quote(reference, safe=":/")
+    return reference
+
+
 @pytest.mark.parametrize(
     "reference",
     (
@@ -36,6 +44,20 @@ def _descriptor(reference: str) -> ModelArtifactDescriptor:
 def test_encoded_public_reference_structure_fails_closed(reference: str) -> None:
     with pytest.raises(ValueError):
         _descriptor(reference)
+
+
+@pytest.mark.parametrize("rounds", (4, 5))
+def test_nested_encoded_credential_structure_fails_closed_at_decode_bound(rounds: int) -> None:
+    canary = "NIKA_DECODE_DEPTH_SECRET_CANARY"
+    reference = _encode_reference(
+        f"https://models.example.test/path?token={canary}",
+        rounds,
+    )
+
+    with pytest.raises(ValueError) as error:
+        _descriptor(reference)
+
+    assert canary not in str(error.value)
 
 
 def test_encoded_userinfo_rejection_does_not_echo_canary() -> None:
