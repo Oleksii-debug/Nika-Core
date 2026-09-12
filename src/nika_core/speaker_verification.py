@@ -196,9 +196,14 @@ class SpeakerVerificationService:
         policy: SpeakerVerificationPolicy | None = None,
     ) -> None:
         capabilities = _validated_capabilities(adapter.capabilities)
+        if policy is not None and not isinstance(policy, SpeakerVerificationPolicy):
+            raise SpeakerVerificationError(
+                SpeakerVerificationErrorCode.INVALID_REQUEST,
+                "speaker verification policy must use the canonical type",
+            )
         self._adapter = adapter
         self._bound_capabilities = capabilities
-        self._policy = policy or SpeakerVerificationPolicy()
+        self._policy = policy if policy is not None else SpeakerVerificationPolicy()
 
     @property
     def capabilities(self) -> SpeakerVerifierCapabilities:

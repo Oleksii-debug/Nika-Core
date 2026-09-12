@@ -123,6 +123,16 @@ def test_custom_policy_requires_strict_threshold_order() -> None:
     assert error.value.code is SpeakerVerificationErrorCode.INVALID_REQUEST
 
 
+def test_noncanonical_policy_is_rejected_before_adapter_effect() -> None:
+    adapter = FakeVerifier()
+
+    with pytest.raises(SpeakerVerificationError) as error:
+        SpeakerVerificationService(adapter, policy=object())  # type: ignore[arg-type]
+
+    assert error.value.code is SpeakerVerificationErrorCode.INVALID_REQUEST
+    assert adapter.calls == 0
+
+
 def test_audio_bounds_are_enforced_before_adapter_effect() -> None:
     adapter = FakeVerifier()
     service = SpeakerVerificationService(adapter)
