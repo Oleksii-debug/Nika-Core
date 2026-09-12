@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from copy import deepcopy
+import copy
 
 import pytest
 
@@ -17,7 +17,7 @@ _EXPECTED = {"status": "agree", "sources": [{"state": "valid"}, {"state": "valid
 
 def _model_backed_payload() -> dict[str, object]:
     return {
-        "checker_summary": deepcopy(_EXPECTED),
+        "checker_summary": copy.deepcopy(_EXPECTED),
         "model_analysis": {
             "text": "Bounded model synthesis.",
             "provider_id": "ollama",
@@ -48,7 +48,7 @@ def _valid(payload: object) -> bool:
 
 
 def test_checker_envelope_accepts_legacy_and_canonical_model_backed_result() -> None:
-    assert _valid({"checker_summary": deepcopy(_EXPECTED)}) is True
+    assert _valid({"checker_summary": copy.deepcopy(_EXPECTED)}) is True
     assert _valid(_model_backed_payload()) is True
 
 
