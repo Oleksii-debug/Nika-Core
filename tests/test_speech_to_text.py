@@ -324,6 +324,20 @@ def test_invalid_detected_language_and_latency_fail_closed() -> None:
     language_result = asyncio.run(SpeechToTextService(bad_language).transcribe(request))
     assert language_result.evidence.error_code is SpeechToTextFailureCode.PROVIDER_ERROR
 
+    too_long_language = _RecordingAdapter(
+        SpeechToTextAdapterResponse(
+            request_id=request.request_id,
+            provider_id=request.provider_id,
+            model=request.model,
+            text="valid transcript",
+            detected_language="en-" + "aa-" * 21 + "aa",
+        )
+    )
+    long_language_result = asyncio.run(
+        SpeechToTextService(too_long_language).transcribe(request)
+    )
+    assert long_language_result.evidence.error_code is SpeechToTextFailureCode.PROVIDER_ERROR
+
     bad_latency = _RecordingAdapter(
         SpeechToTextAdapterResponse(
             request_id=request.request_id,
@@ -354,4 +368,12 @@ def test_request_and_audio_validation_fail_closed() -> None:
             model="uk-small-v1",
             audio=_audio(),
             language="uk\nforged",
+        )
+    with pytest.raises(ValueError):
+        SpeechToTextRequest(
+            request_id="stt-1",
+            provider_id="local-stt",
+            model="uk-small-v1",
+            audio=_audio(),
+            language="en-" + "aa-" * 21 + "aa",
         )
