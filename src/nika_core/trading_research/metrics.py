@@ -14,8 +14,8 @@ _METRIC_CONTEXT = Context(prec=34, rounding=ROUND_HALF_EVEN)
 _SAMPLING_SCHEMA = "nika-trader-sampling-v2"
 _DAY = timedelta(days=1)
 _CANONICAL_REGULAR_RULES: dict[tuple[str, timedelta], Decimal] = {
-    ("continuous-utc-daily-v1", _DAY): Decimal("252"),
-    ("synthetic-one-period-year-v1", _DAY): Decimal("1"),
+    ("continuous-utc-daily-v1", _DAY): Decimal(252),
+    ("synthetic-one-period-year-v1", _DAY): Decimal(1),
 }
 _LEGACY_REGULAR_RULE_ALIASES: dict[
     tuple[str, timedelta, Decimal],
@@ -24,8 +24,8 @@ _LEGACY_REGULAR_RULE_ALIASES: dict[
     (
         "continuous-utc-daily-v1",
         _DAY,
-        Decimal("1"),
-    ): ("synthetic-one-period-year-v1", Decimal("1")),
+        Decimal(1),
+    ): ("synthetic-one-period-year-v1", Decimal(1)),
 }
 
 
