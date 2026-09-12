@@ -14,7 +14,6 @@ _READ_CHUNK_BYTES = 1024 * 1024
 _WINDOWS_FINAL_PATH_BUFFER = 32768
 _MAX_SIGNED_64 = (1 << 63) - 1
 _HEX_DIGITS = frozenset("0123456789abcdef")
-_VERIFIED_CANDIDATE_MINT_TOKEN = object()
 
 
 class CandidateArtifactIntegrityError(RuntimeError):
@@ -39,57 +38,22 @@ def _require_evidence_size(value: object) -> int:
 
 @dataclass(frozen=True, slots=True, init=False)
 class VerifiedCandidateArtifact:
-    """Minimized proof minted only by the canonical physical verifier."""
+    """Minimized receipt produced by the canonical physical verifier.
+
+    Construction history is not a Python security boundary: hostile code can use
+    ``object.__new__`` / ``object.__setattr__``. Direct construction and subclassing
+    are disabled to prevent accidental bypass, but consumers receiving a receipt from
+    outside the verifier boundary must still reverify the physical artifact at their
+    own point of use rather than trusting the object type alone.
+    """
 
     descriptor_digest: str
     registry_key: str
     sha256: str
     size_bytes: int
 
-    def __init__(
-        self,
-        *,
-        descriptor_digest: str,
-        registry_key: str,
-        sha256: str,
-        size_bytes: int,
-        _mint_token: object | None = None,
-    ) -> None:
-        if _mint_token is not _VERIFIED_CANDIDATE_MINT_TOKEN:
-            raise TypeError(
-                "VerifiedCandidateArtifact can only be minted by verify_candidate_artifact"
-            )
-        object.__setattr__(
-            self,
-            "descriptor_digest",
-            _require_evidence_sha256("descriptor_digest", descriptor_digest),
-        )
-        object.__setattr__(
-            self,
-            "registry_key",
-            _require_evidence_sha256("registry_key", registry_key),
-        )
-        object.__setattr__(self, "sha256", _require_evidence_sha256("sha256", sha256))
-        object.__setattr__(self, "size_bytes", _require_evidence_size(size_bytes))
-
     def __init_subclass__(cls, **_: object) -> None:
         raise TypeError("VerifiedCandidateArtifact cannot be subclassed")
-
-
-def _mint_verified_candidate_artifact(
-    *,
-    descriptor_digest: str,
-    registry_key: str,
-    sha256: str,
-    size_bytes: int,
-) -> VerifiedCandidateArtifact:
-    return VerifiedCandidateArtifact(
-        descriptor_digest=descriptor_digest,
-        registry_key=registry_key,
-        sha256=sha256,
-        size_bytes=size_bytes,
-        _mint_token=_VERIFIED_CANDIDATE_MINT_TOKEN,
-    )
 
 
 def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
@@ -371,7 +335,8 @@ def verify_candidate_artifact(
     owns only physical byte verification. With ``allowed_root`` it binds containment
     to the object actually opened: descriptor-relative no-follow traversal on POSIX,
     and final-handle containment validation on Windows. Paths and model bytes are
-    deliberately absent from returned evidence.
+    deliberately absent from returned evidence. Consumers must re-run this verifier
+    at their point of use instead of accepting a receipt as construction-history proof.
     """
     expected_sha256, expected_size = _require_physical_descriptor(descriptor)
 
@@ -475,9 +440,16 @@ def verify_candidate_artifact(
             "candidate artifact digest does not match provenance"
         )
 
-    return _mint_verified_candidate_artifact(
-        descriptor_digest=descriptor.descriptor_digest,
-        registry_key=descriptor.registry_key,
-        sha256=expected_sha256,
-        size_bytes=expected_size,
+    descriptor_digest = _require_evidence_sha256(
+        "descriptor_digest",
+        descriptor.descriptor_digest,
     )
+    registry_key = _require_evidence_sha256("registry_key", descriptor.registry_key)
+    receipt_sha256 = _require_evidence_sha256("sha256", expected_sha256)
+    receipt_size = _require_evidence_size(expected_size)
+    receipt = object.__new__(VerifiedCandidateArtifact)
+    object.__setattr__(receipt, "descriptor_digest", descriptor_digest)
+    object.__setattr__(receipt, "registry_key", registry_key)
+    object.__setattr__(receipt, "sha256", receipt_sha256)
+    object.__setattr__(receipt, "size_bytes", receipt_size)
+    return receipt
