@@ -96,7 +96,7 @@ def test_initialize_rejects_non_integer_pf9_migration_marker(tmp_path) -> None:
 
     assert marker is not None
     assert marker["storage_type"] == "real"
-    with pytest.raises(TypeError, match="SQLite INTEGER"):
+    with pytest.raises(RuntimeError, match="business factory table schema mismatch"):
         BusinessFactoryRepository(store).initialize()
 
 
