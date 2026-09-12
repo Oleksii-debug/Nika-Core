@@ -72,13 +72,18 @@ class WorkerResultEnvelope:
     producer_actor_id: str | None = None
 
     def __post_init__(self) -> None:
-        if not all(value.strip() for value in (self.work_id, self.component_id, self.repository_id)):
-            raise CoordinatorError("worker result identity must not be empty")
+        identities = (self.work_id, self.component_id, self.repository_id)
+        if not all(isinstance(value, str) and value.strip() for value in identities):
+            raise CoordinatorError("worker result identity must be non-empty text")
         _validate_sha(self.base_sha, "base_sha")
         _validate_sha(self.result_sha, "result_sha")
         _validate_digest(self.diff_digest, "diff_digest")
-        if self.producer_actor_id is not None and not self.producer_actor_id.strip():
-            raise CoordinatorError("producer actor identity must not be blank")
+        if not isinstance(self.coding_result, CodingResult):
+            raise CoordinatorError("worker result coding_result must be CodingResult")
+        if self.producer_actor_id is not None and (
+            not isinstance(self.producer_actor_id, str) or not self.producer_actor_id.strip()
+        ):
+            raise CoordinatorError("producer actor identity must be non-empty text")
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,8 +94,18 @@ class ReviewDecision:
     evidence_refs: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if not self.reviewer_id.strip() or not self.reason.strip() or not self.evidence_refs:
-            raise CoordinatorError("independent review requires reviewer, reason and evidence")
+        if not isinstance(self.reviewer_id, str) or not self.reviewer_id.strip():
+            raise CoordinatorError("independent review requires reviewer identity text")
+        if type(self.accepted) is not bool:
+            raise CoordinatorError("independent review accepted must be an exact boolean")
+        if not isinstance(self.reason, str) or not self.reason.strip():
+            raise CoordinatorError("independent review requires reason text")
+        if (
+            not isinstance(self.evidence_refs, tuple)
+            or not self.evidence_refs
+            or any(not isinstance(ref, str) or not ref.strip() for ref in self.evidence_refs)
+        ):
+            raise CoordinatorError("independent review requires non-empty evidence reference text")
 
 
 @dataclass(frozen=True, slots=True)
@@ -728,10 +743,14 @@ def _stable_id(prefix: str, *parts: object) -> str:
 
 
 def _validate_sha(value: str, label: str) -> None:
-    if len(value) != 40 or any(char not in "0123456789abcdef" for char in value.casefold()):
+    if not isinstance(value, str) or len(value) != 40 or any(
+        char not in "0123456789abcdef" for char in value.casefold()
+    ):
         raise CoordinatorError(f"{label} must be a 40-character hexadecimal SHA")
 
 
 def _validate_digest(value: str, label: str) -> None:
-    if len(value) != 64 or any(char not in "0123456789abcdef" for char in value.casefold()):
+    if not isinstance(value, str) or len(value) != 64 or any(
+        char not in "0123456789abcdef" for char in value.casefold()
+    ):
         raise CoordinatorError(f"{label} must be a 64-character hexadecimal digest")
