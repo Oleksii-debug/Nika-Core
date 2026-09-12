@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
@@ -7,11 +9,17 @@ from nika_core.product_factory_orchestration import (
     ProductComponent,
     ProductRepositoryGraph,
     RepositoryRef,
+    TeamPlan,
+    TeamRole,
 )
 from nika_core.product_factory_project_binding import (
     ProductProjectBindingError,
     ProductProjectCoordinatorBinding,
     StaleProductProjectBindingError,
+)
+from nika_core.product_factory_review_authority import (
+    ProductFactoryReviewSubject,
+    team_plan_fingerprint_ref,
 )
 from nika_core.product_project import (
     ProductProjectRepository,
@@ -24,7 +32,20 @@ PERMISSIONS = frozenset({"read_source", "write_source", "run_tests"})
 LOCATOR = "org/repo"
 
 
-def _spec(goal: str = "Build accessible product") -> ProductProjectSpec:
+class _AllowReviewEvidence:
+    def verify(
+        self,
+        subject: ProductFactoryReviewSubject,
+        evidence_refs: tuple[str, ...],
+    ) -> bool:
+        return bool(subject.fingerprint and evidence_refs)
+
+
+def _spec(
+    goal: str = "Build accessible product",
+    *,
+    team_refs: tuple[str, ...] = (),
+) -> ProductProjectSpec:
     return ProductProjectSpec(
         goal=goal,
         desired_outcome="A reviewed product",
@@ -36,6 +57,7 @@ def _spec(goal: str = "Build accessible product") -> ProductProjectSpec:
             ),
         ),
         repository_refs=(LOCATOR,),
+        team_refs=team_refs,
     )
 
 
@@ -63,6 +85,32 @@ def _graph(project_id: str = "p1", locator: str = LOCATOR) -> ProductRepositoryG
                 test_commands=(("python", "-m", "pytest", "tests/docs"),),
             ),
         ),
+    )
+
+
+def _team_plan() -> TeamPlan:
+    return TeamPlan(
+        project_id="p1",
+        plan_id="team-plan:p1",
+        roles=(
+            TeamRole(
+                role_id="team-role:builder",
+                capabilities=("implementation",),
+                component_ids=("core", "docs"),
+                permissions=PERMISSIONS,
+                reasons=("trusted builder assignment",),
+            ),
+            TeamRole(
+                role_id="team-role:reviewer",
+                capabilities=("qa",),
+                component_ids=("core", "docs"),
+                permissions=frozenset({"read_source", "run_tests"}),
+                reasons=("trusted independent review assignment",),
+                independent_review=True,
+            ),
+        ),
+        permission_ceiling=PERMISSIONS,
+        reasons=("durable trusted team assignment",),
     )
 
 
@@ -155,3 +203,52 @@ def test_project_identity_mismatch_fails_before_orchestration(tmp_path) -> None:
 
     with pytest.raises(ProductProjectBindingError, match="project_id"):
         ProductProjectCoordinatorBinding(project, _graph(project_id="p2"))
+
+
+def test_persisted_team_plan_content_fingerprint_binds_exact_review_authority(tmp_path) -> None:
+    repo = _project_repo(tmp_path)
+    team_plan = _team_plan()
+    project = repo.create(
+        project_id="p1",
+        name="Product",
+        spec=_spec(
+            team_refs=(team_plan.plan_id, team_plan_fingerprint_ref(team_plan)),
+        ),
+        idempotency_key="create:p1:trusted-team",
+    )
+
+    binding = ProductProjectCoordinatorBinding(
+        project,
+        _graph(),
+        team_plan=team_plan,
+        review_evidence_authority=_AllowReviewEvidence(),
+    )
+
+    assert binding.has_trusted_review_authority is True
+
+
+def test_reused_persisted_plan_id_with_forged_role_content_fails_closed(tmp_path) -> None:
+    repo = _project_repo(tmp_path)
+    trusted = _team_plan()
+    project = repo.create(
+        project_id="p1",
+        name="Product",
+        spec=_spec(
+            team_refs=(trusted.plan_id, team_plan_fingerprint_ref(trusted)),
+        ),
+        idempotency_key="create:p1:trusted-team",
+    )
+    forged_roles = list(trusted.roles)
+    forged_roles[1] = replace(
+        forged_roles[1],
+        role_id="team-role:attacker-chosen-reviewer",
+    )
+    forged = replace(trusted, roles=tuple(forged_roles))
+
+    with pytest.raises(ProductProjectBindingError, match="content fingerprint"):
+        ProductProjectCoordinatorBinding(
+            project,
+            _graph(),
+            team_plan=forged,
+            review_evidence_authority=_AllowReviewEvidence(),
+        )

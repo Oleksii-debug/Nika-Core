@@ -12,6 +12,7 @@ from nika_core.product_factory_coordinator import (
     WorkRecord,
     WorkState,
 )
+from nika_core.product_factory_orchestration import OwnershipLease
 from nika_core.toolsmith.contracts import (
     AcceptanceCommand,
     AllowedPathPolicy,
@@ -55,14 +56,18 @@ class RepositoryPathIdentity(StrEnum):
 class CodingWorkerDispatchContext:
     """Trusted host-provided execution context for one bounded component job.
 
-    ``path_identity`` is intentionally owned by the Product Factory host boundary rather
-    than inferred from the machine running Nika. A remote or containerized worker may
-    use different repository semantics from the coordinator host. ``None`` remains
+    ``ownership_lease`` is the canonical Product Factory actor assignment. Its
+    ``worker_id`` is the producer principal recorded in candidate evidence; the Toolsmith
+    ``lease`` remains workspace/execution authority and is deliberately not used as actor
+    identity. ``path_identity`` is owned by the Product Factory host boundary rather than
+    inferred from the machine running Nika. A remote or containerized worker may use
+    different repository semantics from the coordinator host. ``None`` remains
     backward-compatible for results without case-variant ambiguity, but case-variant
     evidence fails closed until the host declares the authoritative semantic.
     """
 
     repository_tree_digest: str
+    ownership_lease: OwnershipLease
     lease: WorkspaceLease
     process_policy: ProcessPolicy
     network_policy: NetworkPolicy
@@ -70,8 +75,12 @@ class CodingWorkerDispatchContext:
     path_identity: RepositoryPathIdentity | None = None
 
     def __post_init__(self) -> None:
-        if not self.repository_tree_digest.strip():
+        if not isinstance(self.repository_tree_digest, str) or not self.repository_tree_digest.strip():
             raise CodingWorkerAdapterError("repository tree digest must not be empty")
+        if not isinstance(self.ownership_lease.worker_id, str) or not self.ownership_lease.worker_id.strip():
+            raise CodingWorkerAdapterError("ownership lease worker identity must not be empty")
+        if not isinstance(self.ownership_lease.lease_id, str) or not self.ownership_lease.lease_id.strip():
+            raise CodingWorkerAdapterError("ownership lease identity must not be empty")
         if self.path_identity is not None and not isinstance(
             self.path_identity, RepositoryPathIdentity
         ):
@@ -271,6 +280,7 @@ class CodingWorkerComponentAdapter:
         request: ComponentWorkRequest,
     ) -> tuple[CodingJob, CodingWorkerDispatchContext]:
         context = await self.contexts.context_for(request)
+        _validate_ownership_assignment(request, context.ownership_lease)
         try:
             commands = tuple(AcceptanceCommand(argv=argv) for argv in request.acceptance_commands)
             job = CodingJob(
@@ -352,6 +362,7 @@ class CodingWorkerComponentAdapter:
             result_sha=exact.result_sha,
             diff_digest=exact.diff_digest,
             coding_result=result,
+            producer_actor_id=context.ownership_lease.worker_id,
         )
 
 
@@ -359,6 +370,22 @@ def component_task_id(request: ComponentWorkRequest) -> str:
     """Stable original-task identity shared by Product Factory and Toolsmith."""
 
     return f"product:{request.project_id}:component:{request.component_id}"
+
+
+def _validate_ownership_assignment(
+    request: ComponentWorkRequest,
+    ownership: OwnershipLease,
+) -> None:
+    if request.component_id not in ownership.component_ids:
+        raise CodingWorkerAdapterError(
+            "trusted ownership assignment does not include active component"
+        )
+    assigned_paths = {_canonical_changed_path(path) for path in ownership.allowed_paths}
+    requested_paths = {_canonical_changed_path(path) for path in request.allowed_paths}
+    if not requested_paths.issubset(assigned_paths):
+        raise CodingWorkerAdapterError(
+            "trusted ownership assignment does not cover active component paths"
+        )
 
 
 def _record_for_component(
