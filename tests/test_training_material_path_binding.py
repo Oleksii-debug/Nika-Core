@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
 
+from nika_core import training_materials as training_materials_module
 from nika_core.learning_package import FrozenLearningPackage, LearningDataSplit
 from nika_core.training_materials import (
     ResolvedTrainingMaterial,
@@ -124,6 +126,46 @@ def test_reverify_detects_post_construction_same_size_tamper(tmp_path: Path) -> 
 
     with pytest.raises(TrainingMaterialResolutionError, match="digest does not match"):
         resolved.reverify()
+
+
+def test_same_size_replacement_after_verified_handle_close_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    training_body = b"training-material"
+    validation_body = b"validation-material"
+    training = _material(LearningDataSplit.TRAINING, training_body)
+    validation = _material(LearningDataSplit.VALIDATION, validation_body)
+    evidence = _evidence(training, validation)
+    training_path = (tmp_path / "training.bin").resolve()
+    validation_path = (tmp_path / "validation.bin").resolve()
+    displaced = (tmp_path / "training-original.bin").resolve()
+    training_path.write_bytes(training_body)
+    validation_path.write_bytes(validation_body)
+
+    original_close = os.close
+    close_count = 0
+    replace_after_close = 2 if os.name == "nt" else 1
+
+    def replacing_verified_handle_close(file_descriptor: int) -> None:
+        nonlocal close_count
+        close_count += 1
+        original_close(file_descriptor)
+        if close_count == replace_after_close:
+            training_path.rename(displaced)
+            training_path.write_bytes(b"X" * len(training_body))
+
+    monkeypatch.setattr(
+        training_materials_module.os,
+        "close",
+        replacing_verified_handle_close,
+    )
+
+    with pytest.raises(TrainingMaterialResolutionError, match="path changed"):
+        ResolvedTrainingPackage(
+            evidence=evidence,
+            materials=_resolved_materials(evidence, training_path, validation_path),
+        )
 
 
 def test_non_regular_material_path_is_rejected(tmp_path: Path) -> None:
