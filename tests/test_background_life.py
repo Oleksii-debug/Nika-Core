@@ -16,32 +16,48 @@ from nika_core.resources.contracts import (
 def capacity(
     *,
     scope: str = "background_life",
-    headroom: int = 1,
-    pressure: tuple[str, ...] = (),
+    max_concurrent: int = 1,
+    active_count: int = 0,
+    queued_count: int = 0,
+    cpu_percent: float = 10.0,
+    memory_percent: float = 20.0,
+    max_cpu_percent: float | None = 80.0,
+    max_memory_percent: float | None = 80.0,
     power_plugged: bool | None = True,
 ) -> ResourceCapacityStatus:
     budget = ResourceBudget(
         scope=scope,
         owner_id="living-agent",
-        max_concurrent=1,
-        max_cpu_percent=80.0,
-        max_memory_percent=80.0,
+        max_concurrent=max_concurrent,
+        max_cpu_percent=max_cpu_percent,
+        max_memory_percent=max_memory_percent,
     )
     snapshot = ResourceSnapshot(
-        cpu_percent=10.0,
-        memory_percent=20.0,
+        cpu_percent=cpu_percent,
+        memory_percent=memory_percent,
         available_memory_bytes=8 * 1024 * 1024 * 1024,
         power_plugged=power_plugged,
     )
+    reasons: list[str] = []
+    if active_count >= max_concurrent:
+        reasons.append("concurrency_limit")
+    if max_cpu_percent is not None and cpu_percent > max_cpu_percent:
+        reasons.append("cpu_limit")
+    if max_memory_percent is not None and memory_percent > max_memory_percent:
+        reasons.append("memory_limit")
     return ResourceCapacityStatus(
         budget=budget,
         snapshot=snapshot,
-        active_count=0,
-        queued_count=0,
-        concurrency_headroom=headroom,
-        cpu_headroom_percent=70.0,
-        memory_headroom_percent=60.0,
-        pressure_reasons=pressure,
+        active_count=active_count,
+        queued_count=queued_count,
+        concurrency_headroom=max(0, max_concurrent - active_count),
+        cpu_headroom_percent=(
+            None if max_cpu_percent is None else max_cpu_percent - cpu_percent
+        ),
+        memory_headroom_percent=(
+            None if max_memory_percent is None else max_memory_percent - memory_percent
+        ),
+        pressure_reasons=tuple(reasons),
     )
 
 
@@ -69,7 +85,12 @@ def test_owner_presence_pauses_before_resource_or_power_decisions(presence, reas
     result = decide_background_work(
         owner_presence=presence,
         work_kind=BackgroundWorkKind.BOUNDED_ML_PILOT,
-        capacity=capacity(headroom=0, pressure=("cpu",), power_plugged=False),
+        capacity=capacity(
+            active_count=1,
+            cpu_percent=90.0,
+            memory_percent=90.0,
+            power_plugged=False,
+        ),
     )
 
     assert result.action is BackgroundAction.PAUSE
@@ -95,26 +116,23 @@ def test_owner_presence_pause_does_not_depend_on_capacity_evidence(presence, rea
     assert result.reason == reason
 
 
-def test_resource_pressure_defers_owner_away_work():
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"active_count": 1},
+        {"cpu_percent": 90.0},
+        {"memory_percent": 90.0},
+    ],
+)
+def test_canonical_resource_pressure_defers_owner_away_work(kwargs):
     result = decide_background_work(
         owner_presence=OwnerPresence.AWAY,
         work_kind=BackgroundWorkKind.READING_RESEARCH,
-        capacity=capacity(pressure=("memory",)),
+        capacity=capacity(**kwargs),
     )
 
     assert result.action is BackgroundAction.DEFER
     assert result.reason == "resource_pressure"
-
-
-def test_concurrency_exhaustion_defers_owner_away_work():
-    result = decide_background_work(
-        owner_presence=OwnerPresence.AWAY,
-        work_kind=BackgroundWorkKind.EVIDENCE_VERIFICATION,
-        capacity=capacity(headroom=0),
-    )
-
-    assert result.action is BackgroundAction.DEFER
-    assert result.reason == "concurrency_exhausted"
 
 
 @pytest.mark.parametrize(
@@ -207,6 +225,81 @@ def test_capacity_subclass_cannot_spoof_canonical_resource_authority():
         )
 
 
+def test_exact_dataclass_cannot_forge_concurrency_capacity():
+    status = capacity(active_count=1)
+    object.__setattr__(status, "concurrency_headroom", 1)
+    object.__setattr__(status, "pressure_reasons", ())
+
+    with pytest.raises(ValueError, match="concurrency_headroom"):
+        decide_background_work(
+            owner_presence=OwnerPresence.AWAY,
+            work_kind=BackgroundWorkKind.SELF_TEST,
+            capacity=status,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("pressure_reasons", ()),
+        ("cpu_headroom_percent", 70.0),
+    ],
+)
+def test_exact_dataclass_cannot_hide_cpu_pressure(field, value):
+    status = capacity(cpu_percent=90.0)
+    object.__setattr__(status, field, value)
+
+    with pytest.raises(ValueError, match="inconsistent"):
+        decide_background_work(
+            owner_presence=OwnerPresence.AWAY,
+            work_kind=BackgroundWorkKind.SELF_TEST,
+            capacity=status,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("pressure_reasons", ()),
+        ("memory_headroom_percent", 60.0),
+    ],
+)
+def test_exact_dataclass_cannot_hide_memory_pressure(field, value):
+    status = capacity(memory_percent=90.0)
+    object.__setattr__(status, field, value)
+
+    with pytest.raises(ValueError, match="inconsistent"):
+        decide_background_work(
+            owner_presence=OwnerPresence.AWAY,
+            work_kind=BackgroundWorkKind.SELF_TEST,
+            capacity=status,
+        )
+
+
+@pytest.mark.parametrize(
+    ("target", "field", "value"),
+    [
+        ("budget", "max_concurrent", True),
+        ("budget", "max_cpu_percent", True),
+        ("budget", "max_memory_percent", 0.0),
+        ("snapshot", "cpu_percent", True),
+        ("snapshot", "memory_percent", float("nan")),
+        ("snapshot", "available_memory_bytes", True),
+    ],
+)
+def test_malformed_exact_budget_or_snapshot_fails_closed(target, field, value):
+    status = capacity()
+    nested = getattr(status, target)
+    object.__setattr__(nested, field, value)
+
+    with pytest.raises((TypeError, ValueError)):
+        decide_background_work(
+            owner_presence=OwnerPresence.AWAY,
+            work_kind=BackgroundWorkKind.SELF_TEST,
+            capacity=status,
+        )
+
+
 def test_malformed_capacity_counts_fail_closed():
     status = capacity()
     object.__setattr__(status, "concurrency_headroom", True)
@@ -219,11 +312,11 @@ def test_malformed_capacity_counts_fail_closed():
         )
 
 
-def test_malformed_pressure_reasons_fail_closed():
-    status = capacity()
-    object.__setattr__(status, "pressure_reasons", (" cpu ",))
+def test_noncanonical_pressure_reason_order_or_name_fails_closed():
+    status = capacity(active_count=1, cpu_percent=90.0)
+    object.__setattr__(status, "pressure_reasons", ("cpu_limit", "concurrency_limit"))
 
-    with pytest.raises(ValueError, match="canonical"):
+    with pytest.raises(ValueError, match="pressure_reasons"):
         decide_background_work(
             owner_presence=OwnerPresence.AWAY,
             work_kind=BackgroundWorkKind.SELF_TEST,
