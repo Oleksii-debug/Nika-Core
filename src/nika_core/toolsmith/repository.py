@@ -348,17 +348,30 @@ class ToolsmithRepository:
                 },
             )
 
-    def mark_resume_ready(self, *, task_id: str, capability_id: str) -> None:
+    def mark_resume_ready(self, *, task_id: str, capability_id: str) -> dict[str, str]:
+        # Keep this read for fast diagnostics only. A rollback can win immediately after it,
+        # so it must never authorize durable resume publication.
         row = self.get_escalation(task_id=task_id, capability_id=capability_id)
         if row is None:
             raise KeyError((task_id, capability_id))
         if CandidateState(str(row["state"])) is not CandidateState.REGISTERED:
             raise InvalidTransitionError("original task may resume only after REGISTERED")
-        version = row["pinned_version"]
-        digest = row["pinned_digest"]
-        if not version or not digest:
-            raise RuntimeError("registered escalation is missing exact pinned capability identity")
+
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            authoritative = conn.execute(
+                "SELECT state, pinned_version, pinned_digest FROM capability_escalations "
+                "WHERE task_id = ? AND requested_capability = ?",
+                (task_id, capability_id),
+            ).fetchone()
+            if authoritative is None:
+                raise KeyError((task_id, capability_id))
+            if CandidateState(str(authoritative["state"])) is not CandidateState.REGISTERED:
+                raise StaleTransitionError("candidate changed before resume binding publication")
+            version = authoritative["pinned_version"]
+            digest = authoritative["pinned_digest"]
+            if not version or not digest:
+                raise RuntimeError("registered escalation is missing exact pinned capability identity")
             conn.execute(
                 "INSERT INTO capability_resume_bindings("
                 "task_id, capability_id, version, digest, status, updated_at) "
@@ -375,6 +388,12 @@ class ToolsmithRepository:
                 entity_id=task_id,
                 payload={"capability_id": capability_id, "version": version, "digest": digest},
             )
+        return {
+            "task_id": task_id,
+            "capability_id": capability_id,
+            "version": str(version),
+            "digest": str(digest),
+        }
 
     def rollback_registration(self, *, task_id: str, capability_id: str) -> None:
         row = self.get_escalation(task_id=task_id, capability_id=capability_id)
