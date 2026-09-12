@@ -9,7 +9,6 @@ from nika_core.learning_verification import (
     VerificationOutcome,
 )
 
-
 _SHA_A = "a" * 64
 _SHA_B = "b" * 64
 _SHA_C = "c" * 64
