@@ -2,6 +2,10 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from trading_research_metric_evidence_helpers import (
+    synthetic_daily_sampling,
+    total_return_evidence,
+)
 
 from nika_core.trading_research.contracts import Partition, TradingResearchError
 from nika_core.trading_research.heldout import (
@@ -18,10 +22,6 @@ from nika_core.trading_research.metric_evidence import (
     validate_metric_evidence,
 )
 from nika_core.trading_research.metrics import EquityPoint, SamplingMode, SamplingSpec
-from trading_research_metric_evidence_helpers import (
-    synthetic_daily_sampling,
-    total_return_evidence,
-)
 
 BASE = datetime(2026, 1, 1, tzinfo=UTC)
 CLEAN = ReplayDataQuality(0, 0, 0, "d" * 64)
@@ -90,7 +90,7 @@ def test_metric_evidence_is_factory_only_and_binds_exact_trace() -> None:
 
 def test_metric_evidence_mutation_fails_closed() -> None:
     evidence = total_return_evidence(BASE, "0.5")
-    object.__setattr__(evidence, "value", Decimal("999"))
+    object.__setattr__(evidence, "value", Decimal(999))
     with pytest.raises(TradingResearchError, match="changed after construction"):
         validate_metric_evidence(evidence)
 
@@ -116,7 +116,7 @@ def test_candidate_rejects_missing_or_spoofed_metric_authority() -> None:
             Partition.VALIDATION,
             evidence.metric_name,
             evidence.definition_sha256,
-            Decimal("999"),
+            Decimal(999),
             "f" * 64,
             CLEAN,
             "1" * 64,
