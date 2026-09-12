@@ -44,8 +44,9 @@ characters from the result-set identity, are bounded to 64 identity characters, 
 leaf filename rather than a caller-selected path.
 
 Structured exports preserve result-set/workspace/query identity, result ordering and document identity,
-review state/note/update timestamp, ranking/match explanation, source identity/kind/freshness, the public
-safe location label rather than the raw locator, and observation timestamp. Empty evidence is represented
+review state/note/update timestamp, ranking/match explanation, the deterministic bounded public source
+token (`source-sha256:<sha256>`), source kind/freshness, the public safe location label rather than the
+raw locator, and observation timestamp. Raw source IDs remain internal. Empty evidence is represented
 explicitly rather than silently inventing a source.
 
 XLSX export also enforces Excel's 32,767-character cell limit before serialization. The check runs
@@ -111,8 +112,9 @@ is never copied into TXT, CSV, HTML, DOCX, or XLSX output.
 
 - HTTP evidence renders `http-source`.
 - Local-file evidence renders `local-file`.
-- Exact correlation remains available through the stable `source_id`, source kind,
-  freshness, and observation timestamp already carried by each evidence item.
+- Raw source IDs are never exported. Public correlation uses the deterministic bounded
+  `source-sha256:<sha256>` token together with source kind, freshness, and observation timestamp;
+  exact raw source identity remains internal.
 - URL userinfo, path/query/fragment material, signed parameters, API-key/token values,
   and private absolute filesystem paths therefore do not cross the report/export
   boundary.
