@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -10,6 +11,7 @@ from nika_core.research.models import (
     FreshnessState,
     HttpSourceState,
     RefreshDisposition,
+    RefreshResult,
     ResearchEvidence,
     ResearchResultItem,
     ResearchResultSet,
@@ -23,12 +25,40 @@ from nika_core.research.source_identity import (
 )
 
 
+_FINALIZED_ATTEMPT_PREFIX = "finalized:"
+_pending_attempt: ContextVar[tuple[str, str] | None] = ContextVar(
+    "research_http_pending_attempt",
+    default=None,
+)
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
 def _snapshot_id(source_id: str, raw_sha256: str) -> str:
     return hashlib.sha256(f"{source_id}\0{raw_sha256}".encode()).hexdigest()
+
+
+def _freshness_for(
+    disposition: RefreshDisposition,
+    *,
+    current_raw_sha256: str | None,
+) -> FreshnessState:
+    if disposition in {
+        RefreshDisposition.CHANGED,
+        RefreshDisposition.UNCHANGED,
+        RefreshDisposition.NOT_MODIFIED,
+        RefreshDisposition.DYNAMIC_REQUIRED,
+    }:
+        return FreshnessState.CURRENT
+    if disposition is RefreshDisposition.REMOVED:
+        return FreshnessState.REMOVED
+    if disposition is RefreshDisposition.BLOCKED:
+        return FreshnessState.BLOCKED
+    if current_raw_sha256 is not None:
+        return FreshnessState.STALE
+    return FreshnessState.ERROR
 
 
 def _canonical_stored_locator(locator: str) -> str:
@@ -210,6 +240,11 @@ class NetworkResearchRepository:
                     _now(),
                 ),
             )
+        # HttpResearchService calls finalize_source immediately after the workflow-terminal
+        # attempt. Intermediate retry attempts are simply superseded by the next attempt in
+        # this execution context. Only finalize_source can turn this opaque row into durable
+        # completion evidence, in the same SQLite transaction as the source state update.
+        _pending_attempt.set((source_id, attempt_id))
         return attempt_id
 
     def finalize_source(
@@ -225,51 +260,118 @@ class NetworkResearchRepository:
         error_code: str | None = None,
         error_message: str = "",
     ) -> HttpSourceState:
-        current = self.get_source(source_id)
-        now = _now()
-        success = disposition in {
-            RefreshDisposition.CHANGED,
-            RefreshDisposition.UNCHANGED,
-            RefreshDisposition.NOT_MODIFIED,
-            RefreshDisposition.DYNAMIC_REQUIRED,
-        }
-        if success:
-            freshness = FreshnessState.CURRENT
-        elif disposition is RefreshDisposition.REMOVED:
-            freshness = FreshnessState.REMOVED
-        elif disposition is RefreshDisposition.BLOCKED:
-            freshness = FreshnessState.BLOCKED
-        elif current.current_raw_sha256 is not None:
-            freshness = FreshnessState.STALE
-        else:
-            freshness = FreshnessState.ERROR
-        with self._store.connection() as conn:
-            conn.execute(
-                """UPDATE research_http_sources SET
-                    final_url=?, etag=?, last_modified=?, current_raw_sha256=?,
-                    freshness=?, last_attempt_at=?, last_success_at=?, last_status_code=?,
-                    last_error_code=?, last_error_message=?, updated_at=?
-                WHERE source_id=?""",
-                (
-                    final_url or current.final_url,
-                    etag if etag is not None else current.etag,
-                    last_modified if last_modified is not None else current.last_modified,
+        pending = _pending_attempt.get()
+        pending_attempt_id = pending[1] if pending is not None and pending[0] == source_id else None
+        try:
+            now = _now()
+            with self._store.connection() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                current = conn.execute(
+                    "SELECT * FROM research_http_sources WHERE source_id=?",
+                    (source_id,),
+                ).fetchone()
+                if current is None:
+                    raise KeyError(f"unknown HTTP source: {source_id}")
+                freshness = _freshness_for(
+                    disposition,
+                    current_raw_sha256=current["current_raw_sha256"],
+                )
+                success = freshness is FreshnessState.CURRENT
+                conn.execute(
+                    """UPDATE research_http_sources SET
+                        final_url=?, etag=?, last_modified=?, current_raw_sha256=?,
+                        freshness=?, last_attempt_at=?, last_success_at=?, last_status_code=?,
+                        last_error_code=?, last_error_message=?, updated_at=?
+                    WHERE source_id=?""",
                     (
-                        current_raw_sha256
-                        if current_raw_sha256 is not None
-                        else current.current_raw_sha256
+                        final_url or current["final_url"],
+                        etag if etag is not None else current["etag"],
+                        last_modified if last_modified is not None else current["last_modified"],
+                        (
+                            current_raw_sha256
+                            if current_raw_sha256 is not None
+                            else current["current_raw_sha256"]
+                        ),
+                        freshness.value,
+                        now,
+                        now if success else current["last_success_at"],
+                        status_code,
+                        error_code,
+                        error_message,
+                        now,
+                        source_id,
                     ),
-                    freshness.value,
-                    now,
-                    now if success else current.last_success_at,
-                    status_code,
-                    error_code,
-                    error_message,
-                    now,
-                    source_id,
-                ),
-            )
+                )
+                if pending_attempt_id is not None:
+                    finalized_attempt_id = f"{_FINALIZED_ATTEMPT_PREFIX}{pending_attempt_id}"
+                    cursor = conn.execute(
+                        """UPDATE research_http_attempts
+                        SET attempt_id=?
+                        WHERE attempt_id=? AND source_id=?""",
+                        (finalized_attempt_id, pending_attempt_id, source_id),
+                    )
+                    if cursor.rowcount != 1:
+                        raise RuntimeError("terminal HTTP attempt disappeared before source finalization")
+        finally:
+            if pending_attempt_id is not None:
+                _pending_attempt.set(None)
         return self.get_source(source_id)
+
+    def task_attempt_count(self, *, task_id: str, source_id: str) -> int:
+        with self._store.connection() as conn:
+            row = conn.execute(
+                """SELECT COUNT(*) AS count FROM research_http_attempts
+                WHERE task_id=? AND source_id=?""",
+                (task_id, source_id),
+            ).fetchone()
+        return int(row["count"])
+
+    def durable_task_result_after(
+        self,
+        *,
+        task_id: str,
+        source_id: str,
+        attempts_before: int,
+    ) -> RefreshResult | None:
+        """Return task-bound terminal evidence only after atomic source finalization.
+
+        Attempt rows are intentionally insufficient on their own. ``finalize_source``
+        rewrites exactly the attempt from the current execution context to a
+        ``finalized:`` identity in the same transaction that updates the durable source.
+        Legacy rows, interrupted pending attempts, and attempts owned by another task are
+        therefore fail-closed recovery inputs.
+        """
+        if attempts_before < 0:
+            raise ValueError("Research refresh attempt baseline cannot be negative")
+        with self._store.connection() as conn:
+            source = conn.execute(
+                "SELECT 1 FROM research_http_sources WHERE source_id=?",
+                (source_id,),
+            ).fetchone()
+            if source is None:
+                raise KeyError(f"unknown HTTP source: {source_id}")
+            rows = conn.execute(
+                """SELECT attempt_id, attempt_number, disposition, status_code,
+                    error_code, error_message
+                FROM research_http_attempts
+                WHERE task_id=? AND source_id=?
+                ORDER BY observed_at, rowid
+                LIMIT -1 OFFSET ?""",
+                (task_id, source_id, attempts_before),
+            ).fetchall()
+        if not rows:
+            return None
+        row = rows[-1]
+        if not str(row["attempt_id"]).startswith(_FINALIZED_ATTEMPT_PREFIX):
+            return None
+        return RefreshResult(
+            source_id=source_id,
+            disposition=RefreshDisposition(row["disposition"]),
+            attempts=int(row["attempt_number"]),
+            status_code=row["status_code"],
+            error_code=row["error_code"],
+            message=row["error_message"],
+        )
 
     def record_snapshot(
         self,
