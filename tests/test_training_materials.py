@@ -106,17 +106,45 @@ def _material_set(
     validation: TrainingMaterialEvidence,
     *,
     evaluation_set_sha256: str | None = None,
+    candidate_dataset_sha256: str | None = None,
+    package_manifest_sha256: str | None = None,
 ) -> TrainingMaterialSetEvidence:
-    return TrainingMaterialSetEvidence(
-        workspace_sha256=_sha256(b"workspace-alpha"),
-        package_manifest_sha256=_sha256(b"manifest"),
-        candidate_dataset_sha256=_sha256(b"dataset"),
+    package = FrozenLearningPackage.freeze(
+        package_id="pkg-evidence",
+        package_version="1",
+        base_artifact_sha256=_sha256(b"base-model"),
+        selection_policy_sha256=_sha256(b"selection-policy"),
+        verification_sha256=_sha256(b"verification"),
         evaluation_set_sha256=(
             evaluation_set_sha256
             if evaluation_set_sha256 is not None
             else _sha256(b"held-out")
         ),
-        materials=(training, validation),
+        shards=(training.to_learning_shard(), validation.to_learning_shard()),
+    )
+    canonical_materials = tuple(
+        TrainingMaterialEvidence.from_shard(shard) for shard in package.shards
+    )
+    return TrainingMaterialSetEvidence(
+        workspace_sha256=_sha256(b"workspace-alpha"),
+        package_id=package.package_id,
+        package_version=package.package_version,
+        package_schema_version=package.schema_version,
+        base_artifact_sha256=package.base_artifact_sha256,
+        selection_policy_sha256=package.selection_policy_sha256,
+        verification_sha256=package.verification_sha256,
+        evaluation_set_sha256=package.evaluation_set_sha256,
+        candidate_dataset_sha256=(
+            candidate_dataset_sha256
+            if candidate_dataset_sha256 is not None
+            else package.candidate_dataset_sha256
+        ),
+        package_manifest_sha256=(
+            package_manifest_sha256
+            if package_manifest_sha256 is not None
+            else package.manifest_sha256
+        ),
+        materials=canonical_materials,
     )
 
 
@@ -137,6 +165,9 @@ def test_resolves_exact_frozen_shard_bytes_and_minimizes_durable_evidence(
     assert all(material.path.is_file() for material in resolved.materials)
     assert resolved.evidence.package_manifest_sha256 == package.manifest_sha256
     assert resolved.evidence.candidate_dataset_sha256 == package.candidate_dataset_sha256
+    assert resolved.evidence.base_artifact_sha256 == package.base_artifact_sha256
+    assert resolved.evidence.selection_policy_sha256 == package.selection_policy_sha256
+    assert resolved.evidence.verification_sha256 == package.verification_sha256
     assert resolved.evidence.evaluation_set_sha256 == package.evaluation_set_sha256
     assert len(resolved.training_material_sha256) == 64
     durable = resolved.evidence.canonical_payload()
@@ -417,6 +448,42 @@ def test_material_set_requires_training_and_validation() -> None:
 
     with pytest.raises(ValueError, match="validation"):
         _material_set(first, second)
+
+
+def test_material_set_rejects_forged_candidate_dataset_digest() -> None:
+    training = _material(
+        split=LearningDataSplit.TRAINING,
+        artifact_sha256=_sha256(b"training"),
+    )
+    validation = _material(
+        split=LearningDataSplit.VALIDATION,
+        artifact_sha256=_sha256(b"validation"),
+    )
+
+    with pytest.raises(ValueError, match="candidate dataset digest"):
+        _material_set(
+            training,
+            validation,
+            candidate_dataset_sha256=_sha256(b"forged-dataset"),
+        )
+
+
+def test_material_set_rejects_forged_package_manifest_digest() -> None:
+    training = _material(
+        split=LearningDataSplit.TRAINING,
+        artifact_sha256=_sha256(b"training"),
+    )
+    validation = _material(
+        split=LearningDataSplit.VALIDATION,
+        artifact_sha256=_sha256(b"validation"),
+    )
+
+    with pytest.raises(ValueError, match="package manifest digest"):
+        _material_set(
+            training,
+            validation,
+            package_manifest_sha256=_sha256(b"forged-manifest"),
+        )
 
 
 def test_resolved_package_rejects_path_list_not_bound_to_evidence(tmp_path: Path) -> None:
