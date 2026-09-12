@@ -19,7 +19,6 @@ from nika_core.model_gateway.gateway import ModelGateway
 from nika_core.model_gateway.providers import DeterministicMockProvider
 from nika_core.resources.contracts import ResourceSnapshot
 
-
 GIB = 1024**3
 
 
