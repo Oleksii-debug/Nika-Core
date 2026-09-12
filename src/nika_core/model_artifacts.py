@@ -403,9 +403,9 @@ def _decoded_views(value: str) -> tuple[str, ...]:
         views.append(candidate)
         decoded = unquote(candidate)
         if decoded == candidate:
-            break
+            return tuple(views)
         candidate = decoded
-    return tuple(views)
+    raise ValueError("public reference encoding exceeds supported normalization depth")
 
 
 def _contains_credential_material(value: str) -> bool:
