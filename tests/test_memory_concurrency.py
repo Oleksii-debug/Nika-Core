@@ -131,12 +131,27 @@ def test_conditional_user_memory_still_requires_explicit_approval(tmp_path: Path
 
 
 def test_compare_and_put_can_replace_logically_expired_record(tmp_path: Path) -> None:
-    memory = MemoryService(_store(tmp_path))
+    store = _store(tmp_path)
+    memory = MemoryService(store)
     memory.put(
         **_identity(),
         value={"mode": "expired"},
-        expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        expires_at=datetime.now(UTC) + timedelta(minutes=1),
     )
+    expired_at = datetime.now(UTC) - timedelta(seconds=1)
+    with store.connection() as conn:
+        cursor = conn.execute(
+            "UPDATE memory_records SET expires_at = ? "
+            "WHERE scope = ? AND owner_id = ? AND namespace = ? AND memory_key = ?",
+            (
+                expired_at.isoformat(),
+                MemoryScope.WORKSPACE.value,
+                "research",
+                "policy",
+                "ranking",
+            ),
+        )
+        assert cursor.rowcount == 1
 
     replacement = memory.compare_and_put(
         **_identity(),
