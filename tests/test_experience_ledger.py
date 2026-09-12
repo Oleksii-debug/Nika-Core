@@ -43,14 +43,14 @@ def test_same_event_key_and_same_evidence_is_idempotent(tmp_path) -> None:
     store.initialize()
     ledger = ExperienceLedger(store)
     when = datetime(2026, 9, 3, 4, 5, tzinfo=UTC)
-    kwargs = dict(
-        event_key="task-2:recovery:1",
-        task_id="task-2",
-        kind=ContinuityKind.RECOVERY,
-        outcome=ContinuityOutcome.RESUMED,
-        reason_code="checkpoint_verified",
-        occurred_at=when,
-    )
+    kwargs = {
+        "event_key": "task-2:recovery:1",
+        "task_id": "task-2",
+        "kind": ContinuityKind.RECOVERY,
+        "outcome": ContinuityOutcome.RESUMED,
+        "reason_code": "checkpoint_verified",
+        "occurred_at": when,
+    }
 
     assert ledger.record(**kwargs) == ledger.record(**kwargs)
     assert len(ledger.list_for_task("task-2")) == 1
@@ -152,6 +152,7 @@ def test_naive_timestamp_is_rejected(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
     ledger = ExperienceLedger(store)
+    naive_timestamp = datetime(2026, 9, 3, 2, 0, 0, tzinfo=UTC).replace(tzinfo=None)
 
     with pytest.raises(ValueError, match="timezone-aware"):
         ledger.record(
@@ -160,5 +161,5 @@ def test_naive_timestamp_is_rejected(tmp_path) -> None:
             kind=ContinuityKind.APP_RESTART,
             outcome=ContinuityOutcome.PRESERVED,
             reason_code="state_restored",
-            occurred_at=datetime(2026, 9, 3, 2, 0, 0),
+            occurred_at=naive_timestamp,
         )
