@@ -199,7 +199,7 @@ class SpeechToTextService:
         self._adapter = adapter
 
     async def transcribe(self, request: SpeechToTextRequest) -> SpeechToTextResult:
-        if self._adapter.provider_kind is not ProviderKind.LOCAL:
+        if getattr(self._adapter, "provider_kind", None) is not ProviderKind.LOCAL:
             return self._failure(
                 request,
                 code=SpeechToTextFailureCode.PROVIDER_ERROR,
