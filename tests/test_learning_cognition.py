@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import nika_core.learning_cognition as learning_cognition
+from nika_core import learning_cognition
 from nika_core.learning_cognition import (
     CognitionCandidate,
     CognitionCandidateKind,
