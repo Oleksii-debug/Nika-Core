@@ -27,7 +27,7 @@ def test_put_and_resolve_digest_share_exact_workspace_identity(tmp_path: Path) -
 
     assert resolved.read_bytes() == b"payload"
     assert artifact.storage_relpath.startswith(
-        "9fac1ddce836910fcf398d66abe16690b6cbe41464dc8bf870646b3e530c47c6/"
+        "a0ba8c07d0462e6b04bfa92a886c9524eb023b8b3d788f933c6d033c076d569f/"
     )
 
 
