@@ -22,7 +22,6 @@ from nika_core.v01_packaged_team_runtime import V01PackagedThreeAgentRuntime
 from nika_core.v01_packaged_team_state import V01PackagedTeamStateProvider
 from nika_core.v01_source_settings import V01SourceSettings
 
-
 _TASK_ID = "task-1"
 _TEAM_ID = "team-1"
 _CHECKER_ID = "checker"
