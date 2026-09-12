@@ -69,7 +69,7 @@ def test_load_rejects_real_row_version_even_when_int_coercion_matches_payload(tm
     assert row is not None
     assert row["storage_type"] == "real"
     assert int(row["row_version"]) == snapshot.row_version
-    with pytest.raises(RuntimeError):
+    with pytest.raises(TypeError, match="SQLite INTEGER"):
         repository.load(snapshot.objective.objective_id)
 
 
@@ -96,7 +96,7 @@ def test_initialize_rejects_non_integer_pf9_migration_marker(tmp_path) -> None:
 
     assert marker is not None
     assert marker["storage_type"] == "real"
-    with pytest.raises(RuntimeError):
+    with pytest.raises(TypeError, match="SQLite INTEGER"):
         BusinessFactoryRepository(store).initialize()
 
 
