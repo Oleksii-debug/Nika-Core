@@ -131,6 +131,7 @@ class ExperienceLedger:
     @staticmethod
     def _fingerprint_payload(
         *,
+        event_key: str,
         task_id: str | None,
         kind: ContinuityKind,
         outcome: ContinuityOutcome,
@@ -145,6 +146,7 @@ class ExperienceLedger:
                 "attempt": attempt,
                 "clock_jump_seconds": clock_jump_seconds,
                 "delay_seconds": delay_seconds,
+                "event_key": event_key,
                 "kind": kind.value,
                 "occurred_at": occurred_at,
                 "outcome": outcome.value,
@@ -183,6 +185,7 @@ class ExperienceLedger:
             raise ValueError("occurred_at must be timezone-aware")
         occurred_text = when.astimezone(UTC).isoformat()
         fingerprint = self._fingerprint_payload(
+            event_key=event_key,
             task_id=task_id,
             kind=kind,
             outcome=outcome,
@@ -222,6 +225,7 @@ class ExperienceLedger:
             expected_fingerprint = fingerprint
             if generated_occurrence:
                 expected_fingerprint = self._fingerprint_payload(
+                    event_key=event_key,
                     task_id=task_id,
                     kind=kind,
                     outcome=outcome,
@@ -291,6 +295,7 @@ class ExperienceLedger:
             ) from exc
 
         expected_fingerprint = cls._fingerprint_payload(
+            event_key=event_key,
             task_id=task_id,
             kind=kind,
             outcome=outcome,
