@@ -163,6 +163,8 @@ class ExperienceMemoryComparison:
         expected_comparator_sha256: str,
         expected_comparison_policy_sha256: str,
     ) -> ExperienceMemoryComparison:
+        if cls is not ExperienceMemoryComparison:
+            raise TypeError("comparison factory must produce the canonical type")
         comparison_id = _require_token(comparison_id, field="comparison_id")
         workspace_id = _require_token(workspace_id, field="workspace_id")
         agent_id = _require_token(agent_id, field="agent_id")
