@@ -29,6 +29,23 @@ class TeamCompositionError(ValueError):
     """Raised when a team request is internally inconsistent."""
 
 
+def _require_plain_str(value: object, field_name: str) -> str:
+    if type(value) is not str:
+        raise RepositoryGraphError(f"{field_name} must be a plain string")
+    return value
+
+
+def _require_optional_plain_str(value: object, field_name: str) -> str | None:
+    if value is None:
+        return None
+    return _require_plain_str(value, field_name)
+
+
+def _require_plain_str_items(values: Iterable[object], field_name: str) -> None:
+    for value in values:
+        _require_plain_str(value, field_name)
+
+
 @dataclass(frozen=True, slots=True)
 class ComponentBrief:
     component_id: str
@@ -281,6 +298,19 @@ class RepositoryRef:
     windows_path_semantics: bool = False
 
     def __post_init__(self) -> None:
+        for field_name, value in (
+            ("repository_id", self.repository_id),
+            ("provider", self.provider),
+            ("locator", self.locator),
+            ("default_branch", self.default_branch),
+        ):
+            _require_plain_str(value, field_name)
+        if type(self.case_sensitive_paths) is not bool:
+            raise RepositoryGraphError("case_sensitive_paths must be a plain bool")
+        if type(self.windows_path_semantics) is not bool:
+            raise RepositoryGraphError("windows_path_semantics must be a plain bool")
+        _require_optional_plain_str(self.credential_ref, "credential_ref")
+
         if not all(
             value.strip()
             for value in (self.repository_id, self.provider, self.locator, self.default_branch)
@@ -304,6 +334,14 @@ class ProductComponent:
     release_identity: str | None = None
 
     def __post_init__(self) -> None:
+        _require_plain_str(self.component_id, "component_id")
+        _require_plain_str(self.repository_id, "component.repository_id")
+        _require_plain_str_items(self.paths, "component path")
+        _require_plain_str_items(self.dependencies, "component dependency")
+        for command in (*self.build_commands, *self.test_commands):
+            _require_plain_str_items(command, "command argument")
+        _require_optional_plain_str(self.release_identity, "release_identity")
+
         if not self.component_id.strip() or not self.repository_id.strip():
             raise RepositoryGraphError("component identity fields must not be empty")
 
@@ -314,6 +352,12 @@ class OwnershipLease:
     worker_id: str
     component_ids: tuple[str, ...]
     allowed_paths: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _require_plain_str(self.lease_id, "lease_id")
+        _require_plain_str(self.worker_id, "worker_id")
+        _require_plain_str_items(self.component_ids, "lease component id")
+        _require_plain_str_items(self.allowed_paths, "lease allowed path")
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,6 +378,13 @@ class IntegrationDecision:
     evidence_refs: tuple[str, ...]
 
     def __post_init__(self) -> None:
+        _require_plain_str(self.decision_id, "decision_id")
+        if type(self.kind) is not IntegrationDecisionKind:
+            raise RepositoryGraphError("integration decision kind must be canonical")
+        _require_plain_str_items(self.lease_ids, "integration decision lease id")
+        _require_plain_str(self.reason, "integration decision reason")
+        _require_plain_str_items(self.evidence_refs, "integration decision evidence ref")
+
         if not self.decision_id.strip() or not self.reason.strip() or not self.evidence_refs:
             raise RepositoryGraphError("integration decisions require identity, reason and evidence")
         if len(self.lease_ids) < 2 or len(set(self.lease_ids)) != len(self.lease_ids):
@@ -365,6 +416,11 @@ class ProductRepositoryGraph:
     _components_by_id: dict[str, ProductComponent] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        _require_plain_str(self.project_id, "project_id")
+        if any(type(repository) is not RepositoryRef for repository in self.repositories):
+            raise RepositoryGraphError("repositories must contain canonical RepositoryRef values")
+        if any(type(component) is not ProductComponent for component in self.components):
+            raise RepositoryGraphError("components must contain canonical ProductComponent values")
         if not self.project_id.strip():
             raise RepositoryGraphError("project_id must not be empty")
         self._repositories_by_id = _unique_by(self.repositories, "repository_id")
@@ -395,9 +451,16 @@ class ProductRepositoryGraph:
         *,
         decision: IntegrationDecision | None = None,
     ) -> LeaseAssessment:
+        if type(candidate) is not OwnershipLease:
+            raise RepositoryGraphError("candidate must be a canonical OwnershipLease")
+        active_tuple = tuple(active_leases)
+        if any(type(lease) is not OwnershipLease for lease in active_tuple):
+            raise RepositoryGraphError("active leases must be canonical OwnershipLease values")
+        if decision is not None and type(decision) is not IntegrationDecision:
+            raise RepositoryGraphError("decision must be a canonical IntegrationDecision")
+
         candidate_paths = self._lease_paths(candidate)
         conflicts: list[OwnershipConflict] = []
-        active_tuple = tuple(active_leases)
         active_ids = [lease.lease_id for lease in active_tuple]
         if len(active_ids) != len(set(active_ids)):
             raise RepositoryGraphError("active lease ids must be unique")
@@ -517,6 +580,8 @@ class ProductRepositoryGraph:
                         )
 
     def _lease_paths(self, lease: OwnershipLease) -> tuple[tuple[str, str], ...]:
+        if type(lease) is not OwnershipLease:
+            raise RepositoryGraphError("lease must be a canonical OwnershipLease")
         if not lease.lease_id.strip() or not lease.worker_id.strip():
             raise RepositoryGraphError("lease identity must not be empty")
         if not lease.component_ids or not lease.allowed_paths:
@@ -586,6 +651,9 @@ class ProductRepositoryGraph:
 
 
 def _normalize_local_git_locator(locator: str, *, windows_path_semantics: bool) -> str:
+    _require_plain_str(locator, "local-git locator")
+    if type(windows_path_semantics) is not bool:
+        raise RepositoryGraphError("windows_path_semantics must be a plain bool")
     if not windows_path_semantics:
         normalized = posixpath.normpath(locator.replace("\\", "/"))
         return normalized if normalized == "/" else normalized.rstrip("/")
@@ -657,6 +725,9 @@ def _validate_windows_locator_component(component: str, *, original: str) -> Non
 
 
 def _normalize_repo_path(path: str, *, windows_path_semantics: bool = False) -> str:
+    _require_plain_str(path, "repository path")
+    if type(windows_path_semantics) is not bool:
+        raise RepositoryGraphError("windows_path_semantics must be a plain bool")
     raw_candidate = path.replace("\\", "/")
     if windows_path_semantics:
         _validate_windows_repo_path(raw_candidate, original=path)
@@ -707,6 +778,10 @@ def _validate_windows_repo_path(path: str, *, original: str) -> None:
 
 
 def _path_within(path: str, root: str, case_sensitive: bool) -> bool:
+    _require_plain_str(path, "path")
+    _require_plain_str(root, "root")
+    if type(case_sensitive) is not bool:
+        raise RepositoryGraphError("case_sensitive must be a plain bool")
     if not case_sensitive:
         path = path.casefold()
         root = root.casefold()
