@@ -55,6 +55,7 @@ def test_malformed_exact_head_clearance_fails_closed() -> None:
         _passed_review().mark_merge_ready(
             candidate_sha=SHA_A,
             verification=object(),  # type: ignore[arg-type]
+            verification_evidence=(),
         )
 
 
