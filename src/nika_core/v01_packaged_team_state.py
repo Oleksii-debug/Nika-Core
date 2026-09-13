@@ -384,7 +384,7 @@ class V01PackagedTeamStateProvider:
             return False
         task_payload = json.loads(task_row["payload_json"])
         if not isinstance(task_payload, Mapping):
-            raise ValueError("invalid durable task payload")
+            raise TypeError("invalid durable task payload")
 
         has_selection = _TASK_SELECTION_FIELD in task_payload
         selection_id = task_payload.get(_TASK_SELECTION_FIELD)
