@@ -260,10 +260,6 @@ def test_spoofable_receipt_sha_string_is_rejected_before_comparison() -> None:
         def __ne__(self, other: object) -> bool:
             return False
 
-    material = candidate_material_sha256(
-        selection_policy_sha256=H,
-        shards=_shards(),
-    )
     receipt = _receipt(_ForgedString(A))
 
     with pytest.raises(
