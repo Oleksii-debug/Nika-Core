@@ -12,9 +12,10 @@ from nika_core.data.experience_ledger_schema import EXPERIENCE_LEDGER_SCHEMA_VER
 from nika_core.data.sqlite import SQLiteStore
 
 _REASON_CODE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,95}$")
+_EVENT_KEY_SCOPE = r"[A-Za-z0-9]+-[A-Za-z0-9][A-Za-z0-9_.-]{0,62}"
 _EVENT_KEY_SEGMENT = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
 _EVENT_KEY = re.compile(
-    rf"^{_EVENT_KEY_SEGMENT}(?::{_EVENT_KEY_SEGMENT}){{2,7}}$"
+    rf"^{_EVENT_KEY_SCOPE}(?::{_EVENT_KEY_SEGMENT}){{1,7}}$"
 )
 _MAX_EVENT_KEY_BYTES = 192
 _TASK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,191}$")
