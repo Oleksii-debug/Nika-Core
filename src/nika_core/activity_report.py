@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 
@@ -177,7 +178,11 @@ def _format_counts(items: tuple[ActivityCount, ...]) -> str:
 
 
 def _safe_label(value: str) -> str:
-    collapsed = " ".join(value.split())
+    control_safe = "".join(
+        " " if unicodedata.category(char) in {"Cc", "Cf", "Cs"} else char
+        for char in value
+    )
+    collapsed = " ".join(control_safe.split())
     if not collapsed:
         return "[порожня назва]"
     if len(collapsed) <= 120:
