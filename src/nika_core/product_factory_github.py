@@ -31,9 +31,9 @@ class GitHubIssueRef:
     state: str
 
     def __post_init__(self) -> None:
-        if isinstance(self.number, bool) or not isinstance(self.number, int) or self.number < 1:
-            raise GitHubFactoryError("issue number must be a positive integer")
-        if not isinstance(self.state, str) or self.state not in {"open", "closed"}:
+        _require_positive_int(self.number, "issue number")
+        _require_plain_nonempty_text(self.state, "issue state")
+        if self.state not in {"open", "closed"}:
             raise GitHubFactoryError("issue state must be open or closed")
 
 
@@ -46,17 +46,11 @@ class GitHubCheck:
     evidence_ref: str
 
     def __post_init__(self) -> None:
-        if (
-            not isinstance(self.check_id, str)
-            or not self.check_id.strip()
-            or not isinstance(self.name, str)
-            or not self.name.strip()
-            or not isinstance(self.evidence_ref, str)
-            or not self.evidence_ref.strip()
-        ):
-            raise GitHubFactoryError("check identity and evidence reference must not be empty")
+        _require_plain_nonempty_text(self.check_id, "check id")
+        _require_plain_nonempty_text(self.name, "check name")
+        _require_plain_nonempty_text(self.evidence_ref, "check evidence reference")
         _validate_sha(self.head_sha, "check head_sha")
-        if not isinstance(self.state, CheckState):
+        if type(self.state) is not CheckState:
             raise GitHubFactoryError("check state must be a recognized CheckState")
         try:
             ExactShaCheckEvidence(
@@ -82,20 +76,14 @@ class GitHubPullRequest:
     head_repository_full_name: str | None = None
 
     def __post_init__(self) -> None:
-        if isinstance(self.number, bool) or not isinstance(self.number, int) or self.number < 1:
-            raise GitHubFactoryError("pull request number must be a positive integer")
-        if (
-            not isinstance(self.head_branch, str)
-            or not self.head_branch.strip()
-            or not isinstance(self.base_branch, str)
-            or not self.base_branch.strip()
-        ):
-            raise GitHubFactoryError("pull request branches must not be empty")
+        _require_positive_int(self.number, "pull request number")
+        _require_plain_nonempty_text(self.head_branch, "pull request head branch")
+        _require_plain_nonempty_text(self.base_branch, "pull request base branch")
         if self.head_repository_full_name is not None:
             _normalize_full_name(self.head_repository_full_name)
         _validate_sha(self.head_sha, "pull request head_sha")
         _validate_sha(self.base_sha, "pull request base_sha")
-        if not isinstance(self.state, PullRequestState):
+        if type(self.state) is not PullRequestState:
             raise GitHubFactoryError("pull request state must be a recognized PullRequestState")
         if self.state is PullRequestState.MERGED:
             if self.merge_sha is None:
@@ -116,16 +104,10 @@ class GitHubIntegrationEvidence:
     candidate_repository_full_name: str | None = None
 
     def __post_init__(self) -> None:
-        if (
-            isinstance(self.pull_request_number, bool)
-            or not isinstance(self.pull_request_number, int)
-            or self.pull_request_number < 1
-        ):
-            raise GitHubFactoryError("integration evidence requires a positive pull request number")
+        _require_positive_int(self.pull_request_number, "integration pull request number")
         _validate_sha(self.candidate_sha, "integration candidate sha")
         _validate_sha(self.integration_sha, "integration sha")
-        if not isinstance(self.evidence_ref, str) or not self.evidence_ref.strip():
-            raise GitHubFactoryError("integration evidence reference must not be empty")
+        _require_plain_nonempty_text(self.evidence_ref, "integration evidence reference")
         if self.candidate_repository_full_name is not None:
             _normalize_full_name(self.candidate_repository_full_name)
 
@@ -159,40 +141,39 @@ class GitHubRepositoryObservation:
     default_branch_ancestor_shas: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if (
-            not isinstance(self.owner, str)
-            or not self.owner.strip()
-            or not isinstance(self.name, str)
-            or not self.name.strip()
-            or not isinstance(self.default_branch, str)
-            or not self.default_branch.strip()
-        ):
-            raise GitHubFactoryError("repository identity must not be empty")
+        _require_plain_nonempty_text(self.owner, "repository owner")
+        _require_plain_nonempty_text(self.name, "repository name")
+        _require_plain_nonempty_text(self.default_branch, "default branch")
         _validate_sha(self.default_branch_sha, "default branch sha")
-        if not isinstance(self.default_branch_ancestor_shas, tuple):
+        if type(self.default_branch_ancestor_shas) is not tuple:
             raise GitHubFactoryError("default branch ancestor shas must be a tuple")
         for ancestor_sha in self.default_branch_ancestor_shas:
             _validate_sha(ancestor_sha, "default branch ancestor sha")
         if len(self.default_branch_ancestor_shas) != len(set(self.default_branch_ancestor_shas)):
             raise GitHubFactoryError("default branch ancestor shas must be unique")
-        if self.issue is not None and type(self.issue) is not GitHubIssueRef:
-            raise GitHubFactoryError("issue must be GitHubIssueRef evidence")
-        if self.pull_request is not None and type(self.pull_request) is not GitHubPullRequest:
-            raise GitHubFactoryError("pull request must be GitHubPullRequest evidence")
+        if self.issue is not None:
+            if type(self.issue) is not GitHubIssueRef:
+                raise GitHubFactoryError("issue must be GitHubIssueRef evidence")
+            self.issue.__post_init__()
+        if self.pull_request is not None:
+            if type(self.pull_request) is not GitHubPullRequest:
+                raise GitHubFactoryError("pull request must be GitHubPullRequest evidence")
+            self.pull_request.__post_init__()
         if (self.candidate_branch is None) != (self.candidate_sha is None):
             raise GitHubFactoryError("candidate branch and sha must be present together")
         if self.candidate_repository_full_name is not None and self.candidate_branch is None:
             raise GitHubFactoryError("candidate repository requires candidate branch and sha")
         if self.candidate_branch is not None:
-            if not isinstance(self.candidate_branch, str) or not self.candidate_branch.strip():
-                raise GitHubFactoryError("candidate branch must not be empty")
-            _validate_sha(self.candidate_sha or "", "candidate sha")
+            _require_plain_nonempty_text(self.candidate_branch, "candidate branch")
+            _validate_sha(self.candidate_sha, "candidate sha")
             if self.candidate_repository_full_name is not None:
                 _normalize_full_name(self.candidate_repository_full_name)
-        if not isinstance(self.checks, tuple) or any(
-            type(check) is not GitHubCheck for check in self.checks
-        ):
+        if type(self.checks) is not tuple:
             raise GitHubFactoryError("checks must contain GitHubCheck evidence")
+        for check in self.checks:
+            if type(check) is not GitHubCheck:
+                raise GitHubFactoryError("checks must contain GitHubCheck evidence")
+            check.__post_init__()
         check_ids = [check.check_id for check in self.checks]
         if len(check_ids) != len(set(check_ids)):
             raise GitHubFactoryError("check ids must be unique")
@@ -240,6 +221,13 @@ class GitHubFactoryAdapter:
             raise GitHubFactoryError("repository must be canonical RepositoryRef authority")
         if type(observation) is not GitHubRepositoryObservation:
             raise GitHubFactoryError("observation must be canonical GitHubRepositoryObservation authority")
+
+        _require_plain_nonempty_text(repository.repository_id, "repository id")
+        _require_plain_nonempty_text(repository.provider, "repository provider")
+        _require_plain_nonempty_text(repository.locator, "repository locator")
+        _require_plain_nonempty_text(repository.default_branch, "repository default branch")
+        observation.__post_init__()
+
         if repository.provider.strip().casefold() != "github":
             raise GitHubFactoryError("repository provider must be github")
         expected = _normalize_full_name(repository.locator)
@@ -317,6 +305,7 @@ class GitHubFactoryAdapter:
                     raise GitHubFactoryError(
                         "integration evidence port must return GitHubIntegrationEvidence"
                     )
+                integration_evidence.__post_init__()
                 if integration_evidence.pull_request_number != pr.number:
                     raise GitHubFactoryError("integration evidence pull request does not match")
                 if integration_evidence.candidate_sha != candidate_sha:
@@ -399,9 +388,20 @@ def _verification_check_state(state: CheckState) -> VerificationCheckState:
     }[state]
 
 
+def _require_plain_nonempty_text(value: object, label: str) -> str:
+    if type(value) is not str or not value.strip():
+        raise GitHubFactoryError(f"{label} must be exact non-empty text")
+    return value
+
+
+def _require_positive_int(value: object, label: str) -> int:
+    if type(value) is not int or value < 1:
+        raise GitHubFactoryError(f"{label} must be a positive integer")
+    return value
+
+
 def _normalize_full_name(locator: str) -> str:
-    if not isinstance(locator, str):
-        raise GitHubFactoryError("GitHub repository locator must be text")
+    _require_plain_nonempty_text(locator, "GitHub repository locator")
     value = locator.strip().rstrip("/")
     for prefix in ("https://github.com/", "http://github.com/", "git@github.com:"):
         if value.casefold().startswith(prefix.casefold()):
@@ -414,8 +414,8 @@ def _normalize_full_name(locator: str) -> str:
     return f"{parts[0].casefold()}/{parts[1].casefold()}"
 
 
-def _validate_sha(value: str, label: str) -> None:
-    if not isinstance(value, str) or len(value) != 40 or any(
+def _validate_sha(value: object, label: str) -> None:
+    if type(value) is not str or len(value) != 40 or any(
         char not in "0123456789abcdef" for char in value
     ):
         raise GitHubFactoryError(f"{label} must be an exact lowercase 40-character git sha")
