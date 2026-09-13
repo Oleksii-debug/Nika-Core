@@ -173,8 +173,8 @@ function Test-NikaSafeRelativePath {
         $stem = $part.Split(".")[0].TrimEnd(" ", ".").ToUpperInvariant()
         if (
             $stem -in @("CON", "PRN", "AUX", "NUL") -or
-            $stem -match '^COM[1-9]$' -or
-            $stem -match '^LPT[1-9]$'
+            $stem -match '^COM[1-9¹²³]$' -or
+            $stem -match '^LPT[1-9¹²³]$'
         ) {
             return $false
         }
