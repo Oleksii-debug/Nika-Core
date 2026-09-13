@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typeguard import TypeCheckError
-
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
