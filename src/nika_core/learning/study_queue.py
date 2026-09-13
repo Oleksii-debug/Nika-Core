@@ -155,8 +155,7 @@ class StudyQueue:
         )
         recovered: list[StudyTask] = []
         for task_id in task_ids:
-            self._tasks.transition(task_id, task_state.TaskState.READY)
-            recovered.append(self.get(task_id))
+            recovered.append(self._transition(task_id, task_state.TaskState.READY))
         return tuple(recovered)
 
     def start(self, task_id: str) -> StudyTask:
@@ -173,10 +172,8 @@ class StudyQueue:
             task_state.TaskState.BLOCKED,
             task_state.TaskState.FAILED,
         }:
-            self._tasks.transition(task_id, task_state.TaskState.READY)
-        else:
-            raise ValueError(f"study task cannot resume from {task.state.value}")
-        return self.get(task_id)
+            return self._transition(task_id, task_state.TaskState.READY)
+        raise ValueError(f"study task cannot resume from {task.state.value}")
 
     def complete(self, task_id: str) -> StudyTask:
         return self._transition(task_id, task_state.TaskState.COMPLETED)
@@ -188,9 +185,12 @@ class StudyQueue:
         return self._transition(task_id, task_state.TaskState.CANCELLED)
 
     def _transition(self, task_id: str, target: task_state.TaskState) -> StudyTask:
-        self.get(task_id)
-        self._tasks.transition(task_id, target)
-        return self.get(task_id)
+        _require_text(task_id, "task_id", maximum=256)
+        with self._tasks.store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            task = self.get(task_id)
+            self._tasks.transition_with_connection(conn, task_id, target)
+        return dataclasses.replace(task, state=target)
 
     def _matching_task_ids(
         self,
