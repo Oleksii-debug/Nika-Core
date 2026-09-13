@@ -12,7 +12,11 @@ from nika_core.data.experience_ledger_schema import EXPERIENCE_LEDGER_SCHEMA_VER
 from nika_core.data.sqlite import SQLiteStore
 
 _REASON_CODE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,95}$")
-_EVENT_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,191}$")
+_EVENT_KEY_SEGMENT = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
+_EVENT_KEY = re.compile(
+    rf"^{_EVENT_KEY_SEGMENT}(?::{_EVENT_KEY_SEGMENT}){{2,7}}$"
+)
+_MAX_EVENT_KEY_BYTES = 192
 _TASK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,191}$")
 
 
@@ -88,10 +92,14 @@ class ExperienceLedger:
 
     @staticmethod
     def _validate_event_key(event_key: str) -> str:
-        value = event_key.strip()
-        if value != event_key or not _EVENT_KEY.fullmatch(value):
-            raise ValueError("event_key must be a bounded stable identifier")
-        return value
+        if type(event_key) is not str:
+            raise TypeError("event_key must be a built-in string")
+        if (
+            len(event_key.encode("utf-8")) > _MAX_EVENT_KEY_BYTES
+            or not _EVENT_KEY.fullmatch(event_key)
+        ):
+            raise ValueError("event_key must be a bounded segmented identifier")
+        return event_key
 
     @staticmethod
     def _validate_task_id(task_id: str | None) -> str | None:
