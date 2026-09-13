@@ -31,6 +31,17 @@ class _AuditLogPort(Protocol):
     ) -> int: ...
 
 
+class CloudEffectAuthorizationPort(Protocol):
+    """Host-controlled current-authority check immediately before CLOUD effect admission."""
+
+    def authorize_cloud_effect(
+        self,
+        *,
+        request: ModelRequest,
+        provider: ProviderCapabilities,
+    ) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class _RegisteredProvider:
     provider: ModelProvider
@@ -59,10 +70,16 @@ _SAFE_PROVIDER_MESSAGES = {
 
 
 class ModelGateway:
-    def __init__(self, *, audit_log: _AuditLogPort | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        audit_log: _AuditLogPort | None = None,
+        cloud_effect_authorizer: CloudEffectAuthorizationPort | None = None,
+    ) -> None:
         self._providers: dict[str, _RegisteredProvider] = {}
         self._defaults: dict[ProviderKind, str] = {}
         self._audit_log = audit_log
+        self._cloud_effect_authorizer = cloud_effect_authorizer
 
     def register(self, provider: ModelProvider, *, default: bool = False) -> None:
         capabilities = self._snapshot_capabilities(provider)
@@ -117,6 +134,7 @@ class ModelGateway:
                     "attempt": index + 1,
                 },
             )
+            self._authorize_cloud_effect(attempt_request, capabilities)
 
             response: ModelResponse | None = None
             terminal_error: ModelGatewayError | None = None
@@ -216,6 +234,33 @@ class ModelGateway:
             "model fallback route was exhausted",
             retryable=True,
         )
+
+    def _authorize_cloud_effect(
+        self,
+        request: ModelRequest,
+        capabilities: ProviderCapabilities,
+    ) -> None:
+        if capabilities.kind is not ProviderKind.CLOUD:
+            return
+        authorizer = self._cloud_effect_authorizer
+        if authorizer is not None:
+            try:
+                authorizer.authorize_cloud_effect(
+                    request=request,
+                    provider=capabilities,
+                )
+                return
+            except Exception:  # noqa: BLE001 - authority boundary fails closed
+                pass
+        error = ModelGatewayError(
+            ModelErrorCode.INVALID_REQUEST,
+            "cloud model execution requires current authorization",
+            provider_id=capabilities.provider_id,
+            retryable=False,
+            failure_effect=ModelFailureEffect.NO_EFFECT,
+        )
+        self._audit_failure(request, capabilities.provider_id, error)
+        raise error from None
 
     def _select_candidates(self, request: ModelRequest) -> tuple[_RegisteredProvider, ...]:
         primary = self._select(request)
