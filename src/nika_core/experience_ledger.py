@@ -175,6 +175,10 @@ class ExperienceLedger:
         delay_seconds: float | None = None,
         clock_jump_seconds: float | None = None,
     ) -> ExperienceEvent:
+        if type(kind) is not ContinuityKind:
+            raise TypeError("kind must be a ContinuityKind")
+        if type(outcome) is not ContinuityOutcome:
+            raise TypeError("outcome must be a ContinuityOutcome")
         event_key = self._validate_event_key(event_key)
         task_id = self._validate_task_id(task_id)
         reason_code = self._validate_reason_code(reason_code)

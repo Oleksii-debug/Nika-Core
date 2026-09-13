@@ -319,3 +319,58 @@ def test_tampered_durable_event_key_fails_closed_on_get_and_list(tmp_path) -> No
         reopened.get(forged_key)
     with pytest.raises(ExperienceConflictError, match="integrity"):
         reopened.list_for_task("task-9")
+
+class _ForgedEnumValue:
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+
+@pytest.mark.parametrize(
+    ("kind", "outcome", "expected_field"),
+    (
+        (
+            _ForgedEnumValue(ContinuityKind.RECOVERY.value),
+            ContinuityOutcome.WAITING,
+            "kind",
+        ),
+        (_ForgedEnumValue("forged"), ContinuityOutcome.WAITING, "kind"),
+        (
+            ContinuityKind.RECOVERY,
+            _ForgedEnumValue(ContinuityOutcome.WAITING.value),
+            "outcome",
+        ),
+        (ContinuityKind.RECOVERY, _ForgedEnumValue("forged"), "outcome"),
+    ),
+)
+def test_record_rejects_non_enum_authority_before_persistence(
+    tmp_path, kind: object, outcome: object, expected_field: str
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    ledger = ExperienceLedger(store)
+    event_key = "task-10:recovery:enum-authority"
+
+    with pytest.raises(TypeError, match=rf"{expected_field} must be"):
+        ledger.record(
+            event_key=event_key,
+            task_id="task-10",
+            kind=kind,  # type: ignore[arg-type]
+            outcome=outcome,  # type: ignore[arg-type]
+            reason_code="checkpoint_pending",
+        )
+
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS event_count FROM continuity_experience_events"
+        ).fetchone()
+    assert row is not None
+    assert row["event_count"] == 0
+
+    accepted = ledger.record(
+        event_key=event_key,
+        task_id="task-10",
+        kind=ContinuityKind.RECOVERY,
+        outcome=ContinuityOutcome.WAITING,
+        reason_code="checkpoint_pending",
+    )
+    assert accepted.event_key == event_key
