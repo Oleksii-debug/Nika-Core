@@ -218,6 +218,21 @@ def test_composition_rejects_receipt_subclass_before_trust() -> None:
         _freeze(receipt)
 
 
+def test_unsupported_receipt_schema_cannot_authorize_freeze() -> None:
+    material = candidate_material_sha256(
+        selection_policy_sha256=H,
+        shards=_shards(),
+    )
+    receipt = _receipt(material)
+    object.__setattr__(receipt, "schema_version", receipt.schema_version + 1)
+
+    with pytest.raises(
+        LearningMaterialCompositionError,
+        match="verification receipt schema is unsupported",
+    ):
+        _freeze(receipt)
+
+
 def test_caller_selected_verification_policy_cannot_authorize_freeze() -> None:
     material = candidate_material_sha256(
         selection_policy_sha256=H,
