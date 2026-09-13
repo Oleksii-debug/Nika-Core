@@ -373,14 +373,20 @@ class V01PackagedTeamStateProvider:
                 "SELECT selection_id FROM v01_task_model_bindings WHERE task_id = ?",
                 (shared_task_id,),
             ).fetchone()
+        model_bound_audit = conn.execute(
+            "SELECT 1 FROM audit_events "
+            "WHERE event_type = 'v01.model.bound' AND entity_type = 'task' AND entity_id = ? "
+            "LIMIT 1",
+            (shared_task_id,),
+        ).fetchone()
 
         task_row = conn.execute(
             "SELECT payload_json FROM tasks WHERE task_id = ?",
             (shared_task_id,),
         ).fetchone()
         if task_row is None:
-            if binding is not None:
-                raise ValueError("model binding exists without durable task")
+            if binding is not None or model_bound_audit is not None:
+                raise ValueError("model authority exists without durable task")
             return False
         task_payload = json.loads(task_row["payload_json"])
         if not isinstance(task_payload, Mapping):
@@ -389,8 +395,8 @@ class V01PackagedTeamStateProvider:
         has_selection = _TASK_SELECTION_FIELD in task_payload
         selection_id = task_payload.get(_TASK_SELECTION_FIELD)
         if not has_selection:
-            if binding is not None:
-                raise ValueError("model binding exists without frozen task selection")
+            if binding is not None or model_bound_audit is not None:
+                raise ValueError("model authority exists without frozen task selection")
             return False
         if (
             type(selection_id) is not str
