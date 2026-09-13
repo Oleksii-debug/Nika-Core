@@ -53,13 +53,14 @@ def _model_backed_payload() -> dict[str, object]:
     }
 
 
-def _valid(payload: object) -> bool:
+def _valid(payload: object, *, model_required: bool = False) -> bool:
     return V01PackagedTeamStateProvider._valid_persisted_checker_payload(
         payload,
         expected=_EXPECTED,
         shared_task_id=_TASK_ID,
         team_id=_TEAM_ID,
         root_id=_CHECKER_ID,
+        model_required=model_required,
     )
 
 
@@ -81,9 +82,14 @@ def _base_state(queue: TaskQueue, task_id: str) -> dict[str, object]:
     }
 
 
-def test_checker_envelope_accepts_legacy_and_canonical_model_backed_result() -> None:
-    assert _valid({"checker_summary": copy.deepcopy(_EXPECTED)}) is True
-    assert _valid(_model_backed_payload()) is True
+def test_checker_envelope_is_bound_to_durable_model_requirement() -> None:
+    legacy = {"checker_summary": copy.deepcopy(_EXPECTED)}
+    model_backed = _model_backed_payload()
+
+    assert _valid(legacy) is True
+    assert _valid(model_backed, model_required=True) is True
+    assert _valid(legacy, model_required=True) is False
+    assert _valid(model_backed) is False
 
 
 @pytest.mark.parametrize(
@@ -134,13 +140,13 @@ def test_checker_envelope_rejects_unbound_or_malformed_model_evidence(mutation: 
     else:  # pragma: no cover - parametrization is exhaustive.
         raise AssertionError(mutation)
 
-    assert _valid(payload) is False
+    assert _valid(payload, model_required=True) is False
 
 
 def test_checker_envelope_rejects_summary_rebinding() -> None:
     payload = _model_backed_payload()
     payload["checker_summary"] = {"status": "disagree"}
-    assert _valid(payload) is False
+    assert _valid(payload, model_required=True) is False
 
 
 def test_model_backed_packaged_comparison_survives_fresh_store_restart_without_leak(
@@ -285,11 +291,34 @@ def test_model_backed_packaged_comparison_survives_fresh_store_restart_without_l
         ).fetchone()
         assert row is not None
         persisted = json.loads(row["payload_json"])
-        persisted["model_analysis_provenance"]["model_fingerprint"] = "sha256:corrupt"
+        canonical_persisted = copy.deepcopy(persisted)
+        del persisted["model_analysis"]
+        del persisted["model_analysis_provenance"]
         conn.execute(
             "UPDATE multi_agent_results SET payload_json = ? WHERE result_id = ?",
             (
                 json.dumps(persisted, sort_keys=True, separators=(",", ":")),
+                row["result_id"],
+            ),
+        )
+
+    downgraded = restarted_provider()["v01_team_task"]
+    assert downgraded is not None
+    downgraded_comparison = downgraded["final_result"]["comparison"]
+    assert downgraded_comparison["status"] == "evidence_invalid"
+    assert downgraded_comparison["validated"] is False
+    assert "model_result" not in downgraded_comparison
+    assert _MODEL_TEXT_CANARY not in json.dumps(downgraded, ensure_ascii=False, sort_keys=True)
+    assert calls == [model_name] * 3
+
+    with restarted_store.connection() as conn:
+        canonical_provenance = canonical_persisted["model_analysis_provenance"]
+        assert isinstance(canonical_provenance, dict)
+        canonical_provenance["model_fingerprint"] = "sha256:corrupt"
+        conn.execute(
+            "UPDATE multi_agent_results SET payload_json = ? WHERE result_id = ?",
+            (
+                json.dumps(canonical_persisted, sort_keys=True, separators=(",", ":")),
                 row["result_id"],
             ),
         )
