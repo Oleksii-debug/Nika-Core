@@ -13,10 +13,19 @@ class SportsLabPaperError(ValueError):
     """Fail-closed error for paper-only sports portfolio simulation."""
 
 
+_MAX_IDENTITY_UTF8_BYTES = 256
+
+
 def _required(value: str, field_name: str) -> str:
+    if type(value) is not str:
+        raise SportsLabPaperError(f"{field_name} must be an exact string")
     normalized = value.strip()
     if not normalized:
         raise SportsLabPaperError(f"{field_name} must not be empty")
+    if not normalized.isprintable():
+        raise SportsLabPaperError(f"{field_name} must not contain control characters")
+    if len(normalized.encode("utf-8")) > _MAX_IDENTITY_UTF8_BYTES:
+        raise SportsLabPaperError(f"{field_name} exceeds identity size limit")
     return normalized
 
 
@@ -251,8 +260,12 @@ class ScenarioOutcome:
         object.__setattr__(self, "scenario_id", _required(self.scenario_id, "scenario_id"))
         normalized: dict[str, str] = {}
         for market_id, selection_id in self.winners_by_market.items():
-            market = _required(str(market_id), "market_id")
-            selection = _required(str(selection_id), "selection_id")
+            market = _required(market_id, "market_id")
+            selection = _required(selection_id, "selection_id")
+            if market in normalized:
+                raise SportsLabPaperError(
+                    f"scenario market identities collide after normalization: {market}"
+                )
             normalized[market] = selection
         object.__setattr__(self, "winners_by_market", MappingProxyType(normalized))
 
@@ -341,23 +354,30 @@ def enumerate_market_scenarios(
 ) -> tuple[ScenarioOutcome, ...]:
     if type(max_scenarios) is not int or max_scenarios < 1:
         raise SportsLabPaperError("max_scenarios must be a positive integer")
-    normalized: list[tuple[str, tuple[str, ...]]] = []
-    scenario_count = 1
-    for market_id, selections in sorted(outcomes_by_market.items()):
-        market = _required(str(market_id), "market_id")
-        values = tuple(_required(str(item), "selection_id") for item in selections)
+    normalized_by_market: dict[str, tuple[str, ...]] = {}
+    for market_id, selections in outcomes_by_market.items():
+        market = _required(market_id, "market_id")
+        if market in normalized_by_market:
+            raise SportsLabPaperError(
+                f"market identities collide after normalization: {market}"
+            )
+        values = tuple(_required(item, "selection_id") for item in selections)
         if not values:
             raise SportsLabPaperError(f"market has no outcomes: {market}")
         if len(set(values)) != len(values):
             raise SportsLabPaperError(f"market outcomes must be unique: {market}")
+        normalized_by_market[market] = values
+    if not normalized_by_market:
+        raise SportsLabPaperError("at least one market is required")
+
+    normalized = sorted(normalized_by_market.items())
+    scenario_count = 1
+    for market, values in normalized:
         scenario_count *= len(values)
         if scenario_count > max_scenarios:
             raise SportsLabPaperError(
                 "exact scenario enumeration exceeds configured safety limit"
             )
-        normalized.append((market, values))
-    if not normalized:
-        raise SportsLabPaperError("at least one market is required")
     reports: list[ScenarioOutcome] = []
     market_ids = tuple(item[0] for item in normalized)
     selection_sets = tuple(item[1] for item in normalized)
