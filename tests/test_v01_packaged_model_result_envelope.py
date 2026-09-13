@@ -331,3 +331,50 @@ def test_model_backed_packaged_comparison_survives_fresh_store_restart_without_l
     assert "model_result" not in corrupted_comparison
     assert _MODEL_TEXT_CANARY not in json.dumps(corrupted, ensure_ascii=False, sort_keys=True)
     assert calls == [model_name] * 3
+
+    with restarted_store.connection() as conn:
+        conn.execute(
+            "UPDATE multi_agent_results SET payload_json = ? WHERE result_id = ?",
+            (
+                json.dumps(persisted, sort_keys=True, separators=(",", ":")),
+                row["result_id"],
+            ),
+        )
+        task_row = conn.execute(
+            "SELECT payload_json FROM tasks WHERE task_id = ?",
+            (task.task_id,),
+        ).fetchone()
+        assert task_row is not None
+        task_payload = json.loads(task_row["payload_json"])
+        assert "v01_model_selection" in task_payload
+        del task_payload["v01_model_selection"]
+        conn.execute(
+            "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+            (
+                json.dumps(task_payload, sort_keys=True, separators=(",", ":")),
+                task.task_id,
+            ),
+        )
+        conn.execute(
+            "DELETE FROM v01_task_model_bindings WHERE task_id = ?",
+            (task.task_id,),
+        )
+        bound_audit = conn.execute(
+            "SELECT event_id FROM audit_events "
+            "WHERE event_type = 'v01.model.bound' AND entity_type = 'task' AND entity_id = ?",
+            (task.task_id,),
+        ).fetchone()
+        assert bound_audit is not None
+
+    audit_guarded = restarted_provider()["v01_team_task"]
+    assert audit_guarded is not None
+    audit_guarded_comparison = audit_guarded["final_result"]["comparison"]
+    assert audit_guarded_comparison["status"] == "evidence_invalid"
+    assert audit_guarded_comparison["validated"] is False
+    assert "model_result" not in audit_guarded_comparison
+    assert _MODEL_TEXT_CANARY not in json.dumps(
+        audit_guarded,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    assert calls == [model_name] * 3
