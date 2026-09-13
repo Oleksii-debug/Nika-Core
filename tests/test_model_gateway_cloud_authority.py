@@ -14,11 +14,14 @@ from nika_core.model_gateway.contracts import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    PrivacyClass,
     ProviderCapabilities,
     ProviderKind,
 )
 from nika_core.model_gateway.gateway import ModelGateway
-from nika_core.security.model_cloud_authority import StandingPermissionCloudEffectAuthorizer
+from nika_core.security.model_cloud_authority import (
+    StandingPermissionCloudEffectAuthorizer,
+)
 from nika_core.security.standing_permission import (
     PermissionContext,
     StandingPermissionBinding,
@@ -58,6 +61,7 @@ def _request() -> ModelRequest:
         model="model-a",
         provider_id="approved-api",
         provider_kind=ProviderKind.CLOUD,
+        privacy=PrivacyClass.PUBLIC,
         timeout_seconds=2.0,
     )
 
@@ -66,7 +70,11 @@ def _authority(
     tmp_path: Path,
     *,
     now: datetime,
-) -> tuple[StandingPermissionStore, StandingPermissionBinding, StandingPermissionCloudEffectAuthorizer]:
+) -> tuple[
+    StandingPermissionStore,
+    StandingPermissionBinding,
+    StandingPermissionCloudEffectAuthorizer,
+]:
     context = PermissionContext(
         user_id="user-1",
         project_id="project-1",
