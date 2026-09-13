@@ -5,6 +5,13 @@ from dataclasses import dataclass
 
 import pytest
 
+from nika_core.product_factory_verification import (
+    PRODUCT_FACTORY_REQUIRED_CHECK_IDS,
+    CandidateVerification,
+    CheckState,
+    ExactShaCheckEvidence,
+    classify_candidate_verification,
+)
 from nika_core.qa.review_state import (
     CandidateReviewIdentity,
     CandidateReviewRecord,
@@ -34,6 +41,27 @@ class _MalformedAuthority:
 class _Clearance:
     candidate_sha: str = SHA_A
     merge_clearance: bool = True
+
+
+def _verification() -> CandidateVerification:
+    return classify_candidate_verification(
+        SHA_A,
+        (
+            ExactShaCheckEvidence(
+                "core",
+                SHA_A,
+                CheckState.PASS,
+                "ci:core:review-authority",
+            ),
+            ExactShaCheckEvidence(
+                "factory",
+                SHA_A,
+                CheckState.PASS,
+                "ci:factory:review-authority",
+            ),
+        ),
+        PRODUCT_FACTORY_REQUIRED_CHECK_IDS,
+    )
 
 
 def _pending_review() -> CandidateReviewRecord:
@@ -111,15 +139,27 @@ def test_restore_rejects_forged_merge_ready_without_exact_head_clearance() -> No
         CandidateReviewRecord.restore(json.dumps(raw))
 
 
+def test_restore_rejects_structural_clearance_impostor() -> None:
+    raw = json.loads(_passed_review().snapshot())
+    raw["state"] = "merge_ready"
+
+    with pytest.raises(ReviewPipelineError, match="review snapshot is invalid"):
+        CandidateReviewRecord.restore(
+            json.dumps(raw),
+            verification=_Clearance(),  # type: ignore[arg-type]
+        )
+
+
 def test_verified_merge_ready_is_restart_safe_with_same_head_clearance() -> None:
+    verification = _verification()
     merge_ready = _passed_review().mark_merge_ready(
         candidate_sha=SHA_A,
-        verification=_Clearance(),
+        verification=verification,
     )
 
     restored = CandidateReviewRecord.restore(
         merge_ready.snapshot(),
-        verification=_Clearance(),
+        verification=verification,
     )
 
     assert restored.state.value == "merge_ready"
