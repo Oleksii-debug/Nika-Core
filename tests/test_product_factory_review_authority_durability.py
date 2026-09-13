@@ -10,6 +10,7 @@ from nika_core.product_factory_verification import (
     CandidateVerification,
     CheckState,
     ExactShaCheckEvidence,
+    VerificationState,
     classify_candidate_verification,
 )
 from nika_core.qa.review_state import (
@@ -43,23 +44,31 @@ class _Clearance:
     merge_clearance: bool = True
 
 
-def _verification() -> CandidateVerification:
+def _verification_evidence(
+    *, factory_state: CheckState = CheckState.PASS
+) -> tuple[ExactShaCheckEvidence, ...]:
+    return (
+        ExactShaCheckEvidence(
+            "core",
+            SHA_A,
+            CheckState.PASS,
+            "ci:core:review-authority",
+        ),
+        ExactShaCheckEvidence(
+            "factory",
+            SHA_A,
+            factory_state,
+            f"ci:factory:{factory_state.value}:review-authority",
+        ),
+    )
+
+
+def _verification(
+    *, factory_state: CheckState = CheckState.PASS
+) -> CandidateVerification:
     return classify_candidate_verification(
         SHA_A,
-        (
-            ExactShaCheckEvidence(
-                "core",
-                SHA_A,
-                CheckState.PASS,
-                "ci:core:review-authority",
-            ),
-            ExactShaCheckEvidence(
-                "factory",
-                SHA_A,
-                CheckState.PASS,
-                "ci:factory:review-authority",
-            ),
-        ),
+        _verification_evidence(factory_state=factory_state),
         PRODUCT_FACTORY_REQUIRED_CHECK_IDS,
     )
 
@@ -147,22 +156,49 @@ def test_restore_rejects_structural_clearance_impostor() -> None:
         CandidateReviewRecord.restore(
             json.dumps(raw),
             verification=_Clearance(),  # type: ignore[arg-type]
+            verification_evidence=_verification_evidence(),
         )
 
 
 def test_verified_merge_ready_is_restart_safe_with_same_head_clearance() -> None:
     verification = _verification()
+    evidence = _verification_evidence()
     merge_ready = _passed_review().mark_merge_ready(
         candidate_sha=SHA_A,
         verification=verification,
+        verification_evidence=evidence,
     )
 
     restored = CandidateReviewRecord.restore(
         merge_ready.snapshot(),
         verification=verification,
+        verification_evidence=evidence,
     )
 
     assert restored.state.value == "merge_ready"
+
+
+def test_restore_rejects_mutated_failed_receipt_with_failed_exact_evidence() -> None:
+    pass_verification = _verification()
+    pass_evidence = _verification_evidence()
+    merge_ready = _passed_review().mark_merge_ready(
+        candidate_sha=SHA_A,
+        verification=pass_verification,
+        verification_evidence=pass_evidence,
+    )
+
+    failed_evidence = _verification_evidence(factory_state=CheckState.FAIL)
+    mutated_receipt = _verification(factory_state=CheckState.FAIL)
+    assert mutated_receipt.state is VerificationState.FAIL
+    object.__setattr__(mutated_receipt, "state", VerificationState.PASS)
+    assert mutated_receipt.merge_clearance is True
+
+    with pytest.raises(ReviewPipelineError, match="review snapshot is invalid"):
+        CandidateReviewRecord.restore(
+            merge_ready.snapshot(),
+            verification=mutated_receipt,
+            verification_evidence=failed_evidence,
+        )
 
 
 def test_restore_rejects_truthy_non_boolean_verdict_acceptance() -> None:
