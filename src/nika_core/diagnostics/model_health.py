@@ -223,12 +223,13 @@ class OllamaModelHealthProbe:
 
     @staticmethod
     def _valid_timeout(value: object) -> bool:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if type(value) is not int and type(value) is not float:
             return False
         try:
-            return math.isfinite(value) and value > 0
+            number = float(value)
         except OverflowError:
             return False
+        return math.isfinite(number) and number > 0
 
     def _route_identity(self) -> str:
         parsed = urlsplit(self._base_url)
