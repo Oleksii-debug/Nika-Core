@@ -169,8 +169,12 @@ def _require_int_range(value: int, name: str, *, minimum: int, maximum: int) -> 
 
 
 def _require_positive_unit(value: float, name: str) -> None:
+    message = f"{name} must be a finite number greater than 0 and at most 1"
     if type(value) not in {int, float}:
-        raise ValueError(f"{name} must be a finite number greater than 0 and at most 1")
-    numeric = float(value)
+        raise ValueError(message)
+    try:
+        numeric = float(value)
+    except (OverflowError, ValueError) as exc:
+        raise ValueError(message) from exc
     if not math.isfinite(numeric) or not 0 < numeric <= 1:
-        raise ValueError(f"{name} must be a finite number greater than 0 and at most 1")
+        raise ValueError(message)
