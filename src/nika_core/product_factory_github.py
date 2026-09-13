@@ -9,8 +9,10 @@ from nika_core.product_command.reference_safety import safe_evidence_reference
 from nika_core.product_factory_orchestration import RepositoryRef
 from nika_core.product_factory_verification import (
     MAX_EVIDENCE_REF_LENGTH,
-    CheckState as VerificationCheckState,
     ExactShaCheckEvidence,
+)
+from nika_core.product_factory_verification import (
+    CheckState as VerificationCheckState,
 )
 
 _PROVIDER_CHECK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
