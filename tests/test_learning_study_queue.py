@@ -212,6 +212,60 @@ def test_sparse_recovery_uses_fixed_size_keyset_pages(tmp_path) -> None:
     assert all(" LIMIT 128" in statement for statement in scan_statements)
 
 
+def test_tampered_created_study_task_is_not_transitioned_during_recovery(tmp_path) -> None:
+    path, tasks, queue = _services(tmp_path)
+    interrupted = queue.enqueue(
+        workspace_id="study",
+        agent_id="reader",
+        material=_material(material_id="tampered-created", title="До підміни"),
+    )
+    with tasks.store.connection() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM tasks WHERE task_id = ?",
+            (interrupted.task_id,),
+        ).fetchone()
+        payload = json.loads(row["payload_json"])
+        payload["title"] = "Підмінений durable payload"
+        conn.execute(
+            "UPDATE tasks SET state = ?, payload_json = ? WHERE task_id = ?",
+            (
+                TaskState.CREATED.value,
+                json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                interrupted.task_id,
+            ),
+        )
+        before = conn.execute(
+            "SELECT COUNT(*) AS count FROM task_events "
+            "WHERE task_id = ? AND previous_state = ? AND new_state = ?",
+            (
+                interrupted.task_id,
+                TaskState.CREATED.value,
+                TaskState.READY.value,
+            ),
+        ).fetchone()["count"]
+
+    fresh_store = SQLiteStore(path)
+    fresh_store.initialize()
+    fresh_tasks = TaskQueue(fresh_store)
+    fresh = StudyQueue(fresh_tasks)
+
+    with pytest.raises(ValueError, match="invalid durable study task payload"):
+        fresh.recover_created()
+
+    assert fresh_tasks.get(interrupted.task_id).state is TaskState.CREATED
+    with fresh_store.connection() as conn:
+        after = conn.execute(
+            "SELECT COUNT(*) AS count FROM task_events "
+            "WHERE task_id = ? AND previous_state = ? AND new_state = ?",
+            (
+                interrupted.task_id,
+                TaskState.CREATED.value,
+                TaskState.READY.value,
+            ),
+        ).fetchone()["count"]
+    assert after == before
+
+
 def test_material_requires_an_immutable_source_identity() -> None:
     with pytest.raises(ValueError, match="immutable study identity"):
         _material(source_version=None, content_sha256=None)
