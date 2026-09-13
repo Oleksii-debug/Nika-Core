@@ -82,8 +82,9 @@ def test_actual_renderer_model_settings_accessibility_races_and_secret_boundary(
     assert "PASS: model settings + startup recovery renderer" in result.stdout
 
 
-def test_packaged_uia_proof_covers_model_controls_and_durable_task_selection() -> None:
+def test_packaged_uia_proof_covers_model_controls_and_selected_model_transport() -> None:
     proof = (ROOT / "scripts/m5_uia_proof.ps1").read_text(encoding="utf-8")
+    wrapper = (ROOT / "scripts/v01_autostart_uia_proof.ps1").read_text(encoding="utf-8")
     assert "'Модель для нових завдань'" in proof
     assert "'Тип маршруту моделі'" in proof
     assert "'Назва моделі'" in proof
@@ -94,4 +95,13 @@ def test_packaged_uia_proof_covers_model_controls_and_durable_task_selection() -
     assert "v01_model_selections" in proof
     assert "hashlib.sha256(body.encode('utf-8')).hexdigest() != selection_id" in proof
     assert "'credential_ref': None" in proof
-    assert "never contacts" in proof
+
+    assert "ThreadingHTTPServer" in wrapper
+    assert '("127.0.0.1", 11434)' in wrapper
+    assert "'/api/chat'" in wrapper
+    assert "'uia-proof-model'" in wrapper
+    assert "$lines.Count -ne 3" in wrapper
+    assert "$request.stream -ne $false" in wrapper
+    assert "$request.think -ne $false" in wrapper
+    assert "$request.authorization_present -ne $false" in wrapper
+    assert "Physical Ollama/model inference remains unverified." in wrapper
