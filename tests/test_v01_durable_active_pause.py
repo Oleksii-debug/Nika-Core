@@ -251,6 +251,96 @@ def test_cancel_rejects_hostile_identity_subclasses_before_reservation_or_effect
     asyncio.run(scenario())
 
 
+def test_cancel_rejects_foreign_persisted_session_identity_before_reservation_or_effect(
+    tmp_path,
+) -> None:
+    async def scenario() -> None:
+        store = SQLiteStore(tmp_path / "Ніка foreign cancel session identity.db")
+        store.initialize()
+        queue, task_id = ready_task(store)
+        queue.transition(task_id, TaskState.RUNNING)
+        runtime = AckedExternalPauseRuntime()
+        coordinator = TaskRuntimeCoordinator(queue, AuditLog(store))
+        thread_id = "thread-cancel-authoritative"
+        coordinator.sessions.record_active(
+            task_id=task_id,
+            runtime_id=runtime.runtime_id,
+            thread_id=thread_id,
+            resume_token=thread_id,
+        )
+        original_session = coordinator.sessions.get(task_id)
+        assert original_session is not None
+
+        with pytest.raises(ValueError, match="does not match persisted runtime session"):
+            await coordinator.cancel(
+                runtime,
+                task_id=task_id,
+                thread_id="thread-cancel-foreign",
+            )
+
+        runtime.runtime_id = "runtime-cancel-foreign"
+        with pytest.raises(ValueError, match="does not match persisted runtime session"):
+            await coordinator.cancel(runtime, task_id=task_id, thread_id=thread_id)
+
+        assert runtime.cancel_calls == 0
+        assert queue.get(task_id).state is TaskState.RUNNING
+        assert coordinator.sessions.get(task_id) == original_session
+        cancel_records = tuple(
+            record
+            for record in IdempotencyLedger(store).list_for_task(task_id)
+            if record.operation_type == "runtime.cancel"
+        )
+        assert cancel_records == ()
+
+    asyncio.run(scenario())
+
+
+def test_cancel_rejects_foreign_paused_session_identity_without_second_runtime_stop(
+    tmp_path,
+) -> None:
+    async def scenario() -> None:
+        store = SQLiteStore(tmp_path / "Ніка foreign paused cancel identity.db")
+        store.initialize()
+        queue, task_id = ready_task(store)
+        runtime = BlockingDurableRuntime()
+        coordinator = TaskRuntimeCoordinator(queue, AuditLog(store))
+        thread_id = "thread-pause-foreign-cancel"
+
+        running = asyncio.create_task(
+            coordinator.start(
+                runtime,
+                RuntimeRequest(task_id=task_id, thread_id=thread_id),
+            )
+        )
+        await asyncio.wait_for(runtime.started.wait(), timeout=2)
+        assert await coordinator.pause(runtime, task_id=task_id, thread_id=thread_id)
+        paused_result = await asyncio.wait_for(running, timeout=2)
+        assert paused_result.outcome is RuntimeOutcome.PAUSED
+        assert queue.get(task_id).state is TaskState.PAUSED
+        assert runtime.cancel_calls == 1
+        original_session = coordinator.sessions.get(task_id)
+        assert original_session is not None
+
+        with pytest.raises(ValueError, match="does not match persisted runtime session"):
+            await coordinator.cancel(
+                runtime,
+                task_id=task_id,
+                thread_id="thread-pause-foreign",
+            )
+
+        assert runtime.cancel_calls == 1
+        assert queue.get(task_id).state is TaskState.PAUSED
+        assert coordinator.sessions.get(task_id) == original_session
+        cancel_records = tuple(
+            record
+            for record in IdempotencyLedger(store).list_for_task(task_id)
+            if record.operation_type == "runtime.cancel"
+        )
+        assert cancel_records == ()
+
+    asyncio.run(scenario())
+
+
 def test_active_pause_survives_restart_until_explicit_resume(tmp_path) -> None:
     async def scenario() -> None:
         store = SQLiteStore(tmp_path / "Ніка durable active pause.db")

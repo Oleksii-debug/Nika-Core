@@ -669,6 +669,14 @@ class TaskRuntimeCoordinator:
         )
 
         with self._queue.store.connection() as conn:
+            current = self._task_state_with_connection(conn, task_id)
+            current_record = self._sessions.get_with_connection(conn, task_id)
+            if current_record is not None and (
+                current_record.runtime_id != runtime_id or current_record.thread_id != thread_id
+            ):
+                raise ValueError(
+                    "Cancel request runtime/thread does not match persisted runtime session"
+                )
             reservation, created = self._idempotency.reserve_with_connection(
                 conn,
                 operation_key=operation_key,
@@ -694,8 +702,6 @@ class TaskRuntimeCoordinator:
                     "operation_key": operation_key,
                 },
             )
-            current = self._task_state_with_connection(conn, task_id)
-            current_record = self._sessions.get_with_connection(conn, task_id)
             if (
                 current is TaskState.PAUSED
                 and current_record is not None
