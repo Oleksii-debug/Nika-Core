@@ -123,9 +123,12 @@ def test_complete_recovery_rejects_retired_junction_before_remove(tmp_path: Path
     injected = needle + (
         "        $raceOriginal = $RetiredRollbackPath + '.race-original'\n"
         "        [System.IO.Directory]::Move($RetiredRollbackPath, $raceOriginal)\n"
-        f"        New-Item -ItemType Junction -Path $RetiredRollbackPath -Target '{escaped_target}' | Out-Null\n"
-        "        $raceRetired = Get-Item -LiteralPath $RetiredRollbackPath -Force\n"
-        "        if (($raceRetired.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {\n"
+        "        New-Item -ItemType Junction -Path $RetiredRollbackPath "
+        f"-Target '{escaped_target}' | Out-Null\n"
+        "        if ((Get-Item -LiteralPath $RetiredRollbackPath -Force).Attributes -band "
+        "[System.IO.FileAttributes]::ReparsePoint) {\n"
+        "            $null = $true\n"
+        "        } else {\n"
         "            throw 'test retired junction injection did not create a reparse point'\n"
         "        }\n"
     )
