@@ -187,6 +187,17 @@ def test_identity_text_is_bounded_and_unambiguous(field: str, value: str) -> Non
         replace(_descriptor(), **{field: value})
 
 
+def test_text_ingress_rejects_over_bound_before_normalization() -> None:
+    at_limit = "m" * 2048
+    descriptor = replace(_descriptor(), model_id=at_limit)
+    assert descriptor.model_id == at_limit
+
+    with pytest.raises(ValueError, match="unbounded"):
+        replace(_descriptor(), model_id="m" * 2049)
+    with pytest.raises(ValueError, match="unbounded"):
+        replace(_descriptor(), source_reference="r" * 2049)
+
+
 @pytest.mark.parametrize(
     "resources",
     (
@@ -212,6 +223,38 @@ def test_resource_requirements_reject_bool_huge_and_inverted_values() -> None:
         )
     with pytest.raises(ValueError, match="architecture"):
         ModelArtifactResources(cpu_architectures=("amd64/other",))
+
+
+def test_set_like_metadata_cardinality_is_bounded_before_normalization() -> None:
+    capabilities = tuple(f"cap{i}" for i in range(128))
+    architectures = tuple(f"arch{i}" for i in range(128))
+
+    descriptor = replace(
+        _descriptor(),
+        capabilities=capabilities,
+        resources=ModelArtifactResources(cpu_architectures=architectures),
+    )
+    assert len(descriptor.capabilities) == 128
+    assert len(descriptor.resources.cpu_architectures) == 128
+
+    with pytest.raises(ValueError, match="too many"):
+        replace(_descriptor(), capabilities=capabilities + ("cap128",))
+    with pytest.raises(ValueError, match="too many"):
+        ModelArtifactResources(cpu_architectures=architectures + ("arch128",))
+
+
+def test_serialized_set_like_metadata_cardinality_is_bounded() -> None:
+    raw = _descriptor().as_dict()
+    raw["capabilities"] = [f"cap{i}" for i in range(129)]
+    with pytest.raises(ModelArtifactRegistryError, match="capabilities are unbounded"):
+        ModelArtifactDescriptor.from_json(json.dumps(raw))
+
+    raw = _descriptor().as_dict()
+    resources = dict(raw["resources"])  # type: ignore[arg-type]
+    resources["cpu_architectures"] = [f"arch{i}" for i in range(129)]
+    raw["resources"] = resources
+    with pytest.raises(ModelArtifactRegistryError, match="architectures are unbounded"):
+        ModelArtifactDescriptor.from_json(json.dumps(raw))
 
 
 def test_registration_is_durable_restart_safe_and_audit_safe(tmp_path: Path) -> None:
