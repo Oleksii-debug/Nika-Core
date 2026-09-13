@@ -649,13 +649,21 @@ class TaskRuntimeCoordinator:
         state atomically without issuing a second runtime cancellation request. An accepted
         cancellation is finalized with task state, runtime-session cursor and audit evidence.
         """
+        if type(task_id) is not str or not task_id:
+            raise ValueError("cancel task_id must be an exact non-empty string")
+        if type(thread_id) is not str or not thread_id:
+            raise ValueError("cancel thread_id must be an exact non-empty string")
+        runtime_id = runtime.runtime_id
+        if type(runtime_id) is not str or not runtime_id:
+            raise ValueError("cancel runtime.runtime_id must be an exact non-empty string")
+
         operation_key = self._cancel_operation_key(
-            runtime_id=runtime.runtime_id,
+            runtime_id=runtime_id,
             task_id=task_id,
             thread_id=thread_id,
         )
         fingerprint = self._cancel_input_fingerprint(
-            runtime_id=runtime.runtime_id,
+            runtime_id=runtime_id,
             task_id=task_id,
             thread_id=thread_id,
         )
@@ -681,7 +689,7 @@ class TaskRuntimeCoordinator:
                 entity_type="task",
                 entity_id=task_id,
                 payload={
-                    "runtime_id": runtime.runtime_id,
+                    "runtime_id": runtime_id,
                     "thread_id": thread_id,
                     "operation_key": operation_key,
                 },
@@ -691,7 +699,7 @@ class TaskRuntimeCoordinator:
             if (
                 current is TaskState.PAUSED
                 and current_record is not None
-                and current_record.runtime_id == runtime.runtime_id
+                and current_record.runtime_id == runtime_id
                 and current_record.thread_id == thread_id
                 and current_record.outcome is RuntimeOutcome.PAUSED
                 and usable_resume_token(current_record.resume_token) is not None
@@ -718,7 +726,7 @@ class TaskRuntimeCoordinator:
                     entity_type="task",
                     entity_id=task_id,
                     payload={
-                        "runtime_id": runtime.runtime_id,
+                        "runtime_id": runtime_id,
                         "thread_id": thread_id,
                         "operation_key": operation_key,
                         "previous_task_state": current.value,
@@ -739,7 +747,7 @@ class TaskRuntimeCoordinator:
                     entity_type="task",
                     entity_id=task_id,
                     payload={
-                        "runtime_id": runtime.runtime_id,
+                        "runtime_id": runtime_id,
                         "thread_id": thread_id,
                         "operation_key": operation_key,
                         "error": str(exc),
@@ -756,7 +764,7 @@ class TaskRuntimeCoordinator:
                     entity_type="task",
                     entity_id=task_id,
                     payload={
-                        "runtime_id": runtime.runtime_id,
+                        "runtime_id": runtime_id,
                         "thread_id": thread_id,
                         "operation_key": operation_key,
                     },
@@ -797,7 +805,7 @@ class TaskRuntimeCoordinator:
                 entity_type="task",
                 entity_id=task_id,
                 payload={
-                    "runtime_id": runtime.runtime_id,
+                    "runtime_id": runtime_id,
                     "thread_id": thread_id,
                     "operation_key": operation_key,
                     "previous_task_state": current.value,

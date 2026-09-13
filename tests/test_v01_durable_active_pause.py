@@ -200,6 +200,57 @@ def test_pause_rejects_hostile_identity_subclasses_before_reservation_or_effect(
     asyncio.run(scenario())
 
 
+def test_cancel_rejects_hostile_identity_subclasses_before_reservation_or_effect(
+    tmp_path,
+) -> None:
+    async def scenario() -> None:
+        store = SQLiteStore(tmp_path / "Ніка hostile cancel identity.db")
+        store.initialize()
+        queue, task_id = ready_task(store)
+        queue.transition(task_id, TaskState.RUNNING)
+        runtime = AckedExternalPauseRuntime()
+        coordinator = TaskRuntimeCoordinator(queue, AuditLog(store))
+        thread_id = "thread-cancel-authoritative"
+        coordinator.sessions.record_active(
+            task_id=task_id,
+            runtime_id=runtime.runtime_id,
+            thread_id=thread_id,
+            resume_token=thread_id,
+        )
+        original_session = coordinator.sessions.get(task_id)
+        assert original_session is not None
+
+        with pytest.raises(ValueError, match="task_id must be an exact non-empty string"):
+            await coordinator.cancel(
+                runtime,
+                task_id=ForgedEqualString(task_id),
+                thread_id=thread_id,
+            )
+
+        with pytest.raises(ValueError, match="thread_id must be an exact non-empty string"):
+            await coordinator.cancel(
+                runtime,
+                task_id=task_id,
+                thread_id=ForgedEqualString("thread-cancel-foreign"),
+            )
+
+        runtime.runtime_id = ForgedEqualString("runtime-cancel-foreign")
+        with pytest.raises(ValueError, match=r"runtime\.runtime_id must be an exact non-empty string"):
+            await coordinator.cancel(runtime, task_id=task_id, thread_id=thread_id)
+
+        assert runtime.cancel_calls == 0
+        assert queue.get(task_id).state is TaskState.RUNNING
+        assert coordinator.sessions.get(task_id) == original_session
+        cancel_records = tuple(
+            record
+            for record in IdempotencyLedger(store).list_for_task(task_id)
+            if record.operation_type == "runtime.cancel"
+        )
+        assert cancel_records == ()
+
+    asyncio.run(scenario())
+
+
 def test_active_pause_survives_restart_until_explicit_resume(tmp_path) -> None:
     async def scenario() -> None:
         store = SQLiteStore(tmp_path / "Ніка durable active pause.db")
