@@ -737,7 +737,7 @@ try {
         # The same packaged journey must expose and persist the canonical model choice before
         # task acceptance. This proof stores only a fake local model identity; it never contacts
         # Ollama, downloads a model, or claims live model inference/NVDA verification.
-        Wait-DescendantName 'Модель для нових завдань' | Out-Null
+        Wait-BoundTextEvidence 'Модель для нових завдань'
         $modelRouteControl = Wait-DescendantName 'Тип маршруту моделі' ([System.Windows.Automation.ControlType]::ComboBox)
         $modelNameControl = Wait-DescendantName 'Назва моделі' ([System.Windows.Automation.ControlType]::Edit)
         $saveModelControl = Wait-DescendantName 'Зберегти модель' ([System.Windows.Automation.ControlType]::Button)
