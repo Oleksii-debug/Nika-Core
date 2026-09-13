@@ -6,6 +6,9 @@ import pytest
 
 from nika_core.activity_report import ActivityCount, DailyActivityReportService
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.audit import AuditLog
+from nika_core.memory.contracts import MemoryScope
+from nika_core.memory.service import MemoryService
 from nika_core.resources.contracts import ResourceSnapshot
 
 
@@ -54,6 +57,17 @@ def test_report_projects_canonical_truth_without_sensitive_payloads(tmp_path) ->
             (unsafe_event, "task", "task-1", '{"secret":"AUDIT_SECRET"}', inside),
         )
         conn.execute(
+            "INSERT INTO audit_events(event_type, entity_type, entity_id, payload_json, "
+            "created_at) VALUES (?, ?, ?, ?, ?)",
+            (
+                "memory.upserted",
+                "memory",
+                "agent:agent-1:learning:lesson-1",
+                '{"secret":"MEMORY_AUDIT_SECRET"}',
+                inside,
+            ),
+        )
+        conn.execute(
             "INSERT INTO experiments(experiment_id, definition_json, status, selected_candidate_id, "
             "previous_champion_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             ("experiment-1", "{}", "completed", None, None, inside, inside),
@@ -86,14 +100,18 @@ def test_report_projects_canonical_truth_without_sensitive_payloads(tmp_path) ->
     )
 
     assert report.task_transitions == (ActivityCount("COMPLETED", 1),)
-    assert report.audit_events == (ActivityCount(unsafe_event, 1),)
+    assert report.audit_events == (
+        ActivityCount(unsafe_event, 1),
+        ActivityCount("memory.upserted", 1),
+    )
     assert report.experiment_transitions == (ActivityCount("completed", 1),)
     assert report.research_documents_added == 1
-    assert report.memory_records_updated == 1
+    assert report.memory_update_events == 1
     assert report.resource_snapshot is not None
 
     rendered = report.render_text()
     assert "learning.consulted unsafe [31m=1" in rendered
+    assert "Події оновлення пам'яті: 1" in rendered
     assert "\x1b" not in rendered
     assert "\x07" not in rendered
     assert "\u200d" not in rendered
@@ -101,10 +119,89 @@ def test_report_projects_canonical_truth_without_sensitive_payloads(tmp_path) ->
     assert "батарея 77.0%" in rendered
     assert "TASK_SECRET" not in rendered
     assert "AUDIT_SECRET" not in rendered
+    assert "MEMORY_AUDIT_SECRET" not in rendered
     assert "MEMORY_SECRET" not in rendered
     assert "DOC_SECRET" not in rendered
     assert "Private title" not in rendered
     assert "ARCHIVED" not in rendered
+
+
+def test_report_counts_repeated_memory_upserts_from_durable_audit_history(tmp_path) -> None:
+    store = _prepared_store(tmp_path)
+    memory = MemoryService(store, AuditLog(store))
+    inside = "2026-09-12T10:00:00+00:00"
+
+    memory.put(
+        scope=MemoryScope.AGENT,
+        owner_id="agent-1",
+        namespace="learning",
+        key="lesson-1",
+        value={"secret": "FIRST_MEMORY_SECRET"},
+    )
+    memory.put(
+        scope=MemoryScope.AGENT,
+        owner_id="agent-1",
+        namespace="learning",
+        key="lesson-1",
+        value={"secret": "SECOND_MEMORY_SECRET"},
+    )
+    with store.connection() as conn:
+        current_rows = conn.execute("SELECT COUNT(*) AS count FROM memory_records").fetchone()
+        conn.execute(
+            "UPDATE audit_events SET created_at = ? WHERE event_type = ?",
+            (inside, "memory.upserted"),
+        )
+
+    report = DailyActivityReportService(store).build_window(
+        start=datetime(2026, 9, 12, tzinfo=UTC),
+        end=datetime(2026, 9, 13, tzinfo=UTC),
+    )
+
+    assert current_rows is not None
+    assert int(current_rows["count"]) == 1
+    assert report.memory_update_events == 2
+    assert ActivityCount("memory.upserted", 2) in report.audit_events
+    rendered = report.render_text()
+    assert "FIRST_MEMORY_SECRET" not in rendered
+    assert "SECOND_MEMORY_SECRET" not in rendered
+
+
+def test_report_retains_memory_update_after_record_is_deleted(tmp_path) -> None:
+    store = _prepared_store(tmp_path)
+    memory = MemoryService(store, AuditLog(store))
+    inside = "2026-09-12T10:00:00+00:00"
+
+    memory.put(
+        scope=MemoryScope.AGENT,
+        owner_id="agent-1",
+        namespace="learning",
+        key="lesson-1",
+        value={"secret": "DELETED_MEMORY_SECRET"},
+    )
+    assert memory.delete(
+        scope=MemoryScope.AGENT,
+        owner_id="agent-1",
+        namespace="learning",
+        key="lesson-1",
+    )
+    with store.connection() as conn:
+        current_rows = conn.execute("SELECT COUNT(*) AS count FROM memory_records").fetchone()
+        conn.execute(
+            "UPDATE audit_events SET created_at = ? WHERE event_type IN (?, ?)",
+            (inside, "memory.upserted", "memory.deleted"),
+        )
+
+    report = DailyActivityReportService(store).build_window(
+        start=datetime(2026, 9, 12, tzinfo=UTC),
+        end=datetime(2026, 9, 13, tzinfo=UTC),
+    )
+
+    assert current_rows is not None
+    assert int(current_rows["count"]) == 0
+    assert report.memory_update_events == 1
+    assert ActivityCount("memory.upserted", 1) in report.audit_events
+    assert ActivityCount("memory.deleted", 1) in report.audit_events
+    assert "DELETED_MEMORY_SECRET" not in report.render_text()
 
 
 def test_report_uses_half_open_window_and_never_synthesizes_missing_activity(tmp_path) -> None:
@@ -117,7 +214,7 @@ def test_report_uses_half_open_window_and_never_synthesizes_missing_activity(tmp
     assert report.audit_events == ()
     assert report.experiment_transitions == ()
     assert report.research_documents_added == 0
-    assert report.memory_records_updated == 0
+    assert report.memory_update_events == 0
     assert report.resource_snapshot is None
     assert "немає зафіксованих подій" in report.render_text()
     assert "не синтезується" in report.render_text()
