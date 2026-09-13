@@ -123,9 +123,9 @@ def test_operator_projection_uses_candidate_evidence_only_from_active_status() -
     assert historical_sha not in projection.candidate
 
 
-def test_operator_projection_preserves_candidate_after_terminal_qa_success() -> None:
+def test_uncorrelated_terminal_qa_cannot_replace_historical_component_identity() -> None:
     historical_sha = "a" * 40
-    current_sha = "b" * 40
+    uncorrelated_sha = "b" * 40
     detail = ProductProjectDetail(
         summary=_summary(),
         statuses=(
@@ -145,6 +145,40 @@ def test_operator_projection_preserves_candidate_after_terminal_qa_success() -> 
             ProductStatusEntry(
                 kind=ProductStatusKind.QA,
                 item_id="qa-current",
+                label="Uncorrelated QA",
+                state="passed",
+                evidence=(
+                    EvidenceReference(
+                        kind="git_commit",
+                        reference=uncorrelated_sha,
+                        label="Uncorrelated candidate SHA",
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    projection = project_operator_status(detail)
+
+    assert projection.candidate == "unknown"
+    assert historical_sha not in projection.candidate
+    assert uncorrelated_sha not in projection.candidate
+
+
+def test_operator_projection_preserves_candidate_after_correlated_terminal_qa_success() -> None:
+    current_sha = "b" * 40
+    detail = ProductProjectDetail(
+        summary=_summary(),
+        statuses=(
+            ProductStatusEntry(
+                kind=ProductStatusKind.COMPONENT,
+                item_id="work-current",
+                label="Current issue",
+                state="completed",
+            ),
+            ProductStatusEntry(
+                kind=ProductStatusKind.QA,
+                item_id="work-current:qa",
                 label="Current QA",
                 state="passed",
                 evidence=(
@@ -161,7 +195,6 @@ def test_operator_projection_preserves_candidate_after_terminal_qa_success() -> 
     projection = project_operator_status(detail)
 
     assert projection.candidate == current_sha
-    assert historical_sha not in projection.candidate
 
 
 def test_operator_projection_active_status_without_candidate_suppresses_terminal_history() -> None:
