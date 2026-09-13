@@ -97,10 +97,46 @@
   });
   const productProjectUnavailableMessage = "Стан поточного ProductProject недоступний.";
   const teamTaskUnavailableMessage = "Стан командного завдання недоступний.";
+  const unavailableStateLabel = "Стан недоступний";
   const teamRoleLabels = Object.freeze({
     supervisor: "Координатор",
     worker: "Виконавець",
     checker: "Перевіряльник",
+  });
+  const taskStateLabels = Object.freeze({
+    CREATED: "Створено",
+    READY: "Готове до запуску",
+    RUNNING: "Виконується",
+    WAITING_TOOL: "Очікує інструмент",
+    WAITING_APPROVAL: "Очікує підтвердження",
+    PAUSED: "Призупинено",
+    RETRYING: "Очікує повторної спроби",
+    BLOCKED: "Заблоковано",
+    COMPLETED: "Завершено",
+    FAILED: "Завершено з помилкою",
+    CANCELLED: "Скасовано",
+    ARCHIVED: "Архівовано",
+    not_in_task_queue: "Поза чергою завдань",
+  });
+  const memberStateLabels = Object.freeze({
+    spawned: "Створено",
+    running: "Виконується",
+    waiting_approval: "Очікує підтвердження",
+    paused: "Призупинено",
+    completed: "Завершено",
+    failed: "Завершено з помилкою",
+    cancelled: "Скасовано",
+  });
+  const teamStateLabels = Object.freeze({
+    active: "Активне",
+    completed: "Завершено",
+    failed: "Завершено з помилкою",
+    cancelled: "Скасовано",
+  });
+  const finalStatusLabels = Object.freeze({
+    completed: "Завершено",
+    failed: "Завершено з помилкою",
+    cancelled: "Скасовано",
   });
   const allowedMemberStates = new Set([
     "spawned",
@@ -205,6 +241,13 @@
       row.textContent = formatter(item);
       list.appendChild(row);
     }
+  }
+
+  function presentState(labels, value) {
+    if (typeof value !== "string") return unavailableStateLabel;
+    return Object.prototype.hasOwnProperty.call(labels, value)
+      ? labels[value]
+      : unavailableStateLabel;
   }
 
   function validProductProject(project) {
@@ -390,7 +433,7 @@
     const heading = document.createElement("h4");
     heading.textContent = teamRoleLabels[member.role];
     const details = document.createElement("dl");
-    appendDefinitionItem(details, "Стан", member.state);
+    appendDefinitionItem(details, "Стан", presentState(memberStateLabels, member.state));
     appendDefinitionItem(details, "Поточна операція", member.current_operation);
     item.append(heading, details);
     if (member.safe_error?.code === "member_failed") {
@@ -452,9 +495,9 @@
     const { task, team, members, events, final_result: finalResult } = projection;
     teamTaskFields.task_id.textContent = task.task_id;
     teamTaskFields.command.textContent = task.command || "Команда не збережена у bounded projection.";
-    teamTaskFields.task_state.textContent = task.state;
+    teamTaskFields.task_state.textContent = presentState(taskStateLabels, task.state);
     teamTaskFields.team_id.textContent = team.team_id;
-    teamTaskFields.team_state.textContent = team.state;
+    teamTaskFields.team_state.textContent = presentState(teamStateLabels, team.state);
     teamTaskFields.roster_count.textContent = `${team.member_count} з ${team.expected_member_count}`;
     teamRosterNote.textContent = team.roster_complete
       ? "Усі три реальні учасники підтверджені durable state."
@@ -476,7 +519,7 @@
       teamFinalSummary.hidden = true;
       for (const node of Object.values(teamFinalFields)) node.textContent = "";
     } else {
-      teamFinalFields.status.textContent = finalResult.status;
+      teamFinalFields.status.textContent = presentState(finalStatusLabels, finalResult.status);
       teamFinalFields.text.textContent = finalMessages[finalResult.status];
       teamFinalFields.task_id.textContent = finalResult.task_id;
       teamFinalFields.team_id.textContent = finalResult.team_id;
@@ -908,7 +951,12 @@
     if (autostartReadGeneration === autostartGeneration) renderAutostart(state.autostart ?? null);
     if (modelReadGeneration === modelGeneration) renderModelSettings(state.v01_model_settings ?? null);
     renderSourceSetup(state.v01_sources ?? null);
-    renderItems(tasksList, tasksEmpty, state.tasks || [], (item) => `${item.command || "Без назви"} — ${item.state}`);
+    renderItems(
+      tasksList,
+      tasksEmpty,
+      state.tasks || [],
+      (item) => `${item.command || "Без назви"} — ${presentState(taskStateLabels, item.state)}`,
+    );
     renderItems(agentsList, agentsEmpty, state.agents || [], (item) => `${item.name} — ${item.goal}`);
     renderItems(workspacesList, workspacesEmpty, state.workspaces || [], (item) => `${item.name} — ${item.description || "Без опису"}`);
     const productReady = renderProductProject(state.product_project ?? null);
@@ -954,11 +1002,11 @@
     if (actionId === "team.sources.configure" && result.status === "completed") sourceDirty = false;
     announce(result.message || (result.status === "completed" ? "Виконано." : result.status), failed);
     appendLog(result.message);
-    const stateReady = await refreshState();
-    document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
     const focusId = result.focus_id || (failed ? trigger?.dataset?.errorFocusTarget : trigger?.dataset?.focusTarget);
     if (focusId) focusElementById(focusId);
     else trigger?.focus?.();
+    const stateReady = await refreshState();
+    document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
   }
 
   async function refreshKeymap() {
