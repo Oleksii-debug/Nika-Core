@@ -125,19 +125,15 @@ def _assert_trusted_verification_authority(
     verification: CandidateDatasetVerification,
     expected_verification_policy_sha256: str,
     expected_required_checkers: tuple[tuple[str, str], ...],
-) -> None:
+) -> CandidateDatasetVerification:
+    receipt_material_sha256 = _require_sha256(
+        verification.candidate_material_sha256,
+        field="verification candidate_material_sha256",
+    )
     receipt_policy_sha256 = _require_sha256(
         verification.verification_policy_sha256,
         field="verification verification_policy_sha256",
     )
-    trusted_policy_sha256 = _require_sha256(
-        expected_verification_policy_sha256,
-        field="expected_verification_policy_sha256",
-    )
-    if not hmac.compare_digest(receipt_policy_sha256, trusted_policy_sha256):
-        raise LearningMaterialCompositionError(
-            "verification policy does not match the trusted expectation"
-        )
 
     if type(verification.required_check_ids) is not tuple:
         raise LearningMaterialCompositionError(
@@ -196,6 +192,29 @@ def _assert_trusted_verification_authority(
             "verification checks do not match required_check_ids"
         )
 
+    canonical_receipt = CandidateDatasetVerification.create(
+        candidate_material_sha256=receipt_material_sha256,
+        verification_policy_sha256=receipt_policy_sha256,
+        required_check_ids=receipt_required_ids,
+        checks=verification.checks,
+    )
+    if (
+        type(verification.schema_version) is not int
+        or verification.schema_version != canonical_receipt.schema_version
+    ):
+        raise LearningMaterialCompositionError(
+            "verification receipt schema is unsupported"
+        )
+
+    trusted_policy_sha256 = _require_sha256(
+        expected_verification_policy_sha256,
+        field="expected_verification_policy_sha256",
+    )
+    if not hmac.compare_digest(receipt_policy_sha256, trusted_policy_sha256):
+        raise LearningMaterialCompositionError(
+            "verification policy does not match the trusted expectation"
+        )
+
     trusted_checker_authority = _canonical_expected_checkers(
         expected_required_checkers
     )
@@ -203,6 +222,7 @@ def _assert_trusted_verification_authority(
         raise LearningMaterialCompositionError(
             "verification checker authority does not match the trusted expectation"
         )
+    return canonical_receipt
 
 
 def candidate_material_sha256(
@@ -254,7 +274,7 @@ def freeze_verified_learning_package(
         evaluation_set_sha256,
         field="evaluation_set_sha256",
     )
-    _assert_trusted_verification_authority(
+    canonical_verification = _assert_trusted_verification_authority(
         verification=verification,
         expected_verification_policy_sha256=expected_verification_policy_sha256,
         expected_required_checkers=expected_required_checkers,
@@ -266,7 +286,7 @@ def freeze_verified_learning_package(
         shards=canonical_shards,
     )
     receipt_material_sha256 = _require_sha256(
-        verification.candidate_material_sha256,
+        canonical_verification.candidate_material_sha256,
         field="verification candidate_material_sha256",
     )
     if not hmac.compare_digest(receipt_material_sha256, material_sha256):
@@ -274,7 +294,7 @@ def freeze_verified_learning_package(
             "verification receipt candidate material does not match frozen material"
         )
 
-    verification_sha256 = verification.verification_sha256
+    verification_sha256 = canonical_verification.verification_sha256
     return FrozenLearningPackage.freeze(
         package_id=package_id,
         package_version=package_version,
