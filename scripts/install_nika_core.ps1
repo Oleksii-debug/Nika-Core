@@ -505,8 +505,16 @@ function Resolve-NikaInterruptedUpdate {
         [System.IO.Directory]::Move($RetiredRollbackPath, $RollbackPath)
     }
     elseif (-not $hasDestination -and $hasRollback) {
+        Assert-NikaNoReparsePathChain -Path $RetiredRollbackPath
+        Assert-NikaReleaseBundle -BundleRoot $RetiredRollbackPath
         Assert-NikaNoReparsePathChain -Path $RollbackPath
         Assert-NikaReleaseBundle -BundleRoot $RollbackPath
+        Assert-NikaNoReparsePathChain -Path $DestinationPath
+        Assert-NikaDataMutationSeparation -DataRoot $DataRoot -MutationPaths @(
+            $DestinationPath,
+            $RollbackPath,
+            $RetiredRollbackPath
+        )
         [System.IO.Directory]::Move($RollbackPath, $DestinationPath)
         Assert-NikaNoReparsePathChain -Path $RetiredRollbackPath
         Assert-NikaReleaseBundle -BundleRoot $RetiredRollbackPath
