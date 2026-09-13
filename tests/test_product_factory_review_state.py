@@ -4,6 +4,13 @@ from dataclasses import dataclass
 
 import pytest
 
+from nika_core.product_factory_verification import (
+    PRODUCT_FACTORY_REQUIRED_CHECK_IDS,
+    CandidateVerification,
+    CheckState,
+    ExactShaCheckEvidence,
+    classify_candidate_verification,
+)
 from nika_core.qa.review_state import (
     CandidateReviewIdentity,
     CandidateReviewRecord,
@@ -28,6 +35,31 @@ class _Authority:
     reviewer_id: str = "qa-1"
     authority_ref: str = "authority:qa-assignment-1"
     independent_review_authorized: bool = True
+
+
+def _verification(
+    candidate_sha: str = SHA_A,
+    *,
+    factory_state: CheckState = CheckState.PASS,
+) -> CandidateVerification:
+    return classify_candidate_verification(
+        candidate_sha,
+        (
+            ExactShaCheckEvidence(
+                "core",
+                candidate_sha,
+                CheckState.PASS,
+                f"ci:core:{candidate_sha}",
+            ),
+            ExactShaCheckEvidence(
+                "factory",
+                candidate_sha,
+                factory_state,
+                f"ci:factory:{factory_state.value}:{candidate_sha}",
+            ),
+        ),
+        PRODUCT_FACTORY_REQUIRED_CHECK_IDS,
+    )
 
 
 def _candidate() -> CandidateReviewRecord:
@@ -76,7 +108,7 @@ def test_pass_journey_is_exact_sha_and_restart_safe() -> None:
     assert restored.state is ReviewState.PASS
     assert restored.mark_merge_ready(
         candidate_sha=SHA_A,
-        verification=_Clearance(SHA_A, True),
+        verification=_verification(),
     ).state is ReviewState.MERGE_READY
 
 
@@ -113,7 +145,15 @@ def test_merge_ready_rejects_failed_exact_head_verification() -> None:
     with pytest.raises(ReviewPipelineError, match="verification clearance is required"):
         _passed_review().mark_merge_ready(
             candidate_sha=SHA_A,
-            verification=_Clearance(SHA_A, False),
+            verification=_verification(factory_state=CheckState.FAIL),
+        )
+
+
+def test_merge_ready_rejects_structural_clearance_impostor() -> None:
+    with pytest.raises(ReviewPipelineError, match="verification clearance is malformed"):
+        _passed_review().mark_merge_ready(
+            candidate_sha=SHA_A,
+            verification=_Clearance(SHA_A, True),  # type: ignore[arg-type]
         )
 
 
@@ -121,7 +161,7 @@ def test_merge_ready_rejects_stale_verification_clearance() -> None:
     with pytest.raises(StaleCandidateReviewError, match="exact current candidate SHA"):
         _passed_review().mark_merge_ready(
             candidate_sha=SHA_A,
-            verification=_Clearance(SHA_B, True),
+            verification=_verification(candidate_sha=SHA_B),
         )
 
 
@@ -192,7 +232,7 @@ def test_stale_candidate_sha_cannot_receive_verdict() -> None:
 def test_successor_head_invalidates_prior_clearance_and_reviewer_authority() -> None:
     merge_ready = _passed_review().mark_merge_ready(
         candidate_sha=SHA_A,
-        verification=_Clearance(SHA_A, True),
+        verification=_verification(),
     )
 
     successor = merge_ready.successor(candidate_sha=SHA_B, implementer_id="dev-2")
