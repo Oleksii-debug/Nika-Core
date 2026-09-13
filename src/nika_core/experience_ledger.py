@@ -13,6 +13,7 @@ from nika_core.data.sqlite import SQLiteStore
 
 _REASON_CODE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,95}$")
 _EVENT_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,191}$")
+_TASK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,191}$")
 
 
 class ContinuityKind(StrEnum):
@@ -96,10 +97,11 @@ class ExperienceLedger:
     def _validate_task_id(task_id: str | None) -> str | None:
         if task_id is None:
             return None
-        value = task_id.strip()
-        if not value or value != task_id or len(value) > 192:
+        if type(task_id) is not str:
+            raise TypeError("task_id must be a built-in string")
+        if not _TASK_ID.fullmatch(task_id):
             raise ValueError("task_id must be a bounded stable identifier")
-        return value
+        return task_id
 
     @staticmethod
     def _validate_reason_code(reason_code: str) -> str:
