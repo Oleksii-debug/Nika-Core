@@ -46,6 +46,12 @@ def _require_plain_str_items(values: Iterable[object], field_name: str) -> None:
         _require_plain_str(value, field_name)
 
 
+def _require_plain_tuple(value: object, field_name: str) -> tuple[object, ...]:
+    if type(value) is not tuple:
+        raise RepositoryGraphError(f"{field_name} must be a plain tuple")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class ComponentBrief:
     component_id: str
@@ -336,9 +342,14 @@ class ProductComponent:
     def __post_init__(self) -> None:
         _require_plain_str(self.component_id, "component_id")
         _require_plain_str(self.repository_id, "component.repository_id")
+        _require_plain_tuple(self.paths, "component paths")
+        _require_plain_tuple(self.dependencies, "component dependencies")
+        _require_plain_tuple(self.build_commands, "component build_commands")
+        _require_plain_tuple(self.test_commands, "component test_commands")
         _require_plain_str_items(self.paths, "component path")
         _require_plain_str_items(self.dependencies, "component dependency")
         for command in (*self.build_commands, *self.test_commands):
+            _require_plain_tuple(command, "command argv")
             _require_plain_str_items(command, "command argument")
         _require_optional_plain_str(self.release_identity, "release_identity")
 
@@ -356,6 +367,8 @@ class OwnershipLease:
     def __post_init__(self) -> None:
         _require_plain_str(self.lease_id, "lease_id")
         _require_plain_str(self.worker_id, "worker_id")
+        _require_plain_tuple(self.component_ids, "lease component_ids")
+        _require_plain_tuple(self.allowed_paths, "lease allowed_paths")
         _require_plain_str_items(self.component_ids, "lease component id")
         _require_plain_str_items(self.allowed_paths, "lease allowed path")
 
@@ -381,6 +394,8 @@ class IntegrationDecision:
         _require_plain_str(self.decision_id, "decision_id")
         if type(self.kind) is not IntegrationDecisionKind:
             raise RepositoryGraphError("integration decision kind must be canonical")
+        _require_plain_tuple(self.lease_ids, "integration decision lease_ids")
+        _require_plain_tuple(self.evidence_refs, "integration decision evidence_refs")
         _require_plain_str_items(self.lease_ids, "integration decision lease id")
         _require_plain_str(self.reason, "integration decision reason")
         _require_plain_str_items(self.evidence_refs, "integration decision evidence ref")
@@ -417,6 +432,8 @@ class ProductRepositoryGraph:
 
     def __post_init__(self) -> None:
         _require_plain_str(self.project_id, "project_id")
+        _require_plain_tuple(self.repositories, "repositories")
+        _require_plain_tuple(self.components, "components")
         if any(type(repository) is not RepositoryRef for repository in self.repositories):
             raise RepositoryGraphError("repositories must contain canonical RepositoryRef values")
         if any(type(component) is not ProductComponent for component in self.components):
