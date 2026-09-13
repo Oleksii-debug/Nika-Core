@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
@@ -35,7 +35,11 @@ from nika_core.runtime.recovery_claims import (
     recovery_claim_metadata,
     write_pending_recovery_claim,
 )
-from nika_core.runtime.retry import RetryPolicy, usable_resume_token
+from nika_core.runtime.retry import (
+    RetryPolicy,
+    fresh_retry_safety_evidence,
+    usable_resume_token,
+)
 from nika_core.runtime.session_store import (
     RuntimeSessionRecord,
     RuntimeSessionStore,
@@ -59,6 +63,12 @@ _RESUMABLE_OUTCOMES = frozenset(
 
 _CANCEL_OPERATION_TYPE = "runtime.cancel"
 _RECOVERY_SESSION_EPOCH_SCHEMA = "nika-runtime-recovery-session-epoch-v1"
+
+
+def _consume_timeout_budget(remaining: float | None, elapsed: float) -> float | None:
+    if remaining is None:
+        return None
+    return max(0.0, remaining - max(0.0, elapsed))
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,12 +152,22 @@ class TaskRuntimeCoordinator:
                 payload={"runtime_id": runtime.runtime_id, "thread_id": request.thread_id},
             )
 
+        loop = asyncio.get_running_loop()
+        remaining_timeout = request.timeout_seconds
+        attempt_started = loop.time()
         result = await self._safe_run(runtime, request)
+        remaining_timeout = _consume_timeout_budget(
+            remaining_timeout,
+            loop.time() - attempt_started,
+        )
         retries_used = 0
         resume_claim: _RuntimeResumeClaim | None = None
         resume_claim_started = False
         while policy.should_retry(result, retries_used=retries_used):
             resume_token = usable_resume_token(result.resume_token)
+            model_fresh_retry = (
+                resume_token is None and fresh_retry_safety_evidence(result) is not None
+            )
             if resume_claim is not None and resume_token is None:
                 self._audit.append(
                     event_type="runtime.retry_blocked_unsafe_fresh_replay",
@@ -163,8 +183,40 @@ class TaskRuntimeCoordinator:
                     },
                 )
                 break
-            retries_used += 1
-            delay = policy.delay_seconds(retry_number=retries_used)
+
+            retry_number = retries_used + 1
+            delay = policy.delay_seconds(retry_number=retry_number)
+            if model_fresh_retry and delay <= 0.0:
+                self._audit.append(
+                    event_type="runtime.retry_blocked_unsafe_fresh_replay",
+                    entity_type="task",
+                    entity_id=request.task_id,
+                    payload={
+                        "runtime_id": runtime.runtime_id,
+                        "thread_id": request.thread_id,
+                        "retry_number": retry_number,
+                        "error": result.error,
+                        "error_code": result.error_code.value if result.error_code else None,
+                        "reason": "model fresh retry requires positive bounded backoff",
+                    },
+                )
+                break
+            if remaining_timeout is not None and delay >= remaining_timeout:
+                self._audit.append(
+                    event_type="runtime.retry_blocked_timeout_budget",
+                    entity_type="task",
+                    entity_id=request.task_id,
+                    payload={
+                        "runtime_id": runtime.runtime_id,
+                        "thread_id": request.thread_id,
+                        "retry_number": retry_number,
+                        "delay_seconds": delay,
+                        "remaining_timeout_seconds": remaining_timeout,
+                    },
+                )
+                break
+
+            retries_used = retry_number
             self._queue.transition(request.task_id, TaskState.RETRYING)
             self._audit.append(
                 event_type="runtime.retry_scheduled",
@@ -181,7 +233,38 @@ class TaskRuntimeCoordinator:
                 },
             )
             if delay:
+                sleep_started = loop.time()
                 await asyncio.sleep(delay)
+                actual_wait = max(delay, loop.time() - sleep_started)
+                remaining_timeout = _consume_timeout_budget(remaining_timeout, actual_wait)
+
+            if self._task_state(request.task_id) == TaskState.CANCELLED:
+                self._audit.append(
+                    event_type="runtime.retry_blocked_cancelled",
+                    entity_type="task",
+                    entity_id=request.task_id,
+                    payload={
+                        "runtime_id": runtime.runtime_id,
+                        "thread_id": request.thread_id,
+                        "retry_number": retries_used,
+                    },
+                )
+                break
+            if remaining_timeout is not None and remaining_timeout <= 0.0:
+                self._audit.append(
+                    event_type="runtime.retry_blocked_timeout_budget",
+                    entity_type="task",
+                    entity_id=request.task_id,
+                    payload={
+                        "runtime_id": runtime.runtime_id,
+                        "thread_id": request.thread_id,
+                        "retry_number": retries_used,
+                        "delay_seconds": delay,
+                        "remaining_timeout_seconds": remaining_timeout,
+                    },
+                )
+                break
+
             self._queue.transition(request.task_id, TaskState.RUNNING)
             self._audit.append(
                 event_type="runtime.retry_started",
@@ -192,8 +275,10 @@ class TaskRuntimeCoordinator:
                     "thread_id": request.thread_id,
                     "retry_number": retries_used,
                     "resume": resume_token is not None,
+                    "remaining_timeout_seconds": remaining_timeout,
                 },
             )
+            attempt_started = loop.time()
             if resume_token is not None:
                 resume_request = RuntimeResumeRequest(
                     task_id=request.task_id,
@@ -201,7 +286,11 @@ class TaskRuntimeCoordinator:
                     resume_token=resume_token,
                     mode=RuntimeResumeMode.CONTINUE,
                     max_steps=request.max_steps,
-                    timeout_seconds=request.timeout_seconds,
+                    timeout_seconds=(
+                        remaining_timeout
+                        if request.timeout_seconds is not None
+                        else request.timeout_seconds
+                    ),
                 )
                 if resume_claim is None:
                     record = self._sessions.get(request.task_id)
@@ -231,7 +320,16 @@ class TaskRuntimeCoordinator:
                     resume_claim_started = True
                 result = await self._safe_resume(runtime, resume_request)
             else:
-                result = await self._safe_run(runtime, request)
+                retry_request = (
+                    request
+                    if request.timeout_seconds is None
+                    else replace(request, timeout_seconds=remaining_timeout)
+                )
+                result = await self._safe_run(runtime, retry_request)
+            remaining_timeout = _consume_timeout_budget(
+                remaining_timeout,
+                loop.time() - attempt_started,
+            )
 
         return self._finish(
             runtime.runtime_id,
