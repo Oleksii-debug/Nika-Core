@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-import nika_core.runtime.coordinator as coordinator_module
 from nika_core.builder.compiler import AgentCompiler
 from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.builder.spec import AgentDefinition
@@ -198,7 +197,7 @@ def test_429_retries_once_only_with_positive_backoff_and_no_effect(
         ],
     )
     clock = _FakeClock()
-    monkeypatch.setattr(coordinator_module.asyncio, "sleep", clock.sleep)
+    monkeypatch.setattr(asyncio, "sleep", clock.sleep)
 
     result = asyncio.run(
         coordinator.start(
@@ -291,7 +290,7 @@ def test_cloud_fresh_retry_requires_provider_retryable_and_no_effect(
         supports_hard_cancellation=supports_hard_cancellation,
     )
     clock = _FakeClock()
-    monkeypatch.setattr(coordinator_module.asyncio, "sleep", clock.sleep)
+    monkeypatch.setattr(asyncio, "sleep", clock.sleep)
 
     result = asyncio.run(
         coordinator.start(
@@ -326,7 +325,7 @@ def test_terminal_cancellation_during_backoff_blocks_later_transport(
         queue.transition(task_id, TaskState.CANCELLED)
 
     clock = _FakeClock(on_sleep=cancel_while_waiting)
-    monkeypatch.setattr(coordinator_module.asyncio, "sleep", clock.sleep)
+    monkeypatch.setattr(asyncio, "sleep", clock.sleep)
 
     result = asyncio.run(
         coordinator.start(
@@ -357,7 +356,7 @@ def test_retry_backoff_consumes_original_inference_timeout_budget(
         ],
     )
     clock = _FakeClock()
-    monkeypatch.setattr(coordinator_module.asyncio, "sleep", clock.sleep)
+    monkeypatch.setattr(asyncio, "sleep", clock.sleep)
 
     result = asyncio.run(
         coordinator.start(
@@ -391,7 +390,7 @@ def test_cloud_retry_configuration_must_not_hot_loop(
         ],
     )
     clock = _FakeClock()
-    monkeypatch.setattr(coordinator_module.asyncio, "sleep", clock.sleep)
+    monkeypatch.setattr(asyncio, "sleep", clock.sleep)
 
     result = asyncio.run(
         coordinator.start(
