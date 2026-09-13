@@ -29,7 +29,7 @@ def test_webview_renderer_accepts_paused_member_without_losing_focus() -> None:
         "available": True,
         "task": {
             "task_id": "task-paused-71",
-            "state": "paused",
+            "state": "PAUSED",
             "command": "Продовжити контрольоване завдання.",
         },
         "team": {
@@ -176,6 +176,8 @@ setTimeout(() => {{
     assert rendered["summary_hidden"] is False
     assert rendered["member_count"] == 2
     assert rendered["focus_preserved"] is True
-    assert "paused" in rendered["rendered"]
+    assert "Призупинено" in rendered["rendered"]
+    assert "PAUSED" not in rendered["rendered"]
+    assert "paused" not in rendered["rendered"]
     assert "Роботу призупинено." in rendered["rendered"]
     assert "Стан командного завдання недоступний." not in rendered["rendered"]
