@@ -6,6 +6,7 @@ from enum import StrEnum
 from typing import Protocol
 
 from nika_core.product_command.reference_safety import safe_evidence_reference
+from nika_core.product_factory_verification import CandidateVerification, VerificationState
 
 _MAX_EVIDENCE_REFS = 16
 _MAX_EVIDENCE_REF_CHARS = 256
@@ -18,15 +19,6 @@ class ReviewPipelineError(ValueError):
 
 class StaleCandidateReviewError(ReviewPipelineError):
     """Raised when review evidence targets a different candidate SHA."""
-
-
-class ExactHeadMergeClearance(Protocol):
-    """Structural DEV08 compatibility surface without duplicating verification state."""
-
-    candidate_sha: str
-
-    @property
-    def merge_clearance(self) -> bool: ...
 
 
 class TrustedReviewerAuthority(Protocol):
@@ -160,7 +152,7 @@ class CandidateReviewRecord:
         reviewer_id: str | None = None,
         reviewer_authority: ReviewerAuthorityEvidence | None = None,
         verdict: ReviewVerdict | None = None,
-        verification: ExactHeadMergeClearance | None = None,
+        verification: CandidateVerification | None = None,
     ) -> CandidateReviewRecord:
         """Build a validated non-initial state for canonical lifecycle methods and restore."""
         if not isinstance(identity, CandidateReviewIdentity):
@@ -192,7 +184,7 @@ class CandidateReviewRecord:
         cls,
         payload: str,
         *,
-        verification: ExactHeadMergeClearance | None = None,
+        verification: CandidateVerification | None = None,
     ) -> CandidateReviewRecord:
         try:
             raw = json.loads(payload)
@@ -269,7 +261,7 @@ class CandidateReviewRecord:
         self,
         *,
         candidate_sha: str,
-        verification: ExactHeadMergeClearance,
+        verification: CandidateVerification,
     ) -> CandidateReviewRecord:
         self._require_state(ReviewState.PASS)
         self._require_candidate(candidate_sha)
@@ -367,19 +359,20 @@ class CandidateReviewRecord:
             independent_review_authorized=True,
         )
 
-    def _validate_merge_clearance(self, verification: ExactHeadMergeClearance) -> None:
-        try:
-            candidate_sha = verification.candidate_sha
-            merge_clearance = verification.merge_clearance
-        except AttributeError as exc:
-            raise ReviewPipelineError("exact-head verification clearance is malformed") from exc
+    def _validate_merge_clearance(self, verification: CandidateVerification) -> None:
+        if type(verification) is not CandidateVerification:
+            raise ReviewPipelineError("exact-head verification clearance is malformed")
 
+        candidate_sha = verification.candidate_sha
         _validate_sha(candidate_sha)
         if candidate_sha != self.identity.candidate_sha:
             raise StaleCandidateReviewError(
                 "verification clearance does not match exact current candidate SHA"
             )
-        if merge_clearance is not True:
+        if (
+            verification.state is not VerificationState.PASS
+            or verification.merge_clearance is not True
+        ):
             raise ReviewPipelineError(
                 "exact-head verification clearance is required for merge ready"
             )
