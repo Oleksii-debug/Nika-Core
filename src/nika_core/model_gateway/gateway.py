@@ -250,7 +250,7 @@ class ModelGateway:
                     provider=capabilities,
                 )
                 return
-            except Exception:  # noqa: BLE001 - authority boundary fails closed
+            except Exception:  # noqa: BLE001, S110
                 pass
         error = ModelGatewayError(
             ModelErrorCode.INVALID_REQUEST,
