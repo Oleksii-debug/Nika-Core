@@ -417,12 +417,20 @@ class TaskRuntimeCoordinator:
         thread_id: str,
     ) -> bool:
         """Durably pause active resumable work without converting user intent to cancel."""
+        if type(task_id) is not str or not task_id:
+            raise ValueError("pause task_id must be an exact non-empty string")
+        if type(thread_id) is not str or not thread_id:
+            raise ValueError("pause thread_id must be an exact non-empty string")
+        runtime_id = runtime.runtime_id
+        if type(runtime_id) is not str or not runtime_id:
+            raise ValueError("pause runtime.runtime_id must be an exact non-empty string")
+
         record = self._sessions.get(task_id)
         current = self._task_state(task_id)
         if current is TaskState.PAUSED:
             if record is None:
                 raise ValueError("Paused task is missing its durable runtime session")
-            if record.runtime_id != runtime.runtime_id or record.thread_id != thread_id:
+            if record.runtime_id != runtime_id or record.thread_id != thread_id:
                 raise ValueError("Paused task does not belong to the supplied runtime/thread")
             if record.outcome is not RuntimeOutcome.PAUSED:
                 raise ValueError("Paused task does not have a confirmed paused runtime cursor")
@@ -437,9 +445,9 @@ class TaskRuntimeCoordinator:
             raise ValueError("Safe active pause requires runtime cancellation support")
         if record is None:
             raise ValueError("Safe active pause requires a durable runtime session")
-        if record.runtime_id != runtime.runtime_id:
+        if record.runtime_id != runtime_id:
             raise ValueError(
-                f"Task {task_id} belongs to runtime {record.runtime_id}, not {runtime.runtime_id}"
+                f"Task {task_id} belongs to runtime {record.runtime_id}, not {runtime_id}"
             )
         if record.thread_id != thread_id:
             raise ValueError("Pause request thread does not match persisted runtime session")
@@ -471,7 +479,7 @@ class TaskRuntimeCoordinator:
                 entity_type="task",
                 entity_id=task_id,
                 payload={
-                    "runtime_id": runtime.runtime_id,
+                    "runtime_id": runtime_id,
                     "thread_id": thread_id,
                     "operation_key": operation_key,
                 },
@@ -488,7 +496,7 @@ class TaskRuntimeCoordinator:
                     entity_type="task",
                     entity_id=task_id,
                     payload={
-                        "runtime_id": runtime.runtime_id,
+                        "runtime_id": runtime_id,
                         "thread_id": thread_id,
                         "operation_key": operation_key,
                         "error_type": type(exc).__name__,
@@ -508,7 +516,7 @@ class TaskRuntimeCoordinator:
                         entity_type="task",
                         entity_id=task_id,
                         payload={
-                            "runtime_id": runtime.runtime_id,
+                            "runtime_id": runtime_id,
                             "thread_id": thread_id,
                             "operation_key": operation_key,
                         },
@@ -539,7 +547,7 @@ class TaskRuntimeCoordinator:
             elif current_state is TaskState.PAUSED:
                 if (
                     current_record is None
-                    or current_record.runtime_id != runtime.runtime_id
+                    or current_record.runtime_id != runtime_id
                     or current_record.thread_id != thread_id
                     or current_record.outcome is not RuntimeOutcome.PAUSED
                     or usable_resume_token(current_record.resume_token) is None
@@ -567,7 +575,7 @@ class TaskRuntimeCoordinator:
                 self._sessions.record_result_with_connection(
                     conn,
                     task_id=task_id,
-                    runtime_id=runtime.runtime_id,
+                    runtime_id=runtime_id,
                     thread_id=thread_id,
                     result=RuntimeResult(
                         outcome=RuntimeOutcome.PAUSED,
