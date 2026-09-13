@@ -669,6 +669,7 @@ class TaskRuntimeCoordinator:
         )
 
         with self._queue.store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             current = self._task_state_with_connection(conn, task_id)
             current_record = self._sessions.get_with_connection(conn, task_id)
             if current_record is not None and (
