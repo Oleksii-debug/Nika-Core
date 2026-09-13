@@ -24,7 +24,7 @@ class DailyActivityReport:
     audit_events: tuple[ActivityCount, ...]
     experiment_transitions: tuple[ActivityCount, ...]
     research_documents_added: int
-    memory_records_updated: int
+    memory_update_events: int
     resource_snapshot: ResourceSnapshot | None
     limitations: tuple[str, ...]
 
@@ -35,7 +35,7 @@ class DailyActivityReport:
             f"Події аудиту: {_format_counts(self.audit_events)}",
             f"Переходи експериментів: {_format_counts(self.experiment_transitions)}",
             f"Додано дослідницьких документів: {self.research_documents_added}",
-            f"Оновлено записів пам'яті: {self.memory_records_updated}",
+            f"Події оновлення пам'яті: {self.memory_update_events}",
         ]
         if self.resource_snapshot is None:
             lines.append("Ресурси: поточний знімок не надано.")
@@ -113,11 +113,11 @@ class DailyActivityReportService:
                     (start_iso, end_iso),
                 ).fetchone()
             )
-            memory_records_updated = _scalar_count(
+            memory_update_events = _scalar_count(
                 conn.execute(
-                    "SELECT COUNT(*) AS count FROM memory_records "
-                    "WHERE updated_at >= ? AND updated_at < ?",
-                    (start_iso, end_iso),
+                    "SELECT COUNT(*) AS count FROM audit_events "
+                    "WHERE event_type = ? AND created_at >= ? AND created_at < ?",
+                    ("memory.upserted", start_iso, end_iso),
                 ).fetchone()
             )
 
@@ -132,7 +132,7 @@ class DailyActivityReportService:
             audit_events=audit_events,
             experiment_transitions=experiment_transitions,
             research_documents_added=research_documents_added,
-            memory_records_updated=memory_records_updated,
+            memory_update_events=memory_update_events,
             resource_snapshot=snapshot,
             limitations=(
                 "Включено лише канонічні durable-записи, що існують у локальній БД.",
