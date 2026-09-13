@@ -248,20 +248,57 @@ def test_model_backed_packaged_comparison_survives_fresh_store_restart_without_l
     assert before is not None
     before_comparison = before["final_result"]["comparison"]
     assert before_comparison["validated"] is True
+    assert before_comparison["model_result"] == {
+        "text": _MODEL_TEXT_CANARY,
+        "provider_id": "ollama",
+        "provider_kind": "local",
+        "model": model_name,
+        "provenance_validated": True,
+    }
 
     restarted_store = SQLiteStore(store.path)
     restarted_queue = TaskQueue(restarted_store)
-    after = V01PackagedTeamStateProvider(
+    restarted_provider = V01PackagedTeamStateProvider(
         base_state=lambda: _base_state(restarted_queue, task.task_id),
         store=restarted_store,
-    )()["v01_team_task"]
+    )
+    after = restarted_provider()["v01_team_task"]
     assert after is not None
     assert after["final_result"]["comparison"] == before_comparison
+    assert calls == [model_name] * 3
 
     projected = json.dumps(after, ensure_ascii=False, sort_keys=True)
-    assert _MODEL_TEXT_CANARY not in projected
+    assert _MODEL_TEXT_CANARY in projected
+    assert model_name in projected
+    assert "ollama" in projected
     assert _SOURCE_CANARY not in projected
-    assert model_name not in projected
-    assert "ollama" not in projected
     assert "model_analysis" not in projected
     assert "model_analysis_provenance" not in projected
+    assert "request_correlation_id" not in projected
+
+    team_id = after["team"]["team_id"]
+    with restarted_store.connection() as conn:
+        row = conn.execute(
+            "SELECT result_id, payload_json FROM multi_agent_results "
+            "WHERE team_id = ? AND member_id = 'checker'",
+            (team_id,),
+        ).fetchone()
+        assert row is not None
+        persisted = json.loads(row["payload_json"])
+        persisted["model_analysis_provenance"]["model_fingerprint"] = "sha256:corrupt"
+        conn.execute(
+            "UPDATE multi_agent_results SET payload_json = ? WHERE result_id = ?",
+            (
+                json.dumps(persisted, sort_keys=True, separators=(",", ":")),
+                row["result_id"],
+            ),
+        )
+
+    corrupted = restarted_provider()["v01_team_task"]
+    assert corrupted is not None
+    corrupted_comparison = corrupted["final_result"]["comparison"]
+    assert corrupted_comparison["status"] == "evidence_invalid"
+    assert corrupted_comparison["validated"] is False
+    assert "model_result" not in corrupted_comparison
+    assert _MODEL_TEXT_CANARY not in json.dumps(corrupted, ensure_ascii=False, sort_keys=True)
+    assert calls == [model_name] * 3
