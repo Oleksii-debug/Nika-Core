@@ -1,12 +1,31 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
+from nika_core.product_command.reference_safety import safe_evidence_reference
 from nika_core.product_factory_orchestration import RepositoryRef
-from nika_core.product_factory_verification import CheckState as VerificationCheckState
-from nika_core.product_factory_verification import ExactShaCheckEvidence
+from nika_core.product_factory_verification import (
+    MAX_EVIDENCE_REF_LENGTH,
+    CheckState as VerificationCheckState,
+    ExactShaCheckEvidence,
+)
+
+_PROVIDER_CHECK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_OPAQUE_EVIDENCE_REF_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}:[A-Za-z0-9][A-Za-z0-9._/:-]{0,446}$"
+)
+_SENSITIVE_EVIDENCE_NAMESPACES = (
+    "api-key:",
+    "apikey:",
+    "cookie:",
+    "proxy-authorization:",
+    "set-cookie:",
+    "x-api-key:",
+    "x-auth-token:",
+)
 
 
 class GitHubFactoryError(ValueError):
@@ -46,9 +65,9 @@ class GitHubCheck:
     evidence_ref: str
 
     def __post_init__(self) -> None:
-        _require_plain_nonempty_text(self.check_id, "check id")
+        _require_provider_check_id(self.check_id)
         _require_plain_nonempty_text(self.name, "check name")
-        _require_plain_nonempty_text(self.evidence_ref, "check evidence reference")
+        _require_opaque_evidence_ref(self.evidence_ref, "check evidence reference")
         _validate_sha(self.head_sha, "check head_sha")
         if type(self.state) is not CheckState:
             raise GitHubFactoryError("check state must be a recognized CheckState")
@@ -107,7 +126,7 @@ class GitHubIntegrationEvidence:
         _require_positive_int(self.pull_request_number, "integration pull request number")
         _validate_sha(self.candidate_sha, "integration candidate sha")
         _validate_sha(self.integration_sha, "integration sha")
-        _require_plain_nonempty_text(self.evidence_ref, "integration evidence reference")
+        _require_opaque_evidence_ref(self.evidence_ref, "integration evidence reference")
         if self.candidate_repository_full_name is not None:
             _normalize_full_name(self.candidate_repository_full_name)
 
@@ -377,6 +396,7 @@ class GitHubFactoryAdapter:
 def _provider_check_id(check_id: str) -> str:
     """Keep untrusted provider identity outside the canonical Product Factory gate namespace."""
 
+    _require_provider_check_id(check_id)
     return f"github:{check_id}"
 
 
@@ -391,6 +411,27 @@ def _verification_check_state(state: CheckState) -> VerificationCheckState:
 def _require_plain_nonempty_text(value: object, label: str) -> str:
     if type(value) is not str or not value.strip():
         raise GitHubFactoryError(f"{label} must be exact non-empty text")
+    return value
+
+
+def _require_provider_check_id(value: object) -> str:
+    _require_plain_nonempty_text(value, "check id")
+    if not _PROVIDER_CHECK_ID_RE.fullmatch(value):
+        raise GitHubFactoryError("check id must be a bounded canonical machine identifier")
+    return value
+
+
+def _require_opaque_evidence_ref(value: object, label: str) -> str:
+    _require_plain_nonempty_text(value, label)
+    if len(value) > MAX_EVIDENCE_REF_LENGTH:
+        raise GitHubFactoryError(f"{label} exceeds maximum length")
+    normalized = value.casefold()
+    if normalized.startswith(_SENSITIVE_EVIDENCE_NAMESPACES):
+        raise GitHubFactoryError(f"{label} must not contain credential material")
+    if safe_evidence_reference(value) != value:
+        raise GitHubFactoryError(f"{label} must not contain credential material")
+    if not _OPAQUE_EVIDENCE_REF_RE.fullmatch(value):
+        raise GitHubFactoryError(f"{label} must be a bounded opaque reference")
     return value
 
 
