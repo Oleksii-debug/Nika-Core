@@ -58,13 +58,13 @@ class LearningDataSplit(StrEnum):
 
 
 def _require_token(value: object, *, field: str) -> str:
-    if not isinstance(value, str) or not _TOKEN_RE.fullmatch(value):
+    if type(value) is not str or not _TOKEN_RE.fullmatch(value):
         raise LearningPackageValidationError(f"{field} must be a bounded machine token")
     return value
 
 
 def _require_sha256(value: object, *, field: str) -> str:
-    if not isinstance(value, str) or not _SHA256_RE.fullmatch(value):
+    if type(value) is not str or not _SHA256_RE.fullmatch(value):
         raise LearningPackageValidationError(f"{field} must be lowercase SHA-256")
     return value
 
@@ -226,9 +226,23 @@ class FrozenLearningPackage:
         evaluation_set_sha256: str,
         shards: Iterable[LearningShard],
     ) -> FrozenLearningPackage:
-        shard_values = tuple(shards)
-        if not all(type(shard) is LearningShard for shard in shard_values):
-            raise LearningPackageValidationError("shards must contain exact LearningShard values")
+        try:
+            shard_iterator = iter(shards)
+        except TypeError as exc:
+            raise LearningPackageValidationError("shards must be iterable") from exc
+
+        shard_values_list: list[LearningShard] = []
+        for shard in shard_iterator:
+            if len(shard_values_list) >= _MAX_SHARDS:
+                raise LearningPackageValidationError(
+                    "shard count is outside the supported bound"
+                )
+            if type(shard) is not LearningShard:
+                raise LearningPackageValidationError(
+                    "shards must contain exact LearningShard values"
+                )
+            shard_values_list.append(shard)
+        shard_values = tuple(shard_values_list)
         return cls(
             package_id=package_id,
             package_version=package_version,
@@ -282,7 +296,11 @@ class FrozenLearningPackage:
         *,
         expected_manifest_sha256: str | None = None,
     ) -> FrozenLearningPackage:
-        if isinstance(raw, str):
+        if type(raw) is not str and type(raw) is not bytes:
+            raise LearningPackageIntegrityError(
+                "serialized package size is invalid; input must be exact str or bytes"
+            )
+        if type(raw) is str:
             if not raw or len(raw) > _MAX_MANIFEST_BYTES:
                 raise LearningPackageIntegrityError("serialized package size is invalid")
             decoded = raw
@@ -292,7 +310,7 @@ class FrozenLearningPackage:
                 raise LearningPackageIntegrityError("serialized package is not valid UTF-8") from exc
             if len(encoded) > _MAX_MANIFEST_BYTES:
                 raise LearningPackageIntegrityError("serialized package size is invalid")
-        elif isinstance(raw, bytes):
+        else:
             if not raw or len(raw) > _MAX_MANIFEST_BYTES:
                 raise LearningPackageIntegrityError("serialized package size is invalid")
             encoded = raw
@@ -300,8 +318,6 @@ class FrozenLearningPackage:
                 decoded = raw.decode("utf-8")
             except UnicodeDecodeError as exc:
                 raise LearningPackageIntegrityError("serialized package is not valid UTF-8") from exc
-        else:
-            raise LearningPackageIntegrityError("serialized package must be str or bytes")
         try:
             parsed = json.loads(decoded, object_pairs_hook=_reject_duplicate_keys)
         except json.JSONDecodeError as exc:
