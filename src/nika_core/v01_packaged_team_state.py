@@ -466,8 +466,6 @@ class V01PackagedTeamStateProvider:
             if len(assignments) != 2:
                 return invalid
 
-            # Reproducible checker bytes are not enough: the checker must compare the
-            # two canonical worker assignments that actually drove this durable team.
             expected_worker_ids = {
                 member_id for member_id, role in roles.items() if role == "worker"
             }
@@ -575,13 +573,24 @@ class V01PackagedTeamStateProvider:
                 status in {"agree", "disagree", "partial"}
                 and all(state == "valid" for state in source_states)
             )
-            return {
+            result: dict[str, Any] = {
                 "status": str(status),
                 "validated": evidence_valid,
                 "source_states": source_states,
                 "agreement_count": len(agreements),
                 "difference_count": len(differences),
             }
+            if evidence_valid and isinstance(persisted, Mapping):
+                analysis = persisted.get("model_analysis")
+                if isinstance(analysis, Mapping):
+                    result["model_result"] = {
+                        "text": analysis["text"],
+                        "provider_id": analysis["provider_id"],
+                        "provider_kind": analysis["provider_kind"],
+                        "model": analysis["model"],
+                        "provenance_validated": True,
+                    }
+            return result
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             return invalid
 
