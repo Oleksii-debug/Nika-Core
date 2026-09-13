@@ -14,6 +14,7 @@ from nika_core.kernel.audit import AuditLog
 from nika_core.model_artifact_schema import MODEL_ARTIFACT_SCHEMA_VERSION
 
 _MAX_TEXT = 2048
+_MAX_SET_LIKE_ITEMS = 128
 _MAX_MACHINE_INT = (1 << 63) - 1
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _LABEL = re.compile(r"[A-Za-z0-9_.:+-]{1,128}")
@@ -91,9 +92,11 @@ class ModelArtifactResources:
             raise ValueError(
                 "recommended_memory_bytes must not be below min_system_memory_bytes"
             )
-        if type(self.cpu_architectures) is not tuple or not all(
-            type(value) is str for value in self.cpu_architectures
-        ):
+        if type(self.cpu_architectures) is not tuple:
+            raise TypeError("cpu_architectures must be a tuple of exact text labels")
+        if len(self.cpu_architectures) > _MAX_SET_LIKE_ITEMS:
+            raise ValueError("cpu_architectures contains too many entries")
+        if not all(type(value) is str for value in self.cpu_architectures):
             raise TypeError("cpu_architectures must be a tuple of exact text labels")
         architectures = tuple(sorted(set(self.cpu_architectures)))
         if any(_ARCH.fullmatch(value) is None for value in architectures):
@@ -158,9 +161,11 @@ class ModelArtifactDescriptor:
             raise ValueError("provider_identity integrity must not claim a content SHA-256")
         if self.size_bytes is not None:
             _bounded_positive_int("size_bytes", self.size_bytes)
-        if type(self.capabilities) is not tuple or not all(
-            type(value) is str for value in self.capabilities
-        ):
+        if type(self.capabilities) is not tuple:
+            raise TypeError("capabilities must be a tuple of exact text labels")
+        if len(self.capabilities) > _MAX_SET_LIKE_ITEMS:
+            raise ValueError("capabilities contains too many entries")
+        if not all(type(value) is str for value in self.capabilities):
             raise TypeError("capabilities must be a tuple of exact text labels")
         capabilities = tuple(sorted(set(self.capabilities)))
         if any(_LABEL.fullmatch(value) is None for value in capabilities):
@@ -216,14 +221,22 @@ class ModelArtifactDescriptor:
         capabilities = raw.get("capabilities")
         if type(resources) is not dict or set(resources) != _RESOURCE_KEYS:
             raise ModelArtifactRegistryError("stored model artifact resource schema is invalid")
-        if type(capabilities) is not list or not all(
-            type(value) is str for value in capabilities
-        ):
+        if type(capabilities) is not list:
+            raise ModelArtifactRegistryError("stored model artifact capabilities are invalid")
+        if len(capabilities) > _MAX_SET_LIKE_ITEMS:
+            raise ModelArtifactRegistryError("stored model artifact capabilities are unbounded")
+        if not all(type(value) is str for value in capabilities):
             raise ModelArtifactRegistryError("stored model artifact capabilities are invalid")
         architectures = resources.get("cpu_architectures")
-        if type(architectures) is not list or not all(
-            type(value) is str for value in architectures
-        ):
+        if type(architectures) is not list:
+            raise ModelArtifactRegistryError(
+                "stored model artifact cpu architectures are invalid"
+            )
+        if len(architectures) > _MAX_SET_LIKE_ITEMS:
+            raise ModelArtifactRegistryError(
+                "stored model artifact cpu architectures are unbounded"
+            )
+        if not all(type(value) is str for value in architectures):
             raise ModelArtifactRegistryError(
                 "stored model artifact cpu architectures are invalid"
             )
@@ -395,7 +408,9 @@ def _bounded_positive_int(name: str, value: int | None) -> None:
 def _clean_text(name: str, value: str, *, label: bool = False) -> str:
     if type(value) is not str:
         raise TypeError(f"{name} must be exact text")
-    if not value or value != value.strip() or len(value) > _MAX_TEXT:
+    if not value or len(value) > _MAX_TEXT:
+        raise ValueError(f"{name} is empty, unbounded, or ambiguously padded")
+    if value != value.strip():
         raise ValueError(f"{name} is empty, unbounded, or ambiguously padded")
     if any(ord(char) < 32 or ord(char) == 127 for char in value):
         raise ValueError(f"{name} contains control characters")
