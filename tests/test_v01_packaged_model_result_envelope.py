@@ -290,10 +290,53 @@ def test_model_backed_packaged_comparison_survives_fresh_store_restart_without_l
             (team_id,),
         ).fetchone()
         assert row is not None
-        persisted = json.loads(row["payload_json"])
-        canonical_persisted = copy.deepcopy(persisted)
-        del persisted["model_analysis"]
-        del persisted["model_analysis_provenance"]
+        canonical_persisted = json.loads(row["payload_json"])
+        hostile_persisted = copy.deepcopy(canonical_persisted)
+        hostile_analysis = hostile_persisted["model_analysis"]
+        hostile_provenance = hostile_persisted["model_analysis_provenance"]
+        assert isinstance(hostile_analysis, dict)
+        assert isinstance(hostile_provenance, dict)
+        hostile_provider = "foreign-local-provider"
+        hostile_model = "foreign-self-consistent-model"
+        hostile_analysis["provider_id"] = hostile_provider
+        hostile_analysis["model"] = hostile_model
+        hostile_provenance["provider_id"] = hostile_provider
+        hostile_provenance["model_fingerprint"] = model_identity_fingerprint(hostile_model)
+        conn.execute(
+            "UPDATE multi_agent_results SET payload_json = ? WHERE result_id = ?",
+            (
+                json.dumps(hostile_persisted, sort_keys=True, separators=(",", ":")),
+                row["result_id"],
+            ),
+        )
+
+    wrong_frozen_model = restarted_provider()["v01_team_task"]
+    assert wrong_frozen_model is not None
+    wrong_frozen_comparison = wrong_frozen_model["final_result"]["comparison"]
+    assert wrong_frozen_comparison["status"] == "evidence_invalid"
+    assert wrong_frozen_comparison["validated"] is False
+    assert "model_result" not in wrong_frozen_comparison
+    assert _MODEL_TEXT_CANARY not in json.dumps(
+        wrong_frozen_model,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    assert hostile_provider not in json.dumps(
+        wrong_frozen_model,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    assert hostile_model not in json.dumps(
+        wrong_frozen_model,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    assert calls == [model_name] * 3
+
+    persisted = copy.deepcopy(canonical_persisted)
+    del persisted["model_analysis"]
+    del persisted["model_analysis_provenance"]
+    with restarted_store.connection() as conn:
         conn.execute(
             "UPDATE multi_agent_results SET payload_json = ? WHERE result_id = ?",
             (
