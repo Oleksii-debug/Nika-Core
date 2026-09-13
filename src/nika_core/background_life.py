@@ -108,7 +108,7 @@ def _require_percent(
 
 def _require_headroom(
     value: object,
-    expected: int | float | None,
+    expected: float | None,
     name: str,
 ) -> None:
     if expected is None:
