@@ -19,6 +19,7 @@ _UNAVAILABLE_MESSAGE = "Стан командного завдання недо�
 _ALLOWED_STAGES = frozenset({"worker", "checker", "source_worker"})
 _TERMINAL_TEAM_STATES = frozenset({"completed", "failed", "cancelled"})
 _TERMINAL_MEMBER_STATES = frozenset({"completed", "failed", "cancelled"})
+_TASK_SELECTION_FIELD = "v01_model_selection"
 _MAX_MODEL_ANALYSIS_CHARS = 2000
 
 
@@ -361,6 +362,47 @@ class V01PackagedTeamStateProvider:
         return events
 
     @staticmethod
+    def _model_evidence_required(conn: Any, *, shared_task_id: str) -> bool:
+        binding_table = conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'v01_task_model_bindings'"
+        ).fetchone()
+        binding = None
+        if binding_table is not None:
+            binding = conn.execute(
+                "SELECT selection_id FROM v01_task_model_bindings WHERE task_id = ?",
+                (shared_task_id,),
+            ).fetchone()
+
+        task_row = conn.execute(
+            "SELECT payload_json FROM tasks WHERE task_id = ?",
+            (shared_task_id,),
+        ).fetchone()
+        if task_row is None:
+            if binding is not None:
+                raise ValueError("model binding exists without durable task")
+            return False
+        task_payload = json.loads(task_row["payload_json"])
+        if not isinstance(task_payload, Mapping):
+            raise ValueError("invalid durable task payload")
+
+        has_selection = _TASK_SELECTION_FIELD in task_payload
+        selection_id = task_payload.get(_TASK_SELECTION_FIELD)
+        if not has_selection:
+            if binding is not None:
+                raise ValueError("model binding exists without frozen task selection")
+            return False
+        if (
+            type(selection_id) is not str
+            or not selection_id
+            or selection_id != selection_id.strip()
+            or binding is None
+            or binding["selection_id"] != selection_id
+        ):
+            raise ValueError("invalid durable model selection binding")
+        return True
+
+    @staticmethod
     def _valid_persisted_checker_payload(
         persisted: object,
         *,
@@ -368,12 +410,15 @@ class V01PackagedTeamStateProvider:
         shared_task_id: str,
         team_id: str,
         root_id: str,
+        model_required: bool = False,
     ) -> bool:
         if not isinstance(persisted, Mapping):
             return False
         keys = set(persisted)
         if keys == {"checker_summary"}:
-            return persisted.get("checker_summary") == expected
+            return not model_required and persisted.get("checker_summary") == expected
+        if not model_required:
+            return False
         if keys != {
             "checker_summary",
             "model_analysis",
@@ -531,12 +576,17 @@ class V01PackagedTeamStateProvider:
             if checker_row["outcome"] != "completed" or checker_row["error"] is not None:
                 return invalid
             persisted = json.loads(checker_row["payload_json"])
+            model_required = V01PackagedTeamStateProvider._model_evidence_required(
+                conn,
+                shared_task_id=shared_task_id,
+            )
             if not V01PackagedTeamStateProvider._valid_persisted_checker_payload(
                 persisted,
                 expected=expected,
                 shared_task_id=shared_task_id,
                 team_id=team_id,
                 root_id=root_id,
+                model_required=model_required,
             ):
                 return invalid
 
