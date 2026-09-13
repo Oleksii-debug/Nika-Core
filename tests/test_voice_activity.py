@@ -131,8 +131,10 @@ def test_rms_uses_signed_pcm16_full_scale() -> None:
         {"sample_rate_hz": True},
         {"sample_rate_hz": 7_999},
         {"start_rms": float("nan")},
+        {"start_rms": float("inf")},
         {"start_rms": 0.0},
         {"start_rms": 1.1},
+        {"stop_rms": float("-inf")},
         {"stop_rms": 0.0},
         {"stop_rms": 0.2, "start_rms": 0.1},
         {"attack_frames": 0},
@@ -143,6 +145,22 @@ def test_rms_uses_signed_pcm16_full_scale() -> None:
 def test_invalid_configuration_fails_closed(kwargs) -> None:
     with pytest.raises(ValueError):
         VoiceActivityConfig(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("start_rms", 1 << 100_000),
+        ("stop_rms", 1 << 100_000),
+    ],
+    ids=["start-rms-huge-int", "stop-rms-huge-int"],
+)
+def test_huge_numeric_thresholds_fail_with_owned_value_error(
+    field_name: str,
+    value: int,
+) -> None:
+    with pytest.raises(ValueError, match="finite number"):
+        VoiceActivityConfig(**{field_name: value})
 
 
 @pytest.mark.parametrize("config", [object(), 0, False, "config"])
