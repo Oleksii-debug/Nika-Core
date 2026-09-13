@@ -392,7 +392,7 @@ class MicrophoneCaptureService:
     def _read_capabilities(self) -> MicrophoneCaptureCapabilities:
         try:
             capabilities = self._adapter.capabilities
-        except Exception as error:  # noqa: BLE001 - adapter trust boundary
+        except Exception as error:
             raise MicrophoneCaptureAdapterError(
                 MicrophoneCaptureFailureCode.ADAPTER_ERROR,
                 "microphone capabilities are unavailable",
@@ -482,7 +482,7 @@ def _consume_task_result(task: asyncio.Task[MicrophoneCaptureResponse]) -> None:
         task.result()
     except asyncio.CancelledError:
         pass
-    except Exception:  # noqa: BLE001 - late adapter result is intentionally discarded
+    except Exception:  # noqa: S110 - late adapter result is intentionally discarded
         pass
 
 
