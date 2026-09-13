@@ -6,7 +6,15 @@ from enum import StrEnum
 from typing import Protocol
 
 from nika_core.product_command.reference_safety import safe_evidence_reference
-from nika_core.product_factory_verification import CandidateVerification, VerificationState
+from nika_core.product_factory_verification import (
+    PRODUCT_FACTORY_REQUIRED_CHECK_IDS,
+    CandidateVerification,
+    CheckState,
+    ExactShaCheckEvidence,
+    VerificationError,
+    VerificationState,
+    classify_candidate_verification,
+)
 
 _MAX_EVIDENCE_REFS = 16
 _MAX_EVIDENCE_REF_CHARS = 256
@@ -153,6 +161,7 @@ class CandidateReviewRecord:
         reviewer_authority: ReviewerAuthorityEvidence | None = None,
         verdict: ReviewVerdict | None = None,
         verification: CandidateVerification | None = None,
+        verification_evidence: tuple[ExactShaCheckEvidence, ...] | None = None,
     ) -> CandidateReviewRecord:
         """Build a validated non-initial state for canonical lifecycle methods and restore."""
         if not isinstance(identity, CandidateReviewIdentity):
@@ -167,11 +176,11 @@ class CandidateReviewRecord:
         object.__setattr__(record, "verdict", verdict)
         record._validate()
         if record.state is ReviewState.MERGE_READY:
-            if verification is None:
+            if verification is None or verification_evidence is None:
                 raise ReviewPipelineError(
                     "MERGE_READY construction requires exact-head verification clearance"
                 )
-            record._validate_merge_clearance(verification)
+            record._validate_merge_clearance(verification, verification_evidence)
         return record
 
     def snapshot(self) -> str:
@@ -185,6 +194,7 @@ class CandidateReviewRecord:
         payload: str,
         *,
         verification: CandidateVerification | None = None,
+        verification_evidence: tuple[ExactShaCheckEvidence, ...] | None = None,
     ) -> CandidateReviewRecord:
         try:
             raw = json.loads(payload)
@@ -207,6 +217,7 @@ class CandidateReviewRecord:
                 reviewer_authority=authority,
                 verdict=verdict,
                 verification=verification,
+                verification_evidence=verification_evidence,
             )
         except (KeyError, TypeError, ValueError, AttributeError) as exc:
             raise ReviewPipelineError("review snapshot is invalid") from exc
@@ -262,10 +273,11 @@ class CandidateReviewRecord:
         *,
         candidate_sha: str,
         verification: CandidateVerification,
+        verification_evidence: tuple[ExactShaCheckEvidence, ...],
     ) -> CandidateReviewRecord:
         self._require_state(ReviewState.PASS)
         self._require_candidate(candidate_sha)
-        self._validate_merge_clearance(verification)
+        self._validate_merge_clearance(verification, verification_evidence)
         return self.__from_transition(
             self.identity,
             ReviewState.MERGE_READY,
@@ -273,6 +285,7 @@ class CandidateReviewRecord:
             reviewer_authority=self.reviewer_authority,
             verdict=self.verdict,
             verification=verification,
+            verification_evidence=verification_evidence,
         )
 
     def require_fix(self, *, candidate_sha: str) -> CandidateReviewRecord:
@@ -359,22 +372,76 @@ class CandidateReviewRecord:
             independent_review_authorized=True,
         )
 
-    def _validate_merge_clearance(self, verification: CandidateVerification) -> None:
+    def _validate_merge_clearance(
+        self,
+        verification: CandidateVerification,
+        verification_evidence: tuple[ExactShaCheckEvidence, ...],
+    ) -> None:
         if type(verification) is not CandidateVerification:
             raise ReviewPipelineError("exact-head verification clearance is malformed")
+        if type(verification_evidence) is not tuple or any(
+            type(item) is not ExactShaCheckEvidence for item in verification_evidence
+        ):
+            raise ReviewPipelineError("exact-head verification evidence is malformed")
+        if any(
+            type(item.check_id) is not str
+            or type(item.candidate_sha) is not str
+            or type(item.state) is not CheckState
+            or type(item.evidence_ref) is not str
+            or type(item.required) is not bool
+            for item in verification_evidence
+        ):
+            raise ReviewPipelineError("exact-head verification evidence is malformed")
 
         candidate_sha = verification.candidate_sha
+        if type(candidate_sha) is not str:
+            raise ReviewPipelineError("exact-head verification clearance is malformed")
         _validate_sha(candidate_sha)
         if candidate_sha != self.identity.candidate_sha:
             raise StaleCandidateReviewError(
                 "verification clearance does not match exact current candidate SHA"
             )
+        if type(verification.evidence_refs) is not tuple or any(
+            type(value) is not str for value in verification.evidence_refs
+        ):
+            raise ReviewPipelineError("exact-head verification clearance is malformed")
+        if type(verification.state) is not VerificationState:
+            raise ReviewPipelineError("exact-head verification clearance is malformed")
+
+        try:
+            normalized_evidence = tuple(
+                ExactShaCheckEvidence(
+                    check_id=item.check_id,
+                    candidate_sha=item.candidate_sha,
+                    state=item.state,
+                    evidence_ref=item.evidence_ref,
+                    required=item.required,
+                )
+                for item in verification_evidence
+            )
+            reclassified = classify_candidate_verification(
+                self.identity.candidate_sha,
+                normalized_evidence,
+                PRODUCT_FACTORY_REQUIRED_CHECK_IDS,
+            )
+        except VerificationError as exc:
+            raise ReviewPipelineError("exact-head verification evidence is invalid") from exc
+
         if (
-            verification.state is not VerificationState.PASS
-            or verification.merge_clearance is not True
+            reclassified.state is not VerificationState.PASS
+            or reclassified.merge_clearance is not True
         ):
             raise ReviewPipelineError(
                 "exact-head verification clearance is required for merge ready"
+            )
+        if (
+            verification.candidate_sha != reclassified.candidate_sha
+            or verification.state is not reclassified.state
+            or verification.evidence_refs != reclassified.evidence_refs
+            or verification.merge_clearance is not True
+        ):
+            raise ReviewPipelineError(
+                "exact-head verification receipt does not match reclassified evidence"
             )
 
     def _require_state(self, expected: ReviewState) -> None:
