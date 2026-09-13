@@ -9,6 +9,7 @@ from nika_core.product_factory_verification import (
     CandidateVerification,
     CheckState,
     ExactShaCheckEvidence,
+    VerificationState,
     classify_candidate_verification,
 )
 from nika_core.qa.review_state import (
@@ -37,6 +38,27 @@ class _Authority:
     independent_review_authorized: bool = True
 
 
+def _verification_evidence(
+    candidate_sha: str = SHA_A,
+    *,
+    factory_state: CheckState = CheckState.PASS,
+) -> tuple[ExactShaCheckEvidence, ...]:
+    return (
+        ExactShaCheckEvidence(
+            "core",
+            candidate_sha,
+            CheckState.PASS,
+            f"ci:core:{candidate_sha}",
+        ),
+        ExactShaCheckEvidence(
+            "factory",
+            candidate_sha,
+            factory_state,
+            f"ci:factory:{factory_state.value}:{candidate_sha}",
+        ),
+    )
+
+
 def _verification(
     candidate_sha: str = SHA_A,
     *,
@@ -44,20 +66,7 @@ def _verification(
 ) -> CandidateVerification:
     return classify_candidate_verification(
         candidate_sha,
-        (
-            ExactShaCheckEvidence(
-                "core",
-                candidate_sha,
-                CheckState.PASS,
-                f"ci:core:{candidate_sha}",
-            ),
-            ExactShaCheckEvidence(
-                "factory",
-                candidate_sha,
-                factory_state,
-                f"ci:factory:{factory_state.value}:{candidate_sha}",
-            ),
-        ),
+        _verification_evidence(candidate_sha, factory_state=factory_state),
         PRODUCT_FACTORY_REQUIRED_CHECK_IDS,
     )
 
@@ -109,6 +118,7 @@ def test_pass_journey_is_exact_sha_and_restart_safe() -> None:
     assert restored.mark_merge_ready(
         candidate_sha=SHA_A,
         verification=_verification(),
+        verification_evidence=_verification_evidence(),
     ).state is ReviewState.MERGE_READY
 
 
@@ -146,6 +156,7 @@ def test_merge_ready_rejects_failed_exact_head_verification() -> None:
         _passed_review().mark_merge_ready(
             candidate_sha=SHA_A,
             verification=_verification(factory_state=CheckState.FAIL),
+            verification_evidence=_verification_evidence(factory_state=CheckState.FAIL),
         )
 
 
@@ -154,6 +165,7 @@ def test_merge_ready_rejects_structural_clearance_impostor() -> None:
         _passed_review().mark_merge_ready(
             candidate_sha=SHA_A,
             verification=_Clearance(SHA_A, True),  # type: ignore[arg-type]
+            verification_evidence=_verification_evidence(),
         )
 
 
@@ -162,7 +174,29 @@ def test_merge_ready_rejects_stale_verification_clearance() -> None:
         _passed_review().mark_merge_ready(
             candidate_sha=SHA_A,
             verification=_verification(candidate_sha=SHA_B),
+            verification_evidence=_verification_evidence(candidate_sha=SHA_B),
         )
+
+
+def test_mutated_failed_verification_receipt_cannot_mint_merge_ready() -> None:
+    evidence = _verification_evidence(factory_state=CheckState.FAIL)
+    verification = classify_candidate_verification(
+        SHA_A,
+        evidence,
+        PRODUCT_FACTORY_REQUIRED_CHECK_IDS,
+    )
+    assert verification.state is VerificationState.FAIL
+    object.__setattr__(verification, "state", VerificationState.PASS)
+    assert verification.merge_clearance is True
+
+    passed = _passed_review()
+    with pytest.raises(ReviewPipelineError, match="verification clearance is required"):
+        passed.mark_merge_ready(
+            candidate_sha=SHA_A,
+            verification=verification,
+            verification_evidence=evidence,
+        )
+    assert passed.state is ReviewState.PASS
 
 
 def test_failed_review_must_transition_to_fix_required() -> None:
@@ -233,6 +267,7 @@ def test_successor_head_invalidates_prior_clearance_and_reviewer_authority() -> 
     merge_ready = _passed_review().mark_merge_ready(
         candidate_sha=SHA_A,
         verification=_verification(),
+        verification_evidence=_verification_evidence(),
     )
 
     successor = merge_ready.successor(candidate_sha=SHA_B, implementer_id="dev-2")
