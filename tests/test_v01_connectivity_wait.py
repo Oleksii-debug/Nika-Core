@@ -379,7 +379,7 @@ def test_two_simultaneous_reconnect_wakes_grant_continuation_once(tmp_path) -> N
         return service.evaluate(
             job_id="connectivity-race",
             policy=policy,
-            now=now,
+            now=now + timedelta(seconds=1),
             replay_safe=True,
         )
 

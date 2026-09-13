@@ -17,6 +17,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--evidence", type=Path, required=True)
     result.add_argument("--source-sha", required=True)
     result.add_argument("--artifact-reference", required=True)
+    result.add_argument("--product-version", required=True)
     return result
 
 
@@ -27,9 +28,14 @@ def main() -> int:
         args.evidence,
         source_sha=args.source_sha,
         artifact_reference=args.artifact_reference,
+        expected_product_version=args.product_version,
     )
     if not findings:
-        findings = verify_release_archive(args.artifact, source_sha=args.source_sha)
+        findings = verify_release_archive(
+            args.artifact,
+            source_sha=args.source_sha,
+            expected_product_version=args.product_version,
+        )
     if findings:
         raise SystemExit("M12 distributable evidence verification failed: " + ", ".join(findings))
     print("M12 distributable evidence verified")

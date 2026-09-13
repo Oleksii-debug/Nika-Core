@@ -35,7 +35,7 @@ from nika_core.runtime.recovery_claims import (
     recovery_claim_metadata,
     write_pending_recovery_claim,
 )
-from nika_core.runtime.retry import RetryPolicy
+from nika_core.runtime.retry import RetryPolicy, usable_resume_token
 from nika_core.runtime.session_store import (
     RuntimeSessionRecord,
     RuntimeSessionStore,
@@ -147,7 +147,8 @@ class TaskRuntimeCoordinator:
         resume_claim: _RuntimeResumeClaim | None = None
         resume_claim_started = False
         while policy.should_retry(result, retries_used=retries_used):
-            if resume_claim is not None and result.resume_token is None:
+            resume_token = usable_resume_token(result.resume_token)
+            if resume_claim is not None and resume_token is None:
                 self._audit.append(
                     event_type="runtime.retry_blocked_unsafe_fresh_replay",
                     entity_type="task",
@@ -176,7 +177,7 @@ class TaskRuntimeCoordinator:
                     "delay_seconds": delay,
                     "error": result.error,
                     "error_code": result.error_code.value if result.error_code else None,
-                    "resume_token": result.resume_token,
+                    "resume_token": resume_token,
                 },
             )
             if delay:
@@ -190,14 +191,14 @@ class TaskRuntimeCoordinator:
                     "runtime_id": runtime.runtime_id,
                     "thread_id": request.thread_id,
                     "retry_number": retries_used,
-                    "resume": result.resume_token is not None,
+                    "resume": resume_token is not None,
                 },
             )
-            if result.resume_token is not None:
+            if resume_token is not None:
                 resume_request = RuntimeResumeRequest(
                     task_id=request.task_id,
                     thread_id=request.thread_id,
-                    resume_token=result.resume_token,
+                    resume_token=resume_token,
                     mode=RuntimeResumeMode.CONTINUE,
                     max_steps=request.max_steps,
                     timeout_seconds=request.timeout_seconds,
@@ -216,7 +217,7 @@ class TaskRuntimeCoordinator:
                         )
                     if record.thread_id != request.thread_id:
                         raise ValueError("retry thread does not match persisted runtime session")
-                    if record.resume_token != result.resume_token:
+                    if record.resume_token != resume_token:
                         raise ValueError("retry token does not match persisted runtime session")
                     task_state = self._task_state(request.task_id)
                     resume_claim = await self._acquire_resume_claim(
@@ -295,6 +296,10 @@ class TaskRuntimeCoordinator:
             raise ValueError("Persisted approval wait requires explicit resume_saved_approval()")
 
         task_state = self._task_state(task_id)
+        if record.is_active and task_state == TaskState.RETRYING:
+            raise ValueError(
+                "Persisted RETRYING runtime session lacks durable retry attempt/backoff authority"
+            )
         claim = await self._acquire_resume_claim(
             runtime,
             record,
@@ -563,8 +568,10 @@ class TaskRuntimeCoordinator:
         if not callable(token_factory):
             self._queue.transition(request.task_id, TaskState.RUNNING)
             return False
-        resume_token = token_factory(task_id=request.task_id, thread_id=request.thread_id)
-        if not resume_token:
+        resume_token = usable_resume_token(
+            token_factory(task_id=request.task_id, thread_id=request.thread_id)
+        )
+        if resume_token is None:
             self._queue.transition(request.task_id, TaskState.RUNNING)
             return False
 
@@ -575,7 +582,7 @@ class TaskRuntimeCoordinator:
                 task_id=request.task_id,
                 runtime_id=runtime.runtime_id,
                 thread_id=request.thread_id,
-                resume_token=str(resume_token),
+                resume_token=resume_token,
             )
         return True
 
@@ -586,6 +593,10 @@ class TaskRuntimeCoordinator:
     ) -> RuntimeResumeMode:
         if record.is_active:
             current = self._task_state(task_id)
+            if current == TaskState.RETRYING:
+                raise ValueError(
+                    "Persisted RETRYING runtime session lacks durable retry attempt/backoff authority"
+                )
             if current == TaskState.RUNNING:
                 self._queue.transition(task_id, TaskState.PAUSED)
             elif current not in {TaskState.PAUSED, TaskState.FAILED}:
@@ -616,6 +627,8 @@ class TaskRuntimeCoordinator:
         task_state: TaskState,
         mode: RuntimeResumeMode,
     ) -> _RuntimeResumeClaim:
+        if usable_resume_token(record.resume_token) is None:
+            raise ValueError("persisted runtime session has no usable resume token")
         checkpoint_id = await self._resume_checkpoint_identity(runtime, record)
         session_fingerprint = self._resume_session_fingerprint(record)
         claim_fingerprint = self._resume_claim_fingerprint(
@@ -883,13 +896,14 @@ class TaskRuntimeCoordinator:
         runtime coroutine races with accepted cancellation and reports a later outcome, Nika
         records that observation but does not resurrect or overwrite the cancelled task.
         """
+        resume_token = usable_resume_token(result.resume_token)
         with self._queue.store.connection() as conn:
             current = self._task_state_with_connection(conn, task_id)
             cancellation_won = current == TaskState.CANCELLED
 
             if cancellation_won:
                 self._sessions.delete_with_connection(conn, task_id)
-            elif result.outcome in _RESUMABLE_OUTCOMES and result.resume_token:
+            elif result.outcome in _RESUMABLE_OUTCOMES and resume_token is not None:
                 self._sessions.record_result_with_connection(
                     conn,
                     task_id=task_id,
@@ -965,7 +979,7 @@ class TaskRuntimeCoordinator:
                     "thread_id": thread_id,
                     "outcome": effective_outcome.value,
                     "runtime_reported_outcome": result.outcome.value,
-                    "resume_token": result.resume_token,
+                    "resume_token": resume_token,
                     "error": result.error,
                     "error_code": result.error_code.value if result.error_code else None,
                 },

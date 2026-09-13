@@ -20,6 +20,7 @@ from nika_core.runtime.recovery_claims import (
     recovery_claim_is_reclaimable,
 )
 from nika_core.runtime.registry import RuntimeRegistry
+from nika_core.runtime.retry import usable_resume_token
 from nika_core.runtime.session_store import RuntimeSessionRecord, RuntimeSessionStore
 
 
@@ -63,11 +64,13 @@ class RuntimeRecoveryService:
 
     Startup recovery is intentionally conservative. Only an ACTIVE session left in RUNNING
     state by abrupt process loss is eligible for automatic continuation, and only when no
-    unresolved external side-effect reservation exists. A recovery claim abandoned before its
-    runtime effect starts is reclaimable only after its durable activation lease expires. Once
-    effect_started is persisted, restart remains fail-closed until reconciliation. Before any
-    execution, the registered runtime must also prove that the persisted resume cursor resolves
-    to a readable durable checkpoint.
+    unresolved external side-effect reservation exists. RETRYING is fail-closed because the
+    canonical runtime session does not durably encode retry number or not-before authority;
+    replaying it after restart could reset bounded backoff or retry budget. A recovery claim
+    abandoned before its runtime effect starts is reclaimable only after its durable activation
+    lease expires. Once effect_started is persisted, restart remains fail-closed until
+    reconciliation. Before any execution, the registered runtime must also prove that the
+    persisted resume cursor resolves to a readable durable checkpoint.
     """
 
     def __init__(
@@ -95,8 +98,9 @@ class RuntimeRecoveryService:
         """Return deterministic recovery decisions for every persisted runtime session.
 
         ACTIVE/RUNNING candidates are provisional until ``resume_safe_crash_sessions`` performs
-        the runtime-specific async checkpoint preflight. The sync inventory deliberately never
-        touches third-party checkpoint objects.
+        the runtime-specific async checkpoint preflight. ACTIVE/RETRYING candidates remain
+        fail-closed until canonical durable retry attempt + not-before authority exists.
+        The sync inventory deliberately never touches third-party checkpoint objects.
 
         Generic external-effect reservations left PENDING across process recreation have unknown
         outcomes and are promoted to UNCERTAIN. Canonical runtime recovery claims are excluded:
@@ -242,6 +246,15 @@ class RuntimeRecoveryService:
                 ),
                 None,
             )
+        if usable_resume_token(record.resume_token) is None:
+            return (
+                replace(
+                    candidate,
+                    disposition=RecoveryDisposition.INCONSISTENT_STATE,
+                    reason="persisted runtime session has no usable resume token",
+                ),
+                None,
+            )
         if not isinstance(runtime, RuntimeResumeProbePort):
             return (
                 replace(
@@ -332,7 +345,23 @@ class RuntimeRecoveryService:
                 "persisted runtime session references a missing Nika task",
             )
 
+        if usable_resume_token(record.resume_token) is None:
+            return self._candidate(
+                record,
+                task_state,
+                RecoveryDisposition.INCONSISTENT_STATE,
+                "persisted runtime session has no usable resume token",
+            )
+
         if record.is_active:
+            if task_state == TaskState.RETRYING:
+                return self._candidate(
+                    record,
+                    task_state,
+                    RecoveryDisposition.INCONSISTENT_STATE,
+                    "crash-left RETRYING session has no durable retry attempt/not-before "
+                    "authority; automatic resume would reset bounded retry semantics",
+                )
             if task_state == TaskState.RUNNING:
                 return self._candidate(
                     record,

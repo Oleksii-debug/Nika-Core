@@ -6,6 +6,12 @@ from collections.abc import Mapping
 from typing import Any
 
 from nika_core.builder.repository import AgentDefinitionRepository
+from nika_core.intelligence.modes import IntelligenceMode
+from nika_core.intelligence.provenance import (
+    IntelligenceProvenance,
+    IntelligenceResultStatus,
+    resolve_model_intelligence_mode,
+)
 from nika_core.model_gateway.contracts import (
     ModelErrorCode,
     ModelGatewayError,
@@ -14,7 +20,7 @@ from nika_core.model_gateway.contracts import (
     PrivacyClass,
     ProviderKind,
 )
-from nika_core.model_gateway.gateway import ModelGateway
+from nika_core.model_gateway.gateway import ModelGateway, model_identity_fingerprint
 from nika_core.runtime.contracts import (
     RuntimeCapability,
     RuntimeErrorCode,
@@ -40,6 +46,7 @@ class ModelGatewayAgentRuntime:
         definitions: AgentDefinitionRepository,
         provider_id: str,
         provider_kind: ProviderKind,
+        intelligence_mode: IntelligenceMode | None = None,
         model: str | None = None,
         timeout_seconds: float = 60.0,
         privacy: PrivacyClass = PrivacyClass.PRIVATE,
@@ -62,6 +69,11 @@ class ModelGatewayAgentRuntime:
         self._definitions = definitions
         self._provider_id = provider_id
         self._provider_kind = provider_kind
+        self._intelligence_mode = resolve_model_intelligence_mode(
+            provider_id=provider_id,
+            provider_kind=provider_kind,
+            explicit_mode=intelligence_mode,
+        )
         self._model = model
         self._timeout_seconds = timeout_seconds
         self._privacy = privacy
@@ -72,6 +84,10 @@ class ModelGatewayAgentRuntime:
     @property
     def runtime_id(self) -> str:
         return f"model-gateway:{self._provider_id}"
+
+    @property
+    def intelligence_mode(self) -> IntelligenceMode:
+        return self._intelligence_mode
 
     @property
     def capabilities(self) -> frozenset[RuntimeCapability]:
@@ -113,10 +129,21 @@ class ModelGatewayAgentRuntime:
         except asyncio.CancelledError:
             return RuntimeResult(
                 outcome=RuntimeOutcome.CANCELLED,
-                output={"message": "Model request cancelled.", "provider_id": self._provider_id},
+                output={
+                    "message": "Model request cancelled.",
+                    "provider_id": self._provider_id,
+                    "intelligence_provenance": self._provenance(
+                        request_correlation_id=model_request.request_id,
+                        model=model_request.model,
+                        status=IntelligenceResultStatus.CANCELLED,
+                    ),
+                },
             )
         except ModelGatewayError as exc:
-            return self._failure_result(exc)
+            return self._failure_result(
+                exc,
+                request_correlation_id=model_request.request_id,
+            )
         finally:
             async with self._active_lock:
                 if self._active.get(key) is task:
@@ -125,7 +152,15 @@ class ModelGatewayAgentRuntime:
         if response.request_id != model_request.request_id:
             return RuntimeResult(
                 outcome=RuntimeOutcome.FAILED,
-                output={"recoverable": False, "provider_id": self._provider_id},
+                output={
+                    "recoverable": False,
+                    "provider_id": self._provider_id,
+                    "intelligence_provenance": self._provenance(
+                        request_correlation_id=model_request.request_id,
+                        model=model_request.model,
+                        status=IntelligenceResultStatus.FAILED,
+                    ),
+                },
                 error="The model provider returned a response for a different request.",
                 error_code=RuntimeErrorCode.INTERNAL,
             )
@@ -136,6 +171,11 @@ class ModelGatewayAgentRuntime:
                     "recoverable": False,
                     "provider_id": response.provider_id,
                     "provider_kind": response.provider_kind.value,
+                    "intelligence_provenance": self._provenance(
+                        request_correlation_id=model_request.request_id,
+                        model=model_request.model,
+                        status=IntelligenceResultStatus.FAILED,
+                    ),
                 },
                 error="The model response did not match the configured provider route.",
                 error_code=RuntimeErrorCode.INTERNAL,
@@ -147,6 +187,11 @@ class ModelGatewayAgentRuntime:
                     "recoverable": False,
                     "provider_id": response.provider_id,
                     "provider_kind": response.provider_kind.value,
+                    "intelligence_provenance": self._provenance(
+                        request_correlation_id=model_request.request_id,
+                        model=model_request.model,
+                        status=IntelligenceResultStatus.FAILED,
+                    ),
                 },
                 error="The model response did not match the configured model identity.",
                 error_code=RuntimeErrorCode.INTERNAL,
@@ -160,6 +205,11 @@ class ModelGatewayAgentRuntime:
                 "provider_kind": response.provider_kind.value,
                 "model": response.model,
                 "latency_ms": response.latency_ms,
+                "intelligence_provenance": self._provenance(
+                    request_correlation_id=model_request.request_id,
+                    model=response.model,
+                    status=IntelligenceResultStatus.SUCCEEDED,
+                ),
             },
         )
 
@@ -236,7 +286,12 @@ class ModelGatewayAgentRuntime:
             temperature=self._temperature,
         )
 
-    def _failure_result(self, error: ModelGatewayError) -> RuntimeResult:
+    def _failure_result(
+        self,
+        error: ModelGatewayError,
+        *,
+        request_correlation_id: str,
+    ) -> RuntimeResult:
         message = {
             ModelErrorCode.UNAVAILABLE: "The configured model provider is unavailable. Check it, then retry.",
             ModelErrorCode.TIMEOUT: "The configured model request timed out. Retry when the provider is ready.",
@@ -261,7 +316,15 @@ class ModelGatewayAgentRuntime:
         if error.code is ModelErrorCode.CANCELLED:
             return RuntimeResult(
                 outcome=RuntimeOutcome.CANCELLED,
-                output={"message": message, "provider_id": error.provider_id or self._provider_id},
+                output={
+                    "message": message,
+                    "provider_id": error.provider_id or self._provider_id,
+                    "intelligence_provenance": self._provenance(
+                        request_correlation_id=request_correlation_id,
+                        model=self._model,
+                        status=IntelligenceResultStatus.CANCELLED,
+                    ),
+                },
             )
         runtime_code = (
             RuntimeErrorCode.TIMEOUT
@@ -288,10 +351,31 @@ class ModelGatewayAgentRuntime:
                 "recoverable": recoverable,
                 "provider_retryable": error.retryable,
                 "failure_effect": error.failure_effect.value,
+                "intelligence_provenance": self._provenance(
+                    request_correlation_id=request_correlation_id,
+                    model=self._model,
+                    status=IntelligenceResultStatus.FAILED,
+                ),
             },
             error=message,
             error_code=runtime_code,
         )
+
+    def _provenance(
+        self,
+        *,
+        request_correlation_id: str,
+        model: str | None,
+        status: IntelligenceResultStatus,
+    ) -> dict[str, str]:
+        return IntelligenceProvenance(
+            intelligence_mode=self._intelligence_mode,
+            provider_kind=self._provider_kind,
+            provider_id=self._provider_id,
+            model_fingerprint=model_identity_fingerprint(model),
+            request_correlation_id=request_correlation_id,
+            status=status,
+        ).to_payload()
 
     @staticmethod
     def _required_text(payload: Mapping[str, object], key: str) -> str:
