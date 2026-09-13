@@ -3,7 +3,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import UTC, datetime
 
-from nika_core.model_gateway.contracts import ModelRequest, ProviderCapabilities, ProviderKind
+from nika_core.model_gateway.contracts import (
+    ModelRequest,
+    ProviderCapabilities,
+    ProviderKind,
+)
 from nika_core.security.policy import ActionIntent
 from nika_core.security.standing_permission import (
     StandingPermissionBinding,
@@ -37,7 +41,9 @@ class StandingPermissionCloudEffectAuthorizer:
     ) -> None:
         binding = self._binding
         if provider.kind is not ProviderKind.CLOUD:
-            raise PermissionError("standing cloud authority cannot authorize a non-cloud provider")
+            raise PermissionError(
+                "standing cloud authority cannot authorize a non-cloud provider"
+            )
         if provider.provider_id != binding.target or request.provider_id != binding.target:
             raise PermissionError("cloud provider is outside standing permission scope")
         if request.model is None or request.model != binding.resource_id:
