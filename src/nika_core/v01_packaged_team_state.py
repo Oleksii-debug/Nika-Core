@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -13,6 +14,7 @@ from nika_core.model_gateway.gateway import model_identity_fingerprint
 from nika_core.multi_agent.checker import V01CheckerAgent
 from nika_core.multi_agent.contracts import AgentHandoff, HandoffKind
 from nika_core.multi_agent.research_results import SourceInspectionAssignment
+from nika_core.v01_model_settings import ModelSelection
 
 _STATE_KEY = "v01_team_task"
 _UNAVAILABLE_MESSAGE = "Стан командного завдання недоступний."
@@ -362,7 +364,11 @@ class V01PackagedTeamStateProvider:
         return events
 
     @staticmethod
-    def _model_evidence_required(conn: Any, *, shared_task_id: str) -> bool:
+    def _frozen_model_identity(
+        conn: Any,
+        *,
+        shared_task_id: str,
+    ) -> tuple[str, str, str] | None:
         binding_table = conn.execute(
             "SELECT 1 FROM sqlite_master "
             "WHERE type = 'table' AND name = 'v01_task_model_bindings'"
@@ -370,24 +376,25 @@ class V01PackagedTeamStateProvider:
         binding = None
         if binding_table is not None:
             binding = conn.execute(
-                "SELECT selection_id FROM v01_task_model_bindings WHERE task_id = ?",
+                "SELECT selection_id, selection_json FROM v01_task_model_bindings "
+                "WHERE task_id = ?",
                 (shared_task_id,),
             ).fetchone()
-        model_bound_audit = conn.execute(
-            "SELECT 1 FROM audit_events "
+        model_bound_audits = conn.execute(
+            "SELECT payload_json FROM audit_events "
             "WHERE event_type = 'v01.model.bound' AND entity_type = 'task' AND entity_id = ? "
-            "LIMIT 1",
+            "ORDER BY event_id",
             (shared_task_id,),
-        ).fetchone()
+        ).fetchall()
 
         task_row = conn.execute(
             "SELECT payload_json FROM tasks WHERE task_id = ?",
             (shared_task_id,),
         ).fetchone()
         if task_row is None:
-            if binding is not None or model_bound_audit is not None:
+            if binding is not None or model_bound_audits:
                 raise ValueError("model authority exists without durable task")
-            return False
+            return None
         task_payload = json.loads(task_row["payload_json"])
         if not isinstance(task_payload, Mapping):
             raise TypeError("invalid durable task payload")
@@ -395,18 +402,64 @@ class V01PackagedTeamStateProvider:
         has_selection = _TASK_SELECTION_FIELD in task_payload
         selection_id = task_payload.get(_TASK_SELECTION_FIELD)
         if not has_selection:
-            if binding is not None or model_bound_audit is not None:
+            if binding is not None or model_bound_audits:
                 raise ValueError("model authority exists without frozen task selection")
-            return False
+            return None
         if (
             type(selection_id) is not str
             or not selection_id
             or selection_id != selection_id.strip()
             or binding is None
             or binding["selection_id"] != selection_id
+            or not isinstance(binding["selection_json"], str)
         ):
             raise ValueError("invalid durable model selection binding")
-        return True
+
+        selection_table = conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'v01_model_selections'"
+        ).fetchone()
+        if selection_table is None:
+            raise ValueError("frozen model selection table is missing")
+        selection_row = conn.execute(
+            "SELECT selection_json FROM v01_model_selections WHERE selection_id = ?",
+            (selection_id,),
+        ).fetchone()
+        if selection_row is None or not isinstance(selection_row["selection_json"], str):
+            raise ValueError("frozen model selection is missing")
+        selection_json = selection_row["selection_json"]
+        if binding["selection_json"] != selection_json:
+            raise ValueError("bound model selection differs from frozen selection")
+        if hashlib.sha256(selection_json.encode("utf-8")).hexdigest() != selection_id:
+            raise ValueError("frozen model selection identity is invalid")
+        selection = ModelSelection.from_stored(selection_json)
+
+        if len(model_bound_audits) != 1:
+            raise ValueError("model binding audit is missing or ambiguous")
+        audit_payload = json.loads(model_bound_audits[0]["payload_json"])
+        expected_audit = {
+            "schema_version": 1,
+            "provider_id": selection.provider_id,
+            "provider_kind": selection.provider_kind.value,
+            "model_fingerprint": model_identity_fingerprint(selection.model),
+        }
+        if audit_payload != expected_audit:
+            raise ValueError("model binding audit differs from frozen selection")
+        return (
+            selection.provider_id,
+            selection.provider_kind.value,
+            model_identity_fingerprint(selection.model),
+        )
+
+    @staticmethod
+    def _model_evidence_required(conn: Any, *, shared_task_id: str) -> bool:
+        return (
+            V01PackagedTeamStateProvider._frozen_model_identity(
+                conn,
+                shared_task_id=shared_task_id,
+            )
+            is not None
+        )
 
     @staticmethod
     def _valid_persisted_checker_payload(
@@ -417,6 +470,7 @@ class V01PackagedTeamStateProvider:
         team_id: str,
         root_id: str,
         model_required: bool = False,
+        frozen_model_identity: tuple[str, str, str] | None = None,
     ) -> bool:
         if not isinstance(persisted, Mapping):
             return False
@@ -467,7 +521,14 @@ class V01PackagedTeamStateProvider:
             return False
         if provenance.provider_kind.value != provider_kind:
             return False
-        if provenance.model_fingerprint != model_identity_fingerprint(model):
+        model_fingerprint = model_identity_fingerprint(model)
+        if provenance.model_fingerprint != model_fingerprint:
+            return False
+        if frozen_model_identity is not None and frozen_model_identity != (
+            provider_id,
+            provider_kind,
+            model_fingerprint,
+        ):
             return False
         expected_correlation = f"{shared_task_id}:v01:{team_id}:{root_id}"
         return provenance.request_correlation_id == expected_correlation
@@ -582,10 +643,11 @@ class V01PackagedTeamStateProvider:
             if checker_row["outcome"] != "completed" or checker_row["error"] is not None:
                 return invalid
             persisted = json.loads(checker_row["payload_json"])
-            model_required = V01PackagedTeamStateProvider._model_evidence_required(
+            frozen_model_identity = V01PackagedTeamStateProvider._frozen_model_identity(
                 conn,
                 shared_task_id=shared_task_id,
             )
+            model_required = frozen_model_identity is not None
             if not V01PackagedTeamStateProvider._valid_persisted_checker_payload(
                 persisted,
                 expected=expected,
@@ -593,6 +655,7 @@ class V01PackagedTeamStateProvider:
                 team_id=team_id,
                 root_id=root_id,
                 model_required=model_required,
+                frozen_model_identity=frozen_model_identity,
             ):
                 return invalid
 
