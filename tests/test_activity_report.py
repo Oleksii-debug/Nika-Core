@@ -30,6 +30,7 @@ def test_report_projects_canonical_truth_without_sensitive_payloads(tmp_path) ->
     store = _prepared_store(tmp_path)
     inside = "2026-09-12T10:00:00+00:00"
     outside = "2026-09-13T00:00:00+00:00"
+    unsafe_event = "learning.consulted\nunsafe\x1b[31m\x07\u200d"
 
     with store.connection() as conn:
         conn.execute(
@@ -50,7 +51,7 @@ def test_report_projects_canonical_truth_without_sensitive_payloads(tmp_path) ->
         conn.execute(
             "INSERT INTO audit_events(event_type, entity_type, entity_id, payload_json, "
             "created_at) VALUES (?, ?, ?, ?, ?)",
-            ("learning.consulted\nunsafe", "task", "task-1", '{"secret":"AUDIT_SECRET"}', inside),
+            (unsafe_event, "task", "task-1", '{"secret":"AUDIT_SECRET"}', inside),
         )
         conn.execute(
             "INSERT INTO experiments(experiment_id, definition_json, status, selected_candidate_id, "
@@ -85,14 +86,17 @@ def test_report_projects_canonical_truth_without_sensitive_payloads(tmp_path) ->
     )
 
     assert report.task_transitions == (ActivityCount("COMPLETED", 1),)
-    assert report.audit_events == (ActivityCount("learning.consulted\nunsafe", 1),)
+    assert report.audit_events == (ActivityCount(unsafe_event, 1),)
     assert report.experiment_transitions == (ActivityCount("completed", 1),)
     assert report.research_documents_added == 1
     assert report.memory_records_updated == 1
     assert report.resource_snapshot is not None
 
     rendered = report.render_text()
-    assert "learning.consulted unsafe=1" in rendered
+    assert "learning.consulted unsafe [31m=1" in rendered
+    assert "\x1b" not in rendered
+    assert "\x07" not in rendered
+    assert "\u200d" not in rendered
     assert "CPU 12.5%" in rendered
     assert "батарея 77.0%" in rendered
     assert "TASK_SECRET" not in rendered
