@@ -7,8 +7,10 @@ import pytest
 
 from nika_core.sports_lab import (
     PaperLeg,
+    PaperLegResult,
     PaperPortfolio,
     PaperQuote,
+    PaperSettlement,
     PaperTicket,
     ScenarioOutcome,
     SportsLabPaperError,
@@ -16,6 +18,15 @@ from nika_core.sports_lab import (
     enumerate_market_scenarios,
     evaluate_scenario,
 )
+
+
+class _HostileIdentity:
+    def __str__(self) -> str:
+        return "a"
+
+
+class _StringSubclass(str):
+    pass
 
 
 def _at() -> datetime:
@@ -175,3 +186,77 @@ def test_virtual_bankroll_cannot_be_overcommitted() -> None:
 
     with pytest.raises(SportsLabPaperError, match="virtual bankroll"):
         PaperPortfolio(Decimal(100), (ticket,))
+
+
+def test_hostile_string_coercion_cannot_manufacture_scenario_winner() -> None:
+    ticket = PaperTicket(
+        "ticket",
+        Decimal(100),
+        _at(),
+        (PaperLeg(_quote("q", "e", "m1", "a", "2.00")),),
+    )
+    portfolio = PaperPortfolio(Decimal(1000), (ticket,))
+
+    with pytest.raises(SportsLabPaperError, match="exact string"):
+        ScenarioOutcome(
+            "hostile",
+            {"m1": _HostileIdentity()},  # type: ignore[dict-item]
+        )
+
+    valid_report = evaluate_scenario(
+        portfolio,
+        ScenarioOutcome("valid", {"m1": "a"}),
+        settled_at=_at() + timedelta(hours=1),
+    )
+    assert valid_report.profit_loss == Decimal(100)
+
+
+def test_non_string_market_key_fails_closed_before_enumeration_sort() -> None:
+    outcomes: dict[object, tuple[str, ...]] = {1: ("a",), "m2": ("b",)}
+    with pytest.raises(SportsLabPaperError, match="exact string"):
+        enumerate_market_scenarios(outcomes)  # type: ignore[arg-type]
+
+
+def test_string_subclasses_fail_closed_across_identity_boundaries() -> None:
+    subclass = _StringSubclass("identity")
+
+    with pytest.raises(SportsLabPaperError, match="exact string"):
+        PaperQuote(
+            subclass,
+            "source",
+            "event",
+            "market",
+            "selection",
+            Decimal("2.00"),
+            _at(),
+            _at(),
+        )
+    with pytest.raises(SportsLabPaperError, match="exact string"):
+        PaperTicket(subclass, Decimal(10), _at(), ())
+    with pytest.raises(SportsLabPaperError, match="exact string"):
+        PaperSettlement(subclass, "selection", PaperLegResult.WIN, _at())
+    with pytest.raises(SportsLabPaperError, match="exact string"):
+        ScenarioOutcome(subclass, {"market": "selection"})
+    with pytest.raises(SportsLabPaperError, match="exact string"):
+        enumerate_market_scenarios({"market": (subclass,)})
+
+
+def test_normalized_market_identity_collisions_fail_closed() -> None:
+    with pytest.raises(SportsLabPaperError, match="collide"):
+        ScenarioOutcome(
+            "collision",
+            {"market": "a", " market ": "b"},
+        )
+
+    with pytest.raises(SportsLabPaperError, match="collide"):
+        enumerate_market_scenarios(
+            {"market": ("a",), " market ": ("b",)}
+        )
+
+
+def test_identity_controls_and_oversized_values_fail_closed() -> None:
+    with pytest.raises(SportsLabPaperError, match="control characters"):
+        ScenarioOutcome("bad\nscenario", {"market": "selection"})
+
+    with pytest.raises(SportsLabPaperError, match="size limit"):
+        ScenarioOutcome("x" * 257, {"market": "selection"})
