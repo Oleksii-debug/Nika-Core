@@ -9,7 +9,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from nika_core.model_artifacts import ModelArtifactDescriptor, ModelArtifactKind
-from nika_core.resources.contracts import ResourceObserverPort
+from nika_core.resources.contracts import ResourceObserverPort, ResourceSnapshot
 
 _SCHEMA = "nika.embedded_model_suitability.v1"
 
@@ -32,10 +32,8 @@ class AcceleratorEvidence:
         if self.gpu_available is not None and type(self.gpu_available) is not bool:
             raise TypeError("gpu_available must be bool or None")
         if self.available_vram_bytes is not None:
-            if isinstance(self.available_vram_bytes, bool) or not isinstance(
-                self.available_vram_bytes, int
-            ):
-                raise TypeError("available_vram_bytes must be an integer")
+            if type(self.available_vram_bytes) is not int:
+                raise TypeError("available_vram_bytes must be an exact integer")
             if self.available_vram_bytes < 0:
                 raise ValueError("available_vram_bytes must not be negative")
         if self.gpu_available is False and self.available_vram_bytes not in (None, 0):
@@ -51,14 +49,15 @@ class RuntimeSuitabilityConstraints:
 
     def __post_init__(self) -> None:
         if self.min_logical_cpu_count is not None:
-            if isinstance(self.min_logical_cpu_count, bool) or not isinstance(
-                self.min_logical_cpu_count, int
-            ):
-                raise TypeError("min_logical_cpu_count must be an integer")
+            if type(self.min_logical_cpu_count) is not int:
+                raise TypeError("min_logical_cpu_count must be an exact integer")
             if self.min_logical_cpu_count <= 0:
                 raise ValueError("min_logical_cpu_count must be greater than zero")
         if self.max_estimated_runtime_ms is not None:
-            _positive_finite("max_estimated_runtime_ms", self.max_estimated_runtime_ms)
+            normalized = _positive_finite(
+                "max_estimated_runtime_ms", self.max_estimated_runtime_ms
+            )
+            object.__setattr__(self, "max_estimated_runtime_ms", normalized)
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,18 +138,31 @@ class EmbeddedModelSuitabilityEvaluator:
         estimated_runtime_ms: float | None = None,
     ) -> ModelSuitabilityReport:
         """Classify practical resource suitability without loading or acquiring a model."""
-        if not isinstance(descriptor, ModelArtifactDescriptor):
-            raise TypeError("descriptor must be ModelArtifactDescriptor")
+        if type(descriptor) is not ModelArtifactDescriptor:
+            raise TypeError("descriptor must be exact ModelArtifactDescriptor")
         if descriptor.kind is not ModelArtifactKind.EMBEDDED:
             raise ValueError("embedded suitability requires an embedded model descriptor")
         if type(model_cached) is not bool:
             raise TypeError("model_cached must be bool")
+        if accelerator is not None and type(accelerator) is not AcceleratorEvidence:
+            raise TypeError("accelerator must be exact AcceleratorEvidence or None")
+        if constraints is not None and type(constraints) is not RuntimeSuitabilityConstraints:
+            raise TypeError(
+                "constraints must be exact RuntimeSuitabilityConstraints or None"
+            )
+        normalized_runtime_ms = None
         if estimated_runtime_ms is not None:
-            _nonnegative_finite("estimated_runtime_ms", estimated_runtime_ms)
+            normalized_runtime_ms = _nonnegative_finite(
+                "estimated_runtime_ms", estimated_runtime_ms
+            )
 
-        effective_constraints = constraints or RuntimeSuitabilityConstraints()
-        evidence = accelerator or AcceleratorEvidence()
+        effective_constraints = (
+            constraints if constraints is not None else RuntimeSuitabilityConstraints()
+        )
+        evidence = accelerator if accelerator is not None else AcceleratorEvidence()
         snapshot = self._observer.snapshot()
+        if type(snapshot) is not ResourceSnapshot:
+            raise TypeError("resource observer must return exact ResourceSnapshot")
         architecture = _canonical_architecture(self._architecture_probe())
         disk_free_bytes = self._read_disk_free(Path(storage_path))
         resources = descriptor.resources
@@ -224,9 +236,9 @@ class EmbeddedModelSuitabilityEvaluator:
                 failures.append("insufficient_disk_for_model")
 
         if effective_constraints.max_estimated_runtime_ms is not None:
-            if estimated_runtime_ms is None:
+            if normalized_runtime_ms is None:
                 maybes.append("runtime_estimate_unavailable")
-            elif estimated_runtime_ms > effective_constraints.max_estimated_runtime_ms:
+            elif normalized_runtime_ms > effective_constraints.max_estimated_runtime_ms:
                 failures.append("estimated_runtime_exceeds_limit")
 
         classification, reasons = _classify(failures, unknowns, maybes)
@@ -246,7 +258,7 @@ class EmbeddedModelSuitabilityEvaluator:
                 model_cached=model_cached,
                 gpu_available=evidence.gpu_available,
                 available_vram_bytes=evidence.available_vram_bytes,
-                estimated_runtime_ms=estimated_runtime_ms,
+                estimated_runtime_ms=normalized_runtime_ms,
             ),
         )
 
@@ -273,7 +285,7 @@ def _classify(
 
 
 def _canonical_architecture(value: str) -> str | None:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         return None
     canonical = value.strip().lower()
     return {
@@ -288,30 +300,32 @@ def _disk_free_bytes(path: Path) -> int:
 
 
 def _is_nonnegative_int(value: object) -> bool:
-    return not isinstance(value, bool) and isinstance(value, int) and value >= 0
+    return type(value) is int and value >= 0
 
 
 def _is_positive_int(value: object) -> bool:
-    return not isinstance(value, bool) and isinstance(value, int) and value > 0
+    return type(value) is int and value > 0
 
 
-def _positive_finite(name: str, value: float) -> None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TypeError(f"{name} must be numeric")
+def _positive_finite(name: str, value: float) -> float:
+    if type(value) not in (int, float):
+        raise TypeError(f"{name} must be an exact int or float")
     try:
         normalized = float(value)
     except (OverflowError, ValueError):
         raise ValueError(f"{name} must be finite and greater than zero") from None
     if not math.isfinite(normalized) or normalized <= 0:
         raise ValueError(f"{name} must be finite and greater than zero")
+    return normalized
 
 
-def _nonnegative_finite(name: str, value: float) -> None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TypeError(f"{name} must be numeric")
+def _nonnegative_finite(name: str, value: float) -> float:
+    if type(value) not in (int, float):
+        raise TypeError(f"{name} must be an exact int or float")
     try:
         normalized = float(value)
     except (OverflowError, ValueError):
         raise ValueError(f"{name} must be finite and non-negative") from None
     if not math.isfinite(normalized) or normalized < 0:
         raise ValueError(f"{name} must be finite and non-negative")
+    return normalized
