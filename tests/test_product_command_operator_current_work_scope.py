@@ -85,7 +85,7 @@ def test_unique_active_component_owner_ignores_historical_owner() -> None:
     assert projection.qa == "unknown"
 
 
-def test_project_integration_stays_project_scoped_without_polluting_work_owner() -> None:
+def test_uncorrelated_project_integration_is_not_projected_as_current_work() -> None:
     detail = _detail(
         ProductStatusEntry(
             kind=ProductStatusKind.BUILD,
@@ -111,7 +111,7 @@ def test_project_integration_stays_project_scoped_without_polluting_work_owner()
         ProductStatusEntry(
             kind=ProductStatusKind.DEPLOYMENT,
             item_id="deployment-operation:op-1",
-            label="Project deployment",
+            label="Historical or unrelated project deployment",
             state="pending",
             owner="node-1",
         ),
@@ -122,7 +122,7 @@ def test_project_integration_stays_project_scoped_without_polluting_work_owner()
     assert projection.owner == "dev-current"
     assert projection.test == "unknown"
     assert projection.qa == "unknown"
-    assert projection.integration == "deployment-operation:op-1=pending"
+    assert projection.integration == "not_started"
     assert projection.next == "continue_work:work-current"
 
 
@@ -148,4 +148,65 @@ def test_project_integration_git_commit_cannot_mint_component_candidate() -> Non
 
     assert projection.candidate == "unknown"
     assert deployment_sha not in projection.candidate
+    assert projection.integration == "not_started"
     assert projection.next == "test:not_started"
+
+
+def test_canonical_release_sha_and_intent_bind_project_integration_to_current_candidate() -> None:
+    current_sha = "b" * 40
+    historical_sha = "a" * 40
+    detail = _detail(
+        ProductStatusEntry(
+            kind=ProductStatusKind.COMPONENT,
+            item_id="work-current",
+            label="Current work",
+            state="completed",
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.BUILD,
+            item_id="work-current:test",
+            label="Current tests",
+            state="passed",
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.QA,
+            item_id="work-current:qa",
+            label="Current QA",
+            state="passed",
+            evidence=_candidate(current_sha),
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.RELEASE,
+            item_id="release:intent-current",
+            label="Current release",
+            state="candidate",
+            evidence=_candidate(current_sha),
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.DEPLOYMENT,
+            item_id="deployment:intent-current",
+            label="Current deployment",
+            state="pending",
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.RELEASE,
+            item_id="release:intent-old",
+            label="Historical release",
+            state="released",
+            evidence=_candidate(historical_sha),
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.DEPLOYMENT,
+            item_id="deployment:intent-old",
+            label="Historical deployment",
+            state="healthy",
+        ),
+    )
+
+    projection = project_operator_status(detail)
+
+    assert projection.candidate == current_sha
+    assert "release:intent-current=candidate" in projection.integration
+    assert "deployment:intent-current=pending" in projection.integration
+    assert "intent-old" not in projection.integration
+    assert projection.next == "integration:release:intent-current=candidate"
