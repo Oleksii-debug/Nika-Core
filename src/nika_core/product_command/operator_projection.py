@@ -227,6 +227,17 @@ def _has_candidate_evidence(entry: ProductStatusEntry) -> bool:
     return any(evidence.kind == "git_commit" for evidence in entry.evidence)
 
 
+def _git_commit_refs(entries: tuple[ProductStatusEntry, ...]) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            evidence.reference
+            for entry in entries
+            for evidence in entry.evidence
+            if evidence.kind == "git_commit"
+        )
+    )
+
+
 def _current_work_entries(
     detail: ProductProjectDetail,
 ) -> tuple[ProductStatusEntry, ...]:
@@ -251,16 +262,53 @@ def _single_component_candidate_entries(
     scoped_stages = tuple(
         entry
         for entry in candidate_entries
-        if entry.kind in {ProductStatusKind.BUILD, ProductStatusKind.QA}
+        if entry.kind in _CANDIDATE_STATUS_KINDS
+        and entry.kind is not ProductStatusKind.COMPONENT
         and entry.item_id.startswith(prefix)
     )
     if not scoped_stages:
         return None
 
-    # BUILD/QA item_id correlation is emitted by the canonical coordinator surface.
-    # Project-level deployment/release adapters use their own identifiers, so they
-    # must not be reinterpreted as component-scoped candidate authority here.
+    # Prefix correlation is already the canonical coordinator relation. Project-level
+    # deployment/release adapters use their own identifiers and are admitted below
+    # only through exact candidate SHA + shared deployment intent identity.
     return (component, *scoped_stages)
+
+
+def _bound_project_integration_entries(
+    current_work_entries: tuple[ProductStatusEntry, ...],
+    candidate_sha: str,
+) -> tuple[ProductStatusEntry, ...]:
+    if re.fullmatch(r"[0-9a-f]{40}", candidate_sha) is None:
+        return ()
+
+    matched_intent_ids: set[str] = set()
+    for entry in current_work_entries:
+        if entry.kind is not ProductStatusKind.RELEASE or not entry.item_id.startswith("release:"):
+            continue
+        if candidate_sha not in _git_commit_refs((entry,)):
+            continue
+        intent_id = entry.item_id.removeprefix("release:")
+        if intent_id:
+            matched_intent_ids.add(intent_id)
+
+    if not matched_intent_ids:
+        return ()
+
+    return tuple(
+        entry
+        for entry in current_work_entries
+        if (
+            entry.kind is ProductStatusKind.RELEASE
+            and entry.item_id.removeprefix("release:") in matched_intent_ids
+            and entry.item_id.startswith("release:")
+        )
+        or (
+            entry.kind is ProductStatusKind.DEPLOYMENT
+            and entry.item_id.removeprefix("deployment:") in matched_intent_ids
+            and entry.item_id.startswith("deployment:")
+        )
+    )
 
 
 def _single_component_projection_entries(
@@ -271,15 +319,17 @@ def _single_component_projection_entries(
     scoped_component_stages = tuple(
         entry
         for entry in current_work_entries
-        if entry.kind in {ProductStatusKind.BUILD, ProductStatusKind.QA}
+        if entry.kind in _CANDIDATE_STATUS_KINDS
+        and entry.kind is not ProductStatusKind.COMPONENT
         and entry.item_id.startswith(prefix)
     )
-    project_integration = tuple(
-        entry
-        for entry in current_work_entries
-        if entry.kind in _PROJECT_INTEGRATION_STATUS_KINDS
+    component_scope = (component, *scoped_component_stages)
+    scoped_candidate = _render_candidate(_git_commit_refs(component_scope))
+    project_integration = _bound_project_integration_entries(
+        current_work_entries,
+        scoped_candidate,
     )
-    return (component, *scoped_component_stages, *project_integration)
+    return (*component_scope, *project_integration)
 
 
 def _single_component_current_work_entries(
