@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 
@@ -117,6 +118,22 @@ def test_current_model_bound_audit_shape_is_accepted_for_model_route(tmp_path: P
         "provider_kind": "local",
         "model_fingerprint": model_identity_fingerprint(selection.model),
     }
+
+
+@pytest.mark.parametrize("hostile_schema_version", [True, 1.0])
+def test_current_audit_rejects_non_integer_schema_version_after_restart(
+    tmp_path: Path,
+    hostile_schema_version: object,
+) -> None:
+    store, task_id, _ = _bound_task(tmp_path, "ollama")
+
+    def replace_schema_version(payload: dict[str, Any]) -> None:
+        payload["schema_version"] = hostile_schema_version
+
+    _rewrite_bound_audit(store, task_id, replace_schema_version)
+    restarted_store = SQLiteStore(store.path)
+    with pytest.raises(ValueError, match="model binding audit differs from frozen selection"):
+        _frozen_identity(restarted_store, task_id)
 
 
 def test_historical_model_bound_audit_shape_remains_restart_compatible(tmp_path: Path) -> None:
