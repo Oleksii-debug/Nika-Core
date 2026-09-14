@@ -481,9 +481,9 @@ def _consume_task_result(task: asyncio.Task[MicrophoneCaptureResponse]) -> None:
     try:
         task.result()
     except asyncio.CancelledError:
-        pass
-    except Exception:  # noqa: S110 - late adapter result is intentionally discarded
-        pass
+        return
+    except Exception:  # noqa: BLE001 - late adapter result is intentionally discarded
+        return
 
 
 def _bounded_token(value: object, *, field: str) -> str:
