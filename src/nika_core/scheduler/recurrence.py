@@ -42,6 +42,7 @@ class RecurrenceDecision(StrEnum):
 class RecurrenceTerminalReason(StrEnum):
     CONDITION_MET = "condition_met"
     DEADLINE = "deadline"
+    RANGE_EXHAUSTED = "range_exhausted"
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,11 +298,24 @@ class DurableRecurrenceService:
             self._persist(completed, payload)
             return completed
 
-        next_due = _first_future_slot(
-            invocation.scheduled_for,
-            interval_seconds=current.interval_seconds,
-            now=now,
-        )
+        try:
+            next_due = _first_future_slot(
+                invocation.scheduled_for,
+                interval_seconds=current.interval_seconds,
+                now=now,
+            )
+        except OverflowError:
+            completed = replace(
+                current,
+                status=RecurrenceStatus.COMPLETED,
+                next_due_at=None,
+                next_occurrence_id=None,
+                last_completed_due_at=invocation.scheduled_for,
+                last_completed_occurrence_id=invocation.occurrence_id,
+                terminal_reason=RecurrenceTerminalReason.RANGE_EXHAUSTED,
+            )
+            self._persist(completed, payload)
+            return completed
         if current.deadline_at is not None and next_due >= current.deadline_at:
             completed = replace(
                 current,
