@@ -10,6 +10,7 @@ from .contracts import (
     ModelProvider,
     ModelRequest,
     ModelResponse,
+    ModelUsage,
     ProviderCapabilities,
     ProviderKind,
 )
@@ -53,6 +54,11 @@ class RoutedModelProvider:
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         self._require_stable_capabilities()
+        if type(request.request_id) is not str:
+            raise _route_error(
+                self._route_id,
+                "routed request identity must be exact text",
+            )
         upstream_request = replace(
             request,
             provider_id=self._upstream_capabilities.provider_id,
@@ -100,23 +106,36 @@ class RoutedModelProvider:
             )
 
         self._require_stable_capabilities()
-        if response.request_id != request.request_id:
+        snapshot = _snapshot_response(response, route_id=self._route_id)
+        if snapshot.request_id != request.request_id:
             raise _route_error(
                 self._route_id,
                 "routed provider returned a response for another request",
             )
-        if response.provider_id != self._upstream_capabilities.provider_id:
+        if snapshot.provider_id != self._upstream_capabilities.provider_id:
             raise _route_error(
                 self._route_id,
                 "routed provider returned an unexpected provider identity",
             )
-        if response.provider_kind is not self._upstream_capabilities.kind:
+        if snapshot.provider_kind is not self._upstream_capabilities.kind:
             raise _route_error(
                 self._route_id,
                 "routed provider returned an unexpected provider kind",
             )
 
-        return replace(response, provider_id=self._route_id)
+        # Return a fresh exact DTO. Never retain a provider-owned ModelResponse,
+        # ModelUsage or primitive subclass across the executable-route boundary.
+        # ModelGateway remains the final owner of semantic success validation
+        # (token invariants, finite/nonnegative latency, audit/provenance, etc.).
+        return ModelResponse(
+            request_id=snapshot.request_id,
+            text=snapshot.text,
+            provider_id=self._route_id,
+            provider_kind=snapshot.provider_kind,
+            model=snapshot.model,
+            usage=snapshot.usage,
+            latency_ms=snapshot.latency_ms,
+        )
 
     def _require_stable_capabilities(self) -> None:
         observed = _canonical_capabilities(self._provider.capabilities)
@@ -155,6 +174,54 @@ def _canonical_capabilities(value: ProviderCapabilities) -> ProviderCapabilities
     # a dataclass default. ModelGateway remains the final canonical validator for
     # the registered outer route.
     return replace(value)
+
+
+def _snapshot_response(value: object, *, route_id: str) -> ModelResponse:
+    if type(value) is not ModelResponse:
+        raise _route_error(route_id, "routed provider returned a malformed response")
+
+    for label, item in (
+        ("request_id", value.request_id),
+        ("text", value.text),
+        ("provider_id", value.provider_id),
+        ("model", value.model),
+    ):
+        if type(item) is not str:
+            raise _route_error(
+                route_id,
+                f"routed provider returned malformed {label}",
+            )
+    if type(value.provider_kind) is not ProviderKind:
+        raise _route_error(route_id, "routed provider returned malformed provider kind")
+    if type(value.usage) is not ModelUsage:
+        raise _route_error(route_id, "routed provider returned malformed usage")
+
+    token_values = (
+        value.usage.input_tokens,
+        value.usage.output_tokens,
+        value.usage.total_tokens,
+    )
+    for token_value in token_values:
+        if token_value is not None and type(token_value) is not int:
+            raise _route_error(route_id, "routed provider returned malformed usage")
+
+    latency_ms = value.latency_ms
+    if latency_ms is not None and type(latency_ms) not in {int, float}:
+        raise _route_error(route_id, "routed provider returned malformed latency")
+
+    return ModelResponse(
+        request_id=value.request_id,
+        text=value.text,
+        provider_id=value.provider_id,
+        provider_kind=value.provider_kind,
+        model=value.model,
+        usage=ModelUsage(
+            input_tokens=value.usage.input_tokens,
+            output_tokens=value.usage.output_tokens,
+            total_tokens=value.usage.total_tokens,
+        ),
+        latency_ms=latency_ms,
+    )
 
 
 def _rebind_upstream_error(
