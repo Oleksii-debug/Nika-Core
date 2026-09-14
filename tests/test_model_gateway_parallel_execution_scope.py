@@ -4,7 +4,11 @@ import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
 
+import pytest
+
 from nika_core.model_gateway.contracts import (
+    ModelErrorCode,
+    ModelFailureEffect,
     ModelMessage,
     ModelRequest,
     ModelResponse,
@@ -12,7 +16,11 @@ from nika_core.model_gateway.contracts import (
     ProviderKind,
 )
 from nika_core.model_gateway.gateway import ModelGateway
-from nika_core.model_gateway.parallel import complete_parallel
+from nika_core.model_gateway.parallel import (
+    ParallelModelExecutionScopeDenied,
+    ParallelModelStatus,
+    complete_parallel,
+)
 
 
 class _ScopeProbe:
@@ -27,6 +35,26 @@ class _ScopeProbe:
             yield
         finally:
             self.exited.append(request_id)
+
+
+class _SelectiveDenyScope(_ScopeProbe):
+    @contextmanager
+    def scope_for(self, *, request_id: str) -> Iterator[None]:
+        if request_id == "denied":
+            raise ParallelModelExecutionScopeDenied("fixture denial")
+        self.entered_tasks[request_id] = asyncio.current_task()
+        try:
+            yield
+        finally:
+            self.exited.append(request_id)
+
+
+class _ExitFailureScope:
+    @contextmanager
+    def scope_for(self, *, request_id: str) -> Iterator[None]:
+        del request_id
+        yield
+        raise RuntimeError("scope cleanup failed after provider effect")
 
 
 class _TaskIdentityProvider:
@@ -185,3 +213,71 @@ def test_admission_timeout_never_enters_child_execution_scope() -> None:
 
     assert scope_entries == ["blocking"]
     assert provider_calls == ["blocking"]
+
+
+def test_pre_effect_scope_denial_is_isolated_without_provider_call() -> None:
+    async def scenario():  # type: ignore[no-untyped-def]
+        scope = _SelectiveDenyScope()
+        observed_tasks: dict[str, asyncio.Task[object] | None] = {}
+        gateway = ModelGateway()
+        gateway.register(
+            _TaskIdentityProvider(
+                provider_id="route-a",
+                observed_tasks=observed_tasks,
+            )
+        )
+        gateway.register(
+            _TaskIdentityProvider(
+                provider_id="route-b",
+                observed_tasks=observed_tasks,
+            )
+        )
+        result = await complete_parallel(
+            gateway,
+            (
+                _request("allowed", provider_id="route-a"),
+                _request("denied", provider_id="route-b"),
+            ),
+            max_parallel=2,
+            execution_scopes=scope,
+        )
+        return result, scope, observed_tasks
+
+    result, scope, observed_tasks = asyncio.run(scenario())
+
+    assert result.fully_successful is False
+    assert result.outcomes[0].status is ParallelModelStatus.COMPLETED
+    denied = result.outcomes[1]
+    assert denied.status is ParallelModelStatus.FAILED
+    assert denied.response is None
+    assert denied.failure is not None
+    assert denied.failure.code is ModelErrorCode.INVALID_REQUEST
+    assert denied.failure.provider_id == "route-b"
+    assert denied.failure.retryable is False
+    assert denied.failure.failure_effect is ModelFailureEffect.NO_EFFECT
+    assert set(observed_tasks) == {"allowed"}
+    assert set(scope.entered_tasks) == {"allowed"}
+    assert scope.exited == ["allowed"]
+
+
+def test_scope_exit_failure_after_provider_effect_is_not_laundered_as_no_effect() -> None:
+    async def scenario() -> dict[str, asyncio.Task[object] | None]:
+        observed_tasks: dict[str, asyncio.Task[object] | None] = {}
+        gateway = ModelGateway()
+        gateway.register(
+            _TaskIdentityProvider(
+                provider_id="route",
+                observed_tasks=observed_tasks,
+            )
+        )
+        with pytest.raises(RuntimeError, match="scope cleanup failed after provider effect"):
+            await complete_parallel(
+                gateway,
+                (_request("request", provider_id="route"),),
+                execution_scopes=_ExitFailureScope(),
+            )
+        return observed_tasks
+
+    observed_tasks = asyncio.run(scenario())
+
+    assert set(observed_tasks) == {"request"}
