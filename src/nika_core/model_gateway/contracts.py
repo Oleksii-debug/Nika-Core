@@ -111,11 +111,11 @@ class ModelRequest:
 
         _require_canonical_identifier("model", self.model, optional=True)
         _require_canonical_identifier("provider_id", self.provider_id, optional=True)
-        if self.provider_kind is not None and not isinstance(
-            self.provider_kind, ProviderKind
+        if self.provider_kind is not None and not any(
+            self.provider_kind is member for member in ProviderKind
         ):
             raise TypeError("provider_kind must be a ProviderKind")
-        if not isinstance(self.privacy, PrivacyClass):
+        if not any(self.privacy is member for member in PrivacyClass):
             raise TypeError("privacy must be a PrivacyClass")
 
         if not isinstance(self.fallback_provider_ids, (tuple, list)):
