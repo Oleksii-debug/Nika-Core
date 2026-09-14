@@ -200,7 +200,7 @@ class SpeakerVerificationService:
         *,
         policy: SpeakerVerificationPolicy | None = None,
     ) -> None:
-        capabilities = _validated_capabilities(adapter.capabilities)
+        capabilities = _read_capabilities(adapter)
         if policy is not None and not isinstance(policy, SpeakerVerificationPolicy):
             raise SpeakerVerificationError(
                 SpeakerVerificationErrorCode.INVALID_REQUEST,
@@ -233,7 +233,7 @@ class SpeakerVerificationService:
                 "speaker verification was cancelled",
             )
 
-        current_capabilities = _validated_capabilities(self._adapter.capabilities)
+        current_capabilities = _read_capabilities(self._adapter)
         if current_capabilities != self._bound_capabilities:
             raise SpeakerVerificationError(
                 SpeakerVerificationErrorCode.ROUTE_MISMATCH,
@@ -260,7 +260,7 @@ class SpeakerVerificationService:
                 "speaker verification adapter failed",
             ) from None
 
-        after_capabilities = _validated_capabilities(self._adapter.capabilities)
+        after_capabilities = _read_capabilities(self._adapter)
         if after_capabilities != self._bound_capabilities:
             raise SpeakerVerificationError(
                 SpeakerVerificationErrorCode.ROUTE_MISMATCH,
@@ -325,6 +325,19 @@ class SpeakerVerificationService:
         return SpeakerVerificationOutcome.UNCERTAIN
 
 
+def _read_capabilities(adapter: SpeakerVerifierAdapter) -> SpeakerVerifierCapabilities:
+    try:
+        capabilities = adapter.capabilities
+    except SpeakerVerificationError:
+        raise
+    except Exception:  # noqa: BLE001 - adapter capability access is a provider boundary
+        raise SpeakerVerificationError(
+            SpeakerVerificationErrorCode.ADAPTER_FAILURE,
+            "speaker verifier capabilities are unavailable",
+        ) from None
+    return _validated_capabilities(capabilities)
+
+
 def _validated_capabilities(value: object) -> SpeakerVerifierCapabilities:
     if not isinstance(value, SpeakerVerifierCapabilities):
         raise SpeakerVerificationError(
@@ -347,7 +360,13 @@ def _validated_timeout(value: object) -> float:
             SpeakerVerificationErrorCode.INVALID_REQUEST,
             "speaker verification timeout must be numeric",
         )
-    timeout = float(value)
+    try:
+        timeout = float(value)
+    except (OverflowError, TypeError, ValueError):
+        raise SpeakerVerificationError(
+            SpeakerVerificationErrorCode.INVALID_REQUEST,
+            "speaker verification timeout is outside the supported bound",
+        ) from None
     if not math.isfinite(timeout) or timeout <= 0 or timeout > _MAX_TIMEOUT_SECONDS:
         raise SpeakerVerificationError(
             SpeakerVerificationErrorCode.INVALID_REQUEST,
@@ -357,20 +376,18 @@ def _validated_timeout(value: object) -> float:
 
 
 def _confidence(value: object, *, field: str, response: bool = False) -> float:
+    code = (
+        SpeakerVerificationErrorCode.INVALID_RESPONSE
+        if response
+        else SpeakerVerificationErrorCode.INVALID_REQUEST
+    )
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        code = (
-            SpeakerVerificationErrorCode.INVALID_RESPONSE
-            if response
-            else SpeakerVerificationErrorCode.INVALID_REQUEST
-        )
         raise SpeakerVerificationError(code, f"{field} must be numeric")
-    confidence = float(value)
+    try:
+        confidence = float(value)
+    except (OverflowError, TypeError, ValueError):
+        raise SpeakerVerificationError(code, f"{field} is outside the supported bound") from None
     if not math.isfinite(confidence) or confidence < 0 or confidence > 1:
-        code = (
-            SpeakerVerificationErrorCode.INVALID_RESPONSE
-            if response
-            else SpeakerVerificationErrorCode.INVALID_REQUEST
-        )
         raise SpeakerVerificationError(code, f"{field} must be finite and within 0..1")
     return confidence
 

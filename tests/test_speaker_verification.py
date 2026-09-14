@@ -79,6 +79,20 @@ class FakeVerifier:
         )
 
 
+class _CapabilitiesFailingVerifier(FakeVerifier):
+    def __init__(self, *, fail_on_read: int) -> None:
+        super().__init__()
+        self._capability_reads = 0
+        self._fail_on_read = fail_on_read
+
+    @property
+    def capabilities(self) -> SpeakerVerifierCapabilities:
+        self._capability_reads += 1
+        if self._capability_reads == self._fail_on_read:
+            raise RuntimeError("SENSITIVE_CAPABILITY_DIAGNOSTIC_CANARY")
+        return self._capabilities
+
+
 def _request(
     *,
     profile_id: str = "owner-profile",
@@ -299,6 +313,41 @@ def test_unknown_adapter_error_is_minimized() -> None:
     assert "SENSITIVE_DIAGNOSTIC" not in str(error.value)
 
 
+def test_capability_read_failure_at_construction_is_minimized() -> None:
+    adapter = _CapabilitiesFailingVerifier(fail_on_read=1)
+
+    with pytest.raises(SpeakerVerificationError) as error:
+        SpeakerVerificationService(adapter)
+
+    assert error.value.code is SpeakerVerificationErrorCode.ADAPTER_FAILURE
+    assert "SENSITIVE_CAPABILITY_DIAGNOSTIC" not in str(error.value)
+    assert adapter.calls == 0
+
+
+def test_capability_read_failure_before_effect_is_minimized() -> None:
+    adapter = _CapabilitiesFailingVerifier(fail_on_read=2)
+    service = SpeakerVerificationService(adapter)
+
+    with pytest.raises(SpeakerVerificationError) as error:
+        service.verify(_request())
+
+    assert error.value.code is SpeakerVerificationErrorCode.ADAPTER_FAILURE
+    assert "SENSITIVE_CAPABILITY_DIAGNOSTIC" not in str(error.value)
+    assert adapter.calls == 0
+
+
+def test_capability_read_failure_after_effect_is_minimized() -> None:
+    adapter = _CapabilitiesFailingVerifier(fail_on_read=4)
+    service = SpeakerVerificationService(adapter)
+
+    with pytest.raises(SpeakerVerificationError) as error:
+        service.verify(_request())
+
+    assert error.value.code is SpeakerVerificationErrorCode.ADAPTER_FAILURE
+    assert "SENSITIVE_CAPABILITY_DIAGNOSTIC" not in str(error.value)
+    assert adapter.calls == 1
+
+
 @pytest.mark.parametrize("timeout", [0, -1, 301, True, math.inf, "5"])
 def test_timeout_is_bounded_and_typed(timeout: object) -> None:
     adapter = FakeVerifier()
@@ -309,3 +358,32 @@ def test_timeout_is_bounded_and_typed(timeout: object) -> None:
 
     assert error.value.code is SpeakerVerificationErrorCode.INVALID_REQUEST
     assert adapter.calls == 0
+
+
+def test_float_overflowing_timeout_fails_before_adapter_effect() -> None:
+    adapter = FakeVerifier()
+    service = SpeakerVerificationService(adapter)
+
+    with pytest.raises(SpeakerVerificationError) as error:
+        service.verify(_request(), timeout_seconds=1 << 100_000)
+
+    assert error.value.code is SpeakerVerificationErrorCode.INVALID_REQUEST
+    assert adapter.calls == 0
+
+
+def test_float_overflowing_policy_threshold_fails_as_invalid_request() -> None:
+    with pytest.raises(SpeakerVerificationError) as error:
+        SpeakerVerificationPolicy(no_match_at_or_below=1 << 100_000)
+
+    assert error.value.code is SpeakerVerificationErrorCode.INVALID_REQUEST
+
+
+def test_float_overflowing_response_confidence_fails_as_invalid_response() -> None:
+    adapter = FakeVerifier()
+    adapter.confidence = 1 << 100_000  # type: ignore[assignment]
+    service = SpeakerVerificationService(adapter)
+
+    with pytest.raises(SpeakerVerificationError) as error:
+        service.verify(_request())
+
+    assert error.value.code is SpeakerVerificationErrorCode.INVALID_RESPONSE
