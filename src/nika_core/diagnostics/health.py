@@ -396,14 +396,15 @@ class HealthService:
     def _check_schema_shape(cls, conn: sqlite3.Connection) -> HealthCheck:
         expected = dict(cls._canonical_schema_signature())
         actual = dict(cls._schema_signature(conn))
-        valid = True
-        for table_name, table_signature in expected.items():
-            actual_table = actual.get(table_name)
-            if actual_table is None or not cls._schema_table_matches(
-                table_signature, actual_table
-            ):
-                valid = False
-                break
+        valid = actual.keys() == expected.keys()
+        if valid:
+            for table_name, table_signature in expected.items():
+                actual_table = actual.get(table_name)
+                if actual_table is None or not cls._schema_table_matches(
+                    table_signature, actual_table
+                ):
+                    valid = False
+                    break
         if valid:
             return HealthCheck(
                 check_id="database.schema.shape",
