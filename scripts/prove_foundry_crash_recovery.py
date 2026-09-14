@@ -442,9 +442,7 @@ def _wait_for_crash_window(
                 if ready.get("schema") != _CHILD_READY_SCHEMA:
                     raise RuntimeError("invalid child-ready evidence schema")
                 task_id = ready.get("task_id")
-                # Older/partial ready writes must never be accepted.
                 if type(task_id) is not str:
-                    # Task id is added below from the durable session when exactly one exists.
                     store = SQLiteStore(paths["db"])
                     store.initialize()
                     sessions = RuntimeSessionStore(store)
@@ -461,7 +459,7 @@ def _wait_for_crash_window(
                 if not session.resume_token.startswith("model-gateway-inflight-v1:"):
                     raise RuntimeError("durable crash session lacks model-gateway inflight marker")
                 return ready, session
-            except Exception as exc:  # transient sqlite/read race
+            except Exception as exc:
                 last_error = exc
         time.sleep(0.02)
     raise RuntimeError(
@@ -470,7 +468,21 @@ def _wait_for_crash_window(
     )
 
 
-def _suspend_and_kill(process: subprocess.Popen[bytes]) -> None:
+def _require_same_active_session(before: object, after: object | None) -> object:
+    if after is None or getattr(after, "is_active", False) is not True:
+        raise RuntimeError("durable crash session was no longer ACTIVE at suspended kill boundary")
+    for name in ("task_id", "runtime_id", "thread_id", "resume_token"):
+        if getattr(after, name, None) != getattr(before, name, None):
+            raise RuntimeError(f"durable crash session changed before hard kill: {name}")
+    return after
+
+
+def _suspend_and_kill(
+    process: subprocess.Popen[bytes],
+    *,
+    proof_dir: Path,
+    session_before_suspend: object,
+) -> object:
     try:
         import psutil
     except ImportError as exc:
@@ -479,12 +491,28 @@ def _suspend_and_kill(process: subprocess.Popen[bytes]) -> None:
         ) from exc
     target = psutil.Process(process.pid)
     target.suspend()
-    if process.poll() is not None:
-        raise RuntimeError("crash child exited before suspension was confirmed")
+    try:
+        if process.poll() is not None:
+            raise RuntimeError("crash child exited before suspension was confirmed")
+        paths = _proof_paths(proof_dir)
+        store = SQLiteStore(paths["db"])
+        store.initialize()
+        frozen = RuntimeSessionStore(store).get(
+            getattr(session_before_suspend, "task_id")
+        )
+        frozen = _require_same_active_session(session_before_suspend, frozen)
+    except Exception:
+        try:
+            target.resume()
+        except Exception:
+            pass
+        raise
+
     target.kill()
     process.wait(timeout=15)
     if process.returncode == 0:
         raise RuntimeError("crash child exited normally; hard process-loss proof was not exercised")
+    return frozen
 
 
 def _arm(args: argparse.Namespace) -> dict[str, object]:
@@ -513,7 +541,13 @@ def _arm(args: argparse.Namespace) -> dict[str, object]:
             proof_dir=proof_dir,
             timeout_seconds=args.arm_timeout,
         )
-        _suspend_and_kill(process)
+        if ready.get("pid") != process.pid:
+            raise RuntimeError("child-ready process identity does not match spawned crash child")
+        session = _suspend_and_kill(
+            process,
+            proof_dir=proof_dir,
+            session_before_suspend=session,
+        )
     except Exception:
         if process.poll() is None:
             process.kill()
@@ -547,6 +581,7 @@ def _arm(args: argparse.Namespace) -> dict[str, object]:
         "runtime_id": getattr(session, "runtime_id"),
         "resume_token_sha256": _resume_token_sha256(getattr(session, "resume_token")),
         "durable_active_session_observed": True,
+        "durable_active_session_rechecked_while_suspended": True,
         "native_request_observed_inflight": True,
         "child_process_suspended_before_kill": True,
         "child_process_hard_killed": True,
@@ -725,6 +760,7 @@ async def _verify_async(args: argparse.Namespace) -> dict[str, object]:
         ),
         "model_final": _model_identity(final_model),
         "durable_active_session_observed_before_crash": True,
+        "durable_active_session_rechecked_while_suspended": True,
         "native_request_observed_inflight_before_crash": True,
         "child_process_suspended_before_kill": True,
         "child_process_hard_killed": True,
