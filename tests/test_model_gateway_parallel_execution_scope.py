@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -55,6 +56,17 @@ class _ExitFailureScope:
         del request_id
         yield
         raise RuntimeError("scope cleanup failed after provider effect")
+
+
+class _DeadlineEatingScope(_ScopeProbe):
+    @contextmanager
+    def scope_for(self, *, request_id: str) -> Iterator[None]:
+        self.entered_tasks[request_id] = asyncio.current_task()
+        time.sleep(0.05)
+        try:
+            yield
+        finally:
+            self.exited.append(request_id)
 
 
 class _TaskIdentityProvider:
@@ -213,6 +225,39 @@ def test_admission_timeout_never_enters_child_execution_scope() -> None:
 
     assert scope_entries == ["blocking"]
     assert provider_calls == ["blocking"]
+
+
+def test_scope_entry_consumes_existing_request_deadline_before_provider() -> None:
+    async def scenario():  # type: ignore[no-untyped-def]
+        scope = _DeadlineEatingScope()
+        observed_tasks: dict[str, asyncio.Task[object] | None] = {}
+        gateway = ModelGateway()
+        gateway.register(
+            _TaskIdentityProvider(
+                provider_id="route",
+                observed_tasks=observed_tasks,
+            )
+        )
+        result = await complete_parallel(
+            gateway,
+            (_request("expired-in-scope", provider_id="route", timeout_seconds=0.01),),
+            execution_scopes=scope,
+        )
+        return result, scope, observed_tasks
+
+    result, scope, observed_tasks = asyncio.run(scenario())
+
+    outcome = result.outcomes[0]
+    assert outcome.status is ParallelModelStatus.FAILED
+    assert outcome.response is None
+    assert outcome.failure is not None
+    assert outcome.failure.code is ModelErrorCode.TIMEOUT
+    assert outcome.failure.provider_id == "route"
+    assert outcome.failure.retryable is False
+    assert outcome.failure.failure_effect is ModelFailureEffect.NO_EFFECT
+    assert set(scope.entered_tasks) == {"expired-in-scope"}
+    assert scope.exited == ["expired-in-scope"]
+    assert observed_tasks == {}
 
 
 def test_pre_effect_scope_denial_is_isolated_without_provider_call() -> None:
