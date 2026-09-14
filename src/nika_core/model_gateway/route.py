@@ -11,6 +11,7 @@ from .contracts import (
     ModelRequest,
     ModelResponse,
     ProviderCapabilities,
+    ProviderKind,
 )
 
 MAX_PROVIDER_ROUTE_ID_CHARS = 128
@@ -33,7 +34,6 @@ class RoutedModelProvider:
     def __init__(self, *, route_id: str, provider: ModelProvider) -> None:
         _validate_route_id(route_id)
         capabilities = _canonical_capabilities(provider.capabilities)
-        _validate_upstream_provider_id(capabilities.provider_id)
         self._route_id = route_id
         self._provider = provider
         self._upstream_capabilities = capabilities
@@ -66,14 +66,12 @@ class RoutedModelProvider:
         except asyncio.CancelledError:
             raise
         except ModelGatewayError as error:
-            # Snapshot only typed truth. Do not retain provider-controlled text as
-            # a public cause/context chain.
-            terminal_error = ModelGatewayError(
-                error.code,
-                "routed model provider failed",
-                provider_id=self._route_id,
-                retryable=error.retryable,
-                failure_effect=error.failure_effect,
+            # Snapshot only canonical typed truth. Provider-controlled text and
+            # malformed/foreign error authority are never retained.
+            terminal_error = _rebind_upstream_error(
+                route_id=self._route_id,
+                upstream_provider_id=self._upstream_capabilities.provider_id,
+                error=error,
             )
 
         # Raise outside the provider exception handler so Python does not attach
@@ -123,7 +121,54 @@ class RoutedModelProvider:
 def _canonical_capabilities(value: ProviderCapabilities) -> ProviderCapabilities:
     if type(value) is not ProviderCapabilities:
         raise TypeError("routed provider capabilities must be ProviderCapabilities")
-    return value
+    _validate_upstream_provider_id(value.provider_id)
+    if type(value.kind) is not ProviderKind:
+        raise TypeError("routed provider kind must be ProviderKind")
+    for name, flag in (
+        ("supports_private_data", value.supports_private_data),
+        ("supports_tools", value.supports_tools),
+        ("supports_streaming", value.supports_streaming),
+        ("supports_hard_cancellation", value.supports_hard_cancellation),
+    ):
+        if type(flag) is not bool:
+            raise TypeError(f"routed provider {name} must be bool")
+    return ProviderCapabilities(
+        provider_id=value.provider_id,
+        kind=value.kind,
+        supports_private_data=value.supports_private_data,
+        supports_tools=value.supports_tools,
+        supports_streaming=value.supports_streaming,
+        supports_hard_cancellation=value.supports_hard_cancellation,
+    )
+
+
+def _rebind_upstream_error(
+    *,
+    route_id: str,
+    upstream_provider_id: str,
+    error: ModelGatewayError,
+) -> ModelGatewayError:
+    if type(error) is not ModelGatewayError:
+        return _route_error(route_id, "routed provider returned a malformed error")
+    if type(error.code) is not ModelErrorCode:
+        return _route_error(route_id, "routed provider returned a malformed error")
+    if type(error.retryable) is not bool:
+        return _route_error(route_id, "routed provider returned a malformed error")
+    if type(error.failure_effect) is not ModelFailureEffect:
+        return _route_error(route_id, "routed provider returned a malformed error")
+    if error.provider_id is not None:
+        if type(error.provider_id) is not str or error.provider_id != upstream_provider_id:
+            return _route_error(
+                route_id,
+                "routed provider returned an error for another provider identity",
+            )
+    return ModelGatewayError(
+        error.code,
+        "routed model provider failed",
+        provider_id=route_id,
+        retryable=error.retryable,
+        failure_effect=error.failure_effect,
+    )
 
 
 def _route_error(route_id: str, message: str) -> ModelGatewayError:
@@ -142,7 +187,9 @@ def _validate_route_id(value: str) -> None:
     if not value or value != value.strip():
         raise ValueError("route_id must be non-empty canonical text")
     if len(value) > MAX_PROVIDER_ROUTE_ID_CHARS:
-        raise ValueError(f"route_id must contain at most {MAX_PROVIDER_ROUTE_ID_CHARS} characters")
+        raise ValueError(
+            f"route_id must contain at most {MAX_PROVIDER_ROUTE_ID_CHARS} characters"
+        )
     if any(ord(char) < 32 or ord(char) == 127 for char in value):
         raise ValueError("route_id must not contain control characters")
 
