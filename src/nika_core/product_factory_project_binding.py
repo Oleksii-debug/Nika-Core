@@ -10,7 +10,9 @@ from nika_core.product_factory_coordinator import (
 from nika_core.product_factory_orchestration import ProductRepositoryGraph, TeamPlan
 from nika_core.product_factory_review_authority import (
     ProductFactoryReviewAuthorityPort,
+    ReviewerPrincipalBindings,
     TeamPlanReviewAuthority,
+    reviewer_principal_bindings_ref,
     team_plan_fingerprint_ref,
 )
 from nika_core.product_project import ProductProject
@@ -39,9 +41,11 @@ class ProductProjectCoordinatorBinding:
 
     PF1 remains the durable owner of ProductProject state. A project that persists one or
     more ``team_refs`` may only expose independent review through the exact persisted
-    ``TeamPlan`` plus a host-owned evidence authority. The durable project must bind both
-    the historical plan id and a semantic fingerprint of the exact TeamPlan content, so
-    reusing one plan id with attacker-chosen role content cannot manufacture authority.
+    ``TeamPlan``, a persisted reviewer-role -> actor-principal binding, and a host-owned
+    evidence authority. The durable project binds the historical plan id, a semantic
+    fingerprint of the exact TeamPlan content, and the exact principal mapping so reusing
+    one plan id or comparing role ids to worker ids cannot manufacture independence.
+
     Legacy projects without a persisted team assignment remain plan/recovery compatible,
     but they have no review authority and therefore fail closed if an ACCEPTED transition
     is attempted or restored.
@@ -54,6 +58,7 @@ class ProductProjectCoordinatorBinding:
         default=None,
         repr=False,
     )
+    reviewer_principals: ReviewerPrincipalBindings = field(default=(), repr=False)
     _review_authority: ProductFactoryReviewAuthorityPort | None = field(
         init=False,
         default=None,
@@ -144,15 +149,24 @@ class ProductProjectCoordinatorBinding:
     def _bind_review_authority(self) -> None:
         team_refs = self.project.spec.team_refs
         if not team_refs:
-            if self.team_plan is not None or self.review_evidence_authority is not None:
+            if (
+                self.team_plan is not None
+                or self.review_evidence_authority is not None
+                or self.reviewer_principals
+            ):
                 raise ProductProjectBindingError(
-                    "trusted TeamPlan must be persisted in ProductProject team_refs before use"
+                    "trusted TeamPlan and reviewer principals must be persisted in "
+                    "ProductProject team_refs before use"
                 )
             self._review_authority = None
             return
         if self.team_plan is None or self.review_evidence_authority is None:
             raise ProductProjectBindingError(
                 "persisted ProductProject team assignment requires TeamPlan and review evidence authority"
+            )
+        if not self.reviewer_principals:
+            raise ProductProjectBindingError(
+                "persisted ProductProject team assignment requires reviewer actor principals"
             )
         if self.team_plan.project_id != self.project.project_id:
             raise ProductProjectBindingError("TeamPlan project identity does not match ProductProject")
@@ -165,6 +179,14 @@ class ProductProjectCoordinatorBinding:
             raise ProductProjectBindingError(
                 "TeamPlan content fingerprint is not persisted by ProductProject team_refs"
             )
+        expected_principals_ref = reviewer_principal_bindings_ref(
+            self.team_plan,
+            self.reviewer_principals,
+        )
+        if expected_principals_ref not in team_refs:
+            raise ProductProjectBindingError(
+                "reviewer principal binding is not persisted by ProductProject team_refs"
+            )
         component_ids = {component.component_id for component in self.graph.components}
         assigned_ids = {
             component_id
@@ -176,20 +198,22 @@ class ProductProjectCoordinatorBinding:
             raise ProductProjectBindingError(
                 f"TeamPlan does not cover repository graph components: {missing}"
             )
+        principal_role_ids = {role_id for role_id, _actor_id in self.reviewer_principals}
         independently_reviewed = {
             component_id
             for role in self.team_plan.roles
-            if role.independent_review
+            if role.independent_review and role.role_id in principal_role_ids
             for component_id in role.component_ids
         }
         if not component_ids <= independently_reviewed:
             missing = sorted(component_ids - independently_reviewed)
             raise ProductProjectBindingError(
-                f"TeamPlan has no independent reviewer for components: {missing}"
+                f"TeamPlan has no actor-bound independent reviewer for components: {missing}"
             )
         self._review_authority = TeamPlanReviewAuthority(
             self.team_plan,
             self.review_evidence_authority,
+            self.reviewer_principals,
         )
 
     def _validate_checkpoint(
