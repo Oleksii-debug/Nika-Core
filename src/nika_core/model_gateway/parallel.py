@@ -16,8 +16,8 @@ from .contracts import (
 from .gateway import ModelGateway
 
 DEFAULT_MAX_PARALLEL_MODEL_REQUESTS = 8
-MAX_PARALLEL_MODEL_REQUESTS = 64
-MAX_PARALLEL_MODEL_BATCH_REQUESTS = 64
+MAX_PARALLEL_MODEL_REQUESTS = 256
+MAX_PARALLEL_MODEL_BATCH_REQUESTS = 256
 
 
 class ParallelModelStatus(StrEnum):
@@ -114,7 +114,9 @@ async def complete_parallel(
     independently capped by ``MAX_PARALLEL_MODEL_BATCH_REQUESTS`` before the
     sequence is copied or child tasks are created. The bounded copy below also
     fails closed if a mutable or nonconforming Sequence changes/understates its
-    cardinality during admission.
+    cardinality during admission. The default remains intentionally conservative;
+    callers must explicitly opt into larger concurrency after their resource and
+    provider policy allows it.
 
     Each child receives one monotonic request budget beginning before provider or
     global semaphore admission. Queueing time is charged to the existing
