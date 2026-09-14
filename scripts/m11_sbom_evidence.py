@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from nika_core.packaging.notices import build_third_party_notices, verify_third_party_notices
@@ -11,7 +12,6 @@ from nika_core.packaging.release import (
 )
 from nika_core.packaging.sbom import (
     SupplyChainEvidenceError,
-    build_supply_chain_evidence,
     verify_supply_chain_evidence,
     write_supply_chain_evidence,
 )
@@ -29,7 +29,9 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _runtime_distribution_names(supply_chain: dict[str, object]) -> tuple[str, ...]:
+def _runtime_distribution_names(supply_chain: object) -> tuple[str, ...]:
+    if not isinstance(supply_chain, dict):
+        raise SupplyChainEvidenceError("Resolved supply-chain evidence must be an object")
     raw_components = supply_chain.get("components")
     if not isinstance(raw_components, list) or not raw_components:
         raise SupplyChainEvidenceError("Resolved runtime inventory is missing components")
@@ -52,15 +54,6 @@ def main(argv: list[str] | None = None) -> int:
     report = args.report.resolve(strict=True)
 
     try:
-        supply_chain = build_supply_chain_evidence(
-            report,
-            project_root=project_root,
-            application_name="nika-core",
-            application_version=args.version,
-            source_sha=args.source_sha,
-            extras=("gui",),
-        )
-        runtime_distributions = _runtime_distribution_names(supply_chain)
         supply_path, sbom_path = write_supply_chain_evidence(
             bundle,
             report,
@@ -70,6 +63,8 @@ def main(argv: list[str] | None = None) -> int:
             source_sha=args.source_sha,
             extras=("gui",),
         )
+        supply_chain = json.loads(supply_path.read_text(encoding="utf-8"))
+        runtime_distributions = _runtime_distribution_names(supply_chain)
         notices_path = build_third_party_notices(
             bundle,
             distribution_names=runtime_distributions,
@@ -95,7 +90,14 @@ def main(argv: list[str] | None = None) -> int:
             source_sha=args.source_sha,
             extras=("gui",),
         )
-    except (OSError, RuntimeError, ValueError, SupplyChainEvidenceError) as exc:
+    except (
+        json.JSONDecodeError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        SupplyChainEvidenceError,
+    ) as exc:
         raise SystemExit(f"SBOM release evidence failed: {exc}") from exc
 
     findings = tuple(manifest_findings) + tuple(supply_findings) + tuple(notice_findings)
