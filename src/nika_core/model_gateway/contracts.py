@@ -52,7 +52,7 @@ def _require_canonical_identifier(
         if optional:
             return None
         raise TypeError(f"{name} must be text")
-    if not isinstance(value, str):
+    if type(value) is not str:
         raise TypeError(f"{name} must be text")
     stripped = value.strip()
     if not stripped:
@@ -70,11 +70,11 @@ class ModelMessage:
     content: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.role, str):
+        if type(self.role) is not str:
             raise TypeError("message role must be text")
         if self.role not in _MODEL_MESSAGE_ROLES:
             raise ValueError(f"unsupported message role: {self.role}")
-        if not isinstance(self.content, str):
+        if type(self.content) is not str:
             raise TypeError("message content must be text")
         if not self.content.strip():
             raise ValueError("message content must not be empty")
@@ -125,9 +125,7 @@ class ModelRequest:
             raise ValueError("primary provider cannot also be a fallback provider")
         object.__setattr__(self, "fallback_provider_ids", canonical_fallbacks)
 
-        if isinstance(self.timeout_seconds, bool) or not isinstance(
-            self.timeout_seconds, (int, float)
-        ):
+        if type(self.timeout_seconds) not in (int, float):
             raise TypeError("timeout_seconds must be numeric")
         try:
             finite_timeout = isfinite(float(self.timeout_seconds))
@@ -137,9 +135,7 @@ class ModelRequest:
             raise ValueError("timeout_seconds must be finite and greater than zero")
 
         if self.temperature is not None:
-            if isinstance(self.temperature, bool) or not isinstance(
-                self.temperature, (int, float)
-            ):
+            if type(self.temperature) not in (int, float):
                 raise TypeError("temperature must be numeric")
             try:
                 finite_temperature = isfinite(float(self.temperature))
@@ -155,7 +151,7 @@ class ModelRequest:
         for key, value in self.metadata.items():
             canonical_key = _require_canonical_identifier("metadata key", key)
             assert canonical_key is not None
-            if not isinstance(value, str):
+            if type(value) is not str:
                 raise TypeError("metadata values must be text")
             if not value.strip():
                 raise ValueError("metadata values must not be empty")
@@ -224,7 +220,7 @@ class ModelResourcePolicy:
         ):
             if value is None:
                 continue
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            if type(value) not in (int, float):
                 raise TypeError(f"{name} must be numeric")
             if not 0 < value <= 100:
                 raise ValueError(f"{name} must be finite and in the range (0, 100]")
@@ -235,9 +231,7 @@ class ModelResourcePolicy:
             if not finite_value:
                 raise ValueError(f"{name} must be finite and in the range (0, 100]")
         if self.min_available_memory_bytes is not None:
-            if isinstance(self.min_available_memory_bytes, bool) or not isinstance(
-                self.min_available_memory_bytes, int
-            ):
+            if type(self.min_available_memory_bytes) is not int:
                 raise TypeError("min_available_memory_bytes must be an integer")
             if self.min_available_memory_bytes <= 0:
                 raise ValueError("min_available_memory_bytes must be greater than zero")
