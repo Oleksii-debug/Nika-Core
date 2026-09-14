@@ -9,7 +9,18 @@ from nika_core.product_command.contracts import (
     ProductStatusEntry,
     ProductStatusKind,
 )
+from nika_core.product_command.deployment_adapter import deployment_status_entries
 from nika_core.product_command.operator_projection import project_operator_status
+from nika_core.product_factory_deployment import (
+    DeploymentFabricSnapshot,
+    DeploymentIntent,
+    DeploymentRecord,
+    DeploymentState,
+    EnvironmentIdentity,
+    EnvironmentTier,
+    HealthEvidence,
+    ReleaseRef,
+)
 
 
 def _detail(*statuses: ProductStatusEntry) -> ProductProjectDetail:
@@ -291,3 +302,73 @@ def test_canonical_release_without_matching_deployment_remains_fail_closed() -> 
 
     assert projection.integration == "release:intent-current=candidate"
     assert projection.next == "integration:release:intent-current=candidate"
+
+
+def test_real_deployment_adapter_healthy_record_advances_current_work() -> None:
+    current_sha = "e" * 40
+    environment = EnvironmentIdentity(
+        environment_id="prod",
+        project_id="nika-core",
+        tier=EnvironmentTier.PRODUCTION,
+        provider_ref="provider:prod",
+    )
+    release = ReleaseRef(
+        project_id="nika-core",
+        version="1.0.0",
+        source_sha=current_sha,
+        artifact_digest="f" * 64,
+    )
+    intent = DeploymentIntent(
+        intent_id="intent-current",
+        project_id="nika-core",
+        environment=environment,
+        release=release,
+    )
+    record = DeploymentRecord(
+        intent=intent,
+        state=DeploymentState.HEALTHY,
+        provider_evidence_refs=("provider:deploy",),
+        health=HealthEvidence(
+            environment_id="prod",
+            release_sha=current_sha,
+            healthy=True,
+            evidence_refs=("provider:health",),
+            checked_at=datetime(2026, 9, 14, tzinfo=UTC),
+        ),
+    )
+    integration_statuses = deployment_status_entries(
+        DeploymentFabricSnapshot(
+            records=(record,),
+            healthy_staging=(),
+            current_releases=(("nika-core", "prod", current_sha),),
+        )
+    )
+    detail = _detail(
+        ProductStatusEntry(
+            kind=ProductStatusKind.COMPONENT,
+            item_id="work-current",
+            label="Current work",
+            state="completed",
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.BUILD,
+            item_id="work-current:test",
+            label="Current tests",
+            state="passed",
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.QA,
+            item_id="work-current:qa",
+            label="Current QA",
+            state="passed",
+            evidence=_candidate(current_sha),
+        ),
+        *integration_statuses,
+    )
+
+    projection = project_operator_status(detail)
+
+    assert projection.candidate == current_sha
+    assert "release:intent-current=candidate" in projection.integration
+    assert "deployment:intent-current=healthy" in projection.integration
+    assert projection.next == "next_work"
