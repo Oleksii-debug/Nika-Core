@@ -19,9 +19,16 @@ from nika_core.runtime.contracts import (
     RuntimeResumeProbeStatus,
     RuntimeResumeRequest,
 )
-from nika_core.runtime.coordinator import TaskRuntimeCoordinator
-from nika_core.runtime.idempotency import IdempotencyLedger
-from nika_core.runtime.recovery_claims import RECOVERY_RESUME_OPERATION_TYPE
+from nika_core.runtime.coordinator import (
+    RuntimeRecoveryClaimConflict,
+    TaskRuntimeCoordinator,
+)
+from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
+from nika_core.runtime.recovery_claims import (
+    RECOVERY_RESUME_OPERATION_TYPE,
+    new_recovery_claim_metadata,
+    write_pending_recovery_claim,
+)
 
 
 class ProbeGateRuntime:
@@ -221,3 +228,86 @@ def test_pause_after_claim_before_running_releases_claim_and_wins(tmp_path) -> N
     assert completed.outcome is RuntimeOutcome.COMPLETED
     assert runtime.resume_calls == 1
     assert TaskQueue(store).get(task_id).state is TaskState.COMPLETED
+
+
+def test_stale_resume_cleanup_cannot_delete_reclaimed_authority(tmp_path) -> None:
+    db_path = tmp_path / "Ніка stale resume cannot delete reclaimed claim.db"
+    store = SQLiteStore(db_path)
+    store.initialize()
+    runtime = ProbeGateRuntime()
+    _queue, task_id, thread_id = paused_task(store, runtime)
+
+    prepare_entered = threading.Event()
+    prepare_release = threading.Event()
+    resume_coordinator = GatedPrepareCoordinator(
+        TaskQueue(SQLiteStore(db_path)),
+        AuditLog(SQLiteStore(db_path)),
+        prepare_entered=prepare_entered,
+        prepare_release=prepare_release,
+    )
+    pause_coordinator = TaskRuntimeCoordinator(
+        TaskQueue(SQLiteStore(db_path)),
+        AuditLog(SQLiteStore(db_path)),
+    )
+
+    def resume() -> RuntimeResult:
+        return asyncio.run(resume_coordinator.resume_saved(runtime, task_id=task_id))
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(resume)
+        assert prepare_entered.wait(timeout=5)
+
+        recovery_records = tuple(
+            record
+            for record in IdempotencyLedger(store).list_for_task(task_id)
+            if record.operation_type == RECOVERY_RESUME_OPERATION_TYPE
+        )
+        assert len(recovery_records) == 1
+        original = recovery_records[0]
+        assert original.status is IdempotencyStatus.PENDING
+        assert original.result is not None
+
+        replacement_claim_id = "replacement-recovery-owner-claim"
+        replacement_owner_id = "replacement-recovery-owner"
+        replacement_metadata = new_recovery_claim_metadata(
+            claim_id=replacement_claim_id,
+            owner_id=replacement_owner_id,
+            checkpoint_id=str(original.result["checkpoint_id"]),
+            session_fingerprint=str(original.result["session_fingerprint"]),
+            claim_fingerprint=str(original.result["claim_fingerprint"]),
+            resume_mode=str(original.result["resume_mode"]),
+        )
+        with store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            write_pending_recovery_claim(
+                conn,
+                operation_key=original.operation_key,
+                metadata=replacement_metadata,
+            )
+
+        assert asyncio.run(
+            pause_coordinator.pause(
+                runtime,
+                task_id=task_id,
+                thread_id=thread_id,
+            )
+        )
+        prepare_release.set()
+        with pytest.raises(
+            RuntimeRecoveryClaimConflict,
+            match="ownership or phase changed",
+        ):
+            future.result(timeout=5)
+
+    assert runtime.resume_calls == 0
+    assert TaskQueue(store).get(task_id).state is TaskState.PAUSED
+    preserved = tuple(
+        record
+        for record in IdempotencyLedger(store).list_for_task(task_id)
+        if record.operation_type == RECOVERY_RESUME_OPERATION_TYPE
+    )
+    assert len(preserved) == 1
+    assert preserved[0].status is IdempotencyStatus.PENDING
+    assert preserved[0].result is not None
+    assert preserved[0].result["claim_id"] == replacement_claim_id
+    assert preserved[0].result["owner_id"] == replacement_owner_id
