@@ -438,6 +438,12 @@ class V01PackagedTeamStateProvider:
         if len(model_bound_audits) != 1:
             raise ValueError("model binding audit is missing or ambiguous")
         audit_payload = json.loads(model_bound_audits[0]["payload_json"])
+        if (
+            type(audit_payload) is not dict
+            or type(audit_payload.get("schema_version")) is not int
+            or audit_payload["schema_version"] != 1
+        ):
+            raise ValueError("model binding audit differs from frozen selection")
         provider_kind = selection.provider_kind
         provider_kind_value = provider_kind.value if provider_kind is not None else None
         model_fingerprint = (
