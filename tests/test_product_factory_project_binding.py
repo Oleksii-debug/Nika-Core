@@ -286,3 +286,63 @@ def test_forged_reviewer_actor_mapping_fails_persisted_binding(tmp_path) -> None
             review_evidence_authority=_AllowReviewEvidence(),
             reviewer_principals=((REVIEWER_ROLE, "worker:attacker"),),
         )
+
+
+@pytest.mark.parametrize(
+    "reviewer_principals",
+    (
+        REVIEWER_PRINCIPALS,
+        ((REVIEWER_ROLE, "worker:previous-reviewer"),),
+    ),
+)
+def test_ambiguous_reviewer_actor_mapping_refs_fail_closed_after_reload(
+    tmp_path,
+    reviewer_principals,
+) -> None:
+    repo = _project_repo(tmp_path)
+    trusted = _team_plan()
+    previous_principals: ReviewerPrincipalBindings = (
+        (REVIEWER_ROLE, "worker:previous-reviewer"),
+    )
+    team_refs = _trusted_team_refs(trusted) + (
+        reviewer_principal_bindings_ref(trusted, previous_principals),
+    )
+    repo.create(
+        project_id="p1",
+        name="Product",
+        spec=_spec(team_refs=team_refs),
+        idempotency_key="create:p1:ambiguous-reviewer-principals",
+    )
+    restarted_project = repo.get("p1")
+
+    with pytest.raises(ProductProjectBindingError, match="exactly one current persisted authority ref"):
+        ProductProjectCoordinatorBinding(
+            restarted_project,
+            _graph(),
+            team_plan=trusted,
+            review_evidence_authority=_AllowReviewEvidence(),
+            reviewer_principals=reviewer_principals,
+        )
+
+
+def test_ambiguous_team_plan_fingerprint_refs_fail_closed_after_reload(tmp_path) -> None:
+    repo = _project_repo(tmp_path)
+    trusted = _team_plan()
+    stale = replace(trusted, reasons=("previous durable team assignment",))
+    team_refs = _trusted_team_refs(trusted) + (team_plan_fingerprint_ref(stale),)
+    repo.create(
+        project_id="p1",
+        name="Product",
+        spec=_spec(team_refs=team_refs),
+        idempotency_key="create:p1:ambiguous-team-plan",
+    )
+    restarted_project = repo.get("p1")
+
+    with pytest.raises(ProductProjectBindingError, match="exactly one current persisted authority ref"):
+        ProductProjectCoordinatorBinding(
+            restarted_project,
+            _graph(),
+            team_plan=trusted,
+            review_evidence_authority=_AllowReviewEvidence(),
+            reviewer_principals=REVIEWER_PRINCIPALS,
+        )

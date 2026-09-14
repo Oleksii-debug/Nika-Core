@@ -26,6 +26,20 @@ class StaleProductProjectBindingError(ProductProjectBindingError):
     """Raised when orchestration state targets an obsolete ProductProject version."""
 
 
+def _require_unique_current_authority_ref(
+    team_refs: tuple[str, ...],
+    expected_ref: str,
+    *,
+    label: str,
+) -> None:
+    namespace = f"{expected_ref.rsplit(':', 1)[0]}:"
+    matching = tuple(ref for ref in team_refs if ref.startswith(namespace))
+    if matching != (expected_ref,):
+        raise ProductProjectBindingError(
+            f"{label} must have exactly one current persisted authority ref"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class ProductProjectCoordinatorCheckpoint:
     project_id: str
@@ -175,18 +189,20 @@ class ProductProjectCoordinatorBinding:
                 "TeamPlan identity is not persisted by ProductProject team_refs"
             )
         expected_plan_ref = team_plan_fingerprint_ref(self.team_plan)
-        if expected_plan_ref not in team_refs:
-            raise ProductProjectBindingError(
-                "TeamPlan content fingerprint is not persisted by ProductProject team_refs"
-            )
+        _require_unique_current_authority_ref(
+            team_refs,
+            expected_plan_ref,
+            label="TeamPlan content fingerprint",
+        )
         expected_principals_ref = reviewer_principal_bindings_ref(
             self.team_plan,
             self.reviewer_principals,
         )
-        if expected_principals_ref not in team_refs:
-            raise ProductProjectBindingError(
-                "reviewer principal binding is not persisted by ProductProject team_refs"
-            )
+        _require_unique_current_authority_ref(
+            team_refs,
+            expected_principals_ref,
+            label="reviewer principal binding",
+        )
         component_ids = {component.component_id for component in self.graph.components}
         assigned_ids = {
             component_id
