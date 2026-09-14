@@ -179,10 +179,10 @@ class ProductFactoryCoordinator:
         request = record.request
         self._validate_result_identity(request, envelope)
         if not envelope.coding_result.succeeded:
-            failure = envelope.coding_result.failure
-            if failure is None:
-                raise CoordinatorError("failed worker result requires failure evidence")
-            blocker = _canonical_worker_failure_message(failure.message)
+            blocker = _canonical_worker_failure_message_from_result(
+                envelope.coding_result,
+                missing_error="failed worker result requires failure evidence",
+            )
             updated = WorkRecord(request, WorkState.REPAIR_REQUIRED, envelope, blocker=blocker)
         else:
             self._validate_success_evidence(request, envelope.coding_result.test_evidence)
@@ -356,8 +356,14 @@ class ProductFactoryCoordinator:
                     )
                 self._validate_success_evidence(request, result.coding_result.test_evidence)
                 return
-            if result is not None and result.coding_result.succeeded:
-                self._validate_success_evidence(request, result.coding_result.test_evidence)
+            if result is not None:
+                if result.coding_result.succeeded:
+                    self._validate_success_evidence(request, result.coding_result.test_evidence)
+                else:
+                    _canonical_worker_failure_message_from_result(
+                        result.coding_result,
+                        missing_error="cancelled worker-failed snapshot requires failure evidence",
+                    )
             return
         if record.state is WorkState.REPAIR_REQUIRED:
             if result is None or not blocker:
@@ -370,10 +376,10 @@ class ProductFactoryCoordinator:
             else:
                 if review is not None:
                     raise CoordinatorError("worker-failed repair snapshot cannot contain review evidence")
-                failure = result.coding_result.failure
-                if failure is None:
-                    raise CoordinatorError("worker-failed repair snapshot requires failure evidence")
-                failure_message = _canonical_worker_failure_message(failure.message)
+                failure_message = _canonical_worker_failure_message_from_result(
+                    result.coding_result,
+                    missing_error="worker-failed repair snapshot requires failure evidence",
+                )
                 canonical_blocker = _canonical_worker_failure_message(blocker)
                 if canonical_blocker != failure_message:
                     raise CoordinatorError(
@@ -554,6 +560,17 @@ def _canonical_durable_text(
 
 def _canonical_worker_failure_message(value: object) -> str:
     return _canonical_durable_text(value, label="worker failure message")
+
+
+def _canonical_worker_failure_message_from_result(
+    result: CodingResult,
+    *,
+    missing_error: str,
+) -> str:
+    failure = result.failure
+    if failure is None:
+        raise CoordinatorError(missing_error)
+    return _canonical_worker_failure_message(failure.message)
 
 
 def _canonical_evidence_ref(value: object) -> bool:

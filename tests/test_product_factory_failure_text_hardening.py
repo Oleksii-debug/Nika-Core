@@ -145,3 +145,66 @@ def test_restore_revalidates_worker_failure_message_before_accepting_durable_sta
             replace(snapshot, records=records),
             trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
         )
+
+
+def test_cancelled_worker_failure_round_trips_with_canonical_failure_evidence() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    coordinator.record_result(_failed_result(request, "tests failed"))
+
+    cancelled = coordinator.cancel("core", reason="scope removed")
+    assert cancelled.state is WorkState.CANCELLED
+    assert cancelled.blocker == "scope removed"
+    assert cancelled.result is not None
+    assert cancelled.result.coding_result.failure is not None
+    assert cancelled.result.coding_result.failure.message == "tests failed"
+
+    snapshot = coordinator.snapshot()
+    restored = ProductFactoryCoordinator(_graph())
+    restored.restore(
+        snapshot,
+        trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
+    )
+
+    restored_record = _core_record(restored)
+    assert restored_record.state is WorkState.CANCELLED
+    assert restored_record.blocker == "scope removed"
+    assert restored_record.result is not None
+    assert restored_record.result.coding_result.failure is not None
+    assert restored_record.result.coding_result.failure.message == "tests failed"
+
+
+def test_restore_revalidates_failed_result_retained_by_cancelled_state() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    coordinator.record_result(_failed_result(request, "tests failed"))
+    coordinator.cancel("core", reason="scope removed")
+    snapshot = coordinator.snapshot()
+
+    core = _core_record(coordinator)
+    assert core.result is not None
+    assert core.result.coding_result.failure is not None
+    forged_failure = replace(
+        core.result.coding_result.failure,
+        message=" forged\nmessage",
+    )
+    forged_result = replace(
+        core.result,
+        coding_result=replace(core.result.coding_result, failure=forged_failure),
+    )
+    records = tuple(
+        replace(record, result=forged_result)
+        if record.request.component_id == "core"
+        else record
+        for record in snapshot.records
+    )
+
+    restored = ProductFactoryCoordinator(_graph())
+    with pytest.raises(
+        CoordinatorError,
+        match="worker failure message must be canonical single-line text",
+    ):
+        restored.restore(
+            replace(snapshot, records=records),
+            trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
+        )
