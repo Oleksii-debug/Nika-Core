@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Self
 
 import httpx
 import pytest
@@ -115,7 +116,7 @@ class _CountingTransport:
 class _EncodedAs(str):
     """Visible text with a different hash input under legacy isinstance(str) checks."""
 
-    def __new__(cls, visible: str, encoded_as: str) -> _EncodedAs:
+    def __new__(cls, visible: str, encoded_as: str) -> Self:
         instance = super().__new__(cls, visible)
         instance._encoded_as = encoded_as
         return instance
