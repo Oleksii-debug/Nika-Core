@@ -145,10 +145,10 @@ async def complete_parallel(
     provider policy allows it.
 
     Each child receives one monotonic request budget snapshotted before any child
-    task is created. Event-loop scheduling delay, provider/global semaphore wait
-    and inference therefore consume the same ``ModelRequest.timeout_seconds``
-    budget. Expiry before provider entry is a typed TIMEOUT with positive
-    NO_EFFECT truth and no provider call.
+    task is created. Event-loop scheduling delay, provider/global semaphore wait,
+    trusted execution-scope binding and inference therefore consume the same
+    ``ModelRequest.timeout_seconds`` budget. Expiry before provider entry is a
+    typed TIMEOUT with positive NO_EFFECT truth and no provider call.
 
     Optional ``provider_limits`` add route-specific admission for requests pinned
     to explicit ``provider_id`` values. The mapping is itself bounded before it is
@@ -267,9 +267,8 @@ async def complete_parallel(
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 return _admission_timeout_outcome(request)
-            admitted_request = replace(request, timeout_seconds=remaining)
             if execution_scopes is None:
-                return await execute(admitted_request)
+                return await execute(replace(request, timeout_seconds=remaining))
 
             scope_stack = ExitStack()
             try:
@@ -279,7 +278,13 @@ async def complete_parallel(
                 scope_stack.close()
                 return _execution_scope_denied_outcome(request)
             with scope_stack:
-                return await execute(admitted_request)
+                # Binding task-local host/security authority is part of the same
+                # pre-provider request budget. Recompute after scope entry so a
+                # slow resolver/context cannot manufacture fresh inference time.
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    return _admission_timeout_outcome(request)
+                return await execute(replace(request, timeout_seconds=remaining))
         except asyncio.CancelledError:
             # A provider/callback can raise or self-request CancelledError inside
             # one child. That must not grant one route authority to cancel
