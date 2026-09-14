@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from itertools import islice
-from typing import ContextManager, Protocol
+from typing import Protocol
 
 from .contracts import (
     ModelErrorCode,
@@ -31,7 +32,7 @@ class ParallelModelExecutionScopePort(Protocol):
     before ``ModelGateway.complete``. The gateway remains the effect authority.
     """
 
-    def scope_for(self, *, request_id: str) -> ContextManager[None]: ...
+    def scope_for(self, *, request_id: str) -> AbstractContextManager[None]: ...
 
 
 class ParallelModelStatus(StrEnum):
