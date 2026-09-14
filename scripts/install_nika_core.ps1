@@ -14,7 +14,23 @@ function Get-NikaFullPath {
     if ([string]::IsNullOrWhiteSpace($Path)) {
         throw "Path must not be empty."
     }
-    return [System.IO.Path]::GetFullPath($Path).TrimEnd(
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $root = [System.IO.Path]::GetPathRoot($fullPath)
+    if (-not [string]::IsNullOrWhiteSpace($root)) {
+        $trimmedFullPath = $fullPath.TrimEnd(
+            [System.IO.Path]::DirectorySeparatorChar,
+            [System.IO.Path]::AltDirectorySeparatorChar
+        )
+        $trimmedRoot = $root.TrimEnd(
+            [System.IO.Path]::DirectorySeparatorChar,
+            [System.IO.Path]::AltDirectorySeparatorChar
+        )
+        if ([System.StringComparer]::OrdinalIgnoreCase.Equals($trimmedFullPath, $trimmedRoot)) {
+            return $root
+        }
+    }
+    return $fullPath.TrimEnd(
         [System.IO.Path]::DirectorySeparatorChar,
         [System.IO.Path]::AltDirectorySeparatorChar
     )
@@ -41,9 +57,16 @@ function Test-NikaPathWithin {
         [Parameter(Mandatory=$true)][string]$Root
     )
     $separator = [System.IO.Path]::DirectorySeparatorChar
+    $rootPrefix = $Root
+    if (
+        -not $rootPrefix.EndsWith([string][System.IO.Path]::DirectorySeparatorChar) -and
+        -not $rootPrefix.EndsWith([string][System.IO.Path]::AltDirectorySeparatorChar)
+    ) {
+        $rootPrefix += $separator
+    }
     return (
         [System.StringComparer]::OrdinalIgnoreCase.Equals($Path, $Root) -or
-        $Path.StartsWith($Root + $separator, [System.StringComparison]::OrdinalIgnoreCase)
+        $Path.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)
     )
 }
 
@@ -98,10 +121,7 @@ function Assert-NikaNoReparsePathChain {
     param([Parameter(Mandatory=$true)][string]$Path)
 
     $fullPath = Get-NikaFullPath $Path
-    $volumeRoot = [System.IO.Path]::GetPathRoot($fullPath).TrimEnd(
-        [System.IO.Path]::DirectorySeparatorChar,
-        [System.IO.Path]::AltDirectorySeparatorChar
-    )
+    $volumeRoot = Get-NikaFullPath ([System.IO.Path]::GetPathRoot($fullPath))
     $current = $fullPath
     while (-not [string]::IsNullOrWhiteSpace($current)) {
         if ([System.StringComparer]::OrdinalIgnoreCase.Equals($current, $volumeRoot)) {
@@ -129,8 +149,8 @@ function Assert-NikaSafeDestination {
         [Parameter(Mandatory=$true)][string]$DestinationPath,
         [string]$SourceBundle = ""
     )
-    $root = [System.IO.Path]::GetPathRoot($DestinationPath)
-    if ([System.StringComparer]::OrdinalIgnoreCase.Equals($DestinationPath, $root.TrimEnd([System.IO.Path]::DirectorySeparatorChar))) {
+    $root = Get-NikaFullPath ([System.IO.Path]::GetPathRoot($DestinationPath))
+    if ([System.StringComparer]::OrdinalIgnoreCase.Equals($DestinationPath, $root)) {
         throw "Installing to a drive root is forbidden."
     }
 
