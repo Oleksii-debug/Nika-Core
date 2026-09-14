@@ -75,8 +75,6 @@ class FrozenRuntimeRouter(AgentRuntimePort):
                 "allowed_runtime_ids must contain at most "
                 f"{MAX_FROZEN_RUNTIME_ROUTES} entries"
             )
-        # Bound materialization even if a mutable/hostile Sequence understates
-        # __len__ and produces more entries while being iterated.
         frozen_ids = tuple(islice(allowed_runtime_ids, MAX_FROZEN_RUNTIME_ROUTES + 1))
         if len(frozen_ids) != expected_count:
             raise ValueError("allowed_runtime_ids changed during admission")
@@ -148,9 +146,9 @@ class FrozenRuntimeRouter(AgentRuntimePort):
         settings or process-local state.
         """
 
-        runtime = self._resolve_existing(task_id=task_id, thread_id=thread_id)
-        if RuntimeCapability.DURABLE_RESUME not in runtime.capabilities:
+        if RuntimeCapability.DURABLE_RESUME not in self._capabilities:
             return None
+        runtime = self._resolve_existing(task_id=task_id, thread_id=thread_id)
         factory = getattr(runtime, "initial_resume_token", None)
         if not callable(factory):
             raise TypeError(
