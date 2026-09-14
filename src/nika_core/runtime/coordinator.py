@@ -603,13 +603,17 @@ class TaskRuntimeCoordinator:
         backoff window, so cancellation can be committed locally without fabricating an
         external in-flight cancellation.
         """
+        runtime_id = runtime.runtime_id
+        if type(runtime_id) is not str or type(thread_id) is not str:
+            raise TypeError("cancellation runtime/thread identifiers must be exact strings")
+
         operation_key = self._cancel_operation_key(
-            runtime_id=runtime.runtime_id,
+            runtime_id=runtime_id,
             task_id=task_id,
             thread_id=thread_id,
         )
         fingerprint = self._cancel_input_fingerprint(
-            runtime_id=runtime.runtime_id,
+            runtime_id=runtime_id,
             task_id=task_id,
             thread_id=thread_id,
         )
@@ -635,7 +639,7 @@ class TaskRuntimeCoordinator:
                 entity_type="task",
                 entity_id=task_id,
                 payload={
-                    "runtime_id": runtime.runtime_id,
+                    "runtime_id": runtime_id,
                     "thread_id": thread_id,
                     "operation_key": operation_key,
                 },
@@ -645,10 +649,10 @@ class TaskRuntimeCoordinator:
             if current == TaskState.RETRYING:
                 session = self._sessions.get_with_connection(conn, task_id)
                 if session is not None:
-                    if session.runtime_id != runtime.runtime_id:
+                    if session.runtime_id != runtime_id:
                         raise ValueError(
                             f"Task {task_id} belongs to runtime {session.runtime_id}, "
-                            f"not {runtime.runtime_id}"
+                            f"not {runtime_id}"
                         )
                     if session.thread_id != thread_id:
                         raise ValueError(
@@ -658,7 +662,7 @@ class TaskRuntimeCoordinator:
                     self._require_retry_schedule_route_with_connection(
                         conn,
                         task_id=task_id,
-                        runtime_id=runtime.runtime_id,
+                        runtime_id=runtime_id,
                         thread_id=thread_id,
                     )
                 self._queue.transition_with_connection(conn, task_id, TaskState.CANCELLED)
@@ -678,7 +682,7 @@ class TaskRuntimeCoordinator:
                     entity_type="task",
                     entity_id=task_id,
                     payload={
-                        "runtime_id": runtime.runtime_id,
+                        "runtime_id": runtime_id,
                         "thread_id": thread_id,
                         "operation_key": operation_key,
                         "previous_task_state": current.value,
@@ -699,7 +703,7 @@ class TaskRuntimeCoordinator:
                     entity_type="task",
                     entity_id=task_id,
                     payload={
-                        "runtime_id": runtime.runtime_id,
+                        "runtime_id": runtime_id,
                         "thread_id": thread_id,
                         "operation_key": operation_key,
                         "error": str(exc),
@@ -716,7 +720,7 @@ class TaskRuntimeCoordinator:
                     entity_type="task",
                     entity_id=task_id,
                     payload={
-                        "runtime_id": runtime.runtime_id,
+                        "runtime_id": runtime_id,
                         "thread_id": thread_id,
                         "operation_key": operation_key,
                     },
@@ -757,7 +761,7 @@ class TaskRuntimeCoordinator:
                 entity_type="task",
                 entity_id=task_id,
                 payload={
-                    "runtime_id": runtime.runtime_id,
+                    "runtime_id": runtime_id,
                     "thread_id": thread_id,
                     "operation_key": operation_key,
                     "previous_task_state": current.value,

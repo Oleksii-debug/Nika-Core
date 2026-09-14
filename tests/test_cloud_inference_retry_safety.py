@@ -92,6 +92,26 @@ class _ForeignRetryRuntime:
         raise AssertionError("foreign RETRYING cancellation must fail before runtime.cancel")
 
 
+class _SpoofingText(str):
+    def __eq__(self, other: object) -> bool:
+        del other
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        del other
+        return False
+
+    __hash__ = str.__hash__
+
+
+class _SpoofingRetryRuntime:
+    runtime_id = _SpoofingText("model-gateway:foreign-route")
+
+    async def cancel(self, *, task_id: str, thread_id: str) -> bool:
+        del task_id, thread_id
+        raise AssertionError("spoofed RETRYING cancellation must fail before runtime.cancel")
+
+
 def _definitions(store: SQLiteStore) -> AgentDefinitionRepository:
     repository = AgentDefinitionRepository(store)
     compiler = AgentCompiler(tools=(), model_profiles={"configured"})
@@ -490,6 +510,27 @@ def test_sessionless_retry_cancel_requires_exact_durable_route(
         try:
             assert queue.get(task_id).state is TaskState.RETRYING
             assert coordinator.sessions.get(task_id) is None
+            assert len(provider.requests) == 1
+
+            spoofed_runtime_id = _SpoofingText("model-gateway:foreign-route")
+            spoofed_thread_id = _SpoofingText("thread-foreign")
+            assert runtime.runtime_id == spoofed_runtime_id
+            assert "thread-dev35" == spoofed_thread_id
+
+            spoofing_runtime = cast(AgentRuntimePort, _SpoofingRetryRuntime())
+            with pytest.raises(TypeError, match="exact strings"):
+                await coordinator.cancel(
+                    spoofing_runtime,
+                    task_id=task_id,
+                    thread_id="thread-dev35",
+                )
+            with pytest.raises(TypeError, match="exact strings"):
+                await coordinator.cancel(
+                    runtime,
+                    task_id=task_id,
+                    thread_id=spoofed_thread_id,
+                )
+            assert queue.get(task_id).state is TaskState.RETRYING
             assert len(provider.requests) == 1
 
             foreign_runtime = cast(AgentRuntimePort, _ForeignRetryRuntime())
