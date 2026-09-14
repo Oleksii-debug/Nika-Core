@@ -19,7 +19,9 @@ from nika_core.product_factory_orchestration import (
     TeamRole,
 )
 from nika_core.product_factory_review_authority import (
+    ProductFactoryReviewAuthorityError,
     ProductFactoryReviewSubject,
+    ReviewerPrincipalBindings,
     TeamPlanReviewAuthority,
 )
 from nika_core.toolsmith.contracts import CodingResult, TestEvidence
@@ -28,11 +30,15 @@ SHA_A = "a" * 40
 SHA_B = "b" * 40
 DIGEST = "d" * 64
 PRODUCER = "worker:core-builder"
-TRUSTED_REVIEWER = "team-role:qa-reviewer"
+TRUSTED_REVIEWER = "worker:qa-reviewer"
+TRUSTED_REVIEWER_ROLE = "team-role:qa-reviewer"
 BUILDER_ROLE = "team-role:builder"
-UNTRUSTED_REVIEWER = "invented-reviewer"
+UNTRUSTED_REVIEWER = "worker:invented-reviewer"
 EVIDENCE = ("review-authority:issued:1",)
 PERMISSIONS = frozenset({"read_source", "write_source", "run_tests"})
+REVIEWER_PRINCIPALS: ReviewerPrincipalBindings = (
+    (TRUSTED_REVIEWER_ROLE, TRUSTED_REVIEWER),
+)
 
 
 @dataclass(slots=True)
@@ -81,7 +87,7 @@ def _team_plan(
                 reasons=("canonical implementation assignment",),
             ),
             TeamRole(
-                role_id=TRUSTED_REVIEWER,
+                role_id=TRUSTED_REVIEWER_ROLE,
                 capabilities=("qa",),
                 component_ids=reviewer_components,
                 permissions=frozenset({"read_source", "run_tests"}),
@@ -97,15 +103,13 @@ def _team_plan(
 def _authority(
     evidence_authority: _ExactEvidenceAuthority | None = None,
     *,
-    reviewer_independent: bool = True,
     reviewer_components: tuple[str, ...] = ("core",),
+    reviewer_principals: ReviewerPrincipalBindings = REVIEWER_PRINCIPALS,
 ) -> TeamPlanReviewAuthority:
     return TeamPlanReviewAuthority(
-        _team_plan(
-            reviewer_independent=reviewer_independent,
-            reviewer_components=reviewer_components,
-        ),
+        _team_plan(reviewer_components=reviewer_components),
         evidence_authority or _ExactEvidenceAuthority(),
+        reviewer_principals,
     )
 
 
@@ -152,9 +156,14 @@ def _record(coordinator: ProductFactoryCoordinator):
     return coordinator.snapshot().records[0]
 
 
-def test_secure_candidate_cannot_self_review() -> None:
+def test_secure_candidate_cannot_self_review_in_actor_principal_domain() -> None:
     evidence = _ExactEvidenceAuthority(trusted_reviewer=PRODUCER)
-    coordinator = _coordinator(_authority(evidence))
+    self_review_authority = TeamPlanReviewAuthority(
+        _team_plan(),
+        evidence,
+        ((TRUSTED_REVIEWER_ROLE, PRODUCER),),
+    )
+    coordinator = _coordinator(self_review_authority)
     _record_secure_candidate(coordinator)
 
     with pytest.raises(CoordinatorError, match="independent reviewer"):
@@ -163,7 +172,7 @@ def test_secure_candidate_cannot_self_review() -> None:
             ReviewDecision(
                 reviewer_id=PRODUCER,
                 accepted=True,
-                reason="self review must fail",
+                reason="same actor cannot produce and review through different role identity",
                 evidence_refs=EVIDENCE,
             ),
         )
@@ -192,7 +201,7 @@ def test_secure_candidate_rejects_missing_producer_identity() -> None:
     assert evidence.calls == []
 
 
-def test_team_plan_rejects_unassigned_reviewer_before_evidence_authority() -> None:
+def test_team_plan_rejects_unassigned_reviewer_actor_before_evidence_authority() -> None:
     evidence = _ExactEvidenceAuthority(trusted_reviewer=UNTRUSTED_REVIEWER)
     coordinator = _coordinator(_authority(evidence))
     _record_secure_candidate(coordinator)
@@ -203,7 +212,7 @@ def test_team_plan_rejects_unassigned_reviewer_before_evidence_authority() -> No
             ReviewDecision(
                 reviewer_id=UNTRUSTED_REVIEWER,
                 accepted=True,
-                reason="invented reviewer must fail",
+                reason="invented actor principal must fail",
                 evidence_refs=EVIDENCE,
             ),
         )
@@ -212,24 +221,28 @@ def test_team_plan_rejects_unassigned_reviewer_before_evidence_authority() -> No
     assert evidence.calls == []
 
 
-def test_team_plan_rejects_role_without_independent_review_assignment() -> None:
-    evidence = _ExactEvidenceAuthority(trusted_reviewer=TRUSTED_REVIEWER)
-    coordinator = _coordinator(_authority(evidence, reviewer_independent=False))
-    _record_secure_candidate(coordinator)
-
-    with pytest.raises(CoordinatorError, match="authority rejected"):
-        coordinator.review(
-            "core",
-            ReviewDecision(
-                reviewer_id=TRUSTED_REVIEWER,
-                accepted=True,
-                reason="non-review role cannot promote candidate",
-                evidence_refs=EVIDENCE,
-            ),
+def test_team_plan_requires_principal_binding_for_every_independent_review_role() -> None:
+    with pytest.raises(
+        ProductFactoryReviewAuthorityError,
+        match="cover exactly the independent-review roles",
+    ):
+        TeamPlanReviewAuthority(
+            _team_plan(),
+            _ExactEvidenceAuthority(),
+            (("team-role:not-the-review-role", TRUSTED_REVIEWER),),
         )
 
-    assert _record(coordinator).state is WorkState.REVIEW_REQUIRED
-    assert evidence.calls == []
+
+def test_team_plan_without_independent_review_role_cannot_accept_principal_binding() -> None:
+    with pytest.raises(
+        ProductFactoryReviewAuthorityError,
+        match="cover exactly the independent-review roles",
+    ):
+        TeamPlanReviewAuthority(
+            _team_plan(reviewer_independent=False),
+            _ExactEvidenceAuthority(),
+            REVIEWER_PRINCIPALS,
+        )
 
 
 def test_team_plan_rejects_reviewer_outside_component_scope() -> None:
