@@ -113,6 +113,7 @@ class MultiAgentSupervisor:
         parent = self._store.member(team_id, parent_id)
         self._definitions.require_active(parent.agent_id, parent.agent_version)
         self._validate_child_requests(requests)
+        self._validate_initial_resume_token_contract()
 
         members = tuple(
             self._store.spawn_child(
@@ -435,6 +436,15 @@ class MultiAgentSupervisor:
             except ValueError:
                 return "RuntimeFailure"
         return "RuntimeFailure"
+
+    def _validate_initial_resume_token_contract(self) -> None:
+        if (
+            RuntimeCapability.DURABLE_RESUME in self._runtime.capabilities
+            and not callable(getattr(self._runtime, "initial_resume_token", None))
+        ):
+            raise TypeError(
+                "durable runtime must expose initial_resume_token for crash-safe team execution"
+            )
 
     def _initial_resume_token(
         self,
