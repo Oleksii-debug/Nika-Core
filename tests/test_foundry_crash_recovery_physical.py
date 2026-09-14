@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,6 +22,7 @@ from scripts.prove_foundry_crash_recovery import (
     _ensure_new_proof_directory,
     _model_identity,
     _require_real_reboot,
+    _require_same_active_session,
     _validate_args,
 )
 
@@ -83,6 +85,43 @@ def test_reboot_gate_rejects_same_boot_and_accepts_advanced_boot() -> None:
         _require_real_reboot(arm_boot_time=1000.0, current_boot_time=1001.0)
 
     _require_real_reboot(arm_boot_time=1000.0, current_boot_time=1001.01)
+
+
+def test_suspended_kill_boundary_rejects_cleared_or_changed_session() -> None:
+    before = SimpleNamespace(
+        is_active=True,
+        task_id="task-1",
+        runtime_id="model-gateway:foundry-local",
+        thread_id="thread-1",
+        resume_token="model-gateway-inflight-v1:abc",
+    )
+    same = SimpleNamespace(
+        is_active=True,
+        task_id="task-1",
+        runtime_id="model-gateway:foundry-local",
+        thread_id="thread-1",
+        resume_token="model-gateway-inflight-v1:abc",
+    )
+    cleared = SimpleNamespace(
+        is_active=False,
+        task_id="task-1",
+        runtime_id="model-gateway:foundry-local",
+        thread_id="thread-1",
+        resume_token="model-gateway-inflight-v1:abc",
+    )
+    changed = SimpleNamespace(
+        is_active=True,
+        task_id="task-1",
+        runtime_id="model-gateway:foundry-local",
+        thread_id="thread-1",
+        resume_token="model-gateway-inflight-v1:def",
+    )
+
+    assert _require_same_active_session(before, same) is same
+    with pytest.raises(RuntimeError, match="no longer ACTIVE"):
+        _require_same_active_session(before, cleared)
+    with pytest.raises(RuntimeError, match="resume_token"):
+        _require_same_active_session(before, changed)
 
 
 def test_model_identity_never_exports_foundry_cache_path() -> None:
