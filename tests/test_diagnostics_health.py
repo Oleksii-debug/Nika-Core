@@ -55,6 +55,16 @@ class _FailingObserver:
         raise RuntimeError(f"Bearer {_SECRET_CANARY}")
 
 
+class _HostilePercent(float):
+    def __format__(self, _format_spec: str) -> str:
+        return _SECRET_CANARY
+
+
+class _HostileAvailableBytes(int):
+    def __floordiv__(self, _other: object) -> str:
+        return _SECRET_CANARY
+
+
 def _run(
     config: AppConfig,
     observer: object | None,
@@ -145,6 +155,29 @@ def test_invalid_resource_measurements_fail_closed(tmp_path: Path, snapshot: obj
 
     assert report.overall is HealthStatus.FAIL
     assert _check_map(report)["resources.observer"] is HealthStatus.FAIL
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        ResourceSnapshot(_HostilePercent(10.0), 20.0, 1),
+        ResourceSnapshot(10.0, _HostilePercent(20.0), 1),
+        ResourceSnapshot(10.0, 20.0, _HostileAvailableBytes(1024)),
+    ],
+)
+def test_resource_numeric_subclasses_fail_before_projection(
+    tmp_path: Path,
+    snapshot: object,
+) -> None:
+    database = tmp_path / "nika.db"
+    _write_healthy_database(database)
+
+    report = _run(_config(database), _StaticObserver(snapshot))
+
+    assert report.overall is HealthStatus.FAIL
+    assert _check_map(report)["resources.observer"] is HealthStatus.FAIL
+    assert _SECRET_CANARY not in report.render_text()
+    assert _SECRET_CANARY not in json.dumps(report.as_dict(), ensure_ascii=False)
 
 
 def test_future_core_schema_fails_closed(tmp_path: Path) -> None:

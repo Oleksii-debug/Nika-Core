@@ -440,40 +440,49 @@ class HealthService:
                 ),
             )
         try:
-            snapshot_valid = self._valid_snapshot(snapshot)
+            values = self._validated_resource_values(snapshot)
         except (AttributeError, TypeError, ValueError, OverflowError):
-            snapshot_valid = False
-        if not snapshot_valid:
+            values = None
+        if values is None:
             return HealthCheck(
                 check_id="resources.observer",
                 status=HealthStatus.FAIL,
                 summary="Resource observer returned invalid or non-finite measurements.",
             )
-        available_mib = snapshot.available_memory_bytes // (1024 * 1024)
+        cpu_percent, memory_percent, available_memory_bytes = values
+        available_mib = available_memory_bytes // (1024 * 1024)
         return HealthCheck(
             check_id="resources.observer",
             status=HealthStatus.PASS,
             summary=(
-                f"Resource observation valid: CPU {snapshot.cpu_percent:.1f}%, "
-                f"memory {snapshot.memory_percent:.1f}%, available memory {available_mib} MiB."
+                f"Resource observation valid: CPU {cpu_percent:.1f}%, "
+                f"memory {memory_percent:.1f}%, available memory {available_mib} MiB."
             ),
         )
 
     @classmethod
-    def _valid_snapshot(cls, snapshot: ResourceSnapshot) -> bool:
-        return (
-            cls._valid_percent(snapshot.cpu_percent)
-            and cls._valid_percent(snapshot.memory_percent)
-            and isinstance(snapshot.available_memory_bytes, int)
-            and not isinstance(snapshot.available_memory_bytes, bool)
-            and snapshot.available_memory_bytes >= 0
-        )
+    def _validated_resource_values(
+        cls,
+        snapshot: ResourceSnapshot,
+    ) -> tuple[float, float, int] | None:
+        cpu_percent = snapshot.cpu_percent
+        memory_percent = snapshot.memory_percent
+        available_memory_bytes = snapshot.available_memory_bytes
+        if (
+            not cls._valid_percent(cpu_percent)
+            or not cls._valid_percent(memory_percent)
+            or type(available_memory_bytes) is not int
+            or available_memory_bytes < 0
+        ):
+            return None
+        return float(cpu_percent), float(memory_percent), available_memory_bytes
 
     @staticmethod
     def _valid_percent(value: object) -> bool:
-        return (
-            isinstance(value, (int, float))
-            and not isinstance(value, bool)
-            and math.isfinite(float(value))
-            and 0.0 <= float(value) <= 100.0
-        )
+        if type(value) is not int and type(value) is not float:
+            return False
+        try:
+            number = float(value)
+        except OverflowError:
+            return False
+        return math.isfinite(number) and 0.0 <= number <= 100.0
