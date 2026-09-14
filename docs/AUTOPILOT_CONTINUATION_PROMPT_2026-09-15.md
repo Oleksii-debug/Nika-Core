@@ -20,11 +20,12 @@ Use this prompt for scheduled/autopilot development runs. It is an execution pro
 2. `AGENTS.md`;
 3. `docs/AUTONOMOUS_WORKER_ORCHESTRATION.md`;
 4. `docs/OPEN_SOURCE_ACCELERATION_PLAN_2026-09-15.md`;
-5. актуальний coordination root #553 та writable continuation #803;
-6. свій канонічний PR/branch/head, incumbent owner і актуальні Actions/reviews;
-7. тільки релевантні специфікації для свого scope.
+5. `docs/CROSS_PROJECT_REUSE_INVARIANTS_2026-09-15.md` якщо scope стосується interop, capabilities/tools, external effects, GitHub governance, browser ownership, accessibility/release evidence або cross-project reuse;
+6. актуальний coordination root #553 та writable continuation #803;
+7. свій канонічний PR/branch/head, incumbent owner і актуальні Actions/reviews;
+8. тільки релевантні специфікації для свого scope.
 
-Не перечитуй усю історію репозиторію, всі старі Drive-документи і всі старі comments щогодини.
+Не перечитуй усю історію репозиторію, всі старі Drive-документи і всі старі comments щогодини. Якщо існує компактний derived coordination snapshot, його можна використовувати як cache для швидкого wake-up, але перед будь-якою mutation/integration обов'язковий live exact race-guard GitHub/head/ownership. Snapshot ніколи не є assignment authority.
 
 ### 2. Безкоштовне зараз є жорстким пріоритетом
 
@@ -62,6 +63,8 @@ Canonical direction:
 - local retrieval -> SQLite/FTS5 first;
 - tools/MCP/plugins/Toolsmith -> one canonical Capability Registry projection.
 
+Nika-Core і ChatGPT Autopilot НЕ зливай у один runtime. Nika owns global intent/planning/ownership/model/factory/release truth; Autopilot owns hardened ChatGPT-Web session/tab/send/recovery execution. Інтеграція між ними — малий versioned TaskEnvelope/WorkerResult-style contract через existing concepts, а не shared scheduler/runtime.
+
 ### 4. REUSE BEFORE REWRITE
 
 Before custom code:
@@ -73,7 +76,7 @@ Before custom code:
 
 Do not implement generic coding-agent engine, inference server, OCR engine, speech engine, browser engine, Git client, PDF/Office parser or vector database if a maintained component already satisfies the requirement.
 
-Every adopted dependency must have exact upstream identity/version, license/provenance and tests. Do not copy random source wholesale.
+Every adopted dependency must have exact upstream identity/version, pinned artifact/source identity, exact license/provenance and tests. Do not copy random source wholesale. Compose this with the existing SBOM/provenance lineage; do not create supply-chain framework #2.
 
 ### 5. Як вибрати роботу цього запуску
 
@@ -141,8 +144,12 @@ Every adopted dependency must have exact upstream identity/version, license/prov
 
 Head/base movement invalidates evidence, яке залежить від старого exact candidate. Не перенось predecessor GREEN автоматично.
 
-### 9. Git та concurrency
+UIA/DOM semantic green НЕ дорівнює `NVDA_VERIFIED`. Automated keyboard/focus/semantic/status/copyability checks мають пройти до human test, але physical NVDA залишається окремим exact-candidate human gate.
 
+### 9. Git, source truth та concurrency
+
+- GitHub source lineage є product truth; Drive/ZIP/report/local snapshot — evidence/mirror, не вища source authority;
+- current `main` механічно unprotected; Issue #450 вже володіє settings-level repair — не створюй source pseudo-guard #2;
 - продовжуй існуючий canonical PR/branch, якщо outcome вже має lineage;
 - не створюй successor PR без реальної причини;
 - не force-push `main`;
@@ -152,7 +159,28 @@ Head/base movement invalidates evidence, яке залежить від стар
 - перед mutation/merge перевір remote head і ownership;
 - при collision — yield і виконуй disjoint/read-only useful work.
 
-### 10. Що сповільнює Nika і заборонено без конкретного acceptance reason
+### 10. External side effects: reconcile before retry
+
+Не створюй ToolInvocation/Idempotency ledger #2. Nika вже має `ToolAuthorization`, `ToolEffectGuard` та canonical `IdempotencyLedger` для effectful tools.
+
+Коли capability має зовнішній effect:
+
+- bind exact authorization/effect identity before execution;
+- durable reserve before effect;
+- якщо результат `UNCERTAIN`, НЕ роби blind retry;
+- спочатку виконай capability-specific reconcile/verification;
+- proved happened -> complete/record without repeating effect;
+- proved did not happen -> retry only under same logical operation/idempotency identity;
+- provider idempotency key -> may be used when its semantics are qualified;
+- cannot prove either -> remain fail-closed / manual review.
+
+Capability Registry повинна з часом описувати reconciliation/idempotency policy, а також окремо effect risk і data sensitivity. Side-effect-free read приватного/секретного документа не є автоматично low-risk лише тому, що write=false. Model cannot self-grant stronger scopes.
+
+### 11. Browser ownership
+
+Не допускай дві effect authorities для одного browser target одночасно. Якщо Nika Playwright/general browser і Autopilot managed ChatGPT працюють поруч, target/profile/tab/conversation має мати exact owner/provider claim/lease з expiry/reconcile semantics. Це ownership fence, не scheduler #2.
+
+### 12. Що сповільнює Nika і заборонено без конкретного acceptance reason
 
 Не роби:
 
@@ -164,9 +192,13 @@ Head/base movement invalidates evidence, яке залежить від стар
 - довгі status-only reports;
 - custom low-level engine замість maintained upstream;
 - paid-only integration як blocker;
-- cosmetic refactor, який не скорочує шлях до packaged journey.
+- cosmetic refactor, який не скорочує шлях до packaged journey;
+- cross-repository `oleksii-shared` god-project;
+- перенесення Autosport/12-6 domain machinery у Nika тільки тому, що їхні invariants сильні.
 
-### 11. Кінець запуску
+Спільне між репозиторіями витягуй спочатку як contracts/workflows/evidence schema. Shared application package з'являється лише після кількох реальних consumers і доказу стабільної семантики.
+
+### 13. Кінець запуску
 
 Перед завершенням:
 
@@ -180,8 +212,10 @@ Head/base movement invalidates evidence, яке залежить від стар
 
 Не обіцяй фонову роботу після завершення run. Не повідомляй про прогрес, якого немає у Git/source/Actions/evidence.
 
-### 12. Критерій успіху
+### 14. Критерій успіху
 
 Цей запуск успішний не коли створено багато коду, а коли exact live Nika стала практично ближче до стану, де незрячий власник на Windows 11 + NVDA може встановити Nika, керувати нею клавіатурою, дати складну ціль, пережити restart і реально отримати результат; а Product Factory може реально створити, перевірити й повернути корисний програмний artifact через керований open-source-first pipeline.
+
+Додаткові diagnostic metrics дозволені лише якщо вони допомагають знайти waste: `TIME_FROM_DEFECT_TO_VERIFIED_RELEASE`, `OWNER_TIME_PER_WEEK`, duplicate-authority/code trend, worker wake-up read/arbitration cost, reviewed-to-integrated time. Не оптимізуй метрику замість продукту.
 
 ---
