@@ -111,7 +111,7 @@ class ModelGatewayAgentRuntime:
         try:
             # Reuse the gateway's effect-free canonical selector rather than duplicating
             # provider-registry/default-route semantics in this runtime adapter.
-            provider = self._gateway._select(  # noqa: SLF001 - same canonical gateway boundary
+            provider = self._gateway._select(
                 ModelRequest(
                     request_id=f"runtime-capability:{self._provider_id}",
                     messages=(ModelMessage(role="user", content="capability probe"),),
