@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import pytest
 
@@ -18,6 +18,7 @@ from nika_core.model_gateway.contracts import (
 from nika_core.model_gateway.gateway import ModelGateway
 from nika_core.model_gateway.parallel import (
     MAX_PARALLEL_MODEL_BATCH_REQUESTS,
+    MAX_PARALLEL_MODEL_PROVIDER_LIMITS,
     ParallelModelStatus,
     complete_parallel,
 )
@@ -99,6 +100,25 @@ class _RefuseIterationOverBoundSequence(Sequence[ModelRequest]):
         raise AssertionError("oversized batch must not be materialized")
 
 
+class _RefuseIterationOverBoundMapping(Mapping[str, int]):
+    """Proves oversized limit metadata is rejected from len() before iteration."""
+
+    def __init__(self) -> None:
+        self.iteration_attempts = 0
+
+    def __len__(self) -> int:
+        return MAX_PARALLEL_MODEL_PROVIDER_LIMITS + 1
+
+    def __iter__(self):  # type: ignore[no-untyped-def]
+        self.iteration_attempts += 1
+        raise AssertionError("oversized provider limits must not be materialized")
+
+    def __getitem__(self, key: str) -> int:
+        del key
+        self.iteration_attempts += 1
+        raise AssertionError("oversized provider limits must not be indexed")
+
+
 class _HostileInt(int):
     pass
 
@@ -159,6 +179,25 @@ def test_overbound_batch_rejects_before_copy_task_fanout_or_provider_effect(
 
     assert asyncio.run(scenario()) == 0
     assert requests.iteration_attempts == 0
+    assert provider.calls == 0
+
+
+def test_overbound_provider_limits_reject_before_copy_or_provider_effect() -> None:
+    provider = _CountingProvider("provider")
+    gateway = ModelGateway()
+    gateway.register(provider)
+    limits = _RefuseIterationOverBoundMapping()
+
+    with pytest.raises(ValueError, match="provider_limits must contain at most"):
+        asyncio.run(
+            complete_parallel(
+                gateway,
+                (_request("request", provider_id="provider", timeout_seconds=1.0),),
+                provider_limits=limits,
+            )
+        )
+
+    assert limits.iteration_attempts == 0
     assert provider.calls == 0
 
 
