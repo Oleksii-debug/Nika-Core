@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import math
 import os
 import subprocess
 import threading
@@ -105,14 +106,22 @@ class WindowsPowerShellSpeechBackend:
                 "Windows System.Speech is available only on Windows",
             )
         windows_dir = _get_windows_directory()
-        executable = (
+        powershell = (
             windows_dir
             / "System32"
             / "WindowsPowerShell"
             / "v1.0"
             / "powershell.exe"
         )
-        self._powershell = _validate_trusted_powershell(executable)
+        taskkill = windows_dir / "System32" / "taskkill.exe"
+        self._powershell = _validate_trusted_system_executable(
+            powershell,
+            label="Windows PowerShell speech host",
+        )
+        self._taskkill = _validate_trusted_system_executable(
+            taskkill,
+            label="Windows process termination host",
+        )
 
     @classmethod
     def discover(cls) -> WindowsPowerShellSpeechBackend:
@@ -150,27 +159,29 @@ class WindowsPowerShellSpeechBackend:
         timeout_seconds: float,
         cancel_event: Event | None,
     ) -> _ProcessOutcome:
-        if timeout_seconds <= 0:
-            raise SpeechError(
-                SpeechErrorCode.INVALID_REQUEST,
-                "speech timeout must be positive",
-            )
+        timeout = _validate_timeout(timeout_seconds)
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
-        process = subprocess.Popen(
-            (
-                str(self._powershell),
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                script,
-            ),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            shell=False,
-            creationflags=creationflags,
-        )
+        try:
+            process = subprocess.Popen(
+                (
+                    str(self._powershell),
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    script,
+                ),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                shell=False,
+                creationflags=creationflags,
+            )
+        except OSError:
+            raise SpeechError(
+                SpeechErrorCode.PROCESS_FAILED,
+                "speech process could not be started",
+            ) from None
         result: list[tuple[bytes, None] | Exception] = []
 
         def communicate() -> None:
@@ -181,7 +192,7 @@ class WindowsPowerShellSpeechBackend:
 
         worker = threading.Thread(target=communicate, daemon=True)
         worker.start()
-        deadline = time.monotonic() + timeout_seconds
+        deadline = time.monotonic() + timeout
         failure: SpeechError | None = None
         while worker.is_alive():
             if cancel_event is not None and cancel_event.is_set():
@@ -189,7 +200,7 @@ class WindowsPowerShellSpeechBackend:
                     SpeechErrorCode.PROCESS_CANCELLED,
                     "speech output was cancelled",
                 )
-                _terminate_process_tree(process)
+                _terminate_process_tree(process, taskkill_executable=self._taskkill)
                 break
             if time.monotonic() >= deadline:
                 failure = SpeechError(
@@ -197,13 +208,13 @@ class WindowsPowerShellSpeechBackend:
                     "speech output exceeded its deadline",
                     retryable=True,
                 )
-                _terminate_process_tree(process)
+                _terminate_process_tree(process, taskkill_executable=self._taskkill)
                 break
             worker.join(timeout=0.02)
 
         worker.join(timeout=5)
         if worker.is_alive():
-            _terminate_process_tree(process)
+            _terminate_process_tree(process, taskkill_executable=self._taskkill)
             raise SpeechError(
                 SpeechErrorCode.PROCESS_FAILED,
                 "speech process did not terminate cleanly",
@@ -234,11 +245,24 @@ class WindowsPowerShellSpeechBackend:
 
 class WindowsSystemSpeechAdapter:
     def __init__(self, backend: WindowsSpeechBackendPort | None = None) -> None:
-        self._backend = backend or WindowsPowerShellSpeechBackend.discover()
+        self._backend = backend if backend is not None else WindowsPowerShellSpeechBackend.discover()
 
     def list_voices(self, *, timeout_seconds: float = 10.0) -> tuple[SpeechVoice, ...]:
-        _validate_timeout(timeout_seconds)
-        payload = self._backend.list_voices(timeout_seconds=timeout_seconds)
+        timeout = _validate_timeout(timeout_seconds)
+        try:
+            payload = self._backend.list_voices(timeout_seconds=timeout)
+        except SpeechError:
+            raise
+        except Exception:  # noqa: BLE001 - backend diagnostics must not escape
+            raise SpeechError(
+                SpeechErrorCode.PROCESS_FAILED,
+                "speech engine voice enumeration failed",
+            ) from None
+        if type(payload) is not bytes:
+            raise SpeechError(
+                SpeechErrorCode.INVALID_ENGINE_RESPONSE,
+                "speech engine returned invalid voice metadata",
+            )
         try:
             raw = json.loads(payload.decode("utf-8-sig"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -267,12 +291,12 @@ class WindowsSystemSpeechAdapter:
         timeout_seconds: float = 120.0,
         cancel_event: Event | None = None,
     ) -> SpeechReceipt:
-        if not isinstance(request, SpeechRequest):
+        if type(request) is not SpeechRequest:
             raise SpeechError(
                 SpeechErrorCode.INVALID_REQUEST,
                 "request must be a SpeechRequest",
             )
-        _validate_timeout(timeout_seconds)
+        timeout = _validate_timeout(timeout_seconds)
         if cancel_event is not None and cancel_event.is_set():
             raise SpeechError(SpeechErrorCode.PROCESS_CANCELLED, "speech output was cancelled")
         if not _PROCESS_SPEECH_LOCK.acquire(blocking=False):
@@ -292,11 +316,19 @@ class WindowsSystemSpeechAdapter:
                 ensure_ascii=False,
                 separators=(",", ":"),
             ).encode("utf-8")
-            response = self._backend.speak(
-                payload,
-                timeout_seconds=timeout_seconds,
-                cancel_event=cancel_event,
-            )
+            try:
+                response = self._backend.speak(
+                    payload,
+                    timeout_seconds=timeout,
+                    cancel_event=cancel_event,
+                )
+            except SpeechError:
+                raise
+            except Exception:  # noqa: BLE001 - backend diagnostics must not escape
+                raise SpeechError(
+                    SpeechErrorCode.PROCESS_FAILED,
+                    "speech engine failed",
+                ) from None
             voice_id = _parse_speak_response(response)
             if request.voice_id is not None and voice_id.casefold() != request.voice_id.casefold():
                 raise SpeechError(
@@ -341,7 +373,12 @@ def _parse_voice(value: Any) -> SpeechVoice:
     )
 
 
-def _parse_speak_response(payload: bytes) -> str:
+def _parse_speak_response(payload: object) -> str:
+    if type(payload) is not bytes:
+        raise SpeechError(
+            SpeechErrorCode.INVALID_ENGINE_RESPONSE,
+            "speech engine returned invalid completion metadata",
+        )
     try:
         raw = json.loads(payload.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -374,14 +411,22 @@ def _optional_string(value: Any) -> str | None:
     return value or None
 
 
-def _validate_timeout(timeout_seconds: float) -> None:
+def _validate_timeout(timeout_seconds: object) -> float:
     if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
         raise SpeechError(SpeechErrorCode.INVALID_REQUEST, "speech timeout must be numeric")
-    if timeout_seconds <= 0 or timeout_seconds > 3600:
+    try:
+        timeout = float(timeout_seconds)
+    except (OverflowError, TypeError, ValueError):
         raise SpeechError(
             SpeechErrorCode.INVALID_REQUEST,
-            "speech timeout must be greater than 0 and at most 3600 seconds",
+            "speech timeout is outside the supported bound",
+        ) from None
+    if not math.isfinite(timeout) or timeout <= 0 or timeout > 3600:
+        raise SpeechError(
+            SpeechErrorCode.INVALID_REQUEST,
+            "speech timeout must be finite, greater than 0, and at most 3600 seconds",
         )
+    return timeout
 
 
 def _get_windows_directory() -> Path:
@@ -395,41 +440,53 @@ def _get_windows_directory() -> Path:
     return Path(buffer.value).resolve(strict=True)
 
 
-def _validate_trusted_powershell(executable: Path) -> Path:
+def _validate_trusted_system_executable(executable: Path, *, label: str) -> Path:
     try:
         resolved = executable.resolve(strict=True)
-    except OSError as exc:
+    except OSError:
         raise SpeechError(
             SpeechErrorCode.ENGINE_UNAVAILABLE,
-            "Windows PowerShell speech host is unavailable",
-        ) from exc
+            f"{label} is unavailable",
+        ) from None
     if not resolved.is_file():
         raise SpeechError(
             SpeechErrorCode.ENGINE_UNAVAILABLE,
-            "Windows PowerShell speech host is not a regular file",
+            f"{label} is not a regular file",
         )
     attributes = ctypes.windll.kernel32.GetFileAttributesW(str(resolved))
     if attributes == _INVALID_FILE_ATTRIBUTES:
         raise SpeechError(
             SpeechErrorCode.ENGINE_UNAVAILABLE,
-            "unable to inspect Windows PowerShell speech host",
+            f"unable to inspect {label}",
         )
     if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
         raise SpeechError(
             SpeechErrorCode.ENGINE_UNAVAILABLE,
-            "Windows PowerShell speech host must not be a reparse point",
+            f"{label} must not be a reparse point",
         )
     return resolved
 
 
-def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
+def _terminate_process_tree(
+    process: subprocess.Popen[bytes],
+    *,
+    taskkill_executable: Path,
+) -> None:
     if process.poll() is not None:
         return
-    subprocess.run(
-        ("taskkill", "/PID", str(process.pid), "/T", "/F"),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        shell=False,
-        check=False,
-    )
+    try:
+        subprocess.run(
+            (str(taskkill_executable), "/PID", str(process.pid), "/T", "/F"),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            shell=False,
+            check=False,
+        )
+    except OSError:
+        pass
+    if process.poll() is None:
+        try:
+            process.kill()
+        except OSError:
+            pass

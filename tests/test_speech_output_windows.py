@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
+from pathlib import Path
 
 import pytest
 
+import nika_core.speech.windows as speech_windows
 from nika_core.speech import (
     MAX_SPEECH_TEXT_CHARS,
     SpeechError,
@@ -18,7 +21,7 @@ from nika_core.speech import (
 class FakeBackend:
     def __init__(self) -> None:
         self.spoken_payloads: list[dict[str, object]] = []
-        self.voice_payload = json.dumps(
+        self.voice_payload: object = json.dumps(
             [
                 {
                     "voice_id": "Microsoft Test",
@@ -29,11 +32,11 @@ class FakeBackend:
                 }
             ]
         ).encode()
-        self.speak_payload = b'{"voice_id":"Microsoft Test"}'
+        self.speak_payload: object = b'{"voice_id":"Microsoft Test"}'
 
     def list_voices(self, *, timeout_seconds: float) -> bytes:
         assert timeout_seconds > 0
-        return self.voice_payload
+        return self.voice_payload  # type: ignore[return-value]
 
     def speak(
         self,
@@ -45,7 +48,28 @@ class FakeBackend:
         assert timeout_seconds > 0
         assert cancel_event is None or not cancel_event.is_set()
         self.spoken_payloads.append(json.loads(payload.decode("utf-8")))
-        return self.speak_payload
+        return self.speak_payload  # type: ignore[return-value]
+
+
+class FalseyBackend(FakeBackend):
+    def __bool__(self) -> bool:
+        return False
+
+
+class ExplodingBackend(FakeBackend):
+    def list_voices(self, *, timeout_seconds: float) -> bytes:
+        del timeout_seconds
+        raise RuntimeError("SENSITIVE_BACKEND_DIAGNOSTIC_CANARY")
+
+    def speak(
+        self,
+        payload: bytes,
+        *,
+        timeout_seconds: float,
+        cancel_event: threading.Event | None,
+    ) -> bytes:
+        del payload, timeout_seconds, cancel_event
+        raise RuntimeError("SENSITIVE_BACKEND_DIAGNOSTIC_CANARY")
 
 
 class BlockingBackend(FakeBackend):
@@ -103,6 +127,16 @@ def test_speech_request_rejects_invalid_input(kwargs: dict[str, object]) -> None
     with pytest.raises(SpeechError) as error:
         SpeechRequest(**kwargs)  # type: ignore[arg-type]
     assert error.value.code is SpeechErrorCode.INVALID_REQUEST
+
+
+def test_falsey_injected_backend_does_not_fall_through_to_platform_discovery() -> None:
+    backend = FalseyBackend()
+    adapter = WindowsSystemSpeechAdapter(backend)
+
+    voices = adapter.list_voices()
+
+    assert len(voices) == 1
+    assert voices[0].voice_id == "Microsoft Test"
 
 
 def test_adapter_lists_installed_voices_without_mutating_host() -> None:
@@ -180,6 +214,38 @@ def test_adapter_fails_closed_when_selected_voice_differs() -> None:
     assert error.value.code is SpeechErrorCode.INVALID_ENGINE_RESPONSE
 
 
+@pytest.mark.parametrize("operation", ["list", "speak"])
+def test_unknown_backend_diagnostic_is_minimized(operation: str) -> None:
+    adapter = WindowsSystemSpeechAdapter(ExplodingBackend())
+
+    with pytest.raises(SpeechError) as error:
+        if operation == "list":
+            adapter.list_voices()
+        else:
+            adapter.speak(SpeechRequest("hello"))
+
+    assert error.value.code is SpeechErrorCode.PROCESS_FAILED
+    assert "SENSITIVE_BACKEND_DIAGNOSTIC" not in str(error.value)
+
+
+@pytest.mark.parametrize("operation", ["list", "speak"])
+def test_non_bytes_backend_response_fails_closed(operation: str) -> None:
+    backend = FakeBackend()
+    if operation == "list":
+        backend.voice_payload = "not-bytes"
+    else:
+        backend.speak_payload = {"voice_id": "Microsoft Test"}
+    adapter = WindowsSystemSpeechAdapter(backend)
+
+    with pytest.raises(SpeechError) as error:
+        if operation == "list":
+            adapter.list_voices()
+        else:
+            adapter.speak(SpeechRequest("hello"))
+
+    assert error.value.code is SpeechErrorCode.INVALID_ENGINE_RESPONSE
+
+
 def test_adapter_rejects_cancelled_request_before_backend_effect() -> None:
     backend = FakeBackend()
     adapter = WindowsSystemSpeechAdapter(backend)
@@ -223,7 +289,10 @@ def test_adapter_rejects_overlapping_speech_without_second_effect() -> None:
     assert len(backend.spoken_payloads) == 1
 
 
-@pytest.mark.parametrize("timeout", [0, -1, 3600.1, True, "1"])
+@pytest.mark.parametrize(
+    "timeout",
+    [0, -1, 3600.1, True, "1", math.nan, math.inf, 1 << 100_000],
+)
 def test_adapter_rejects_invalid_timeout(timeout: object) -> None:
     backend = FakeBackend()
     adapter = WindowsSystemSpeechAdapter(backend)
@@ -232,6 +301,40 @@ def test_adapter_rejects_invalid_timeout(timeout: object) -> None:
         adapter.list_voices(timeout_seconds=timeout)  # type: ignore[arg-type]
 
     assert error.value.code is SpeechErrorCode.INVALID_REQUEST
+
+
+def test_process_tree_termination_uses_supplied_trusted_taskkill_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    class FakeProcess:
+        pid = 42
+        killed = False
+
+        def poll(self) -> None:
+            return None
+
+        def kill(self) -> None:
+            self.killed = True
+
+    process = FakeProcess()
+
+    def fake_run(command: tuple[str, ...], **kwargs: object) -> object:
+        del kwargs
+        commands.append(command)
+        return object()
+
+    monkeypatch.setattr(speech_windows.subprocess, "run", fake_run)
+    trusted_taskkill = Path("/trusted/System32/taskkill.exe")
+
+    speech_windows._terminate_process_tree(  # noqa: SLF001 - focused private-boundary regression
+        process,  # type: ignore[arg-type]
+        taskkill_executable=trusted_taskkill,
+    )
+
+    assert commands == [
+        (str(trusted_taskkill), "/PID", "42", "/T", "/F")
+    ]
+    assert process.killed is True
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires physical Windows System.Speech host")
