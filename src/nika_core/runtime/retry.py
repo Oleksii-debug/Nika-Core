@@ -12,7 +12,7 @@ from nika_core.runtime.contracts import RuntimeErrorCode, RuntimeOutcome, Runtim
 def usable_resume_token(value: object) -> str | None:
     """Return the exact resume token only when it is usable durable text authority."""
 
-    if isinstance(value, str) and value.strip():
+    if type(value) is str and value.strip():
         return value
     return None
 
