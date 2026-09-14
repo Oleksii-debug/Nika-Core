@@ -18,6 +18,7 @@ from .gateway import ModelGateway
 DEFAULT_MAX_PARALLEL_MODEL_REQUESTS = 8
 MAX_PARALLEL_MODEL_REQUESTS = 256
 MAX_PARALLEL_MODEL_BATCH_REQUESTS = 256
+MAX_PARALLEL_MODEL_PROVIDER_LIMITS = 256
 
 
 class ParallelModelStatus(StrEnum):
@@ -125,10 +126,11 @@ async def complete_parallel(
     NO_EFFECT truth and no provider call.
 
     Optional ``provider_limits`` add route-specific admission for requests pinned
-    to explicit ``provider_id`` values. A request waits for its provider slot
-    *before* it takes a global slot, preventing a saturated or slow provider from
-    occupying every global slot while unrelated providers/local routes are ready
-    to run.
+    to explicit ``provider_id`` values. The mapping is itself bounded before it is
+    copied so admission metadata cannot become an unbounded allocation surface.
+    A request waits for its provider slot *before* it takes a global slot,
+    preventing a saturated or slow provider from occupying every global slot
+    while unrelated providers/local routes are ready to run.
 
     Provider-limited batches deliberately reject hidden ModelGateway fallbacks:
     an inner fallback attempt could switch to a provider whose semaphore this
@@ -288,13 +290,32 @@ def _validated_provider_limits(
     if not isinstance(provider_limits, Mapping):
         raise TypeError("provider_limits must be a mapping")
 
+    expected_limit_count = len(provider_limits)
+    if expected_limit_count > MAX_PARALLEL_MODEL_PROVIDER_LIMITS:
+        raise ValueError(
+            "provider_limits must contain at most "
+            f"{MAX_PARALLEL_MODEL_PROVIDER_LIMITS} entries"
+        )
+    limit_items = tuple(
+        islice(provider_limits.items(), MAX_PARALLEL_MODEL_PROVIDER_LIMITS + 1)
+    )
+    if len(limit_items) != expected_limit_count:
+        raise ValueError("provider_limits changed during admission")
+    if len(limit_items) > MAX_PARALLEL_MODEL_PROVIDER_LIMITS:
+        raise ValueError(
+            "provider_limits must contain at most "
+            f"{MAX_PARALLEL_MODEL_PROVIDER_LIMITS} entries"
+        )
+
     registered = frozenset(gateway.providers())
     validated: dict[str, int] = {}
-    for provider_id, limit in provider_limits.items():
+    for provider_id, limit in limit_items:
         if type(provider_id) is not str:
             raise TypeError("provider limit ID must be text")
         if not provider_id or provider_id != provider_id.strip():
             raise ValueError("provider limit ID must be non-empty canonical text")
+        if provider_id in validated:
+            raise ValueError("provider_limits contains duplicate provider IDs")
         if provider_id not in registered:
             raise ValueError(f"provider limit references an unknown provider: {provider_id}")
         _validate_limit(limit, name=f"provider limit for {provider_id}")
