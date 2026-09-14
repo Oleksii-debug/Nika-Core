@@ -140,6 +140,35 @@ def test_current_markers_with_extra_unique_index_fail_schema_shape(tmp_path: Pat
     assert report.overall is HealthStatus.FAIL
 
 
+def test_current_markers_with_extra_incoming_foreign_key_table_fail_schema_shape(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "nika.db"
+    SQLiteStore(database).initialize()
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "INSERT INTO tasks("
+            "task_id, workspace_id, agent_id, state, payload_json, created_at, updated_at"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("guarded-task", "workspace", "agent", "queued", "{}", "now", "now"),
+        )
+        conn.execute(
+            """CREATE TABLE rogue_task_guard (
+                task_id TEXT NOT NULL,
+                FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE RESTRICT
+            )"""
+        )
+        conn.execute("INSERT INTO rogue_task_guard(task_id) VALUES (?)", ("guarded-task",))
+
+    report = _run(database)
+
+    checks = _check_map(report)
+    assert checks["database.integrity"] is HealthStatus.PASS
+    assert checks["database.foreign-keys"] is HealthStatus.PASS
+    assert checks["database.schema.shape"] is HealthStatus.FAIL
+    assert report.overall is HealthStatus.FAIL
+
+
 def test_current_markers_with_behavior_changing_trigger_fail_schema_shape(
     tmp_path: Path,
 ) -> None:
