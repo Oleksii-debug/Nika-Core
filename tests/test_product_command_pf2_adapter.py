@@ -76,6 +76,27 @@ def test_pf2_ready_component_projects_to_textual_component_status() -> None:
     assert "Allowed paths:" in entry.detail
 
 
+def test_pf2_terminal_states_project_to_textual_component_status() -> None:
+    cases = (
+        (WorkState.DONE, "done", "Завершено", None),
+        (WorkState.CANCELLED, "cancelled", "Скасовано", "Cancelled by operator."),
+    )
+
+    for state, component_id, label, blocker in cases:
+        snapshot = CoordinatorSnapshot(
+            project_id="project-1",
+            revision=8,
+            records=(WorkRecord(_request(component_id), state, blocker=blocker),),
+        )
+
+        entries = coordinator_status_entries(snapshot)
+
+        component = next(item for item in entries if item.kind is ProductStatusKind.COMPONENT)
+        assert component.item_id == component_id
+        assert component.state == state.value
+        assert label in component.detail
+
+
 def test_pf2_result_review_and_qa_evidence_remain_textually_inspectable() -> None:
     request = _request()
     coding_result = CodingResult(
