@@ -705,6 +705,50 @@ $rollbackRecoveryState = Resolve-NikaInterruptedRollback `
     -SwapPath $rollbackSwapPath `
     -DataRoot $dataRoot
 
+# A clean install has no prior rollback to retire, so a hard stop after the
+# first Update moves Destination -> Rollback leaves no deterministic marker.
+# For Update only, restore that exact verified pre-command image and then let
+# the requested Update execute once. Rollback retains its existing missing-D
+# semantics and marker-bearing recovery remains authoritative above.
+if (
+    $Mode -eq "Update" -and
+    -not (Test-Path -LiteralPath $destinationPath) -and
+    (Test-Path -LiteralPath $rollbackPath -PathType Container) -and
+    -not (Test-Path -LiteralPath $retiredRollbackPath) -and
+    -not (Test-Path -LiteralPath $rollbackSwapPath)
+) {
+    Assert-NikaNoReparsePathChain -Path $rollbackPath
+    Assert-NikaReleaseBundle -BundleRoot $rollbackPath
+    Assert-NikaNoReparsePathChain -Path $destinationPath
+    Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @(
+        $destinationPath,
+        $rollbackPath,
+        $retiredRollbackPath,
+        $rollbackSwapPath
+    )
+    if (
+        (Test-Path -LiteralPath $retiredRollbackPath) -or
+        (Test-Path -LiteralPath $rollbackSwapPath)
+    ) {
+        throw "Markerless first-update recovery became ambiguous; refusing mutation."
+    }
+    Assert-NikaNoReparsePathChain -Path $rollbackPath
+    Assert-NikaReleaseBundle -BundleRoot $rollbackPath
+    Assert-NikaNoReparsePathChain -Path $destinationPath
+    Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @(
+        $destinationPath,
+        $rollbackPath,
+        $retiredRollbackPath,
+        $rollbackSwapPath
+    )
+    [System.IO.Directory]::Move($rollbackPath, $destinationPath)
+    Assert-NikaNoReparsePathChain -Path $destinationPath
+    Assert-NikaReleaseBundle -BundleRoot $destinationPath
+    if (Test-Path -LiteralPath $rollbackPath) {
+        throw "Markerless first-update recovery left an unresolved rollback image."
+    }
+}
+
 if ($Mode -eq "Rollback") {
     if (-not (Test-Path -LiteralPath $rollbackPath -PathType Container)) {
         throw "No rollback image is available."
