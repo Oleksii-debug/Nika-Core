@@ -230,7 +230,7 @@ class CredentialRefOpenAICompatibleProvider:
                 retryable=False,
                 failure_effect=ModelFailureEffect.NO_EFFECT,
             ) from None
-        if not isinstance(material, str) or not material or "\x00" in material:
+        if type(material) is not str or not material or "\x00" in material:
             raise ModelGatewayError(
                 ModelErrorCode.AUTHENTICATION,
                 "model credential could not be resolved",

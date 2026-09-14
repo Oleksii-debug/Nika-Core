@@ -14,6 +14,9 @@ from nika_core.model_gateway.api_route import (
     CredentialRefOpenAICompatibleProvider,
 )
 from nika_core.model_gateway.contracts import (
+    ModelErrorCode,
+    ModelFailureEffect,
+    ModelGatewayError,
     ModelMessage,
     ModelRequest,
     PrivacyClass,
@@ -44,6 +47,20 @@ class _RecordingResolver:
 
 class _TextSubclass(str):
     pass
+
+
+class _CredentialSubclass(str):
+    def __format__(self, format_spec: str) -> str:
+        raise AssertionError("behavioral credential material reached header formatting")
+
+
+class _BehavioralCredentialResolver:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def resolve(self, credential_ref: str) -> str:
+        self.calls += 1
+        return _CredentialSubclass("approved-route-secret")
 
 
 def _request() -> ModelRequest:
@@ -204,6 +221,46 @@ def test_registered_cloud_route_keeps_original_credential_after_config_mutation(
     assert resolver.references == ["env:NIKA_ROUTE_A"]
     assert provider.credential_ref == "env:NIKA_ROUTE_A"
     assert transport_calls == 1
+
+
+def test_provider_rejects_behavioral_credential_material_before_transport() -> None:
+    resolver = _BehavioralCredentialResolver()
+    client_factory_calls = 0
+    transport_calls = 0
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        nonlocal transport_calls
+        transport_calls += 1
+        raise AssertionError("behavioral credential material reached transport")
+
+    def client_factory(*, timeout: float) -> httpx.AsyncClient:
+        nonlocal client_factory_calls
+        client_factory_calls += 1
+        return httpx.AsyncClient(
+            transport=httpx.MockTransport(transport),
+            timeout=timeout,
+        )
+
+    provider = CredentialRefOpenAICompatibleProvider(
+        config=ApiModelRouteConfig(
+            provider_id="approved-api",
+            base_url="https://api.example.test/v1",
+            default_model="model-a",
+            credential_ref="env:NIKA_ROUTE_A",
+        ),
+        credential_resolver=resolver,
+        client_factory=client_factory,
+    )
+
+    with pytest.raises(ModelGatewayError) as captured:
+        asyncio.run(provider.complete(_request()))
+
+    assert captured.value.code is ModelErrorCode.AUTHENTICATION
+    assert captured.value.failure_effect is ModelFailureEffect.NO_EFFECT
+    assert captured.value.provider_id == "approved-api"
+    assert resolver.calls == 1
+    assert client_factory_calls == 0
+    assert transport_calls == 0
 
 
 def test_provider_rejects_behavioral_route_identity_scalar() -> None:
