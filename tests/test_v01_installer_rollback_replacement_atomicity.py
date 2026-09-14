@@ -197,7 +197,7 @@ def test_rollback_swap_is_deterministic_and_reconciled_before_mode_dispatch() ->
     assert '".$leaf.swap-$([Guid]::NewGuid().ToString(\'N\'))"' not in payload
     assert recovery_start < recovery_call < dispatch
     assert "Multiple interrupted installer transactions are present" in payload
-    assert '$rollbackRecoveryState -eq "completed-rollback"' in payload[:dispatch]
+    assert '"completed-rollback"' not in payload[recovery_start:dispatch]
 
 
 def test_rollback_recovery_freezes_both_hard_interruption_geometries() -> None:
@@ -217,12 +217,18 @@ def test_rollback_recovery_freezes_both_hard_interruption_geometries() -> None:
 
     assert "[System.IO.Directory]::Move($SwapPath, $DestinationPath)" in first_window
     assert '$recoveryState = "restored-precommand"' in first_window
-    assert "[System.IO.Directory]::Move($SwapPath, $RollbackPath)" in second_window
-    assert '$recoveryState = "completed-rollback"' in second_window
+    restore_rollback = "[System.IO.Directory]::Move($DestinationPath, $RollbackPath)"
+    restore_active = "[System.IO.Directory]::Move($SwapPath, $DestinationPath)"
+    assert restore_rollback in second_window
+    assert restore_active in second_window
+    assert second_window.index(restore_rollback) < second_window.index(restore_active)
+    assert '$recoveryState = "restored-precommand"' in second_window
+    assert '"completed-rollback"' not in second_window
     assert "Assert-NikaNoReparsePathChain -Path $SwapPath" in first_window
     assert "Assert-NikaReleaseBundle -BundleRoot $SwapPath" in first_window
-    assert "Assert-NikaNoReparsePathChain -Path $SwapPath" in second_window
-    assert "Assert-NikaReleaseBundle -BundleRoot $SwapPath" in second_window
+    assert second_window.count("Assert-NikaNoReparsePathChain -Path $SwapPath") >= 2
+    assert second_window.count("Assert-NikaReleaseBundle -BundleRoot $SwapPath") >= 2
+    assert second_window.count("Assert-NikaDataMutationSeparation -DataRoot $DataRoot -MutationPaths @(") >= 2
 
 
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
@@ -451,6 +457,77 @@ def test_rollback_restart_after_activation_crash_does_not_replay_swap(tmp_path: 
     assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
     assert not rollback.exists()
     assert (swap / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+
+    resumed = _run(shell, script=SCRIPT, mode="Rollback", destination=destination)
+    assert resumed.returncode == 0, resumed.stderr or resumed.stdout
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+    assert not swap.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
+def test_rollback_recovery_restart_after_first_second_window_move_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    destination, rollback, swap = _prepare_rollback_pair(tmp_path, shell)
+    destination.rename(swap)
+    rollback.rename(destination)
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    assert not rollback.exists()
+    assert (swap / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+
+    payload = SCRIPT.read_text(encoding="utf-8")
+    second_window = payload.index("elseif ($hasDestination -and -not $hasRollback) {")
+    first_recovery_move = "        [System.IO.Directory]::Move($DestinationPath, $RollbackPath)"
+    move_index = payload.index(first_recovery_move, second_window)
+    insert_at = move_index + len(first_recovery_move)
+    instrumented_payload = payload[:insert_at] + "\n        exit 91" + payload[insert_at:]
+    instrumented = tmp_path / "install_nika_core_rollback_recovery_crash1.ps1"
+    instrumented.write_text(instrumented_payload, encoding="utf-8")
+
+    crashed = _run(shell, script=instrumented, mode="Rollback", destination=destination)
+    assert crashed.returncode == 91, crashed.stderr or crashed.stdout
+    assert not destination.exists()
+    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    assert (swap / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+
+    resumed = _run(shell, script=SCRIPT, mode="Rollback", destination=destination)
+    assert resumed.returncode == 0, resumed.stderr or resumed.stdout
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+    assert not swap.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
+def test_rollback_recovery_restart_after_final_second_window_move_runs_mode_once(
+    tmp_path: Path,
+) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    destination, rollback, swap = _prepare_rollback_pair(tmp_path, shell)
+    destination.rename(swap)
+    rollback.rename(destination)
+
+    payload = SCRIPT.read_text(encoding="utf-8")
+    second_window = payload.index("elseif ($hasDestination -and -not $hasRollback) {")
+    final_recovery_move = "        [System.IO.Directory]::Move($SwapPath, $DestinationPath)"
+    move_index = payload.index(final_recovery_move, second_window)
+    insert_at = move_index + len(final_recovery_move)
+    instrumented_payload = payload[:insert_at] + "\n        exit 92" + payload[insert_at:]
+    instrumented = tmp_path / "install_nika_core_rollback_recovery_crash2.ps1"
+    instrumented.write_text(instrumented_payload, encoding="utf-8")
+
+    crashed = _run(shell, script=instrumented, mode="Rollback", destination=destination)
+    assert crashed.returncode == 92, crashed.stderr or crashed.stdout
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    assert not swap.exists()
 
     resumed = _run(shell, script=SCRIPT, mode="Rollback", destination=destination)
     assert resumed.returncode == 0, resumed.stderr or resumed.stdout
