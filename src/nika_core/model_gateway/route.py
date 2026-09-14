@@ -66,13 +66,28 @@ class RoutedModelProvider:
         except asyncio.CancelledError:
             raise
         except ModelGatewayError as error:
-            # Snapshot only canonical typed truth. Provider-controlled text and
-            # malformed/foreign error authority are never retained.
-            terminal_error = _rebind_upstream_error(
-                route_id=self._route_id,
-                upstream_provider_id=self._upstream_capabilities.provider_id,
-                error=error,
-            )
+            # A typed upstream error is authoritative only while the provider's
+            # registered capability identity is still unchanged *after* the
+            # attempted effect. Otherwise optimistic retryable/NO_EFFECT truth
+            # could be laundered through a route whose execution surface drifted
+            # during complete(). Capability access is itself an untrusted provider
+            # boundary, so any malformed/drifting/throwing observation discards
+            # that optimistic authority and becomes route-scoped UNKNOWN.
+            try:
+                self._require_stable_capabilities()
+            except Exception:  # noqa: BLE001 - untrusted capability boundary
+                terminal_error = _route_error(
+                    self._route_id,
+                    "routed provider capabilities changed during failed execution",
+                )
+            else:
+                # Snapshot only canonical typed truth. Provider-controlled text and
+                # malformed/foreign error authority are never retained.
+                terminal_error = _rebind_upstream_error(
+                    route_id=self._route_id,
+                    upstream_provider_id=self._upstream_capabilities.provider_id,
+                    error=error,
+                )
 
         # Raise outside the provider exception handler so Python does not attach
         # provider-controlled diagnostics through __context__.
