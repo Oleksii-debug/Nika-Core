@@ -217,21 +217,28 @@ class TaskRuntimeCoordinator:
                 break
 
             retries_used = retry_number
-            self._queue.transition(request.task_id, TaskState.RETRYING)
-            self._audit.append(
-                event_type="runtime.retry_scheduled",
-                entity_type="task",
-                entity_id=request.task_id,
-                payload={
-                    "runtime_id": runtime.runtime_id,
-                    "thread_id": request.thread_id,
-                    "retry_number": retries_used,
-                    "delay_seconds": delay,
-                    "error": result.error,
-                    "error_code": result.error_code.value if result.error_code else None,
-                    "resume_token": resume_token,
-                },
-            )
+            with self._queue.store.connection() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                self._queue.transition_with_connection(
+                    conn,
+                    request.task_id,
+                    TaskState.RETRYING,
+                )
+                self._audit.append_with_connection(
+                    conn,
+                    event_type="runtime.retry_scheduled",
+                    entity_type="task",
+                    entity_id=request.task_id,
+                    payload={
+                        "runtime_id": runtime.runtime_id,
+                        "thread_id": request.thread_id,
+                        "retry_number": retries_used,
+                        "delay_seconds": delay,
+                        "error": result.error,
+                        "error_code": result.error_code.value if result.error_code else None,
+                        "resume_token": resume_token,
+                    },
+                )
             if delay:
                 sleep_started = loop.time()
                 await asyncio.sleep(delay)
@@ -372,6 +379,53 @@ class TaskRuntimeCoordinator:
                 },
             )
         return True
+
+    @staticmethod
+    def _require_retry_schedule_route_with_connection(
+        conn,
+        *,
+        task_id: str,
+        runtime_id: str,
+        thread_id: str,
+    ) -> None:
+        row = conn.execute(
+            "SELECT event_type, payload_json FROM audit_events "
+            "WHERE entity_type = ? AND entity_id = ? "
+            "AND event_type IN (?, ?) ORDER BY event_id DESC LIMIT 1",
+            (
+                "task",
+                task_id,
+                "runtime.retry_scheduled",
+                "runtime.retry_started",
+            ),
+        ).fetchone()
+        if row is None or row["event_type"] != "runtime.retry_scheduled":
+            raise ValueError("RETRYING task lacks current durable retry route authority")
+        try:
+            payload = json.loads(row["payload_json"])
+        except (TypeError, json.JSONDecodeError):
+            raise ValueError("RETRYING task has invalid durable retry route authority") from None
+        if type(payload) is not dict:
+            raise ValueError("RETRYING task has invalid durable retry route authority")
+
+        bound_runtime_id = payload.get("runtime_id")
+        bound_thread_id = payload.get("thread_id")
+        retry_number = payload.get("retry_number")
+        if (
+            type(bound_runtime_id) is not str
+            or not bound_runtime_id.strip()
+            or type(bound_thread_id) is not str
+            or not bound_thread_id.strip()
+            or type(retry_number) is not int
+            or retry_number < 1
+        ):
+            raise ValueError("RETRYING task has invalid durable retry route authority")
+        if bound_runtime_id != runtime_id:
+            raise ValueError(
+                f"Task {task_id} retry belongs to runtime {bound_runtime_id}, not {runtime_id}"
+            )
+        if bound_thread_id != thread_id:
+            raise ValueError("Cancellation thread does not match durable retry schedule")
 
     async def resume_approval(
         self,
@@ -600,6 +654,13 @@ class TaskRuntimeCoordinator:
                         raise ValueError(
                             "Cancellation thread does not match persisted runtime session"
                         )
+                else:
+                    self._require_retry_schedule_route_with_connection(
+                        conn,
+                        task_id=task_id,
+                        runtime_id=runtime.runtime_id,
+                        thread_id=thread_id,
+                    )
                 self._queue.transition_with_connection(conn, task_id, TaskState.CANCELLED)
                 self._sessions.delete_with_connection(conn, task_id)
                 self._idempotency.complete_with_connection(

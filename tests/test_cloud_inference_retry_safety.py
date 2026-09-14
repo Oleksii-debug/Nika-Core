@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -24,7 +25,12 @@ from nika_core.model_gateway.contracts import (
 )
 from nika_core.model_gateway.gateway import ModelGateway
 from nika_core.multi_agent.model_gateway_runtime import ModelGatewayAgentRuntime
-from nika_core.runtime.contracts import RuntimeErrorCode, RuntimeOutcome, RuntimeRequest
+from nika_core.runtime.contracts import (
+    AgentRuntimePort,
+    RuntimeErrorCode,
+    RuntimeOutcome,
+    RuntimeRequest,
+)
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
 from nika_core.runtime.retry import RetryPolicy
 
@@ -76,6 +82,14 @@ class _SequenceCloudProvider:
             usage=ModelUsage(input_tokens=2, output_tokens=1, total_tokens=3),
             latency_ms=1.0,
         )
+
+
+class _ForeignRetryRuntime:
+    runtime_id = "model-gateway:foreign-route"
+
+    async def cancel(self, *, task_id: str, thread_id: str) -> bool:
+        del task_id, thread_id
+        raise AssertionError("foreign RETRYING cancellation must fail before runtime.cancel")
 
 
 def _definitions(store: SQLiteStore) -> AgentDefinitionRepository:
@@ -300,6 +314,62 @@ def test_cloud_fresh_retry_requires_provider_retryable_and_no_effect(
     assert clock.sleeps == []
 
 
+def test_retry_schedule_state_and_route_binding_commit_atomically(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, queue, task_id, _, runtime, provider = _harness(
+        tmp_path,
+        [
+            _error(
+                ModelErrorCode.RATE_LIMITED,
+                retryable=True,
+                effect=ModelFailureEffect.NO_EFFECT,
+            ),
+            "must-not-run-after-audit-failure",
+        ],
+    )
+    audit = AuditLog(store)
+    coordinator = TaskRuntimeCoordinator(queue, audit)
+    original_append = audit.append_with_connection
+
+    def fail_retry_schedule(
+        conn,
+        *,
+        event_type: str,
+        entity_type: str,
+        entity_id: str,
+        payload: dict[str, object] | None = None,
+    ) -> int:
+        if event_type == "runtime.retry_scheduled":
+            raise RuntimeError("forced retry-schedule audit failure")
+        return original_append(
+            conn,
+            event_type=event_type,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            payload=payload,
+        )
+
+    monkeypatch.setattr(audit, "append_with_connection", fail_retry_schedule)
+
+    with pytest.raises(RuntimeError, match="forced retry-schedule audit failure"):
+        asyncio.run(
+            coordinator.start(
+                runtime,
+                _request(task_id),
+                retry_policy=_cloud_retry_policy(),
+            )
+        )
+
+    assert queue.get(task_id).state is TaskState.RUNNING
+    assert len(provider.requests) == 1
+    assert not any(
+        event.event_type == "runtime.retry_scheduled"
+        for event in AuditLog(store).list_for(entity_type="task", entity_id=task_id)
+    )
+
+
 def test_public_cancellation_during_backoff_is_durable_and_blocks_later_transport(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -379,6 +449,89 @@ def test_public_cancellation_during_backoff_is_durable_and_blocks_later_transpor
     assert outcome is RuntimeOutcome.CANCELLED
     assert len(provider.requests) == 1
     assert sleeps == [1.0]
+
+
+def test_sessionless_retry_cancel_requires_exact_durable_route(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nika_core.runtime.idempotency import IdempotencyLedger
+
+    store, queue, task_id, coordinator, runtime, provider = _harness(
+        tmp_path,
+        [
+            _error(
+                ModelErrorCode.RATE_LIMITED,
+                retryable=True,
+                effect=ModelFailureEffect.NO_EFFECT,
+            ),
+            "must-not-run-after-route-checks",
+        ],
+    )
+
+    async def scenario() -> RuntimeOutcome:
+        sleep_started = asyncio.Event()
+        release_sleep = asyncio.Event()
+
+        async def blocked_sleep(seconds: float) -> None:
+            assert seconds == 1.0
+            sleep_started.set()
+            await release_sleep.wait()
+
+        monkeypatch.setattr(asyncio, "sleep", blocked_sleep)
+        running = asyncio.create_task(
+            coordinator.start(
+                runtime,
+                _request(task_id),
+                retry_policy=_cloud_retry_policy(),
+            )
+        )
+        await sleep_started.wait()
+        try:
+            assert queue.get(task_id).state is TaskState.RETRYING
+            assert coordinator.sessions.get(task_id) is None
+            assert len(provider.requests) == 1
+
+            foreign_runtime = cast(AgentRuntimePort, _ForeignRetryRuntime())
+            with pytest.raises(ValueError, match="retry belongs to runtime"):
+                await coordinator.cancel(
+                    foreign_runtime,
+                    task_id=task_id,
+                    thread_id="thread-dev35",
+                )
+            assert queue.get(task_id).state is TaskState.RETRYING
+            assert len(provider.requests) == 1
+
+            with pytest.raises(ValueError, match="durable retry schedule"):
+                await coordinator.cancel(
+                    runtime,
+                    task_id=task_id,
+                    thread_id="thread-foreign",
+                )
+            assert queue.get(task_id).state is TaskState.RETRYING
+            assert len(provider.requests) == 1
+            assert [
+                record
+                for record in IdempotencyLedger(store).list_for_task(task_id)
+                if record.operation_type == "runtime.cancel"
+            ] == []
+
+            accepted = await coordinator.cancel(
+                runtime,
+                task_id=task_id,
+                thread_id="thread-dev35",
+            )
+            assert accepted is True
+            assert queue.get(task_id).state is TaskState.CANCELLED
+        finally:
+            release_sleep.set()
+
+        return (await running).outcome
+
+    outcome = asyncio.run(scenario())
+
+    assert outcome is RuntimeOutcome.CANCELLED
+    assert len(provider.requests) == 1
 
 
 def test_retry_backoff_consumes_original_inference_timeout_budget(
