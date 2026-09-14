@@ -132,14 +132,14 @@ def _canonical_capabilities(value: ProviderCapabilities) -> ProviderCapabilities
     ):
         if type(flag) is not bool:
             raise TypeError(f"routed provider {name} must be bool")
-    return ProviderCapabilities(
-        provider_id=value.provider_id,
-        kind=value.kind,
-        supports_private_data=value.supports_private_data,
-        supports_tools=value.supports_tools,
-        supports_streaming=value.supports_streaming,
-        supports_hard_cancellation=value.supports_hard_cancellation,
-    )
+
+    # Preserve the exact canonical capability DTO rather than reconstructing it
+    # field-by-field. That keeps route identity orthogonal to capability growth:
+    # when the canonical contract adds trusted fields (for example CLOUD effect
+    # host authority), they survive the wrapper instead of silently resetting to
+    # a dataclass default. ModelGateway remains the final canonical validator for
+    # the registered outer route.
+    return replace(value)
 
 
 def _rebind_upstream_error(
