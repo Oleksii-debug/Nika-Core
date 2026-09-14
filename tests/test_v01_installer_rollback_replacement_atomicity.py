@@ -109,6 +109,35 @@ def _prepare_missing_destination_recovery_state(
     return bundle_v3, destination, rollback, retired
 
 
+def _prepare_rollback_pair(tmp_path: Path, shell: str) -> tuple[Path, Path, Path]:
+    bundle_v1 = _bundle(tmp_path / "rollback-version-1", "v1")
+    bundle_v2 = _bundle(tmp_path / "rollback-version-2", "v2")
+    destination = tmp_path / "rollback-install" / "Nika Core"
+    rollback = destination.parent / f".{destination.name}.rollback"
+    swap = destination.parent / f".{destination.name}.rollback-swap"
+
+    installed = _run(
+        shell,
+        script=SCRIPT,
+        mode="Install",
+        destination=destination,
+        bundle=bundle_v1,
+    )
+    assert installed.returncode == 0, installed.stderr or installed.stdout
+    updated = _run(
+        shell,
+        script=SCRIPT,
+        mode="Update",
+        destination=destination,
+        bundle=bundle_v2,
+    )
+    assert updated.returncode == 0, updated.stderr or updated.stdout
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    assert not swap.exists()
+    return destination, rollback, swap
+
+
 def test_update_replacement_order_preserves_prior_rollback_until_activation() -> None:
     payload = SCRIPT.read_text(encoding="utf-8")
     update = payload[payload.index("$hadPriorRollback ="):]
@@ -137,7 +166,7 @@ def test_missing_destination_recovery_revalidates_all_authority_before_first_mov
     payload = SCRIPT.read_text(encoding="utf-8")
     recovery = payload[
         payload.index("function Resolve-NikaInterruptedUpdate") :
-        payload.index('if ([string]::IsNullOrWhiteSpace($Destination))')
+        payload.index("function Resolve-NikaInterruptedRollback")
     ]
     branch = recovery[
         recovery.index("elseif (-not $hasDestination -and $hasRollback) {") :
@@ -156,6 +185,44 @@ def test_missing_destination_recovery_revalidates_all_authority_before_first_mov
     )
     for required in required_before_effect:
         assert branch.index(required) < first_move_index
+
+
+def test_rollback_swap_is_deterministic_and_reconciled_before_mode_dispatch() -> None:
+    payload = SCRIPT.read_text(encoding="utf-8")
+    recovery_start = payload.index("function Resolve-NikaInterruptedRollback")
+    dispatch = payload.index('if ($Mode -eq "Rollback") {')
+    recovery_call = payload.index("$rollbackRecoveryState = Resolve-NikaInterruptedRollback")
+
+    assert '$rollbackSwapPath = Join-Path $parent (".$leaf.rollback-swap")' in payload
+    assert '".$leaf.swap-$([Guid]::NewGuid().ToString(\'N\'))"' not in payload
+    assert recovery_start < recovery_call < dispatch
+    assert "Multiple interrupted installer transactions are present" in payload
+    assert '$rollbackRecoveryState -eq "completed-rollback"' in payload[:dispatch]
+
+
+def test_rollback_recovery_freezes_both_hard_interruption_geometries() -> None:
+    payload = SCRIPT.read_text(encoding="utf-8")
+    recovery = payload[
+        payload.index("function Resolve-NikaInterruptedRollback") :
+        payload.index('if ([string]::IsNullOrWhiteSpace($Destination))')
+    ]
+    first_window = recovery[
+        recovery.index("if (-not $hasDestination -and $hasRollback) {") :
+        recovery.index("elseif ($hasDestination -and -not $hasRollback) {")
+    ]
+    second_window = recovery[
+        recovery.index("elseif ($hasDestination -and -not $hasRollback) {") :
+        recovery.index("else {", recovery.index("elseif ($hasDestination -and -not $hasRollback) {"))
+    ]
+
+    assert "[System.IO.Directory]::Move($SwapPath, $DestinationPath)" in first_window
+    assert '$recoveryState = "restored-precommand"' in first_window
+    assert "[System.IO.Directory]::Move($SwapPath, $RollbackPath)" in second_window
+    assert '$recoveryState = "completed-rollback"' in second_window
+    assert "Assert-NikaNoReparsePathChain -Path $SwapPath" in first_window
+    assert "Assert-NikaReleaseBundle -BundleRoot $SwapPath" in first_window
+    assert "Assert-NikaNoReparsePathChain -Path $SwapPath" in second_window
+    assert "Assert-NikaReleaseBundle -BundleRoot $SwapPath" in second_window
 
 
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
@@ -351,3 +418,104 @@ def test_missing_destination_recovery_rejects_retired_junction_before_first_move
     )
     assert removed.returncode == 0, removed.stderr or removed.stdout
     race_original.rename(retired)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
+def test_rollback_restart_after_active_staged_crash_completes_once(tmp_path: Path) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    destination, rollback, swap = _prepare_rollback_pair(tmp_path, shell)
+    destination.rename(swap)
+    assert not destination.exists()
+    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    assert (swap / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+
+    resumed = _run(shell, script=SCRIPT, mode="Rollback", destination=destination)
+    assert resumed.returncode == 0, resumed.stderr or resumed.stdout
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+    assert not swap.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
+def test_rollback_restart_after_activation_crash_does_not_replay_swap(tmp_path: Path) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    destination, rollback, swap = _prepare_rollback_pair(tmp_path, shell)
+    destination.rename(swap)
+    rollback.rename(destination)
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    assert not rollback.exists()
+    assert (swap / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+
+    resumed = _run(shell, script=SCRIPT, mode="Rollback", destination=destination)
+    assert resumed.returncode == 0, resumed.stderr or resumed.stdout
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+    assert not swap.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
+def test_rollback_restart_rejects_invalid_owned_transient_without_mutation(tmp_path: Path) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    destination, rollback, swap = _prepare_rollback_pair(tmp_path, shell)
+    swap.mkdir()
+    (swap / "not-a-release.txt").write_text("invalid", encoding="utf-8")
+
+    rejected = _run(shell, script=SCRIPT, mode="Rollback", destination=destination)
+    assert rejected.returncode != 0
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    assert (swap / "not-a-release.txt").read_text(encoding="utf-8") == "invalid"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
+def test_rollback_restart_rejects_swap_junction_without_touching_external_target(tmp_path: Path) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    destination, rollback, swap = _prepare_rollback_pair(tmp_path, shell)
+    preserved_active = Path(str(swap) + ".preserved-active")
+    destination.rename(preserved_active)
+    external_target = tmp_path / "external-rollback-swap-target"
+    external_target.mkdir()
+    sentinel = external_target / "sentinel.txt"
+    sentinel.write_text("must-not-change", encoding="utf-8")
+
+    linked = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(swap), str(external_target)],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="backslashreplace",
+        timeout=10,
+    )
+    assert linked.returncode == 0, linked.stderr or linked.stdout
+
+    rejected = _run(shell, script=SCRIPT, mode="Rollback", destination=destination)
+    assert rejected.returncode != 0
+    assert "Reparse points are forbidden" in rejected.stderr
+    assert not destination.exists()
+    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    assert (preserved_active / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+    assert sentinel.read_text(encoding="utf-8") == "must-not-change"
+
+    removed = subprocess.run(
+        ["cmd", "/c", "rmdir", str(swap)],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="backslashreplace",
+        timeout=10,
+    )
+    assert removed.returncode == 0, removed.stderr or removed.stdout
