@@ -4,7 +4,12 @@ from typing import Any
 
 import pytest
 
-from nika_core.model_gateway.contracts import ModelMessage, ModelRequest
+from nika_core.model_gateway.contracts import (
+    ModelMessage,
+    ModelRequest,
+    PrivacyClass,
+    ProviderKind,
+)
 
 
 class _HostileText(str):
@@ -77,3 +82,37 @@ def test_metadata_value_rejects_string_subclass_before_hooks() -> None:
 def test_temperature_rejects_numeric_subclasses_before_hooks(value: object) -> None:
     with pytest.raises(TypeError, match="temperature must be numeric"):
         _request(temperature=value)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        (
+            "provider_kind",
+            str.__new__(ProviderKind, "local"),
+            "provider_kind must be a ProviderKind",
+        ),
+        (
+            "privacy",
+            str.__new__(PrivacyClass, "private"),
+            "privacy must be a PrivacyClass",
+        ),
+    ),
+)
+def test_request_enums_reject_constructor_bypassed_members(
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    with pytest.raises(TypeError, match=message):
+        _request(**{field: value})
+
+
+def test_request_enums_accept_canonical_members() -> None:
+    request = _request(
+        provider_kind=ProviderKind.LOCAL,
+        privacy=PrivacyClass.SENSITIVE,
+    )
+
+    assert request.provider_kind is ProviderKind.LOCAL
+    assert request.privacy is PrivacyClass.SENSITIVE
