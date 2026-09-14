@@ -29,6 +29,16 @@ class ModelHealthSnapshot:
     inference_proven: ModelHealthFact
 
     def __post_init__(self) -> None:
+        facts = (
+            ("configured", self.configured),
+            ("reachable", self.reachable),
+            ("model_present", self.model_present),
+            ("model_ready", self.model_ready),
+            ("inference_proven", self.inference_proven),
+        )
+        for name, value in facts:
+            if type(value) is not ModelHealthFact:
+                raise TypeError(f"{name} must be a canonical ModelHealthFact")
         if self.model_present is ModelHealthFact.YES and self.reachable is not ModelHealthFact.YES:
             raise ValueError("model_present=yes requires reachable=yes")
         if self.model_ready is ModelHealthFact.YES and not (

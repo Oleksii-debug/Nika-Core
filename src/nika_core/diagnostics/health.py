@@ -44,6 +44,10 @@ class HealthCheck:
     status: HealthStatus
     summary: str
 
+    def __post_init__(self) -> None:
+        if type(self.status) is not HealthStatus:
+            raise TypeError("status must be a canonical HealthStatus")
+
     def as_dict(self) -> dict[str, str]:
         return {
             "check_id": self.check_id,
@@ -56,6 +60,22 @@ class HealthCheck:
 class HealthReport:
     generated_at: datetime
     checks: tuple[HealthCheck, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.checks) is not tuple:
+            raise TypeError("checks must be an immutable tuple")
+        canonical_checks: list[HealthCheck] = []
+        for check in self.checks:
+            if type(check) is not HealthCheck:
+                raise TypeError("checks must contain canonical HealthCheck values")
+            canonical_checks.append(
+                HealthCheck(
+                    check_id=check.check_id,
+                    status=check.status,
+                    summary=check.summary,
+                )
+            )
+        object.__setattr__(self, "checks", tuple(canonical_checks))
 
     @property
     def overall(self) -> HealthStatus:
