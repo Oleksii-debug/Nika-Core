@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -35,16 +34,13 @@ _MODEL_ID = "fixture-model"
 
 
 class _FakeClock:
-    def __init__(self, *, on_sleep: Callable[[], None] | None = None) -> None:
+    def __init__(self) -> None:
         self.elapsed = 0.0
         self.sleeps: list[float] = []
-        self._on_sleep = on_sleep
 
     async def sleep(self, seconds: float) -> None:
         self.sleeps.append(seconds)
         self.elapsed += seconds
-        if self._on_sleep is not None:
-            self._on_sleep()
 
 
 class _SequenceCloudProvider:
@@ -305,11 +301,11 @@ def test_cloud_fresh_retry_requires_provider_retryable_and_no_effect(
     assert clock.sleeps == []
 
 
-def test_terminal_cancellation_during_backoff_blocks_later_transport(
+def test_public_cancellation_during_backoff_is_durable_and_blocks_later_transport(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, queue, task_id, coordinator, runtime, provider = _harness(
+    store, queue, task_id, coordinator, runtime, provider = _harness(
         tmp_path,
         [
             _error(
@@ -321,23 +317,50 @@ def test_terminal_cancellation_during_backoff_blocks_later_transport(
         ],
     )
 
-    def cancel_while_waiting() -> None:
-        queue.transition(task_id, TaskState.CANCELLED)
+    async def scenario() -> tuple[RuntimeOutcome, list[float]]:
+        sleep_started = asyncio.Event()
+        release_sleep = asyncio.Event()
+        sleeps: list[float] = []
 
-    clock = _FakeClock(on_sleep=cancel_while_waiting)
-    monkeypatch.setattr(asyncio, "sleep", clock.sleep)
+        async def blocked_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            sleep_started.set()
+            await release_sleep.wait()
 
-    result = asyncio.run(
-        coordinator.start(
-            runtime,
-            _request(task_id),
-            retry_policy=_cloud_retry_policy(),
+        monkeypatch.setattr(asyncio, "sleep", blocked_sleep)
+        running = asyncio.create_task(
+            coordinator.start(
+                runtime,
+                _request(task_id),
+                retry_policy=_cloud_retry_policy(),
+            )
         )
-    )
+        await sleep_started.wait()
+        try:
+            accepted = await coordinator.cancel(
+                runtime,
+                task_id=task_id,
+                thread_id="thread-dev35",
+            )
+            assert accepted is True
+            assert queue.get(task_id).state is TaskState.CANCELLED
+            assert coordinator.sessions.get(task_id) is None
 
-    assert result.outcome is RuntimeOutcome.CANCELLED
+            restarted_queue = TaskQueue(store)
+            restarted_coordinator = TaskRuntimeCoordinator(restarted_queue, AuditLog(store))
+            assert restarted_queue.get(task_id).state is TaskState.CANCELLED
+            assert restarted_coordinator.sessions.get(task_id) is None
+        finally:
+            release_sleep.set()
+
+        result = await running
+        return result.outcome, sleeps
+
+    outcome, sleeps = asyncio.run(scenario())
+
+    assert outcome is RuntimeOutcome.CANCELLED
     assert len(provider.requests) == 1
-    assert clock.sleeps == [1.0]
+    assert sleeps == [1.0]
 
 
 def test_retry_backoff_consumes_original_inference_timeout_budget(

@@ -509,11 +509,11 @@ class TaskRuntimeCoordinator:
     ) -> bool:
         """Request cancellation without allowing a crash to resurrect the task.
 
-        Cancellation is an external side effect. Nika first commits a PENDING idempotency
-        reservation and audit event, then calls the runtime. If the process dies after that
-        durable intent but before local finalization, startup recovery sees the unresolved
-        operation and refuses automatic resume. An accepted cancellation is then finalized
-        atomically with the task state, runtime-session cursor and audit evidence.
+        Nika first commits durable cancellation intent. For an active runtime effect, it then
+        asks the runtime to cancel and preserves the existing uncertain-effect rules. RETRYING
+        is different: the previous runtime attempt has already returned and Nika owns the
+        backoff window, so cancellation can be committed locally without fabricating an
+        external in-flight cancellation.
         """
         operation_key = self._cancel_operation_key(
             runtime_id=runtime.runtime_id,
@@ -552,6 +552,34 @@ class TaskRuntimeCoordinator:
                     "operation_key": operation_key,
                 },
             )
+
+            current = self._task_state_with_connection(conn, task_id)
+            if current == TaskState.RETRYING:
+                self._queue.transition_with_connection(conn, task_id, TaskState.CANCELLED)
+                self._sessions.delete_with_connection(conn, task_id)
+                self._idempotency.complete_with_connection(
+                    conn,
+                    operation_key,
+                    {
+                        "accepted": True,
+                        "task_state": TaskState.CANCELLED.value,
+                    },
+                )
+                self._audit.append_with_connection(
+                    conn,
+                    event_type="runtime.cancel_accepted",
+                    entity_type="task",
+                    entity_id=task_id,
+                    payload={
+                        "runtime_id": runtime.runtime_id,
+                        "thread_id": thread_id,
+                        "operation_key": operation_key,
+                        "previous_task_state": current.value,
+                        "task_state_changed": True,
+                        "runtime_cancel_called": False,
+                    },
+                )
+                return True
 
         try:
             accepted = await runtime.cancel(task_id=task_id, thread_id=thread_id)
