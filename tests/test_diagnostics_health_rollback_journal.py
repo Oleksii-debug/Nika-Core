@@ -58,15 +58,20 @@ def test_active_delete_journal_snapshot_recovers_committed_state_without_source_
         assert writer.execute("PRAGMA journal_mode=DELETE").fetchone()[0] == "delete"
         writer.execute("PRAGMA cache_size=1")
         writer.execute("PRAGMA cache_spill=ON")
-        writer.execute("CREATE TABLE health_rollback_probe(value TEXT NOT NULL)")
-        writer.execute("INSERT INTO health_rollback_probe(value) VALUES ('committed')")
+        writer.execute(
+            """INSERT INTO audit_events(
+                event_type, entity_type, entity_id, payload_json, created_at
+            ) VALUES ('health.rollback.committed', 'health', 'rollback-probe', '{}', 'now')"""
+        )
         writer.commit()
         committed_size = database.stat().st_size
 
         writer.execute("BEGIN IMMEDIATE")
         writer.execute("DROP TABLE tasks")
         writer.executemany(
-            "INSERT INTO health_rollback_probe(value) VALUES (?)",
+            """INSERT INTO audit_events(
+                event_type, entity_type, entity_id, payload_json, created_at
+            ) VALUES ('health.rollback.uncommitted', 'health', 'rollback-probe', ?, 'now')""",
             (("x" * 8192,) for _ in range(128)),
         )
         journal = Path(f"{database}-journal")
@@ -87,7 +92,9 @@ def test_active_delete_journal_snapshot_recovers_committed_state_without_source_
         writer.close()
 
     with sqlite3.connect(database) as reader:
-        assert reader.execute("SELECT COUNT(*) FROM health_rollback_probe").fetchone() == (1,)
+        assert reader.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE event_type = 'health.rollback.committed'"
+        ).fetchone() == (1,)
         assert reader.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks'"
         ).fetchone() == (1,)
@@ -100,8 +107,6 @@ def test_snapshot_fails_closed_when_rollback_journal_appears_during_capture(
     database = tmp_path / "journal-create-race.db"
     _write_healthy_database(database)
     writer = sqlite3.connect(database)
-    writer.execute("CREATE TABLE health_race_probe(value TEXT NOT NULL)")
-    writer.commit()
     journal = Path(f"{database}-journal")
     assert not journal.exists()
 
@@ -114,7 +119,11 @@ def test_snapshot_fails_closed_when_rollback_journal_appears_during_capture(
         copied = original_copy(cls, source, destination)
         if source == database and not raced:
             writer.execute("BEGIN IMMEDIATE")
-            writer.execute("INSERT INTO health_race_probe(value) VALUES ('uncommitted')")
+            writer.execute(
+                """INSERT INTO audit_events(
+                    event_type, entity_type, entity_id, payload_json, created_at
+                ) VALUES ('health.race.uncommitted', 'health', 'create-race', '{}', 'now')"""
+            )
             assert journal.exists()
             active_state = _database_family_state(database)
             raced = True
@@ -142,10 +151,12 @@ def test_snapshot_fails_closed_when_rollback_journal_disappears_during_capture(
     database = tmp_path / "journal-remove-race.db"
     _write_healthy_database(database)
     writer = sqlite3.connect(database)
-    writer.execute("CREATE TABLE health_race_probe(value TEXT NOT NULL)")
-    writer.commit()
     writer.execute("BEGIN IMMEDIATE")
-    writer.execute("INSERT INTO health_race_probe(value) VALUES ('uncommitted')")
+    writer.execute(
+        """INSERT INTO audit_events(
+            event_type, entity_type, entity_id, payload_json, created_at
+        ) VALUES ('health.race.uncommitted', 'health', 'remove-race', '{}', 'now')"""
+    )
     journal = Path(f"{database}-journal")
     assert journal.exists()
 
@@ -168,7 +179,9 @@ def test_snapshot_fails_closed_when_rollback_journal_disappears_during_capture(
         assert raced is True
         assert _check_map(report)["database.open"] is HealthStatus.FAIL
         assert not journal.exists()
-        assert writer.execute("SELECT COUNT(*) FROM health_race_probe").fetchone() == (0,)
+        assert writer.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE entity_id = 'remove-race'"
+        ).fetchone() == (0,)
     finally:
         writer.rollback()
         writer.close()
