@@ -30,13 +30,18 @@ The product must be able to use, at the same time:
 - multiple API/cloud models;
 - a mix of local and API models;
 - multiple requests to the same provider/model when provider limits and local resources permit;
+- multiple replicas/endpoints exposing the same provider/model identity;
 - multiple agents/tasks that independently use different models in parallel.
 
-### 3.1 Concurrency semantics
+### 3.1 Concurrency and route-identity semantics
 
 The canonical model runtime must provide asynchronous dispatch with per-request identity, cancellation, timeout, budget, result provenance, and durable completion state. Independent requests may run concurrently. Ordering constraints are scoped only to work that actually has a dependency, exclusivity requirement, rate limit, or shared-resource conflict.
 
 There must be no architecture-wide mutex or single-worker bottleneck around ModelGateway/model execution.
+
+Executable **provider-route identity is distinct from provider/engine identity and model identity**. Two routes may use the same engine and exact same model while pointing at different endpoints, replicas, processes, nodes, accounts, or independently admitted execution surfaces. Nika must preserve which exact route served each request/result. A provider/model match alone is never sufficient reason to deduplicate two configured executable routes.
+
+Changing a default route must not mutate the route already frozen into an accepted task. Restart must restore the exact required route identity or fail explicitly; it must not silently substitute a different replica/provider/model.
 
 ### 3.2 Local-model resource scheduling
 
@@ -44,7 +49,8 @@ For local models, parallelism must be resource-aware rather than blindly unlimit
 
 The scheduler/admission policy must distinguish at least:
 
-- model identity/runtime;
+- executable provider-route identity;
+- provider/engine and model identity;
 - expected RAM/VRAM footprint where available;
 - CPU/GPU execution class;
 - currently active local inference sessions;
@@ -53,13 +59,15 @@ The scheduler/admission policy must distinguish at least:
 
 ### 3.3 API-model resource scheduling
 
-For API/cloud models, concurrency must be independently bounded per provider/account/model according to configured policy and observed rate limits. One slow provider must not block unrelated providers or local inference.
+For API/cloud models, concurrency must be independently bounded per configured route/provider/account/model according to configured policy and observed rate limits. One slow route/provider must not block unrelated providers, replicas, or local inference.
 
 ### 3.4 Fan-out/fan-in is first-class
 
-Nika must support one task intentionally dispatching to several models in parallel, collecting all bounded results, and then applying an explicit aggregation/review step. This is required for research, adversarial review, comparison, ensemble/consensus, developer-auditor workflows, and Product Factory work.
+Nika must support one task intentionally dispatching to several models/routes in parallel, collecting all bounded results, and then applying an explicit aggregation/review step. This is required for research, adversarial review, comparison, ensemble/consensus, developer-auditor workflows, and Product Factory work.
 
-A partial provider failure must be represented explicitly; it must not silently convert a multi-model run into a false full-success result.
+A partial provider/route failure must be represented explicitly; it must not silently convert a multi-model run into a false full-success result.
+
+High fan-out must be explicitly bounded rather than prohibited by a small installation-wide constant. The normal product default should remain conservative, while callers with suitable provider/resource authority may request larger bounded concurrency. Acceptance must include a deterministic stress case large enough to represent several concurrent projects/teams without claiming that one physical machine or third-party API can sustain that throughput in production.
 
 ## 4. Autopilot interoperability
 
@@ -126,9 +134,12 @@ Final acceptance requires proof that:
 
 - unrelated local/API model requests genuinely overlap in time under allowed resources;
 - no global model serialization bottleneck exists;
+- two independently configured routes/replicas exposing the same provider/model can run concurrently and remain distinguishable in result evidence;
+- a large but bounded multi-project fan-out can overlap when explicitly admitted;
 - fan-out/fan-in returns source-bound results and explicit partial failures;
 - the Windows UI remains responsive while concurrent model/browser/worker work is active;
 - cancellation and restart are safe under concurrency;
+- durable work preserves exact route identity across restart or fails explicitly;
 - Nika and Autopilot can exchange authenticated idempotent jobs/results without manual copy/paste;
 - one representative multi-chat plus direct-model workflow completes end-to-end;
 - all of the above are exercised from the packaged Windows product and do not bypass canonical safety/provenance/state authorities.
