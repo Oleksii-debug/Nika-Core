@@ -28,7 +28,6 @@ from nika_core.runtime.contracts import RuntimeErrorCode, RuntimeOutcome, Runtim
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
 from nika_core.runtime.retry import RetryPolicy
 
-
 _PROVIDER_ID = "cloud-retry-fixture"
 _MODEL_ID = "fixture-model"
 
