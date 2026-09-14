@@ -78,7 +78,7 @@ class _ErrorProvider:
         self._capabilities = ProviderCapabilities(
             provider_id="upstream-api",
             kind=ProviderKind.CLOUD,
-            supports_private_data=False,
+            supports_private_data=True,
         )
 
     @property
