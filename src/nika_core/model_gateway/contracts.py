@@ -76,9 +76,7 @@ class ModelRequest:
             raise ValueError("fallback provider IDs must be unique")
         if self.provider_id is not None and self.provider_id in self.fallback_provider_ids:
             raise ValueError("primary provider cannot also be a fallback provider")
-        if isinstance(self.timeout_seconds, bool) or not isinstance(
-            self.timeout_seconds, (int, float)
-        ):
+        if type(self.timeout_seconds) not in (int, float):
             raise TypeError("timeout_seconds must be numeric")
         try:
             finite_timeout = isfinite(float(self.timeout_seconds))
@@ -147,7 +145,7 @@ class ModelResourcePolicy:
         ):
             if value is None:
                 continue
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            if type(value) not in (int, float):
                 raise TypeError(f"{name} must be numeric")
             if not 0 < value <= 100:
                 raise ValueError(f"{name} must be finite and in the range (0, 100]")
@@ -158,9 +156,7 @@ class ModelResourcePolicy:
             if not finite_value:
                 raise ValueError(f"{name} must be finite and in the range (0, 100]")
         if self.min_available_memory_bytes is not None:
-            if isinstance(self.min_available_memory_bytes, bool) or not isinstance(
-                self.min_available_memory_bytes, int
-            ):
+            if type(self.min_available_memory_bytes) is not int:
                 raise TypeError("min_available_memory_bytes must be an integer")
             if self.min_available_memory_bytes <= 0:
                 raise ValueError("min_available_memory_bytes must be greater than zero")
