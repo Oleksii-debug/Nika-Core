@@ -85,12 +85,12 @@ class VoiceActivityDetector:
         resolved = VoiceActivityConfig() if config is None else config
         if type(resolved) is not VoiceActivityConfig:
             raise TypeError("config must be VoiceActivityConfig")
-        self._config = resolved
+        self._config = _validated_config_snapshot(resolved)
         self.reset()
 
     @property
     def config(self) -> VoiceActivityConfig:
-        return self._config
+        return _validated_config_snapshot(self._config)
 
     @property
     def speech_active(self) -> bool:
@@ -135,6 +135,17 @@ class VoiceActivityDetector:
             rms=rms,
             sample_count=sample_count,
         )
+
+
+def _validated_config_snapshot(config: VoiceActivityConfig) -> VoiceActivityConfig:
+    return VoiceActivityConfig(
+        sample_rate_hz=config.sample_rate_hz,
+        start_rms=config.start_rms,
+        stop_rms=config.stop_rms,
+        attack_frames=config.attack_frames,
+        release_frames=config.release_frames,
+        max_frame_ms=config.max_frame_ms,
+    )
 
 
 def _bounded_pcm16_bytes(value: Buffer, *, maximum: int) -> bytes:
