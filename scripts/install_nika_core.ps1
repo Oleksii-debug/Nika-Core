@@ -144,6 +144,41 @@ function Assert-NikaNoReparsePathChain {
     }
 }
 
+function Remove-NikaTreeNoFollow {
+    param([Parameter(Mandatory=$true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+    Assert-NikaNoReparsePathChain -Path $Path
+    $rootItem = Get-Item -LiteralPath $Path -Force
+    if (($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Installer cleanup refuses reparse points."
+    }
+    if (-not $rootItem.PSIsContainer) {
+        Remove-Item -LiteralPath $Path -Force
+        return
+    }
+
+    foreach ($child in @(Get-ChildItem -LiteralPath $Path -Force)) {
+        if (($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Installer cleanup refuses nested reparse points."
+        }
+        if ($child.PSIsContainer) {
+            Remove-NikaTreeNoFollow -Path $child.FullName
+        }
+        else {
+            Remove-Item -LiteralPath $child.FullName -Force
+        }
+    }
+
+    Assert-NikaNoReparsePathChain -Path $Path
+    if (@(Get-ChildItem -LiteralPath $Path -Force).Count -ne 0) {
+        throw "Installer cleanup tree changed during validation."
+    }
+    Remove-Item -LiteralPath $Path -Force
+}
+
 function Assert-NikaSafeDestination {
     param(
         [Parameter(Mandatory=$true)][string]$DestinationPath,
@@ -476,6 +511,15 @@ function Assert-NikaReleaseBundle {
     }
 }
 
+function Get-NikaReleaseManifestDigest {
+    param([Parameter(Mandatory=$true)][string]$BundleRoot)
+
+    Assert-NikaReleaseBundle -BundleRoot $BundleRoot
+    $manifestPath = Get-NikaFullPath (Join-Path $BundleRoot "release-manifest.json")
+    Assert-NikaNoReparsePathChain -Path $manifestPath
+    return (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
 function Copy-NikaBundleToStage {
     param(
         [Parameter(Mandatory=$true)][string]$BundleRoot,
@@ -486,6 +530,152 @@ function Copy-NikaBundleToStage {
         Copy-Item -LiteralPath $item.FullName -Destination $StagePath -Recurse
     }
     Assert-NikaReleaseBundle -BundleRoot $StagePath
+}
+
+function Get-NikaFirstUpdateTransaction {
+    param(
+        [Parameter(Mandatory=$true)][string]$ParentPath,
+        [Parameter(Mandatory=$true)][string]$Leaf,
+        [Parameter(Mandatory=$true)][string]$DataRoot
+    )
+
+    if (-not (Test-Path -LiteralPath $ParentPath -PathType Container)) {
+        return $null
+    }
+    Assert-NikaNoReparsePathChain -Path $ParentPath
+    $prefix = ".$Leaf.first-update-"
+    $matches = @(
+        Get-ChildItem -LiteralPath $ParentPath -Force | Where-Object {
+            $_.Name.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)
+        }
+    )
+    if ($matches.Count -eq 0) {
+        return $null
+    }
+    if ($matches.Count -ne 1) {
+        throw "Multiple first-update transaction authorities are present."
+    }
+
+    $item = $matches[0]
+    if (-not $item.PSIsContainer) {
+        throw "First-update transaction authority is not a directory."
+    }
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "First-update transaction authority must not be a reparse point."
+    }
+    $targetDigest = $item.Name.Substring($prefix.Length)
+    if ($targetDigest -cnotmatch '^[0-9a-f]{64}$') {
+        throw "First-update transaction authority has an invalid target identity."
+    }
+
+    $transactionPath = Get-NikaFullPath $item.FullName
+    $candidatePath = Get-NikaFullPath (Join-Path $transactionPath "candidate")
+    Assert-NikaNoReparsePathChain -Path $transactionPath
+    Assert-NikaDataMutationSeparation -DataRoot $DataRoot -MutationPaths @(
+        $transactionPath,
+        $candidatePath
+    )
+    return [pscustomobject]@{
+        Path = $transactionPath
+        CandidatePath = $candidatePath
+        TargetDigest = $targetDigest
+    }
+}
+
+function Resolve-NikaInterruptedFirstUpdate {
+    param(
+        [Parameter(Mandatory=$true)][string]$DestinationPath,
+        [Parameter(Mandatory=$true)][string]$RollbackPath,
+        [Parameter(Mandatory=$true)][object]$Transaction,
+        [Parameter(Mandatory=$true)][string]$DataRoot
+    )
+
+    if ($null -eq $Transaction) {
+        return "none"
+    }
+
+    $transactionPath = [string]$Transaction.Path
+    $candidatePath = [string]$Transaction.CandidatePath
+    $targetDigest = [string]$Transaction.TargetDigest
+    Assert-NikaNoReparsePathChain -Path $transactionPath
+    Assert-NikaDataMutationSeparation -DataRoot $DataRoot -MutationPaths @(
+        $DestinationPath,
+        $RollbackPath,
+        $transactionPath,
+        $candidatePath
+    )
+
+    $hasDestination = Test-Path -LiteralPath $DestinationPath -PathType Container
+    $hasRollback = Test-Path -LiteralPath $RollbackPath -PathType Container
+    $hasCandidate = Test-Path -LiteralPath $candidatePath -PathType Container
+    if ((Test-Path -LiteralPath $DestinationPath) -and -not $hasDestination) {
+        throw "First-update recovery destination authority is not a directory."
+    }
+    if ((Test-Path -LiteralPath $RollbackPath) -and -not $hasRollback) {
+        throw "First-update recovery rollback authority is not a directory."
+    }
+    if ((Test-Path -LiteralPath $candidatePath) -and -not $hasCandidate) {
+        throw "First-update recovery candidate authority is not a directory."
+    }
+
+    if ($hasDestination -and -not $hasRollback) {
+        # Transaction exists but no destructive move is durable. The current
+        # installed image is still authoritative, so abort the transient
+        # candidate without inferring state from an unowned rollback geometry.
+        Assert-NikaNoReparsePathChain -Path $DestinationPath
+        Assert-NikaReleaseBundle -BundleRoot $DestinationPath
+        Assert-NikaDataMutationSeparation -DataRoot $DataRoot -MutationPaths @(
+            $DestinationPath,
+            $RollbackPath,
+            $transactionPath,
+            $candidatePath
+        )
+        Remove-NikaTreeNoFollow -Path $transactionPath
+        return "restored-precommand"
+    }
+    elseif (-not $hasDestination -and $hasRollback -and $hasCandidate) {
+        # Crash after Destination -> Rollback. Candidate presence under the
+        # installer-owned transaction proves this geometry belongs to us.
+        Assert-NikaNoReparsePathChain -Path $RollbackPath
+        Assert-NikaReleaseBundle -BundleRoot $RollbackPath
+        Assert-NikaNoReparsePathChain -Path $candidatePath
+        Assert-NikaReleaseBundle -BundleRoot $candidatePath
+        Assert-NikaNoReparsePathChain -Path $DestinationPath
+        Assert-NikaDataMutationSeparation -DataRoot $DataRoot -MutationPaths @(
+            $DestinationPath,
+            $RollbackPath,
+            $transactionPath,
+            $candidatePath
+        )
+        [System.IO.Directory]::Move($RollbackPath, $DestinationPath)
+
+        Assert-NikaNoReparsePathChain -Path $DestinationPath
+        Assert-NikaReleaseBundle -BundleRoot $DestinationPath
+        Assert-NikaDataMutationSeparation -DataRoot $DataRoot -MutationPaths @(
+            $DestinationPath,
+            $RollbackPath,
+            $transactionPath,
+            $candidatePath
+        )
+        Remove-NikaTreeNoFollow -Path $transactionPath
+        return "restored-precommand"
+    }
+    elseif ($hasDestination -and $hasRollback -and -not $hasCandidate) {
+        # Candidate was atomically activated. Keep the empty transaction
+        # directory as durable completion authority until a distinct mutation
+        # supersedes it; a retry of the exact target can then be idempotent.
+        Assert-NikaNoReparsePathChain -Path $DestinationPath
+        Assert-NikaNoReparsePathChain -Path $RollbackPath
+        Assert-NikaReleaseBundle -BundleRoot $DestinationPath
+        Assert-NikaReleaseBundle -BundleRoot $RollbackPath
+        $activeDigest = Get-NikaReleaseManifestDigest -BundleRoot $DestinationPath
+        if ($activeDigest -cne $targetDigest) {
+            throw "Committed first-update transaction target does not match the active image."
+        }
+        return "committed"
+    }
+
+    throw "First-update transaction state is ambiguous; refusing recovery."
 }
 
 function Resolve-NikaInterruptedUpdate {
@@ -556,7 +746,7 @@ function Resolve-NikaInterruptedUpdate {
             $RollbackPath,
             $RetiredRollbackPath
         )
-        Remove-Item -LiteralPath $RetiredRollbackPath -Recurse -Force
+        Remove-NikaTreeNoFollow -Path $RetiredRollbackPath
     }
     else {
         throw "Interrupted update state cannot be restored without losing a verified image."
@@ -688,10 +878,15 @@ Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @(
     $retiredRollbackPath,
     $rollbackSwapPath
 )
-if (
-    (Test-Path -LiteralPath $retiredRollbackPath) -and
-    (Test-Path -LiteralPath $rollbackSwapPath)
-) {
+$firstUpdateTransaction = Get-NikaFirstUpdateTransaction `
+    -ParentPath $parent `
+    -Leaf $leaf `
+    -DataRoot $dataRoot
+$transactionSignalCount = 0
+if (Test-Path -LiteralPath $retiredRollbackPath) { $transactionSignalCount += 1 }
+if (Test-Path -LiteralPath $rollbackSwapPath) { $transactionSignalCount += 1 }
+if ($null -ne $firstUpdateTransaction) { $transactionSignalCount += 1 }
+if ($transactionSignalCount -gt 1) {
     throw "Multiple interrupted installer transactions are present; refusing recovery."
 }
 Resolve-NikaInterruptedUpdate `
@@ -704,49 +899,26 @@ $rollbackRecoveryState = Resolve-NikaInterruptedRollback `
     -RollbackPath $rollbackPath `
     -SwapPath $rollbackSwapPath `
     -DataRoot $dataRoot
+$firstUpdateRecoveryState = "none"
+if ($null -ne $firstUpdateTransaction) {
+    $firstUpdateRecoveryState = Resolve-NikaInterruptedFirstUpdate `
+        -DestinationPath $destinationPath `
+        -RollbackPath $rollbackPath `
+        -Transaction $firstUpdateTransaction `
+        -DataRoot $dataRoot
+    if ($firstUpdateRecoveryState -ne "committed") {
+        $firstUpdateTransaction = $null
+    }
+}
 
-# A clean install has no prior rollback to retire, so a hard stop after the
-# first Update moves Destination -> Rollback leaves no deterministic marker.
-# For Update only, restore that exact verified pre-command image and then let
-# the requested Update execute once. Rollback retains its existing missing-D
-# semantics and marker-bearing recovery remains authoritative above.
-if (
-    $Mode -eq "Update" -and
-    -not (Test-Path -LiteralPath $destinationPath) -and
-    (Test-Path -LiteralPath $rollbackPath -PathType Container) -and
-    -not (Test-Path -LiteralPath $retiredRollbackPath) -and
-    -not (Test-Path -LiteralPath $rollbackSwapPath)
-) {
-    Assert-NikaNoReparsePathChain -Path $rollbackPath
-    Assert-NikaReleaseBundle -BundleRoot $rollbackPath
-    Assert-NikaNoReparsePathChain -Path $destinationPath
+if ($firstUpdateRecoveryState -eq "committed" -and $Mode -eq "Rollback") {
     Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @(
-        $destinationPath,
-        $rollbackPath,
-        $retiredRollbackPath,
-        $rollbackSwapPath
+        [string]$firstUpdateTransaction.Path,
+        [string]$firstUpdateTransaction.CandidatePath
     )
-    if (
-        (Test-Path -LiteralPath $retiredRollbackPath) -or
-        (Test-Path -LiteralPath $rollbackSwapPath)
-    ) {
-        throw "Markerless first-update recovery became ambiguous; refusing mutation."
-    }
-    Assert-NikaNoReparsePathChain -Path $rollbackPath
-    Assert-NikaReleaseBundle -BundleRoot $rollbackPath
-    Assert-NikaNoReparsePathChain -Path $destinationPath
-    Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @(
-        $destinationPath,
-        $rollbackPath,
-        $retiredRollbackPath,
-        $rollbackSwapPath
-    )
-    [System.IO.Directory]::Move($rollbackPath, $destinationPath)
-    Assert-NikaNoReparsePathChain -Path $destinationPath
-    Assert-NikaReleaseBundle -BundleRoot $destinationPath
-    if (Test-Path -LiteralPath $rollbackPath) {
-        throw "Markerless first-update recovery left an unresolved rollback image."
-    }
+    Remove-NikaTreeNoFollow -Path ([string]$firstUpdateTransaction.Path)
+    $firstUpdateTransaction = $null
+    $firstUpdateRecoveryState = "none"
 }
 
 if ($Mode -eq "Rollback") {
@@ -866,6 +1038,21 @@ if ($Mode -eq "Rollback") {
 $bundleRoot = Get-NikaFullPath $BundlePath
 Assert-NikaSafeDestination -DestinationPath $destinationPath -SourceBundle $bundleRoot
 Assert-NikaReleaseBundle -BundleRoot $bundleRoot
+$bundleManifestDigest = Get-NikaReleaseManifestDigest -BundleRoot $bundleRoot
+
+if ($firstUpdateRecoveryState -eq "committed" -and $Mode -eq "Update") {
+    if ($bundleManifestDigest -ceq [string]$firstUpdateTransaction.TargetDigest) {
+        Write-Output $destinationPath
+        exit 0
+    }
+    Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @(
+        [string]$firstUpdateTransaction.Path,
+        [string]$firstUpdateTransaction.CandidatePath
+    )
+    Remove-NikaTreeNoFollow -Path ([string]$firstUpdateTransaction.Path)
+    $firstUpdateTransaction = $null
+    $firstUpdateRecoveryState = "none"
+}
 
 if ($Mode -eq "Install" -and (Test-Path -LiteralPath $destinationPath)) {
     throw "Destination already exists; use Update."
@@ -873,8 +1060,17 @@ if ($Mode -eq "Install" -and (Test-Path -LiteralPath $destinationPath)) {
 if ($Mode -eq "Update" -and -not (Test-Path -LiteralPath $destinationPath -PathType Container)) {
     throw "Update requires an existing installed application."
 }
+$hadPriorRollback = $false
 if ($Mode -eq "Update") {
     Assert-NikaReleaseBundle -BundleRoot $destinationPath
+    $hadPriorRollback = Test-Path -LiteralPath $rollbackPath -PathType Container
+    if ((Test-Path -LiteralPath $rollbackPath) -and -not $hadPriorRollback) {
+        throw "Existing rollback authority is not a directory."
+    }
+    if ($hadPriorRollback) {
+        Assert-NikaNoReparsePathChain -Path $rollbackPath
+        Assert-NikaReleaseBundle -BundleRoot $rollbackPath
+    }
 }
 
 Assert-NikaNoReparsePathChain -Path $destinationPath
@@ -882,7 +1078,24 @@ Assert-NikaNoReparsePathChain -Path $bundleRoot
 Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath)
 New-Item -ItemType Directory -Path $parent -Force | Out-Null
 Assert-NikaNoReparsePathChain -Path $destinationPath
-$stagePath = Join-Path $parent (".$leaf.staging-$([Guid]::NewGuid().ToString('N'))")
+$firstUpdateTransactionPath = ""
+if ($Mode -eq "Update" -and -not $hadPriorRollback) {
+    $firstUpdateTransactionPath = Join-Path $parent (".$leaf.first-update-$bundleManifestDigest")
+    $stagePath = Join-Path $firstUpdateTransactionPath "candidate"
+    Assert-NikaNoReparsePathChain -Path $firstUpdateTransactionPath
+    Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @(
+        $firstUpdateTransactionPath,
+        $stagePath
+    )
+    if (Test-Path -LiteralPath $firstUpdateTransactionPath) {
+        throw "First-update transaction authority already exists."
+    }
+    New-Item -ItemType Directory -Path $firstUpdateTransactionPath | Out-Null
+    Assert-NikaNoReparsePathChain -Path $firstUpdateTransactionPath
+}
+else {
+    $stagePath = Join-Path $parent (".$leaf.staging-$([Guid]::NewGuid().ToString('N'))")
+}
 Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $stagePath)
 try {
     Copy-NikaBundleToStage -BundleRoot $bundleRoot -StagePath $stagePath
@@ -914,14 +1127,6 @@ try {
     }
     else {
         $failedActivationPath = Join-Path $parent (".$leaf.failed-$([Guid]::NewGuid().ToString('N'))")
-        $hadPriorRollback = Test-Path -LiteralPath $rollbackPath -PathType Container
-        if ((Test-Path -LiteralPath $rollbackPath) -and -not $hadPriorRollback) {
-            throw "Existing rollback authority is not a directory."
-        }
-        if ($hadPriorRollback) {
-            Assert-NikaNoReparsePathChain -Path $rollbackPath
-            Assert-NikaReleaseBundle -BundleRoot $rollbackPath
-        }
         Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @(
             $destinationPath,
             $rollbackPath,
@@ -1035,7 +1240,7 @@ try {
                     $rollbackPath,
                     $retiredRollbackPath
                 )
-                Remove-Item -LiteralPath $retiredRollbackPath -Recurse -Force
+                Remove-NikaTreeNoFollow -Path $retiredRollbackPath
                 $priorRollbackRetired = $false
             }
             catch {
@@ -1048,7 +1253,11 @@ finally {
     if (Test-Path -LiteralPath $stagePath) {
         Assert-NikaNoReparsePathChain -Path $stagePath
         Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $stagePath)
-        Remove-Item -LiteralPath $stagePath -Recurse -Force
+        if ([string]::IsNullOrWhiteSpace($firstUpdateTransactionPath)) {
+            Remove-NikaTreeNoFollow -Path $stagePath
+        }
+        # A deterministic first-update candidate stays inside its durable
+        # transaction directory. Recovery owns it after any failed/crashed run.
     }
 }
 

@@ -82,34 +82,25 @@ def test_complete_recovery_rejects_retired_junction_before_remove(tmp_path: Path
     bundle_v1 = _bundle(tmp_path / "version-1", "v1")
     bundle_v2 = _bundle(tmp_path / "version-2", "v2")
     bundle_v3 = _bundle(tmp_path / "version-3", "v3")
+    bundle_v4 = _bundle(tmp_path / "version-4", "v4")
     destination = tmp_path / "install" / "Nika Core"
     rollback = destination.parent / f".{destination.name}.rollback"
     retired = destination.parent / f".{destination.name}.rollback-retired"
 
-    installed = _run(
-        shell,
-        script=SCRIPT,
-        mode="Install",
-        destination=destination,
-        bundle=bundle_v1,
-    )
+    installed = _run(shell, script=SCRIPT, mode="Install", destination=destination, bundle=bundle_v1)
     assert installed.returncode == 0, installed.stderr or installed.stdout
-    updated = _run(
-        shell,
-        script=SCRIPT,
-        mode="Update",
-        destination=destination,
-        bundle=bundle_v2,
-    )
-    assert updated.returncode == 0, updated.stderr or updated.stdout
-    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
-    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    first_update = _run(shell, script=SCRIPT, mode="Update", destination=destination, bundle=bundle_v2)
+    assert first_update.returncode == 0, first_update.stderr or first_update.stdout
+    second_update = _run(shell, script=SCRIPT, mode="Update", destination=destination, bundle=bundle_v3)
+    assert second_update.returncode == 0, second_update.stderr or second_update.stdout
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v3"
+    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
 
     # Simulate the crash-left state handled by the hasDestination && hasRollback
     # recovery branch: both verified images are present and a valid retired image
-    # is still waiting for safe cleanup.
+    # is still waiting for safe cleanup after a later update.
     shutil.copytree(rollback, retired)
-    assert (retired / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    assert (retired / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
 
     external_target = tmp_path / "external-retired-target"
     external_target.mkdir()
@@ -141,15 +132,15 @@ def test_complete_recovery_rejects_retired_junction_before_remove(tmp_path: Path
         script=instrumented,
         mode="Update",
         destination=destination,
-        bundle=bundle_v3,
+        bundle=bundle_v4,
     )
 
     assert failed.returncode != 0, failed.stdout
     assert "Reparse points are forbidden" in failed.stderr
-    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
-    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
-    assert (race_original / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
-    assert retired.exists(), "the guarded Remove-Item effect must not run"
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v3"
+    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+    assert (race_original / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+    assert retired.exists(), "the guarded cleanup effect must not run"
     assert sentinel.read_text(encoding="utf-8") == "must-not-change"
 
     removed = subprocess.run(
