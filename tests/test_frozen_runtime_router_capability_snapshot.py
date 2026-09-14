@@ -25,27 +25,41 @@ class _Resolver:
         return "runtime-a"
 
 
+class _MixedResolver(_Resolver):
+    def runtime_id_for_existing(self, *, task_id: str, thread_id: str) -> str:
+        del thread_id
+        return {
+            "durable-task": "runtime-a",
+            "plain-task": "runtime-b",
+        }[task_id]
+
+
 class _ThirdReadExplodesRuntime:
     """Proves cursor admission does not trust capabilities twice after fencing."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        runtime_id: str = "runtime-a",
+        durable_resume: bool = True,
+    ) -> None:
+        self._runtime_id = runtime_id
+        self._durable_resume = durable_resume
         self.capability_reads = 0
 
     @property
     def runtime_id(self) -> str:
-        return "runtime-a"
+        return self._runtime_id
 
     @property
     def capabilities(self) -> frozenset[RuntimeCapability]:
         self.capability_reads += 1
         if self.capability_reads >= 3:
             raise AssertionError("capabilities were re-read after the stability fence")
-        return frozenset(
-            {
-                RuntimeCapability.DURABLE_RESUME,
-                RuntimeCapability.PARALLELISM,
-            }
-        )
+        values = {RuntimeCapability.PARALLELISM}
+        if self._durable_resume:
+            values.add(RuntimeCapability.DURABLE_RESUME)
+        return frozenset(values)
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
         del request
@@ -59,8 +73,7 @@ class _ThirdReadExplodesRuntime:
         del task_id, thread_id
         return False
 
-    @staticmethod
-    def initial_resume_token(*, task_id: str, thread_id: str) -> str:
+    def initial_resume_token(self, *, task_id: str, thread_id: str) -> str:
         return f"token:{task_id}:{thread_id}"
 
 
@@ -78,3 +91,39 @@ def test_initial_resume_token_uses_router_admitted_capability_truth() -> None:
 
     assert token == "token:task:thread"
     assert runtime.capability_reads == 2
+
+
+def test_initial_resume_token_uses_exact_route_capability_in_mixed_portfolio() -> None:
+    durable = _ThirdReadExplodesRuntime(
+        runtime_id="runtime-a",
+        durable_resume=True,
+    )
+    plain = _ThirdReadExplodesRuntime(
+        runtime_id="runtime-b",
+        durable_resume=False,
+    )
+    registry = RuntimeRegistry()
+    registry.register(durable)
+    registry.register(plain)
+    router = FrozenRuntimeRouter(
+        registry=registry,
+        resolver=_MixedResolver(),
+        allowed_runtime_ids=("runtime-a", "runtime-b"),
+    )
+
+    assert router.capabilities == frozenset({RuntimeCapability.PARALLELISM})
+    assert RuntimeCapability.DURABLE_RESUME not in router.capabilities
+
+    durable_token = router.initial_resume_token(
+        task_id="durable-task",
+        thread_id="durable-thread",
+    )
+    plain_token = router.initial_resume_token(
+        task_id="plain-task",
+        thread_id="plain-thread",
+    )
+
+    assert durable_token == "token:durable-task:durable-thread"
+    assert plain_token is None
+    assert durable.capability_reads == 2
+    assert plain.capability_reads == 2

@@ -144,11 +144,27 @@ class FrozenRuntimeRouter(AgentRuntimePort):
         authoritative parent plan/binding, or must not advertise DURABLE_RESUME for
         this router. This method never manufactures route affinity from current
         settings or process-local state.
+
+        Aggregate router capabilities remain the conservative intersection used for
+        advertisement. Cursor eligibility is route-specific: once the exact frozen
+        route is resolved and re-fenced, use that route's immutable admitted
+        capability snapshot rather than the aggregate intersection or another live
+        capability read.
         """
 
-        if RuntimeCapability.DURABLE_RESUME not in self._capabilities:
+        runtime_id = _canonical_runtime_id(
+            self._resolver.runtime_id_for_existing(
+                task_id=task_id,
+                thread_id=thread_id,
+            ),
+            label="resolved runtime_id",
+        )
+        runtime = self._resolve_runtime(runtime_id)
+        if (
+            RuntimeCapability.DURABLE_RESUME
+            not in self._capability_snapshots[runtime_id]
+        ):
             return None
-        runtime = self._resolve_existing(task_id=task_id, thread_id=thread_id)
         factory = getattr(runtime, "initial_resume_token", None)
         if not callable(factory):
             raise TypeError(
