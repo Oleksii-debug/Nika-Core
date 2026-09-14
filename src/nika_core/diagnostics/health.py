@@ -96,7 +96,15 @@ class _FileIdentity:
 
 
 SchemaColumn = tuple[str, str, int, int]
-SchemaSignature = tuple[tuple[str, tuple[SchemaColumn, ...]], ...]
+SchemaForeignKey = tuple[int, int, str, str, str, str, str, str]
+SchemaIndexColumn = tuple[int, int, str, int, str, int]
+SchemaIndex = tuple[str, int, str, int, tuple[SchemaIndexColumn, ...]]
+SchemaTable = tuple[
+    tuple[SchemaColumn, ...],
+    tuple[SchemaForeignKey, ...],
+    tuple[SchemaIndex, ...],
+]
+SchemaSignature = tuple[tuple[str, SchemaTable], ...]
 
 
 class HealthService:
@@ -385,7 +393,14 @@ class HealthService:
     def _check_schema_shape(cls, conn: sqlite3.Connection) -> HealthCheck:
         expected = dict(cls._canonical_schema_signature())
         actual = dict(cls._schema_signature(conn))
-        valid = all(actual.get(table_name) == columns for table_name, columns in expected.items())
+        valid = True
+        for table_name, table_signature in expected.items():
+            actual_table = actual.get(table_name)
+            if actual_table is None or not cls._schema_table_matches(
+                table_signature, actual_table
+            ):
+                valid = False
+                break
         if valid:
             return HealthCheck(
                 check_id="database.schema.shape",
@@ -395,7 +410,10 @@ class HealthService:
         return HealthCheck(
             check_id="database.schema.shape",
             status=HealthStatus.FAIL,
-            summary="Required canonical tables or columns are missing or malformed.",
+            summary=(
+                "Required canonical tables, columns, foreign keys, or indexes are "
+                "missing or malformed."
+            ),
         )
 
     @staticmethod
@@ -420,15 +438,72 @@ class HealthService:
                 "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
             )
         )
-        signature: list[tuple[str, tuple[SchemaColumn, ...]]] = []
+        signature: list[tuple[str, SchemaTable]] = []
         for table_name in table_names:
             rows = conn.execute(
                 'SELECT name, type, "notnull", pk FROM pragma_table_info(?) ORDER BY cid',
                 (table_name,),
             )
-            columns = tuple((str(row[0]), str(row[1]), int(row[2]), int(row[3])) for row in rows)
-            signature.append((str(table_name), columns))
+            columns = tuple(
+                (str(row[0]), str(row[1]), int(row[2]), int(row[3])) for row in rows
+            )
+            foreign_keys = tuple(
+                (
+                    int(row[0]),
+                    int(row[1]),
+                    str(row[2]),
+                    str(row[3]),
+                    "" if row[4] is None else str(row[4]),
+                    str(row[5]),
+                    str(row[6]),
+                    str(row[7]),
+                )
+                for row in conn.execute(
+                    "SELECT * FROM pragma_foreign_key_list(?) ORDER BY id, seq",
+                    (table_name,),
+                )
+            )
+            indexes: list[SchemaIndex] = []
+            for row in conn.execute(
+                "SELECT * FROM pragma_index_list(?) ORDER BY seq",
+                (table_name,),
+            ):
+                index_name = str(row[1])
+                index_columns = tuple(
+                    (
+                        int(column[0]),
+                        int(column[1]),
+                        "" if column[2] is None else str(column[2]),
+                        int(column[3]),
+                        "" if column[4] is None else str(column[4]),
+                        int(column[5]),
+                    )
+                    for column in conn.execute(
+                        "SELECT * FROM pragma_index_xinfo(?) ORDER BY seqno",
+                        (index_name,),
+                    )
+                )
+                indexes.append(
+                    (
+                        index_name,
+                        int(row[2]),
+                        str(row[3]),
+                        int(row[4]),
+                        index_columns,
+                    )
+                )
+            signature.append((str(table_name), (columns, foreign_keys, tuple(indexes))))
         return tuple(signature)
+
+    @staticmethod
+    def _schema_table_matches(expected: SchemaTable, actual: SchemaTable) -> bool:
+        expected_columns, expected_foreign_keys, expected_indexes = expected
+        actual_columns, actual_foreign_keys, actual_indexes = actual
+        return (
+            actual_columns == expected_columns
+            and actual_foreign_keys == expected_foreign_keys
+            and all(index in actual_indexes for index in expected_indexes)
+        )
 
     def _check_resources(self) -> HealthCheck:
         observer = self._resource_observer
