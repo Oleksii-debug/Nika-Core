@@ -147,22 +147,14 @@ class EmbeddedModelSuitabilityEvaluator:
             raise ValueError("embedded suitability requires an embedded model descriptor")
         if type(model_cached) is not bool:
             raise TypeError("model_cached must be bool")
-        if accelerator is not None and type(accelerator) is not AcceleratorEvidence:
-            raise TypeError("accelerator must be exact AcceleratorEvidence or None")
-        if constraints is not None and type(constraints) is not RuntimeSuitabilityConstraints:
-            raise TypeError(
-                "constraints must be exact RuntimeSuitabilityConstraints or None"
-            )
+        evidence = _canonical_accelerator(accelerator)
+        effective_constraints = _canonical_constraints(constraints)
         normalized_runtime_ms = None
         if estimated_runtime_ms is not None:
             normalized_runtime_ms = _nonnegative_finite(
                 "estimated_runtime_ms", estimated_runtime_ms
             )
 
-        effective_constraints = (
-            constraints if constraints is not None else RuntimeSuitabilityConstraints()
-        )
-        evidence = accelerator if accelerator is not None else AcceleratorEvidence()
         snapshot = self._observer.snapshot()
         if type(snapshot) is not ResourceSnapshot:
             raise TypeError("resource observer must return exact ResourceSnapshot")
@@ -308,6 +300,42 @@ def _canonical_descriptor(
     except AttributeError as exc:
         raise TypeError(
             "descriptor must be a fully initialized ModelArtifactDescriptor"
+        ) from exc
+
+
+def _canonical_accelerator(
+    accelerator: AcceleratorEvidence | None,
+) -> AcceleratorEvidence:
+    if accelerator is None:
+        return AcceleratorEvidence()
+    if type(accelerator) is not AcceleratorEvidence:
+        raise TypeError("accelerator must be exact AcceleratorEvidence or None")
+    try:
+        return AcceleratorEvidence(
+            gpu_available=accelerator.gpu_available,
+            available_vram_bytes=accelerator.available_vram_bytes,
+        )
+    except AttributeError as exc:
+        raise TypeError("accelerator must be a fully initialized AcceleratorEvidence") from exc
+
+
+def _canonical_constraints(
+    constraints: RuntimeSuitabilityConstraints | None,
+) -> RuntimeSuitabilityConstraints:
+    if constraints is None:
+        return RuntimeSuitabilityConstraints()
+    if type(constraints) is not RuntimeSuitabilityConstraints:
+        raise TypeError(
+            "constraints must be exact RuntimeSuitabilityConstraints or None"
+        )
+    try:
+        return RuntimeSuitabilityConstraints(
+            min_logical_cpu_count=constraints.min_logical_cpu_count,
+            max_estimated_runtime_ms=constraints.max_estimated_runtime_ms,
+        )
+    except AttributeError as exc:
+        raise TypeError(
+            "constraints must be a fully initialized RuntimeSuitabilityConstraints"
         ) from exc
 
 
