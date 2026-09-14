@@ -665,3 +665,33 @@ def test_interval_int_subclass_fails_before_persistence(tmp_path: Path) -> None:
     assert scheduler.upserts == []
     assert service.get("subclass-interval") is None
     assert calls == []
+
+
+def test_clock_jump_persists_range_exhaustion_after_one_effect(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    start = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
+    clock = FakeClock(start)
+    calls: list[RecurrenceInvocation] = []
+    service, _ = _service(store, clock, calls)
+    created = service.create(
+        recurrence_id="range-exhaustion",
+        task_id=TASK_ID,
+        action_id="monitor.check",
+        interval_seconds=60,
+        start_at=start,
+    )
+
+    clock.value = datetime.max.replace(tzinfo=UTC) - timedelta(seconds=30)
+    service.action_handler({"recurrence_id": "range-exhaustion"})
+
+    assert len(calls) == 1
+    state = service.get("range-exhaustion")
+    assert state is not None
+    assert state.status is RecurrenceStatus.COMPLETED
+    assert state.terminal_reason is RecurrenceTerminalReason.RANGE_EXHAUSTED
+    assert state.last_completed_occurrence_id == created.next_occurrence_id
+    assert state.next_occurrence_id is None
+
+    restarted, _ = _service(store, clock, calls)
+    restarted.action_handler({"recurrence_id": "range-exhaustion"})
+    assert len(calls) == 1
