@@ -618,8 +618,9 @@ function Resolve-NikaInterruptedRollback {
         $recoveryState = "restored-precommand"
     }
     elseif ($hasDestination -and -not $hasRollback) {
-        # Crash window 2: rollback image is already active. Finish the original
-        # rollback transaction; a repeated Rollback invocation must not swap again.
+        # Crash window 2: rollback image is already active, but consuming the
+        # deterministic marker here would make recovery itself non-idempotent.
+        # Restore the exact pre-command pair through crash window 1 instead.
         Assert-NikaNoReparsePathChain -Path $DestinationPath
         Assert-NikaReleaseBundle -BundleRoot $DestinationPath
         Assert-NikaNoReparsePathChain -Path $SwapPath
@@ -630,8 +631,20 @@ function Resolve-NikaInterruptedRollback {
             $RollbackPath,
             $SwapPath
         )
-        [System.IO.Directory]::Move($SwapPath, $RollbackPath)
-        $recoveryState = "completed-rollback"
+        [System.IO.Directory]::Move($DestinationPath, $RollbackPath)
+
+        Assert-NikaNoReparsePathChain -Path $SwapPath
+        Assert-NikaReleaseBundle -BundleRoot $SwapPath
+        Assert-NikaNoReparsePathChain -Path $RollbackPath
+        Assert-NikaReleaseBundle -BundleRoot $RollbackPath
+        Assert-NikaNoReparsePathChain -Path $DestinationPath
+        Assert-NikaDataMutationSeparation -DataRoot $DataRoot -MutationPaths @(
+            $DestinationPath,
+            $RollbackPath,
+            $SwapPath
+        )
+        [System.IO.Directory]::Move($SwapPath, $DestinationPath)
+        $recoveryState = "restored-precommand"
     }
     else {
         throw "Interrupted rollback state is ambiguous; refusing to mutate installer images."
@@ -692,11 +705,6 @@ $rollbackRecoveryState = Resolve-NikaInterruptedRollback `
     -RollbackPath $rollbackPath `
     -SwapPath $rollbackSwapPath `
     -DataRoot $dataRoot
-
-if ($Mode -eq "Rollback" -and $rollbackRecoveryState -eq "completed-rollback") {
-    Write-Output $destinationPath
-    exit 0
-}
 
 if ($Mode -eq "Rollback") {
     if (-not (Test-Path -LiteralPath $rollbackPath -PathType Container)) {
