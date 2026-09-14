@@ -501,7 +501,6 @@ function Resolve-NikaInterruptedUpdate {
     }
 
     Assert-NikaNoReparsePathChain -Path $RetiredRollbackPath
-    Assert-NikaReleaseBundle -BundleRoot $RetiredRollbackPath
     Assert-NikaDataMutationSeparation -DataRoot $DataRoot -MutationPaths @(
         $DestinationPath,
         $RollbackPath,
