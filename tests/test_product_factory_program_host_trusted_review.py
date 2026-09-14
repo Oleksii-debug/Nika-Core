@@ -5,6 +5,7 @@ import pytest
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.product_factory_checkpoint_host import ProductFactoryCheckpointHost
+from nika_core.product_factory_coding_program import build_product_factory_coding_program_host
 from nika_core.product_factory_coordinator import (
     CoordinatorError,
     ReviewDecision,
@@ -18,13 +19,12 @@ from nika_core.product_factory_orchestration import (
     TeamPlan,
     TeamRole,
 )
-from nika_core.product_factory_program_host import (
-    ProductFactoryProgramError,
-    ProductFactoryProgramHost,
-)
+from nika_core.product_factory_program_host import ProductFactoryProgramError
 from nika_core.product_factory_project_binding import ProductProjectCoordinatorBinding
 from nika_core.product_factory_review_authority import (
     ProductFactoryReviewSubject,
+    ReviewerPrincipalBindings,
+    reviewer_principal_bindings_ref,
     team_plan_fingerprint_ref,
 )
 from nika_core.product_project import (
@@ -40,20 +40,36 @@ SHA_A = "a" * 40
 SHA_B = "b" * 40
 DIFF_DIGEST = "d" * 64
 PERMISSIONS = frozenset({"read_source", "write_source", "run_tests"})
-PRODUCER = "team-role:builder"
-REVIEWER = "team-role:qa"
+PRODUCER = "worker:builder"
+REVIEWER = "worker:qa"
+BUILDER_ROLE = "team-role:builder"
+REVIEWER_ROLE = "team-role:qa"
+REVIEWER_PRINCIPALS: ReviewerPrincipalBindings = ((REVIEWER_ROLE, REVIEWER),)
 TRUSTED_EVIDENCE = ("review-evidence:trusted:1",)
 
 
-class _NoWorker:
-    async def dispatch(self, request):  # pragma: no cover - must never be reached here
-        raise AssertionError(f"unexpected dispatch for {request.work_id}")
+class _NeverUsedCodingWorker:
+    async def execute(self, job):  # pragma: no cover - must never be reached here
+        raise AssertionError(f"unexpected execute for {job.job_id}")
 
-    async def inspect(self, work_id):  # pragma: no cover - must never be reached here
-        raise AssertionError(f"unexpected inspect for {work_id}")
+    async def cancel(self, job_id):  # pragma: no cover - must never be reached here
+        raise AssertionError(f"unexpected cancel for {job_id}")
 
-    async def recover(self, request, state):  # pragma: no cover - must never be reached here
-        raise AssertionError(f"unexpected recovery for {request.work_id}: {state}")
+    async def inspect(self, job_id):  # pragma: no cover - must never be reached here
+        raise AssertionError(f"unexpected inspect for {job_id}")
+
+    async def recover(self, job, state):  # pragma: no cover - must never be reached here
+        raise AssertionError(f"unexpected recovery for {job.job_id}: {state}")
+
+
+class _NeverUsedContexts:
+    async def context_for(self, request):  # pragma: no cover - must never be reached here
+        raise AssertionError(f"unexpected context for {request.work_id}")
+
+
+class _NeverUsedEvidence:
+    async def collect(self, request, job, result):  # pragma: no cover - must never be reached here
+        raise AssertionError(f"unexpected evidence collection for {request.work_id}")
 
 
 class _ExactEvidenceAuthority:
@@ -106,14 +122,14 @@ def _team_plan() -> TeamPlan:
         plan_id="team-plan:pf4-program-host",
         roles=(
             TeamRole(
-                role_id=PRODUCER,
+                role_id=BUILDER_ROLE,
                 capabilities=("implementation",),
                 component_ids=("core", "ui"),
                 permissions=PERMISSIONS,
                 reasons=("canonical implementation owner",),
             ),
             TeamRole(
-                role_id=REVIEWER,
+                role_id=REVIEWER_ROLE,
                 capabilities=("qa",),
                 component_ids=("core", "ui"),
                 permissions=frozenset({"read_source", "run_tests"}),
@@ -142,19 +158,34 @@ def _project(store: SQLiteStore, plan: TeamPlan):
                 ),
             ),
             repository_refs=(REPOSITORY_LOCATOR,),
-            team_refs=(plan.plan_id, team_plan_fingerprint_ref(plan)),
+            team_refs=(
+                plan.plan_id,
+                team_plan_fingerprint_ref(plan),
+                reviewer_principal_bindings_ref(plan, REVIEWER_PRINCIPALS),
+            ),
         ),
         idempotency_key="create:pf4-program-host-trusted-review",
     )
     return repository, project
 
 
-def _binding(project, plan, evidence_authority):
+def _binding(project, plan, evidence_authority, reviewer_principals=REVIEWER_PRINCIPALS):
     return ProductProjectCoordinatorBinding(
         project,
         _graph(),
         team_plan=plan,
         review_evidence_authority=evidence_authority,
+        reviewer_principals=reviewer_principals,
+    )
+
+
+def _host(store: SQLiteStore, authority):
+    return build_product_factory_coding_program_host(
+        store,
+        worker=_NeverUsedCodingWorker(),
+        contexts=_NeverUsedContexts(),
+        evidence=_NeverUsedEvidence(),
+        review_evidence_authority=authority,
     )
 
 
@@ -195,7 +226,7 @@ def _state(coordinator, component_id: str) -> WorkState:
     )
 
 
-def test_program_host_owns_review_authority_and_legitimate_review_survives_restart(
+def test_canonical_builder_owns_review_authority_and_legitimate_review_survives_restart(
     tmp_path,
 ) -> None:
     store = SQLiteStore(tmp_path / "nika.db")
@@ -220,11 +251,7 @@ def test_program_host_owns_review_authority_and_legitimate_review_survives_resta
         host_task_id=task.task_id,
         checkpoint=binding.checkpoint(coordinator),
     )
-    host = ProductFactoryProgramHost(
-        store,
-        _NoWorker(),
-        review_evidence_authority=authority,
-    )
+    host = _host(store, authority)
 
     rogue_binding = _binding(project, plan, _AllowAllAuthority())
     rogue_coordinator = _plan(rogue_binding)
@@ -236,7 +263,7 @@ def test_program_host_owns_review_authority_and_legitimate_review_survives_resta
             coordinator=rogue_coordinator,
             component_id="core",
             decision=ReviewDecision(
-                reviewer_id="invented-reviewer",
+                reviewer_id="worker:invented-reviewer",
                 accepted=True,
                 reason="caller injected allow-all authority",
                 evidence_refs=("forged",),
@@ -251,15 +278,15 @@ def test_program_host_owns_review_authority_and_legitimate_review_survives_resta
             evidence_refs=("forged",),
         ),
         ReviewDecision(
-            reviewer_id="invented-reviewer",
+            reviewer_id="worker:invented-reviewer",
             accepted=True,
-            reason="unassigned reviewer",
+            reason="unassigned reviewer actor",
             evidence_refs=TRUSTED_EVIDENCE,
         ),
         ReviewDecision(
             reviewer_id=PRODUCER,
             accepted=True,
-            reason="producer cannot self review",
+            reason="producer actor cannot self review through reviewer role",
             evidence_refs=TRUSTED_EVIDENCE,
         ),
     )
@@ -294,11 +321,7 @@ def test_program_host_owns_review_authority_and_legitimate_review_survives_resta
     restarted_store.initialize()
     restarted_project = ProductProjectRepository(restarted_store).get(PROJECT_ID)
     restarted_authority = _ExactEvidenceAuthority()
-    restarted_host = ProductFactoryProgramHost(
-        restarted_store,
-        _NoWorker(),
-        review_evidence_authority=restarted_authority,
-    )
+    restarted_host = _host(restarted_store, restarted_authority)
     restarted_binding = _binding(restarted_project, plan, restarted_authority)
     restored = restarted_host.restore_latest(
         host_task_id=task.task_id,
@@ -309,3 +332,23 @@ def test_program_host_owns_review_authority_and_legitimate_review_survives_resta
     assert _state(restored, "ui") is WorkState.READY
     assert {request.component_id for request in restored.ready_requests()} == {"ui"}
     assert projects.get(PROJECT_ID).project_id == PROJECT_ID
+
+
+def test_canonical_builder_without_review_authority_fails_closed_for_persisted_team_plan(
+    tmp_path,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    plan = _team_plan()
+    _projects, project = _project(store, plan)
+    authority = _ExactEvidenceAuthority()
+    binding = _binding(project, plan, authority)
+    coordinator = _plan(binding)
+    host = _host(store, None)
+
+    with pytest.raises(ProductFactoryProgramError, match="ProgramHost-owned"):
+        host.dispatch_ready(
+            host_task_id="task:missing-authority",
+            binding=binding,
+            coordinator=coordinator,
+        )
