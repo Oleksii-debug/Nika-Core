@@ -26,7 +26,6 @@ from nika_core.model_gateway.gateway import ModelGateway
 from nika_core.multi_agent.model_gateway_runtime import ModelGatewayAgentRuntime
 from nika_core.runtime.contracts import RuntimeErrorCode, RuntimeOutcome, RuntimeRequest
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
-from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
 from nika_core.runtime.retry import RetryPolicy
 
 
@@ -306,6 +305,8 @@ def test_public_cancellation_during_backoff_is_durable_and_blocks_later_transpor
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
+
     store, queue, task_id, coordinator, runtime, provider = _harness(
         tmp_path,
         [
