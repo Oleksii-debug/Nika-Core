@@ -278,8 +278,11 @@ def test_health_does_not_mutate_source_wal_family(tmp_path: Path) -> None:
     try:
         assert writer.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
         writer.execute("PRAGMA wal_autocheckpoint=0")
-        writer.execute("CREATE TABLE health_wal_probe(value TEXT NOT NULL)")
-        writer.execute("INSERT INTO health_wal_probe(value) VALUES ('committed-in-wal')")
+        writer.execute(
+            """INSERT INTO audit_events(
+                event_type, entity_type, entity_id, payload_json, created_at
+            ) VALUES ('health.wal.probe', 'health', 'wal-probe', '{}', 'now')"""
+        )
         writer.commit()
         assert Path(f"{database}-wal").exists()
         before = _database_family_state(database)
