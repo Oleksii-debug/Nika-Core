@@ -109,10 +109,16 @@ async def complete_parallel(
     remain authoritative inside each registered provider.
 
     ``max_parallel`` bounds the whole batch. Optional ``provider_limits`` add
-    route-specific admission for explicit ``provider_id`` requests. A request
-    waits for its provider slot *before* it takes a global slot, preventing a
-    saturated or slow provider from occupying every global slot while unrelated
-    providers/local routes are ready to run.
+    route-specific admission for requests pinned to explicit ``provider_id``
+    values. A request waits for its provider slot *before* it takes a global
+    slot, preventing a saturated or slow provider from occupying every global
+    slot while unrelated providers/local routes are ready to run.
+
+    Provider-limited batches deliberately reject hidden ModelGateway fallbacks:
+    an inner fallback attempt could switch to a provider whose semaphore this
+    layer did not acquire. Callers that need provider ceilings therefore fan out
+    explicit provider routes. Ordinary single-request ModelGateway fallback
+    remains available when provider-specific admission is not requested.
 
     Outcomes are returned in the exact input order. A typed failure of one
     request is isolated as content-free failure evidence and does not erase
@@ -130,6 +136,7 @@ async def complete_parallel(
         raise ValueError("parallel model request IDs must be unique")
 
     limits = _validated_provider_limits(gateway, provider_limits)
+    _validate_provider_limited_routes(batch, limits)
     global_semaphore = asyncio.Semaphore(min(max_parallel, len(batch)))
     provider_semaphores = {
         provider_id: asyncio.Semaphore(limit) for provider_id, limit in limits.items()
@@ -203,6 +210,23 @@ def _validated_provider_limits(
         _validate_limit(limit, name=f"provider limit for {provider_id}")
         validated[provider_id] = limit
     return validated
+
+
+def _validate_provider_limited_routes(
+    requests: tuple[ModelRequest, ...],
+    provider_limits: Mapping[str, int],
+) -> None:
+    if not provider_limits:
+        return
+    for request in requests:
+        if request.fallback_provider_ids:
+            raise ValueError(
+                "provider-limited parallel requests must use explicit routes without fallback"
+            )
+        if request.provider_id is None:
+            raise ValueError(
+                "provider-limited parallel requests require an explicit provider_id"
+            )
 
 
 def _validate_limit(value: int, *, name: str) -> None:
