@@ -5,15 +5,22 @@ _SCRIPT = _ROOT / "scripts" / "v01_autostart_uia_proof.ps1"
 _M5_SCRIPT = _ROOT / "scripts" / "m5_uia_proof.ps1"
 
 
-def test_generic_keyboard_source_proof_precedes_autostart_mutation() -> None:
+def test_generic_keyboard_source_proof_has_one_bounded_nonmutating_retry_before_autostart() -> None:
     text = _SCRIPT.read_text(encoding="utf-8")
     generic = text.index("-WindowTitle $WindowTitle -VerifySourceSetup")
     first_enable = text.index("-AutostartPhase Enable")
     generic_block = text[generic:first_enable]
+    invocation = "-WindowTitle $WindowTitle -VerifySourceSetup"
 
     assert generic < first_enable
     assert "-AutostartPhase" not in generic_block
-    assert "generic keyboard/source-setup proof failed before autostart mutation" in text
+    assert generic_block.count(invocation) == 2
+    assert generic_block.count("if ($LASTEXITCODE -ne 0)") == 2
+    assert "retrying once in a fresh process" in generic_block
+    assert "failed after the single non-mutating retry" in generic_block
+    assert "while (" not in generic_block
+    assert "for (" not in generic_block
+    assert "Start-Sleep" not in generic_block
 
 
 def test_m5_autostart_phases_are_isolated_from_generic_keyboard_prelude() -> None:
