@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 
 import pytest
 
@@ -15,7 +16,10 @@ from nika_core.model_gateway.contracts import (
     ProviderKind,
 )
 from nika_core.model_gateway.gateway import ModelGateway
-from nika_core.model_gateway.parallel import complete_parallel
+from nika_core.model_gateway.parallel import (
+    MAX_PARALLEL_MODEL_BATCH_REQUESTS,
+    complete_parallel,
+)
 
 
 class _CountingProvider:
@@ -54,8 +58,50 @@ class _UnavailableProvider(_CountingProvider):
         )
 
 
+class _RefuseIterationOverBoundSequence(Sequence[ModelRequest]):
+    """Proves oversized admission is rejected from len() without copying input."""
+
+    def __init__(self) -> None:
+        self.iteration_attempts = 0
+
+    def __len__(self) -> int:
+        return MAX_PARALLEL_MODEL_BATCH_REQUESTS + 1
+
+    def __getitem__(self, index: int | slice) -> ModelRequest:
+        del index
+        self.iteration_attempts += 1
+        raise AssertionError("oversized batch must not be materialized")
+
+
 def _messages() -> tuple[ModelMessage, ...]:
     return (ModelMessage(role="user", content="parallel admission proof"),)
+
+
+def test_overbound_batch_rejects_before_copy_task_fanout_or_provider_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _CountingProvider("provider")
+    gateway = ModelGateway()
+    gateway.register(provider)
+    requests = _RefuseIterationOverBoundSequence()
+
+    async def scenario() -> int:
+        created_tasks = 0
+        real_create_task = asyncio.create_task
+
+        def tracked_create_task(coro, *args, **kwargs):  # type: ignore[no-untyped-def]
+            nonlocal created_tasks
+            created_tasks += 1
+            return real_create_task(coro, *args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "create_task", tracked_create_task)
+        with pytest.raises(ValueError, match="batch must contain at most"):
+            await complete_parallel(gateway, requests, max_parallel=1)
+        return created_tasks
+
+    assert asyncio.run(scenario()) == 0
+    assert requests.iteration_attempts == 0
+    assert provider.calls == 0
 
 
 def test_provider_limited_batch_rejects_hidden_fallback_before_any_effect() -> None:
