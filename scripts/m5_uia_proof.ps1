@@ -10,6 +10,9 @@ $ErrorActionPreference = 'Stop'
 if ($AutostartPhase -ne 'None' -and ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted')) {
     throw 'Autostart mutation proof is restricted to an isolated GitHub-hosted Windows runner.'
 }
+if ($VerifySourceSetup -and $AutostartPhase -ne 'None') {
+    throw 'Source setup proof must run in the non-mutating generic UIA phase.'
+}
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Windows.Forms
@@ -670,7 +673,7 @@ try {
     $startControl = $null
     $tasksControl = $null
     $commandControl = $null
-    if ($AutostartPhase -ne 'Observe') {
+    if ($AutostartPhase -eq 'None') {
         $startControl = Wait-DescendantName 'Створити завдання' ([System.Windows.Automation.ControlType]::Button)
         $tasksControl = Wait-DescendantName 'Завдання' ([System.Windows.Automation.ControlType]::Text)
         $commandControl = Wait-DescendantName 'Що має зробити Nika?' ([System.Windows.Automation.ControlType]::Edit)
