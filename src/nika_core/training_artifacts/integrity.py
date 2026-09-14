@@ -8,7 +8,11 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
-from nika_core.model_artifacts import ModelArtifactDescriptor, ModelIntegrityBasis
+from nika_core.model_artifacts import (
+    ModelArtifactDescriptor,
+    ModelArtifactRegistryError,
+    ModelIntegrityBasis,
+)
 
 _READ_CHUNK_BYTES = 1024 * 1024
 _WINDOWS_FINAL_PATH_BUFFER = 32768
@@ -373,18 +377,43 @@ def _open_contained_read_only(path: Path, root: Path) -> tuple[int, os.stat_resu
     return file_descriptor, before
 
 
-def _require_physical_descriptor(descriptor: ModelArtifactDescriptor) -> tuple[str, int]:
+def _canonical_descriptor_snapshot(
+    descriptor: ModelArtifactDescriptor,
+) -> ModelArtifactDescriptor:
     if type(descriptor) is not ModelArtifactDescriptor:
         raise TypeError("descriptor must be a ModelArtifactDescriptor")
-    if descriptor.integrity_basis is not ModelIntegrityBasis.SHA256:
+    try:
+        return ModelArtifactDescriptor.from_json(descriptor.canonical_json())
+    except (AttributeError, ModelArtifactRegistryError, TypeError, ValueError) as exc:
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact descriptor is not canonical"
+        ) from exc
+
+
+def _require_physical_descriptor(
+    descriptor: ModelArtifactDescriptor,
+) -> tuple[ModelArtifactDescriptor, str, int]:
+    snapshot = _canonical_descriptor_snapshot(descriptor)
+    if snapshot.integrity_basis is not ModelIntegrityBasis.SHA256:
         raise CandidateArtifactIntegrityError(
             "candidate artifact requires canonical SHA-256 integrity provenance"
         )
-    if descriptor.sha256 is None or descriptor.size_bytes is None:
+    if snapshot.sha256 is None or snapshot.size_bytes is None:
         raise CandidateArtifactIntegrityError(
             "candidate artifact descriptor requires exact digest and size"
         )
-    return descriptor.sha256, descriptor.size_bytes
+    return snapshot, snapshot.sha256, snapshot.size_bytes
+
+
+def _require_descriptor_unchanged(
+    descriptor: ModelArtifactDescriptor,
+    snapshot: ModelArtifactDescriptor,
+) -> None:
+    current = _canonical_descriptor_snapshot(descriptor)
+    if current.canonical_json() != snapshot.canonical_json():
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact descriptor changed during verification"
+        )
 
 
 def verify_candidate_artifact(
@@ -402,7 +431,9 @@ def verify_candidate_artifact(
     deliberately absent from returned evidence. Consumers must re-run this verifier
     at their point of use instead of accepting a receipt as construction-history proof.
     """
-    expected_sha256, expected_size = _require_physical_descriptor(descriptor)
+    descriptor_snapshot, expected_sha256, expected_size = _require_physical_descriptor(
+        descriptor
+    )
 
     candidate, resolved_root = _resolve_candidate_path(path, allowed_root=allowed_root)
     if resolved_root is None:
@@ -521,11 +552,14 @@ def verify_candidate_artifact(
             "candidate artifact digest does not match provenance"
         )
 
+    _require_descriptor_unchanged(descriptor, descriptor_snapshot)
     descriptor_digest = _require_evidence_sha256(
         "descriptor_digest",
-        descriptor.descriptor_digest,
+        descriptor_snapshot.descriptor_digest,
     )
-    registry_key = _require_evidence_sha256("registry_key", descriptor.registry_key)
+    registry_key = _require_evidence_sha256(
+        "registry_key", descriptor_snapshot.registry_key
+    )
     receipt_sha256 = _require_evidence_sha256("sha256", expected_sha256)
     receipt_size = _require_evidence_size(expected_size)
     receipt = object.__new__(VerifiedCandidateArtifact)

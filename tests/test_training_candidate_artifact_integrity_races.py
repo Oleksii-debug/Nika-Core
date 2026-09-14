@@ -164,3 +164,36 @@ def test_path_replacement_after_hashing_fails_final_identity_check(
 
     with pytest.raises(CandidateArtifactIntegrityError, match="path changed"):
         verify_candidate_artifact(candidate, descriptor)
+
+
+def test_descriptor_identity_mutation_during_hashing_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = tmp_path / "candidate.bin"
+    candidate.write_bytes(b"descriptor-bound-bytes")
+    descriptor = _descriptor(candidate)
+    entry_digest = descriptor.descriptor_digest
+    entry_registry_key = descriptor.registry_key
+    original_read = integrity.os.read
+    mutated = False
+
+    def mutating_read(file_descriptor: int, size: int) -> bytes:
+        nonlocal mutated
+        chunk = original_read(file_descriptor, size)
+        if chunk and not mutated:
+            mutated = True
+            object.__setattr__(descriptor, "model_id", "candidate-race-mutated")
+        return chunk
+
+    monkeypatch.setattr(integrity.os, "read", mutating_read)
+
+    with pytest.raises(
+        CandidateArtifactIntegrityError,
+        match="descriptor changed during verification",
+    ):
+        verify_candidate_artifact(candidate, descriptor)
+
+    assert mutated is True
+    assert descriptor.descriptor_digest != entry_digest
+    assert descriptor.registry_key != entry_registry_key
