@@ -276,6 +276,53 @@ def test_parallel_fanout_respects_batch_concurrency_ceiling() -> None:
     assert asyncio.run(scenario()) == 2
 
 
+def test_provider_wait_does_not_consume_global_slot_or_block_other_provider() -> None:
+    async def scenario() -> int:
+        tracker = _ConcurrencyTracker()
+        release = asyncio.Event()
+        overlap = asyncio.Event()
+        gateway = ModelGateway()
+        gateway.register(
+            _BarrierProvider(
+                provider_id="slow-a",
+                kind=ProviderKind.CLOUD,
+                tracker=tracker,
+                overlap=overlap,
+                release=release,
+            )
+        )
+        gateway.register(
+            _BarrierProvider(
+                provider_id="independent-b",
+                kind=ProviderKind.LOCAL,
+                tracker=tracker,
+                overlap=overlap,
+                release=release,
+            )
+        )
+
+        task = asyncio.create_task(
+            complete_parallel(
+                gateway,
+                (
+                    _request("a-1", provider_id="slow-a", model="api-a"),
+                    _request("a-2", provider_id="slow-a", model="api-a"),
+                    _request("b-1", provider_id="independent-b", model="local-b"),
+                ),
+                max_parallel=2,
+                provider_limits={"slow-a": 1},
+            )
+        )
+        await asyncio.wait_for(overlap.wait(), timeout=1.0)
+        observed = tracker.max_active
+        release.set()
+        result = await asyncio.wait_for(task, timeout=1.0)
+        assert tuple(item.request_id for item in result.outcomes) == ("a-1", "a-2", "b-1")
+        return observed
+
+    assert asyncio.run(scenario()) == 2
+
+
 def test_parallel_result_preserves_input_order_not_completion_order() -> None:
     gateway = ModelGateway()
     gateway.register(_DelayedProvider(provider_id="slow", delay_seconds=0.03))
@@ -384,6 +431,47 @@ def test_parallel_concurrency_limit_rejects_boolean() -> None:
                 gateway,
                 (_request("request", provider_id="provider", model="m"),),
                 max_parallel=True,
+            )
+        )
+
+
+@pytest.mark.parametrize("value", [0, -1, MAX_PARALLEL_MODEL_REQUESTS + 1])
+def test_provider_concurrency_limit_is_bounded(value: int) -> None:
+    gateway = ModelGateway()
+    gateway.register(_DelayedProvider(provider_id="provider", delay_seconds=0.0))
+    with pytest.raises(ValueError, match="provider limit for provider must be between"):
+        asyncio.run(
+            complete_parallel(
+                gateway,
+                (_request("request", provider_id="provider", model="m"),),
+                provider_limits={"provider": value},
+            )
+        )
+
+
+def test_provider_concurrency_limit_rejects_boolean() -> None:
+    gateway = ModelGateway()
+    gateway.register(_DelayedProvider(provider_id="provider", delay_seconds=0.0))
+    with pytest.raises(TypeError, match="provider limit for provider must be an integer"):
+        asyncio.run(
+            complete_parallel(
+                gateway,
+                (_request("request", provider_id="provider", model="m"),),
+                provider_limits={"provider": True},
+            )
+        )
+
+
+def test_unknown_provider_limit_fails_before_any_provider_effect() -> None:
+    gateway = ModelGateway()
+    provider = _DelayedProvider(provider_id="provider", delay_seconds=0.0)
+    gateway.register(provider)
+    with pytest.raises(ValueError, match="unknown provider"):
+        asyncio.run(
+            complete_parallel(
+                gateway,
+                (_request("request", provider_id="provider", model="m"),),
+                provider_limits={"typo-provider": 1},
             )
         )
 
