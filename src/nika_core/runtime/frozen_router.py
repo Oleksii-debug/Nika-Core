@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from itertools import islice
 from typing import Protocol, runtime_checkable
 
 from .contracts import (
@@ -64,6 +65,8 @@ class FrozenRuntimeRouter(AgentRuntimePort):
             raise TypeError("resolver must implement FrozenRuntimeRouteResolver")
         self._runtime_id = _canonical_runtime_id(runtime_id, label="router runtime_id")
 
+        if isinstance(allowed_runtime_ids, (str, bytes, bytearray)):
+            raise TypeError("allowed_runtime_ids must be a sequence of runtime IDs")
         expected_count = len(allowed_runtime_ids)
         if expected_count < 1:
             raise ValueError("allowed_runtime_ids must not be empty")
@@ -72,9 +75,16 @@ class FrozenRuntimeRouter(AgentRuntimePort):
                 "allowed_runtime_ids must contain at most "
                 f"{MAX_FROZEN_RUNTIME_ROUTES} entries"
             )
-        frozen_ids = tuple(allowed_runtime_ids)
+        # Bound materialization even if a mutable/hostile Sequence understates
+        # __len__ and produces more entries while being iterated.
+        frozen_ids = tuple(islice(allowed_runtime_ids, MAX_FROZEN_RUNTIME_ROUTES + 1))
         if len(frozen_ids) != expected_count:
             raise ValueError("allowed_runtime_ids changed during admission")
+        if len(frozen_ids) > MAX_FROZEN_RUNTIME_ROUTES:
+            raise ValueError(
+                "allowed_runtime_ids must contain at most "
+                f"{MAX_FROZEN_RUNTIME_ROUTES} entries"
+            )
 
         canonical_ids = tuple(
             _canonical_runtime_id(value, label="allowed runtime_id")
@@ -129,10 +139,13 @@ class FrozenRuntimeRouter(AgentRuntimePort):
         return await runtime.cancel(task_id=task_id, thread_id=thread_id)
 
     def initial_resume_token(self, *, task_id: str, thread_id: str) -> str | None:
-        """Delegate initial durable cursor creation to the exact frozen route.
+        """Delegate initial cursor creation when route authority already exists.
 
-        MultiAgentSupervisor discovers this optional method dynamically. Returning
-        ``None`` for a non-durable route preserves the existing supervisor contract.
+        Some supervisors ask for an initial cursor before persisting a newly spawned
+        child. Such compositions must resolve the frozen route from an already
+        authoritative parent plan/binding, or must not advertise DURABLE_RESUME for
+        this router. This method never manufactures route affinity from current
+        settings or process-local state.
         """
 
         runtime = self._resolve_existing(task_id=task_id, thread_id=thread_id)
