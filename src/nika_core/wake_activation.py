@@ -56,8 +56,11 @@ class WakeActivationEvidence:
 
 class WakeActivationDetector:
     def __init__(self, policy: WakeActivationPolicy | None = None) -> None:
-        self._policy = policy or WakeActivationPolicy()
-        if not isinstance(self._policy, WakeActivationPolicy):
+        if policy is None:
+            self._policy = WakeActivationPolicy()
+        elif isinstance(policy, WakeActivationPolicy):
+            self._policy = policy
+        else:
             raise WakeActivationError("policy must be a WakeActivationPolicy")
         self._phrases = tuple(
             (_phrase_tokens(phrase), _sha256_text(_normalized_text(phrase)))

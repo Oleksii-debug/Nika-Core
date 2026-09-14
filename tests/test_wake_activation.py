@@ -95,6 +95,12 @@ def test_invalid_or_ambiguous_policy_fails_closed(phrases: object) -> None:
         WakeActivationPolicy(phrases)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("policy", [False, 0, "", [], ()])
+def test_falsey_wrong_type_detector_policy_fails_closed(policy: object) -> None:
+    with pytest.raises(WakeActivationError, match="policy must be a WakeActivationPolicy"):
+        WakeActivationDetector(policy)  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize(
     ("request_id", "transcript"),
     [
