@@ -32,9 +32,7 @@ class RoutedModelProvider:
 
     def __init__(self, *, route_id: str, provider: ModelProvider) -> None:
         _validate_route_id(route_id)
-        capabilities = provider.capabilities
-        if type(capabilities) is not ProviderCapabilities:
-            raise TypeError("routed provider capabilities must be ProviderCapabilities")
+        capabilities = _canonical_capabilities(provider.capabilities)
         _validate_upstream_provider_id(capabilities.provider_id)
         self._route_id = route_id
         self._provider = provider
@@ -54,36 +52,66 @@ class RoutedModelProvider:
         return self._capabilities
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
+        self._require_stable_capabilities()
         upstream_request = replace(
             request,
             provider_id=self._upstream_capabilities.provider_id,
             provider_kind=self._upstream_capabilities.kind,
             fallback_provider_ids=(),
         )
+        terminal_error: ModelGatewayError | None = None
+        response: ModelResponse | None = None
         try:
             response = await self._provider.complete(upstream_request)
         except asyncio.CancelledError:
             raise
         except ModelGatewayError as error:
-            # Do not retain provider-controlled diagnostics as a public cause or
-            # context chain. The outer ModelGateway will normalize this typed
-            # route-bound error to its canonical safe public message.
-            raise ModelGatewayError(
+            # Snapshot only typed truth. Do not retain provider-controlled text as
+            # a public cause/context chain.
+            terminal_error = ModelGatewayError(
                 error.code,
                 "routed model provider failed",
                 provider_id=self._route_id,
                 retryable=error.retryable,
                 failure_effect=error.failure_effect,
-            ) from None
+            )
 
+        # Raise outside the provider exception handler so Python does not attach
+        # provider-controlled diagnostics through __context__.
+        if terminal_error is not None:
+            raise terminal_error
+        if response is None:
+            raise _route_error(
+                self._route_id,
+                "routed provider completed without a response",
+            )
+
+        self._require_stable_capabilities()
         if response.request_id != request.request_id:
-            raise _route_error("routed provider returned a response for another request")
+            raise _route_error(
+                self._route_id,
+                "routed provider returned a response for another request",
+            )
         if response.provider_id != self._upstream_capabilities.provider_id:
-            raise _route_error("routed provider returned an unexpected provider identity")
+            raise _route_error(
+                self._route_id,
+                "routed provider returned an unexpected provider identity",
+            )
         if response.provider_kind is not self._upstream_capabilities.kind:
-            raise _route_error("routed provider returned an unexpected provider kind")
+            raise _route_error(
+                self._route_id,
+                "routed provider returned an unexpected provider kind",
+            )
 
         return replace(response, provider_id=self._route_id)
+
+    def _require_stable_capabilities(self) -> None:
+        observed = _canonical_capabilities(self._provider.capabilities)
+        if observed != self._upstream_capabilities:
+            raise _route_error(
+                self._route_id,
+                "routed provider capabilities changed after registration",
+            )
 
     def __repr__(self) -> str:
         return (
@@ -92,10 +120,17 @@ class RoutedModelProvider:
         )
 
 
-def _route_error(message: str) -> ModelGatewayError:
+def _canonical_capabilities(value: ProviderCapabilities) -> ProviderCapabilities:
+    if type(value) is not ProviderCapabilities:
+        raise TypeError("routed provider capabilities must be ProviderCapabilities")
+    return value
+
+
+def _route_error(route_id: str, message: str) -> ModelGatewayError:
     return ModelGatewayError(
         ModelErrorCode.PROVIDER_ERROR,
         message,
+        provider_id=route_id,
         retryable=False,
         failure_effect=ModelFailureEffect.UNKNOWN,
     )
