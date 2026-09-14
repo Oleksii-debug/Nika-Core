@@ -10,13 +10,20 @@ from nika_core.model_artifacts import (
     ModelArtifactResources,
     ModelIntegrityBasis,
 )
-from nika_core.model_suitability import EmbeddedModelSuitabilityEvaluator
+from nika_core.model_suitability import (
+    AcceleratorEvidence,
+    EmbeddedModelSuitabilityEvaluator,
+    RuntimeSuitabilityConstraints,
+)
 from nika_core.resources.contracts import ResourceSnapshot
 
 _GIB = 1024**3
 
 
 class _HostileInt(int):
+    def __lt__(self, _other: object) -> bool:
+        return False
+
     def __gt__(self, _other: object) -> bool:
         return False
 
@@ -36,7 +43,9 @@ class _CountingObserver:
         )
 
 
-def _descriptor() -> ModelArtifactDescriptor:
+def _descriptor(
+    *, resources: ModelArtifactResources | None = None
+) -> ModelArtifactDescriptor:
     return ModelArtifactDescriptor(
         kind=ModelArtifactKind.EMBEDDED,
         provider_id="foundry-local",
@@ -45,8 +54,30 @@ def _descriptor() -> ModelArtifactDescriptor:
         license_reference="https://example.invalid/license",
         integrity_basis=ModelIntegrityBasis.PROVIDER_IDENTITY,
         size_bytes=1 * _GIB,
-        resources=ModelArtifactResources(min_system_memory_bytes=1 * _GIB),
+        resources=resources
+        if resources is not None
+        else ModelArtifactResources(min_system_memory_bytes=1 * _GIB),
     )
+
+
+def _evaluator() -> tuple[
+    EmbeddedModelSuitabilityEvaluator,
+    _CountingObserver,
+    list[Path],
+]:
+    observer = _CountingObserver()
+    disk_calls: list[Path] = []
+
+    def disk_probe(path: Path) -> int:
+        disk_calls.append(path)
+        return 100 * _GIB
+
+    evaluator = EmbeddedModelSuitabilityEvaluator(
+        observer,
+        disk_free_probe=disk_probe,
+        architecture_probe=lambda: "AMD64",
+    )
+    return evaluator, observer, disk_calls
 
 
 def _forged_resources() -> ModelArtifactResources:
@@ -63,22 +94,10 @@ def _forged_resources() -> ModelArtifactResources:
     return forged
 
 
-def test_forged_hard_requirement_fails_before_observation_or_disk_probe() -> None:
+def test_forged_descriptor_requirement_fails_before_hardware_observation() -> None:
     descriptor = _descriptor()
     object.__setattr__(descriptor, "resources", _forged_resources())
-    observer = _CountingObserver()
-    disk_calls = 0
-
-    def disk_probe(_path: Path) -> int:
-        nonlocal disk_calls
-        disk_calls += 1
-        return 100 * _GIB
-
-    evaluator = EmbeddedModelSuitabilityEvaluator(
-        observer,
-        disk_free_probe=disk_probe,
-        architecture_probe=lambda: "AMD64",
-    )
+    evaluator, observer, disk_calls = _evaluator()
 
     with pytest.raises(TypeError, match="exact integer"):
         evaluator.assess(
@@ -88,4 +107,43 @@ def test_forged_hard_requirement_fails_before_observation_or_disk_probe() -> Non
         )
 
     assert observer.calls == 0
-    assert disk_calls == 0
+    assert disk_calls == []
+
+
+def test_forged_accelerator_evidence_fails_before_hardware_observation() -> None:
+    descriptor = _descriptor(
+        resources=ModelArtifactResources(min_vram_bytes=8 * _GIB)
+    )
+    accelerator = object.__new__(AcceleratorEvidence)
+    object.__setattr__(accelerator, "gpu_available", True)
+    object.__setattr__(accelerator, "available_vram_bytes", _HostileInt(128 * _GIB))
+    evaluator, observer, disk_calls = _evaluator()
+
+    with pytest.raises(TypeError, match="exact integer"):
+        evaluator.assess(
+            descriptor,
+            storage_path="unused",
+            model_cached=True,
+            accelerator=accelerator,
+        )
+
+    assert observer.calls == 0
+    assert disk_calls == []
+
+
+def test_forged_runtime_constraints_fail_before_hardware_observation() -> None:
+    constraints = object.__new__(RuntimeSuitabilityConstraints)
+    object.__setattr__(constraints, "min_logical_cpu_count", _HostileInt(128))
+    object.__setattr__(constraints, "max_estimated_runtime_ms", None)
+    evaluator, observer, disk_calls = _evaluator()
+
+    with pytest.raises(TypeError, match="exact integer"):
+        evaluator.assess(
+            _descriptor(),
+            storage_path="unused",
+            model_cached=True,
+            constraints=constraints,
+        )
+
+    assert observer.calls == 0
+    assert disk_calls == []
