@@ -343,12 +343,10 @@ def test_canonical_builder_without_review_authority_fails_closed_for_persisted_t
     _projects, project = _project(store, plan)
     authority = _ExactEvidenceAuthority()
     binding = _binding(project, plan, authority)
-    coordinator = _plan(binding)
     host = _host(store, None)
 
     with pytest.raises(ProductFactoryProgramError, match="ProgramHost-owned"):
-        host.dispatch_ready(
+        host.restore_latest(
             host_task_id="task:missing-authority",
             binding=binding,
-            coordinator=coordinator,
         )
