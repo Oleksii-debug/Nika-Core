@@ -46,10 +46,11 @@ def test_packaged_restart_proof_reuses_strict_m5_identity_and_refuses_user_regis
     m5 = (ROOT / "scripts/m5_uia_proof.ps1").read_text(encoding="utf-8")
     assert "RUNNER_ENVIRONMENT -ne 'github-hosted'" in wrapper
     assert "RUNNER_ENVIRONMENT -ne 'github-hosted'" in m5
-    assert wrapper.index("GetValueNames() -contains 'NikaCore'") < wrapper.index(
-        "-AutostartPhase Enable"
-    )
-    assert "-AutostartPhase Enable -VerifySourceSetup" in wrapper
+    registry_fence = wrapper.index("GetValueNames() -contains 'NikaCore'")
+    generic_proof = wrapper.index("-WindowTitle $WindowTitle -VerifySourceSetup")
+    enable_phase = wrapper.index("-AutostartPhase Enable")
+    assert registry_fence < generic_proof < enable_phase
+    assert "-AutostartPhase Enable -VerifySourceSetup" not in wrapper
     assert "-AutostartPhase Observe" in wrapper
     assert "-AutostartPhase Disable" in wrapper
     assert "$current -ceq $expectedCommand" in wrapper
