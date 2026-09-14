@@ -288,14 +288,13 @@ def test_spoofable_shard_sha_string_is_rejected_before_canonicalization() -> Non
     class _ForgedString(str):
         pass
 
-    forged = LearningShard(
-        split=LearningDataSplit.TRAINING,
-        artifact_sha256=_ForgedString(A),
-        provenance_sha256=C,
-        license_evidence_sha256=E,
-        record_count=10,
-        byte_count=100,
-    )
+    forged = object.__new__(LearningShard)
+    object.__setattr__(forged, "split", LearningDataSplit.TRAINING)
+    object.__setattr__(forged, "artifact_sha256", _ForgedString(A))
+    object.__setattr__(forged, "provenance_sha256", C)
+    object.__setattr__(forged, "license_evidence_sha256", E)
+    object.__setattr__(forged, "record_count", 10)
+    object.__setattr__(forged, "byte_count", 100)
     shards = (
         forged,
         _shard(LearningDataSplit.VALIDATION, B, D, F),
