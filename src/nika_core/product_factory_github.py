@@ -134,7 +134,7 @@ class GitHubIntegrationEvidence:
 
 
 class GitHubIntegrationEvidencePort(Protocol):
-    """Trusted provider seam that proves candidate-to-integration identity."""
+    """Trusted seam proving candidate integration is reachable from an exact target tip."""
 
     def prove_integration(
         self,
@@ -143,8 +143,9 @@ class GitHubIntegrationEvidencePort(Protocol):
         pull_request_number: int,
         candidate_sha: str,
         integration_sha: str,
+        target_default_branch_sha: str,
     ) -> GitHubIntegrationEvidence:
-        """Return producer-native evidence for the exact requested relation."""
+        """Prove candidate-to-integration and integration-to-current-target-tip identity."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,6 +322,7 @@ class GitHubFactoryAdapter:
                     pull_request_number=pr.number,
                     candidate_sha=candidate_sha,
                     integration_sha=pr.merge_sha,
+                    target_default_branch_sha=observation.default_branch_sha,
                 )
                 if type(integration_evidence) is not GitHubIntegrationEvidence:
                     raise GitHubFactoryError(

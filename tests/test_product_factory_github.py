@@ -264,6 +264,7 @@ def test_merged_pr_projects_only_trusted_candidate_integration_identity() -> Non
             "pull_request_number": 720,
             "candidate_sha": CANDIDATE_SHA,
             "integration_sha": MERGE_SHA,
+            "target_default_branch_sha": DESCENDANT_SHA,
         }
     ]
 
