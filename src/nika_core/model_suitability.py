@@ -8,7 +8,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-from nika_core.model_artifacts import ModelArtifactDescriptor, ModelArtifactKind
+from nika_core.model_artifacts import (
+    ModelArtifactDescriptor,
+    ModelArtifactKind,
+    ModelArtifactResources,
+)
 from nika_core.resources.contracts import ResourceObserverPort, ResourceSnapshot
 
 _SCHEMA = "nika.embedded_model_suitability.v1"
@@ -138,8 +142,7 @@ class EmbeddedModelSuitabilityEvaluator:
         estimated_runtime_ms: float | None = None,
     ) -> ModelSuitabilityReport:
         """Classify practical resource suitability without loading or acquiring a model."""
-        if type(descriptor) is not ModelArtifactDescriptor:
-            raise TypeError("descriptor must be exact ModelArtifactDescriptor")
+        descriptor = _canonical_descriptor(descriptor)
         if descriptor.kind is not ModelArtifactKind.EMBEDDED:
             raise ValueError("embedded suitability requires an embedded model descriptor")
         if type(model_cached) is not bool:
@@ -270,6 +273,42 @@ class EmbeddedModelSuitabilityEvaluator:
         if not _is_nonnegative_int(value):
             return None
         return value
+
+
+def _canonical_descriptor(
+    descriptor: ModelArtifactDescriptor,
+) -> ModelArtifactDescriptor:
+    if type(descriptor) is not ModelArtifactDescriptor:
+        raise TypeError("descriptor must be exact ModelArtifactDescriptor")
+    try:
+        resources = descriptor.resources
+        if type(resources) is not ModelArtifactResources:
+            raise TypeError("resources must be exact ModelArtifactResources")
+        canonical_resources = ModelArtifactResources(
+            min_system_memory_bytes=resources.min_system_memory_bytes,
+            min_available_memory_bytes=resources.min_available_memory_bytes,
+            min_vram_bytes=resources.min_vram_bytes,
+            recommended_memory_bytes=resources.recommended_memory_bytes,
+            cpu_architectures=resources.cpu_architectures,
+        )
+        return ModelArtifactDescriptor(
+            schema_version=descriptor.schema_version,
+            kind=descriptor.kind,
+            provider_id=descriptor.provider_id,
+            model_id=descriptor.model_id,
+            model_version=descriptor.model_version,
+            source_reference=descriptor.source_reference,
+            license_reference=descriptor.license_reference,
+            integrity_basis=descriptor.integrity_basis,
+            sha256=descriptor.sha256,
+            size_bytes=descriptor.size_bytes,
+            capabilities=descriptor.capabilities,
+            resources=canonical_resources,
+        )
+    except AttributeError as exc:
+        raise TypeError(
+            "descriptor must be a fully initialized ModelArtifactDescriptor"
+        ) from exc
 
 
 def _classify(
