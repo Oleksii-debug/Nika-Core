@@ -1,0 +1,161 @@
+name: Temporary 832 atomic retry repair
+
+on:
+  push:
+    branches:
+      - repair/dev10-cloud-retry-safety-4efc726
+
+permissions:
+  contents: write
+
+jobs:
+  apply-repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Apply guarded coordinator repair
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/nika_core/runtime/coordinator.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''            if self._task_state(request.task_id) == TaskState.CANCELLED:
+              self._audit.append(
+                  event_type="runtime.retry_blocked_cancelled",
+                  entity_type="task",
+                  entity_id=request.task_id,
+                  payload={
+                      "runtime_id": runtime.runtime_id,
+                      "thread_id": request.thread_id,
+                      "retry_number": retries_used,
+                  },
+              )
+              break
+          if remaining_timeout is not None and remaining_timeout <= 0.0:
+              self._audit.append(
+                  event_type="runtime.retry_blocked_timeout_budget",
+                  entity_type="task",
+                  entity_id=request.task_id,
+                  payload={
+                      "runtime_id": runtime.runtime_id,
+                      "thread_id": request.thread_id,
+                      "retry_number": retries_used,
+                      "delay_seconds": delay,
+                      "remaining_timeout_seconds": remaining_timeout,
+                  },
+              )
+              break
+
+          self._queue.transition(request.task_id, TaskState.RUNNING)
+          self._audit.append(
+              event_type="runtime.retry_started",
+              entity_type="task",
+              entity_id=request.task_id,
+              payload={
+                  "runtime_id": runtime.runtime_id,
+                  "thread_id": request.thread_id,
+                  "retry_number": retries_used,
+                  "resume": resume_token is not None,
+                  "remaining_timeout_seconds": remaining_timeout,
+              },
+          )
+'''
+          new = '''            if not self._begin_retry_attempt(
+              task_id=request.task_id,
+              runtime_id=runtime.runtime_id,
+              thread_id=request.thread_id,
+              retry_number=retries_used,
+              resume=resume_token is not None,
+              delay_seconds=delay,
+              remaining_timeout_seconds=remaining_timeout,
+          ):
+              break
+'''
+          if text.count(old) != 1:
+              raise SystemExit("guard failed: expected exact post-backoff retry block once")
+          text = text.replace(old, new, 1)
+
+          marker = "\n    async def resume_approval("
+          helper = '''
+    def _begin_retry_attempt(
+        self,
+        *,
+        task_id: str,
+        runtime_id: str,
+        thread_id: str,
+        retry_number: int,
+        resume: bool,
+        delay_seconds: float,
+        remaining_timeout_seconds: float | None,
+    ) -> bool:
+        """Atomically decide whether RETRYING work may re-enter RUNNING."""
+        with self._queue.store.connection() as conn:
+            # The retry owner and public cancel path must serialize on one SQLite
+            # writer boundary. Otherwise cancel can commit RETRYING->CANCELLED
+            # after a stale state read but before RETRYING->RUNNING.
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._task_state_with_connection(conn, task_id)
+            if current == TaskState.CANCELLED:
+                self._audit.append_with_connection(
+                    conn,
+                    event_type="runtime.retry_blocked_cancelled",
+                    entity_type="task",
+                    entity_id=task_id,
+                    payload={
+                        "runtime_id": runtime_id,
+                        "thread_id": thread_id,
+                        "retry_number": retry_number,
+                    },
+                )
+                return False
+            if remaining_timeout_seconds is not None and remaining_timeout_seconds <= 0.0:
+                self._audit.append_with_connection(
+                    conn,
+                    event_type="runtime.retry_blocked_timeout_budget",
+                    entity_type="task",
+                    entity_id=task_id,
+                    payload={
+                        "runtime_id": runtime_id,
+                        "thread_id": thread_id,
+                        "retry_number": retry_number,
+                        "delay_seconds": delay_seconds,
+                        "remaining_timeout_seconds": remaining_timeout_seconds,
+                    },
+                )
+                return False
+
+            self._queue.transition_with_connection(conn, task_id, TaskState.RUNNING)
+            self._audit.append_with_connection(
+                conn,
+                event_type="runtime.retry_started",
+                entity_type="task",
+                entity_id=task_id,
+                payload={
+                    "runtime_id": runtime_id,
+                    "thread_id": thread_id,
+                    "retry_number": retry_number,
+                    "resume": resume,
+                    "remaining_timeout_seconds": remaining_timeout_seconds,
+                },
+            )
+        return True
+'''
+          if text.count(marker) != 1:
+              raise SystemExit("guard failed: resume_approval marker changed")
+          text = text.replace(marker, "\n" + helper + marker, 1)
+          path.write_text(text, encoding="utf-8")
+          PY
+      - name: Commit repair and remove temporary workflow
+        shell: bash
+        run: |
+          rm .github/workflows/temporary-832-atomic-retry-repair.yml
+          git diff --check
+          git config user.name "nika-core-autonomous-repair"
+          git config user.email "actions@users.noreply.github.com"
+          git add src/nika_core/runtime/coordinator.py .github/workflows/temporary-832-atomic-retry-repair.yml
+          git commit -m "fix(runtime): serialize retry reentry with cancel"
+          git push origin HEAD:repair/dev10-cloud-retry-safety-4efc726
