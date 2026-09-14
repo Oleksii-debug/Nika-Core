@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -59,7 +60,7 @@ def _request() -> ModelRequest:
 
 def _client_factory(
     transport: httpx.MockTransport,
-):
+) -> Callable[..., httpx.AsyncClient]:
     def factory(*, timeout: float) -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=transport, timeout=timeout)
 
