@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
@@ -61,6 +63,24 @@ class DeterministicGoal:
             raise ValueError("goal facts must not be empty")
 
 
+class _FrozenArguments(Mapping[str, object]):
+    """Defensive immutable snapshot that yields copies of nested execution values."""
+
+    __slots__ = ("_payload",)
+
+    def __init__(self, values: Mapping[str, object]) -> None:
+        self._payload = deepcopy(dict(values))
+
+    def __getitem__(self, key: str) -> object:
+        return deepcopy(self._payload[key])
+
+    def __iter__(self):
+        return iter(self._payload)
+
+    def __len__(self) -> int:
+        return len(self._payload)
+
+
 @dataclass(frozen=True, slots=True)
 class DeterministicAction:
     action_id: str
@@ -69,7 +89,7 @@ class DeterministicAction:
     adds: frozenset[str] = field(default_factory=frozenset)
     removes: frozenset[str] = field(default_factory=frozenset)
     tool_id: str | None = None
-    arguments: dict[str, object] = field(default_factory=dict)
+    arguments: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.action_id.strip():
@@ -83,6 +103,11 @@ class DeterministicAction:
             raise ValueError("action facts must not be empty")
         if self.tool_id is not None and not self.tool_id.strip():
             raise ValueError("tool_id must not be empty")
+        if not isinstance(self.arguments, Mapping):
+            raise TypeError("action arguments must be a mapping")
+        if any(not isinstance(key, str) for key in self.arguments):
+            raise TypeError("action argument names must be strings")
+        object.__setattr__(self, "arguments", _FrozenArguments(self.arguments))
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,8 +117,131 @@ class PlanStep:
 
 
 @dataclass(frozen=True, slots=True)
+class DeterministicPlanProvenance:
+    """Privacy-safe, durable evidence binding one deterministic plan to its context."""
+
+    schema_version: int
+    goal_fingerprint: str
+    state_fingerprint: str
+    state_version: str
+    selected_rules_fingerprint: str
+    selected_rule_count: int
+    planner_id: str
+    planner_version: str
+    planner_strategy: str
+    steps_fingerprint: str
+    step_count: int
+    planner_invoked: bool = True
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 1:
+            raise ValueError("unsupported deterministic plan provenance schema_version")
+        for name in (
+            "goal_fingerprint",
+            "state_fingerprint",
+            "selected_rules_fingerprint",
+            "steps_fingerprint",
+        ):
+            value = getattr(self, name)
+            if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+                raise ValueError(f"{name} must be a lowercase SHA-256 fingerprint")
+        for name in ("state_version", "planner_id", "planner_version", "planner_strategy"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must not be empty")
+            if len(value) > 256 or any(ord(char) < 32 for char in value):
+                raise ValueError(f"{name} is invalid")
+        if self.selected_rule_count < 0 or self.step_count < 0:
+            raise ValueError("deterministic plan provenance counts must be non-negative")
+        if type(self.planner_invoked) is not bool:
+            raise TypeError("planner_invoked must be a boolean")
+
+    def to_dict(self) -> dict[str, object]:
+        """Return only JSON-safe evidence suitable for the existing audit/checkpoint stores."""
+
+        return {
+            "schema_version": self.schema_version,
+            "goal_fingerprint": self.goal_fingerprint,
+            "state_fingerprint": self.state_fingerprint,
+            "state_version": self.state_version,
+            "selected_rules_fingerprint": self.selected_rules_fingerprint,
+            "selected_rule_count": self.selected_rule_count,
+            "planner_id": self.planner_id,
+            "planner_version": self.planner_version,
+            "planner_strategy": self.planner_strategy,
+            "steps_fingerprint": self.steps_fingerprint,
+            "step_count": self.step_count,
+            "planner_invoked": self.planner_invoked,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> DeterministicPlanProvenance:
+        """Restore provenance from durable JSON without accepting partial/stale-shaped data."""
+
+        expected = {
+            "schema_version",
+            "goal_fingerprint",
+            "state_fingerprint",
+            "state_version",
+            "selected_rules_fingerprint",
+            "selected_rule_count",
+            "planner_id",
+            "planner_version",
+            "planner_strategy",
+            "steps_fingerprint",
+            "step_count",
+            "planner_invoked",
+        }
+        if set(payload) != expected:
+            raise ValueError("deterministic plan provenance fields do not match schema v1")
+
+        schema_version = payload["schema_version"]
+        selected_rule_count = payload["selected_rule_count"]
+        step_count = payload["step_count"]
+        planner_invoked = payload["planner_invoked"]
+        if type(schema_version) is not int:
+            raise TypeError("schema_version must be an integer")
+        if type(selected_rule_count) is not int or type(step_count) is not int:
+            raise TypeError("deterministic plan provenance counts must be integers")
+        if type(planner_invoked) is not bool:
+            raise TypeError("planner_invoked must be a boolean")
+
+        text_fields = {
+            name: payload[name]
+            for name in (
+                "goal_fingerprint",
+                "state_fingerprint",
+                "state_version",
+                "selected_rules_fingerprint",
+                "planner_id",
+                "planner_version",
+                "planner_strategy",
+                "steps_fingerprint",
+            )
+        }
+        if any(not isinstance(value, str) for value in text_fields.values()):
+            raise TypeError("deterministic plan provenance text fields must be strings")
+
+        return cls(
+            schema_version=schema_version,
+            goal_fingerprint=str(text_fields["goal_fingerprint"]),
+            state_fingerprint=str(text_fields["state_fingerprint"]),
+            state_version=str(text_fields["state_version"]),
+            selected_rules_fingerprint=str(text_fields["selected_rules_fingerprint"]),
+            selected_rule_count=selected_rule_count,
+            planner_id=str(text_fields["planner_id"]),
+            planner_version=str(text_fields["planner_version"]),
+            planner_strategy=str(text_fields["planner_strategy"]),
+            steps_fingerprint=str(text_fields["steps_fingerprint"]),
+            step_count=step_count,
+            planner_invoked=planner_invoked,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class DeterministicPlan:
     steps: tuple[PlanStep, ...]
+    provenance: DeterministicPlanProvenance | None = None
 
 
 class DeterministicEffectStatus(StrEnum):
