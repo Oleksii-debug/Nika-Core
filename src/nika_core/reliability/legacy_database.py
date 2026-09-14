@@ -24,12 +24,14 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
 from nika_core.product_project_schema import PRODUCT_PROJECT_SCHEMA_VERSION
 from nika_core.reliability.backup import BackupRecoveryError, SQLiteRecoveryManager
+from nika_core.research.knowledge_schema import KNOWLEDGE_SCHEMA_VERSION
 
 _RECEIPT_TABLE = "legacy_database_adoption_v1"
 _EMPTY_TABLES = {
     "schema_migrations",
     "multi_agent_state_schema_migrations",
     "product_project_schema_migrations",
+    "knowledge_schema_migrations",
     "sqlite_sequence",
     "audit_events",
     # FTS5 bookkeeping exists even with zero indexed documents. The actual
@@ -38,6 +40,10 @@ _EMPTY_TABLES = {
     "corpus_fts_idx",
     "corpus_fts_docsize",
     "corpus_fts_config",
+    "knowledge_fts_data",
+    "knowledge_fts_idx",
+    "knowledge_fts_docsize",
+    "knowledge_fts_config",
 }
 _MESSAGE = (
     "Потрібне відновлення даних Nika. Знайдено несумісні або різні бази даних. "
@@ -110,6 +116,7 @@ def _inspect(path: Path, *, canonical: bool = False) -> _State | None:
         for name, supported in (
             ("multi_agent_state_schema_migrations", MULTI_AGENT_STATE_SCHEMA_VERSION),
             ("product_project_schema_migrations", PRODUCT_PROJECT_SCHEMA_VERSION),
+            ("knowledge_schema_migrations", KNOWLEDGE_SCHEMA_VERSION),
         ):
             if name in tables:
                 history = [
