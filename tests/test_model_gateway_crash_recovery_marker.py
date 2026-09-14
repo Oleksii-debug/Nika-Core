@@ -31,9 +31,16 @@ from nika_core.runtime.session_store import RuntimeSessionStore
 
 
 class _BarrierLocalProvider:
-    def __init__(self, entered: asyncio.Event, release: asyncio.Event) -> None:
+    def __init__(
+        self,
+        entered: asyncio.Event,
+        release: asyncio.Event,
+        *,
+        supports_hard_cancellation: bool = False,
+    ) -> None:
         self._entered = entered
         self._release = release
+        self._supports_hard_cancellation = supports_hard_cancellation
 
     @property
     def capabilities(self) -> ProviderCapabilities:
@@ -41,6 +48,7 @@ class _BarrierLocalProvider:
             provider_id="foundry-local",
             kind=ProviderKind.LOCAL,
             supports_private_data=True,
+            supports_hard_cancellation=self._supports_hard_cancellation,
         )
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
@@ -125,6 +133,7 @@ def test_inflight_model_request_is_durable_but_never_claims_resumable_checkpoint
             assert persisted.thread_id == "thread-foundry-crash"
             assert persisted.resume_token.startswith("model-gateway-inflight-v1:")
             assert RuntimeCapability.DURABLE_RESUME not in runtime.capabilities
+            assert RuntimeCapability.CANCELLATION not in runtime.capabilities
 
             restarted_runtime = _runtime(gateway=ModelGateway(), definitions=definitions)
             registry = RuntimeRegistry()
@@ -166,5 +175,95 @@ def test_inflight_model_request_is_durable_but_never_claims_resumable_checkpoint
                 "SELECT state FROM tasks WHERE task_id = ?", (task.task_id,)
             ).fetchone()["state"]
         assert state == TaskState.COMPLETED.value
+
+    asyncio.run(scenario())
+
+
+def test_non_hard_cancellable_provider_does_not_commit_false_cancelled_state(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        store = SQLiteStore(tmp_path / "nika.db")
+        store.initialize()
+        queue = TaskQueue(store)
+        audit = AuditLog(store)
+        sessions = RuntimeSessionStore(store)
+        definitions = _definitions(store)
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        gateway = ModelGateway()
+        gateway.register(_BarrierLocalProvider(entered, release), default=True)
+        runtime = _runtime(gateway=gateway, definitions=definitions)
+        coordinator = TaskRuntimeCoordinator(queue, audit, session_store=sessions)
+
+        task = queue.create(workspace_id="cancel-proof", agent_id="worker")
+        queue.transition(task.task_id, TaskState.READY)
+        execution = asyncio.create_task(coordinator.start(runtime, _request(task.task_id)))
+
+        try:
+            await entered.wait()
+            assert RuntimeCapability.CANCELLATION not in runtime.capabilities
+            assert await coordinator.cancel(
+                runtime,
+                task_id=task.task_id,
+                thread_id="thread-foundry-crash",
+            ) is False
+            assert not execution.done()
+            persisted = sessions.get(task.task_id)
+            assert persisted is not None
+            assert persisted.is_active
+            with store.connection() as conn:
+                state = conn.execute(
+                    "SELECT state FROM tasks WHERE task_id = ?", (task.task_id,)
+                ).fetchone()["state"]
+            assert state == TaskState.RUNNING.value
+        finally:
+            release.set()
+            result = await execution
+
+        assert result.outcome is RuntimeOutcome.COMPLETED
+        assert sessions.get(task.task_id) is None
+        with store.connection() as conn:
+            state = conn.execute(
+                "SELECT state FROM tasks WHERE task_id = ?", (task.task_id,)
+            ).fetchone()["state"]
+        assert state == TaskState.COMPLETED.value
+
+    asyncio.run(scenario())
+
+
+def test_hard_cancellable_provider_is_advertised_and_can_cancel(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        store = SQLiteStore(tmp_path / "nika.db")
+        store.initialize()
+        definitions = _definitions(store)
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        gateway = ModelGateway()
+        gateway.register(
+            _BarrierLocalProvider(
+                entered,
+                release,
+                supports_hard_cancellation=True,
+            ),
+            default=True,
+        )
+        runtime = _runtime(gateway=gateway, definitions=definitions)
+        request = _request("hard-cancel-task")
+
+        assert RuntimeCapability.CANCELLATION in runtime.capabilities
+        execution = asyncio.create_task(runtime.run(request))
+        await entered.wait()
+        accepted = await runtime.cancel(
+            task_id=request.task_id,
+            thread_id=request.thread_id,
+        )
+        release.set()
+        result = await execution
+
+        assert accepted is True
+        assert result.outcome is RuntimeOutcome.CANCELLED
 
     asyncio.run(scenario())
