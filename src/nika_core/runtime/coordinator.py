@@ -238,46 +238,16 @@ class TaskRuntimeCoordinator:
                 actual_wait = max(delay, loop.time() - sleep_started)
                 remaining_timeout = _consume_timeout_budget(remaining_timeout, actual_wait)
 
-            if self._task_state(request.task_id) == TaskState.CANCELLED:
-                self._audit.append(
-                    event_type="runtime.retry_blocked_cancelled",
-                    entity_type="task",
-                    entity_id=request.task_id,
-                    payload={
-                        "runtime_id": runtime.runtime_id,
-                        "thread_id": request.thread_id,
-                        "retry_number": retries_used,
-                    },
-                )
+            if not self._begin_retry_attempt(
+                task_id=request.task_id,
+                runtime_id=runtime.runtime_id,
+                thread_id=request.thread_id,
+                retry_number=retries_used,
+                resume=resume_token is not None,
+                delay_seconds=delay,
+                remaining_timeout_seconds=remaining_timeout,
+            ):
                 break
-            if remaining_timeout is not None and remaining_timeout <= 0.0:
-                self._audit.append(
-                    event_type="runtime.retry_blocked_timeout_budget",
-                    entity_type="task",
-                    entity_id=request.task_id,
-                    payload={
-                        "runtime_id": runtime.runtime_id,
-                        "thread_id": request.thread_id,
-                        "retry_number": retries_used,
-                        "delay_seconds": delay,
-                        "remaining_timeout_seconds": remaining_timeout,
-                    },
-                )
-                break
-
-            self._queue.transition(request.task_id, TaskState.RUNNING)
-            self._audit.append(
-                event_type="runtime.retry_started",
-                entity_type="task",
-                entity_id=request.task_id,
-                payload={
-                    "runtime_id": runtime.runtime_id,
-                    "thread_id": request.thread_id,
-                    "retry_number": retries_used,
-                    "resume": resume_token is not None,
-                    "remaining_timeout_seconds": remaining_timeout,
-                },
-            )
             attempt_started = loop.time()
             if resume_token is not None:
                 resume_request = RuntimeResumeRequest(
@@ -338,6 +308,70 @@ class TaskRuntimeCoordinator:
             result,
             resume_claim=resume_claim,
         )
+
+    def _begin_retry_attempt(
+        self,
+        *,
+        task_id: str,
+        runtime_id: str,
+        thread_id: str,
+        retry_number: int,
+        resume: bool,
+        delay_seconds: float,
+        remaining_timeout_seconds: float | None,
+    ) -> bool:
+        """Atomically decide whether RETRYING work may re-enter RUNNING."""
+        with self._queue.store.connection() as conn:
+            # Retry and public cancel must serialize on one SQLite writer boundary.
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._task_state_with_connection(conn, task_id)
+            if current == TaskState.CANCELLED:
+                self._audit.append_with_connection(
+                    conn,
+                    event_type="runtime.retry_blocked_cancelled",
+                    entity_type="task",
+                    entity_id=task_id,
+                    payload={
+                        "runtime_id": runtime_id,
+                        "thread_id": thread_id,
+                        "retry_number": retry_number,
+                    },
+                )
+                return False
+            if (
+                remaining_timeout_seconds is not None
+                and remaining_timeout_seconds <= 0.0
+            ):
+                self._audit.append_with_connection(
+                    conn,
+                    event_type="runtime.retry_blocked_timeout_budget",
+                    entity_type="task",
+                    entity_id=task_id,
+                    payload={
+                        "runtime_id": runtime_id,
+                        "thread_id": thread_id,
+                        "retry_number": retry_number,
+                        "delay_seconds": delay_seconds,
+                        "remaining_timeout_seconds": remaining_timeout_seconds,
+                    },
+                )
+                return False
+
+            self._queue.transition_with_connection(conn, task_id, TaskState.RUNNING)
+            self._audit.append_with_connection(
+                conn,
+                event_type="runtime.retry_started",
+                entity_type="task",
+                entity_id=task_id,
+                payload={
+                    "runtime_id": runtime_id,
+                    "thread_id": thread_id,
+                    "retry_number": retry_number,
+                    "resume": resume,
+                    "remaining_timeout_seconds": remaining_timeout_seconds,
+                },
+            )
+        return True
 
     async def resume_approval(
         self,
