@@ -209,4 +209,85 @@ def test_canonical_release_sha_and_intent_bind_project_integration_to_current_ca
     assert "release:intent-current=candidate" in projection.integration
     assert "deployment:intent-current=pending" in projection.integration
     assert "intent-old" not in projection.integration
+    assert projection.next == "integration:deployment:intent-current=pending"
+
+
+def test_canonical_release_metadata_does_not_stall_healthy_deployment() -> None:
+    current_sha = "c" * 40
+    detail = _detail(
+        ProductStatusEntry(
+            kind=ProductStatusKind.COMPONENT,
+            item_id="work-current",
+            label="Current work",
+            state="completed",
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.BUILD,
+            item_id="work-current:test",
+            label="Current tests",
+            state="passed",
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.QA,
+            item_id="work-current:qa",
+            label="Current QA",
+            state="passed",
+            evidence=_candidate(current_sha),
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.RELEASE,
+            item_id="release:intent-current",
+            label="Current release",
+            state="candidate",
+            evidence=_candidate(current_sha),
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.DEPLOYMENT,
+            item_id="deployment:intent-current",
+            label="Current deployment",
+            state="healthy",
+        ),
+    )
+
+    projection = project_operator_status(detail)
+
+    assert "release:intent-current=candidate" in projection.integration
+    assert "deployment:intent-current=healthy" in projection.integration
+    assert projection.next == "next_work"
+
+
+def test_canonical_release_without_matching_deployment_remains_fail_closed() -> None:
+    current_sha = "d" * 40
+    detail = _detail(
+        ProductStatusEntry(
+            kind=ProductStatusKind.COMPONENT,
+            item_id="work-current",
+            label="Current work",
+            state="completed",
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.BUILD,
+            item_id="work-current:test",
+            label="Current tests",
+            state="passed",
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.QA,
+            item_id="work-current:qa",
+            label="Current QA",
+            state="passed",
+            evidence=_candidate(current_sha),
+        ),
+        ProductStatusEntry(
+            kind=ProductStatusKind.RELEASE,
+            item_id="release:intent-current",
+            label="Current release",
+            state="candidate",
+            evidence=_candidate(current_sha),
+        ),
+    )
+
+    projection = project_operator_status(detail)
+
+    assert projection.integration == "release:intent-current=candidate"
     assert projection.next == "integration:release:intent-current=candidate"
