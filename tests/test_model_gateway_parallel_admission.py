@@ -5,6 +5,9 @@ import asyncio
 import pytest
 
 from nika_core.model_gateway.contracts import (
+    ModelErrorCode,
+    ModelFailureEffect,
+    ModelGatewayError,
     ModelMessage,
     ModelRequest,
     ModelResponse,
@@ -36,6 +39,18 @@ class _CountingProvider:
             provider_id=self.capabilities.provider_id,
             provider_kind=self.capabilities.kind,
             model=request.model or "default",
+        )
+
+
+class _UnavailableProvider(_CountingProvider):
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        self.calls += 1
+        raise ModelGatewayError(
+            ModelErrorCode.UNAVAILABLE,
+            "untrusted provider detail",
+            provider_id=self.capabilities.provider_id,
+            retryable=True,
+            failure_effect=ModelFailureEffect.NO_EFFECT,
         )
 
 
@@ -92,23 +107,6 @@ def test_provider_limited_batch_requires_explicit_provider_before_any_effect() -
 
 
 def test_unlimited_parallel_batch_preserves_canonical_gateway_fallback_contract() -> None:
-    class _UnavailableProvider(_CountingProvider):
-        async def complete(self, request: ModelRequest) -> ModelResponse:
-            from nika_core.model_gateway.contracts import (
-                ModelErrorCode,
-                ModelFailureEffect,
-                ModelGatewayError,
-            )
-
-            self.calls += 1
-            raise ModelGatewayError(
-                ModelErrorCode.UNAVAILABLE,
-                "untrusted provider detail",
-                provider_id=self.capabilities.provider_id,
-                retryable=True,
-                failure_effect=ModelFailureEffect.NO_EFFECT,
-            )
-
     primary = _UnavailableProvider("primary")
     fallback = _CountingProvider("fallback")
     gateway = ModelGateway()
