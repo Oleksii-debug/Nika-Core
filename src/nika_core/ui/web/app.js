@@ -802,6 +802,9 @@
       }
     }
 
+    const enabledModelInputsBeforeDispatch = new Set(
+      Object.values(modelInputs).filter((input) => input && !input.disabled),
+    );
     modelPending = true;
     modelGeneration += 1;
     setModelControlsDisabled(true);
@@ -820,6 +823,7 @@
       announce(result.message, failed);
       appendLog(result.message);
     } catch {
+      result = null;
       announce("Немає підтвердження зміни моделі. Перечитайте збережені налаштування перед повтором.", true);
       appendLog("Немає підтвердження зміни моделі; автоматичний повтор не виконується.");
     } finally {
@@ -829,6 +833,14 @@
         || (result?.status === "failed" || result?.status === "rejected"
           ? trigger?.dataset?.errorFocusTarget
           : null);
+      const focusTarget = focusId ? document.getElementById(focusId) : null;
+      if (
+        focusTarget instanceof HTMLElement
+        && focusTarget.disabled
+        && enabledModelInputsBeforeDispatch.has(focusTarget)
+      ) {
+        focusTarget.disabled = false;
+      }
       const focusApplied = focusId ? focusElementById(focusId) : false;
       if (!await refreshState({ announceTeamTransitions: false })) renderModelSettings(null);
       if (!focusApplied) {

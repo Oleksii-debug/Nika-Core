@@ -101,6 +101,7 @@ let currentRecovery = {
 };
 let dispatchMode = "success";
 let failRead = false;
+let deferredStateRead = null;
 const calls = [];
 
 function safeModelSnapshot(payload) {
@@ -135,10 +136,23 @@ function snapshot() {
   };
 }
 
+function holdNextStateRead() {
+  let release;
+  deferredStateRead = new Promise((resolve) => {
+    release = () => {
+      const response = snapshot();
+      deferredStateRead = null;
+      resolve(response);
+    };
+  });
+  return release;
+}
+
 global.pywebview = { api: {
   list_actions: async () => [],
   get_state: async () => {
     if (failRead) throw new Error("PRIVATE_MODEL_CANARY");
+    if (deferredStateRead) return deferredStateRead;
     return snapshot();
   },
   dispatch: async (command) => {
@@ -146,6 +160,9 @@ global.pywebview = { api: {
     if (dispatchMode === "disconnect") throw new Error("PRIVATE_MODEL_CANARY");
     if (command.action_id === "settings.model.refresh") {
       return { status: "completed", message: "Збережені налаштування моделі перечитано.", focus_id: "model-route-kind" };
+    }
+    if (command.action_id === "settings.model.configure" && dispatchMode === "reject-provider") {
+      return { status: "rejected", message: "Перевірте постачальника моделі.", focus_id: "model-provider" };
     }
     if (command.action_id === "settings.model.configure") {
       currentModel = safeModelSnapshot(command.payload);
@@ -258,6 +275,24 @@ const status = element("model-settings-status");
   assert.equal(document.activeElement, element("command-input"));
   assert.match(status.textContent, /ollama, qwen3:8b/);
 
+  let releaseStateRead = holdNextStateRead();
+  click(reload);
+  await tick();
+  assert.equal(
+    document.activeElement,
+    route,
+    "Refresh acknowledgement focus must land before the state refresh resolves",
+  );
+  assert.equal(route.disabled, false, "Only the acknowledged refresh target should be restored early");
+  assert.equal(model.disabled, true, "Unrelated model controls must remain pending-disabled");
+  assert.equal(baseUrl.disabled, true, "Unrelated model controls must remain pending-disabled");
+  assert.equal(provider.disabled, true, "Route-disabled provider must not be reopened by refresh focus");
+  assert.equal(save.disabled, true, "Mutation control must remain disabled until state refresh completes");
+  releaseStateRead();
+  await tick(); await tick();
+  assert.equal(model.disabled, false);
+  assert.equal(provider.disabled, true);
+
   route.value = "openai_compatible";
   fire(route, "change");
   assert.equal(provider.disabled, false);
@@ -294,6 +329,27 @@ const status = element("model-settings-status");
   assert.equal(credential.value, "", "Credential reference must not be reflected from persisted snapshot");
   assert.match(status.textContent, /навмисно не показується/);
   assert.equal(JSON.stringify(currentModel).includes("NIKA_TEST_API_KEY"), false);
+
+  credential.value = "env:NIKA_TEST_API_KEY";
+  fire(credential, "input");
+  dispatchMode = "reject-provider";
+  releaseStateRead = holdNextStateRead();
+  click(save);
+  await tick();
+  assert.equal(
+    document.activeElement,
+    provider,
+    "Rejected Configure focus must land before the state refresh resolves",
+  );
+  assert.equal(provider.disabled, false, "The acknowledged correction target must be focusable");
+  assert.equal(route.disabled, true, "Unrelated model controls must remain pending-disabled");
+  assert.equal(model.disabled, true, "Unrelated model controls must remain pending-disabled");
+  assert.equal(save.disabled, true, "Rejected write must not reopen Save before state refresh");
+  releaseStateRead();
+  await tick(); await tick();
+  dispatchMode = "success";
+  assert.equal(provider.disabled, false);
+  assert.equal(credential.value, "env:NIKA_TEST_API_KEY", "Rejected draft must survive state refresh");
 
   model.focus();
   model.value = "unsaved-model";
