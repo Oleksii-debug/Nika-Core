@@ -140,12 +140,13 @@ def _prepare_rollback_pair(tmp_path: Path, shell: str) -> tuple[Path, Path, Path
 
 def test_update_replacement_order_preserves_prior_rollback_until_activation() -> None:
     payload = SCRIPT.read_text(encoding="utf-8")
-    update = payload[payload.index("$hadPriorRollback ="):]
+    update_start = payload.index("$failedActivationPath = Join-Path $parent")
+    update = payload[update_start : payload.index("\nfinally {", update_start)]
 
     retire_prior = "[System.IO.Directory]::Move($rollbackPath, $retiredRollbackPath)"
     establish_replacement = "[System.IO.Directory]::Move($destinationPath, $rollbackPath)"
     activate_candidate = "[System.IO.Directory]::Move($stagePath, $destinationPath)"
-    retire_after_success = "Remove-Item -LiteralPath $retiredRollbackPath -Recurse -Force"
+    retire_after_success = "Remove-NikaTreeNoFollow -Path $retiredRollbackPath"
 
     assert "$retiredRollbackPath = Join-Path $parent (\".$leaf.rollback-retired\")" in payload
     assert "function Resolve-NikaInterruptedUpdate" in payload
@@ -160,6 +161,7 @@ def test_update_replacement_order_preserves_prior_rollback_until_activation() ->
     assert update.index(establish_replacement) < update.index(activate_candidate)
     assert update.index(activate_candidate) < update.index(retire_after_success)
     assert "Remove-Item -LiteralPath $rollbackPath -Recurse -Force" not in update
+    assert "Remove-Item -LiteralPath $retiredRollbackPath -Recurse -Force" not in update
 
 
 def test_missing_destination_recovery_revalidates_all_authority_before_first_move() -> None:
