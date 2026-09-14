@@ -264,7 +264,7 @@ class OllamaModelHealthProbe:
         models = self._models(response)
         if models is None:
             return ModelHealthFact.UNKNOWN
-        return ModelHealthFact.YES if self._model_id in models else ModelHealthFact.NO
+        return ModelHealthFact.YES if self._selected_model_in(models) else ModelHealthFact.NO
 
     def _readiness_from_response(self, response: httpx.Response) -> ModelHealthFact:
         if not 200 <= response.status_code < 300:
@@ -272,10 +272,18 @@ class OllamaModelHealthProbe:
         models = self._models(response)
         if models is None:
             return ModelHealthFact.UNKNOWN
-        if self._model_id in models:
+        if self._selected_model_in(models):
             return ModelHealthFact.YES
         # Not currently running is not proof that an installed model cannot be made ready.
         return ModelHealthFact.UNKNOWN
+
+    def _selected_model_in(self, models: set[str]) -> bool:
+        if self._model_id in models:
+            return True
+        leaf = self._model_id.rsplit("/", 1)[-1]
+        if ":" in leaf or "@" in leaf:
+            return False
+        return f"{self._model_id}:latest" in models
 
     @staticmethod
     def _models(response: httpx.Response) -> set[str] | None:
