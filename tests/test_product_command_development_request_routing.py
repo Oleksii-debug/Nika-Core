@@ -15,6 +15,8 @@ from nika_core.product_command.routing import route_command
         "Please fix issue #654 in repository Oleksii-debug/Nika-Core",
         "Could you develop issue #654 in repository Oleksii-debug/Nika-Core?",
         "розроби issue #654 у repository Oleksii-debug/Nika-Core",
+        "репозиторій Oleksii-debug/Nika-Core issue #654: виправ",
+        "repo Oleksii-debug/Nika-Core PR 711 — реалізуй",
     ),
 )
 def test_repository_development_intent_routes_to_product_factory(command: str) -> None:
@@ -39,6 +41,7 @@ def test_repository_development_intent_routes_to_product_factory(command: str) -
         "Explain how to implement PR 711 in repo Oleksii-debug/Nika-Core",
         'What does "develop issue #654 in repository Oleksii-debug/Nika-Core" mean?',
         "Please develop an explanation of why issue #654 in repository Oleksii-debug/Nika-Core should not be implemented.",
+        "репозиторій Oleksii-debug/Nika-Core issue #654: поясни",
     ),
 )
 def test_incomplete_or_read_only_repository_intent_stays_agent_task(command: str) -> None:
@@ -56,6 +59,7 @@ def test_incomplete_or_read_only_repository_intent_stays_agent_task(command: str
         "I don't want you to develop issue #654 in repository Oleksii-debug/Nika-Core; just explain it",
         "Please do not automatically develop issue #654 in repository Oleksii-debug/Nika-Core",
         "не розроби issue #654 у repository Oleksii-debug/Nika-Core",
+        "репозиторій Oleksii-debug/Nika-Core issue #654: не виправ",
     ),
 )
 def test_negated_repository_development_intent_stays_agent_task(command: str) -> None:
@@ -66,10 +70,15 @@ def test_negated_repository_development_intent_stays_agent_task(command: str) ->
     assert decision.requires_user_decision is False
 
 
-def test_development_intent_with_toolsmith_request_fails_closed_as_ambiguous() -> None:
-    decision = route_command(
-        "develop issue #654 in repository Oleksii-debug/Nika-Core and add plugin tool"
-    )
+@pytest.mark.parametrize(
+    "command",
+    (
+        "develop issue #654 in repository Oleksii-debug/Nika-Core and add plugin tool",
+        "репозиторій Oleksii-debug/Nika-Core issue #654: виправ і додай плагін",
+    ),
+)
+def test_development_intent_with_toolsmith_request_fails_closed_as_ambiguous(command: str) -> None:
+    decision = route_command(command)
 
     assert decision.route is CommandRouteKind.AMBIGUOUS
     assert decision.requires_user_decision is True
