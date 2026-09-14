@@ -90,6 +90,8 @@ def test_installer_manifest_ingress_declares_strict_object_authority() -> None:
     assert "Release manifest contains a duplicate JSON member" in payload
     assert "Release manifest object shape is invalid" in payload
     assert "[System.StringComparer]::Ordinal.Equals" in payload
+    assert "'CONIN$'" in payload
+    assert "'CONOUT$'" in payload
 
 
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell manifest proof is Windows-only")
@@ -173,6 +175,10 @@ def test_noncanonical_manifest_shape_fails_before_install_mutation(
 @pytest.mark.parametrize(
     "reserved_path",
     [
+        "CONIN$",
+        "conout$",
+        "ConIn$.txt",
+        "_internal/ConOut$.dat",
         "_internal/COM¹",
         "_internal/COM².txt",
         "_internal/COM³.dat",
@@ -181,7 +187,7 @@ def test_noncanonical_manifest_shape_fails_before_install_mutation(
         "_internal/LPT³.dat",
     ],
 )
-def test_superscript_reserved_device_aliases_fail_before_install_mutation(
+def test_reserved_device_aliases_fail_before_install_mutation(
     tmp_path: Path,
     reserved_path: str,
 ) -> None:

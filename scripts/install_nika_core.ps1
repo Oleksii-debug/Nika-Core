@@ -192,7 +192,7 @@ function Test-NikaSafeRelativePath {
         }
         $stem = $part.Split(".")[0].TrimEnd(" ", ".").ToUpperInvariant()
         if (
-            $stem -in @("CON", "PRN", "AUX", "NUL") -or
+            $stem -in @("CON", "PRN", "AUX", "NUL", 'CONIN$', 'CONOUT$') -or
             $stem -match '^COM[1-9¹²³]$' -or
             $stem -match '^LPT[1-9¹²³]$'
         ) {
@@ -572,6 +572,81 @@ function Resolve-NikaInterruptedUpdate {
     }
 }
 
+function Resolve-NikaInterruptedRollback {
+    param(
+        [Parameter(Mandatory=$true)][string]$DestinationPath,
+        [Parameter(Mandatory=$true)][string]$RollbackPath,
+        [Parameter(Mandatory=$true)][string]$SwapPath,
+        [Parameter(Mandatory=$true)][string]$DataRoot
+    )
+
+    if (-not (Test-Path -LiteralPath $SwapPath)) {
+        return "none"
+    }
+
+    Assert-NikaNoReparsePathChain -Path $SwapPath
+    Assert-NikaReleaseBundle -BundleRoot $SwapPath
+    Assert-NikaDataMutationSeparation -DataRoot $DataRoot -MutationPaths @(
+        $DestinationPath,
+        $RollbackPath,
+        $SwapPath
+    )
+
+    $hasDestination = Test-Path -LiteralPath $DestinationPath -PathType Container
+    $hasRollback = Test-Path -LiteralPath $RollbackPath -PathType Container
+    if ((Test-Path -LiteralPath $DestinationPath) -and -not $hasDestination) {
+        throw "Interrupted rollback destination authority is not a directory."
+    }
+    if ((Test-Path -LiteralPath $RollbackPath) -and -not $hasRollback) {
+        throw "Interrupted rollback image authority is not a directory."
+    }
+
+    if (-not $hasDestination -and $hasRollback) {
+        # Crash window 1: active was staged but rollback was not activated.
+        # Restore the exact pre-command pair; the requested mode may then run normally.
+        Assert-NikaNoReparsePathChain -Path $SwapPath
+        Assert-NikaReleaseBundle -BundleRoot $SwapPath
+        Assert-NikaNoReparsePathChain -Path $RollbackPath
+        Assert-NikaReleaseBundle -BundleRoot $RollbackPath
+        Assert-NikaNoReparsePathChain -Path $DestinationPath
+        Assert-NikaDataMutationSeparation -DataRoot $DataRoot -MutationPaths @(
+            $DestinationPath,
+            $RollbackPath,
+            $SwapPath
+        )
+        [System.IO.Directory]::Move($SwapPath, $DestinationPath)
+        $recoveryState = "restored-precommand"
+    }
+    elseif ($hasDestination -and -not $hasRollback) {
+        # Crash window 2: rollback image is already active. Finish the original
+        # rollback transaction; a repeated Rollback invocation must not swap again.
+        Assert-NikaNoReparsePathChain -Path $DestinationPath
+        Assert-NikaReleaseBundle -BundleRoot $DestinationPath
+        Assert-NikaNoReparsePathChain -Path $SwapPath
+        Assert-NikaReleaseBundle -BundleRoot $SwapPath
+        Assert-NikaNoReparsePathChain -Path $RollbackPath
+        Assert-NikaDataMutationSeparation -DataRoot $DataRoot -MutationPaths @(
+            $DestinationPath,
+            $RollbackPath,
+            $SwapPath
+        )
+        [System.IO.Directory]::Move($SwapPath, $RollbackPath)
+        $recoveryState = "completed-rollback"
+    }
+    else {
+        throw "Interrupted rollback state is ambiguous; refusing to mutate installer images."
+    }
+
+    Assert-NikaNoReparsePathChain -Path $DestinationPath
+    Assert-NikaNoReparsePathChain -Path $RollbackPath
+    Assert-NikaReleaseBundle -BundleRoot $DestinationPath
+    Assert-NikaReleaseBundle -BundleRoot $RollbackPath
+    if (Test-Path -LiteralPath $SwapPath) {
+        throw "Interrupted rollback recovery left an unresolved swap image."
+    }
+    return $recoveryState
+}
+
 if ([string]::IsNullOrWhiteSpace($Destination)) {
     if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
         throw "LOCALAPPDATA is required when Destination is omitted."
@@ -593,17 +668,35 @@ Assert-NikaSafeDestination -DestinationPath $destinationPath
 
 $rollbackPath = Join-Path $parent (".$leaf.rollback")
 $retiredRollbackPath = Join-Path $parent (".$leaf.rollback-retired")
+$rollbackSwapPath = Join-Path $parent (".$leaf.rollback-swap")
 $dataRoot = Get-NikaCanonicalDataRoot
 Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @(
     $destinationPath,
     $rollbackPath,
-    $retiredRollbackPath
+    $retiredRollbackPath,
+    $rollbackSwapPath
 )
+if (
+    (Test-Path -LiteralPath $retiredRollbackPath) -and
+    (Test-Path -LiteralPath $rollbackSwapPath)
+) {
+    throw "Multiple interrupted installer transactions are present; refusing recovery."
+}
 Resolve-NikaInterruptedUpdate `
     -DestinationPath $destinationPath `
     -RollbackPath $rollbackPath `
     -RetiredRollbackPath $retiredRollbackPath `
     -DataRoot $dataRoot
+$rollbackRecoveryState = Resolve-NikaInterruptedRollback `
+    -DestinationPath $destinationPath `
+    -RollbackPath $rollbackPath `
+    -SwapPath $rollbackSwapPath `
+    -DataRoot $dataRoot
+
+if ($Mode -eq "Rollback" -and $rollbackRecoveryState -eq "completed-rollback") {
+    Write-Output $destinationPath
+    exit 0
+}
 
 if ($Mode -eq "Rollback") {
     if (-not (Test-Path -LiteralPath $rollbackPath -PathType Container)) {
@@ -615,28 +708,53 @@ if ($Mode -eq "Rollback") {
     New-Item -ItemType Directory -Path $parent -Force | Out-Null
     Assert-NikaNoReparsePathChain -Path $destinationPath
     Assert-NikaNoReparsePathChain -Path $rollbackPath
-    Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath)
+    Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $rollbackSwapPath)
     if (-not (Test-Path -LiteralPath $destinationPath -PathType Container)) {
-        Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath)
+        Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $rollbackSwapPath)
         [System.IO.Directory]::Move($rollbackPath, $destinationPath)
         Write-Output $destinationPath
         exit 0
     }
 
     Assert-NikaReleaseBundle -BundleRoot $destinationPath
-    $swapPath = Join-Path $parent (".$leaf.swap-$([Guid]::NewGuid().ToString('N'))")
+    $swapPath = $rollbackSwapPath
+    if (Test-Path -LiteralPath $swapPath) {
+        throw "Rollback cannot begin with an unresolved swap image."
+    }
     Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $swapPath)
     $rollbackPhase = "start"
     try {
+        Assert-NikaNoReparsePathChain -Path $destinationPath
+        Assert-NikaReleaseBundle -BundleRoot $destinationPath
         Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $swapPath)
         [System.IO.Directory]::Move($destinationPath, $swapPath)
         $rollbackPhase = "active-staged"
+
+        Assert-NikaNoReparsePathChain -Path $swapPath
+        Assert-NikaReleaseBundle -BundleRoot $swapPath
+        Assert-NikaNoReparsePathChain -Path $rollbackPath
+        Assert-NikaReleaseBundle -BundleRoot $rollbackPath
+        Assert-NikaNoReparsePathChain -Path $destinationPath
         Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $swapPath)
         [System.IO.Directory]::Move($rollbackPath, $destinationPath)
         $rollbackPhase = "rollback-activated"
+
+        Assert-NikaNoReparsePathChain -Path $destinationPath
+        Assert-NikaReleaseBundle -BundleRoot $destinationPath
+        Assert-NikaNoReparsePathChain -Path $swapPath
+        Assert-NikaReleaseBundle -BundleRoot $swapPath
+        Assert-NikaNoReparsePathChain -Path $rollbackPath
         Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $swapPath)
         [System.IO.Directory]::Move($swapPath, $rollbackPath)
         $rollbackPhase = "complete"
+
+        Assert-NikaNoReparsePathChain -Path $destinationPath
+        Assert-NikaNoReparsePathChain -Path $rollbackPath
+        Assert-NikaReleaseBundle -BundleRoot $destinationPath
+        Assert-NikaReleaseBundle -BundleRoot $rollbackPath
+        if (Test-Path -LiteralPath $swapPath) {
+            throw "Rollback completed with an unresolved swap image."
+        }
     }
     catch {
         $rollbackError = $_
@@ -647,6 +765,9 @@ if ($Mode -eq "Rollback") {
                     -not (Test-Path -LiteralPath $destinationPath) -and
                     (Test-Path -LiteralPath $swapPath -PathType Container)
                 ) {
+                    Assert-NikaNoReparsePathChain -Path $swapPath
+                    Assert-NikaReleaseBundle -BundleRoot $swapPath
+                    Assert-NikaNoReparsePathChain -Path $destinationPath
                     Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $swapPath)
                     [System.IO.Directory]::Move($swapPath, $destinationPath)
                 }
@@ -656,6 +777,9 @@ if ($Mode -eq "Rollback") {
                     (Test-Path -LiteralPath $destinationPath -PathType Container) -and
                     -not (Test-Path -LiteralPath $rollbackPath)
                 ) {
+                    Assert-NikaNoReparsePathChain -Path $destinationPath
+                    Assert-NikaReleaseBundle -BundleRoot $destinationPath
+                    Assert-NikaNoReparsePathChain -Path $rollbackPath
                     Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $swapPath)
                     [System.IO.Directory]::Move($destinationPath, $rollbackPath)
                 }
@@ -663,6 +787,9 @@ if ($Mode -eq "Rollback") {
                     -not (Test-Path -LiteralPath $destinationPath) -and
                     (Test-Path -LiteralPath $swapPath -PathType Container)
                 ) {
+                    Assert-NikaNoReparsePathChain -Path $swapPath
+                    Assert-NikaReleaseBundle -BundleRoot $swapPath
+                    Assert-NikaNoReparsePathChain -Path $destinationPath
                     Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $swapPath)
                     [System.IO.Directory]::Move($swapPath, $destinationPath)
                 }
