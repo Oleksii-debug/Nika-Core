@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping, Sequence
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, ExitStack
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from itertools import islice
@@ -23,6 +23,10 @@ MAX_PARALLEL_MODEL_BATCH_REQUESTS = 256
 MAX_PARALLEL_MODEL_PROVIDER_LIMITS = 256
 
 
+class ParallelModelExecutionScopeDenied(RuntimeError):
+    """Trusted request-specific execution scope could not be bound pre-effect."""
+
+
 class ParallelModelExecutionScopePort(Protocol):
     """Trusted per-request execution context entered inside each child task.
 
@@ -30,6 +34,12 @@ class ParallelModelExecutionScopePort(Protocol):
     payload authority. A security/runtime adapter may use this seam to bind
     already-authorized host context to the exact asyncio child task immediately
     before ``ModelGateway.complete``. The gateway remains the effect authority.
+
+    A request-specific, known pre-effect denial may raise
+    ``ParallelModelExecutionScopeDenied`` from ``scope_for`` or context entry so
+    only that child is projected as INVALID_REQUEST/NO_EFFECT. Structural adapter
+    errors and context-exit failures are not normalized because an exit failure
+    may occur after provider effect and therefore cannot truthfully claim NO_EFFECT.
     """
 
     def scope_for(self, *, request_id: str) -> AbstractContextManager[None]: ...
@@ -257,7 +267,15 @@ async def complete_parallel(
             admitted_request = replace(request, timeout_seconds=remaining)
             if execution_scopes is None:
                 return await execute(admitted_request)
-            with execution_scopes.scope_for(request_id=request.request_id):
+
+            scope_stack = ExitStack()
+            try:
+                scope = execution_scopes.scope_for(request_id=request.request_id)
+                scope_stack.enter_context(scope)
+            except ParallelModelExecutionScopeDenied:
+                scope_stack.close()
+                return _execution_scope_denied_outcome(request)
+            with scope_stack:
                 return await execute(admitted_request)
         finally:
             if global_acquired:
@@ -301,6 +319,19 @@ def _admission_timeout_outcome(request: ModelRequest) -> ParallelModelOutcome:
         status=ParallelModelStatus.FAILED,
         failure=ParallelModelFailure(
             code=ModelErrorCode.TIMEOUT,
+            provider_id=request.provider_id,
+            retryable=False,
+            failure_effect=ModelFailureEffect.NO_EFFECT,
+        ),
+    )
+
+
+def _execution_scope_denied_outcome(request: ModelRequest) -> ParallelModelOutcome:
+    return ParallelModelOutcome(
+        request_id=request.request_id,
+        status=ParallelModelStatus.FAILED,
+        failure=ParallelModelFailure(
+            code=ModelErrorCode.INVALID_REQUEST,
             provider_id=request.provider_id,
             retryable=False,
             failure_effect=ModelFailureEffect.NO_EFFECT,
