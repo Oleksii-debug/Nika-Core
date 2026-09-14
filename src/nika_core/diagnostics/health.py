@@ -15,6 +15,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from nika_core.config import AppConfig
+from nika_core.data.multi_agent_state_schema import MULTI_AGENT_STATE_SCHEMA_VERSION
 from nika_core.data.schema import SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_project_schema import PRODUCT_PROJECT_SCHEMA_VERSION
@@ -188,6 +189,18 @@ class HealthService:
                         ),
                         supported_version=SCHEMA_VERSION,
                         check_id="database.schema.core",
+                    )
+                )
+                checks.append(
+                    self._check_migration_history(
+                        conn,
+                        query=(
+                            "SELECT version, typeof(version) "
+                            "FROM multi_agent_state_schema_migrations "
+                            "ORDER BY version LIMIT ?"
+                        ),
+                        supported_version=MULTI_AGENT_STATE_SCHEMA_VERSION,
+                        check_id="database.schema.multi-agent-state",
                     )
                 )
                 checks.append(
