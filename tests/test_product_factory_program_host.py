@@ -457,28 +457,31 @@ def test_durable_result_with_pending_ledger_reconciles_after_restart_without_wor
     tmp_path,
 ) -> None:
     store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
-    worker = FakeProgramWorker()
-
-    class FailingCompleteLedger(IdempotencyLedger):
-        def complete(self, operation_key, result=None):
-            raise OSError("simulated ledger write outage")
-
-    host = ProductFactoryProgramHost(
-        store,
-        worker,
-        idempotency=FailingCompleteLedger(store),
-    )
-    outcomes = _run(
-        host.dispatch_ready(
+    seed_host = ProductFactoryProgramHost(store, FakeProgramWorker())
+    request = coordinator.start("component-0")
+    lease = seed_host._acquire(request)
+    try:
+        seed_host._checkpoint_running(
             host_task_id=task_id,
             binding=binding,
             coordinator=coordinator,
-            max_count=1,
+            requests=(request,),
+            leases=(lease,),
         )
-    )
+        operation, created = seed_host._reserve_effect(
+            host_task_id=task_id,
+            request=request,
+            lease=lease,
+        )
+        assert created is True
+        assert operation.status is IdempotencyStatus.PENDING
 
-    assert outcomes[0].disposition is ProgramWorkDisposition.NEEDS_RECONCILIATION
-    request = _record(coordinator, "component-0").request
+        updated = coordinator.record_result(_envelope(request))
+        assert updated.state is WorkState.REVIEW_REQUIRED
+        seed_host._save_fenced(task_id, binding, coordinator, lease)
+    finally:
+        seed_host._release_best_effort(lease)
+
     assert IdempotencyLedger(store).require(
         f"pf-worker:{request.work_id}"
     ).status is IdempotencyStatus.PENDING

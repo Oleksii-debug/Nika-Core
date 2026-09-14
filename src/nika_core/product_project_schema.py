@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-PRODUCT_PROJECT_SCHEMA_VERSION = 2
+PRODUCT_PROJECT_SCHEMA_VERSION = 3
 
 PRODUCT_PROJECT_MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -77,5 +77,16 @@ PRODUCT_PROJECT_MIGRATIONS: dict[int, tuple[str, ...]] = {
             "CREATE INDEX IF NOT EXISTS idx_product_decisions_option "
             "ON product_decisions(project_id, option_id, decision_version DESC)"
         ),
+    ),
+    3: (
+        """CREATE TABLE IF NOT EXISTS product_factory_work_ownership (
+            project_id TEXT NOT NULL,
+            work_id TEXT NOT NULL,
+            owner_id TEXT,
+            fence INTEGER NOT NULL CHECK(fence > 0),
+            issued_at TEXT,
+            expires_at TEXT,
+            PRIMARY KEY (project_id, work_id)
+        )""",
     ),
 }

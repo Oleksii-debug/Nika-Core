@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
@@ -21,6 +24,11 @@ from nika_core.product_factory_coordinator import (
     WorkState,
 )
 from nika_core.product_factory_project_binding import ProductProjectCoordinatorBinding
+from nika_core.product_factory_work_ownership import (
+    ProductFactoryWorkOwnership,
+    WorkOwnershipError,
+    WorkOwnershipLease,
+)
 from nika_core.runtime.idempotency import (
     IdempotencyLedger,
     IdempotencyRecord,
@@ -68,29 +76,53 @@ class ProductFactoryProgramWorkerPort(Protocol):
 
 @dataclass(slots=True)
 class ProductFactoryProgramHost:
-    """Crash-consistent PF2 host above bounded worker dispatch, not a second runtime.
+    """Crash-consistent Product Factory host above bounded CodingWorker dispatch.
 
-    The ordering is deliberate:
+    Work ownership is a durable fence, not advisory metadata. The canonical ordering is:
 
-    1. coordinator state is persisted as RUNNING;
-    2. the external worker operation is durably reserved;
-    3. only then may the worker be called;
-    4. returned evidence is reconciled and checkpointed;
-    5. only after the result checkpoint is durable is the operation marked complete.
+    1. acquire exact `(project_id, work_id, owner_id, fence)` authority;
+    2. under that fence, persist the READY -> RUNNING transition without yet claiming
+       that an external worker effect has been admitted;
+    3. after the bounded concurrency wait, revalidate the exact fence and reserve the
+       idempotent operation immediately before the external dispatch/recovery effect;
+       lost authority fails closed and canonical recovery owns the durable work;
+    4. reconcile returned evidence under the same fence and atomically persist the
+       result checkpoint plus ledger completion;
+    5. release the lease only after a terminal durable transition, or after durable
+       UNCERTAIN has made duplicate dispatch impossible.
 
-    A process loss therefore leaves enough durable state to decide whether a worker may be
-    started, must be inspected/recovered, or has already produced a durable result.
+    SQLite transactions never span an external worker await.
     """
 
     store: SQLiteStore
     worker: ProductFactoryProgramWorkerPort
     idempotency: IdempotencyLedger | None = field(default=None, repr=False)
+    ownership: ProductFactoryWorkOwnership | None = field(default=None, repr=False)
+    owner_id: str = field(
+        default_factory=lambda: f"program-host:{uuid.uuid4().hex}",
+        repr=False,
+    )
+    lease_seconds: int = 300
     _checkpoints: ProductFactoryCheckpointHost = field(init=False, repr=False)
     _ledger: IdempotencyLedger = field(init=False, repr=False)
+    _ownership: ProductFactoryWorkOwnership = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        if (
+            not isinstance(self.owner_id, str)
+            or not self.owner_id.strip()
+            or self.owner_id != self.owner_id.strip()
+        ):
+            raise ValueError("owner_id must be canonical non-empty text")
+        if (
+            isinstance(self.lease_seconds, bool)
+            or not isinstance(self.lease_seconds, int)
+            or self.lease_seconds <= 0
+        ):
+            raise ValueError("lease_seconds must be a positive integer")
         self._checkpoints = ProductFactoryCheckpointHost(self.store)
         self._ledger = self.idempotency or IdempotencyLedger(self.store)
+        self._ownership = self.ownership or ProductFactoryWorkOwnership(self.store)
 
     def restore_latest(
         self,
@@ -132,14 +164,26 @@ class ProductFactoryProgramHost:
         if not ready:
             return ()
 
+        leases: list[WorkOwnershipLease] = []
         before_start = coordinator.snapshot()
-        started = tuple(coordinator.start(request.component_id) for request in ready)
         try:
-            self._save(host_task_id, binding, coordinator)
+            for request in ready:
+                leases.append(self._acquire(request))
+            started = tuple(coordinator.start(request.component_id) for request in ready)
+            self._checkpoint_running(
+                host_task_id=host_task_id,
+                binding=binding,
+                coordinator=coordinator,
+                requests=started,
+                leases=tuple(leases),
+            )
         except Exception:
             coordinator.restore(before_start)
+            for lease in leases:
+                self._release_best_effort(lease)
             raise
 
+        lease_by_work = {lease.work_id: lease for lease in leases}
         semaphore = asyncio.Semaphore(max_parallel)
         outcomes = await asyncio.gather(
             *(
@@ -149,6 +193,7 @@ class ProductFactoryProgramHost:
                     binding=binding,
                     coordinator=coordinator,
                     request=request,
+                    lease=lease_by_work[request.work_id],
                 )
                 for request in started
             )
@@ -212,13 +257,34 @@ class ProductFactoryProgramHost:
                 raise ProductFactoryProgramError(
                     "durable result operation identity requires explicit reconciliation"
                 )
-            result = _result_summary(record)
-            if operation.status is IdempotencyStatus.PENDING:
-                self._ledger.complete(operation_key, result)
+            if operation.status not in {
+                IdempotencyStatus.PENDING,
+                IdempotencyStatus.UNCERTAIN,
+            }:
+                continue
+            lease = self._acquire(record.request)
+            try:
+                result = _result_summary(record)
+                with self.store.connection() as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    self._assert_lease(connection, lease)
+                    if operation.status is IdempotencyStatus.PENDING:
+                        self._ledger.complete_with_connection(
+                            connection,
+                            operation_key,
+                            result,
+                        )
+                    else:
+                        self._ledger._set_status_with_connection(
+                            connection,
+                            operation_key,
+                            IdempotencyStatus.COMPLETED,
+                            result,
+                            allow_uncertain_completion=True,
+                        )
                 reconciled.append(operation_key)
-            elif operation.status is IdempotencyStatus.UNCERTAIN:
-                self._ledger.reconcile_completed(operation_key, result)
-                reconciled.append(operation_key)
+            finally:
+                self._release_best_effort(lease)
         return tuple(reconciled)
 
     def review_and_checkpoint(
@@ -230,13 +296,17 @@ class ProductFactoryProgramHost:
         component_id: str,
         decision: ReviewDecision,
     ) -> WorkRecord:
+        request = _request_for_component(coordinator, component_id)
+        lease = self._acquire(request)
         before = coordinator.snapshot()
-        updated = coordinator.review(component_id, decision)
         try:
-            self._save(host_task_id, binding, coordinator)
+            updated = coordinator.review(component_id, decision)
+            self._save_fenced(host_task_id, binding, coordinator, lease)
         except Exception:
             coordinator.restore(before)
             raise
+        finally:
+            self._release_best_effort(lease)
         return updated
 
     def prepare_repair_and_checkpoint(
@@ -249,13 +319,17 @@ class ProductFactoryProgramHost:
         base_sha: str,
         reason: str,
     ) -> ComponentWorkRequest:
+        prior_request = _request_for_component(coordinator, component_id)
+        lease = self._acquire(prior_request)
         before = coordinator.snapshot()
-        request = coordinator.prepare_repair(component_id, base_sha=base_sha, reason=reason)
         try:
-            self._save(host_task_id, binding, coordinator)
+            request = coordinator.prepare_repair(component_id, base_sha=base_sha, reason=reason)
+            self._save_fenced(host_task_id, binding, coordinator, lease)
         except Exception:
             coordinator.restore(before)
             raise
+        finally:
+            self._release_best_effort(lease)
         return request
 
     def block_and_checkpoint(
@@ -267,13 +341,17 @@ class ProductFactoryProgramHost:
         component_id: str,
         reason: str,
     ) -> WorkRecord:
+        request = _request_for_component(coordinator, component_id)
+        lease = self._acquire(request)
         before = coordinator.snapshot()
-        updated = coordinator.block(component_id, reason)
         try:
-            self._save(host_task_id, binding, coordinator)
+            updated = coordinator.block(component_id, reason)
+            self._save_fenced(host_task_id, binding, coordinator, lease)
         except Exception:
             coordinator.restore(before)
             raise
+        finally:
+            self._release_best_effort(lease)
         return updated
 
     async def _dispatch_one(
@@ -284,24 +362,40 @@ class ProductFactoryProgramHost:
         binding: ProductProjectCoordinatorBinding,
         coordinator: ProductFactoryCoordinator,
         request: ComponentWorkRequest,
+        lease: WorkOwnershipLease,
     ) -> ProgramWorkOutcome:
-        async with semaphore:
-            operation_key = _operation_key(request)
-            operation, created = self._ledger.reserve_once(
-                operation_key=operation_key,
-                task_id=host_task_id,
-                operation_type=_OPERATION_TYPE,
-                input_fingerprint=_request_fingerprint(request),
-            )
+        operation_key = _operation_key(request)
+        try:
+            await semaphore.acquire()
+        except asyncio.CancelledError:
+            self._release_best_effort(lease)
+            raise
+
+        try:
+            try:
+                lease = self._reestablish_effect_authority(request, lease)
+                operation, created = self._reserve_effect(
+                    host_task_id=host_task_id,
+                    request=request,
+                    lease=lease,
+                )
+            except Exception:
+                self._release_best_effort(lease)
+                raise
+
             if not created:
+                self._release_best_effort(lease)
                 return _existing_operation_outcome(request, operation)
+
             try:
                 envelope = await self.worker.dispatch(request)
             except asyncio.CancelledError:
-                self._mark_uncertain(operation_key)
+                self._mark_uncertain_fenced(operation_key, lease)
+                self._release_best_effort(lease)
                 raise
             except Exception as exc:  # noqa: BLE001 - isolate one external worker failure
-                self._mark_uncertain(operation_key)
+                self._mark_uncertain_fenced(operation_key, lease)
+                self._release_best_effort(lease)
                 return _outcome(
                     request,
                     coordinator,
@@ -309,6 +403,8 @@ class ProductFactoryProgramHost:
                     IdempotencyStatus.UNCERTAIN,
                     f"worker dispatch did not return trusted evidence: {type(exc).__name__}",
                 )
+        finally:
+            semaphore.release()
 
         return self._record_worker_result(
             host_task_id=host_task_id,
@@ -318,6 +414,7 @@ class ProductFactoryProgramHost:
             operation_key=operation_key,
             envelope=envelope,
             was_uncertain=False,
+            lease=lease,
         )
 
     async def _recover_one(
@@ -331,18 +428,60 @@ class ProductFactoryProgramHost:
     ) -> ProgramWorkOutcome:
         request = record.request
         operation_key = _operation_key(request)
+        lease = self._acquire(request)
         operation = self._ledger.get(operation_key)
 
         if operation is None:
-            return await self._dispatch_one(
-                semaphore=semaphore,
+            try:
+                await semaphore.acquire()
+            except asyncio.CancelledError:
+                self._release_best_effort(lease)
+                raise
+            try:
+                try:
+                    lease = self._reestablish_effect_authority(request, lease)
+                    operation, created = self._reserve_effect(
+                        host_task_id=host_task_id,
+                        request=request,
+                        lease=lease,
+                    )
+                except Exception:
+                    self._release_best_effort(lease)
+                    raise
+                if not created:
+                    self._release_best_effort(lease)
+                    return _existing_operation_outcome(request, operation)
+                try:
+                    envelope = await self.worker.dispatch(request)
+                except asyncio.CancelledError:
+                    self._mark_uncertain_fenced(operation_key, lease)
+                    self._release_best_effort(lease)
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    self._mark_uncertain_fenced(operation_key, lease)
+                    self._release_best_effort(lease)
+                    return _outcome(
+                        request,
+                        coordinator,
+                        ProgramWorkDisposition.UNCERTAIN,
+                        IdempotencyStatus.UNCERTAIN,
+                        f"worker dispatch did not return trusted evidence: {type(exc).__name__}",
+                    )
+            finally:
+                semaphore.release()
+            return self._record_worker_result(
                 host_task_id=host_task_id,
                 binding=binding,
                 coordinator=coordinator,
                 request=request,
+                operation_key=operation_key,
+                envelope=envelope,
+                was_uncertain=False,
+                lease=lease,
             )
 
         if operation.task_id != host_task_id or operation.operation_type != _OPERATION_TYPE:
+            self._release_best_effort(lease)
             return _outcome(
                 request,
                 coordinator,
@@ -351,6 +490,7 @@ class ProductFactoryProgramHost:
                 "worker operation belongs to a different Product Factory host task",
             )
         if operation.input_fingerprint != _request_fingerprint(request):
+            self._release_best_effort(lease)
             return _outcome(
                 request,
                 coordinator,
@@ -359,6 +499,7 @@ class ProductFactoryProgramHost:
                 "worker operation fingerprint does not match durable request",
             )
         if operation.status is IdempotencyStatus.COMPLETED:
+            self._release_best_effort(lease)
             return _outcome(
                 request,
                 coordinator,
@@ -368,13 +509,16 @@ class ProductFactoryProgramHost:
             )
 
         async with semaphore:
+            lease = self._reestablish_effect_authority(request, lease)
             try:
                 state = await self.worker.inspect(request.work_id)
             except asyncio.CancelledError:
-                self._mark_uncertain(operation_key)
+                self._mark_uncertain_fenced(operation_key, lease)
+                self._release_best_effort(lease)
                 raise
             except Exception as exc:  # noqa: BLE001 - isolate one external inspect failure
-                self._mark_uncertain(operation_key)
+                self._mark_uncertain_fenced(operation_key, lease)
+                self._release_best_effort(lease)
                 return _outcome(
                     request,
                     coordinator,
@@ -383,17 +527,24 @@ class ProductFactoryProgramHost:
                     f"worker inspection did not return trusted state: {type(exc).__name__}",
                 )
             if state is None:
-                self._mark_uncertain(operation_key)
                 before = coordinator.snapshot()
                 blocked = coordinator.block(
                     request.component_id,
                     "worker recovery state is unavailable; explicit reconciliation required",
                 )
                 try:
-                    self._save(host_task_id, binding, coordinator)
+                    self._save_and_mark_uncertain(
+                        host_task_id=host_task_id,
+                        binding=binding,
+                        coordinator=coordinator,
+                        operation_key=operation_key,
+                        lease=lease,
+                    )
                 except Exception:
                     coordinator.restore(before)
+                    self._release_best_effort(lease)
                     raise
+                self._release_best_effort(lease)
                 return ProgramWorkOutcome(
                     component_id=request.component_id,
                     work_id=request.work_id,
@@ -402,13 +553,16 @@ class ProductFactoryProgramHost:
                     operation_status=IdempotencyStatus.UNCERTAIN,
                     detail="worker state is missing; duplicate execution is forbidden",
                 )
+            lease = self._reestablish_effect_authority(request, lease)
             try:
                 envelope = await self.worker.recover(request, state)
             except asyncio.CancelledError:
-                self._mark_uncertain(operation_key)
+                self._mark_uncertain_fenced(operation_key, lease)
+                self._release_best_effort(lease)
                 raise
             except Exception as exc:  # noqa: BLE001 - isolate one external recovery failure
-                self._mark_uncertain(operation_key)
+                self._mark_uncertain_fenced(operation_key, lease)
+                self._release_best_effort(lease)
                 return _outcome(
                     request,
                     coordinator,
@@ -425,6 +579,7 @@ class ProductFactoryProgramHost:
             operation_key=operation_key,
             envelope=envelope,
             was_uncertain=operation.status is IdempotencyStatus.UNCERTAIN,
+            lease=lease,
         )
 
     def _record_worker_result(
@@ -437,41 +592,55 @@ class ProductFactoryProgramHost:
         operation_key: str,
         envelope: WorkerResultEnvelope,
         was_uncertain: bool,
+        lease: WorkOwnershipLease,
     ) -> ProgramWorkOutcome:
         before = coordinator.snapshot()
         try:
             updated = coordinator.record_result(envelope)
-            self._save(host_task_id, binding, coordinator)
-        except Exception as exc:  # noqa: BLE001 - preserve uncertain external-side-effect state
+            summary = _result_summary(updated)
+            with self.store.connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                self._assert_lease(connection, lease)
+                self._checkpoint_on_connection(
+                    connection,
+                    host_task_id=host_task_id,
+                    binding=binding,
+                    coordinator=coordinator,
+                )
+                if was_uncertain:
+                    self._ledger._set_status_with_connection(
+                        connection,
+                        operation_key,
+                        IdempotencyStatus.COMPLETED,
+                        summary,
+                        allow_uncertain_completion=True,
+                    )
+                else:
+                    self._ledger.complete_with_connection(
+                        connection,
+                        operation_key,
+                        summary,
+                    )
+        except Exception as exc:  # noqa: BLE001 - external effect must become uncertain
             coordinator.restore(before)
-            self._mark_uncertain(operation_key)
+            marker_detail = ""
+            try:
+                self._mark_uncertain_fenced(operation_key, lease)
+            except Exception as marker_exc:  # noqa: BLE001 - PENDING remains replay-blocking
+                marker_detail = f"; uncertainty marker failed: {type(marker_exc).__name__}"
+            self._release_best_effort(lease)
             return _outcome(
                 request,
                 coordinator,
                 ProgramWorkDisposition.UNCERTAIN,
                 IdempotencyStatus.UNCERTAIN,
-                f"worker evidence could not be durably reconciled: {type(exc).__name__}",
-            )
-
-        summary = _result_summary(updated)
-        try:
-            if was_uncertain:
-                self._ledger.reconcile_completed(operation_key, summary)
-            else:
-                self._ledger.complete(operation_key, summary)
-        except Exception as exc:  # noqa: BLE001 - durable result forbids worker replay
-            return ProgramWorkOutcome(
-                component_id=request.component_id,
-                work_id=request.work_id,
-                disposition=ProgramWorkDisposition.NEEDS_RECONCILIATION,
-                state=updated.state,
-                operation_status=self._ledger.require(operation_key).status,
-                detail=(
-                    "result is durable but operation ledger needs reconciliation: "
-                    f"{type(exc).__name__}"
+                (
+                    "worker evidence could not be durably reconciled: "
+                    f"{type(exc).__name__}{marker_detail}"
                 ),
             )
 
+        self._release_best_effort(lease)
         disposition = (
             ProgramWorkDisposition.REVIEW_REQUIRED
             if updated.state is WorkState.REVIEW_REQUIRED
@@ -483,24 +652,192 @@ class ProductFactoryProgramHost:
             disposition=disposition,
             state=updated.state,
             operation_status=IdempotencyStatus.COMPLETED,
-            detail="worker evidence is durable and awaits the next Product Factory decision",
+            detail="worker evidence and operation completion are atomically durable",
         )
 
-    def _save(
+    def _checkpoint_running(
+        self,
+        *,
+        host_task_id: str,
+        binding: ProductProjectCoordinatorBinding,
+        coordinator: ProductFactoryCoordinator,
+        requests: tuple[ComponentWorkRequest, ...],
+        leases: tuple[WorkOwnershipLease, ...],
+    ) -> None:
+        lease_by_work = {lease.work_id: lease for lease in leases}
+        if set(lease_by_work) != {request.work_id for request in requests}:
+            raise ProductFactoryProgramError("RUNNING transition requires exact lease per work item")
+        with self.store.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for request in requests:
+                self._assert_lease(connection, lease_by_work[request.work_id])
+            self._checkpoint_on_connection(
+                connection,
+                host_task_id=host_task_id,
+                binding=binding,
+                coordinator=coordinator,
+            )
+
+    def _reserve_effect(
+        self,
+        *,
+        host_task_id: str,
+        request: ComponentWorkRequest,
+        lease: WorkOwnershipLease,
+    ) -> tuple[IdempotencyRecord, bool]:
+        with self.store.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._assert_lease(connection, lease)
+            return self._ledger.reserve_with_connection(
+                connection,
+                operation_key=_operation_key(request),
+                task_id=host_task_id,
+                operation_type=_OPERATION_TYPE,
+                input_fingerprint=_request_fingerprint(request),
+            )
+
+    def _save_fenced(
         self,
         host_task_id: str,
         binding: ProductProjectCoordinatorBinding,
         coordinator: ProductFactoryCoordinator,
+        lease: WorkOwnershipLease,
     ) -> None:
-        self._checkpoints.save(
+        with self.store.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._assert_lease(connection, lease)
+            self._checkpoint_on_connection(
+                connection,
+                host_task_id=host_task_id,
+                binding=binding,
+                coordinator=coordinator,
+            )
+
+    def _save_and_mark_uncertain(
+        self,
+        *,
+        host_task_id: str,
+        binding: ProductProjectCoordinatorBinding,
+        coordinator: ProductFactoryCoordinator,
+        operation_key: str,
+        lease: WorkOwnershipLease,
+    ) -> None:
+        with self.store.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._assert_lease(connection, lease)
+            self._checkpoint_on_connection(
+                connection,
+                host_task_id=host_task_id,
+                binding=binding,
+                coordinator=coordinator,
+            )
+            current = self._ledger._require_with_connection(connection, operation_key)
+            if current.status is IdempotencyStatus.PENDING:
+                self._ledger.mark_uncertain_with_connection(connection, operation_key)
+
+    def _checkpoint_on_connection(
+        self,
+        connection,
+        *,
+        host_task_id: str,
+        binding: ProductProjectCoordinatorBinding,
+        coordinator: ProductFactoryCoordinator,
+    ) -> None:
+        borrowed = _BorrowedSQLiteStore(self.store, connection)
+        ProductFactoryCheckpointHost(borrowed).save(
             host_task_id=host_task_id,
             checkpoint=binding.checkpoint(coordinator),
         )
 
-    def _mark_uncertain(self, operation_key: str) -> None:
-        operation = self._ledger.require(operation_key)
-        if operation.status is IdempotencyStatus.PENDING:
-            self._ledger.mark_uncertain(operation_key)
+    def _mark_uncertain_fenced(
+        self,
+        operation_key: str,
+        lease: WorkOwnershipLease,
+    ) -> None:
+        with self.store.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._assert_lease(connection, lease)
+            current = self._ledger._require_with_connection(connection, operation_key)
+            if current.status is IdempotencyStatus.PENDING:
+                self._ledger.mark_uncertain_with_connection(connection, operation_key)
+
+    def _acquire(self, request: ComponentWorkRequest) -> WorkOwnershipLease:
+        try:
+            return self._ownership.acquire(
+                project_id=request.project_id,
+                work_id=request.work_id,
+                owner_id=self.owner_id,
+                lease_seconds=self.lease_seconds,
+            )
+        except WorkOwnershipError as exc:
+            raise ProductFactoryProgramError(
+                f"Product Factory work ownership is unavailable for {request.work_id}: {exc}"
+            ) from exc
+
+    def _reestablish_effect_authority(
+        self,
+        request: ComponentWorkRequest,
+        lease: WorkOwnershipLease,
+    ) -> WorkOwnershipLease:
+        """Require the exact reservation fence immediately before any external effect."""
+        try:
+            self._ownership.assert_owner(
+                project_id=lease.project_id,
+                work_id=lease.work_id,
+                owner_id=lease.owner_id,
+                fence=lease.fence,
+            )
+        except WorkOwnershipError as exc:
+            raise ProductFactoryProgramError(
+                f"stale Product Factory authority cannot start external effect for {request.work_id}: {exc}"
+            ) from exc
+        return lease
+
+    def _assert_lease(self, connection, lease: WorkOwnershipLease) -> None:
+        self._ownership.assert_owner_in_transaction(
+            connection,
+            project_id=lease.project_id,
+            work_id=lease.work_id,
+            owner_id=lease.owner_id,
+            fence=lease.fence,
+        )
+
+    def _release_best_effort(self, lease: WorkOwnershipLease) -> None:
+        try:
+            self._ownership.release(
+                project_id=lease.project_id,
+                work_id=lease.work_id,
+                owner_id=lease.owner_id,
+                fence=lease.fence,
+            )
+        except WorkOwnershipError:
+            return
+
+
+class _BorrowedSQLiteStore:
+    """Thin transaction adapter; canonical checkpoint code keeps owning checkpoint semantics."""
+
+    def __init__(self, source: SQLiteStore, connection) -> None:
+        self.path = source.path
+        self._connection = connection
+
+    @contextmanager
+    def connection(self) -> Iterator:
+        yield self._connection
+
+
+def _request_for_component(
+    coordinator: ProductFactoryCoordinator,
+    component_id: str,
+) -> ComponentWorkRequest:
+    try:
+        return next(
+            record.request
+            for record in coordinator.snapshot().records
+            if record.request.component_id == component_id
+        )
+    except StopIteration as exc:
+        raise ProductFactoryProgramError(f"unknown Product Factory component: {component_id}") from exc
 
 
 def _existing_operation_outcome(
