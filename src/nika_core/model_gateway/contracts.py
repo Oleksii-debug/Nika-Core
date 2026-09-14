@@ -98,11 +98,15 @@ class ModelRequest:
 
         if not isinstance(self.messages, (tuple, list)):
             raise TypeError("messages must be a list or tuple")
-        canonical_messages = tuple(self.messages)
-        if not canonical_messages:
+        input_messages = tuple(self.messages)
+        if not input_messages:
             raise ValueError("at least one message is required")
-        if any(type(message) is not ModelMessage for message in canonical_messages):
+        if any(type(message) is not ModelMessage for message in input_messages):
             raise TypeError("messages must contain only ModelMessage values")
+        canonical_messages = tuple(
+            ModelMessage(role=message.role, content=message.content)
+            for message in input_messages
+        )
         object.__setattr__(self, "messages", canonical_messages)
 
         _require_canonical_identifier("model", self.model, optional=True)
