@@ -82,7 +82,9 @@ class ModelGatewayAgentRuntime:
         self._timeout_seconds = timeout_seconds
         self._privacy = privacy
         self._temperature = temperature
-        self._active: dict[tuple[str, str], tuple[asyncio.Task[Any], bool]] = {}
+        self._active: dict[
+            tuple[str, str], tuple[asyncio.Task[Any], bool, bool]
+        ] = {}
         self._active_lock = asyncio.Lock()
 
     @property
@@ -194,11 +196,18 @@ class ModelGatewayAgentRuntime:
                 )
             hard_cancellable = self._route_supports_hard_cancellation()
             task = asyncio.create_task(self._gateway.complete(model_request))
-            self._active[key] = (task, hard_cancellable)
+            self._active[key] = (task, hard_cancellable, False)
 
         try:
             response = await task
         except asyncio.CancelledError:
+            async with self._active_lock:
+                active = self._active.get(key)
+                explicit_cancel_requested = (
+                    active is not None and active[0] is task and active[2]
+                )
+            if not explicit_cancel_requested:
+                raise
             return RuntimeResult(
                 outcome=RuntimeOutcome.CANCELLED,
                 output={
@@ -304,9 +313,10 @@ class ModelGatewayAgentRuntime:
             active = self._active.get(key)
             if active is None or active[0].done():
                 return False
-            task, hard_cancellable = active
+            task, hard_cancellable, _ = active
             if not hard_cancellable:
                 return False
+            self._active[key] = (task, hard_cancellable, True)
             task.cancel()
         try:
             await task

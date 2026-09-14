@@ -233,6 +233,52 @@ def test_non_hard_cancellable_provider_does_not_commit_false_cancelled_state(
     asyncio.run(scenario())
 
 
+def test_outer_caller_cancellation_preserves_running_recovery_marker(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        store = SQLiteStore(tmp_path / "nika.db")
+        store.initialize()
+        queue = TaskQueue(store)
+        audit = AuditLog(store)
+        sessions = RuntimeSessionStore(store)
+        definitions = _definitions(store)
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        gateway = ModelGateway()
+        gateway.register(_BarrierLocalProvider(entered, release), default=True)
+        runtime = _runtime(gateway=gateway, definitions=definitions)
+        coordinator = TaskRuntimeCoordinator(queue, audit, session_store=sessions)
+
+        task = queue.create(workspace_id="outer-cancel-proof", agent_id="worker")
+        queue.transition(task.task_id, TaskState.READY)
+        execution = asyncio.create_task(coordinator.start(runtime, _request(task.task_id)))
+
+        await entered.wait()
+        assert RuntimeCapability.CANCELLATION not in runtime.capabilities
+        persisted = sessions.get(task.task_id)
+        assert persisted is not None
+        assert persisted.is_active
+
+        execution.cancel()
+        try:
+            await execution
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("outer cancellation must propagate to the caller")
+
+        assert sessions.get(task.task_id) == persisted
+        with store.connection() as conn:
+            state = conn.execute(
+                "SELECT state FROM tasks WHERE task_id = ?", (task.task_id,)
+            ).fetchone()["state"]
+        assert state == TaskState.RUNNING.value
+
+    asyncio.run(scenario())
+
+
 def test_hard_cancellable_provider_is_advertised_and_can_cancel(tmp_path: Path) -> None:
     async def scenario() -> None:
         store = SQLiteStore(tmp_path / "nika.db")
