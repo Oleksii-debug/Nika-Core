@@ -8,6 +8,9 @@ from typing import Protocol
 from nika_core.product_factory_orchestration import TeamPlan
 
 _TEAM_PLAN_REF_PREFIX = "team-plan-sha256:"
+_REVIEWER_PRINCIPALS_REF_PREFIX = "team-reviewer-principals-sha256:"
+
+ReviewerPrincipalBindings = tuple[tuple[str, str], ...]
 
 
 class ProductFactoryReviewAuthorityError(ValueError):
@@ -18,9 +21,10 @@ class ProductFactoryReviewAuthorityError(ValueError):
 class ProductFactoryReviewSubject:
     """Immutable exact candidate/reviewer subject presented to trusted authority.
 
-    This object is evidence identity only. It never proves that ``reviewer_id`` is a
-    trusted actor by itself; a host-owned ``ProductFactoryReviewAuthorityPort`` must
-    authenticate/authorize the reviewer for this exact subject.
+    ``reviewer_id`` and ``producer_actor_id`` are actor principals in the same identity
+    domain. A TeamPlan role id is assignment metadata, not an actor principal. A host-owned
+    ``ProductFactoryReviewAuthorityPort`` must authenticate/authorize the reviewer for
+    this exact subject.
     """
 
     project_id: str
@@ -44,9 +48,9 @@ class ProductFactoryReviewSubject:
             self.producer_actor_id,
             self.reviewer_id,
         )
-        if not all(isinstance(value, str) and value.strip() for value in identities):
+        if not all(_is_exact_non_empty_text(value) for value in identities):
             raise ProductFactoryReviewAuthorityError(
-                "review subject identity must be non-empty text"
+                "review subject identity must be exact non-empty text"
             )
         _validate_sha(self.base_sha, "base_sha")
         _validate_sha(self.result_sha, "result_sha")
@@ -110,17 +114,23 @@ def team_plan_semantic_fingerprint(team_plan: TeamPlan) -> str:
 
     if not isinstance(team_plan, TeamPlan):
         raise ProductFactoryReviewAuthorityError("team plan must be a TeamPlan")
-    if not isinstance(team_plan.project_id, str) or not team_plan.project_id.strip():
-        raise ProductFactoryReviewAuthorityError("team plan project identity must not be empty")
-    if not isinstance(team_plan.plan_id, str) or not team_plan.plan_id.strip():
-        raise ProductFactoryReviewAuthorityError("team plan identity must not be empty")
-    if not isinstance(team_plan.roles, tuple) or not team_plan.roles:
-        raise ProductFactoryReviewAuthorityError("team plan requires roles")
+    if not _is_exact_non_empty_text(team_plan.project_id):
+        raise ProductFactoryReviewAuthorityError(
+            "team plan project identity must be exact non-empty text"
+        )
+    if not _is_exact_non_empty_text(team_plan.plan_id):
+        raise ProductFactoryReviewAuthorityError(
+            "team plan identity must be exact non-empty text"
+        )
+    if type(team_plan.roles) is not tuple or not team_plan.roles:
+        raise ProductFactoryReviewAuthorityError("team plan requires exact tuple roles")
 
     roles: list[dict[str, object]] = []
     for role in sorted(team_plan.roles, key=lambda item: item.role_id):
-        if not isinstance(role.role_id, str) or not role.role_id.strip():
-            raise ProductFactoryReviewAuthorityError("team plan roles require identities")
+        if not _is_exact_non_empty_text(role.role_id):
+            raise ProductFactoryReviewAuthorityError(
+                "team plan roles require exact non-empty identities"
+            )
         if type(role.independent_review) is not bool:
             raise ProductFactoryReviewAuthorityError(
                 "team plan independent_review must be an exact boolean"
@@ -131,17 +141,17 @@ def team_plan_semantic_fingerprint(team_plan: TeamPlan) -> str:
             ("reasons", role.reasons),
             ("evidence_refs", role.evidence_refs),
         ):
-            if not isinstance(values, tuple) or any(
-                not isinstance(value, str) or not value.strip() for value in values
+            if type(values) is not tuple or any(
+                not _is_exact_non_empty_text(value) for value in values
             ):
                 raise ProductFactoryReviewAuthorityError(
-                    f"team plan role {label} must contain non-empty text"
+                    f"team plan role {label} must contain exact non-empty text"
                 )
-        if not isinstance(role.permissions, frozenset) or any(
-            not isinstance(value, str) or not value.strip() for value in role.permissions
+        if type(role.permissions) is not frozenset or any(
+            not _is_exact_non_empty_text(value) for value in role.permissions
         ):
             raise ProductFactoryReviewAuthorityError(
-                "team plan role permissions must contain non-empty text"
+                "team plan role permissions must contain exact non-empty text"
             )
         roles.append(
             {
@@ -155,17 +165,17 @@ def team_plan_semantic_fingerprint(team_plan: TeamPlan) -> str:
             }
         )
 
-    if not isinstance(team_plan.permission_ceiling, frozenset) or any(
-        not isinstance(value, str) or not value.strip() for value in team_plan.permission_ceiling
+    if type(team_plan.permission_ceiling) is not frozenset or any(
+        not _is_exact_non_empty_text(value) for value in team_plan.permission_ceiling
     ):
         raise ProductFactoryReviewAuthorityError(
-            "team plan permission ceiling must contain non-empty text"
+            "team plan permission ceiling must contain exact non-empty text"
         )
-    if not isinstance(team_plan.reasons, tuple) or any(
-        not isinstance(value, str) or not value.strip() for value in team_plan.reasons
+    if type(team_plan.reasons) is not tuple or any(
+        not _is_exact_non_empty_text(value) for value in team_plan.reasons
     ):
         raise ProductFactoryReviewAuthorityError(
-            "team plan reasons must contain non-empty text"
+            "team plan reasons must contain exact non-empty text"
         )
 
     payload = {
@@ -186,58 +196,148 @@ def team_plan_fingerprint_ref(team_plan: TeamPlan) -> str:
     return f"{_TEAM_PLAN_REF_PREFIX}{team_plan_semantic_fingerprint(team_plan)}"
 
 
+def reviewer_principal_bindings_fingerprint(
+    team_plan: TeamPlan,
+    reviewer_principals: ReviewerPrincipalBindings,
+) -> str:
+    """Bind independent TeamPlan role identities to reviewer actor principals.
+
+    Product Factory worker evidence records ``OwnershipLease.worker_id`` as the producer
+    actor principal. TeamPlan ``role_id`` values are a different identity domain. This
+    binding supplies the missing durable role -> actor relation so self-review checks and
+    reviewer authorization compare actor principals with actor principals rather than
+    relying on accidental string inequality across domains.
+    """
+
+    plan_fingerprint = team_plan_semantic_fingerprint(team_plan)
+    bindings = _validated_reviewer_principals(team_plan, reviewer_principals)
+    payload = {
+        "schema": "product-factory-reviewer-principals-v1",
+        "team_plan_sha256": plan_fingerprint,
+        "bindings": sorted(bindings.items()),
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def reviewer_principal_bindings_ref(
+    team_plan: TeamPlan,
+    reviewer_principals: ReviewerPrincipalBindings,
+) -> str:
+    """Return the durable ProductProject ``team_refs`` role -> actor binding."""
+
+    return (
+        f"{_REVIEWER_PRINCIPALS_REF_PREFIX}"
+        f"{reviewer_principal_bindings_fingerprint(team_plan, reviewer_principals)}"
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class TeamPlanReviewAuthority:
     """Scope trusted exact-review evidence to the canonical PF team assignment.
 
-    ``TeamPlan`` is the assignment authority: only a role explicitly marked for
-    independent review and assigned to the exact component may review it. The delegated
+    ``TeamPlan`` owns review role/scope assignment. ``reviewer_principals`` is the exact,
+    durable role -> actor binding for every independent-review role. The delegated
     ``evidence_authority`` remains the host-owned authenticity boundary proving that the
-    exact review evidence was really issued; this adapter never treats caller text or a
-    role id alone as proof.
+    exact review evidence was really issued; caller text, a role id, or a role/actor pair
+    that is not durably bound never becomes authority by itself.
     """
 
     team_plan: TeamPlan
     evidence_authority: ProductFactoryReviewAuthorityPort
+    reviewer_principals: ReviewerPrincipalBindings
 
     def __post_init__(self) -> None:
-        # Reuse the exact-content validator used by the durable fingerprint boundary.
         team_plan_semantic_fingerprint(self.team_plan)
         role_ids = [role.role_id for role in self.team_plan.roles]
         if len(role_ids) != len(set(role_ids)):
             raise ProductFactoryReviewAuthorityError("team plan role identities must be unique")
+        _validated_reviewer_principals(self.team_plan, self.reviewer_principals)
 
     def verify(
         self,
         subject: ProductFactoryReviewSubject,
         evidence_refs: tuple[str, ...],
     ) -> bool:
-        if subject.project_id != self.team_plan.project_id or not evidence_refs:
+        if not isinstance(subject, ProductFactoryReviewSubject):
             return False
+        if type(evidence_refs) is not tuple or not evidence_refs or any(
+            not _is_exact_non_empty_text(value) for value in evidence_refs
+        ):
+            return False
+        if subject.project_id != self.team_plan.project_id:
+            return False
+
+        bindings = dict(self.reviewer_principals)
         reviewer = next(
-            (role for role in self.team_plan.roles if role.role_id == subject.reviewer_id),
+            (
+                role
+                for role in self.team_plan.roles
+                if role.independent_review
+                and bindings.get(role.role_id) == subject.reviewer_id
+            ),
             None,
         )
-        if reviewer is None or not reviewer.independent_review:
+        if reviewer is None:
             return False
         if subject.component_id not in reviewer.component_ids:
             return False
         return self.evidence_authority.verify(subject, evidence_refs) is True
 
 
+def _validated_reviewer_principals(
+    team_plan: TeamPlan,
+    reviewer_principals: ReviewerPrincipalBindings,
+) -> dict[str, str]:
+    if type(reviewer_principals) is not tuple or not reviewer_principals:
+        raise ProductFactoryReviewAuthorityError(
+            "reviewer principal bindings must be a non-empty exact tuple"
+        )
+
+    bindings: dict[str, str] = {}
+    for item in reviewer_principals:
+        if type(item) is not tuple or len(item) != 2:
+            raise ProductFactoryReviewAuthorityError(
+                "reviewer principal binding must be an exact (role_id, actor_id) tuple"
+            )
+        role_id, actor_id = item
+        if not _is_exact_non_empty_text(role_id) or not _is_exact_non_empty_text(actor_id):
+            raise ProductFactoryReviewAuthorityError(
+                "reviewer principal binding identities must be exact non-empty text"
+            )
+        if role_id in bindings:
+            raise ProductFactoryReviewAuthorityError(
+                "reviewer principal binding role identities must be unique"
+            )
+        bindings[role_id] = actor_id
+
+    independent_roles = {
+        role.role_id for role in team_plan.roles if role.independent_review
+    }
+    if set(bindings) != independent_roles:
+        raise ProductFactoryReviewAuthorityError(
+            "reviewer principal bindings must cover exactly the independent-review roles"
+        )
+    return bindings
+
+
+def _is_exact_non_empty_text(value: object) -> bool:
+    return type(value) is str and bool(value.strip())
+
+
 def _validate_sha(value: str, label: str) -> None:
-    if not isinstance(value, str) or len(value) != 40 or any(
+    if type(value) is not str or len(value) != 40 or any(
         char not in "0123456789abcdef" for char in value.casefold()
     ):
         raise ProductFactoryReviewAuthorityError(
-            f"{label} must be a 40-character hexadecimal SHA"
+            f"{label} must be an exact 40-character hexadecimal SHA"
         )
 
 
 def _validate_digest(value: str, label: str) -> None:
-    if not isinstance(value, str) or len(value) != 64 or any(
+    if type(value) is not str or len(value) != 64 or any(
         char not in "0123456789abcdef" for char in value.casefold()
     ):
         raise ProductFactoryReviewAuthorityError(
-            f"{label} must be a 64-character hexadecimal digest"
+            f"{label} must be an exact 64-character hexadecimal digest"
         )
