@@ -21,6 +21,7 @@ from nika_core.speech_to_text import (
 
 class _RecordingAdapter:
     provider_kind = ProviderKind.LOCAL
+    provider_id = "local-stt"
 
     def __init__(self, response: SpeechToTextAdapterResponse) -> None:
         self.response = response
@@ -47,6 +48,7 @@ class _UntypedRecordingAdapter:
 
 class _ExplodingAdapter:
     provider_kind = ProviderKind.LOCAL
+    provider_id = "local-stt"
 
     async def transcribe(self, request: SpeechToTextRequest) -> SpeechToTextAdapterResponse:
         del request
@@ -55,6 +57,7 @@ class _ExplodingAdapter:
 
 class _TypedFailureAdapter:
     provider_kind = ProviderKind.LOCAL
+    provider_id = "local-stt"
 
     def __init__(self, code: SpeechToTextFailureCode, *, retryable: bool) -> None:
         self.code = code
@@ -71,6 +74,7 @@ class _TypedFailureAdapter:
 
 class _BlockedAdapter:
     provider_kind = ProviderKind.LOCAL
+    provider_id = "local-stt"
 
     def __init__(self) -> None:
         self.entered = asyncio.Event()
@@ -100,10 +104,11 @@ def _request(
     *,
     audio: SpeechAudio | None = None,
     policy: SpeechToTextPolicy | None = None,
+    provider_id: str = "local-stt",
 ) -> SpeechToTextRequest:
     return SpeechToTextRequest(
         request_id="stt-1",
-        provider_id="local-stt",
+        provider_id=provider_id,
         model="uk-small-v1",
         audio=audio or _audio(),
         language="uk",
@@ -174,6 +179,25 @@ def test_untyped_adapter_is_rejected_before_audio_is_sent() -> None:
     )
 
     result = asyncio.run(SpeechToTextService(adapter).transcribe(request))  # type: ignore[arg-type]
+
+    assert result.text is None
+    assert result.evidence.status is SpeechToTextStatus.FAILED
+    assert result.evidence.error_code is SpeechToTextFailureCode.PROVIDER_ERROR
+    assert adapter.calls == []
+
+
+def test_wrong_provider_route_is_rejected_before_audio_is_sent() -> None:
+    request = _request(provider_id="other-local-stt")
+    adapter = _RecordingAdapter(
+        SpeechToTextAdapterResponse(
+            request_id=request.request_id,
+            provider_id=request.provider_id,
+            model=request.model,
+            text="must not run",
+        )
+    )
+
+    result = asyncio.run(SpeechToTextService(adapter).transcribe(request))
 
     assert result.text is None
     assert result.evidence.status is SpeechToTextStatus.FAILED

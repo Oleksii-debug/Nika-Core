@@ -174,6 +174,7 @@ class SpeechToTextResult:
 
 class SpeechToTextAdapter(Protocol):
     provider_kind: ProviderKind
+    provider_id: str
 
     async def transcribe(self, request: SpeechToTextRequest) -> SpeechToTextAdapterResponse: ...
 
@@ -182,6 +183,9 @@ class UnavailableSpeechToTextAdapter:
     """Explicit no-STT adapter used when no local speech engine is configured."""
 
     provider_kind = ProviderKind.LOCAL
+
+    def __init__(self, *, provider_id: str = "local-stt") -> None:
+        self.provider_id = _bounded_token(provider_id, "provider_id")
 
     async def transcribe(self, request: SpeechToTextRequest) -> SpeechToTextAdapterResponse:
         raise SpeechToTextAdapterError(
@@ -204,7 +208,8 @@ class SpeechToTextService:
         self._adapter = adapter
 
     async def transcribe(self, request: SpeechToTextRequest) -> SpeechToTextResult:
-        if getattr(self._adapter, "provider_kind", None) is not ProviderKind.LOCAL:
+        adapter_provider_id = self._trusted_local_provider_id()
+        if adapter_provider_id is None or request.provider_id != adapter_provider_id:
             return self._failure(
                 request,
                 code=SpeechToTextFailureCode.PROVIDER_ERROR,
@@ -250,16 +255,27 @@ class SpeechToTextService:
                 retryable=False,
             )
 
-        if not isinstance(response, SpeechToTextAdapterResponse):
+        if type(response) is not SpeechToTextAdapterResponse:
+            return self._failure(
+                request,
+                code=SpeechToTextFailureCode.PROVIDER_ERROR,
+                retryable=False,
+            )
+        try:
+            response_request_id = _bounded_token(response.request_id, "response.request_id")
+            response_provider_id = _bounded_token(response.provider_id, "response.provider_id")
+            response_model = _bounded_token(response.model, "response.model")
+        except ValueError:
             return self._failure(
                 request,
                 code=SpeechToTextFailureCode.PROVIDER_ERROR,
                 retryable=False,
             )
         if (
-            response.request_id != request.request_id
-            or response.provider_id != request.provider_id
-            or response.model != request.model
+            response_request_id != request.request_id
+            or response_provider_id != request.provider_id
+            or response_provider_id != adapter_provider_id
+            or response_model != request.model
         ):
             return self._failure(
                 request,
@@ -308,6 +324,16 @@ class SpeechToTextService:
             latency_ms=latency_ms,
         )
         return SpeechToTextResult(text=text, evidence=evidence)
+
+    def _trusted_local_provider_id(self) -> str | None:
+        try:
+            provider_kind = self._adapter.provider_kind
+            provider_id = _bounded_token(self._adapter.provider_id, "adapter.provider_id")
+        except Exception:  # noqa: BLE001 - adapter route metadata is an untrusted boundary
+            return None
+        if provider_kind is not ProviderKind.LOCAL:
+            return None
+        return provider_id
 
     def _failure(
         self,
