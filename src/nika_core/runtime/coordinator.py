@@ -302,7 +302,8 @@ class TaskRuntimeCoordinator:
         if record.outcome == RuntimeOutcome.WAITING_APPROVAL:
             raise ValueError("Persisted approval wait requires explicit resume_saved_approval()")
 
-        task_state = self._task_state(task_id)
+        with self._queue.store.connection() as conn:
+            task_state, task_epoch = self._task_state_epoch_with_connection(conn, task_id)
         if record.is_active and task_state == TaskState.RETRYING:
             raise ValueError(
                 "Persisted RETRYING runtime session lacks durable retry attempt/backoff authority"
@@ -312,8 +313,15 @@ class TaskRuntimeCoordinator:
             record,
             task_state=task_state,
             mode=RuntimeResumeMode.CONTINUE,
+            expected_task_epoch=task_epoch,
         )
-        mode = self._prepare_saved_resume_state(task_id, record)
+        mode = self._prepare_saved_resume_state(
+            task_id,
+            record,
+            expected_state=task_state,
+            expected_task_epoch=task_epoch,
+            claim=claim,
+        )
         self._audit.append(
             event_type="runtime.saved_resume_started",
             entity_type="task",
@@ -425,18 +433,81 @@ class TaskRuntimeCoordinator:
         if type(runtime_id) is not str or not runtime_id:
             raise ValueError("pause runtime.runtime_id must be an exact non-empty string")
 
-        record = self._sessions.get(task_id)
-        current = self._task_state(task_id)
-        if current is TaskState.PAUSED:
-            if record is None:
-                raise ValueError("Paused task is missing its durable runtime session")
-            if record.runtime_id != runtime_id or record.thread_id != thread_id:
-                raise ValueError("Paused task does not belong to the supplied runtime/thread")
-            if record.outcome is not RuntimeOutcome.PAUSED:
-                raise ValueError("Paused task does not have a confirmed paused runtime cursor")
-            if usable_resume_token(record.resume_token) is None:
-                raise ValueError("Paused task does not have a usable runtime resume token")
-            return True
+        with self._queue.store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current, task_epoch = self._task_state_epoch_with_connection(conn, task_id)
+            record = self._sessions.get_with_connection(conn, task_id)
+            if current is TaskState.PAUSED:
+                if record is None:
+                    raise ValueError("Paused task is missing its durable runtime session")
+                if record.runtime_id != runtime_id or record.thread_id != thread_id:
+                    raise ValueError("Paused task does not belong to the supplied runtime/thread")
+                if record.outcome is not RuntimeOutcome.PAUSED:
+                    raise ValueError("Paused task does not have a confirmed paused runtime cursor")
+                if usable_resume_token(record.resume_token) is None:
+                    raise ValueError("Paused task does not have a usable runtime resume token")
+                operation_key = self._pause_operation_key(
+                    record=record,
+                    task_epoch=task_epoch,
+                )
+                fingerprint = self._pause_input_fingerprint(
+                    record=record,
+                    task_epoch=task_epoch,
+                )
+                _, created = self._idempotency.reserve_with_connection(
+                    conn,
+                    operation_key=operation_key,
+                    task_id=task_id,
+                    operation_type=_PAUSE_OPERATION_TYPE,
+                    input_fingerprint=fingerprint,
+                )
+                if not created:
+                    raise IdempotencyConflictError(
+                        "runtime pause reaffirmation already owns this paused session epoch"
+                    )
+                self._sessions.record_result_with_connection(
+                    conn,
+                    task_id=task_id,
+                    runtime_id=runtime_id,
+                    thread_id=thread_id,
+                    result=RuntimeResult(
+                        outcome=RuntimeOutcome.PAUSED,
+                        resume_token=record.resume_token,
+                    ),
+                )
+                reaffirmed_record = self._sessions.get_with_connection(conn, task_id)
+                if (
+                    reaffirmed_record is None
+                    or reaffirmed_record.outcome is not RuntimeOutcome.PAUSED
+                    or usable_resume_token(reaffirmed_record.resume_token) is None
+                    or reaffirmed_record.updated_at == record.updated_at
+                ):
+                    raise RuntimeError("runtime pause reaffirmation did not advance session epoch")
+                self._idempotency.complete_with_connection(
+                    conn,
+                    operation_key,
+                    {
+                        "accepted": True,
+                        "applied": True,
+                        "reaffirmed": True,
+                        "task_state": TaskState.PAUSED.value,
+                        "paused_session_updated_at": reaffirmed_record.updated_at,
+                    },
+                )
+                self._audit.append_with_connection(
+                    conn,
+                    event_type="runtime.pause_reaffirmed",
+                    entity_type="task",
+                    entity_id=task_id,
+                    payload={
+                        "runtime_id": runtime_id,
+                        "thread_id": thread_id,
+                        "operation_key": operation_key,
+                        "previous_session_updated_at": record.updated_at,
+                        "session_updated_at": reaffirmed_record.updated_at,
+                    },
+                )
+                return True
         if current is not TaskState.RUNNING:
             raise ValueError(f"Task {task_id} cannot be paused from state {current.value}")
         if RuntimeCapability.DURABLE_RESUME not in runtime.capabilities:
@@ -878,34 +949,102 @@ class TaskRuntimeCoordinator:
         self,
         task_id: str,
         record: RuntimeSessionRecord,
+        *,
+        expected_state: TaskState,
+        expected_task_epoch: str,
+        claim: _RuntimeResumeClaim,
     ) -> RuntimeResumeMode:
-        if record.is_active:
-            current = self._task_state(task_id)
-            if current == TaskState.RETRYING:
-                raise ValueError(
-                    "Persisted RETRYING runtime session lacks durable retry attempt/backoff authority"
-                )
-            if current == TaskState.RUNNING:
-                self._queue.transition(task_id, TaskState.PAUSED)
-            elif current not in {TaskState.PAUSED, TaskState.FAILED}:
-                raise ValueError(
-                    f"Active runtime session has incompatible task state: {current.value}"
-                )
-            self._queue.transition(task_id, TaskState.READY)
-            self._queue.transition(task_id, TaskState.RUNNING)
-            self._audit.append(
-                event_type="runtime.crash_recovery_started",
-                entity_type="task",
-                entity_id=task_id,
-                payload={"runtime_id": record.runtime_id, "thread_id": record.thread_id},
+        prepare_error: ValueError | None = None
+        with self._queue.store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current_record = self._sessions.get_with_connection(conn, task_id)
+            current_state, current_task_epoch = self._task_state_epoch_with_connection(
+                conn,
+                task_id,
             )
-            return RuntimeResumeMode.CONTINUE
-
-        if record.outcome in {RuntimeOutcome.PAUSED, RuntimeOutcome.FAILED}:
-            self._queue.transition(task_id, TaskState.READY)
-            self._queue.transition(task_id, TaskState.RUNNING)
-            return RuntimeResumeMode.CONTINUE
-        raise ValueError(f"Stored runtime outcome is not resumable: {record.outcome}")
+            if (
+                current_record != record
+                or current_state is not expected_state
+                or current_task_epoch != expected_task_epoch
+            ):
+                self._release_unstarted_resume_claim_with_connection(
+                    conn,
+                    claim,
+                    reason="control_epoch_changed_before_resume",
+                )
+                prepare_error = ValueError(
+                    "task/session changed after durable recovery claim and before resume"
+                )
+            elif record.is_active:
+                if current_state is TaskState.RETRYING:
+                    self._release_unstarted_resume_claim_with_connection(
+                        conn,
+                        claim,
+                        reason="retry_state_has_no_durable_resume_authority",
+                    )
+                    prepare_error = ValueError(
+                        "Persisted RETRYING runtime session lacks durable retry "
+                        "attempt/backoff authority"
+                    )
+                elif current_state not in {
+                    TaskState.RUNNING,
+                    TaskState.PAUSED,
+                    TaskState.FAILED,
+                }:
+                    self._release_unstarted_resume_claim_with_connection(
+                        conn,
+                        claim,
+                        reason="active_session_state_incompatible",
+                    )
+                    prepare_error = ValueError(
+                        "Active runtime session has incompatible task state: "
+                        f"{current_state.value}"
+                    )
+                else:
+                    if current_state is TaskState.RUNNING:
+                        self._queue.transition_with_connection(
+                            conn,
+                            task_id,
+                            TaskState.PAUSED,
+                        )
+                    self._queue.transition_with_connection(conn, task_id, TaskState.READY)
+                    self._queue.transition_with_connection(conn, task_id, TaskState.RUNNING)
+                    self._audit.append_with_connection(
+                        conn,
+                        event_type="runtime.crash_recovery_started",
+                        entity_type="task",
+                        entity_id=task_id,
+                        payload={
+                            "runtime_id": record.runtime_id,
+                            "thread_id": record.thread_id,
+                        },
+                    )
+            elif record.outcome in {RuntimeOutcome.PAUSED, RuntimeOutcome.FAILED}:
+                if not can_transition(current_state, TaskState.READY):
+                    self._release_unstarted_resume_claim_with_connection(
+                        conn,
+                        claim,
+                        reason="stored_outcome_state_incompatible",
+                    )
+                    prepare_error = ValueError(
+                        "Stored resumable runtime outcome has incompatible task state: "
+                        f"{current_state.value}"
+                    )
+                else:
+                    self._queue.transition_with_connection(conn, task_id, TaskState.READY)
+                    self._queue.transition_with_connection(conn, task_id, TaskState.RUNNING)
+            else:
+                self._release_unstarted_resume_claim_with_connection(
+                    conn,
+                    claim,
+                    reason="stored_outcome_not_resumable",
+                )
+                prepare_error = ValueError(
+                    f"Stored runtime outcome is not resumable: {record.outcome}"
+                )
+        if prepare_error is not None:
+            raise prepare_error
+        return RuntimeResumeMode.CONTINUE
 
     async def _acquire_resume_claim(
         self,
@@ -914,6 +1053,7 @@ class TaskRuntimeCoordinator:
         *,
         task_state: TaskState,
         mode: RuntimeResumeMode,
+        expected_task_epoch: str | None = None,
     ) -> _RuntimeResumeClaim:
         if usable_resume_token(record.resume_token) is None:
             raise ValueError("persisted runtime session has no usable resume token")
@@ -941,9 +1081,17 @@ class TaskRuntimeCoordinator:
             current_record = self._sessions.get_with_connection(conn, record.task_id)
             if current_record != record:
                 raise ValueError("runtime session changed before durable recovery claim")
-            current_state = self._task_state_with_connection(conn, record.task_id)
+            current_state, current_task_epoch = self._task_state_epoch_with_connection(
+                conn,
+                record.task_id,
+            )
             if current_state != task_state:
                 raise ValueError("task state changed before durable recovery claim")
+            if (
+                expected_task_epoch is not None
+                and current_task_epoch != expected_task_epoch
+            ):
+                raise ValueError("task control epoch changed before durable recovery claim")
 
             try:
                 reservation, created = self._idempotency.reserve_with_connection(
@@ -1021,6 +1169,37 @@ class TaskRuntimeCoordinator:
             session_fingerprint=session_fingerprint,
             claim_fingerprint=claim_fingerprint,
             resume_mode=mode,
+        )
+
+    def _release_unstarted_resume_claim_with_connection(
+        self,
+        conn,
+        claim: _RuntimeResumeClaim,
+        *,
+        reason: str,
+    ) -> None:
+        status = self._idempotency_status_with_connection(conn, claim.operation_key)
+        if status is not IdempotencyStatus.PENDING:
+            raise RuntimeRecoveryClaimConflict(
+                claim.operation_key,
+                status,
+                detail="recovery claim changed before local resume preparation",
+            )
+        self._idempotency.release_pending_with_connection(conn, claim.operation_key)
+        self._audit.append_with_connection(
+            conn,
+            event_type="runtime.recovery_claim_released_before_effect",
+            entity_type="runtime_recovery",
+            entity_id=claim.operation_key,
+            payload={
+                "task_id": claim.task_id,
+                "runtime_id": claim.runtime_id,
+                "thread_id": claim.thread_id,
+                "operation_key": claim.operation_key,
+                "claim_id": claim.claim_id,
+                "owner_id": claim.owner_id,
+                "reason": reason,
+            },
         )
 
     def _begin_resume_effect(self, claim: _RuntimeResumeClaim) -> None:
