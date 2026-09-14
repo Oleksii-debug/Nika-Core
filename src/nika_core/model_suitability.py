@@ -68,10 +68,10 @@ class RuntimeSuitabilityConstraints:
 class SuitabilityObservations:
     cpu_architecture: str | None
     logical_cpu_count: int | None
-    cpu_percent: float
+    cpu_percent: float | None
     total_memory_bytes: int | None
-    available_memory_bytes: int
-    memory_percent: float
+    available_memory_bytes: int | None
+    memory_percent: float | None
     disk_free_bytes: int | None
     model_size_bytes: int | None
     model_cached: bool
@@ -158,6 +158,13 @@ class EmbeddedModelSuitabilityEvaluator:
         snapshot = self._observer.snapshot()
         if type(snapshot) is not ResourceSnapshot:
             raise TypeError("resource observer must return exact ResourceSnapshot")
+        cpu_percent = _optional_nonnegative_finite(snapshot.cpu_percent)
+        memory_percent = _optional_nonnegative_finite(snapshot.memory_percent)
+        available_memory_bytes = _optional_nonnegative_int(
+            snapshot.available_memory_bytes
+        )
+        logical_cpu_count = _optional_positive_int(snapshot.logical_cpu_count)
+        total_memory_bytes = _optional_nonnegative_int(snapshot.total_memory_bytes)
         architecture = _canonical_architecture(self._architecture_probe())
         disk_free_bytes = self._read_disk_free(Path(storage_path))
         resources = descriptor.resources
@@ -179,21 +186,21 @@ class EmbeddedModelSuitabilityEvaluator:
             unknowns.append("hardware_requirements_not_declared")
 
         if resources.min_system_memory_bytes is not None:
-            if not _is_nonnegative_int(snapshot.total_memory_bytes):
+            if total_memory_bytes is None:
                 unknowns.append("total_memory_unknown")
-            elif snapshot.total_memory_bytes < resources.min_system_memory_bytes:
+            elif total_memory_bytes < resources.min_system_memory_bytes:
                 failures.append("insufficient_system_memory")
 
         if resources.min_available_memory_bytes is not None:
-            if not _is_nonnegative_int(snapshot.available_memory_bytes):
+            if available_memory_bytes is None:
                 unknowns.append("available_memory_unknown")
-            elif snapshot.available_memory_bytes < resources.min_available_memory_bytes:
+            elif available_memory_bytes < resources.min_available_memory_bytes:
                 failures.append("insufficient_available_memory")
 
         if resources.recommended_memory_bytes is not None:
-            if not _is_nonnegative_int(snapshot.total_memory_bytes):
+            if total_memory_bytes is None:
                 maybes.append("recommended_memory_unverified")
-            elif snapshot.total_memory_bytes < resources.recommended_memory_bytes:
+            elif total_memory_bytes < resources.recommended_memory_bytes:
                 maybes.append("below_recommended_memory")
 
         if resources.cpu_architectures:
@@ -207,9 +214,9 @@ class EmbeddedModelSuitabilityEvaluator:
                     failures.append("cpu_architecture_unsupported")
 
         if effective_constraints.min_logical_cpu_count is not None:
-            if not _is_positive_int(snapshot.logical_cpu_count):
+            if logical_cpu_count is None:
                 unknowns.append("logical_cpu_count_unknown")
-            elif snapshot.logical_cpu_count < effective_constraints.min_logical_cpu_count:
+            elif logical_cpu_count < effective_constraints.min_logical_cpu_count:
                 failures.append("insufficient_logical_cpu_count")
 
         if resources.min_vram_bytes is not None:
@@ -243,11 +250,11 @@ class EmbeddedModelSuitabilityEvaluator:
             descriptor_digest=descriptor.descriptor_digest,
             observations=SuitabilityObservations(
                 cpu_architecture=architecture,
-                logical_cpu_count=snapshot.logical_cpu_count,
-                cpu_percent=snapshot.cpu_percent,
-                total_memory_bytes=snapshot.total_memory_bytes,
-                available_memory_bytes=snapshot.available_memory_bytes,
-                memory_percent=snapshot.memory_percent,
+                logical_cpu_count=logical_cpu_count,
+                cpu_percent=cpu_percent,
+                total_memory_bytes=total_memory_bytes,
+                available_memory_bytes=available_memory_bytes,
+                memory_percent=memory_percent,
                 disk_free_bytes=disk_free_bytes,
                 model_size_bytes=descriptor.size_bytes,
                 model_cached=model_cached,
@@ -372,6 +379,21 @@ def _is_nonnegative_int(value: object) -> bool:
 
 def _is_positive_int(value: object) -> bool:
     return type(value) is int and value > 0
+
+
+def _optional_nonnegative_int(value: object) -> int | None:
+    return value if _is_nonnegative_int(value) else None
+
+
+def _optional_positive_int(value: object) -> int | None:
+    return value if _is_positive_int(value) else None
+
+
+def _optional_nonnegative_finite(value: object) -> float | None:
+    try:
+        return _nonnegative_finite("resource observation", value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
 
 
 def _positive_finite(name: str, value: float) -> float:
