@@ -165,6 +165,26 @@ class LearningShard:
             raise LearningPackageIntegrityError(str(exc)) from exc
 
 
+def _snapshot_learning_shard(shard: object) -> LearningShard:
+    if type(shard) is not LearningShard:
+        raise LearningPackageValidationError(
+            "shards must contain exact LearningShard values"
+        )
+    try:
+        return LearningShard(
+            split=shard.split,
+            artifact_sha256=shard.artifact_sha256,
+            provenance_sha256=shard.provenance_sha256,
+            license_evidence_sha256=shard.license_evidence_sha256,
+            record_count=shard.record_count,
+            byte_count=shard.byte_count,
+        )
+    except AttributeError as exc:
+        raise LearningPackageValidationError(
+            "LearningShard fields must be complete"
+        ) from exc
+
+
 @dataclass(frozen=True, slots=True)
 class FrozenLearningPackage:
     package_id: str
@@ -189,8 +209,10 @@ class FrozenLearningPackage:
             raise LearningPackageValidationError("shards must be an immutable tuple")
         if not 1 <= len(self.shards) <= _MAX_SHARDS:
             raise LearningPackageValidationError("shard count is outside the supported bound")
-        if not all(type(shard) is LearningShard for shard in self.shards):
-            raise LearningPackageValidationError("shards must contain exact LearningShard values")
+        canonical_shards = tuple(
+            _snapshot_learning_shard(shard) for shard in self.shards
+        )
+        object.__setattr__(self, "shards", canonical_shards)
         if self.shards != _canonical_shard_order(self.shards):
             raise LearningPackageValidationError("learning-package shard order is not canonical")
 
@@ -237,11 +259,7 @@ class FrozenLearningPackage:
                 raise LearningPackageValidationError(
                     "shard count is outside the supported bound"
                 )
-            if type(shard) is not LearningShard:
-                raise LearningPackageValidationError(
-                    "shards must contain exact LearningShard values"
-                )
-            shard_values_list.append(shard)
+            shard_values_list.append(_snapshot_learning_shard(shard))
         shard_values = tuple(shard_values_list)
         return cls(
             package_id=package_id,
