@@ -99,6 +99,14 @@ class _RefuseIterationOverBoundSequence(Sequence[ModelRequest]):
         raise AssertionError("oversized batch must not be materialized")
 
 
+class _HostileInt(int):
+    pass
+
+
+class _HostileText(str):
+    pass
+
+
 def _messages() -> tuple[ModelMessage, ...]:
     return (ModelMessage(role="user", content="parallel admission proof"),)
 
@@ -152,6 +160,44 @@ def test_overbound_batch_rejects_before_copy_task_fanout_or_provider_effect(
     assert asyncio.run(scenario()) == 0
     assert requests.iteration_attempts == 0
     assert provider.calls == 0
+
+
+def test_child_scheduler_delay_consumes_existing_request_timeout_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario():  # type: ignore[no-untyped-def]
+        provider = _CountingProvider("provider")
+        gateway = ModelGateway()
+        gateway.register(provider)
+        real_create_task = asyncio.create_task
+
+        def delayed_create_task(coro, *args, **kwargs):  # type: ignore[no-untyped-def]
+            async def delayed():  # type: ignore[no-untyped-def]
+                await asyncio.sleep(0.05)
+                return await coro
+
+            return real_create_task(delayed(), *args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "create_task", delayed_create_task)
+        result = await complete_parallel(
+            gateway,
+            (
+                _request(
+                    "scheduler-delayed-timeout",
+                    provider_id="provider",
+                    timeout_seconds=0.01,
+                ),
+            ),
+            max_parallel=1,
+        )
+        return result, provider.calls
+
+    result, provider_calls = asyncio.run(scenario())
+
+    assert provider_calls == 0
+    _assert_admission_timeout(0, result)
+    assert result.outcomes[0].failure is not None
+    assert result.outcomes[0].failure.provider_id == "provider"
 
 
 def test_global_admission_wait_consumes_existing_request_timeout_budget() -> None:
@@ -313,3 +359,54 @@ def test_unlimited_parallel_batch_preserves_canonical_gateway_fallback_contract(
     assert result.outcomes[0].response.provider_id == "fallback"
     assert primary.calls == 1
     assert fallback.calls == 1
+
+
+def test_max_parallel_rejects_integer_subclass_before_provider_effect() -> None:
+    provider = _CountingProvider("provider")
+    gateway = ModelGateway()
+    gateway.register(provider)
+
+    with pytest.raises(TypeError, match="max_parallel must be an integer"):
+        asyncio.run(
+            complete_parallel(
+                gateway,
+                (_request("request", provider_id="provider", timeout_seconds=1.0),),
+                max_parallel=_HostileInt(1),
+            )
+        )
+
+    assert provider.calls == 0
+
+
+def test_provider_limit_rejects_integer_subclass_before_provider_effect() -> None:
+    provider = _CountingProvider("provider")
+    gateway = ModelGateway()
+    gateway.register(provider)
+
+    with pytest.raises(TypeError, match="provider limit for provider must be an integer"):
+        asyncio.run(
+            complete_parallel(
+                gateway,
+                (_request("request", provider_id="provider", timeout_seconds=1.0),),
+                provider_limits={"provider": _HostileInt(1)},
+            )
+        )
+
+    assert provider.calls == 0
+
+
+def test_provider_limit_rejects_text_subclass_before_provider_effect() -> None:
+    provider = _CountingProvider("provider")
+    gateway = ModelGateway()
+    gateway.register(provider)
+
+    with pytest.raises(TypeError, match="provider limit ID must be text"):
+        asyncio.run(
+            complete_parallel(
+                gateway,
+                (_request("request", provider_id="provider", timeout_seconds=1.0),),
+                provider_limits={_HostileText("provider"): 1},
+            )
+        )
+
+    assert provider.calls == 0
