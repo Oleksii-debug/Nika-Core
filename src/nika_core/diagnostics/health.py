@@ -100,6 +100,7 @@ SchemaForeignKey = tuple[int, int, str, str, str, str, str, str]
 SchemaIndexColumn = tuple[int, int, str, int, str, int]
 SchemaIndex = tuple[str, int, str, int, str, tuple[SchemaIndexColumn, ...]]
 SchemaTable = tuple[
+    str,
     tuple[SchemaColumn, ...],
     tuple[SchemaForeignKey, ...],
     tuple[SchemaIndex, ...],
@@ -411,7 +412,7 @@ class HealthService:
             check_id="database.schema.shape",
             status=HealthStatus.FAIL,
             summary=(
-                "Required canonical tables, columns, foreign keys, or indexes are "
+                "Required canonical tables, definitions, columns, foreign keys, or indexes are "
                 "missing or malformed."
             ),
         )
@@ -440,6 +441,15 @@ class HealthService:
         )
         signature: list[tuple[str, SchemaTable]] = []
         for table_name in table_names:
+            table_sql_row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table_name,),
+            ).fetchone()
+            table_sql = (
+                ""
+                if table_sql_row is None or table_sql_row[0] is None
+                else str(table_sql_row[0])
+            )
             rows = conn.execute(
                 'SELECT name, type, "notnull", pk FROM pragma_table_info(?) ORDER BY cid',
                 (table_name,),
@@ -502,15 +512,18 @@ class HealthService:
                         index_columns,
                     )
                 )
-            signature.append((str(table_name), (columns, foreign_keys, tuple(indexes))))
+            signature.append(
+                (str(table_name), (table_sql, columns, foreign_keys, tuple(indexes)))
+            )
         return tuple(signature)
 
     @staticmethod
     def _schema_table_matches(expected: SchemaTable, actual: SchemaTable) -> bool:
-        expected_columns, expected_foreign_keys, expected_indexes = expected
-        actual_columns, actual_foreign_keys, actual_indexes = actual
+        expected_sql, expected_columns, expected_foreign_keys, expected_indexes = expected
+        actual_sql, actual_columns, actual_foreign_keys, actual_indexes = actual
         return (
-            actual_columns == expected_columns
+            actual_sql == expected_sql
+            and actual_columns == expected_columns
             and actual_foreign_keys == expected_foreign_keys
             and all(index in actual_indexes for index in expected_indexes)
         )

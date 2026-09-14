@@ -91,3 +91,35 @@ def test_current_markers_with_wrong_canonical_partial_index_predicate_fail_schem
     assert checks["database.foreign-keys"] is HealthStatus.PASS
     assert checks["database.schema.shape"] is HealthStatus.FAIL
     assert report.overall is HealthStatus.FAIL
+
+
+def test_current_markers_with_missing_canonical_check_constraint_fail_schema_shape(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "nika.db"
+    SQLiteStore(database).initialize()
+    with sqlite3.connect(database) as conn:
+        conn.execute("DROP INDEX idx_workspaces_latest")
+        conn.execute("DROP TABLE workspaces")
+        conn.execute(
+            """CREATE TABLE workspaces (
+                workspace_id TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                enabled INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(workspace_id, version)
+            )"""
+        )
+        conn.execute(
+            "CREATE INDEX idx_workspaces_latest ON workspaces(workspace_id, version DESC)"
+        )
+
+    report = _run(database)
+
+    checks = _check_map(report)
+    assert checks["database.integrity"] is HealthStatus.PASS
+    assert checks["database.foreign-keys"] is HealthStatus.PASS
+    assert checks["database.schema.shape"] is HealthStatus.FAIL
+    assert report.overall is HealthStatus.FAIL
