@@ -406,6 +406,32 @@ def _first_incomplete(
     return next(iter(_incomplete(entries)), None)
 
 
+def _integration_progress_entries(
+    entries: tuple[ProductStatusEntry, ...],
+) -> tuple[ProductStatusEntry, ...]:
+    """Treat canonical release rows as identity metadata once their deployment exists."""
+
+    deployment_intents = {
+        entry.item_id.removeprefix("deployment:")
+        for entry in entries
+        if entry.kind is ProductStatusKind.DEPLOYMENT
+        and entry.item_id.startswith("deployment:")
+        and entry.item_id.removeprefix("deployment:")
+    }
+    if not deployment_intents:
+        return entries
+
+    return tuple(
+        entry
+        for entry in entries
+        if not (
+            entry.kind is ProductStatusKind.RELEASE
+            and entry.item_id.startswith("release:")
+            and entry.item_id.removeprefix("release:") in deployment_intents
+        )
+    )
+
+
 def _component_stage_entries(
     component: ProductStatusEntry,
     entries: tuple[ProductStatusEntry, ...],
@@ -505,7 +531,7 @@ def _next_action(
         return "qa:not_started"
     if qa_entries and candidate == "unknown":
         return "inspect_project:missing_candidate_identity"
-    integration = _first_incomplete(integration_entries)
+    integration = _first_incomplete(_integration_progress_entries(integration_entries))
     if integration is not None:
         return f"integration:{integration.item_id}={integration.state}"
     if qa_entries and not integration_entries:
