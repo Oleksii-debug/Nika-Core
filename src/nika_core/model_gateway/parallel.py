@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -99,6 +99,7 @@ async def complete_parallel(
     requests: Sequence[ModelRequest],
     *,
     max_parallel: int = DEFAULT_MAX_PARALLEL_MODEL_REQUESTS,
+    provider_limits: Mapping[str, int] | None = None,
 ) -> ParallelModelBatchResult:
     """Run independent canonical ModelGateway requests concurrently.
 
@@ -106,6 +107,12 @@ async def complete_parallel(
     not select providers, bypass provider-specific safety locks, create another
     scheduler, or reinterpret fallback policy. Provider-specific constraints
     remain authoritative inside each registered provider.
+
+    ``max_parallel`` bounds the whole batch. Optional ``provider_limits`` add
+    route-specific admission for explicit ``provider_id`` requests. A request
+    waits for its provider slot *before* it takes a global slot, preventing a
+    saturated or slow provider from occupying every global slot while unrelated
+    providers/local routes are ready to run.
 
     Outcomes are returned in the exact input order. A typed failure of one
     request is isolated as content-free failure evidence and does not erase
@@ -116,36 +123,51 @@ async def complete_parallel(
     batch = tuple(requests)
     if not batch:
         raise ValueError("parallel model batch must contain at least one request")
-    if isinstance(max_parallel, bool) or not isinstance(max_parallel, int):
-        raise TypeError("max_parallel must be an integer")
-    if not 1 <= max_parallel <= MAX_PARALLEL_MODEL_REQUESTS:
-        raise ValueError(
-            f"max_parallel must be between 1 and {MAX_PARALLEL_MODEL_REQUESTS}"
-        )
+    _validate_limit(max_parallel, name="max_parallel")
 
     request_ids = tuple(request.request_id for request in batch)
     if len(request_ids) != len(set(request_ids)):
         raise ValueError("parallel model request IDs must be unique")
 
-    semaphore = asyncio.Semaphore(min(max_parallel, len(batch)))
+    limits = _validated_provider_limits(gateway, provider_limits)
+    global_semaphore = asyncio.Semaphore(min(max_parallel, len(batch)))
+    provider_semaphores = {
+        provider_id: asyncio.Semaphore(limit) for provider_id, limit in limits.items()
+    }
 
-    async def run_one(request: ModelRequest) -> ParallelModelOutcome:
-        async with semaphore:
-            try:
-                response = await gateway.complete(request)
-            except ModelGatewayError as error:
-                return ParallelModelOutcome(
-                    request_id=request.request_id,
-                    status=ParallelModelStatus.FAILED,
-                    failure=ParallelModelFailure.from_gateway_error(error),
-                )
-            if response.request_id != request.request_id:
-                raise RuntimeError("parallel ModelGateway response identity mismatch")
+    async def execute(request: ModelRequest) -> ParallelModelOutcome:
+        try:
+            response = await gateway.complete(request)
+        except ModelGatewayError as error:
             return ParallelModelOutcome(
                 request_id=request.request_id,
-                status=ParallelModelStatus.COMPLETED,
-                response=response,
+                status=ParallelModelStatus.FAILED,
+                failure=ParallelModelFailure.from_gateway_error(error),
             )
+        if response.request_id != request.request_id:
+            raise RuntimeError("parallel ModelGateway response identity mismatch")
+        return ParallelModelOutcome(
+            request_id=request.request_id,
+            status=ParallelModelStatus.COMPLETED,
+            response=response,
+        )
+
+    async def run_one(request: ModelRequest) -> ParallelModelOutcome:
+        provider_semaphore = (
+            provider_semaphores.get(request.provider_id)
+            if request.provider_id is not None
+            else None
+        )
+        if provider_semaphore is None:
+            async with global_semaphore:
+                return await execute(request)
+
+        # Provider admission comes first. Otherwise multiple requests queued on
+        # one provider could consume every global slot while merely waiting for
+        # that provider, head-of-line blocking an independent route.
+        async with provider_semaphore:
+            async with global_semaphore:
+                return await execute(request)
 
     tasks = tuple(asyncio.create_task(run_one(request)) for request in batch)
     try:
@@ -158,3 +180,35 @@ async def complete_parallel(
         raise
 
     return ParallelModelBatchResult(tuple(outcomes))
+
+
+def _validated_provider_limits(
+    gateway: ModelGateway,
+    provider_limits: Mapping[str, int] | None,
+) -> dict[str, int]:
+    if provider_limits is None:
+        return {}
+    if not isinstance(provider_limits, Mapping):
+        raise TypeError("provider_limits must be a mapping")
+
+    registered = frozenset(gateway.providers())
+    validated: dict[str, int] = {}
+    for provider_id, limit in provider_limits.items():
+        if not isinstance(provider_id, str) or not provider_id.strip():
+            raise ValueError("provider limit ID must be non-empty text")
+        if provider_id != provider_id.strip():
+            raise ValueError("provider limit ID must not contain surrounding whitespace")
+        if provider_id not in registered:
+            raise ValueError(f"provider limit references an unknown provider: {provider_id}")
+        _validate_limit(limit, name=f"provider limit for {provider_id}")
+        validated[provider_id] = limit
+    return validated
+
+
+def _validate_limit(value: int, *, name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an integer")
+    if not 1 <= value <= MAX_PARALLEL_MODEL_REQUESTS:
+        raise ValueError(
+            f"{name} must be between 1 and {MAX_PARALLEL_MODEL_REQUESTS}"
+        )
