@@ -169,6 +169,10 @@ try {
     & $pwsh -NoProfile -File $proof -ExePath $ExePath -WindowTitle $WindowTitle -VerifySourceSetup
     if ($LASTEXITCODE -ne 0) {
         Write-Host 'Packaged generic keyboard/source-setup proof made no autostart mutation; retrying once in a fresh process.'
+        # The retry owns a fresh M5 database/process generation. Discard only transport
+        # evidence from the failed proof generation so exact-three counts describe the
+        # successful retry rather than accumulating stale QA observations.
+        Remove-Item -LiteralPath $requestLog -Force -ErrorAction SilentlyContinue
         & $pwsh -NoProfile -File $proof -ExePath $ExePath -WindowTitle $WindowTitle -VerifySourceSetup
         if ($LASTEXITCODE -ne 0) {
             throw 'Packaged generic keyboard/source-setup proof failed after the single non-mutating retry.'

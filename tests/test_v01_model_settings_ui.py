@@ -117,3 +117,14 @@ def test_packaged_uia_proof_covers_model_controls_and_selected_model_transport()
     assert "$request.think -ne $false" in wrapper
     assert "$request.authorization_present -ne $false" in wrapper
     assert "Physical Ollama/model inference remains unverified." in wrapper
+
+    invocation = "-WindowTitle $WindowTitle -VerifySourceSetup"
+    first_generic = wrapper.index(invocation)
+    retry_generic = wrapper.index(invocation, first_generic + len(invocation))
+    reset_log = wrapper.index(
+        "Remove-Item -LiteralPath $requestLog -Force -ErrorAction SilentlyContinue",
+        first_generic,
+    )
+    transport_assertion = wrapper.index("Assert-SelectedModelRequests", retry_generic)
+    first_enable = wrapper.index("-AutostartPhase Enable", transport_assertion)
+    assert first_generic < reset_log < retry_generic < transport_assertion < first_enable
