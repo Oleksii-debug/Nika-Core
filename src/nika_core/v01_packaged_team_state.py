@@ -9,6 +9,7 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.intelligence.provenance import (
     IntelligenceProvenance,
     IntelligenceResultStatus,
+    resolve_model_intelligence_mode,
 )
 from nika_core.model_gateway.gateway import model_identity_fingerprint
 from nika_core.multi_agent.checker import V01CheckerAgent
@@ -543,12 +544,22 @@ class V01PackagedTeamStateProvider:
         model_fingerprint = model_identity_fingerprint(model)
         if provenance.model_fingerprint != model_fingerprint:
             return False
-        if frozen_model_identity is not None and frozen_model_identity != (
-            provider_id,
-            provider_kind,
-            model_fingerprint,
-        ):
-            return False
+        if frozen_model_identity is not None:
+            if frozen_model_identity != (
+                provider_id,
+                provider_kind,
+                model_fingerprint,
+            ):
+                return False
+            try:
+                expected_mode = resolve_model_intelligence_mode(
+                    provider_id=provider_id,
+                    provider_kind=provenance.provider_kind,
+                )
+            except (TypeError, ValueError):
+                return False
+            if provenance.intelligence_mode is not expected_mode:
+                return False
         expected_correlation = f"{shared_task_id}:v01:{team_id}:{root_id}"
         return provenance.request_correlation_id == expected_correlation
 
