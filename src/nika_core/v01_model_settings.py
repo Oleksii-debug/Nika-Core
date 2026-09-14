@@ -154,11 +154,17 @@ class ModelSelection(BaseModel):
                 raise ValueError("Ollama route requires an explicit model and endpoint")
             if self.credential_ref is not None:
                 raise ValueError("Ollama route must not contain a credential reference")
-            parsed = urlsplit(self.base_url)
+            try:
+                parsed = urlsplit(self.base_url)
+                port = parsed.port
+            except ValueError as exc:
+                raise ValueError("Ollama route requires a valid explicit port") from exc
             if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
                 raise ValueError("Ollama route requires an HTTP(S) host")
             if parsed.hostname.lower() not in {"localhost", "127.0.0.1", "::1"}:
                 raise ValueError("Ollama local route must use a loopback host")
+            if port is None or port == 0:
+                raise ValueError("Ollama route requires an explicit non-zero port")
             if parsed.username is not None or parsed.password is not None:
                 raise ValueError("Ollama route must not contain userinfo")
             if parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
