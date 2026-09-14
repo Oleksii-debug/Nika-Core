@@ -24,6 +24,7 @@ from nika_core.runtime.contracts import (
 from nika_core.runtime.idempotency import (
     IdempotencyConflictError,
     IdempotencyLedger,
+    IdempotencyRecord,
     IdempotencyStatus,
 )
 from nika_core.runtime.recovery_claims import (
@@ -1178,12 +1179,49 @@ class TaskRuntimeCoordinator:
         *,
         reason: str,
     ) -> None:
-        status = self._idempotency_status_with_connection(conn, claim.operation_key)
-        if status is not IdempotencyStatus.PENDING:
+        row = conn.execute(
+            "SELECT * FROM idempotency_records WHERE operation_key = ?",
+            (claim.operation_key,),
+        ).fetchone()
+        status = None if row is None else IdempotencyStatus(row["status"])
+        current_metadata = None
+        if row is not None and status is IdempotencyStatus.PENDING:
+            raw_result = row["result_json"]
+            decoded_result = None
+            if isinstance(raw_result, str):
+                try:
+                    candidate = json.loads(raw_result)
+                except json.JSONDecodeError:
+                    candidate = None
+                if isinstance(candidate, dict):
+                    decoded_result = candidate
+            current_metadata = recovery_claim_metadata(
+                IdempotencyRecord(
+                    operation_key=row["operation_key"],
+                    task_id=row["task_id"],
+                    operation_type=row["operation_type"],
+                    input_fingerprint=row["input_fingerprint"],
+                    status=status,
+                    result=decoded_result,
+                    created_at=row["created_at"],
+                    updated_at=row["updated_at"],
+                )
+            )
+        if (
+            status is not IdempotencyStatus.PENDING
+            or current_metadata is None
+            or current_metadata.claim_id != claim.claim_id
+            or current_metadata.owner_id != claim.owner_id
+            or current_metadata.checkpoint_id != claim.checkpoint_id
+            or current_metadata.session_fingerprint != claim.session_fingerprint
+            or current_metadata.claim_fingerprint != claim.claim_fingerprint
+            or current_metadata.resume_mode != claim.resume_mode.value
+            or current_metadata.effect_started_at is not None
+        ):
             raise RuntimeRecoveryClaimConflict(
                 claim.operation_key,
                 status,
-                detail="recovery claim changed before local resume preparation",
+                detail="recovery claim ownership or phase changed before local resume preparation",
             )
         self._idempotency.release_pending_with_connection(conn, claim.operation_key)
         self._audit.append_with_connection(
