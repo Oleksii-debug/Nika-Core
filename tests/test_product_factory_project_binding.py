@@ -19,6 +19,8 @@ from nika_core.product_factory_project_binding import (
 )
 from nika_core.product_factory_review_authority import (
     ProductFactoryReviewSubject,
+    ReviewerPrincipalBindings,
+    reviewer_principal_bindings_ref,
     team_plan_fingerprint_ref,
 )
 from nika_core.product_project import (
@@ -30,6 +32,9 @@ from nika_core.product_project import (
 SHA_A = "a" * 40
 PERMISSIONS = frozenset({"read_source", "write_source", "run_tests"})
 LOCATOR = "org/repo"
+REVIEWER_ROLE = "team-role:reviewer"
+REVIEWER_ACTOR = "worker:reviewer"
+REVIEWER_PRINCIPALS: ReviewerPrincipalBindings = ((REVIEWER_ROLE, REVIEWER_ACTOR),)
 
 
 class _AllowReviewEvidence:
@@ -101,7 +106,7 @@ def _team_plan() -> TeamPlan:
                 reasons=("trusted builder assignment",),
             ),
             TeamRole(
-                role_id="team-role:reviewer",
+                role_id=REVIEWER_ROLE,
                 capabilities=("qa",),
                 component_ids=("core", "docs"),
                 permissions=frozenset({"read_source", "run_tests"}),
@@ -111,6 +116,14 @@ def _team_plan() -> TeamPlan:
         ),
         permission_ceiling=PERMISSIONS,
         reasons=("durable trusted team assignment",),
+    )
+
+
+def _trusted_team_refs(team_plan: TeamPlan) -> tuple[str, ...]:
+    return (
+        team_plan.plan_id,
+        team_plan_fingerprint_ref(team_plan),
+        reviewer_principal_bindings_ref(team_plan, REVIEWER_PRINCIPALS),
     )
 
 
@@ -205,15 +218,15 @@ def test_project_identity_mismatch_fails_before_orchestration(tmp_path) -> None:
         ProductProjectCoordinatorBinding(project, _graph(project_id="p2"))
 
 
-def test_persisted_team_plan_content_fingerprint_binds_exact_review_authority(tmp_path) -> None:
+def test_persisted_team_plan_and_reviewer_actor_binding_bind_exact_review_authority(
+    tmp_path,
+) -> None:
     repo = _project_repo(tmp_path)
     team_plan = _team_plan()
     project = repo.create(
         project_id="p1",
         name="Product",
-        spec=_spec(
-            team_refs=(team_plan.plan_id, team_plan_fingerprint_ref(team_plan)),
-        ),
+        spec=_spec(team_refs=_trusted_team_refs(team_plan)),
         idempotency_key="create:p1:trusted-team",
     )
 
@@ -222,9 +235,11 @@ def test_persisted_team_plan_content_fingerprint_binds_exact_review_authority(tm
         _graph(),
         team_plan=team_plan,
         review_evidence_authority=_AllowReviewEvidence(),
+        reviewer_principals=REVIEWER_PRINCIPALS,
     )
 
     assert binding.has_trusted_review_authority is True
+    assert REVIEWER_ROLE != REVIEWER_ACTOR
 
 
 def test_reused_persisted_plan_id_with_forged_role_content_fails_closed(tmp_path) -> None:
@@ -233,9 +248,7 @@ def test_reused_persisted_plan_id_with_forged_role_content_fails_closed(tmp_path
     project = repo.create(
         project_id="p1",
         name="Product",
-        spec=_spec(
-            team_refs=(trusted.plan_id, team_plan_fingerprint_ref(trusted)),
-        ),
+        spec=_spec(team_refs=_trusted_team_refs(trusted)),
         idempotency_key="create:p1:trusted-team",
     )
     forged_roles = list(trusted.roles)
@@ -251,4 +264,25 @@ def test_reused_persisted_plan_id_with_forged_role_content_fails_closed(tmp_path
             _graph(),
             team_plan=forged,
             review_evidence_authority=_AllowReviewEvidence(),
+            reviewer_principals=REVIEWER_PRINCIPALS,
+        )
+
+
+def test_forged_reviewer_actor_mapping_fails_persisted_binding(tmp_path) -> None:
+    repo = _project_repo(tmp_path)
+    trusted = _team_plan()
+    project = repo.create(
+        project_id="p1",
+        name="Product",
+        spec=_spec(team_refs=_trusted_team_refs(trusted)),
+        idempotency_key="create:p1:trusted-team",
+    )
+
+    with pytest.raises(ProductProjectBindingError, match="principal binding"):
+        ProductProjectCoordinatorBinding(
+            project,
+            _graph(),
+            team_plan=trusted,
+            review_evidence_authority=_AllowReviewEvidence(),
+            reviewer_principals=((REVIEWER_ROLE, "worker:attacker"),),
         )
