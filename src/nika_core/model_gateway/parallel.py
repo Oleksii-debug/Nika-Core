@@ -171,15 +171,15 @@ async def complete_parallel(
     Omitting the scope never weakens ModelGateway authorization; a gateway that
     requires current host authority still fails closed.
 
-    Outcomes are returned in the exact input order. A typed failure of one
-    request is isolated as content-free failure evidence and does not erase
-    successful sibling results. A child-local/spurious cancellation is likewise
-    isolated as CANCELLED/UNKNOWN; only cancellation of the parent batch itself
-    propagates through every child. Cancelling the parent batch cancels every
-    child task and waits for their local cancellation paths before propagating.
-    This is local coroutine cancellation only; callers must consult canonical
-    route capabilities before claiming underlying provider inference was hard-
-    cancelled.
+    Outcomes are returned in the exact input order. A typed or malformed response
+    failure of one request is isolated as content-free failure evidence and does
+    not erase successful sibling results. A child-local/spurious cancellation is
+    likewise isolated as CANCELLED/UNKNOWN; only cancellation of the parent batch
+    itself propagates through every child. Cancelling the parent batch cancels
+    every child task and waits for their local cancellation paths before
+    propagating. This is local coroutine cancellation only; callers must consult
+    canonical route capabilities before claiming underlying provider inference
+    was hard-cancelled.
     """
 
     _validate_limit(max_parallel, name="max_parallel")
@@ -192,10 +192,6 @@ async def complete_parallel(
             f"{MAX_PARALLEL_MODEL_BATCH_REQUESTS} requests"
         )
 
-    # Sequence.__len__ lets ordinary oversized input fail before any copy. islice
-    # keeps even a mutable/hostile Sequence bounded if iteration disagrees with
-    # the admitted length, so no caller can turn one batch into unbounded task
-    # allocation between admission and materialization.
     batch = tuple(islice(requests, MAX_PARALLEL_MODEL_BATCH_REQUESTS + 1))
     if len(batch) != expected_batch_size:
         raise ValueError("parallel model batch changed during admission")
@@ -216,9 +212,6 @@ async def complete_parallel(
         provider_id: asyncio.Semaphore(limit) for provider_id, limit in limits.items()
     }
 
-    # Deadline identity is fixed before create_task(). Otherwise a child delayed
-    # by event-loop pressure would receive a fresh timeout budget when it finally
-    # begins executing, which violates the end-to-end request deadline contract.
     loop = asyncio.get_running_loop()
     accepted_at = loop.time()
     deadlines = tuple(accepted_at + request.timeout_seconds for request in batch)
@@ -233,8 +226,11 @@ async def complete_parallel(
                 status=ParallelModelStatus.FAILED,
                 failure=ParallelModelFailure.from_gateway_error(error),
             )
-        if response.request_id != request.request_id:
-            raise RuntimeError("parallel ModelGateway response identity mismatch")
+        if type(response) is not ModelResponse:
+            return _malformed_response_outcome(request)
+        response_request_id = response.request_id
+        if type(response_request_id) is not str or response_request_id != request.request_id:
+            return _malformed_response_outcome(request)
         return ParallelModelOutcome(
             request_id=request.request_id,
             status=ParallelModelStatus.COMPLETED,
@@ -250,9 +246,6 @@ async def complete_parallel(
         provider_acquired = False
         global_acquired = False
         try:
-            # Provider admission comes first. Otherwise multiple requests queued on
-            # one provider could consume every global slot while merely waiting for
-            # that provider, head-of-line blocking an independent route.
             if provider_semaphore is not None:
                 provider_acquired = await _acquire_before_deadline(
                     provider_semaphore, deadline
@@ -278,19 +271,11 @@ async def complete_parallel(
                 scope_stack.close()
                 return _execution_scope_denied_outcome(request)
             with scope_stack:
-                # Binding task-local host/security authority is part of the same
-                # pre-provider request budget. Recompute after scope entry so a
-                # slow resolver/context cannot manufacture fresh inference time.
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
                     return _admission_timeout_outcome(request)
                 return await execute(replace(request, timeout_seconds=remaining))
         except asyncio.CancelledError:
-            # A provider/callback can raise or self-request CancelledError inside
-            # one child. That must not grant one route authority to cancel
-            # unrelated siblings. Only an actual cancellation request on the
-            # parent batch is batch-wide. The isolated child effect is UNKNOWN:
-            # local coroutine cancellation does not prove the provider stopped.
             if batch_task is not None and batch_task.cancelling() > 0:
                 raise
             return _child_cancelled_outcome(request)
@@ -362,6 +347,19 @@ def _child_cancelled_outcome(request: ModelRequest) -> ParallelModelOutcome:
         status=ParallelModelStatus.FAILED,
         failure=ParallelModelFailure(
             code=ModelErrorCode.CANCELLED,
+            provider_id=request.provider_id,
+            retryable=False,
+            failure_effect=ModelFailureEffect.UNKNOWN,
+        ),
+    )
+
+
+def _malformed_response_outcome(request: ModelRequest) -> ParallelModelOutcome:
+    return ParallelModelOutcome(
+        request_id=request.request_id,
+        status=ParallelModelStatus.FAILED,
+        failure=ParallelModelFailure(
+            code=ModelErrorCode.PROVIDER_ERROR,
             provider_id=request.provider_id,
             retryable=False,
             failure_effect=ModelFailureEffect.UNKNOWN,
