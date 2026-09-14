@@ -173,10 +173,12 @@ async def complete_parallel(
 
     Outcomes are returned in the exact input order. A typed failure of one
     request is isolated as content-free failure evidence and does not erase
-    successful sibling results. Cancelling the parent batch cancels every child
-    task and waits for their local cancellation paths before propagating. This is
-    local coroutine cancellation only; callers must consult canonical route
-    capabilities before claiming that underlying provider inference was hard-
+    successful sibling results. A child-local/spurious cancellation is likewise
+    isolated as CANCELLED/UNKNOWN; only cancellation of the parent batch itself
+    propagates through every child. Cancelling the parent batch cancels every
+    child task and waits for their local cancellation paths before propagating.
+    This is local coroutine cancellation only; callers must consult canonical
+    route capabilities before claiming underlying provider inference was hard-
     cancelled.
     """
 
@@ -220,6 +222,7 @@ async def complete_parallel(
     loop = asyncio.get_running_loop()
     accepted_at = loop.time()
     deadlines = tuple(accepted_at + request.timeout_seconds for request in batch)
+    batch_task = asyncio.current_task()
 
     async def execute(request: ModelRequest) -> ParallelModelOutcome:
         try:
@@ -277,6 +280,15 @@ async def complete_parallel(
                 return _execution_scope_denied_outcome(request)
             with scope_stack:
                 return await execute(admitted_request)
+        except asyncio.CancelledError:
+            # A provider/callback can raise or self-request CancelledError inside
+            # one child. That must not grant one route authority to cancel
+            # unrelated siblings. Only an actual cancellation request on the
+            # parent batch is batch-wide. The isolated child effect is UNKNOWN:
+            # local coroutine cancellation does not prove the provider stopped.
+            if batch_task is not None and batch_task.cancelling() > 0:
+                raise
+            return _child_cancelled_outcome(request)
         finally:
             if global_acquired:
                 global_semaphore.release()
@@ -335,6 +347,19 @@ def _execution_scope_denied_outcome(request: ModelRequest) -> ParallelModelOutco
             provider_id=request.provider_id,
             retryable=False,
             failure_effect=ModelFailureEffect.NO_EFFECT,
+        ),
+    )
+
+
+def _child_cancelled_outcome(request: ModelRequest) -> ParallelModelOutcome:
+    return ParallelModelOutcome(
+        request_id=request.request_id,
+        status=ParallelModelStatus.FAILED,
+        failure=ParallelModelFailure(
+            code=ModelErrorCode.CANCELLED,
+            provider_id=request.provider_id,
+            retryable=False,
+            failure_effect=ModelFailureEffect.UNKNOWN,
         ),
     )
 
