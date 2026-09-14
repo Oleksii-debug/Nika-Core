@@ -152,8 +152,8 @@ def test_stop_immediately_after_create_uses_submitted_runtime_identity(
     try:
         assert create_result.status == "accepted"
         assert stop_result.status == "accepted"
-        assert runtime.cancelled.wait(timeout=_ASYNC_PROOF_TIMEOUT)
-        _wait_for_state(queue, task.task_id, TaskState.CANCELLED)
+        _wait_for_state(queue, task.task_id, TaskState.CANCELLED, timeout=10.0)
+        assert runtime.cancelled.is_set()
     finally:
         runtime.release.set()
         backend.close()
