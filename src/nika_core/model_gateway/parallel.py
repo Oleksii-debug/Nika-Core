@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from itertools import islice
 
 from .contracts import (
     ModelErrorCode,
@@ -16,6 +17,7 @@ from .gateway import ModelGateway
 
 DEFAULT_MAX_PARALLEL_MODEL_REQUESTS = 8
 MAX_PARALLEL_MODEL_REQUESTS = 64
+MAX_PARALLEL_MODEL_BATCH_REQUESTS = 64
 
 
 class ParallelModelStatus(StrEnum):
@@ -108,11 +110,17 @@ async def complete_parallel(
     scheduler, or reinterpret fallback policy. Provider-specific constraints
     remain authoritative inside each registered provider.
 
-    ``max_parallel`` bounds the whole batch. Optional ``provider_limits`` add
-    route-specific admission for requests pinned to explicit ``provider_id``
-    values. A request waits for its provider slot *before* it takes a global
-    slot, preventing a saturated or slow provider from occupying every global
-    slot while unrelated providers/local routes are ready to run.
+    ``max_parallel`` bounds active execution. The admitted fan-out cardinality is
+    independently capped by ``MAX_PARALLEL_MODEL_BATCH_REQUESTS`` before the
+    sequence is copied or child tasks are created. The bounded copy below also
+    fails closed if a mutable or nonconforming Sequence changes/understates its
+    cardinality during admission.
+
+    Optional ``provider_limits`` add route-specific admission for requests pinned
+    to explicit ``provider_id`` values. A request waits for its provider slot
+    *before* it takes a global slot, preventing a saturated or slow provider from
+    occupying every global slot while unrelated providers/local routes are ready
+    to run.
 
     Provider-limited batches deliberately reject hidden ModelGateway fallbacks:
     an inner fallback attempt could switch to a provider whose semaphore this
@@ -126,10 +134,28 @@ async def complete_parallel(
     task and waits for their local cancellation paths before propagating.
     """
 
-    batch = tuple(requests)
-    if not batch:
-        raise ValueError("parallel model batch must contain at least one request")
     _validate_limit(max_parallel, name="max_parallel")
+    expected_batch_size = len(requests)
+    if expected_batch_size < 1:
+        raise ValueError("parallel model batch must contain at least one request")
+    if expected_batch_size > MAX_PARALLEL_MODEL_BATCH_REQUESTS:
+        raise ValueError(
+            "parallel model batch must contain at most "
+            f"{MAX_PARALLEL_MODEL_BATCH_REQUESTS} requests"
+        )
+
+    # Sequence.__len__ lets ordinary oversized input fail before any copy. islice
+    # keeps even a mutable/hostile Sequence bounded if iteration disagrees with
+    # the admitted length, so no caller can turn one batch into unbounded task
+    # allocation between admission and materialization.
+    batch = tuple(islice(requests, MAX_PARALLEL_MODEL_BATCH_REQUESTS + 1))
+    if len(batch) != expected_batch_size:
+        raise ValueError("parallel model batch changed during admission")
+    if len(batch) > MAX_PARALLEL_MODEL_BATCH_REQUESTS:
+        raise ValueError(
+            "parallel model batch must contain at most "
+            f"{MAX_PARALLEL_MODEL_BATCH_REQUESTS} requests"
+        )
 
     request_ids = tuple(request.request_id for request in batch)
     if len(request_ids) != len(set(request_ids)):
