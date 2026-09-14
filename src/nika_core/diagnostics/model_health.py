@@ -199,7 +199,7 @@ class OllamaModelHealthProbe:
             or type(self._base_url) is not str
             or not self._base_url.strip()
             or type(self._provider_id) is not str
-            or not self._provider_id.strip()
+            or self._provider_id != "ollama"
             or not self._valid_timeout(self._timeout_seconds)
         ):
             return ModelHealthFact.NO
