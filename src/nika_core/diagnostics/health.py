@@ -21,6 +21,7 @@ from nika_core.product_project_schema import PRODUCT_PROJECT_SCHEMA_VERSION
 from nika_core.resources.contracts import ResourceObserverPort, ResourceSnapshot
 
 SUPPORTED_CONFIG_SCHEMA_VERSION = 1
+_MAX_RESOURCE_MEMORY_BYTES = (1 << 64) - 1
 
 
 class HealthStatus(StrEnum):
@@ -473,6 +474,7 @@ class HealthService:
             or not cls._valid_percent(memory_percent)
             or type(available_memory_bytes) is not int
             or available_memory_bytes < 0
+            or available_memory_bytes > _MAX_RESOURCE_MEMORY_BYTES
         ):
             return None
         return float(cpu_percent), float(memory_percent), available_memory_bytes

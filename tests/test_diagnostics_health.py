@@ -145,6 +145,7 @@ def test_resource_observer_exception_does_not_escape_secret_text(tmp_path: Path)
         ResourceSnapshot(10.0, False, 1),
         ResourceSnapshot(10.0, 20.0, -1),
         ResourceSnapshot(10.0, 20.0, True),
+        ResourceSnapshot(10.0, 20.0, 1 << 64),
     ],
 )
 def test_invalid_resource_measurements_fail_closed(tmp_path: Path, snapshot: object) -> None:
