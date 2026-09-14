@@ -275,6 +275,35 @@ class ModelArtifactRegistry:
     def register(self, descriptor: ModelArtifactDescriptor) -> str:
         if type(descriptor) is not ModelArtifactDescriptor:
             raise TypeError("descriptor must be exact ModelArtifactDescriptor")
+        try:
+            resources = descriptor.resources
+            if type(resources) is not ModelArtifactResources:
+                raise TypeError("resources must be exact ModelArtifactResources")
+            canonical_resources = ModelArtifactResources(
+                min_system_memory_bytes=resources.min_system_memory_bytes,
+                min_available_memory_bytes=resources.min_available_memory_bytes,
+                min_vram_bytes=resources.min_vram_bytes,
+                recommended_memory_bytes=resources.recommended_memory_bytes,
+                cpu_architectures=resources.cpu_architectures,
+            )
+            descriptor = ModelArtifactDescriptor(
+                schema_version=descriptor.schema_version,
+                kind=descriptor.kind,
+                provider_id=descriptor.provider_id,
+                model_id=descriptor.model_id,
+                model_version=descriptor.model_version,
+                source_reference=descriptor.source_reference,
+                license_reference=descriptor.license_reference,
+                integrity_basis=descriptor.integrity_basis,
+                sha256=descriptor.sha256,
+                size_bytes=descriptor.size_bytes,
+                capabilities=descriptor.capabilities,
+                resources=canonical_resources,
+            )
+        except AttributeError as exc:
+            raise TypeError(
+                "descriptor must be a fully initialized ModelArtifactDescriptor"
+            ) from exc
         body = descriptor.canonical_json()
         digest = descriptor.descriptor_digest
         try:
