@@ -14,6 +14,13 @@ SHA_B = "b" * 40
 DIGEST = "d" * 64
 
 
+class _HostileText(str):
+    def __eq__(self, other):
+        return other == "team-role:qa"
+
+    __hash__ = str.__hash__
+
+
 def _worker_result(**overrides: Any) -> WorkerResultEnvelope:
     values: dict[str, Any] = {
         "work_id": "work-1",
@@ -44,10 +51,16 @@ def _review(**overrides: Any) -> ReviewDecision:
     ("overrides", "message"),
     (
         ({"reviewer_id": 1}, "reviewer identity text"),
+        ({"reviewer_id": _HostileText("attacker")}, "reviewer identity text"),
         ({"accepted": 1}, "exact boolean"),
         ({"reason": object()}, "reason text"),
+        ({"reason": _HostileText("forged reason")}, "reason text"),
         ({"evidence_refs": ["review-evidence:trusted:1"]}, "evidence reference text"),
         ({"evidence_refs": (1,)}, "evidence reference text"),
+        (
+            {"evidence_refs": (_HostileText("review-evidence:trusted:1"),)},
+            "evidence reference text",
+        ),
     ),
 )
 def test_review_decision_malformed_authority_ingress_is_bounded(
@@ -62,9 +75,14 @@ def test_review_decision_malformed_authority_ingress_is_bounded(
     ("overrides", "message"),
     (
         ({"work_id": 1}, "identity must be non-empty text"),
+        ({"work_id": _HostileText("work-1")}, "identity must be non-empty text"),
         ({"base_sha": 1}, "base_sha must be a 40-character hexadecimal SHA"),
         ({"coding_result": "not-a-coding-result"}, "coding_result must be CodingResult"),
         ({"producer_actor_id": 1}, "producer actor identity must be non-empty text"),
+        (
+            {"producer_actor_id": _HostileText("team-role:builder")},
+            "producer actor identity must be non-empty text",
+        ),
     ),
 )
 def test_worker_result_malformed_producer_ingress_is_bounded(
