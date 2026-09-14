@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from itertools import islice
+from typing import ContextManager, Protocol
 
 from .contracts import (
     ModelErrorCode,
@@ -19,6 +20,18 @@ DEFAULT_MAX_PARALLEL_MODEL_REQUESTS = 8
 MAX_PARALLEL_MODEL_REQUESTS = 256
 MAX_PARALLEL_MODEL_BATCH_REQUESTS = 256
 MAX_PARALLEL_MODEL_PROVIDER_LIMITS = 256
+
+
+class ParallelModelExecutionScopePort(Protocol):
+    """Trusted per-request execution context entered inside each child task.
+
+    The port intentionally carries only request identity, never provider/model
+    payload authority. A security/runtime adapter may use this seam to bind
+    already-authorized host context to the exact asyncio child task immediately
+    before ``ModelGateway.complete``. The gateway remains the effect authority.
+    """
+
+    def scope_for(self, *, request_id: str) -> ContextManager[None]: ...
 
 
 class ParallelModelStatus(StrEnum):
@@ -103,6 +116,7 @@ async def complete_parallel(
     *,
     max_parallel: int = DEFAULT_MAX_PARALLEL_MODEL_REQUESTS,
     provider_limits: Mapping[str, int] | None = None,
+    execution_scopes: ParallelModelExecutionScopePort | None = None,
 ) -> ParallelModelBatchResult:
     """Run independent canonical ModelGateway requests concurrently.
 
@@ -137,6 +151,14 @@ async def complete_parallel(
     layer did not acquire. Callers that need provider ceilings therefore fan out
     explicit provider routes. Ordinary single-request ModelGateway fallback
     remains available when provider-specific admission is not requested.
+
+    ``execution_scopes`` is an optional trusted composition seam, not an
+    authorization mechanism. Its per-request context is entered only after
+    admission and *inside the exact child asyncio task* immediately around the
+    canonical gateway call. This lets task-bound security authorities bind each
+    child explicitly without allowing a parent task's authority to be inherited.
+    Omitting the scope never weakens ModelGateway authorization; a gateway that
+    requires current host authority still fails closed.
 
     Outcomes are returned in the exact input order. A typed failure of one
     request is isolated as content-free failure evidence and does not erase
@@ -231,7 +253,11 @@ async def complete_parallel(
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 return _admission_timeout_outcome(request)
-            return await execute(replace(request, timeout_seconds=remaining))
+            admitted_request = replace(request, timeout_seconds=remaining)
+            if execution_scopes is None:
+                return await execute(admitted_request)
+            with execution_scopes.scope_for(request_id=request.request_id):
+                return await execute(admitted_request)
         finally:
             if global_acquired:
                 global_semaphore.release()
