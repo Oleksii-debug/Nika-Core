@@ -158,7 +158,7 @@ def test_pause_after_claim_before_running_releases_claim_and_wins(tmp_path) -> N
     store = SQLiteStore(db_path)
     store.initialize()
     runtime = ProbeGateRuntime()
-    queue, task_id, thread_id = paused_task(store, runtime)
+    _queue, task_id, thread_id = paused_task(store, runtime)
 
     prepare_entered = threading.Event()
     prepare_release = threading.Event()
