@@ -18,6 +18,7 @@ from nika_core.model_gateway.contracts import (
 from nika_core.model_gateway.gateway import ModelGateway
 from nika_core.model_gateway.parallel import (
     MAX_PARALLEL_MODEL_BATCH_REQUESTS,
+    ParallelModelStatus,
     complete_parallel,
 )
 
@@ -58,6 +59,31 @@ class _UnavailableProvider(_CountingProvider):
         )
 
 
+class _BlockingProvider(_CountingProvider):
+    def __init__(
+        self,
+        provider_id: str,
+        *,
+        entered: asyncio.Event,
+        release: asyncio.Event,
+    ) -> None:
+        super().__init__(provider_id)
+        self._entered = entered
+        self._release = release
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        self.calls += 1
+        self._entered.set()
+        await self._release.wait()
+        return ModelResponse(
+            request_id=request.request_id,
+            text="ok",
+            provider_id=self.capabilities.provider_id,
+            provider_kind=self.capabilities.kind,
+            model=request.model or "default",
+        )
+
+
 class _RefuseIterationOverBoundSequence(Sequence[ModelRequest]):
     """Proves oversized admission is rejected from len() without copying input."""
 
@@ -75,6 +101,30 @@ class _RefuseIterationOverBoundSequence(Sequence[ModelRequest]):
 
 def _messages() -> tuple[ModelMessage, ...]:
     return (ModelMessage(role="user", content="parallel admission proof"),)
+
+
+def _request(
+    request_id: str,
+    *,
+    provider_id: str,
+    timeout_seconds: float,
+) -> ModelRequest:
+    return ModelRequest(
+        request_id=request_id,
+        messages=_messages(),
+        provider_id=provider_id,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def _assert_admission_timeout(result_index: int, result) -> None:  # type: ignore[no-untyped-def]
+    outcome = result.outcomes[result_index]
+    assert outcome.status is ParallelModelStatus.FAILED
+    assert outcome.response is None
+    assert outcome.failure is not None
+    assert outcome.failure.code is ModelErrorCode.TIMEOUT
+    assert outcome.failure.retryable is False
+    assert outcome.failure.failure_effect is ModelFailureEffect.NO_EFFECT
 
 
 def test_overbound_batch_rejects_before_copy_task_fanout_or_provider_effect(
@@ -102,6 +152,97 @@ def test_overbound_batch_rejects_before_copy_task_fanout_or_provider_effect(
     assert asyncio.run(scenario()) == 0
     assert requests.iteration_attempts == 0
     assert provider.calls == 0
+
+
+def test_global_admission_wait_consumes_existing_request_timeout_budget() -> None:
+    async def scenario():  # type: ignore[no-untyped-def]
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        provider = _BlockingProvider(
+            "provider",
+            entered=entered,
+            release=release,
+        )
+        gateway = ModelGateway()
+        gateway.register(provider)
+        task = asyncio.create_task(
+            complete_parallel(
+                gateway,
+                (
+                    _request(
+                        "blocking",
+                        provider_id="provider",
+                        timeout_seconds=1.0,
+                    ),
+                    _request(
+                        "queued-timeout",
+                        provider_id="provider",
+                        timeout_seconds=0.05,
+                    ),
+                ),
+                max_parallel=1,
+            )
+        )
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+        await asyncio.sleep(0.1)
+        assert provider.calls == 1
+        release.set()
+        result = await asyncio.wait_for(task, timeout=1.0)
+        return result, provider.calls
+
+    result, provider_calls = asyncio.run(scenario())
+
+    assert provider_calls == 1
+    assert result.outcomes[0].status is ParallelModelStatus.COMPLETED
+    _assert_admission_timeout(1, result)
+    assert result.outcomes[1].failure is not None
+    assert result.outcomes[1].failure.provider_id == "provider"
+
+
+def test_provider_admission_wait_consumes_existing_request_timeout_budget() -> None:
+    async def scenario():  # type: ignore[no-untyped-def]
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        provider = _BlockingProvider(
+            "provider",
+            entered=entered,
+            release=release,
+        )
+        gateway = ModelGateway()
+        gateway.register(provider)
+        task = asyncio.create_task(
+            complete_parallel(
+                gateway,
+                (
+                    _request(
+                        "blocking",
+                        provider_id="provider",
+                        timeout_seconds=1.0,
+                    ),
+                    _request(
+                        "provider-queued-timeout",
+                        provider_id="provider",
+                        timeout_seconds=0.05,
+                    ),
+                ),
+                max_parallel=2,
+                provider_limits={"provider": 1},
+            )
+        )
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+        await asyncio.sleep(0.1)
+        assert provider.calls == 1
+        release.set()
+        result = await asyncio.wait_for(task, timeout=1.0)
+        return result, provider.calls
+
+    result, provider_calls = asyncio.run(scenario())
+
+    assert provider_calls == 1
+    assert result.outcomes[0].status is ParallelModelStatus.COMPLETED
+    _assert_admission_timeout(1, result)
+    assert result.outcomes[1].failure is not None
+    assert result.outcomes[1].failure.provider_id == "provider"
 
 
 def test_provider_limited_batch_rejects_hidden_fallback_before_any_effect() -> None:
