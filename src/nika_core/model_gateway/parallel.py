@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from itertools import islice
 
@@ -116,6 +116,13 @@ async def complete_parallel(
     fails closed if a mutable or nonconforming Sequence changes/understates its
     cardinality during admission.
 
+    Each child receives one monotonic request budget beginning before provider or
+    global semaphore admission. Queueing time is charged to the existing
+    ``ModelRequest.timeout_seconds`` budget, and only the remaining budget is
+    passed into the canonical ModelGateway after admission. Expiry while waiting
+    for admission is a typed TIMEOUT with positive NO_EFFECT truth and no provider
+    call.
+
     Optional ``provider_limits`` add route-specific admission for requests pinned
     to explicit ``provider_id`` values. A request waits for its provider slot
     *before* it takes a global slot, preventing a saturated or slow provider from
@@ -186,21 +193,39 @@ async def complete_parallel(
         )
 
     async def run_one(request: ModelRequest) -> ParallelModelOutcome:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + request.timeout_seconds
         provider_semaphore = (
             provider_semaphores.get(request.provider_id)
             if request.provider_id is not None
             else None
         )
-        if provider_semaphore is None:
-            async with global_semaphore:
-                return await execute(request)
+        provider_acquired = False
+        global_acquired = False
+        try:
+            # Provider admission comes first. Otherwise multiple requests queued on
+            # one provider could consume every global slot while merely waiting for
+            # that provider, head-of-line blocking an independent route.
+            if provider_semaphore is not None:
+                provider_acquired = await _acquire_before_deadline(
+                    provider_semaphore, deadline
+                )
+                if not provider_acquired:
+                    return _admission_timeout_outcome(request)
 
-        # Provider admission comes first. Otherwise multiple requests queued on
-        # one provider could consume every global slot while merely waiting for
-        # that provider, head-of-line blocking an independent route.
-        async with provider_semaphore:
-            async with global_semaphore:
-                return await execute(request)
+            global_acquired = await _acquire_before_deadline(global_semaphore, deadline)
+            if not global_acquired:
+                return _admission_timeout_outcome(request)
+
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return _admission_timeout_outcome(request)
+            return await execute(replace(request, timeout_seconds=remaining))
+        finally:
+            if global_acquired:
+                global_semaphore.release()
+            if provider_acquired and provider_semaphore is not None:
+                provider_semaphore.release()
 
     tasks = tuple(asyncio.create_task(run_one(request)) for request in batch)
     try:
@@ -213,6 +238,33 @@ async def complete_parallel(
         raise
 
     return ParallelModelBatchResult(tuple(outcomes))
+
+
+async def _acquire_before_deadline(
+    semaphore: asyncio.Semaphore,
+    deadline: float,
+) -> bool:
+    remaining = deadline - asyncio.get_running_loop().time()
+    if remaining <= 0:
+        return False
+    try:
+        await asyncio.wait_for(semaphore.acquire(), timeout=remaining)
+    except TimeoutError:
+        return False
+    return True
+
+
+def _admission_timeout_outcome(request: ModelRequest) -> ParallelModelOutcome:
+    return ParallelModelOutcome(
+        request_id=request.request_id,
+        status=ParallelModelStatus.FAILED,
+        failure=ParallelModelFailure(
+            code=ModelErrorCode.TIMEOUT,
+            provider_id=request.provider_id,
+            retryable=False,
+            failure_effect=ModelFailureEffect.NO_EFFECT,
+        ),
+    )
 
 
 def _validated_provider_limits(
