@@ -34,7 +34,7 @@ payload contains:
 - explicit missed-run policy;
 - exact next due timestamp plus stable next occurrence ID;
 - exact last-completed timestamp plus stable completed occurrence ID;
-- terminal reason when a condition or deadline ends the series;
+- terminal reason when a condition, deadline, or representable datetime range ends the series;
 - target payload.
 
 A new service instance backed by the same `ScheduledJobStore` reconstructs that state without a
@@ -51,7 +51,10 @@ service persists the first fixed-interval slot strictly after the current clock.
 catch-up storm.
 
 Resume uses the same rule: an overdue persisted intent is retained as the one coalesced occurrence;
-a future intent is not moved earlier.
+a future intent is not moved earlier. Interval definitions whose first successor cannot be represented
+are rejected before persistence. If a previously valid long-lived recurrence later exhausts Python's
+representable datetime range after an occurrence, that occurrence is durably recorded exactly once
+and the series becomes `COMPLETED` with `RANGE_EXHAUSTED` rather than replaying the same effect.
 
 ## Pause, cancel, condition, deadline
 
@@ -90,7 +93,8 @@ test adapter. It contains no wall-clock sleep. The focused suite covers:
 - condition termination;
 - stable per-occurrence identity across restart;
 - conflicting recurrence definition failure;
-- timezone/interval validation before persistence.
+- timezone/interval validation before persistence;
+- unrepresentable interval rejection and durable range-exhaustion completion after one effect.
 
 `HUMAN_TESTED=false`
 
