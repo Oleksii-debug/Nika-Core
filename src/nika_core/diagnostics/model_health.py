@@ -124,7 +124,7 @@ class OllamaModelHealthProbe:
         client_factory: Callable[..., httpx.Client] = httpx.Client,
     ) -> None:
         self._model_id = model_id
-        self._base_url = base_url.rstrip("/")
+        self._base_url = base_url.rstrip("/") if type(base_url) is str else base_url
         self._provider_id = provider_id
         self._timeout_seconds = timeout_seconds
         self._evidence_port = evidence_port
@@ -193,12 +193,12 @@ class OllamaModelHealthProbe:
 
     def _configured(self) -> ModelHealthFact:
         if (
-            not isinstance(self._model_id, str)
+            type(self._model_id) is not str
             or not self._model_id.strip()
             or self._model_id != self._model_id.strip()
-            or not isinstance(self._base_url, str)
+            or type(self._base_url) is not str
             or not self._base_url.strip()
-            or not isinstance(self._provider_id, str)
+            or type(self._provider_id) is not str
             or not self._provider_id.strip()
             or not self._valid_timeout(self._timeout_seconds)
         ):
