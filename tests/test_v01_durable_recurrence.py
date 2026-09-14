@@ -611,3 +611,57 @@ def test_naive_time_and_invalid_interval_fail_before_persistence(tmp_path: Path)
         )
     assert service.get("naive") is None
     assert service.get("bad-interval") is None
+
+
+@pytest.mark.parametrize(
+    ("start_at", "interval_seconds"),
+    (
+        (datetime(2030, 1, 1, 12, 0, tzinfo=UTC), 10**20),
+        (datetime.max.replace(tzinfo=UTC) - timedelta(seconds=30), 60),
+    ),
+)
+def test_unrepresentable_interval_fails_before_persistence_or_handler(
+    tmp_path: Path,
+    start_at: datetime,
+    interval_seconds: int,
+) -> None:
+    store = _store(tmp_path)
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    calls: list[RecurrenceInvocation] = []
+    service, scheduler = _service(store, clock, calls)
+
+    with pytest.raises(ValueError, match="cannot advance start_at"):
+        service.create(
+            recurrence_id="unrepresentable-interval",
+            task_id=TASK_ID,
+            action_id="monitor.check",
+            interval_seconds=interval_seconds,
+            start_at=start_at,
+        )
+
+    assert scheduler.upserts == []
+    assert service.get("unrepresentable-interval") is None
+    assert calls == []
+
+
+def test_interval_int_subclass_fails_before_persistence(tmp_path: Path) -> None:
+    class IntSubclass(int):
+        pass
+
+    store = _store(tmp_path)
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    calls: list[RecurrenceInvocation] = []
+    service, scheduler = _service(store, clock, calls)
+
+    with pytest.raises(ValueError, match="positive integer"):
+        service.create(
+            recurrence_id="subclass-interval",
+            task_id=TASK_ID,
+            action_id="monitor.check",
+            interval_seconds=IntSubclass(60),
+            start_at=clock.value,
+        )
+
+    assert scheduler.upserts == []
+    assert service.get("subclass-interval") is None
+    assert calls == []
