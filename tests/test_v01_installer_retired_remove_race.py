@@ -73,6 +73,19 @@ def _run(
     )
 
 
+def test_cleanup_uses_runtime_recursive_delete_without_child_walk() -> None:
+    payload = SCRIPT.read_text(encoding="utf-8")
+    helper = payload[
+        payload.index("function Remove-NikaTreeNoFollow") :
+        payload.index("function Assert-NikaSafeDestination")
+    ]
+
+    assert "[System.IO.Directory]::Delete($fullPath, $true)" in helper
+    assert "Get-ChildItem" not in helper
+    assert "Remove-NikaTreeNoFollow -Path $child.FullName" not in helper
+    assert 'throw "Installer cleanup did not remove the owned tree."' in helper
+
+
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
 def test_complete_recovery_rejects_retired_junction_before_remove(tmp_path: Path) -> None:
     shell = _powershell()
@@ -154,3 +167,75 @@ def test_complete_recovery_rejects_retired_junction_before_remove(tmp_path: Path
     )
     assert removed.returncode == 0, removed.stderr or removed.stdout
     race_original.rename(retired)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
+def test_descendant_junction_swap_during_cleanup_never_touches_external_target(
+    tmp_path: Path,
+) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    bundle_v1 = _bundle(tmp_path / "descendant-version-1", "v1")
+    bundle_v2 = _bundle(tmp_path / "descendant-version-2", "v2")
+    bundle_v3 = _bundle(tmp_path / "descendant-version-3", "v3")
+    bundle_v4 = _bundle(tmp_path / "descendant-version-4", "v4")
+    destination = tmp_path / "descendant-install" / "Nika Core"
+    rollback = destination.parent / f".{destination.name}.rollback"
+    retired = destination.parent / f".{destination.name}.rollback-retired"
+
+    installed = _run(shell, script=SCRIPT, mode="Install", destination=destination, bundle=bundle_v1)
+    assert installed.returncode == 0, installed.stderr or installed.stdout
+    first_update = _run(shell, script=SCRIPT, mode="Update", destination=destination, bundle=bundle_v2)
+    assert first_update.returncode == 0, first_update.stderr or first_update.stdout
+    second_update = _run(shell, script=SCRIPT, mode="Update", destination=destination, bundle=bundle_v3)
+    assert second_update.returncode == 0, second_update.stderr or second_update.stdout
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v3"
+    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+
+    shutil.copytree(rollback, retired)
+    assert (retired / "_internal" / "runtime.dat").read_text(encoding="utf-8") == "runtime-v2"
+
+    external_target = tmp_path / "external-descendant-cleanup-target"
+    external_target.mkdir()
+    sentinel = external_target / "sentinel.txt"
+    sentinel.write_text("must-not-change", encoding="utf-8")
+
+    payload = SCRIPT.read_text(encoding="utf-8")
+    needle = "            [System.IO.Directory]::Delete($fullPath, $true)\n"
+    assert payload.count(needle) == 1
+    escaped_target = str(external_target).replace("'", "''")
+    injected = (
+        "            if (-not (Get-Variable -Name NikaCleanupRaceInjected -Scope Script "
+        "-ErrorAction SilentlyContinue)) {\n"
+        "                $raceChild = Join-Path $fullPath '_internal'\n"
+        "                if (Test-Path -LiteralPath $raceChild -PathType Container) {\n"
+        "                    $script:NikaCleanupRaceInjected = $true\n"
+        "                    $raceOriginal = $raceChild + '.race-original'\n"
+        "                    [System.IO.Directory]::Move($raceChild, $raceOriginal)\n"
+        f"                    New-Item -ItemType Junction -Path $raceChild -Target '{escaped_target}' | Out-Null\n"
+        "                    $raceLink = Get-Item -LiteralPath $raceChild -Force\n"
+        "                    if (($raceLink.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {\n"
+        "                        throw 'test descendant junction injection did not create a reparse point'\n"
+        "                    }\n"
+        "                }\n"
+        "            }\n"
+        + needle
+    )
+    instrumented = tmp_path / "install_nika_core_descendant_cleanup_race.ps1"
+    instrumented.write_text(payload.replace(needle, injected, 1), encoding="utf-8")
+
+    resumed = _run(
+        shell,
+        script=instrumented,
+        mode="Update",
+        destination=destination,
+        bundle=bundle_v4,
+    )
+
+    assert resumed.returncode == 0, resumed.stderr or resumed.stdout
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v4"
+    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v3"
+    assert not retired.exists()
+    assert sentinel.read_text(encoding="utf-8") == "must-not-change"
