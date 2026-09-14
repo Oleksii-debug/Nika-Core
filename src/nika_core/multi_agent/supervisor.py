@@ -113,14 +113,6 @@ class MultiAgentSupervisor:
         parent = self._store.member(team_id, parent_id)
         self._definitions.require_active(parent.agent_id, parent.agent_version)
         self._validate_child_requests(requests)
-        resume_tokens = {
-            request.member_id: self._initial_resume_token(
-                team_id=team_id,
-                member_id=request.member_id,
-                thread_id=request.thread_id,
-            )
-            for request in requests
-        }
 
         members = tuple(
             self._store.spawn_child(
@@ -149,10 +141,18 @@ class MultiAgentSupervisor:
         async def run_child(member: TeamMember) -> ChildExecution:
             request = by_id[member.member_id]
             async with semaphore:
+                try:
+                    resume_token = self._initial_resume_token(
+                        team_id=team_id,
+                        member_id=member.member_id,
+                        thread_id=member.thread_id,
+                    )
+                except Exception as exc:  # noqa: BLE001 - isolate cursor setup per child.
+                    return self._finish_exception(member, exc)
                 return await self._run_new_child(
                     member,
                     request.payload,
-                    resume_token=resume_tokens[member.member_id],
+                    resume_token=resume_token,
                 )
 
         return tuple(await asyncio.gather(*(run_child(member) for member in members)))
@@ -443,10 +443,12 @@ class MultiAgentSupervisor:
         member_id: str,
         thread_id: str,
     ) -> str | None:
-        if RuntimeCapability.DURABLE_RESUME not in self._runtime.capabilities:
-            return None
+        capabilities = self._runtime.capabilities
+        durable_resume = RuntimeCapability.DURABLE_RESUME in capabilities
         token_factory = getattr(self._runtime, "initial_resume_token", None)
         if not callable(token_factory):
+            if not durable_resume:
+                return None
             raise TypeError(
                 "durable runtime must expose initial_resume_token for crash-safe team execution"
             )
@@ -454,9 +456,13 @@ class MultiAgentSupervisor:
             task_id=self._task_id(team_id, member_id),
             thread_id=thread_id,
         )
-        if not token:
-            raise RuntimeError("durable runtime returned an empty initial resume token")
-        return str(token)
+        if token is None:
+            if durable_resume:
+                raise RuntimeError("durable runtime returned no initial resume token")
+            return None
+        if type(token) is not str or not token or token != token.strip():
+            raise TypeError("runtime returned a malformed initial resume token")
+        return token
 
     def _validate_child_requests(self, requests: tuple[ChildRequest, ...]) -> None:
         seen_member_ids: set[str] = set()
