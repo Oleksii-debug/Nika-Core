@@ -70,3 +70,24 @@ def test_current_markers_with_missing_canonical_foreign_key_fail_schema_shape(
     assert checks["database.foreign-keys"] is HealthStatus.PASS
     assert checks["database.schema.shape"] is HealthStatus.FAIL
     assert report.overall is HealthStatus.FAIL
+
+
+def test_current_markers_with_wrong_canonical_partial_index_predicate_fail_schema_shape(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "nika.db"
+    SQLiteStore(database).initialize()
+    with sqlite3.connect(database) as conn:
+        conn.execute("DROP INDEX idx_agent_definitions_one_active")
+        conn.execute(
+            "CREATE UNIQUE INDEX idx_agent_definitions_one_active "
+            "ON agent_definitions(agent_id) WHERE status = 'retired'"
+        )
+
+    report = _run(database)
+
+    checks = _check_map(report)
+    assert checks["database.integrity"] is HealthStatus.PASS
+    assert checks["database.foreign-keys"] is HealthStatus.PASS
+    assert checks["database.schema.shape"] is HealthStatus.FAIL
+    assert report.overall is HealthStatus.FAIL

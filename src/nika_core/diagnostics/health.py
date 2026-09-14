@@ -98,7 +98,7 @@ class _FileIdentity:
 SchemaColumn = tuple[str, str, int, int]
 SchemaForeignKey = tuple[int, int, str, str, str, str, str, str]
 SchemaIndexColumn = tuple[int, int, str, int, str, int]
-SchemaIndex = tuple[str, int, str, int, tuple[SchemaIndexColumn, ...]]
+SchemaIndex = tuple[str, int, str, int, str, tuple[SchemaIndexColumn, ...]]
 SchemaTable = tuple[
     tuple[SchemaColumn, ...],
     tuple[SchemaForeignKey, ...],
@@ -483,12 +483,22 @@ class HealthService:
                         (index_name,),
                     )
                 )
+                index_sql_row = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+                    (index_name,),
+                ).fetchone()
+                index_sql = (
+                    ""
+                    if index_sql_row is None or index_sql_row[0] is None
+                    else str(index_sql_row[0])
+                )
                 indexes.append(
                     (
                         index_name,
                         int(row[2]),
                         str(row[3]),
                         int(row[4]),
+                        index_sql,
                         index_columns,
                     )
                 )
