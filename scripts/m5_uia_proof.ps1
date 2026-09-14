@@ -737,6 +737,20 @@ try {
     }
 
     if ($VerifySourceSetup) {
+        # The same packaged journey must expose and persist the canonical model choice before
+        # task acceptance. This proof stores only a fake local model identity; it never contacts
+        # Ollama, downloads a model, or claims live model inference/NVDA verification.
+        Wait-BoundTextEvidence 'Модель для нових завдань'
+        $modelRouteControl = Wait-DescendantName 'Тип маршруту моделі' ([System.Windows.Automation.ControlType]::ComboBox)
+        $modelNameControl = Wait-DescendantName 'Назва моделі' ([System.Windows.Automation.ControlType]::Edit)
+        $saveModelControl = Wait-DescendantName 'Зберегти модель' ([System.Windows.Automation.ControlType]::Button)
+        Set-BoundControlFocus $modelRouteControl
+        Set-BoundControlValue $modelNameControl 'uia-proof-model'
+        Set-BoundControlFocus $saveModelControl
+        [System.Windows.Forms.SendKeys]::SendWait(' ')
+        Wait-BoundTextEvidence 'Модель збережено для нових завдань.'
+        Wait-FocusName $commandControl
+
         $sourceRootControl = Wait-DescendantName 'Папка джерел — повний шлях' ([System.Windows.Automation.ControlType]::Edit)
         $sourceAControl = Wait-DescendantName 'Перший файл — назва в цій папці або повний шлях' ([System.Windows.Automation.ControlType]::Edit)
         $sourceBControl = Wait-DescendantName 'Другий файл — назва в цій папці або повний шлях' ([System.Windows.Automation.ControlType]::Edit)
@@ -757,6 +771,54 @@ try {
             [System.Windows.Forms.SendKeys]::SendWait('^n')
             Wait-FocusName $tasksControl
             Wait-BoundTextEvidence 'Командне завдання завершено; збережені результати учасників доступні.'
+
+            $modelBindingProbe = @'
+import hashlib
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+db_path = Path(sys.argv[1]).resolve()
+with sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True) as db:
+    db.row_factory = sqlite3.Row
+    row = db.execute(
+        'SELECT payload_json FROM tasks ORDER BY created_at DESC LIMIT 1'
+    ).fetchone()
+    if row is None:
+        raise SystemExit('controlled proof task is missing')
+    payload = json.loads(row['payload_json'])
+    selection_id = payload.get('v01_model_selection')
+    if not isinstance(selection_id, str) or len(selection_id) != 64:
+        raise SystemExit('task did not freeze a canonical model selection id')
+    selected = db.execute(
+        'SELECT selection_json FROM v01_model_selections WHERE selection_id = ?',
+        (selection_id,),
+    ).fetchone()
+    if selected is None:
+        raise SystemExit('frozen model selection is missing')
+    body = selected['selection_json']
+    if hashlib.sha256(body.encode('utf-8')).hexdigest() != selection_id:
+        raise SystemExit('frozen model selection identity is inconsistent')
+    model = json.loads(body)
+    expected = {
+        'route_kind': 'ollama',
+        'provider_id': 'ollama',
+        'model': 'uia-proof-model',
+        'base_url': 'http://localhost:11434',
+        'credential_ref': None,
+        'private_data_allowed': True,
+        'timeout_seconds': 60.0,
+    }
+    for key, value in expected.items():
+        if model.get(key) != value:
+            raise SystemExit('frozen model selection differs at ' + key)
+print('Controlled packaged task froze canonical local model selection.')
+'@
+            $modelBindingProbe | python - $env:NIKA_DB_PATH
+            if ($LASTEXITCODE -ne 0) {
+                throw 'Packaged model selection was not durably frozen into the controlled task.'
+            }
         } catch {
             # Diagnostics are restricted to this proof's clean, controlled database
             # and the exact bound Nika window. No source contents or stored payloads.
@@ -779,7 +841,7 @@ with sqlite3.connect(Path(sys.argv[1]).resolve().as_uri() + '?mode=ro', uri=True
             $stateProbe | python - $env:NIKA_DB_PATH
             throw
         }
-        Write-Host 'Packaged source setup -> save action -> canonical task/team -> visible completed result verified.'
+        Write-Host 'Packaged model UI -> durable task model selection -> source setup -> canonical task/team -> visible completed result verified.'
     }
 
     Write-Host 'WebView2 UI Automation descendants, exact semantic identity, and keyboard/focus flow verified successfully.'

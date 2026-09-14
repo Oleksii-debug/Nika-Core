@@ -12,6 +12,12 @@ def build_default_action_registry() -> ActionRegistry:
         ActionDefinition("agent.stop", "Stop agent", "Agents", "Ctrl+Shift+S"),
         ActionDefinition("team.sources.configure", "Зберегти джерела команди", "Джерела", None),
         ActionDefinition(
+            "settings.model.configure", "Зберегти модель", "Налаштування", None
+        ),
+        ActionDefinition(
+            "settings.model.refresh", "Перечитати модель", "Налаштування", None
+        ),
+        ActionDefinition(
             "settings.autostart.configure", "Зберегти автозапуск", "Налаштування", None
         ),
         ActionDefinition(

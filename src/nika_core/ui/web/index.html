@@ -19,6 +19,8 @@
     <button type="button" data-action-id="nav.logs" data-focus-target="logs-heading">Журнал</button>
     <button type="button" data-action-id="nav.workspaces" data-focus-target="workspaces-heading">Робочі простори</button>
     <a href="#team-task-heading">Командне завдання</a>
+    <a href="#recovery-heading">Відновлення</a>
+    <a href="#model-settings-heading">Модель</a>
     <a href="#source-setup-heading">Джерела команди</a>
     <a href="#product-project-heading">ProductProject</a>
     <a href="#keyboard-heading">Клавіатура</a>
@@ -35,6 +37,63 @@
       <div class="actions">
         <button type="button" id="autostart-save" data-action-id="settings.autostart.configure" disabled>Зберегти автозапуск</button>
         <button type="button" data-action-id="settings.autostart.refresh" data-error-focus-target="autostart-heading">Перечитати автозапуск</button>
+      </div>
+    </section>
+    <section aria-labelledby="recovery-heading">
+      <h2 id="recovery-heading" tabindex="-1">Відновлення після перезапуску</h2>
+      <p id="recovery-status">Перевірка незавершеної роботи.</p>
+      <dl id="recovery-summary" aria-label="Стан відновлення після перезапуску" hidden>
+        <dt>Безпечне автоматичне продовження</dt>
+        <dd id="recovery-auto-count">0</dd>
+        <dt>Очікує ручного продовження</dt>
+        <dd id="recovery-manual-count">0</dd>
+        <dt>Очікує підтвердження</dt>
+        <dd id="recovery-approval-count">0</dd>
+        <dt>Невизначені зовнішні дії</dt>
+        <dd id="recovery-uncertain-count">0</dd>
+        <dt>Заблоковане відновлення</dt>
+        <dd id="recovery-blocked-count">0</dd>
+        <dt>Невдалі спроби безпечного продовження</dt>
+        <dd id="recovery-failed-count">0</dd>
+      </dl>
+      <p id="recovery-help">Nika автоматично продовжує лише crash-left роботу з канонічно перевіреним checkpoint і без невизначених зовнішніх ефектів. Призупинена, очікуюча підтвердження або невизначена робота не запускається без відповідної authority.</p>
+    </section>
+    <section aria-labelledby="model-settings-heading">
+      <h2 id="model-settings-heading" tabindex="-1">Модель для нових завдань</h2>
+      <p id="model-settings-help">Вибір зберігається до створення нового завдання і не змінює модель уже прийнятого завдання. Для локального Ollama використовується лише локальна адреса. Для API вкажіть лише посилання на змінну середовища у форматі env:НАЗВА; сам ключ у це поле не вводьте.</p>
+
+      <label for="model-route-kind">Тип маршруту моделі</label>
+      <select id="model-route-kind" aria-describedby="model-settings-help model-settings-status">
+        <option value="ollama">Локальний Ollama</option>
+        <option value="openai_compatible">Сумісний API</option>
+      </select>
+
+      <label for="model-provider">Ідентифікатор постачальника</label>
+      <input id="model-provider" type="text" spellcheck="false" autocomplete="off" aria-describedby="model-settings-help">
+
+      <label for="model-name">Назва моделі</label>
+      <input id="model-name" type="text" spellcheck="false" autocomplete="off" aria-describedby="model-settings-help">
+
+      <label for="model-base-url">Базова адреса постачальника</label>
+      <input id="model-base-url" type="url" spellcheck="false" autocomplete="off" aria-describedby="model-settings-help">
+
+      <label for="model-credential-ref">Посилання на змінну середовища API</label>
+      <input id="model-credential-ref" type="text" spellcheck="false" autocomplete="off" aria-describedby="model-credential-help model-settings-status">
+      <p id="model-credential-help">Наприклад: env:OPENAI_API_KEY. Не вводьте сюди API-ключ або пароль. Збережене посилання навмисно не показується після перечитування.</p>
+
+      <label>
+        <input id="model-private-data" type="checkbox" aria-describedby="model-private-help">
+        Дозволити приватні дані для вибраного API
+      </label>
+      <p id="model-private-help">Для локального Ollama цей параметр завжди дозволений локально. Для зовнішнього API вмикайте лише коли політика постачальника це дозволяє.</p>
+
+      <label for="model-timeout">Тайм-аут моделі, секунд</label>
+      <input id="model-timeout" type="number" min="1" max="600" step="1" inputmode="decimal" aria-describedby="model-settings-help">
+
+      <p id="model-settings-status">Перевірка збереженої моделі.</p>
+      <div class="actions">
+        <button type="button" id="model-save" data-action-id="settings.model.configure" data-error-focus-target="model-route-kind">Зберегти модель</button>
+        <button type="button" id="model-reload" data-action-id="settings.model.refresh" data-error-focus-target="model-settings-heading">Перечитати модель</button>
       </div>
     </section>
     <section aria-labelledby="source-setup-heading">
@@ -56,7 +115,7 @@
       <h2 id="command-heading" tabindex="-1">Команда</h2>
       <label for="command-input">Що має зробити Nika?</label>
       <textarea id="command-input" rows="5"></textarea>
-      <p id="execution-mode">Поточний пакет запускає команди через безпечний детермінований режим без LLM.</p>
+      <p id="execution-mode">Нове завдання незмінно фіксує вибрану модель разом з іншими налаштуваннями. Поточний контрольований сценарій команди зберігає власні детерміновані кроки; інтерфейс не підміняє runtime-стан або маршрут моделі.</p>
       <div class="actions">
         <button type="button" data-action-id="task.create" data-error-focus-target="command-input">Створити завдання</button>
         <button type="button" data-action-id="task.pause">Призупинити</button>

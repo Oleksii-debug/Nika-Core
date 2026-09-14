@@ -29,10 +29,15 @@ from nika_core.ui.bridge import UIActionBridge
 from nika_core.ui.bridge_models import UIResult
 from nika_core.ui.desktop_backend import DesktopBackend
 from nika_core.ui.shell import launch_windows_shell
+from nika_core.v01_model_settings import V01ModelSettings
 from nika_core.v01_packaged_team_runtime import V01PackagedThreeAgentRuntime
 from nika_core.v01_packaged_team_state import V01PackagedTeamStateProvider
 from nika_core.v01_source_settings import V01SourceSettings
 from nika_core.windows_autostart import WindowsAutostartService
+
+
+class _StartupRecoveryInventoryError(RuntimeError):
+    """Fail-closed packaged startup boundary; never exposes raw recovery diagnostics."""
 
 
 def _focus(focus_id: str, message: str) -> UIResult:
@@ -52,21 +57,41 @@ def build_windows_bridge(
     actions = build_default_action_registry()
     keymap = Keymap(store, actions)
     source_settings = V01SourceSettings(store, config)
+    model_settings = V01ModelSettings(store)
+
+    def prepare_task_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        source_bound = source_settings.prepare_task_payload(payload)
+        model_snapshot = model_settings.snapshot()
+        if model_snapshot.get("status") == "missing":
+            return dict(source_bound)
+        return model_settings.prepare_task_payload(source_bound)
+
+    runtime = V01PackagedThreeAgentRuntime(
+        store=store,
+        config=config,
+        source_settings=source_settings,
+    )
     backend = DesktopBackend(
         queue=TaskQueue(store),
         agents=AgentRegistry(store),
         workspaces=WorkspaceRegistry(store),
         audit=AuditLog(store),
-        runtime=V01PackagedThreeAgentRuntime(
-            store=store, config=config, source_settings=source_settings
-        ),
-        prepare_task_payload=source_settings.prepare_task_payload,
+        runtime=runtime,
+        prepare_task_payload=prepare_task_payload,
         autostart_service=(
             WindowsAutostartService(Path(sys.executable))
             if sys.platform == "win32" and getattr(sys, "frozen", False)
             else None
         ),
     )
+    try:
+        backend.start_startup_recovery()
+    except Exception as exc:
+        backend.close()
+        raise _StartupRecoveryInventoryError(
+            "packaged startup recovery inventory failed"
+        ) from exc
+
     products = ProductProjectCommandService(ProductProjectRepository(store))
     product_router = PackagedProductCommandRouter(
         products=products,
@@ -85,7 +110,32 @@ def build_windows_bridge(
     )
 
     def source_state() -> Mapping[str, Any]:
-        return {**packaged_state(), "v01_sources": source_settings.snapshot()}
+        state = {**packaged_state(), "v01_sources": source_settings.snapshot()}
+        state["v01_model_settings"] = model_settings.snapshot()
+        return state
+
+    def refresh_model_settings(payload: Mapping[str, Any]) -> UIResult:
+        if payload:
+            return UIResult(
+                request_id="model-settings",
+                status="rejected",
+                message="Перечитування моделі не приймає параметрів.",
+                focus_id="model-route-kind",
+            )
+        snapshot = model_settings.snapshot()
+        if snapshot.get("status") == "invalid":
+            return UIResult(
+                request_id="model-settings",
+                status="failed",
+                message="Не вдалося прочитати збережені налаштування моделі.",
+                focus_id="model-route-kind",
+            )
+        return UIResult(
+            request_id="model-settings",
+            status="completed",
+            message="Збережені налаштування моделі перечитано.",
+            focus_id="model-route-kind",
+        )
 
     bridge = UIActionBridge(
         actions,
@@ -98,6 +148,8 @@ def build_windows_bridge(
             "team.sources.configure": source_settings.configure,
             "settings.autostart.configure": backend.autostart_settings.configure,
             "settings.autostart.refresh": backend.autostart_settings.refresh,
+            "settings.model.configure": model_settings.configure,
+            "settings.model.refresh": refresh_model_settings,
             "nav.tasks": lambda _payload: _focus("tasks-heading", "Завдання відкрито."),
             "nav.agents": lambda _payload: _focus("agents-heading", "Агенти відкрито."),
             "nav.logs": lambda _payload: _focus("logs-heading", "Журнал відкрито."),
@@ -260,7 +312,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             command=args.pf11_proof_command,
             output_path=args.pf11_proof_output,
         )
-    bridge, _products = build_windows_bridge(config)
+    try:
+        bridge, _products = build_windows_bridge(config)
+    except _StartupRecoveryInventoryError:
+        show_recovery_error(
+            "Nika не може безпечно перевірити незавершену роботу після перезапуску. "
+            "Запуск зупинено без автоматичного повторення дій."
+        )
+        return 1
     launch_windows_shell(bridge, title=f"Nika Core {config.app_version}")
     return 0
 
