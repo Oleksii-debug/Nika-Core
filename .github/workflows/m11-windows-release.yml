@@ -74,7 +74,7 @@ jobs:
           python -m pip list --format=freeze --exclude nika-core |
             Set-Content -Encoding utf8NoBOM $constraints
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m pip install --ignore-installed --quiet --constraint $constraints --report ./build/m11/pip-runtime-report.json ".[gui]"
+          python -m pip install --force-reinstall --quiet --constraint $constraints --report ./build/m11/pip-runtime-report.json ".[gui]"
           $resolverExit = $LASTEXITCODE
           Remove-Item $constraints -Force -ErrorAction SilentlyContinue
           if ($resolverExit -ne 0) { exit $resolverExit }

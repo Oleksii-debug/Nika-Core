@@ -10,7 +10,7 @@ WORKFLOWS = (
     ROOT / ".github/workflows/m12-prehuman-release-gate.yml",
 )
 ACTUAL_RUNTIME_INSTALL = (
-    "python -m pip install --ignore-installed --quiet --constraint "
+    "python -m pip install --force-reinstall --quiet --constraint "
     "$constraints --report "
 )
 
@@ -22,6 +22,7 @@ def test_packaged_release_provenance_comes_from_actual_runtime_install(
     workflow = workflow_path.read_text(encoding="utf-8")
 
     assert "pip install --dry-run" not in workflow
+    assert "pip install --ignore-installed" not in workflow
     assert ACTUAL_RUNTIME_INSTALL in workflow
     assert workflow.index(ACTUAL_RUNTIME_INSTALL) < workflow.index(
         "python scripts/m11_release.py"
