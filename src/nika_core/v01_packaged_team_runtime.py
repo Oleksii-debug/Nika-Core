@@ -12,6 +12,11 @@ from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.builder.spec import AgentDefinition, ToolGrant
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.intelligence.provenance import (
+    IntelligenceProvenance,
+    IntelligenceResultStatus,
+)
+from nika_core.model_gateway.gateway import model_identity_fingerprint
 from nika_core.multi_agent import (
     MultiAgentStore,
     MultiAgentSupervisor,
@@ -420,6 +425,10 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
                 "provider_kind": model_result.output["provider_kind"],
                 "model": model_result.output["model"],
             }
+            output["model_analysis_provenance"] = self._model_provenance(
+                model_result,
+                request_correlation_id=f"{shared_task_id}:{thread_id}",
+            )
 
         return RuntimeResult(
             outcome=RuntimeOutcome.COMPLETED,
@@ -461,6 +470,31 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         if not text or "\x00" in text:
             raise ValueError("model result text is invalid")
         return text[:_MAX_MODEL_ANALYSIS_CHARS]
+
+    @staticmethod
+    def _model_provenance(
+        result: RuntimeResult,
+        *,
+        request_correlation_id: str,
+    ) -> dict[str, str]:
+        raw = result.output.get("intelligence_provenance")
+        if not isinstance(raw, Mapping):
+            raise TypeError("model result provenance is missing")
+        provenance = IntelligenceProvenance.from_payload(raw)
+        if provenance.status is not IntelligenceResultStatus.SUCCEEDED:
+            raise ValueError("completed model result provenance is not successful")
+        if provenance.request_correlation_id != request_correlation_id:
+            raise ValueError("model result provenance correlation does not match")
+        if provenance.provider_id != result.output.get("provider_id"):
+            raise ValueError("model result provenance provider does not match")
+        if provenance.provider_kind.value != result.output.get("provider_kind"):
+            raise ValueError("model result provenance provider kind does not match")
+        model = result.output.get("model")
+        if not isinstance(model, str):
+            raise TypeError("model result identity is missing")
+        if provenance.model_fingerprint != model_identity_fingerprint(model):
+            raise ValueError("model result provenance model identity does not match")
+        return provenance.to_payload()
 
     def _source_config(self, task_id: str) -> tuple[Path, Path, Path]:
         # A pre-setup team may be adopted only with the very same declared sources.

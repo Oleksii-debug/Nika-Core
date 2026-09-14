@@ -78,7 +78,7 @@ jobs:
   integrated-windows:
     name: M12 integrated system proof (Windows)
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -165,9 +165,39 @@ jobs:
           "zip_path=$zipPath" >> $env:GITHUB_OUTPUT
           "zip_sha256=$zipSha256" >> $env:GITHUB_OUTPUT
           "zip_size=$($zipItem.Length)" >> $env:GITHUB_OUTPUT
+      - name: Re-prove runtime from exact extracted final ZIP
+        id: exact-final-runtime
+        shell: pwsh
+        run: |
+          $zipPath = '${{ steps.distributable.outputs.zip_path }}'
+          $extractRoot = Join-Path $env:RUNNER_TEMP 'Nika Core — фінальний ZIP'
+          if (Test-Path -LiteralPath $extractRoot) {
+            Remove-Item -LiteralPath $extractRoot -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
+          python -c "from pathlib import Path; from nika_core.packaging.release import verify_release_archive; findings = verify_release_archive(Path(r'$zipPath'), source_sha='${{ env.NIKA_CANDIDATE_SHA }}'); print('\n'.join(findings)); raise SystemExit(1 if findings else 0)"
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Exact final distributable ZIP failed canonical archive verification before extraction.'
+          }
+          Expand-Archive -LiteralPath $zipPath -DestinationPath $extractRoot -Force
+          $env:NIKA_EXTRACTED_RELEASE_ROOT = $extractRoot
+          python -c "import os; from pathlib import Path; from nika_core.packaging.release import _decode_release_manifest, verify_release_manifest; root = Path(os.environ['NIKA_EXTRACTED_RELEASE_ROOT']); manifest = _decode_release_manifest((root / 'release-manifest.json').read_bytes()); assert manifest is not None, 'invalid extracted release manifest'; assert manifest.source_sha == '${{ env.NIKA_CANDIDATE_SHA }}', 'extracted release manifest source SHA mismatch'; findings = verify_release_manifest(root, manifest); print('\n'.join(findings)); raise SystemExit(1 if findings else 0)"
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Extracted exact final distributable failed release-manifest verification.'
+          }
+          $extractedExe = Join-Path $extractRoot 'NikaCore.exe'
+          if (-not (Test-Path -LiteralPath $extractedExe -PathType Leaf)) {
+            throw "Extracted final distributable executable is missing: $extractedExe"
+          }
+          ./scripts/v01_autostart_uia_proof.ps1 -ExePath $extractedExe -WindowTitle 'Nika Core ${{ steps.release.outputs.version }}'
+          $exact_final_artifact_runtime_uia = $true
+          "exact_final_artifact_runtime_uia=$($exact_final_artifact_runtime_uia.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
       - name: Record automated pre-human evidence
         shell: pwsh
         run: |
+          if ('${{ steps.exact-final-runtime.outputs.exact_final_artifact_runtime_uia }}' -ne 'true') {
+            throw 'Exact final artifact runtime/UIA proof did not complete.'
+          }
           $evidence = [ordered]@{
             schema_version = 3
             product_version = '${{ steps.release.outputs.version }}'
@@ -207,6 +237,7 @@ jobs:
           --artifact-reference '${{ steps.distributable.outputs.zip_path }}'
           --evidence ./dist/m12-prehuman-evidence.json
           --source-sha '${{ env.NIKA_CANDIDATE_SHA }}'
+          --product-version '${{ steps.release.outputs.version }}'
       - name: Upload exact pre-human candidate evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -265,7 +296,8 @@ jobs:
             --artifact $zipPath `
             --artifact-reference './dist/NikaCore-${{ steps.release.outputs.version }}-windows-x64.zip' `
             --evidence ./attestation-input/m12-prehuman-evidence.json `
-            --source-sha '${{ github.sha }}'
+            --source-sha '${{ github.sha }}' `
+            --product-version '${{ steps.release.outputs.version }}'
       - name: Attest exact final distributable
         id: attest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6

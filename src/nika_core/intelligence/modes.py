@@ -2,13 +2,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import StrEnum
+from typing import Protocol
 
 from nika_core.model_gateway.contracts import (
     ModelRequest,
     ModelResponse,
     ProviderKind,
 )
-from nika_core.model_gateway.gateway import ModelGateway
+
+
+class ModelCompletionPort(Protocol):
+    """Provider-neutral completion boundary required by intelligence routing."""
+
+    async def complete(self, request: ModelRequest) -> ModelResponse: ...
 
 
 class IntelligenceMode(StrEnum):
@@ -116,7 +122,7 @@ class IntelligenceModeRouter:
     def __init__(
         self,
         *,
-        gateway: ModelGateway,
+        gateway: ModelCompletionPort,
         policy: IntelligenceModePolicy | None = None,
     ) -> None:
         self._gateway = gateway
