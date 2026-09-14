@@ -40,6 +40,18 @@ def test_model_settings_form_is_semantic_and_action_registered() -> None:
         assert f'id="{control_id}"' in html
 
 
+def test_model_settings_backend_focus_precedes_potentially_slow_state_refresh() -> None:
+    app = (ROOT / "src/nika_core/ui/web/app.js").read_text(encoding="utf-8")
+    start = app.index("  async function dispatchModel(")
+    end = app.index("\n  function renderAutostart(", start)
+    body = app[start:end]
+    focus_attempt = "const focusApplied = focusId ? focusElementById(focusId) : false;"
+    refresh = "await refreshState({ announceTeamTransitions: false })"
+    assert focus_attempt in body
+    assert body.index(focus_attempt) < body.index(refresh)
+    assert "if (!focusApplied)" in body
+
+
 def test_packaged_bridge_reuses_integrated_model_settings_and_freezes_task_choice() -> None:
     script = (ROOT / "scripts/nika_windows.py").read_text(encoding="utf-8")
     assert "from nika_core.v01_model_settings import V01ModelSettings" in script

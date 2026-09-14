@@ -825,14 +825,17 @@
     } finally {
       modelPending = false;
       modelGeneration += 1;
-      if (!await refreshState({ announceTeamTransitions: false })) renderModelSettings(null);
       const focusId = result?.focus_id
         || (result?.status === "failed" || result?.status === "rejected"
           ? trigger?.dataset?.errorFocusTarget
           : null);
-      if (focusId) focusElementById(focusId);
-      else if (modelInputs.route_kind && !modelInputs.route_kind.disabled) modelInputs.route_kind.focus();
-      else trigger?.focus?.();
+      const focusApplied = focusId ? focusElementById(focusId) : false;
+      if (!await refreshState({ announceTeamTransitions: false })) renderModelSettings(null);
+      if (!focusApplied) {
+        if (focusId) focusElementById(focusId);
+        else if (modelInputs.route_kind && !modelInputs.route_kind.disabled) modelInputs.route_kind.focus();
+        else trigger?.focus?.();
+      }
     }
   }
 
