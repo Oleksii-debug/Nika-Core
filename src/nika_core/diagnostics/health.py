@@ -217,30 +217,49 @@ class HealthService:
     @classmethod
     @contextmanager
     def _read_only_connection(cls, path: Path) -> Iterator[sqlite3.Connection]:
-        """Inspect a stable copy so SQLite never opens or mutates the source database."""
+        """Inspect one identity-fenced private database family without opening the source."""
         with TemporaryDirectory(prefix="nika-health-db-") as directory:
             snapshot = Path(directory) / "nika-health.db"
-            source_wal = Path(f"{path}-wal")
-            snapshot_wal = Path(f"{snapshot}-wal")
+            sidecars = (
+                ("WAL", Path(f"{path}-wal"), Path(f"{snapshot}-wal")),
+                (
+                    "rollback journal",
+                    Path(f"{path}-journal"),
+                    Path(f"{snapshot}-journal"),
+                ),
+            )
 
             main_before = cls._file_identity(path)
-            wal_before = cls._optional_file_identity(source_wal)
+            sidecars_before = tuple(
+                cls._optional_file_identity(source) for _, source, _ in sidecars
+            )
             copied_main = cls._copy_stable_file(path, snapshot)
             if copied_main != main_before:
                 raise OSError("SQLite main file changed before health snapshot completed")
-            if wal_before is not None:
-                copied_wal = cls._copy_stable_file(source_wal, snapshot_wal)
-                if copied_wal != wal_before:
-                    raise OSError("SQLite WAL changed before health snapshot completed")
+            for (label, source, destination), expected in zip(
+                sidecars, sidecars_before, strict=True
+            ):
+                if expected is None:
+                    continue
+                copied = cls._copy_stable_file(source, destination)
+                if copied != expected:
+                    raise OSError(f"SQLite {label} changed before health snapshot completed")
 
             if cls._file_identity(path) != main_before:
                 raise OSError("SQLite main file changed while health snapshot was captured")
-            if cls._optional_file_identity(source_wal) != wal_before:
-                raise OSError("SQLite WAL changed while health snapshot was captured")
+            for (label, source, _), expected in zip(
+                sidecars, sidecars_before, strict=True
+            ):
+                if cls._optional_file_identity(source) != expected:
+                    raise OSError(f"SQLite {label} changed while health snapshot was captured")
 
-            uri = f"{snapshot.resolve().as_uri()}?mode=ro"
+            # A copied rollback journal may be hot. SQLite must be allowed to recover only
+            # the private copy before the connection becomes query-only. The source DB is
+            # never opened, and any WAL/-shm/journal writes remain inside this temp family.
+            uri = f"{snapshot.resolve().as_uri()}?mode=rw"
             conn = sqlite3.connect(uri, uri=True)
             try:
+                conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
                 conn.execute("PRAGMA query_only = ON")
                 yield conn
             finally:

@@ -43,12 +43,13 @@ credential material.
 
 ### SQLite
 
-Health never opens the configured source database through SQLite. It copies a stable snapshot of the
-main database file plus an active WAL, if present, into a private temporary directory after checking
-file identity before/during/after the copy. SQLite opens only that temporary snapshot using URI
-`mode=ro` and `PRAGMA query_only=ON`, so health cannot create or modify the source database's
-`-wal`/`-shm` family. Concurrent source changes fail the observation closed rather than producing a
-trusted PASS.
+Health never opens the configured source database through SQLite. It captures the main database plus
+any active WAL or rollback journal as one identity-fenced family in a private temporary directory;
+sidecar presence/absence is part of the fence, so creation, removal, or mutation during capture fails
+closed. SQLite opens only that private copy using URI `mode=rw` long enough to recover a copied hot
+rollback journal or establish private WAL state, then health enables `PRAGMA query_only=ON` before
+running checks. Any recovery/checkpoint/`-shm`/journal writes therefore stay inside the temporary
+family and cannot mutate the configured source database.
 
 Checks include database integrity, foreign keys, exact supported migration history, and canonical
 schema shape. Required schema shape is derived from a private temporary database initialized by the
