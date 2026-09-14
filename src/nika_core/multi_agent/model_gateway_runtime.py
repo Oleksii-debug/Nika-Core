@@ -19,6 +19,7 @@ from nika_core.model_gateway.contracts import (
     ModelMessage,
     ModelRequest,
     PrivacyClass,
+    ProviderCapabilities,
     ProviderKind,
 )
 from nika_core.model_gateway.gateway import ModelGateway, model_identity_fingerprint
@@ -81,7 +82,7 @@ class ModelGatewayAgentRuntime:
         self._timeout_seconds = timeout_seconds
         self._privacy = privacy
         self._temperature = temperature
-        self._active: dict[tuple[str, str], asyncio.Task[Any]] = {}
+        self._active: dict[tuple[str, str], tuple[asyncio.Task[Any], bool]] = {}
         self._active_lock = asyncio.Lock()
 
     @property
@@ -95,13 +96,43 @@ class ModelGatewayAgentRuntime:
     @property
     def capabilities(self) -> frozenset[RuntimeCapability]:
         capabilities = {
-            RuntimeCapability.CANCELLATION,
             RuntimeCapability.PARALLELISM,
             RuntimeCapability.SUBAGENTS,
         }
+        if self._route_supports_hard_cancellation():
+            capabilities.add(RuntimeCapability.CANCELLATION)
         if self._provider_kind is ProviderKind.LOCAL:
             capabilities.add(RuntimeCapability.LOCAL_MODELS)
         return frozenset(capabilities)
+
+    def _route_supports_hard_cancellation(self) -> bool:
+        """Read hard-cancel truth from the exact canonical ModelGateway route, fail closed."""
+
+        try:
+            # Reuse the gateway's effect-free canonical selector rather than duplicating
+            # provider-registry/default-route semantics in this runtime adapter.
+            provider = self._gateway._select(  # noqa: SLF001 - same canonical gateway boundary
+                ModelRequest(
+                    request_id=f"runtime-capability:{self._provider_id}",
+                    messages=(ModelMessage(role="user", content="capability probe"),),
+                    provider_id=self._provider_id,
+                    provider_kind=self._provider_kind,
+                    model=self._model,
+                    privacy=PrivacyClass.PUBLIC,
+                    timeout_seconds=1.0,
+                )
+            )
+            capabilities = provider.capabilities
+        except (AttributeError, ModelGatewayError, TypeError, ValueError):
+            return False
+        return (
+            type(capabilities) is ProviderCapabilities
+            and type(capabilities.provider_id) is str
+            and capabilities.provider_id == self._provider_id
+            and capabilities.kind is self._provider_kind
+            and type(capabilities.supports_hard_cancellation) is bool
+            and capabilities.supports_hard_cancellation
+        )
 
     def initial_resume_token(self, *, task_id: str, thread_id: str) -> str:
         """Persist an opaque in-flight marker without claiming durable inference resume."""
@@ -154,15 +185,16 @@ class ModelGatewayAgentRuntime:
         key = (request.task_id, request.thread_id)
         async with self._active_lock:
             existing = self._active.get(key)
-            if existing is not None and not existing.done():
+            if existing is not None and not existing[0].done():
                 return RuntimeResult(
                     outcome=RuntimeOutcome.FAILED,
                     output={"recoverable": True, "provider_id": self._provider_id},
                     error="This agent already has an active model request.",
                     error_code=RuntimeErrorCode.DUPLICATE_ACTIVE,
                 )
+            hard_cancellable = self._route_supports_hard_cancellation()
             task = asyncio.create_task(self._gateway.complete(model_request))
-            self._active[key] = task
+            self._active[key] = (task, hard_cancellable)
 
         try:
             response = await task
@@ -186,7 +218,8 @@ class ModelGatewayAgentRuntime:
             )
         finally:
             async with self._active_lock:
-                if self._active.get(key) is task:
+                active = self._active.get(key)
+                if active is not None and active[0] is task:
                     self._active.pop(key, None)
 
         if response.request_id != model_request.request_id:
@@ -268,8 +301,11 @@ class ModelGatewayAgentRuntime:
     async def cancel(self, *, task_id: str, thread_id: str) -> bool:
         key = (task_id, thread_id)
         async with self._active_lock:
-            task = self._active.get(key)
-            if task is None or task.done():
+            active = self._active.get(key)
+            if active is None or active[0].done():
+                return False
+            task, hard_cancellable = active
+            if not hard_cancellable:
                 return False
             task.cancel()
         try:
