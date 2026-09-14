@@ -80,7 +80,7 @@ def test_operator_projection_exposes_required_factory_fields() -> None:
         "CANDIDATE": "a" * 40,
         "TEST": "unknown",
         "QA": "work-654:qa=passed",
-        "INTEGRATION": "integration-654=pending",
+        "INTEGRATION": "not_started",
         "NEXT": "continue_work:work-654",
     }
 
