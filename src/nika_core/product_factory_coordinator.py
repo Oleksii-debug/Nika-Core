@@ -102,6 +102,10 @@ class WorkRecord:
     review: ReviewDecision | None = None
     blocker: str | None = None
 
+    def __post_init__(self) -> None:
+        if type(self.state) is not WorkState:
+            raise CoordinatorError("work state must be an exact WorkState")
+
 
 @dataclass(frozen=True, slots=True)
 class CoordinatorSnapshot:
@@ -326,6 +330,8 @@ class ProductFactoryCoordinator:
         self._advance_ready()
 
     def _validate_restored_record(self, record: WorkRecord) -> None:
+        if type(record.state) is not WorkState:
+            raise CoordinatorError("snapshot work state must be an exact WorkState")
         request, result, review, blocker = record.request, record.result, record.review, record.blocker
         if result is not None:
             self._validate_result_identity(request, result)
