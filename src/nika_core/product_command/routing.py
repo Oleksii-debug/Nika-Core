@@ -51,6 +51,16 @@ _DEVELOPMENT_REQUEST_PATTERNS = (
         r".*\b(розроби|розробити|реалізуй|реалізувати|виправ|виправити)\b",
         re.IGNORECASE,
     ),
+    re.compile(
+        r"\b(develop|implement|fix)\b.*\bhttps?://github\.com/"
+        r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(?:issues|pull)/\d+\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(розроби|розробити|реалізуй|реалізувати|виправ|виправити)\b.*"
+        r"\bhttps?://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(?:issues|pull)/\d+\b",
+        re.IGNORECASE,
+    ),
 )
 _DEVELOPMENT_ACTION_AUTHORITY_PATTERNS = (
     re.compile(
@@ -79,6 +89,22 @@ _DEVELOPMENT_ACTION_AUTHORITY_PATTERNS = (
         r"(?:https?://github\.com/)?[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\b"
         r".*\b(?:issue|pr|задачу|задача)\s*#?\d+\b"
         r"\s*(?::|;|,|—|-)\s*(?:будь\s+ласка,?\s+)?(?:розроби|реалізуй|виправ)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:please\s+)?(?:develop|implement|fix)\s+https?://github\.com/"
+        r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(?:issues|pull)/\d+\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:please\s+)?(?:can|could|would|will)\s+you\s+(?:please\s+)?"
+        r"(?:develop|implement|fix)\s+https?://github\.com/"
+        r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(?:issues|pull)/\d+\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:будь\s+ласка,?\s+)?(?:розроби|реалізуй|виправ)\s+https?://github\.com/"
+        r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(?:issues|pull)/\d+\b",
         re.IGNORECASE,
     ),
 )
