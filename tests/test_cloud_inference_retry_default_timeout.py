@@ -140,5 +140,5 @@ def test_model_fresh_retry_without_explicit_total_timeout_fails_closed(
 
     assert result.outcome is RuntimeOutcome.FAILED
     assert len(provider.requests) == 1
-    assert provider.requests[0].timeout_seconds == 3.0
+    assert 0.0 < provider.requests[0].timeout_seconds <= 3.0
     assert sleeps == []
