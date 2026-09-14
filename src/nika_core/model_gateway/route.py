@@ -156,12 +156,13 @@ def _rebind_upstream_error(
         return _route_error(route_id, "routed provider returned a malformed error")
     if type(error.failure_effect) is not ModelFailureEffect:
         return _route_error(route_id, "routed provider returned a malformed error")
-    if error.provider_id is not None:
-        if type(error.provider_id) is not str or error.provider_id != upstream_provider_id:
-            return _route_error(
-                route_id,
-                "routed provider returned an error for another provider identity",
-            )
+    if error.provider_id is not None and (
+        type(error.provider_id) is not str or error.provider_id != upstream_provider_id
+    ):
+        return _route_error(
+            route_id,
+            "routed provider returned an error for another provider identity",
+        )
     return ModelGatewayError(
         error.code,
         "routed model provider failed",
