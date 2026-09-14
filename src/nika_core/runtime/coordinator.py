@@ -555,6 +555,17 @@ class TaskRuntimeCoordinator:
 
             current = self._task_state_with_connection(conn, task_id)
             if current == TaskState.RETRYING:
+                session = self._sessions.get_with_connection(conn, task_id)
+                if session is not None:
+                    if session.runtime_id != runtime.runtime_id:
+                        raise ValueError(
+                            f"Task {task_id} belongs to runtime {session.runtime_id}, "
+                            f"not {runtime.runtime_id}"
+                        )
+                    if session.thread_id != thread_id:
+                        raise ValueError(
+                            "Cancellation thread does not match persisted runtime session"
+                        )
                 self._queue.transition_with_connection(conn, task_id, TaskState.CANCELLED)
                 self._sessions.delete_with_connection(conn, task_id)
                 self._idempotency.complete_with_connection(
@@ -563,6 +574,7 @@ class TaskRuntimeCoordinator:
                     {
                         "accepted": True,
                         "task_state": TaskState.CANCELLED.value,
+                        "runtime_call_skipped": True,
                     },
                 )
                 self._audit.append_with_connection(
@@ -576,7 +588,7 @@ class TaskRuntimeCoordinator:
                         "operation_key": operation_key,
                         "previous_task_state": current.value,
                         "task_state_changed": True,
-                        "runtime_cancel_called": False,
+                        "runtime_call_skipped": True,
                     },
                 )
                 return True

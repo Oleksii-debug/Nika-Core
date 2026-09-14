@@ -26,6 +26,7 @@ from nika_core.model_gateway.gateway import ModelGateway
 from nika_core.multi_agent.model_gateway_runtime import ModelGatewayAgentRuntime
 from nika_core.runtime.contracts import RuntimeErrorCode, RuntimeOutcome, RuntimeRequest
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
+from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
 from nika_core.runtime.retry import RetryPolicy
 
 
@@ -327,7 +328,12 @@ def test_public_cancellation_during_backoff_is_durable_and_blocks_later_transpor
             sleep_started.set()
             await release_sleep.wait()
 
+        async def unexpected_runtime_cancel(*, task_id: str, thread_id: str) -> bool:
+            del task_id, thread_id
+            raise AssertionError("RETRYING cancellation must not call the provider runtime")
+
         monkeypatch.setattr(asyncio, "sleep", blocked_sleep)
+        monkeypatch.setattr(runtime, "cancel", unexpected_runtime_cancel)
         running = asyncio.create_task(
             coordinator.start(
                 runtime,
@@ -345,6 +351,18 @@ def test_public_cancellation_during_backoff_is_durable_and_blocks_later_transpor
             assert accepted is True
             assert queue.get(task_id).state is TaskState.CANCELLED
             assert coordinator.sessions.get(task_id) is None
+
+            cancel_records = [
+                record
+                for record in IdempotencyLedger(store).list_for_task(task_id)
+                if record.operation_type == "runtime.cancel"
+            ]
+            assert len(cancel_records) == 1
+            cancel_record = cancel_records[0]
+            assert cancel_record.status is IdempotencyStatus.COMPLETED
+            assert cancel_record.result is not None
+            assert cancel_record.result["accepted"] is True
+            assert cancel_record.result["runtime_call_skipped"] is True
 
             restarted_queue = TaskQueue(store)
             restarted_coordinator = TaskRuntimeCoordinator(restarted_queue, AuditLog(store))
