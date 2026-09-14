@@ -32,6 +32,16 @@ class RefreshDisposition(StrEnum):
     FAILED = "failed"
 
 
+class ResearchFetchFailureClass(StrEnum):
+    NETWORK = "network"
+    PRIVATE = "private"
+    AUTH = "auth"
+    UNSUPPORTED = "unsupported"
+    POLICY = "policy"
+    HTTP = "http"
+    RESOURCE = "resource"
+
+
 class FreshnessState(StrEnum):
     UNKNOWN = "unknown"
     CURRENT = "current"
@@ -159,6 +169,7 @@ class RefreshResult:
     document_id: str | None = None
     error_code: str | None = None
     message: str = ""
+    failure_class: ResearchFetchFailureClass | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -417,6 +417,7 @@ class HttpResearchService:
                 status_code=result.status_code,
                 error_code=result.error_code,
                 message=result.message,
+                failure_class=result.failure_class,
             )
 
         if result.body is None or result.media_type is None:
