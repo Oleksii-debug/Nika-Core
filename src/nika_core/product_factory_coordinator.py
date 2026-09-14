@@ -179,7 +179,10 @@ class ProductFactoryCoordinator:
         request = record.request
         self._validate_result_identity(request, envelope)
         if not envelope.coding_result.succeeded:
-            blocker = envelope.coding_result.failure.message if envelope.coding_result.failure else None
+            failure = envelope.coding_result.failure
+            if failure is None:
+                raise CoordinatorError("failed worker result requires failure evidence")
+            blocker = _canonical_worker_failure_message(failure.message)
             updated = WorkRecord(request, WorkState.REPAIR_REQUIRED, envelope, blocker=blocker)
         else:
             self._validate_success_evidence(request, envelope.coding_result.test_evidence)
@@ -360,11 +363,22 @@ class ProductFactoryCoordinator:
             if result is None or not blocker:
                 raise CoordinatorError("repair_required snapshot work requires result evidence and blocker")
             if result.coding_result.succeeded:
+                _canonical_durable_text(blocker, label="repair blocker")
                 if review is None or review.accepted or blocker != review.reason:
                     raise CoordinatorError("review-rejected repair snapshot is internally inconsistent")
                 self._validate_success_evidence(request, result.coding_result.test_evidence)
-            elif review is not None:
-                raise CoordinatorError("worker-failed repair snapshot cannot contain review evidence")
+            else:
+                if review is not None:
+                    raise CoordinatorError("worker-failed repair snapshot cannot contain review evidence")
+                failure = result.coding_result.failure
+                if failure is None:
+                    raise CoordinatorError("worker-failed repair snapshot requires failure evidence")
+                failure_message = _canonical_worker_failure_message(failure.message)
+                canonical_blocker = _canonical_worker_failure_message(blocker)
+                if canonical_blocker != failure_message:
+                    raise CoordinatorError(
+                        "worker-failed repair blocker does not match failure evidence"
+                    )
             return
         if record.state is WorkState.BLOCKED:
             if result is not None or review is not None or blocker is None:
@@ -536,6 +550,10 @@ def _canonical_durable_text(
     ):
         raise CoordinatorError(f"{label} must be canonical single-line text")
     return value
+
+
+def _canonical_worker_failure_message(value: object) -> str:
+    return _canonical_durable_text(value, label="worker failure message")
 
 
 def _canonical_evidence_ref(value: object) -> bool:
