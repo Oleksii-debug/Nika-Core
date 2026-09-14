@@ -98,6 +98,46 @@ def test_memoryview_input_is_consumed_without_retaining_mutable_audio() -> None:
     assert decision.rms > 0.05
 
 
+def test_received_config_is_canonically_revalidated() -> None:
+    config = VoiceActivityConfig()
+    object.__setattr__(config, "attack_frames", 0)
+
+    with pytest.raises(ValueError, match="attack_frames"):
+        VoiceActivityDetector(config)
+
+
+def test_detector_does_not_retain_caller_owned_config_alias() -> None:
+    config = VoiceActivityConfig(attack_frames=2, max_frame_ms=20)
+    detector = VoiceActivityDetector(config)
+    object.__setattr__(config, "attack_frames", 1)
+    object.__setattr__(config, "max_frame_ms", 1_000)
+
+    with pytest.raises(ValueError, match="frame bound"):
+        detector.process(_frame(0, samples=321))
+    first = detector.process(_frame(2_000))
+
+    assert first.speech_active is False
+    assert first.started is False
+
+
+def test_public_config_snapshot_cannot_mutate_detector() -> None:
+    detector = VoiceActivityDetector(
+        VoiceActivityConfig(attack_frames=2, max_frame_ms=20)
+    )
+    exposed = detector.config
+    object.__setattr__(exposed, "attack_frames", 1)
+    object.__setattr__(exposed, "max_frame_ms", 1_000)
+
+    assert detector.config.attack_frames == 2
+    assert detector.config.max_frame_ms == 20
+    with pytest.raises(ValueError, match="frame bound"):
+        detector.process(_frame(0, samples=321))
+    first = detector.process(_frame(2_000))
+
+    assert first.speech_active is False
+    assert first.started is False
+
+
 @pytest.mark.parametrize("value", [b"", b"\x00", "audio", object()])
 def test_invalid_pcm_input_fails_closed(value) -> None:
     detector = VoiceActivityDetector()
