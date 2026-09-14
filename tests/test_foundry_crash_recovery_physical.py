@@ -17,6 +17,7 @@ from nika_core.model_gateway.contracts import (
 )
 from nika_core.model_gateway.foundry_local import FoundryModelEvidence
 from scripts.prove_foundry_crash_recovery import (
+    _CALL_COMPLETE_SCHEMA,
     _CHILD_READY_SCHEMA,
     _CrashWindowProvider,
     _ensure_new_proof_directory,
@@ -154,7 +155,12 @@ def test_crash_window_marker_requires_real_inflight_provider_call_and_hashes_req
     async def scenario() -> None:
         inner = _BarrierFoundry()
         ready_path = tmp_path / "ready.json"
-        provider = _CrashWindowProvider(inner, ready_path)  # type: ignore[arg-type]
+        complete_path = tmp_path / "complete.json"
+        provider = _CrashWindowProvider(  # type: ignore[arg-type]
+            inner,
+            ready_path,
+            complete_path,
+        )
         request = _request()
 
         execution = asyncio.create_task(provider.complete(request))
@@ -165,6 +171,7 @@ def test_crash_window_marker_requires_real_inflight_provider_call_and_hashes_req
 
         assert ready_path.exists()
         assert not execution.done()
+        assert not complete_path.exists()
         evidence = json.loads(ready_path.read_text(encoding="utf-8"))
         assert evidence["schema"] == _CHILD_READY_SCHEMA
         assert evidence["native_request_observed_inflight"] is True
@@ -177,6 +184,9 @@ def test_crash_window_marker_requires_real_inflight_provider_call_and_hashes_req
         inner.release.set()
         response = await execution
         assert response.text == "finished"
+        assert complete_path.exists()
+        completed = json.loads(complete_path.read_text(encoding="utf-8"))
+        assert completed["schema"] == _CALL_COMPLETE_SCHEMA
 
     asyncio.run(scenario())
 
