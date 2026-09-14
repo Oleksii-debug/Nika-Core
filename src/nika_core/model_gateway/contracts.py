@@ -101,7 +101,7 @@ class ModelRequest:
         canonical_messages = tuple(self.messages)
         if not canonical_messages:
             raise ValueError("at least one message is required")
-        if any(not isinstance(message, ModelMessage) for message in canonical_messages):
+        if any(type(message) is not ModelMessage for message in canonical_messages):
             raise TypeError("messages must contain only ModelMessage values")
         object.__setattr__(self, "messages", canonical_messages)
 
