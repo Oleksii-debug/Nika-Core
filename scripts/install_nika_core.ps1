@@ -150,33 +150,60 @@ function Remove-NikaTreeNoFollow {
     if (-not (Test-Path -LiteralPath $Path)) {
         return
     }
-    Assert-NikaNoReparsePathChain -Path $Path
-    $rootItem = Get-Item -LiteralPath $Path -Force
+
+    $fullPath = Get-NikaFullPath $Path
+    Assert-NikaNoReparsePathChain -Path $fullPath
+    $rootItem = Get-Item -LiteralPath $fullPath -Force
     if (($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "Installer cleanup refuses reparse points."
     }
     if (-not $rootItem.PSIsContainer) {
-        Remove-Item -LiteralPath $Path -Force
+        Remove-Item -LiteralPath $fullPath -Force
+        if (Test-Path -LiteralPath $fullPath) {
+            throw "Installer cleanup did not remove the owned path."
+        }
         return
     }
 
-    foreach ($child in @(Get-ChildItem -LiteralPath $Path -Force)) {
-        if (($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "Installer cleanup refuses nested reparse points."
+    # Directory.Delete(recursive=true) has the no-follow behavior required for
+    # destructive cleanup on Windows: a directory reparse entry is removed as
+    # an entry instead of recursively deleting through its external target.
+    # A nested junction can leave the owned parent non-empty on some runtimes,
+    # so retry once after revalidating the still-owned root/ancestor authority.
+    $attempt = 0
+    while (Test-Path -LiteralPath $fullPath) {
+        $attempt += 1
+        Assert-NikaNoReparsePathChain -Path $fullPath
+        $currentRoot = Get-Item -LiteralPath $fullPath -Force
+        if (($currentRoot.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Installer cleanup refuses reparse points."
         }
-        if ($child.PSIsContainer) {
-            Remove-NikaTreeNoFollow -Path $child.FullName
+        if (-not $currentRoot.PSIsContainer) {
+            throw "Installer cleanup root changed type during deletion."
         }
-        else {
-            Remove-Item -LiteralPath $child.FullName -Force
+
+        $deleteError = $null
+        try {
+            [System.IO.Directory]::Delete($fullPath, $true)
+        }
+        catch [System.IO.IOException] {
+            $deleteError = $_
+        }
+
+        if (-not (Test-Path -LiteralPath $fullPath)) {
+            break
+        }
+        if ($attempt -ge 2) {
+            if ($null -ne $deleteError) {
+                throw $deleteError
+            }
+            throw "Installer cleanup did not remove the owned tree."
         }
     }
 
-    Assert-NikaNoReparsePathChain -Path $Path
-    if (@(Get-ChildItem -LiteralPath $Path -Force).Count -ne 0) {
-        throw "Installer cleanup tree changed during validation."
+    if (Test-Path -LiteralPath $fullPath) {
+        throw "Installer cleanup did not remove the owned tree."
     }
-    Remove-Item -LiteralPath $Path -Force
 }
 
 function Assert-NikaSafeDestination {
