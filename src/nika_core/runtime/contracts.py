@@ -85,6 +85,12 @@ class RuntimeResumeRequest:
     timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
+        if (
+            type(self.task_id) is not str
+            or type(self.thread_id) is not str
+            or type(self.resume_token) is not str
+        ):
+            raise TypeError("resume identifiers must be exact strings")
         if not self.task_id.strip() or not self.thread_id.strip() or not self.resume_token.strip():
             raise ValueError("resume identifiers must not be empty")
         if self.max_steps < 1:
@@ -144,9 +150,11 @@ class RuntimeResult:
     def __post_init__(self) -> None:
         if not isinstance(self.outcome, RuntimeOutcome):
             raise TypeError("outcome must be a RuntimeOutcome")
+        if self.resume_token is not None and type(self.resume_token) is not str:
+            raise TypeError("resume_token must be an exact string when provided")
         if (
             self.outcome in {RuntimeOutcome.WAITING_APPROVAL, RuntimeOutcome.PAUSED}
-            and (not isinstance(self.resume_token, str) or not self.resume_token.strip())
+            and (self.resume_token is None or not self.resume_token.strip())
         ):
             raise ValueError("resumable outcome requires a usable resume token")
         if self.outcome == RuntimeOutcome.FAILED and not self.error:
