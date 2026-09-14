@@ -11,6 +11,34 @@ from nika_core.model_gateway.contracts import (
 )
 
 
+class _HostileInt(int):
+    def __float__(self) -> float:
+        raise AssertionError("hostile int conversion must not run")
+
+    def __lt__(self, _other: object) -> bool:
+        raise AssertionError("hostile int comparison must not run")
+
+    def __le__(self, _other: object) -> bool:
+        raise AssertionError("hostile int comparison must not run")
+
+    def __gt__(self, _other: object) -> bool:
+        raise AssertionError("hostile int comparison must not run")
+
+
+class _HostileFloat(float):
+    def __float__(self) -> float:
+        raise AssertionError("hostile float conversion must not run")
+
+    def __lt__(self, _other: object) -> bool:
+        raise AssertionError("hostile float comparison must not run")
+
+    def __le__(self, _other: object) -> bool:
+        raise AssertionError("hostile float comparison must not run")
+
+    def __gt__(self, _other: object) -> bool:
+        raise AssertionError("hostile float comparison must not run")
+
+
 def _request(*, timeout_seconds: object) -> ModelRequest:
     return ModelRequest(
         request_id="request-1",
@@ -21,6 +49,20 @@ def _request(*, timeout_seconds: object) -> ModelRequest:
 
 @pytest.mark.parametrize("value", (True, False, "30", None))
 def test_model_request_timeout_rejects_non_numeric_or_boolean(value: object) -> None:
+    with pytest.raises(TypeError, match="timeout_seconds must be numeric"):
+        _request(timeout_seconds=value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        _HostileInt(30),
+        _HostileFloat(30.0),
+    ),
+)
+def test_model_request_timeout_rejects_numeric_subclasses_before_hooks(
+    value: object,
+) -> None:
     with pytest.raises(TypeError, match="timeout_seconds must be numeric"):
         _request(timeout_seconds=value)
 
@@ -51,6 +93,22 @@ def test_model_request_timeout_accepts_finite_positive_numbers(value: float) -> 
 @pytest.mark.parametrize("field", ("max_cpu_percent", "max_memory_percent"))
 @pytest.mark.parametrize("value", (True, False, "50"))
 def test_resource_percentages_reject_non_numeric_or_boolean(
+    field: str,
+    value: object,
+) -> None:
+    with pytest.raises(TypeError, match=f"{field} must be numeric"):
+        ModelResourcePolicy(**{field: value})  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("field", ("max_cpu_percent", "max_memory_percent"))
+@pytest.mark.parametrize(
+    "value",
+    (
+        _HostileInt(50),
+        _HostileFloat(50.0),
+    ),
+)
+def test_resource_percentages_reject_numeric_subclasses_before_hooks(
     field: str,
     value: object,
 ) -> None:
@@ -104,6 +162,11 @@ def test_resource_percentages_accept_finite_bounded_numbers(
 def test_min_available_memory_requires_strict_integer(value: object) -> None:
     with pytest.raises(TypeError, match="must be an integer"):
         ModelResourcePolicy(min_available_memory_bytes=value)  # type: ignore[arg-type]
+
+
+def test_min_available_memory_rejects_integer_subclass_before_hooks() -> None:
+    with pytest.raises(TypeError, match="must be an integer"):
+        ModelResourcePolicy(min_available_memory_bytes=_HostileInt(1024))
 
 
 @pytest.mark.parametrize("value", (0, -1))
