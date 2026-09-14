@@ -17,6 +17,9 @@ from nika_core.product_command.routing import route_command
         "розроби issue #654 у repository Oleksii-debug/Nika-Core",
         "репозиторій Oleksii-debug/Nika-Core issue #654: виправ",
         "repo Oleksii-debug/Nika-Core PR 711 — реалізуй",
+        "fix https://github.com/Oleksii-debug/Nika-Core/issues/654",
+        "Could you implement https://github.com/Oleksii-debug/Nika-Core/pull/711?",
+        "виправ https://github.com/Oleksii-debug/Nika-Core/issues/654",
     ),
 )
 def test_repository_development_intent_routes_to_product_factory(command: str) -> None:
@@ -42,6 +45,10 @@ def test_repository_development_intent_routes_to_product_factory(command: str) -
         'What does "develop issue #654 in repository Oleksii-debug/Nika-Core" mean?',
         "Please develop an explanation of why issue #654 in repository Oleksii-debug/Nika-Core should not be implemented.",
         "репозиторій Oleksii-debug/Nika-Core issue #654: поясни",
+        "explain https://github.com/Oleksii-debug/Nika-Core/issues/654",
+        "fix https://github.example.com/Oleksii-debug/Nika-Core/issues/654",
+        "fix https://github.com.evil.example/Oleksii-debug/Nika-Core/issues/654",
+        "fix https://github.com/Oleksii-debug/Nika-Core/issues/not-a-number",
     ),
 )
 def test_incomplete_or_read_only_repository_intent_stays_agent_task(command: str) -> None:
@@ -60,6 +67,8 @@ def test_incomplete_or_read_only_repository_intent_stays_agent_task(command: str
         "Please do not automatically develop issue #654 in repository Oleksii-debug/Nika-Core",
         "не розроби issue #654 у repository Oleksii-debug/Nika-Core",
         "репозиторій Oleksii-debug/Nika-Core issue #654: не виправ",
+        "do not fix https://github.com/Oleksii-debug/Nika-Core/issues/654",
+        "не виправ https://github.com/Oleksii-debug/Nika-Core/issues/654",
     ),
 )
 def test_negated_repository_development_intent_stays_agent_task(command: str) -> None:
@@ -75,6 +84,7 @@ def test_negated_repository_development_intent_stays_agent_task(command: str) ->
     (
         "develop issue #654 in repository Oleksii-debug/Nika-Core and add plugin tool",
         "репозиторій Oleksii-debug/Nika-Core issue #654: виправ і додай плагін",
+        "fix https://github.com/Oleksii-debug/Nika-Core/issues/654 and add plugin tool",
     ),
 )
 def test_development_intent_with_toolsmith_request_fails_closed_as_ambiguous(command: str) -> None:
