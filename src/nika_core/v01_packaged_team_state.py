@@ -437,19 +437,38 @@ class V01PackagedTeamStateProvider:
         if len(model_bound_audits) != 1:
             raise ValueError("model binding audit is missing or ambiguous")
         audit_payload = json.loads(model_bound_audits[0]["payload_json"])
-        expected_audit = {
+        provider_kind = selection.provider_kind
+        provider_kind_value = provider_kind.value if provider_kind is not None else None
+        model_fingerprint = (
+            model_identity_fingerprint(selection.model)
+            if selection.model is not None
+            else None
+        )
+        historical_audit = {
             "schema_version": 1,
             "provider_id": selection.provider_id,
-            "provider_kind": selection.provider_kind.value,
-            "model_fingerprint": model_identity_fingerprint(selection.model),
+            "provider_kind": provider_kind_value,
+            "model_fingerprint": model_fingerprint,
         }
-        if audit_payload != expected_audit:
+        current_audit = {
+            **historical_audit,
+            "intelligence_mode": selection.intelligence_mode,
+        }
+        if audit_payload == historical_audit:
+            if selection.route_kind not in {"ollama", "openai_compatible"}:
+                raise ValueError("model binding audit differs from frozen selection")
+        elif audit_payload != current_audit:
             raise ValueError("model binding audit differs from frozen selection")
-        return (
-            selection.provider_id,
-            selection.provider_kind.value,
-            model_identity_fingerprint(selection.model),
-        )
+
+        if selection.route_kind == "deterministic":
+            return None
+        if (
+            selection.provider_id is None
+            or provider_kind_value is None
+            or model_fingerprint is None
+        ):
+            raise ValueError("model-backed frozen selection is incomplete")
+        return selection.provider_id, provider_kind_value, model_fingerprint
 
     @staticmethod
     def _model_evidence_required(conn: Any, *, shared_task_id: str) -> bool:
