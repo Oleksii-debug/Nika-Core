@@ -10,12 +10,14 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+from nika_core.data.sqlite import SQLiteStore
 from nika_core.packaging.release import (
     build_release_manifest,
     verify_distributable_evidence,
     verify_release_archive,
     write_release_manifest,
 )
+from nika_core.product_project import ProductProjectRepository
 
 _INSTALLER_NAME = "install_nika_core.ps1"
 _UPGRADE_PROBE_NAME = "m12-byte-distinct-upgrade-proof.txt"
@@ -111,6 +113,57 @@ def _run_installed_pf11(executable: Path, output: Path, *, env: dict[str, str]) 
     return payload
 
 
+def _read_durable_project_witness(
+    data_path: Path,
+    proof: dict[str, object],
+) -> tuple[str, int, str, str]:
+    """Bind PF11 evidence to the already-durable canonical ProductProject row."""
+    if not data_path.is_file():
+        raise RuntimeError("packaged installer lifecycle durable database is missing")
+    project_id = proof.get("project_id")
+    spec_version = proof.get("spec_version")
+    if (
+        not isinstance(project_id, str)
+        or not project_id.strip()
+        or not isinstance(spec_version, int)
+        or isinstance(spec_version, bool)
+        or spec_version < 1
+    ):
+        raise RuntimeError("PF11 evidence has invalid durable ProductProject identity")
+
+    store = SQLiteStore(data_path)
+    store.initialize()
+    try:
+        project = ProductProjectRepository(store).get(project_id)
+    except KeyError as exc:
+        raise RuntimeError("PF11 ProductProject is missing from the durable database") from exc
+    if project.project_id != project_id or project.spec_version != spec_version:
+        raise RuntimeError("PF11 evidence does not match the durable ProductProject row")
+    if not project.spec.goal.strip() or not project.created_at.strip():
+        raise RuntimeError("durable ProductProject continuity witness is incomplete")
+    return (
+        project.project_id,
+        project.spec_version,
+        project.spec.goal,
+        project.created_at,
+    )
+
+
+def _require_durable_project_continuity(
+    expected: tuple[str, int, str, str],
+    data_path: Path,
+    proof: dict[str, object],
+    *,
+    phase: str,
+) -> tuple[str, int, str, str]:
+    current = _read_durable_project_witness(data_path, proof)
+    if current != expected:
+        raise RuntimeError(
+            f"packaged installer {phase} did not preserve the durable ProductProject row"
+        )
+    return current
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -194,6 +247,7 @@ def prove_packaged_installer_lifecycle(artifact: Path) -> None:
             root / "pf11-install.json",
             env=environment,
         )
+        install_witness = _read_durable_project_witness(data_path, install_proof)
         if _sha256(destination / "release-manifest.json") != exact_manifest_sha:
             raise RuntimeError("Install did not preserve exact final package identity")
         if (destination / _UPGRADE_PROBE_NAME).exists():
@@ -222,6 +276,12 @@ def prove_packaged_installer_lifecycle(artifact: Path) -> None:
             root / "pf11-update.json",
             env=environment,
         )
+        _require_durable_project_continuity(
+            install_witness,
+            data_path,
+            update_proof,
+            phase="Update",
+        )
 
         installed_installer = destination / _INSTALLER_NAME
         if not installed_installer.is_file():
@@ -247,6 +307,12 @@ def prove_packaged_installer_lifecycle(artifact: Path) -> None:
             destination / "NikaCore.exe",
             root / "pf11-rollback.json",
             env=environment,
+        )
+        _require_durable_project_continuity(
+            install_witness,
+            data_path,
+            rollback_proof,
+            phase="Rollback",
         )
 
         stable_identity = {
