@@ -32,10 +32,10 @@ class StandingPermissionExecutionAuthority:
     context: PermissionContext
 
     def __post_init__(self) -> None:
-        if type(self.subject_id) is not str:
-            raise TypeError("subject_id must be exact text")
-        if type(self.context) is not PermissionContext:
-            raise TypeError("context must be an exact PermissionContext")
+        subject_id = _exact_text(self.subject_id, "subject_id")
+        context = _snapshot_permission_context(self.context)
+        object.__setattr__(self, "subject_id", subject_id)
+        object.__setattr__(self, "context", context)
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,12 +77,13 @@ class StandingPermissionCloudEffectAuthorizer:
     ) -> Iterator[None]:
         """Bind trusted authority to exactly the current async execution task."""
 
-        if type(authority) is not StandingPermissionExecutionAuthority:
-            raise TypeError("authority must be exact StandingPermissionExecutionAuthority")
+        authority_snapshot = _snapshot_execution_authority(authority)
         task = asyncio.current_task()
         if task is None:
             raise RuntimeError("cloud execution authority requires a running async task")
-        token = self._execution_scope.set(_ExecutionScope(authority=authority, task=task))
+        token = self._execution_scope.set(
+            _ExecutionScope(authority=authority_snapshot, task=task)
+        )
         try:
             yield
         finally:
@@ -96,31 +97,38 @@ class StandingPermissionCloudEffectAuthorizer:
     ) -> None:
         authority = self._current_execution_authority()
         try:
-            binding = self._binding_resolver(authority)
+            raw_binding = self._binding_resolver(authority)
         except Exception:  # noqa: BLE001 - resolver is a host integration boundary
             raise PermissionError("cloud execution authority could not be resolved") from None
-        if type(binding) is not StandingPermissionBinding:
-            raise PermissionError("cloud execution authority has no standing binding")
+        try:
+            binding = _snapshot_standing_binding(raw_binding)
+        except Exception:  # noqa: BLE001 - returned binding is an authority boundary
+            raise PermissionError("cloud execution authority has no valid standing binding") from None
         if not self._binding_matches_execution(binding, authority):
             raise PermissionError("standing permission does not belong to this execution")
         if provider.kind is not ProviderKind.CLOUD:
             raise PermissionError(
                 "standing cloud authority cannot authorize a non-cloud provider"
             )
+        effect_network_host = provider.effect_network_host
+        if type(effect_network_host) is not str or not effect_network_host:
+            raise PermissionError("cloud provider has no trusted effect host")
+        if binding.network_host is None or effect_network_host != binding.network_host:
+            raise PermissionError("cloud effect host is outside standing permission scope")
         if provider.provider_id != binding.target or request.provider_id != binding.target:
             raise PermissionError("cloud provider is outside standing permission scope")
-        if request.model is None or request.model != binding.resource_id:
+        if type(request.model) is not str or request.model != binding.resource_id:
             raise PermissionError("cloud model is outside standing permission scope")
 
         intent = ActionIntent(
             action_id=request.request_id,
             tool_id=_CLOUD_ACTION_CLASS,
             risk=ToolRisk.EXTERNAL_SIDE_EFFECT,
-            target=binding.target,
-            network_host=binding.network_host,
+            target=provider.provider_id,
+            network_host=effect_network_host,
             task_id=authority.context.task_id,
             project_id=authority.context.project_id,
-            site=binding.network_host,
+            site=effect_network_host,
             resource=binding.resource_id,
             arguments={
                 "request_id": request.request_id,
@@ -156,8 +164,50 @@ class StandingPermissionCloudEffectAuthorizer:
         binding_context = binding.context
         return (
             binding.subject_id == authority.subject_id
-            and type(binding_context) is PermissionContext
             and binding_context.user_id == context.user_id
             and binding_context.project_id == context.project_id
             and binding_context.task_id == context.task_id
         )
+
+
+def _exact_text(value: object, label: str) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{label} must be exact text")
+    return value
+
+
+def _snapshot_permission_context(value: object) -> PermissionContext:
+    if type(value) is not PermissionContext:
+        raise TypeError("context must be an exact PermissionContext")
+    return PermissionContext(
+        user_id=_exact_text(value.user_id, "context.user_id"),
+        project_id=_exact_text(value.project_id, "context.project_id"),
+        task_id=_exact_text(value.task_id, "context.task_id"),
+    )
+
+
+def _snapshot_execution_authority(
+    value: object,
+) -> StandingPermissionExecutionAuthority:
+    if type(value) is not StandingPermissionExecutionAuthority:
+        raise TypeError("authority must be exact StandingPermissionExecutionAuthority")
+    return StandingPermissionExecutionAuthority(
+        subject_id=_exact_text(value.subject_id, "subject_id"),
+        context=_snapshot_permission_context(value.context),
+    )
+
+
+def _snapshot_standing_binding(value: object) -> StandingPermissionBinding:
+    if type(value) is not StandingPermissionBinding:
+        raise TypeError("binding must be an exact StandingPermissionBinding")
+    network_host = value.network_host
+    if network_host is not None:
+        network_host = _exact_text(network_host, "binding.network_host")
+    return StandingPermissionBinding(
+        permission_id=_exact_text(value.permission_id, "binding.permission_id"),
+        subject_id=_exact_text(value.subject_id, "binding.subject_id"),
+        context=_snapshot_permission_context(value.context),
+        target=_exact_text(value.target, "binding.target"),
+        resource_id=_exact_text(value.resource_id, "binding.resource_id"),
+        network_host=network_host,
+    )

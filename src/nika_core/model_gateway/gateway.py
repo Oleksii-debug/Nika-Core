@@ -310,6 +310,7 @@ class ModelGateway:
             supports_tools = capabilities.supports_tools
             supports_streaming = capabilities.supports_streaming
             supports_hard_cancellation = capabilities.supports_hard_cancellation
+            effect_network_host = capabilities.effect_network_host
         except (TypeError, ValueError):
             raise
         except Exception:  # noqa: BLE001 - provider implementations are untrusted
@@ -327,6 +328,12 @@ class ModelGateway:
         ):
             if not isinstance(value, bool):
                 raise TypeError("model provider capability flags must be bool")
+        if effect_network_host is not None and not _is_canonical_network_host(
+            effect_network_host
+        ):
+            raise ValueError("model provider effect host must be canonical host text")
+        if kind is not ProviderKind.CLOUD and effect_network_host is not None:
+            raise ValueError("only CLOUD providers may declare an external effect host")
         return ProviderCapabilities(
             provider_id=provider_id,
             kind=kind,
@@ -334,6 +341,7 @@ class ModelGateway:
             supports_tools=supports_tools,
             supports_streaming=supports_streaming,
             supports_hard_cancellation=supports_hard_cancellation,
+            effect_network_host=effect_network_host,
         )
 
     @staticmethod
@@ -588,6 +596,18 @@ def _is_canonical_identity(value: object) -> bool:
         isinstance(value, str)
         and bool(value)
         and value == value.strip()
+        and not any(ord(char) < 32 or ord(char) == 127 for char in value)
+    )
+
+
+def _is_canonical_network_host(value: object) -> bool:
+    return (
+        type(value) is str
+        and bool(value)
+        and value == value.strip()
+        and value == value.lower().rstrip(".")
+        and "://" not in value
+        and not any(char in value for char in "/\\?#@")
         and not any(ord(char) < 32 or ord(char) == 127 for char in value)
     )
 

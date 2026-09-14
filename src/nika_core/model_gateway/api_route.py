@@ -116,12 +116,22 @@ class CredentialRefOpenAICompatibleProvider:
         credential_resolver: CredentialResolverPort,
         client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient,
     ) -> None:
+        # Snapshot the actual route used for every later provider effect. Keeping
+        # this separate from the caller-owned/frozen config closes a post-register
+        # object.__setattr__ route-host substitution seam.
+        base_url = str(config.base_url)
+        parsed = urlsplit(base_url)
+        effect_network_host = parsed.hostname
+        if effect_network_host is None:
+            raise ValueError("API model route base_url requires a host")
+        self._base_url = base_url
+        self._effect_network_host = effect_network_host.lower().rstrip(".")
         self._config = config
         self._credential_resolver = credential_resolver
         self._client_factory = client_factory
         self._prototype = OpenAICompatibleProvider(
             provider_id=config.provider_id,
-            base_url=config.base_url,
+            base_url=self._base_url,
             kind=ProviderKind.CLOUD,
             default_model=config.default_model,
             supports_private_data=config.supports_private_data,
@@ -131,7 +141,16 @@ class CredentialRefOpenAICompatibleProvider:
 
     @property
     def capabilities(self) -> ProviderCapabilities:
-        return self._prototype.capabilities
+        prototype = self._prototype.capabilities
+        return ProviderCapabilities(
+            provider_id=prototype.provider_id,
+            kind=prototype.kind,
+            supports_private_data=prototype.supports_private_data,
+            supports_tools=prototype.supports_tools,
+            supports_streaming=prototype.supports_streaming,
+            supports_hard_cancellation=prototype.supports_hard_cancellation,
+            effect_network_host=self._effect_network_host,
+        )
 
     @property
     def credential_ref(self) -> str:
@@ -145,7 +164,7 @@ class CredentialRefOpenAICompatibleProvider:
         try:
             provider = OpenAICompatibleProvider(
                 provider_id=self._config.provider_id,
-                base_url=self._config.base_url,
+                base_url=self._base_url,
                 kind=ProviderKind.CLOUD,
                 default_model=self._config.default_model,
                 api_key=material,
