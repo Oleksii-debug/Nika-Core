@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from nika_core.packaging.notices import build_third_party_notices, verify_third_party_notices
 from nika_core.packaging.release import (
     build_release_manifest,
     verify_release_manifest,
@@ -10,6 +11,7 @@ from nika_core.packaging.release import (
 )
 from nika_core.packaging.sbom import (
     SupplyChainEvidenceError,
+    build_supply_chain_evidence,
     verify_supply_chain_evidence,
     write_supply_chain_evidence,
 )
@@ -27,6 +29,22 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _runtime_distribution_names(supply_chain: dict[str, object]) -> tuple[str, ...]:
+    raw_components = supply_chain.get("components")
+    if not isinstance(raw_components, list) or not raw_components:
+        raise SupplyChainEvidenceError("Resolved runtime inventory is missing components")
+
+    names: list[str] = []
+    for component in raw_components:
+        if not isinstance(component, dict):
+            raise SupplyChainEvidenceError("Resolved runtime component must be an object")
+        name = component.get("name")
+        if not isinstance(name, str) or not name:
+            raise SupplyChainEvidenceError("Resolved runtime component name is invalid")
+        names.append(name)
+    return tuple(names)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     bundle = args.bundle.resolve(strict=True)
@@ -34,6 +52,15 @@ def main(argv: list[str] | None = None) -> int:
     report = args.report.resolve(strict=True)
 
     try:
+        supply_chain = build_supply_chain_evidence(
+            report,
+            project_root=project_root,
+            application_name="nika-core",
+            application_version=args.version,
+            source_sha=args.source_sha,
+            extras=("gui",),
+        )
+        runtime_distributions = _runtime_distribution_names(supply_chain)
         supply_path, sbom_path = write_supply_chain_evidence(
             bundle,
             report,
@@ -42,6 +69,14 @@ def main(argv: list[str] | None = None) -> int:
             application_version=args.version,
             source_sha=args.source_sha,
             extras=("gui",),
+        )
+        notices_path = build_third_party_notices(
+            bundle,
+            distribution_names=runtime_distributions,
+        )
+        notice_findings = verify_third_party_notices(
+            bundle,
+            distribution_names=runtime_distributions,
         )
         manifest = build_release_manifest(
             bundle,
@@ -60,15 +95,16 @@ def main(argv: list[str] | None = None) -> int:
             source_sha=args.source_sha,
             extras=("gui",),
         )
-    except (OSError, ValueError, SupplyChainEvidenceError) as exc:
+    except (OSError, RuntimeError, ValueError, SupplyChainEvidenceError) as exc:
         raise SystemExit(f"SBOM release evidence failed: {exc}") from exc
 
-    findings = tuple(manifest_findings) + tuple(supply_findings)
+    findings = tuple(manifest_findings) + tuple(supply_findings) + tuple(notice_findings)
     if findings:
         raise SystemExit(f"SBOM release evidence verification failed: {findings}")
 
     print(f"supply-chain={supply_path.name}")
     print(f"sbom={sbom_path.name}")
+    print(f"notices={notices_path.name}")
     print("release-manifest=verified")
     return 0
 
