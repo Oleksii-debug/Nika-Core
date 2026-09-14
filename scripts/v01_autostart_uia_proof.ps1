@@ -20,13 +20,21 @@ try {
 $proof = Join-Path $PSScriptRoot 'm5_uia_proof.ps1'
 $pwsh = (Get-Process -Id $PID).Path
 try {
-    # Each invocation cold-starts the same real EXE with a new PID/window generation.
-    # The existing M5 harness owns identity/focus, process cleanup and private DB fixtures.
-    & $pwsh -NoProfile -File $proof -ExePath $ExePath -WindowTitle $WindowTitle -AutostartPhase Enable -VerifySourceSetup
+    # Prove the generic keyboard/source journey once without granting autostart
+    # mutation authority. This prevents an unrelated pre-mutation focus failure
+    # from consuming the bounded retry reserved for an autostart keyboard action.
+    & $pwsh -NoProfile -File $proof -ExePath $ExePath -WindowTitle $WindowTitle -VerifySourceSetup
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Packaged generic keyboard/source-setup proof failed before autostart mutation.'
+    }
+
+    # Each autostart invocation cold-starts the same real EXE with a new PID/window
+    # generation and exercises only the exact autostart semantic controls.
+    & $pwsh -NoProfile -File $proof -ExePath $ExePath -WindowTitle $WindowTitle -AutostartPhase Enable
     if ($LASTEXITCODE -ne 0) {
         # Hosted WebView2 can occasionally keep focus on the exact Save button while
         # dropping its keyboard activation. Never replay an unknown write: retry the
-        # whole fresh-process Enable phase at most once only when the OS proves the
+        # fresh-process Enable mutation at most once only when the OS proves the
         # failed attempt left the test-owned registration completely absent.
         $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($keyPath)
         try {
@@ -39,14 +47,14 @@ try {
 
         if ($null -eq $afterFailedEnable) {
             Write-Host 'Autostart enable attempt made no OS registration mutation; retrying once in a fresh process.'
-            & $pwsh -NoProfile -File $proof -ExePath $ExePath -WindowTitle $WindowTitle -AutostartPhase Enable -VerifySourceSetup
+            & $pwsh -NoProfile -File $proof -ExePath $ExePath -WindowTitle $WindowTitle -AutostartPhase Enable
             if ($LASTEXITCODE -ne 0) {
-                throw 'Packaged autostart enable/source-setup phase failed after the single zero-mutation retry.'
+                throw 'Packaged autostart enable phase failed after the single zero-mutation retry.'
             }
         } elseif ($afterFailedEnable -ceq $expectedCommand) {
-            throw 'Packaged autostart enable/source-setup phase failed after changing OS registration; refusing to replay the mutation.'
+            throw 'Packaged autostart enable phase failed after changing OS registration; refusing to replay the mutation.'
         } else {
-            throw 'Packaged autostart enable/source-setup phase failed with unexpected OS registration; refusing to replay the mutation.'
+            throw 'Packaged autostart enable phase failed with unexpected OS registration; refusing to replay the mutation.'
         }
     }
     & $pwsh -NoProfile -File $proof -ExePath $ExePath -WindowTitle $WindowTitle -AutostartPhase Observe
@@ -55,8 +63,8 @@ try {
     if ($LASTEXITCODE -ne 0) {
         # A hosted WebView2 provider can occasionally drop the keyboard activation
         # while leaving focus on the exact Save button. Replaying an unknown write is
-        # forbidden. Retry the whole fresh-process phase at most once only when the
-        # OS proves that the failed attempt made no registration mutation at all.
+        # forbidden. Retry the fresh-process Disable mutation at most once only when
+        # the OS proves that the failed attempt made no registration mutation at all.
         $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($keyPath)
         try {
             $afterFailedDisable = if ($null -eq $key) {
@@ -78,7 +86,7 @@ try {
             throw 'Packaged autostart disable phase failed with unexpected OS registration; refusing to replay the mutation.'
         }
     }
-    Write-Host 'Autostart UI -> registration -> fresh process -> persisted UI -> disable verified. Windows login execution and human NVDA remain unverified.'
+    Write-Host 'Generic keyboard/source proof plus autostart UI -> registration -> fresh process -> persisted UI -> disable verified. Windows login execution and human NVDA remain unverified.'
 } finally {
     # Remove only our exact test-owned value if a later phase failed. Preserve any
     # concurrently replaced registration; never delete the Run key or other values.
