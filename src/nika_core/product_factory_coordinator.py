@@ -37,6 +37,38 @@ class WorkState(StrEnum):
     CANCELLED = "cancelled"
 
 
+def _validate_allowed_paths(value: object) -> None:
+    if (
+        type(value) is not tuple
+        or not value
+        or any(type(path) is not str or not path for path in value)
+    ):
+        raise CoordinatorError("work request allowed paths must be a non-empty exact tuple of strings")
+
+
+def _validate_permission_ceiling(value: object) -> None:
+    if (
+        type(value) is not frozenset
+        or not value
+        or any(type(permission) is not str or not permission for permission in value)
+    ):
+        raise CoordinatorError(
+            "work request permission ceiling must be a non-empty exact frozenset of strings"
+        )
+
+
+def _validate_acceptance_commands(value: object) -> None:
+    if type(value) is not tuple or any(
+        type(command) is not tuple
+        or not command
+        or any(type(part) is not str or not part for part in command)
+        for command in value
+    ):
+        raise CoordinatorError(
+            "work request acceptance commands must be an exact tuple of non-empty argv tuples"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class ComponentWorkRequest:
     work_id: str
@@ -57,10 +89,9 @@ class ComponentWorkRequest:
         ):
             raise CoordinatorError("work request identity and goal must not be empty")
         _validate_sha(self.base_sha, "base_sha")
-        if not self.allowed_paths:
-            raise CoordinatorError("work request must declare allowed paths")
-        if not self.permission_ceiling:
-            raise CoordinatorError("work request must declare a permission ceiling")
+        _validate_allowed_paths(self.allowed_paths)
+        _validate_permission_ceiling(self.permission_ceiling)
+        _validate_acceptance_commands(self.acceptance_commands)
         if self.attempt < 1:
             raise CoordinatorError("attempt must be positive")
 
@@ -138,12 +169,13 @@ class ProductFactoryCoordinator:
     def plan(self, *, base_shas: dict[str, str], goals: dict[str, str], permission_ceiling: frozenset[str]) -> CoordinatorSnapshot:
         if self._records or self._trusted_plan is not None:
             raise CoordinatorError("coordinator is already planned")
-        if not permission_ceiling:
-            raise CoordinatorError("project permission ceiling must not be empty")
+        _validate_permission_ceiling(permission_ceiling)
         components = self._components()
         repositories = self._repositories()
         for component_id in self.graph.dependency_order():
             component = components[component_id]
+            _validate_allowed_paths(component.paths)
+            _validate_acceptance_commands(component.test_commands)
             repository = repositories[component.repository_id]
             base_sha = base_shas.get(repository.repository_id)
             goal = goals.get(component_id, "").strip()
@@ -462,6 +494,10 @@ class ProductFactoryCoordinator:
 def trusted_plan_fingerprint(plan: tuple[ComponentWorkRequest, ...]) -> str:
     if not plan:
         raise CoordinatorError("trusted plan descriptor must not be empty")
+    for request in plan:
+        _validate_allowed_paths(request.allowed_paths)
+        _validate_permission_ceiling(request.permission_ceiling)
+        _validate_acceptance_commands(request.acceptance_commands)
     payload = tuple((request.project_id, request.component_id, request.repository_id, request.goal, request.base_sha, request.allowed_paths, tuple(sorted(request.permission_ceiling)), request.acceptance_commands) for request in sorted(plan, key=lambda item: item.component_id))
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -491,6 +527,9 @@ def validate_trusted_plan_snapshot(snapshot: CoordinatorSnapshot, authority_fing
             raise CoordinatorError("trusted plan contains invalid attempt-one work identity")
     for record in snapshot.records:
         request = record.request
+        _validate_allowed_paths(request.allowed_paths)
+        _validate_permission_ceiling(request.permission_ceiling)
+        _validate_acceptance_commands(request.acceptance_commands)
         initial = plan_by_component[request.component_id]
         if request.project_id != initial.project_id:
             raise CoordinatorError("work request project identity drifted from trusted plan")
