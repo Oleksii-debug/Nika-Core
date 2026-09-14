@@ -167,3 +167,48 @@ def test_noncanonical_manifest_shape_fails_before_install_mutation(
 
     assert rejected.returncode != 0, rejected.stdout or rejected.stderr
     assert not destination.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell manifest proof is Windows-only")
+@pytest.mark.parametrize(
+    "reserved_path",
+    [
+        "_internal/COM¹",
+        "_internal/COM².txt",
+        "_internal/COM³.dat",
+        "_internal/LPT¹",
+        "_internal/LPT².txt",
+        "_internal/LPT³.dat",
+    ],
+)
+def test_superscript_reserved_device_aliases_fail_before_install_mutation(
+    tmp_path: Path,
+    reserved_path: str,
+) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    bundle = _bundle(tmp_path / "case")
+    manifest_path = bundle / "release-manifest.json"
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    files = payload["files"]
+    assert isinstance(files, list)
+    files.append({"path": reserved_path, "size": 0, "sha256": "0" * 64})
+    manifest_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    destination = tmp_path / "install" / "Nika Core"
+
+    rejected = _run_install(
+        shell,
+        bundle=bundle,
+        destination=destination,
+        data_root=tmp_path / "data",
+    )
+
+    assert rejected.returncode != 0, rejected.stdout or rejected.stderr
+    assert "unsafe path" in rejected.stderr
+    assert not destination.exists()
+    assert not destination.parent.exists()

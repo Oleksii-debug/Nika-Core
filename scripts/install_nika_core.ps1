@@ -173,8 +173,8 @@ function Test-NikaSafeRelativePath {
         $stem = $part.Split(".")[0].TrimEnd(" ", ".").ToUpperInvariant()
         if (
             $stem -in @("CON", "PRN", "AUX", "NUL") -or
-            $stem -match '^COM[1-9]$' -or
-            $stem -match '^LPT[1-9]$'
+            $stem -match '^COM[1-9¹²³]$' -or
+            $stem -match '^LPT[1-9¹²³]$'
         ) {
             return $false
         }
@@ -494,12 +494,36 @@ function Resolve-NikaInterruptedUpdate {
     if ($hasDestination -and -not $hasRollback) {
         Assert-NikaNoReparsePathChain -Path $DestinationPath
         Assert-NikaReleaseBundle -BundleRoot $DestinationPath
+        Assert-NikaNoReparsePathChain -Path $RetiredRollbackPath
+        Assert-NikaReleaseBundle -BundleRoot $RetiredRollbackPath
+        Assert-NikaNoReparsePathChain -Path $RollbackPath
+        Assert-NikaDataMutationSeparation -DataRoot $DataRoot -MutationPaths @(
+            $DestinationPath,
+            $RollbackPath,
+            $RetiredRollbackPath
+        )
         [System.IO.Directory]::Move($RetiredRollbackPath, $RollbackPath)
     }
     elseif (-not $hasDestination -and $hasRollback) {
+        Assert-NikaNoReparsePathChain -Path $RetiredRollbackPath
+        Assert-NikaReleaseBundle -BundleRoot $RetiredRollbackPath
         Assert-NikaNoReparsePathChain -Path $RollbackPath
         Assert-NikaReleaseBundle -BundleRoot $RollbackPath
+        Assert-NikaNoReparsePathChain -Path $DestinationPath
+        Assert-NikaDataMutationSeparation -DataRoot $DataRoot -MutationPaths @(
+            $DestinationPath,
+            $RollbackPath,
+            $RetiredRollbackPath
+        )
         [System.IO.Directory]::Move($RollbackPath, $DestinationPath)
+        Assert-NikaNoReparsePathChain -Path $RetiredRollbackPath
+        Assert-NikaReleaseBundle -BundleRoot $RetiredRollbackPath
+        Assert-NikaNoReparsePathChain -Path $RollbackPath
+        Assert-NikaDataMutationSeparation -DataRoot $DataRoot -MutationPaths @(
+            $DestinationPath,
+            $RollbackPath,
+            $RetiredRollbackPath
+        )
         [System.IO.Directory]::Move($RetiredRollbackPath, $RollbackPath)
     }
     elseif ($hasDestination -and $hasRollback) {
@@ -507,6 +531,12 @@ function Resolve-NikaInterruptedUpdate {
         Assert-NikaNoReparsePathChain -Path $RollbackPath
         Assert-NikaReleaseBundle -BundleRoot $DestinationPath
         Assert-NikaReleaseBundle -BundleRoot $RollbackPath
+        Assert-NikaNoReparsePathChain -Path $RetiredRollbackPath
+        Assert-NikaDataMutationSeparation -DataRoot $DataRoot -MutationPaths @(
+            $DestinationPath,
+            $RollbackPath,
+            $RetiredRollbackPath
+        )
         Remove-Item -LiteralPath $RetiredRollbackPath -Recurse -Force
     }
     else {
