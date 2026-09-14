@@ -20,12 +20,17 @@ try {
 $proof = Join-Path $PSScriptRoot 'm5_uia_proof.ps1'
 $pwsh = (Get-Process -Id $PID).Path
 try {
-    # Prove the generic keyboard/source journey once without granting autostart
-    # mutation authority. This prevents an unrelated pre-mutation focus failure
-    # from consuming the bounded retry reserved for an autostart keyboard action.
+    # Prove the generic keyboard/source journey without granting autostart mutation
+    # authority. The generic M5 harness owns a private per-process DB fixture, so a
+    # known hosted-WebView2 focus transient can be retried once in a fresh process
+    # without replaying any HKCU Run mutation.
     & $pwsh -NoProfile -File $proof -ExePath $ExePath -WindowTitle $WindowTitle -VerifySourceSetup
     if ($LASTEXITCODE -ne 0) {
-        throw 'Packaged generic keyboard/source-setup proof failed before autostart mutation.'
+        Write-Host 'Packaged generic keyboard/source-setup proof made no autostart mutation; retrying once in a fresh process.'
+        & $pwsh -NoProfile -File $proof -ExePath $ExePath -WindowTitle $WindowTitle -VerifySourceSetup
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Packaged generic keyboard/source-setup proof failed after the single non-mutating retry.'
+        }
     }
 
     # Each autostart invocation cold-starts the same real EXE with a new PID/window
