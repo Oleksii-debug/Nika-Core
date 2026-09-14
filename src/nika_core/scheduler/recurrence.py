@@ -113,6 +113,7 @@ class DurableRecurrenceService:
         target_action = _required_text(action_id, "action_id")
         interval = _validate_interval(interval_seconds)
         anchor = _require_aware_utc(start_at, "start_at")
+        _validate_interval_origin(anchor, interval, "start_at")
         deadline = (
             _require_aware_utc(deadline_at, "deadline_at") if deadline_at is not None else None
         )
@@ -437,6 +438,7 @@ def _decode_job(
         raise ValueError("durable recurrence task identity mismatch")
     interval = _validate_interval(metadata.get("interval_seconds"))
     anchor = _parse_iso(metadata.get("anchor_at"), "anchor_at")
+    _validate_interval_origin(anchor, interval, "persisted anchor_at")
     deadline = _parse_optional_iso(metadata.get("deadline_at"), "deadline_at")
     next_due = _parse_optional_iso(metadata.get("next_due_at"), "next_due_at")
     last_due = _parse_optional_iso(metadata.get("last_completed_due_at"), "last_completed_due_at")
@@ -554,9 +556,22 @@ def _job_id(recurrence_id: str) -> str:
 
 
 def _validate_interval(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+    if type(value) is not int or value <= 0:
         raise ValueError("interval_seconds must be a positive integer")
     return value
+
+
+def _validate_interval_origin(
+    origin: datetime,
+    interval_seconds: int,
+    label: str,
+) -> None:
+    try:
+        origin + timedelta(seconds=interval_seconds)
+    except OverflowError as exc:
+        raise ValueError(
+            f"interval_seconds cannot advance {label} within the datetime range"
+        ) from exc
 
 
 def _parse_iso(value: object, label: str) -> datetime:
