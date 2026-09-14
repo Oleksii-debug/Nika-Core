@@ -118,12 +118,11 @@ async def complete_parallel(
     callers must explicitly opt into larger concurrency after their resource and
     provider policy allows it.
 
-    Each child receives one monotonic request budget beginning before provider or
-    global semaphore admission. Queueing time is charged to the existing
-    ``ModelRequest.timeout_seconds`` budget, and only the remaining budget is
-    passed into the canonical ModelGateway after admission. Expiry while waiting
-    for admission is a typed TIMEOUT with positive NO_EFFECT truth and no provider
-    call.
+    Each child receives one monotonic request budget snapshotted before any child
+    task is created. Event-loop scheduling delay, provider/global semaphore wait
+    and inference therefore consume the same ``ModelRequest.timeout_seconds``
+    budget. Expiry before provider entry is a typed TIMEOUT with positive
+    NO_EFFECT truth and no provider call.
 
     Optional ``provider_limits`` add route-specific admission for requests pinned
     to explicit ``provider_id`` values. A request waits for its provider slot
@@ -140,7 +139,10 @@ async def complete_parallel(
     Outcomes are returned in the exact input order. A typed failure of one
     request is isolated as content-free failure evidence and does not erase
     successful sibling results. Cancelling the parent batch cancels every child
-    task and waits for their local cancellation paths before propagating.
+    task and waits for their local cancellation paths before propagating. This is
+    local coroutine cancellation only; callers must consult canonical route
+    capabilities before claiming that underlying provider inference was hard-
+    cancelled.
     """
 
     _validate_limit(max_parallel, name="max_parallel")
@@ -177,6 +179,13 @@ async def complete_parallel(
         provider_id: asyncio.Semaphore(limit) for provider_id, limit in limits.items()
     }
 
+    # Deadline identity is fixed before create_task(). Otherwise a child delayed
+    # by event-loop pressure would receive a fresh timeout budget when it finally
+    # begins executing, which violates the end-to-end request deadline contract.
+    loop = asyncio.get_running_loop()
+    accepted_at = loop.time()
+    deadlines = tuple(accepted_at + request.timeout_seconds for request in batch)
+
     async def execute(request: ModelRequest) -> ParallelModelOutcome:
         try:
             response = await gateway.complete(request)
@@ -194,9 +203,7 @@ async def complete_parallel(
             response=response,
         )
 
-    async def run_one(request: ModelRequest) -> ParallelModelOutcome:
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + request.timeout_seconds
+    async def run_one(request: ModelRequest, deadline: float) -> ParallelModelOutcome:
         provider_semaphore = (
             provider_semaphores.get(request.provider_id)
             if request.provider_id is not None
@@ -219,7 +226,7 @@ async def complete_parallel(
             if not global_acquired:
                 return _admission_timeout_outcome(request)
 
-            remaining = deadline - loop.time()
+            remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 return _admission_timeout_outcome(request)
             return await execute(replace(request, timeout_seconds=remaining))
@@ -229,7 +236,10 @@ async def complete_parallel(
             if provider_acquired and provider_semaphore is not None:
                 provider_semaphore.release()
 
-    tasks = tuple(asyncio.create_task(run_one(request)) for request in batch)
+    tasks = tuple(
+        asyncio.create_task(run_one(request, deadline))
+        for request, deadline in zip(batch, deadlines, strict=True)
+    )
     try:
         outcomes = await asyncio.gather(*tasks)
     except BaseException:
@@ -281,10 +291,10 @@ def _validated_provider_limits(
     registered = frozenset(gateway.providers())
     validated: dict[str, int] = {}
     for provider_id, limit in provider_limits.items():
-        if not isinstance(provider_id, str) or not provider_id.strip():
-            raise ValueError("provider limit ID must be non-empty text")
-        if provider_id != provider_id.strip():
-            raise ValueError("provider limit ID must not contain surrounding whitespace")
+        if type(provider_id) is not str:
+            raise TypeError("provider limit ID must be text")
+        if not provider_id or provider_id != provider_id.strip():
+            raise ValueError("provider limit ID must be non-empty canonical text")
         if provider_id not in registered:
             raise ValueError(f"provider limit references an unknown provider: {provider_id}")
         _validate_limit(limit, name=f"provider limit for {provider_id}")
@@ -310,7 +320,7 @@ def _validate_provider_limited_routes(
 
 
 def _validate_limit(value: int, *, name: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, int):
+    if type(value) is not int:
         raise TypeError(f"{name} must be an integer")
     if not 1 <= value <= MAX_PARALLEL_MODEL_REQUESTS:
         raise ValueError(
