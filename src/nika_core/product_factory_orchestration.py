@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ntpath
 import posixpath
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -26,6 +27,29 @@ class RepositoryGraphError(ValueError):
 
 class TeamCompositionError(ValueError):
     """Raised when a team request is internally inconsistent."""
+
+
+def _require_plain_str(value: object, field_name: str) -> str:
+    if type(value) is not str:
+        raise RepositoryGraphError(f"{field_name} must be a plain string")
+    return value
+
+
+def _require_optional_plain_str(value: object, field_name: str) -> str | None:
+    if value is None:
+        return None
+    return _require_plain_str(value, field_name)
+
+
+def _require_plain_str_items(values: Iterable[object], field_name: str) -> None:
+    for value in values:
+        _require_plain_str(value, field_name)
+
+
+def _require_plain_tuple(value: object, field_name: str) -> tuple[object, ...]:
+    if type(value) is not tuple:
+        raise RepositoryGraphError(f"{field_name} must be a plain tuple")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,8 +301,22 @@ class RepositoryRef:
     default_branch: str
     credential_ref: str | None = None
     case_sensitive_paths: bool = True
+    windows_path_semantics: bool = False
 
     def __post_init__(self) -> None:
+        for field_name, value in (
+            ("repository_id", self.repository_id),
+            ("provider", self.provider),
+            ("locator", self.locator),
+            ("default_branch", self.default_branch),
+        ):
+            _require_plain_str(value, field_name)
+        if type(self.case_sensitive_paths) is not bool:
+            raise RepositoryGraphError("case_sensitive_paths must be a plain bool")
+        if type(self.windows_path_semantics) is not bool:
+            raise RepositoryGraphError("windows_path_semantics must be a plain bool")
+        _require_optional_plain_str(self.credential_ref, "credential_ref")
+
         if not all(
             value.strip()
             for value in (self.repository_id, self.provider, self.locator, self.default_branch)
@@ -302,6 +340,19 @@ class ProductComponent:
     release_identity: str | None = None
 
     def __post_init__(self) -> None:
+        _require_plain_str(self.component_id, "component_id")
+        _require_plain_str(self.repository_id, "component.repository_id")
+        _require_plain_tuple(self.paths, "component paths")
+        _require_plain_tuple(self.dependencies, "component dependencies")
+        _require_plain_tuple(self.build_commands, "component build_commands")
+        _require_plain_tuple(self.test_commands, "component test_commands")
+        _require_plain_str_items(self.paths, "component path")
+        _require_plain_str_items(self.dependencies, "component dependency")
+        for command in (*self.build_commands, *self.test_commands):
+            _require_plain_tuple(command, "command argv")
+            _require_plain_str_items(command, "command argument")
+        _require_optional_plain_str(self.release_identity, "release_identity")
+
         if not self.component_id.strip() or not self.repository_id.strip():
             raise RepositoryGraphError("component identity fields must not be empty")
 
@@ -312,6 +363,14 @@ class OwnershipLease:
     worker_id: str
     component_ids: tuple[str, ...]
     allowed_paths: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _require_plain_str(self.lease_id, "lease_id")
+        _require_plain_str(self.worker_id, "worker_id")
+        _require_plain_tuple(self.component_ids, "lease component_ids")
+        _require_plain_tuple(self.allowed_paths, "lease allowed_paths")
+        _require_plain_str_items(self.component_ids, "lease component id")
+        _require_plain_str_items(self.allowed_paths, "lease allowed path")
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,6 +391,15 @@ class IntegrationDecision:
     evidence_refs: tuple[str, ...]
 
     def __post_init__(self) -> None:
+        _require_plain_str(self.decision_id, "decision_id")
+        if type(self.kind) is not IntegrationDecisionKind:
+            raise RepositoryGraphError("integration decision kind must be canonical")
+        _require_plain_tuple(self.lease_ids, "integration decision lease_ids")
+        _require_plain_tuple(self.evidence_refs, "integration decision evidence_refs")
+        _require_plain_str_items(self.lease_ids, "integration decision lease id")
+        _require_plain_str(self.reason, "integration decision reason")
+        _require_plain_str_items(self.evidence_refs, "integration decision evidence ref")
+
         if not self.decision_id.strip() or not self.reason.strip() or not self.evidence_refs:
             raise RepositoryGraphError("integration decisions require identity, reason and evidence")
         if len(self.lease_ids) < 2 or len(set(self.lease_ids)) != len(self.lease_ids):
@@ -363,6 +431,13 @@ class ProductRepositoryGraph:
     _components_by_id: dict[str, ProductComponent] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        _require_plain_str(self.project_id, "project_id")
+        _require_plain_tuple(self.repositories, "repositories")
+        _require_plain_tuple(self.components, "components")
+        if any(type(repository) is not RepositoryRef for repository in self.repositories):
+            raise RepositoryGraphError("repositories must contain canonical RepositoryRef values")
+        if any(type(component) is not ProductComponent for component in self.components):
+            raise RepositoryGraphError("components must contain canonical ProductComponent values")
         if not self.project_id.strip():
             raise RepositoryGraphError("project_id must not be empty")
         self._repositories_by_id = _unique_by(self.repositories, "repository_id")
@@ -393,9 +468,16 @@ class ProductRepositoryGraph:
         *,
         decision: IntegrationDecision | None = None,
     ) -> LeaseAssessment:
+        if type(candidate) is not OwnershipLease:
+            raise RepositoryGraphError("candidate must be a canonical OwnershipLease")
+        active_tuple = tuple(active_leases)
+        if any(type(lease) is not OwnershipLease for lease in active_tuple):
+            raise RepositoryGraphError("active leases must be canonical OwnershipLease values")
+        if decision is not None and type(decision) is not IntegrationDecision:
+            raise RepositoryGraphError("decision must be a canonical IntegrationDecision")
+
         candidate_paths = self._lease_paths(candidate)
         conflicts: list[OwnershipConflict] = []
-        active_tuple = tuple(active_leases)
         active_ids = [lease.lease_id for lease in active_tuple]
         if len(active_ids) != len(set(active_ids)):
             raise RepositoryGraphError("active lease ids must be unique")
@@ -437,9 +519,16 @@ class ProductRepositoryGraph:
         seen: dict[tuple[str, str], str] = {}
         for repository in self.repositories:
             provider = repository.provider.strip().casefold()
-            locator = repository.locator.strip().rstrip("/")
+            locator = repository.locator
             if provider == "github":
-                locator = locator.casefold()
+                locator = locator.strip().rstrip("/").casefold()
+            elif provider == "local-git":
+                locator = _normalize_local_git_locator(
+                    locator,
+                    windows_path_semantics=repository.windows_path_semantics,
+                )
+            else:
+                locator = locator.strip().rstrip("/")
             key = (provider, locator)
             previous = seen.get(key)
             if previous is not None and previous != repository.repository_id:
@@ -458,7 +547,13 @@ class ProductRepositoryGraph:
                 )
             if not component.paths:
                 raise RepositoryGraphError(f"component {component.component_id} requires owned paths")
-            normalized = [_normalize_repo_path(path) for path in component.paths]
+            normalized = [
+                _normalize_repo_path(
+                    path,
+                    windows_path_semantics=repository.windows_path_semantics,
+                )
+                for path in component.paths
+            ]
             if len(normalized) != len(set(normalized)):
                 raise RepositoryGraphError(f"component {component.component_id} repeats an owned path")
             if len(component.dependencies) != len(set(component.dependencies)):
@@ -478,9 +573,16 @@ class ProductRepositoryGraph:
     def _validate_component_overlap(self) -> None:
         by_repo: dict[str, list[tuple[str, str]]] = {}
         for component in self.components:
+            repository = self._repositories_by_id[component.repository_id]
             for path in component.paths:
                 by_repo.setdefault(component.repository_id, []).append(
-                    (component.component_id, _normalize_repo_path(path))
+                    (
+                        component.component_id,
+                        _normalize_repo_path(
+                            path,
+                            windows_path_semantics=repository.windows_path_semantics,
+                        ),
+                    )
                 )
         for repository_id, entries in by_repo.items():
             repository = self._repositories_by_id[repository_id]
@@ -495,6 +597,8 @@ class ProductRepositoryGraph:
                         )
 
     def _lease_paths(self, lease: OwnershipLease) -> tuple[tuple[str, str], ...]:
+        if type(lease) is not OwnershipLease:
+            raise RepositoryGraphError("lease must be a canonical OwnershipLease")
         if not lease.lease_id.strip() or not lease.worker_id.strip():
             raise RepositoryGraphError("lease identity must not be empty")
         if not lease.component_ids or not lease.allowed_paths:
@@ -510,41 +614,191 @@ class ProductRepositoryGraph:
         repos = {component.repository_id for component in components}
         result: list[tuple[str, str]] = []
         for raw_path in lease.allowed_paths:
-            path = _normalize_repo_path(raw_path)
-            matches = [
-                component
-                for component in components
+            paths_by_repo: dict[str, str] = {}
+            errors_by_repo: dict[str, RepositoryGraphError] = {}
+            matches: list[ProductComponent] = []
+            for component in components:
+                repository_id = component.repository_id
+                if repository_id in errors_by_repo:
+                    continue
+                repository = self._repositories_by_id[repository_id]
+                if repository_id not in paths_by_repo:
+                    try:
+                        paths_by_repo[repository_id] = _normalize_repo_path(
+                            raw_path,
+                            windows_path_semantics=repository.windows_path_semantics,
+                        )
+                    except RepositoryGraphError as exc:
+                        errors_by_repo[repository_id] = exc
+                        continue
+                path = paths_by_repo[repository_id]
                 if any(
                     _path_within(
                         path,
-                        _normalize_repo_path(root),
-                        self._repositories_by_id[component.repository_id].case_sensitive_paths,
+                        _normalize_repo_path(
+                            root,
+                            windows_path_semantics=repository.windows_path_semantics,
+                        ),
+                        repository.case_sensitive_paths,
                     )
                     for root in component.paths
-                )
-            ]
+                ):
+                    matches.append(component)
             if not matches:
-                raise RepositoryGraphError(f"lease path {path} is outside component ownership")
+                if len(repos) == 1:
+                    only_repository = next(iter(repos))
+                    repository_error = errors_by_repo.get(only_repository)
+                    if repository_error is not None:
+                        raise repository_error
+                display_path = _normalize_repo_path(raw_path)
+                raise RepositoryGraphError(
+                    f"lease path {display_path} is outside component ownership"
+                )
             matching_repos = {component.repository_id for component in matches}
             if len(matching_repos) != 1:
-                raise RepositoryGraphError(f"lease path {path} is ambiguous across repositories")
-            result.append((next(iter(matching_repos)), path))
+                display_path = _normalize_repo_path(raw_path)
+                raise RepositoryGraphError(
+                    f"lease path {display_path} is ambiguous across repositories"
+                )
+            repository_id = next(iter(matching_repos))
+            result.append((repository_id, paths_by_repo[repository_id]))
         if not {repo_id for repo_id, _ in result}.issubset(repos):
             raise RepositoryGraphError("lease path repository mismatch")
         return tuple(result)
 
 
-def _normalize_repo_path(path: str) -> str:
-    candidate = path.replace("\\", "/").strip()
+def _normalize_local_git_locator(locator: str, *, windows_path_semantics: bool) -> str:
+    _require_plain_str(locator, "local-git locator")
+    if type(windows_path_semantics) is not bool:
+        raise RepositoryGraphError("windows_path_semantics must be a plain bool")
+    if not windows_path_semantics:
+        normalized = posixpath.normpath(locator.replace("\\", "/"))
+        return normalized if normalized == "/" else normalized.rstrip("/")
+
+    raw = locator.replace("\\", "/")
+    if raw.startswith(("//?/", "//./")):
+        raise RepositoryGraphError("Windows local-git locator must not use a device namespace")
+
+    drive, tail = ntpath.splitdrive(locator)
+    is_unc = drive.startswith(("\\\\", "//"))
+    if drive and not is_unc and not tail.startswith(("\\", "/")):
+        raise RepositoryGraphError("Windows local-git locator must not be drive-relative")
+    if not drive and tail.startswith(("\\", "/")):
+        raise RepositoryGraphError("Windows local-git locator must not be root-relative")
+    if is_unc:
+        unc = drive.replace("\\", "/").lstrip("/")
+        unc_parts = unc.split("/")
+        if len(unc_parts) != 2 or any(not part for part in unc_parts):
+            raise RepositoryGraphError("Windows local-git UNC locator requires server and share")
+        _validate_windows_locator_component(unc_parts[0], original=locator)
+        _validate_windows_locator_component(unc_parts[1], original=locator)
+    elif drive:
+        if len(drive) != 2 or drive[1] != ":" or not drive[0].isalpha():
+            raise RepositoryGraphError("Windows local-git locator has an unsafe drive identity")
+
+    path_tail = tail.replace("\\", "/")
+    for component in path_tail.split("/"):
+        if not component or component in {".", ".."}:
+            continue
+        _validate_windows_locator_component(component, original=locator)
+
+    normalized = ntpath.normcase(ntpath.normpath(locator)).replace("\\", "/")
+    if normalized.startswith("//"):
+        return "//" + normalized.lstrip("/").rstrip("/")
+    return normalized.rstrip("/") or normalized
+
+
+def _validate_windows_locator_component(component: str, *, original: str) -> None:
+    reserved_stems = {
+        "aux",
+        "con",
+        "conin$",
+        "conout$",
+        "nul",
+        "prn",
+        *(f"com{index}" for index in range(10)),
+        *(f"lpt{index}" for index in range(10)),
+        "com¹",
+        "com²",
+        "com³",
+        "lpt¹",
+        "lpt²",
+        "lpt³",
+    }
+    invalid_characters = frozenset('<>:"|?*')
+    if component.startswith(" ") or component.endswith((" ", ".")):
+        raise RepositoryGraphError(
+            f"Windows local-git locator component has unsafe edge identity: {original!r}"
+        )
+    if any(character in invalid_characters or ord(character) < 32 for character in component):
+        raise RepositoryGraphError(
+            f"Windows local-git locator component contains reserved syntax: {original!r}"
+        )
+    stem = component.split(".", 1)[0].casefold()
+    if stem in reserved_stems:
+        raise RepositoryGraphError(
+            f"Windows local-git locator component uses a reserved device name: {original!r}"
+        )
+
+
+def _normalize_repo_path(path: str, *, windows_path_semantics: bool = False) -> str:
+    _require_plain_str(path, "repository path")
+    if type(windows_path_semantics) is not bool:
+        raise RepositoryGraphError("windows_path_semantics must be a plain bool")
+    raw_candidate = path.replace("\\", "/")
+    if windows_path_semantics:
+        _validate_windows_repo_path(raw_candidate, original=path)
+    candidate = raw_candidate if windows_path_semantics else raw_candidate.strip()
     if not candidate or candidate.startswith("/") or ":" in candidate.split("/", 1)[0]:
         raise RepositoryGraphError(f"repository path must be relative: {path!r}")
     normalized = posixpath.normpath(candidate)
     if normalized in {".", ".."} or normalized.startswith("../"):
         raise RepositoryGraphError(f"repository path escapes root: {path!r}")
-    return normalized.rstrip("/")
+    normalized = normalized.rstrip("/")
+    if windows_path_semantics:
+        _validate_windows_repo_path(normalized, original=path)
+    return normalized
+
+
+def _validate_windows_repo_path(path: str, *, original: str) -> None:
+    reserved_stems = {
+        "aux",
+        "con",
+        "conin$",
+        "conout$",
+        "nul",
+        "prn",
+        *(f"com{index}" for index in range(10)),
+        *(f"lpt{index}" for index in range(10)),
+        "com¹",
+        "com²",
+        "com³",
+        "lpt¹",
+        "lpt²",
+        "lpt³",
+    }
+    invalid_characters = frozenset('<>:"|?*')
+    for component in path.split("/"):
+        if component.startswith(" ") or component.endswith((" ", ".")):
+            raise RepositoryGraphError(
+                f"Windows repository path component has unsafe edge identity: {original!r}"
+            )
+        if any(character in invalid_characters or ord(character) < 32 for character in component):
+            raise RepositoryGraphError(
+                f"Windows repository path component contains reserved syntax: {original!r}"
+            )
+        stem = component.split(".", 1)[0].casefold()
+        if stem in reserved_stems:
+            raise RepositoryGraphError(
+                f"Windows repository path component uses a reserved device name: {original!r}"
+            )
 
 
 def _path_within(path: str, root: str, case_sensitive: bool) -> bool:
+    _require_plain_str(path, "path")
+    _require_plain_str(root, "root")
+    if type(case_sensitive) is not bool:
+        raise RepositoryGraphError("case_sensitive must be a plain bool")
     if not case_sensitive:
         path = path.casefold()
         root = root.casefold()
