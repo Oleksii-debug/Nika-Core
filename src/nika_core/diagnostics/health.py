@@ -99,11 +99,13 @@ SchemaColumn = tuple[str, str, int, int]
 SchemaForeignKey = tuple[int, int, str, str, str, str, str, str]
 SchemaIndexColumn = tuple[int, int, str, int, str, int]
 SchemaIndex = tuple[str, int, str, int, str, tuple[SchemaIndexColumn, ...]]
+SchemaTrigger = tuple[str, str]
 SchemaTable = tuple[
     str,
     tuple[SchemaColumn, ...],
     tuple[SchemaForeignKey, ...],
     tuple[SchemaIndex, ...],
+    tuple[SchemaTrigger, ...],
 ]
 SchemaSignature = tuple[tuple[str, SchemaTable], ...]
 
@@ -412,8 +414,8 @@ class HealthService:
             check_id="database.schema.shape",
             status=HealthStatus.FAIL,
             summary=(
-                "Required canonical tables, definitions, columns, foreign keys, or indexes are "
-                "missing or malformed."
+                "Required canonical tables, definitions, columns, foreign keys, indexes, or "
+                "triggers are missing or malformed."
             ),
         )
 
@@ -512,20 +514,48 @@ class HealthService:
                         index_columns,
                     )
                 )
+            triggers = tuple(
+                (
+                    str(row[0]),
+                    "" if row[1] is None else str(row[1]),
+                )
+                for row in conn.execute(
+                    "SELECT name, sql FROM sqlite_master "
+                    "WHERE type = 'trigger' AND tbl_name = ? ORDER BY name",
+                    (table_name,),
+                )
+            )
             signature.append(
-                (str(table_name), (table_sql, columns, foreign_keys, tuple(indexes)))
+                (
+                    str(table_name),
+                    (table_sql, columns, foreign_keys, tuple(indexes), triggers),
+                )
             )
         return tuple(signature)
 
     @staticmethod
     def _schema_table_matches(expected: SchemaTable, actual: SchemaTable) -> bool:
-        expected_sql, expected_columns, expected_foreign_keys, expected_indexes = expected
-        actual_sql, actual_columns, actual_foreign_keys, actual_indexes = actual
+        (
+            expected_sql,
+            expected_columns,
+            expected_foreign_keys,
+            expected_indexes,
+            expected_triggers,
+        ) = expected
+        (
+            actual_sql,
+            actual_columns,
+            actual_foreign_keys,
+            actual_indexes,
+            actual_triggers,
+        ) = actual
         return (
             actual_sql == expected_sql
             and actual_columns == expected_columns
             and actual_foreign_keys == expected_foreign_keys
+            and len(actual_indexes) == len(expected_indexes)
             and all(index in actual_indexes for index in expected_indexes)
+            and actual_triggers == expected_triggers
         )
 
     def _check_resources(self) -> HealthCheck:

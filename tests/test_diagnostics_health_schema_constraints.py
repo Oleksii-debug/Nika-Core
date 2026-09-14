@@ -123,3 +123,41 @@ def test_current_markers_with_missing_canonical_check_constraint_fail_schema_sha
     assert checks["database.foreign-keys"] is HealthStatus.PASS
     assert checks["database.schema.shape"] is HealthStatus.FAIL
     assert report.overall is HealthStatus.FAIL
+
+
+def test_current_markers_with_extra_unique_index_fail_schema_shape(tmp_path: Path) -> None:
+    database = tmp_path / "nika.db"
+    SQLiteStore(database).initialize()
+    with sqlite3.connect(database) as conn:
+        conn.execute("CREATE UNIQUE INDEX idx_tasks_payload_unique ON tasks(payload_json)")
+
+    report = _run(database)
+
+    checks = _check_map(report)
+    assert checks["database.integrity"] is HealthStatus.PASS
+    assert checks["database.foreign-keys"] is HealthStatus.PASS
+    assert checks["database.schema.shape"] is HealthStatus.FAIL
+    assert report.overall is HealthStatus.FAIL
+
+
+def test_current_markers_with_behavior_changing_trigger_fail_schema_shape(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "nika.db"
+    SQLiteStore(database).initialize()
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            """CREATE TRIGGER reject_task_insert
+            BEFORE INSERT ON tasks
+            BEGIN
+                SELECT RAISE(ABORT, 'blocked');
+            END"""
+        )
+
+    report = _run(database)
+
+    checks = _check_map(report)
+    assert checks["database.integrity"] is HealthStatus.PASS
+    assert checks["database.foreign-keys"] is HealthStatus.PASS
+    assert checks["database.schema.shape"] is HealthStatus.FAIL
+    assert report.overall is HealthStatus.FAIL
