@@ -302,7 +302,38 @@ def test_spoofable_shard_sha_string_is_rejected_before_canonicalization() -> Non
 
     with pytest.raises(
         LearningMaterialCompositionError,
-        match="shard artifact_sha256 must be an exact",
+        match="canonical LearningShard validation",
+    ):
+        candidate_material_sha256(
+            selection_policy_sha256=H,
+            shards=shards,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("record_count", True), ("byte_count", 0)),
+)
+def test_forged_shard_numeric_fields_are_revalidated_before_canonicalization(
+    field: str,
+    value: object,
+) -> None:
+    forged = object.__new__(LearningShard)
+    object.__setattr__(forged, "split", LearningDataSplit.TRAINING)
+    object.__setattr__(forged, "artifact_sha256", A)
+    object.__setattr__(forged, "provenance_sha256", C)
+    object.__setattr__(forged, "license_evidence_sha256", E)
+    object.__setattr__(forged, "record_count", 10)
+    object.__setattr__(forged, "byte_count", 100)
+    object.__setattr__(forged, field, value)
+    shards = (
+        forged,
+        _shard(LearningDataSplit.VALIDATION, B, D, F),
+    )
+
+    with pytest.raises(
+        LearningMaterialCompositionError,
+        match="canonical LearningShard validation",
     ):
         candidate_material_sha256(
             selection_policy_sha256=H,

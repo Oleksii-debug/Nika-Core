@@ -8,6 +8,7 @@ import re
 from nika_core.learning_package import (
     FrozenLearningPackage,
     LearningDataSplit,
+    LearningPackageValidationError,
     LearningShard,
 )
 from nika_core.learning_verification import (
@@ -64,20 +65,30 @@ def _canonical_shards(shards: tuple[LearningShard, ...]) -> tuple[LearningShard,
         raise LearningMaterialCompositionError(
             "shards must contain exact LearningShard values"
         )
+    canonical: list[LearningShard] = []
     for shard in shards:
         if type(shard.split) is not LearningDataSplit:
             raise LearningMaterialCompositionError(
                 "shard split must be an exact LearningDataSplit"
             )
-        _require_sha256(shard.artifact_sha256, field="shard artifact_sha256")
-        _require_sha256(shard.provenance_sha256, field="shard provenance_sha256")
-        _require_sha256(
-            shard.license_evidence_sha256,
-            field="shard license_evidence_sha256",
-        )
+        try:
+            canonical.append(
+                LearningShard(
+                    split=shard.split,
+                    artifact_sha256=shard.artifact_sha256,
+                    provenance_sha256=shard.provenance_sha256,
+                    license_evidence_sha256=shard.license_evidence_sha256,
+                    record_count=shard.record_count,
+                    byte_count=shard.byte_count,
+                )
+            )
+        except LearningPackageValidationError as exc:
+            raise LearningMaterialCompositionError(
+                "shard fields do not satisfy canonical LearningShard validation"
+            ) from exc
     return tuple(
         sorted(
-            shards,
+            canonical,
             key=lambda shard: (
                 shard.split.value,
                 shard.artifact_sha256,
