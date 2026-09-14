@@ -440,10 +440,11 @@ class HealthService:
                     "Resource observer failed; provider diagnostics were intentionally omitted."
                 ),
             )
-        try:
-            values = self._validated_resource_values(snapshot)
-        except (AttributeError, TypeError, ValueError, OverflowError):
-            values = None
+        values = (
+            self._validated_resource_values(snapshot)
+            if type(snapshot) is ResourceSnapshot
+            else None
+        )
         if values is None:
             return HealthCheck(
                 check_id="resources.observer",

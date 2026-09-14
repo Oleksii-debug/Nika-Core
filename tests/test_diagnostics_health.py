@@ -55,6 +55,12 @@ class _FailingObserver:
         raise RuntimeError(f"Bearer {_SECRET_CANARY}")
 
 
+class _HostileSnapshot:
+    @property
+    def cpu_percent(self) -> float:
+        raise RuntimeError(f"Bearer {_SECRET_CANARY}")
+
+
 class _HostilePercent(float):
     def __format__(self, _format_spec: str) -> str:
         return _SECRET_CANARY
@@ -130,6 +136,20 @@ def test_resource_observer_exception_does_not_escape_secret_text(tmp_path: Path)
 
     assert report.overall is HealthStatus.WARN
     assert _check_map(report)["resources.observer"] is HealthStatus.WARN
+    assert _SECRET_CANARY not in report.render_text()
+    assert _SECRET_CANARY not in json.dumps(report.as_dict(), ensure_ascii=False)
+
+
+def test_resource_observer_non_snapshot_return_cannot_execute_hostile_getter(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "nika.db"
+    _write_healthy_database(database)
+
+    report = _run(_config(database), _StaticObserver(_HostileSnapshot()))
+
+    assert report.overall is HealthStatus.FAIL
+    assert _check_map(report)["resources.observer"] is HealthStatus.FAIL
     assert _SECRET_CANARY not in report.render_text()
     assert _SECRET_CANARY not in json.dumps(report.as_dict(), ensure_ascii=False)
 
