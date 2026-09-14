@@ -72,13 +72,6 @@ class RoutedModelProvider:
         except asyncio.CancelledError:
             raise
         except ModelGatewayError as error:
-            # A typed upstream error is authoritative only while the provider's
-            # registered capability identity is still unchanged *after* the
-            # attempted effect. Otherwise optimistic retryable/NO_EFFECT truth
-            # could be laundered through a route whose execution surface drifted
-            # during complete(). Capability access is itself an untrusted provider
-            # boundary, so any malformed/drifting/throwing observation discards
-            # that optimistic authority and becomes route-scoped UNKNOWN.
             try:
                 self._require_stable_capabilities()
             except Exception:  # noqa: BLE001 - untrusted capability boundary
@@ -87,8 +80,6 @@ class RoutedModelProvider:
                     "routed provider capabilities changed during failed execution",
                 )
             else:
-                # Snapshot only canonical typed truth. Provider-controlled text and
-                # malformed/foreign error authority are never retained.
                 terminal_error = _rebind_upstream_error(
                     route_id=self._route_id,
                     upstream_provider_id=self._upstream_capabilities.provider_id,
@@ -123,10 +114,6 @@ class RoutedModelProvider:
                 "routed provider returned an unexpected provider kind",
             )
 
-        # Return a fresh exact DTO. Never retain a provider-owned ModelResponse,
-        # ModelUsage or primitive subclass across the executable-route boundary.
-        # ModelGateway remains the final owner of semantic success validation
-        # (token invariants, finite/nonnegative latency, audit/provenance, etc.).
         return ModelResponse(
             request_id=snapshot.request_id,
             text=snapshot.text,
@@ -155,71 +142,67 @@ class RoutedModelProvider:
 def _canonical_capabilities(value: ProviderCapabilities) -> ProviderCapabilities:
     if type(value) is not ProviderCapabilities:
         raise TypeError("routed provider capabilities must be ProviderCapabilities")
-    _validate_upstream_provider_id(value.provider_id)
-    if type(value.kind) is not ProviderKind:
+
+    # Copy first, then validate only the Nika-owned exact dataclass snapshot. This
+    # avoids validating one provider-owned state and later re-reading a different
+    # state while still preserving future canonical capability fields.
+    snapshot = replace(value)
+    _validate_upstream_provider_id(snapshot.provider_id)
+    if type(snapshot.kind) is not ProviderKind:
         raise TypeError("routed provider kind must be ProviderKind")
     for name, flag in (
-        ("supports_private_data", value.supports_private_data),
-        ("supports_tools", value.supports_tools),
-        ("supports_streaming", value.supports_streaming),
-        ("supports_hard_cancellation", value.supports_hard_cancellation),
+        ("supports_private_data", snapshot.supports_private_data),
+        ("supports_tools", snapshot.supports_tools),
+        ("supports_streaming", snapshot.supports_streaming),
+        ("supports_hard_cancellation", snapshot.supports_hard_cancellation),
     ):
         if type(flag) is not bool:
             raise TypeError(f"routed provider {name} must be bool")
-
-    # Preserve the exact canonical capability DTO rather than reconstructing it
-    # field-by-field. That keeps route identity orthogonal to capability growth:
-    # when the canonical contract adds trusted fields (for example CLOUD effect
-    # host authority), they survive the wrapper instead of silently resetting to
-    # a dataclass default. ModelGateway remains the final canonical validator for
-    # the registered outer route.
-    return replace(value)
+    return snapshot
 
 
 def _snapshot_response(value: object, *, route_id: str) -> ModelResponse:
     if type(value) is not ModelResponse:
         raise _route_error(route_id, "routed provider returned a malformed response")
 
+    # Snapshot the exact outer DTO before validating it, then copy nested usage as
+    # its own exact Nika-owned DTO. Subsequent checks/reprojection never re-read
+    # the provider-owned response object.
+    snapshot = replace(value)
+    if type(snapshot.usage) is not ModelUsage:
+        raise _route_error(route_id, "routed provider returned malformed usage")
+    usage = replace(snapshot.usage)
+
     for label, item in (
-        ("request_id", value.request_id),
-        ("text", value.text),
-        ("provider_id", value.provider_id),
-        ("model", value.model),
+        ("request_id", snapshot.request_id),
+        ("text", snapshot.text),
+        ("provider_id", snapshot.provider_id),
+        ("model", snapshot.model),
     ):
         if type(item) is not str:
             raise _route_error(
                 route_id,
                 f"routed provider returned malformed {label}",
             )
-    if type(value.provider_kind) is not ProviderKind:
+    if type(snapshot.provider_kind) is not ProviderKind:
         raise _route_error(route_id, "routed provider returned malformed provider kind")
-    if type(value.usage) is not ModelUsage:
-        raise _route_error(route_id, "routed provider returned malformed usage")
 
-    token_values = (
-        value.usage.input_tokens,
-        value.usage.output_tokens,
-        value.usage.total_tokens,
-    )
+    token_values = (usage.input_tokens, usage.output_tokens, usage.total_tokens)
     for token_value in token_values:
         if token_value is not None and type(token_value) is not int:
             raise _route_error(route_id, "routed provider returned malformed usage")
 
-    latency_ms = value.latency_ms
+    latency_ms = snapshot.latency_ms
     if latency_ms is not None and type(latency_ms) not in {int, float}:
         raise _route_error(route_id, "routed provider returned malformed latency")
 
     return ModelResponse(
-        request_id=value.request_id,
-        text=value.text,
-        provider_id=value.provider_id,
-        provider_kind=value.provider_kind,
-        model=value.model,
-        usage=ModelUsage(
-            input_tokens=value.usage.input_tokens,
-            output_tokens=value.usage.output_tokens,
-            total_tokens=value.usage.total_tokens,
-        ),
+        request_id=snapshot.request_id,
+        text=snapshot.text,
+        provider_id=snapshot.provider_id,
+        provider_kind=snapshot.provider_kind,
+        model=snapshot.model,
+        usage=usage,
         latency_ms=latency_ms,
     )
 
