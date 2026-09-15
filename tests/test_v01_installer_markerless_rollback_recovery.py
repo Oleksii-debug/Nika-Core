@@ -17,6 +17,9 @@ def _bundle(root: Path, marker: str) -> Path:
     bundle = root / f"bundle-{marker}"
     bundle.mkdir(parents=True)
     (bundle / "NikaCore.exe").write_text(marker, encoding="utf-8")
+    internal = bundle / "_internal"
+    internal.mkdir()
+    (internal / "runtime.dat").write_text(f"runtime-{marker}", encoding="utf-8")
     manifest = build_release_manifest(
         bundle,
         product="NikaCore",

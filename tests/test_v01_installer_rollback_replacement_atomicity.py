@@ -168,6 +168,26 @@ def _prepare_rollback_pair(
     assert not swap.exists()
     if retire_first_update_receipt:
         _retire_committed_first_update_receipt(destination)
+        payload = SCRIPT.read_text(encoding="utf-8")
+        needle = "        [System.IO.Directory]::Move($destinationPath, $swapPath)\n"
+        assert payload.count(needle) == 1
+        instrumented = tmp_path / "install_nika_core_marker_persisted_crash.ps1"
+        instrumented.write_text(
+            payload.replace(needle, "        exit 90\n" + needle, 1),
+            encoding="utf-8",
+        )
+        marker_persisted = _run(
+            shell,
+            script=instrumented,
+            mode="Rollback",
+            destination=destination,
+        )
+        assert marker_persisted.returncode == 90, marker_persisted.stderr or marker_persisted.stdout
+        marker = destination.parent / f".{destination.name}.rollback-operation.json"
+        assert marker.is_file()
+        assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+        assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+        assert not swap.exists()
     return destination, rollback, swap
 
 
