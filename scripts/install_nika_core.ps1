@@ -405,7 +405,7 @@ function Get-NikaManifestProperty {
     if ($Object.PSObject.Properties.Name -notcontains $Name) {
         throw "Release manifest is missing required metadata."
     }
-    return $Object.$Name
+    Write-Output -NoEnumerate ($Object.$Name)
 }
 
 function Assert-NikaReleaseBundle {
