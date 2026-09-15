@@ -140,9 +140,8 @@ class ModelGateway:
             terminal_error: ModelGatewayError | None = None
             cancelled = False
             try:
-                response = await asyncio.wait_for(
-                    provider.complete(attempt_request), timeout=remaining
-                )
+                async with asyncio.timeout(remaining):
+                    response = await provider.complete(attempt_request)
             except TimeoutError:
                 error = ModelGatewayError(
                     ModelErrorCode.TIMEOUT,
