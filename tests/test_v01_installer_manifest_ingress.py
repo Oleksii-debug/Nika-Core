@@ -95,6 +95,31 @@ def test_installer_manifest_ingress_declares_strict_object_authority() -> None:
 
 
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell manifest proof is Windows-only")
+def test_canonical_one_file_manifest_installs(tmp_path: Path) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    bundle = _bundle(tmp_path / "case")
+    manifest = json.loads((bundle / "release-manifest.json").read_text(encoding="utf-8"))
+    files = manifest["files"]
+    assert isinstance(files, list)
+    assert len(files) == 1
+    assert files[0]["path"] == "NikaCore.exe"
+
+    destination = tmp_path / "install" / "Nika Core"
+    installed = _run_install(
+        shell,
+        bundle=bundle,
+        destination=destination,
+        data_root=tmp_path / "data",
+    )
+
+    assert installed.returncode == 0, installed.stderr or installed.stdout
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "fixture"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell manifest proof is Windows-only")
 @pytest.mark.parametrize("mutate_raw", [_duplicate_top_level, _duplicate_file_member])
 def test_duplicate_json_members_fail_before_install_mutation(
     tmp_path: Path,
