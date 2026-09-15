@@ -222,6 +222,66 @@ def test_same_rollback_operation_rejects_verified_pair_substitution_without_muta
 
 
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
+def test_interrupted_rollback_marker_mismatch_fails_before_recovery_mutation(
+    tmp_path: Path,
+) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    bundle_v1 = _bundle(tmp_path / "v1", "v1")
+    bundle_v2 = _bundle(tmp_path / "v2", "v2")
+    bundle_v3 = _bundle(tmp_path / "v3", "v3")
+    destination = tmp_path / "install" / "Nika Core"
+    rollback = destination.parent / f".{destination.name}.rollback"
+    swap = destination.parent / f".{destination.name}.rollback-swap"
+    operation_id = "5" * 32
+
+    assert _run(
+        shell,
+        script=SCRIPT,
+        mode="Install",
+        destination=destination,
+        bundle=bundle_v1,
+    ).returncode == 0
+    assert _run(
+        shell,
+        script=SCRIPT,
+        mode="Update",
+        destination=destination,
+        bundle=bundle_v2,
+    ).returncode == 0
+    completed = _run(
+        shell,
+        script=SCRIPT,
+        mode="Rollback",
+        destination=destination,
+        operation_id=operation_id,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+
+    # Keep the durable marker for v2 -> v1, but forge a fully valid crash
+    # geometry whose swap image is unrelated v3. Recovery must not move it.
+    shutil.rmtree(destination)
+    shutil.copytree(bundle_v3, swap)
+    assert not destination.exists()
+    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+    assert (swap / "NikaCore.exe").read_text(encoding="utf-8") == "v3"
+
+    rejected = _run(
+        shell,
+        script=SCRIPT,
+        mode="Rollback",
+        destination=destination,
+        operation_id=operation_id,
+    )
+    assert rejected.returncode != 0
+    assert not destination.exists()
+    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+    assert (swap / "NikaCore.exe").read_text(encoding="utf-8") == "v3"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
 def test_malformed_rollback_operation_identity_fails_before_mutation(tmp_path: Path) -> None:
     shell = _powershell()
     if shell is None:
