@@ -117,3 +117,57 @@ def test_markerless_interrupted_rollback_swap_fails_before_recovery_mutation(
     assert not marker.exists()
     assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
     assert (swap / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
+def test_markerless_interrupted_rollback_after_activation_fails_without_mutation(
+    tmp_path: Path,
+) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    bundle_v1 = _bundle(tmp_path / "v1", "v1")
+    bundle_v2 = _bundle(tmp_path / "v2", "v2")
+    destination = tmp_path / "install" / "Nika Core"
+    rollback = destination.parent / f".{destination.name}.rollback"
+    swap = destination.parent / f".{destination.name}.rollback-swap"
+    marker = destination.parent / f".{destination.name}.rollback-operation.json"
+
+    installed = _run(
+        shell,
+        mode="Install",
+        destination=destination,
+        bundle=bundle_v1,
+    )
+    assert installed.returncode == 0, installed.stderr or installed.stdout
+    updated = _run(
+        shell,
+        mode="Update",
+        destination=destination,
+        bundle=bundle_v2,
+    )
+    assert updated.returncode == 0, updated.stderr or updated.stdout
+    assert not marker.exists()
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+
+    destination.rename(swap)
+    rollback.rename(destination)
+    assert not rollback.exists()
+    assert not marker.exists()
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    assert (swap / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+
+    rejected = _run(
+        shell,
+        mode="Rollback",
+        destination=destination,
+        operation_id="7" * 32,
+    )
+    assert rejected.returncode != 0
+    assert "durable rollback operation marker" in (rejected.stderr + rejected.stdout).lower()
+    assert not marker.exists()
+    assert not rollback.exists()
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    assert (swap / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
