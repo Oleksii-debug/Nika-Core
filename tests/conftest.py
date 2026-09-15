@@ -12,6 +12,10 @@ _LEGACY_CLOUD_AUTH_FILES = frozenset(
         "test_intelligence_provenance.py",
         "test_m4_model_tools.py",
         "test_model_gateway_api_route.py",
+        "test_multi_agent_model_gateway_runtime.py",
+        "test_v01_model_runtime_binding.py",
+        "test_v01_packaged_model_runtime_composition.py",
+        "test_v01_packaged_model_selection_modes.py",
     }
 )
 
@@ -35,9 +39,10 @@ def _legacy_cloud_effect_authority(
 
     #704 made CLOUD execution fail closed unless a current effect authorizer is
     supplied. The dedicated cloud-authority suite owns that security contract.
-    These four older modules test routing, transport, provenance, cancellation,
-    and provider error normalization downstream of authorization, so they get an
-    explicit synthetic authorizer instead of relying on the old implicit allow.
+    These legacy modules test routing, transport, provenance, cancellation,
+    runtime composition, and provider error normalization downstream of
+    authorization, so they get an explicit synthetic authorizer instead of
+    relying on the old implicit allow.
     """
 
     if request.node.path.name not in _LEGACY_CLOUD_AUTH_FILES:
