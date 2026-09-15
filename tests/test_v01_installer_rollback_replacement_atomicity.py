@@ -73,6 +73,31 @@ def _run(
     )
 
 
+def _committed_first_update_receipt(destination: Path) -> Path:
+    prefix = f".{destination.name}.first-update-"
+    receipts = [
+        entry
+        for entry in destination.parent.iterdir()
+        if entry.name.lower().startswith(prefix.lower())
+    ]
+    assert len(receipts) == 1
+    receipt = receipts[0]
+    assert receipt.is_dir()
+    target_digest = receipt.name[len(prefix) :]
+    assert len(target_digest) == 64
+    assert all(character in "0123456789abcdef" for character in target_digest)
+    assert not (receipt / "candidate").exists()
+    return receipt
+
+
+def _retire_committed_first_update_receipt(destination: Path) -> None:
+    # A real later Update with a different manifest, or a real Rollback, removes
+    # the durable first-update completion receipt before its first destructive
+    # move. Manual crash fixtures must cross the same boundary before creating
+    # a later transaction's interrupted geometry.
+    _committed_first_update_receipt(destination).rmdir()
+
+
 def _prepare_missing_destination_recovery_state(
     tmp_path: Path,
     shell: str,
@@ -101,6 +126,7 @@ def _prepare_missing_destination_recovery_state(
     )
     assert updated.returncode == 0, updated.stderr or updated.stdout
 
+    _retire_committed_first_update_receipt(destination)
     rollback.rename(retired)
     destination.rename(rollback)
     assert not destination.exists()
@@ -109,7 +135,12 @@ def _prepare_missing_destination_recovery_state(
     return bundle_v3, destination, rollback, retired
 
 
-def _prepare_rollback_pair(tmp_path: Path, shell: str) -> tuple[Path, Path, Path]:
+def _prepare_rollback_pair(
+    tmp_path: Path,
+    shell: str,
+    *,
+    retire_first_update_receipt: bool = True,
+) -> tuple[Path, Path, Path]:
     bundle_v1 = _bundle(tmp_path / "rollback-version-1", "v1")
     bundle_v2 = _bundle(tmp_path / "rollback-version-2", "v2")
     destination = tmp_path / "rollback-install" / "Nika Core"
@@ -135,17 +166,20 @@ def _prepare_rollback_pair(tmp_path: Path, shell: str) -> tuple[Path, Path, Path
     assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
     assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
     assert not swap.exists()
+    if retire_first_update_receipt:
+        _retire_committed_first_update_receipt(destination)
     return destination, rollback, swap
 
 
 def test_update_replacement_order_preserves_prior_rollback_until_activation() -> None:
     payload = SCRIPT.read_text(encoding="utf-8")
-    update = payload[payload.index("$hadPriorRollback ="):]
+    update_start = payload.index("$failedActivationPath = Join-Path $parent")
+    update = payload[update_start : payload.index("\nfinally {", update_start)]
 
     retire_prior = "[System.IO.Directory]::Move($rollbackPath, $retiredRollbackPath)"
     establish_replacement = "[System.IO.Directory]::Move($destinationPath, $rollbackPath)"
     activate_candidate = "[System.IO.Directory]::Move($stagePath, $destinationPath)"
-    retire_after_success = "Remove-Item -LiteralPath $retiredRollbackPath -Recurse -Force"
+    retire_after_success = "Remove-NikaTreeNoFollow -Path $retiredRollbackPath"
 
     assert "$retiredRollbackPath = Join-Path $parent (\".$leaf.rollback-retired\")" in payload
     assert "function Resolve-NikaInterruptedUpdate" in payload
@@ -160,6 +194,7 @@ def test_update_replacement_order_preserves_prior_rollback_until_activation() ->
     assert update.index(establish_replacement) < update.index(activate_candidate)
     assert update.index(activate_candidate) < update.index(retire_after_success)
     assert "Remove-Item -LiteralPath $rollbackPath -Recurse -Force" not in update
+    assert "Remove-Item -LiteralPath $retiredRollbackPath -Recurse -Force" not in update
 
 
 def test_missing_destination_recovery_revalidates_all_authority_before_first_move() -> None:
@@ -324,6 +359,7 @@ def test_interrupted_retired_rollback_is_recovered_before_next_update(tmp_path: 
     )
     assert updated.returncode == 0, updated.stderr or updated.stdout
 
+    _retire_committed_first_update_receipt(destination)
     rollback.rename(retired)
     assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
     assert (retired / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
@@ -596,3 +632,26 @@ def test_rollback_restart_rejects_swap_junction_without_touching_external_target
         timeout=10,
     )
     assert removed.returncode == 0, removed.stderr or removed.stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
+def test_multiple_transaction_authorities_remain_fail_closed(tmp_path: Path) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    destination, rollback, swap = _prepare_rollback_pair(
+        tmp_path,
+        shell,
+        retire_first_update_receipt=False,
+    )
+    receipt = _committed_first_update_receipt(destination)
+    destination.rename(swap)
+
+    rejected = _run(shell, script=SCRIPT, mode="Rollback", destination=destination)
+    assert rejected.returncode != 0, rejected.stdout
+    assert "Multiple interrupted installer transactions are present" in rejected.stderr
+    assert receipt.exists()
+    assert not destination.exists()
+    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    assert (swap / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
