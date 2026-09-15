@@ -1090,6 +1090,44 @@ Resolve-NikaInterruptedUpdate `
     -RollbackPath $rollbackPath `
     -RetiredRollbackPath $retiredRollbackPath `
     -DataRoot $dataRoot
+
+if ((Test-Path -LiteralPath $rollbackSwapPath) -and $null -ne $rollbackOperationMarker) {
+    if (
+        $Mode -eq "Rollback" -and
+        -not [string]::IsNullOrEmpty($RollbackOperationId) -and
+        $RollbackOperationId -cne [string]$rollbackOperationMarker.OperationId
+    ) {
+        throw "A new rollback operation cannot supersede an interrupted rollback operation."
+    }
+
+    Assert-NikaNoReparsePathChain -Path $rollbackSwapPath
+    Assert-NikaReleaseBundle -BundleRoot $rollbackSwapPath
+    $recoveryHasDestination = Test-Path -LiteralPath $destinationPath -PathType Container
+    $recoveryHasRollback = Test-Path -LiteralPath $rollbackPath -PathType Container
+    $swapDigest = Get-NikaReleaseManifestDigest -BundleRoot $rollbackSwapPath
+    if ($swapDigest -cne [string]$rollbackOperationMarker.SourceDigest) {
+        throw "Interrupted rollback swap image does not match the durable operation marker."
+    }
+
+    if (-not $recoveryHasDestination -and $recoveryHasRollback) {
+        Assert-NikaReleaseBundle -BundleRoot $rollbackPath
+        $recoveryRollbackDigest = Get-NikaReleaseManifestDigest -BundleRoot $rollbackPath
+        if ($recoveryRollbackDigest -cne [string]$rollbackOperationMarker.TargetDigest) {
+            throw "Interrupted rollback target image does not match the durable operation marker."
+        }
+    }
+    elseif ($recoveryHasDestination -and -not $recoveryHasRollback) {
+        Assert-NikaReleaseBundle -BundleRoot $destinationPath
+        $recoveryDestinationDigest = Get-NikaReleaseManifestDigest -BundleRoot $destinationPath
+        if ($recoveryDestinationDigest -cne [string]$rollbackOperationMarker.TargetDigest) {
+            throw "Interrupted rollback active image does not match the durable operation marker."
+        }
+    }
+    else {
+        throw "Interrupted rollback marker state is ambiguous; refusing recovery."
+    }
+}
+
 $rollbackRecoveryState = Resolve-NikaInterruptedRollback `
     -DestinationPath $destinationPath `
     -RollbackPath $rollbackPath `
