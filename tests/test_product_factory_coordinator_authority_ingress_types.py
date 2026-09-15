@@ -77,7 +77,7 @@ def test_review_decision_malformed_authority_ingress_is_bounded(
         ({"work_id": 1}, "identity must be non-empty text"),
         ({"work_id": _HostileText("work-1")}, "identity must be non-empty text"),
         ({"base_sha": 1}, "base_sha must be a 40-character hexadecimal SHA"),
-        ({"coding_result": "not-a-coding-result"}, "coding_result must be CodingResult"),
+        ({"coding_result": "not-a-coding-result"}, "coding_result must be exact CodingResult"),
         ({"producer_actor_id": 1}, "producer actor identity must be non-empty text"),
         (
             {"producer_actor_id": _HostileText("team-role:builder")},
