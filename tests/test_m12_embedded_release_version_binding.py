@@ -74,6 +74,11 @@ def test_m12_cli_propagates_trusted_version_to_archive_verifier(
 
     monkeypatch.setattr(m12_release_evidence, "verify_release_archive", _verify_archive)
     monkeypatch.setattr(
+        m12_release_evidence,
+        "prove_packaged_installer_lifecycle",
+        lambda _artifact: None,
+    )
+    monkeypatch.setattr(
         sys,
         "argv",
         [
