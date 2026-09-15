@@ -1091,6 +1091,10 @@ Resolve-NikaInterruptedUpdate `
     -RetiredRollbackPath $retiredRollbackPath `
     -DataRoot $dataRoot
 
+if ((Test-Path -LiteralPath $rollbackSwapPath) -and $null -eq $rollbackOperationMarker) {
+    throw "Interrupted rollback swap requires a durable rollback operation marker."
+}
+
 if ((Test-Path -LiteralPath $rollbackSwapPath) -and $null -ne $rollbackOperationMarker) {
     if (
         $Mode -eq "Rollback" -and
