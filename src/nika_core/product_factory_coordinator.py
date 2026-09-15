@@ -78,8 +78,8 @@ class WorkerResultEnvelope:
         _validate_sha(self.base_sha, "base_sha")
         _validate_sha(self.result_sha, "result_sha")
         _validate_digest(self.diff_digest, "diff_digest")
-        if not isinstance(self.coding_result, CodingResult):
-            raise CoordinatorError("worker result coding_result must be CodingResult")
+        if type(self.coding_result) is not CodingResult:
+            raise CoordinatorError("worker result coding_result must be exact CodingResult")
         if self.producer_actor_id is not None and (
             type(self.producer_actor_id) is not str or not self.producer_actor_id.strip()
         ):
@@ -752,14 +752,14 @@ def _stable_id(prefix: str, *parts: object) -> str:
 
 
 def _validate_sha(value: str, label: str) -> None:
-    if not isinstance(value, str) or len(value) != 40 or any(
+    if type(value) is not str or len(value) != 40 or any(
         char not in "0123456789abcdef" for char in value.casefold()
     ):
         raise CoordinatorError(f"{label} must be a 40-character hexadecimal SHA")
 
 
 def _validate_digest(value: str, label: str) -> None:
-    if not isinstance(value, str) or len(value) != 64 or any(
+    if type(value) is not str or len(value) != 64 or any(
         char not in "0123456789abcdef" for char in value.casefold()
     ):
         raise CoordinatorError(f"{label} must be a 64-character hexadecimal digest")
