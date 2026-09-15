@@ -37,6 +37,28 @@ def _stable_folder_source_id(workspace_id: str, path: Path) -> str:
     return f"local-{digest[:24]}"
 
 
+def _validate_local_source(source: SourceSpec) -> None:
+    if source.kind is not SourceKind.LOCAL_FILE:
+        raise ValueError("local corpus ingestion requires a local_file source")
+    required = {
+        "source_id": source.source_id,
+        "workspace_id": source.workspace_id,
+        "locator": source.locator,
+    }
+    for field, value in required.items():
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{field} is required")
+
+
+def _canonical_local_source(source: SourceSpec, candidate: Path) -> SourceSpec:
+    return SourceSpec(
+        source_id=source.source_id,
+        workspace_id=source.workspace_id,
+        kind=SourceKind.LOCAL_FILE,
+        locator=str(candidate),
+    )
+
+
 class LocalCorpusService:
     """Deterministic local-source vertical with optional durable raw artifacts."""
 
@@ -44,14 +66,30 @@ class LocalCorpusService:
         self._repository = repository
         self._allowed_root = Path(allowed_root)
 
-    def ingest(self, source: SourceSpec, *, max_bytes: int = 16 * 1024 * 1024) -> IngestResult:
-        extracted = extract_local_file(
+    def ingest(
+        self,
+        source: SourceSpec,
+        *,
+        max_bytes: int = 16 * 1024 * 1024,
+        max_logical_line_chars: int = 1_000_000,
+    ) -> IngestResult:
+        _validate_local_source(source)
+        candidate = resolve_local_file(
             source.locator,
             allowed_root=self._allowed_root,
             max_bytes=max_bytes,
         )
-        self._repository.upsert_source(source)
-        return self._repository.ingest_document(source, extracted)
+        canonical_source = _canonical_local_source(source, candidate)
+        extracted = extract_local_file(
+            candidate,
+            allowed_root=self._allowed_root,
+            max_bytes=max_bytes,
+            max_logical_line_chars=max_logical_line_chars,
+        )
+        if extracted.status is not ExtractionStatus.EXTRACTED:
+            raise LocalIngestionError("local source contains no indexable text")
+        self._repository.upsert_source(canonical_source)
+        return self._repository.ingest_document(canonical_source, extracted)
 
     def ingest_artifact(
         self,
@@ -60,23 +98,24 @@ class LocalCorpusService:
         blob_store: ContentAddressedBlobStore,
         max_bytes: int = 64 * 1024 * 1024,
         document_limits: DocumentLimits | None = None,
+        max_logical_line_chars: int = 1_000_000,
     ) -> ArtifactIngestResult:
-        if source.kind is not SourceKind.LOCAL_FILE:
-            raise ValueError("artifact ingestion requires a local_file source")
+        _validate_local_source(source)
         candidate = resolve_local_file(
             source.locator,
             allowed_root=self._allowed_root,
             max_bytes=max_bytes,
         )
+        canonical_source = _canonical_local_source(source, candidate)
         media_type = local_media_type(candidate)
-        self._repository.upsert_source(source)
+        self._repository.upsert_source(canonical_source)
         artifact = blob_store.put_file(
-            source.workspace_id,
+            canonical_source.workspace_id,
             candidate,
             max_bytes=max_bytes,
         )
         self._repository.record_artifact(
-            source,
+            canonical_source,
             artifact,
             media_type=media_type,
             original_name=candidate.name,
@@ -95,6 +134,7 @@ class LocalCorpusService:
                     candidate,
                     allowed_root=self._allowed_root,
                     max_bytes=max_bytes,
+                    max_logical_line_chars=max_logical_line_chars,
                 )
         except Exception as exc:
             self._repository.record_extraction(
@@ -122,7 +162,7 @@ class LocalCorpusService:
         if status is not ExtractionStatus.EXTRACTED:
             return ArtifactIngestResult(artifact=artifact, extraction=extraction, corpus=None)
 
-        corpus = self._repository.ingest_document(source, extracted)
+        corpus = self._repository.ingest_document(canonical_source, extracted)
         self._repository.link_document_artifact(
             document_id=corpus.document.document_id,
             artifact_id=artifact.artifact_id,
