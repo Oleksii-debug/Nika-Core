@@ -3,11 +3,21 @@ param(
     [ValidateSet("Install", "Update", "Rollback")]
     [string]$Mode = "Install",
     [string]$BundlePath = "",
-    [string]$Destination = ""
+    [string]$Destination = "",
+    [string]$RollbackOperationId = ""
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+if (-not [string]::IsNullOrEmpty($RollbackOperationId)) {
+    if ($RollbackOperationId -cnotmatch '^[0-9a-f]{32}$') {
+        throw "RollbackOperationId must be exactly 32 lowercase hexadecimal characters."
+    }
+    if ($Mode -ne "Rollback") {
+        throw "RollbackOperationId is only valid for Rollback mode."
+    }
+}
 
 function Get-NikaFullPath {
     param([Parameter(Mandatory=$true)][string]$Path)
@@ -547,6 +557,173 @@ function Get-NikaReleaseManifestDigest {
     return (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Get-NikaRollbackOperationMarker {
+    param(
+        [Parameter(Mandatory=$true)][string]$MarkerPath,
+        [Parameter(Mandatory=$true)][string]$DataRoot
+    )
+
+    if (-not (Test-Path -LiteralPath $MarkerPath)) {
+        return $null
+    }
+    Assert-NikaNoReparsePathChain -Path $MarkerPath
+    Assert-NikaDataMutationSeparation -DataRoot $DataRoot -MutationPaths @($MarkerPath)
+    if (-not (Test-Path -LiteralPath $MarkerPath -PathType Leaf)) {
+        throw "Rollback operation marker must be a regular file."
+    }
+    $markerItem = Get-Item -LiteralPath $MarkerPath -Force
+    if (($markerItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Rollback operation marker must not be a reparse point."
+    }
+
+    try {
+        $markerJson = Get-Content -LiteralPath $MarkerPath -Raw -Encoding UTF8
+        $marker = $markerJson | ConvertFrom-Json
+    }
+    catch {
+        throw "Rollback operation marker is invalid JSON."
+    }
+    Assert-NikaUniqueJsonObjectKeys -Json $markerJson
+    Assert-NikaExactJsonObjectShape -Object $marker -RequiredKeys @(
+        "marker_version",
+        "operation_id",
+        "source_digest",
+        "target_digest"
+    )
+
+    if (
+        $marker.marker_version -is [bool] -or
+        -not (($marker.marker_version -is [int]) -or ($marker.marker_version -is [long])) -or
+        [int64]$marker.marker_version -ne 1
+    ) {
+        throw "Rollback operation marker version is invalid."
+    }
+    if (-not ($marker.operation_id -is [string]) -or [string]$marker.operation_id -cnotmatch '^[0-9a-f]{32}$') {
+        throw "Rollback operation marker identity is invalid."
+    }
+    foreach ($name in @("source_digest", "target_digest")) {
+        $value = $marker.$name
+        if (-not ($value -is [string]) -or [string]$value -cnotmatch '^[0-9a-f]{64}$') {
+            throw "Rollback operation marker manifest identity is invalid."
+        }
+    }
+    if ([string]$marker.source_digest -ceq [string]$marker.target_digest) {
+        throw "Rollback operation marker source and target identities must differ."
+    }
+
+    return [pscustomobject]@{
+        OperationId = [string]$marker.operation_id
+        SourceDigest = [string]$marker.source_digest
+        TargetDigest = [string]$marker.target_digest
+    }
+}
+
+function Write-NikaRollbackOperationMarker {
+    param(
+        [Parameter(Mandatory=$true)][string]$MarkerPath,
+        [Parameter(Mandatory=$true)][string]$OperationId,
+        [Parameter(Mandatory=$true)][string]$SourceDigest,
+        [Parameter(Mandatory=$true)][string]$TargetDigest,
+        [Parameter(Mandatory=$true)][string]$DataRoot
+    )
+
+    if ($OperationId -cnotmatch '^[0-9a-f]{32}$') {
+        throw "Rollback operation identity is invalid."
+    }
+    if ($SourceDigest -cnotmatch '^[0-9a-f]{64}$' -or $TargetDigest -cnotmatch '^[0-9a-f]{64}$') {
+        throw "Rollback operation manifest identity is invalid."
+    }
+    if ($SourceDigest -ceq $TargetDigest) {
+        throw "Rollback source and target images must differ."
+    }
+
+    $tempPath = "$MarkerPath.new-$([Guid]::NewGuid().ToString('N'))"
+    Assert-NikaNoReparsePathChain -Path $MarkerPath
+    Assert-NikaNoReparsePathChain -Path $tempPath
+    Assert-NikaDataMutationSeparation -DataRoot $DataRoot -MutationPaths @($MarkerPath, $tempPath)
+    if (Test-Path -LiteralPath $tempPath) {
+        throw "Rollback operation marker staging path already exists."
+    }
+
+    $payload = [ordered]@{
+        marker_version = 1
+        operation_id = $OperationId
+        source_digest = $SourceDigest
+        target_digest = $TargetDigest
+    } | ConvertTo-Json -Compress
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    $bytes = $encoding.GetBytes($payload)
+    $stream = [System.IO.FileStream]::new(
+        $tempPath,
+        [System.IO.FileMode]::CreateNew,
+        [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::None,
+        4096,
+        [System.IO.FileOptions]::WriteThrough
+    )
+    try {
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+    }
+    finally {
+        $stream.Dispose()
+    }
+
+    try {
+        Assert-NikaNoReparsePathChain -Path $tempPath
+        if (Test-Path -LiteralPath $MarkerPath) {
+            Assert-NikaNoReparsePathChain -Path $MarkerPath
+            if (-not (Test-Path -LiteralPath $MarkerPath -PathType Leaf)) {
+                throw "Rollback operation marker authority is not a regular file."
+            }
+            [System.IO.File]::Replace($tempPath, $MarkerPath, $null, $true)
+        }
+        else {
+            [System.IO.File]::Move($tempPath, $MarkerPath)
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempPath) {
+            Assert-NikaNoReparsePathChain -Path $tempPath
+            Remove-Item -LiteralPath $tempPath -Force
+        }
+    }
+
+    $written = Get-NikaRollbackOperationMarker -MarkerPath $MarkerPath -DataRoot $DataRoot
+    if (
+        $null -eq $written -or
+        [string]$written.OperationId -cne $OperationId -or
+        [string]$written.SourceDigest -cne $SourceDigest -or
+        [string]$written.TargetDigest -cne $TargetDigest
+    ) {
+        throw "Rollback operation marker write verification failed."
+    }
+}
+
+function Remove-NikaRollbackOperationMarker {
+    param(
+        [Parameter(Mandatory=$true)][string]$MarkerPath,
+        [Parameter(Mandatory=$true)][string]$DataRoot
+    )
+
+    if (-not (Test-Path -LiteralPath $MarkerPath)) {
+        return
+    }
+    Assert-NikaNoReparsePathChain -Path $MarkerPath
+    Assert-NikaDataMutationSeparation -DataRoot $DataRoot -MutationPaths @($MarkerPath)
+    if (-not (Test-Path -LiteralPath $MarkerPath -PathType Leaf)) {
+        throw "Rollback operation marker authority is not a regular file."
+    }
+    $markerItem = Get-Item -LiteralPath $MarkerPath -Force
+    if (($markerItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Rollback operation marker must not be a reparse point."
+    }
+    Remove-Item -LiteralPath $MarkerPath -Force
+    if (Test-Path -LiteralPath $MarkerPath) {
+        throw "Rollback operation marker could not be retired."
+    }
+}
+
 function Copy-NikaBundleToStage {
     param(
         [Parameter(Mandatory=$true)][string]$BundleRoot,
@@ -646,9 +823,6 @@ function Resolve-NikaInterruptedFirstUpdate {
     }
 
     if ($hasDestination -and -not $hasRollback) {
-        # Transaction exists but no destructive move is durable. The current
-        # installed image is still authoritative, so abort the transient
-        # candidate without inferring state from an unowned rollback geometry.
         Assert-NikaNoReparsePathChain -Path $DestinationPath
         Assert-NikaReleaseBundle -BundleRoot $DestinationPath
         Assert-NikaDataMutationSeparation -DataRoot $DataRoot -MutationPaths @(
@@ -661,8 +835,6 @@ function Resolve-NikaInterruptedFirstUpdate {
         return "restored-precommand"
     }
     elseif (-not $hasDestination -and $hasRollback -and $hasCandidate) {
-        # Crash after Destination -> Rollback. Candidate presence under the
-        # installer-owned transaction proves this geometry belongs to us.
         Assert-NikaNoReparsePathChain -Path $RollbackPath
         Assert-NikaReleaseBundle -BundleRoot $RollbackPath
         Assert-NikaNoReparsePathChain -Path $candidatePath
@@ -688,9 +860,6 @@ function Resolve-NikaInterruptedFirstUpdate {
         return "restored-precommand"
     }
     elseif ($hasDestination -and $hasRollback -and -not $hasCandidate) {
-        # Candidate was atomically activated. Keep the empty transaction
-        # directory as durable completion authority until a distinct mutation
-        # supersedes it; a retry of the exact target can then be idempotent.
         Assert-NikaNoReparsePathChain -Path $DestinationPath
         Assert-NikaNoReparsePathChain -Path $RollbackPath
         Assert-NikaReleaseBundle -BundleRoot $DestinationPath
@@ -818,8 +987,6 @@ function Resolve-NikaInterruptedRollback {
     }
 
     if (-not $hasDestination -and $hasRollback) {
-        # Crash window 1: active was staged but rollback was not activated.
-        # Restore the exact pre-command pair; the requested mode may then run normally.
         Assert-NikaNoReparsePathChain -Path $SwapPath
         Assert-NikaReleaseBundle -BundleRoot $SwapPath
         Assert-NikaNoReparsePathChain -Path $RollbackPath
@@ -834,9 +1001,6 @@ function Resolve-NikaInterruptedRollback {
         $recoveryState = "restored-precommand"
     }
     elseif ($hasDestination -and -not $hasRollback) {
-        # Crash window 2: rollback image is already active, but consuming the
-        # deterministic marker here would make recovery itself non-idempotent.
-        # Restore the exact pre-command pair through crash window 1 instead.
         Assert-NikaNoReparsePathChain -Path $DestinationPath
         Assert-NikaReleaseBundle -BundleRoot $DestinationPath
         Assert-NikaNoReparsePathChain -Path $SwapPath
@@ -898,13 +1062,18 @@ Assert-NikaSafeDestination -DestinationPath $destinationPath
 $rollbackPath = Join-Path $parent (".$leaf.rollback")
 $retiredRollbackPath = Join-Path $parent (".$leaf.rollback-retired")
 $rollbackSwapPath = Join-Path $parent (".$leaf.rollback-swap")
+$rollbackOperationMarkerPath = Join-Path $parent (".$leaf.rollback-operation.json")
 $dataRoot = Get-NikaCanonicalDataRoot
 Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @(
     $destinationPath,
     $rollbackPath,
     $retiredRollbackPath,
-    $rollbackSwapPath
+    $rollbackSwapPath,
+    $rollbackOperationMarkerPath
 )
+$rollbackOperationMarker = Get-NikaRollbackOperationMarker `
+    -MarkerPath $rollbackOperationMarkerPath `
+    -DataRoot $dataRoot
 $firstUpdateTransaction = Get-NikaFirstUpdateTransaction `
     -ParentPath $parent `
     -Leaf $leaf `
@@ -925,6 +1094,9 @@ $rollbackRecoveryState = Resolve-NikaInterruptedRollback `
     -DestinationPath $destinationPath `
     -RollbackPath $rollbackPath `
     -SwapPath $rollbackSwapPath `
+    -DataRoot $dataRoot
+$rollbackOperationMarker = Get-NikaRollbackOperationMarker `
+    -MarkerPath $rollbackOperationMarkerPath `
     -DataRoot $dataRoot
 $firstUpdateRecoveryState = "none"
 if ($null -ne $firstUpdateTransaction) {
@@ -958,25 +1130,109 @@ if ($Mode -eq "Rollback") {
     New-Item -ItemType Directory -Path $parent -Force | Out-Null
     Assert-NikaNoReparsePathChain -Path $destinationPath
     Assert-NikaNoReparsePathChain -Path $rollbackPath
-    Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $rollbackSwapPath)
+    Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @(
+        $destinationPath,
+        $rollbackPath,
+        $rollbackSwapPath,
+        $rollbackOperationMarkerPath
+    )
     if (-not (Test-Path -LiteralPath $destinationPath -PathType Container)) {
-        Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $rollbackSwapPath)
+        if ($null -ne $rollbackOperationMarker) {
+            throw "Rollback operation marker cannot be resolved without an active image."
+        }
+        Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @(
+            $destinationPath,
+            $rollbackPath,
+            $rollbackSwapPath,
+            $rollbackOperationMarkerPath
+        )
         [System.IO.Directory]::Move($rollbackPath, $destinationPath)
         Write-Output $destinationPath
         exit 0
     }
 
     Assert-NikaReleaseBundle -BundleRoot $destinationPath
+    $sourceDigest = Get-NikaReleaseManifestDigest -BundleRoot $destinationPath
+    $targetDigest = Get-NikaReleaseManifestDigest -BundleRoot $rollbackPath
+    if ($sourceDigest -ceq $targetDigest) {
+        throw "Rollback source and target images must be byte-distinct manifest identities."
+    }
+
+    $requestedRollbackOperationId = $RollbackOperationId
+    if ($null -ne $rollbackOperationMarker) {
+        $markerMatchesPreCommand = (
+            [string]$rollbackOperationMarker.SourceDigest -ceq $sourceDigest -and
+            [string]$rollbackOperationMarker.TargetDigest -ceq $targetDigest
+        )
+        $markerMatchesCommitted = (
+            [string]$rollbackOperationMarker.SourceDigest -ceq $targetDigest -and
+            [string]$rollbackOperationMarker.TargetDigest -ceq $sourceDigest
+        )
+
+        if ([string]::IsNullOrEmpty($requestedRollbackOperationId)) {
+            if ($markerMatchesCommitted) {
+                Write-Output $destinationPath
+                exit 0
+            }
+            if (-not $markerMatchesPreCommand) {
+                throw "Rollback operation marker does not match the verified installer image pair."
+            }
+            $requestedRollbackOperationId = [string]$rollbackOperationMarker.OperationId
+        }
+        elseif ($requestedRollbackOperationId -ceq [string]$rollbackOperationMarker.OperationId) {
+            if ($markerMatchesCommitted) {
+                Write-Output $destinationPath
+                exit 0
+            }
+            if (-not $markerMatchesPreCommand) {
+                throw "Rollback operation identity is bound to a different verified image pair."
+            }
+        }
+        else {
+            if (-not $markerMatchesCommitted) {
+                throw "A new rollback operation cannot supersede a non-terminal rollback operation."
+            }
+        }
+    }
+    elseif ([string]::IsNullOrEmpty($requestedRollbackOperationId)) {
+        $requestedRollbackOperationId = [Guid]::NewGuid().ToString('N')
+    }
+
+    if (
+        $null -eq $rollbackOperationMarker -or
+        $requestedRollbackOperationId -cne [string]$rollbackOperationMarker.OperationId
+    ) {
+        Write-NikaRollbackOperationMarker `
+            -MarkerPath $rollbackOperationMarkerPath `
+            -OperationId $requestedRollbackOperationId `
+            -SourceDigest $sourceDigest `
+            -TargetDigest $targetDigest `
+            -DataRoot $dataRoot
+        $rollbackOperationMarker = Get-NikaRollbackOperationMarker `
+            -MarkerPath $rollbackOperationMarkerPath `
+            -DataRoot $dataRoot
+    }
+
     $swapPath = $rollbackSwapPath
     if (Test-Path -LiteralPath $swapPath) {
         throw "Rollback cannot begin with an unresolved swap image."
     }
-    Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $swapPath)
+    Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @(
+        $destinationPath,
+        $rollbackPath,
+        $swapPath,
+        $rollbackOperationMarkerPath
+    )
     $rollbackPhase = "start"
     try {
         Assert-NikaNoReparsePathChain -Path $destinationPath
         Assert-NikaReleaseBundle -BundleRoot $destinationPath
-        Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $swapPath)
+        Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @(
+            $destinationPath,
+            $rollbackPath,
+            $swapPath,
+            $rollbackOperationMarkerPath
+        )
         [System.IO.Directory]::Move($destinationPath, $swapPath)
         $rollbackPhase = "active-staged"
 
@@ -985,7 +1241,12 @@ if ($Mode -eq "Rollback") {
         Assert-NikaNoReparsePathChain -Path $rollbackPath
         Assert-NikaReleaseBundle -BundleRoot $rollbackPath
         Assert-NikaNoReparsePathChain -Path $destinationPath
-        Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $swapPath)
+        Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @(
+            $destinationPath,
+            $rollbackPath,
+            $swapPath,
+            $rollbackOperationMarkerPath
+        )
         [System.IO.Directory]::Move($rollbackPath, $destinationPath)
         $rollbackPhase = "rollback-activated"
 
@@ -994,7 +1255,12 @@ if ($Mode -eq "Rollback") {
         Assert-NikaNoReparsePathChain -Path $swapPath
         Assert-NikaReleaseBundle -BundleRoot $swapPath
         Assert-NikaNoReparsePathChain -Path $rollbackPath
-        Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $swapPath)
+        Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @(
+            $destinationPath,
+            $rollbackPath,
+            $swapPath,
+            $rollbackOperationMarkerPath
+        )
         [System.IO.Directory]::Move($swapPath, $rollbackPath)
         $rollbackPhase = "complete"
 
@@ -1005,11 +1271,27 @@ if ($Mode -eq "Rollback") {
         if (Test-Path -LiteralPath $swapPath) {
             throw "Rollback completed with an unresolved swap image."
         }
+        $committedMarker = Get-NikaRollbackOperationMarker `
+            -MarkerPath $rollbackOperationMarkerPath `
+            -DataRoot $dataRoot
+        if (
+            $null -eq $committedMarker -or
+            [string]$committedMarker.OperationId -cne $requestedRollbackOperationId -or
+            [string]$committedMarker.SourceDigest -cne $sourceDigest -or
+            [string]$committedMarker.TargetDigest -cne $targetDigest
+        ) {
+            throw "Rollback completed without its durable operation acknowledgement."
+        }
     }
     catch {
         $rollbackError = $_
         try {
-            Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $swapPath)
+            Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @(
+                $destinationPath,
+                $rollbackPath,
+                $swapPath,
+                $rollbackOperationMarkerPath
+            )
             if ($rollbackPhase -eq "active-staged") {
                 if (
                     -not (Test-Path -LiteralPath $destinationPath) -and
@@ -1018,7 +1300,12 @@ if ($Mode -eq "Rollback") {
                     Assert-NikaNoReparsePathChain -Path $swapPath
                     Assert-NikaReleaseBundle -BundleRoot $swapPath
                     Assert-NikaNoReparsePathChain -Path $destinationPath
-                    Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $swapPath)
+                    Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @(
+                        $destinationPath,
+                        $rollbackPath,
+                        $swapPath,
+                        $rollbackOperationMarkerPath
+                    )
                     [System.IO.Directory]::Move($swapPath, $destinationPath)
                 }
             }
@@ -1030,7 +1317,12 @@ if ($Mode -eq "Rollback") {
                     Assert-NikaNoReparsePathChain -Path $destinationPath
                     Assert-NikaReleaseBundle -BundleRoot $destinationPath
                     Assert-NikaNoReparsePathChain -Path $rollbackPath
-                    Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $swapPath)
+                    Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @(
+                        $destinationPath,
+                        $rollbackPath,
+                        $swapPath,
+                        $rollbackOperationMarkerPath
+                    )
                     [System.IO.Directory]::Move($destinationPath, $rollbackPath)
                 }
                 if (
@@ -1040,7 +1332,12 @@ if ($Mode -eq "Rollback") {
                     Assert-NikaNoReparsePathChain -Path $swapPath
                     Assert-NikaReleaseBundle -BundleRoot $swapPath
                     Assert-NikaNoReparsePathChain -Path $destinationPath
-                    Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $swapPath)
+                    Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @(
+                        $destinationPath,
+                        $rollbackPath,
+                        $swapPath,
+                        $rollbackOperationMarkerPath
+                    )
                     [System.IO.Directory]::Move($swapPath, $destinationPath)
                 }
             }
@@ -1066,6 +1363,32 @@ $bundleRoot = Get-NikaFullPath $BundlePath
 Assert-NikaSafeDestination -DestinationPath $destinationPath -SourceBundle $bundleRoot
 Assert-NikaReleaseBundle -BundleRoot $bundleRoot
 $bundleManifestDigest = Get-NikaReleaseManifestDigest -BundleRoot $bundleRoot
+
+if ($null -ne $rollbackOperationMarker) {
+    if ($Mode -ne "Update") {
+        throw "A durable rollback operation marker may only be superseded by Update or Rollback."
+    }
+    if (
+        -not (Test-Path -LiteralPath $destinationPath -PathType Container) -or
+        -not (Test-Path -LiteralPath $rollbackPath -PathType Container)
+    ) {
+        throw "Update cannot supersede a rollback operation marker without a verified image pair."
+    }
+    Assert-NikaReleaseBundle -BundleRoot $destinationPath
+    Assert-NikaReleaseBundle -BundleRoot $rollbackPath
+    $currentDestinationDigest = Get-NikaReleaseManifestDigest -BundleRoot $destinationPath
+    $currentRollbackDigest = Get-NikaReleaseManifestDigest -BundleRoot $rollbackPath
+    if (
+        [string]$rollbackOperationMarker.SourceDigest -cne $currentRollbackDigest -or
+        [string]$rollbackOperationMarker.TargetDigest -cne $currentDestinationDigest
+    ) {
+        throw "Update cannot supersede a non-terminal rollback operation marker."
+    }
+    Remove-NikaRollbackOperationMarker `
+        -MarkerPath $rollbackOperationMarkerPath `
+        -DataRoot $dataRoot
+    $rollbackOperationMarker = $null
+}
 
 if ($firstUpdateRecoveryState -eq "committed" -and $Mode -eq "Update") {
     if ($bundleManifestDigest -ceq [string]$firstUpdateTransaction.TargetDigest) {
@@ -1283,8 +1606,6 @@ finally {
         if ([string]::IsNullOrWhiteSpace($firstUpdateTransactionPath)) {
             Remove-NikaTreeNoFollow -Path $stagePath
         }
-        # A deterministic first-update candidate stays inside its durable
-        # transaction directory. Recovery owns it after any failed/crashed run.
     }
 }
 
