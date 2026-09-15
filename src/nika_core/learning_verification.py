@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import re
 from dataclasses import dataclass
@@ -45,7 +46,7 @@ class LearningVerificationIntegrityError(LearningVerificationError):
 
 
 class LearningVerificationRejectedError(LearningVerificationError):
-    """Raised when a receipt does not prove every required check passed."""
+    """Raised when a receipt is not trusted verification evidence."""
 
 
 class VerificationOutcome(StrEnum):
@@ -54,13 +55,13 @@ class VerificationOutcome(StrEnum):
 
 
 def _require_token(value: object, *, field: str) -> str:
-    if not isinstance(value, str) or not _TOKEN_RE.fullmatch(value):
+    if type(value) is not str or not _TOKEN_RE.fullmatch(value):
         raise LearningVerificationValidationError(f"{field} must be a bounded machine token")
     return value
 
 
 def _require_sha256(value: object, *, field: str) -> str:
-    if not isinstance(value, str) or not _SHA256_RE.fullmatch(value):
+    if type(value) is not str or not _SHA256_RE.fullmatch(value):
         raise LearningVerificationValidationError(f"{field} must be lowercase SHA-256")
     return value
 
@@ -98,6 +99,38 @@ def _canonical_checks(
     return tuple(sorted(values, key=lambda item: item.check_id))
 
 
+def _canonical_trusted_checkers(value: object) -> tuple[tuple[str, str], ...]:
+    if type(value) is not tuple:
+        raise LearningVerificationValidationError(
+            "expected_required_checkers must be an immutable tuple"
+        )
+    if not 1 <= len(value) <= _MAX_CHECKS:
+        raise LearningVerificationValidationError(
+            "expected required checker count is outside the supported bound"
+        )
+
+    normalized: list[tuple[str, str]] = []
+    for item in value:
+        if type(item) is not tuple or len(item) != 2:
+            raise LearningVerificationValidationError(
+                "expected_required_checkers entries must be exact pairs"
+            )
+        check_id = _require_token(item[0], field="expected check_id")
+        checker_sha256 = _require_sha256(
+            item[1],
+            field="expected checker_sha256",
+        )
+        normalized.append((check_id, checker_sha256))
+
+    normalized.sort(key=lambda item: item[0])
+    check_ids = tuple(item[0] for item in normalized)
+    if len(set(check_ids)) != len(check_ids):
+        raise LearningVerificationValidationError(
+            "expected required checker ids must be unique"
+        )
+    return tuple(normalized)
+
+
 @dataclass(frozen=True, slots=True)
 class VerificationCheckEvidence:
     check_id: str
@@ -109,7 +142,7 @@ class VerificationCheckEvidence:
         _require_token(self.check_id, field="check_id")
         _require_sha256(self.checker_sha256, field="checker_sha256")
         _require_sha256(self.evidence_sha256, field="evidence_sha256")
-        if not isinstance(self.outcome, VerificationOutcome):
+        if type(self.outcome) is not VerificationOutcome:
             raise LearningVerificationValidationError(
                 "outcome must be a VerificationOutcome"
             )
@@ -237,6 +270,8 @@ class CandidateDatasetVerification:
 
     @property
     def is_verified(self) -> bool:
+        """Return structural PASS state only; this is not an authority decision."""
+
         return all(item.outcome is VerificationOutcome.PASS for item in self.checks)
 
     def canonical_payload(self) -> dict[str, object]:
@@ -250,15 +285,73 @@ class CandidateDatasetVerification:
 
     @property
     def receipt_sha256(self) -> str:
+        """Return immutable receipt identity without making a trust claim."""
+
         return _digest_payload(self.canonical_payload())
 
     @property
     def verification_sha256(self) -> str:
-        if not self.is_verified:
+        raise LearningVerificationRejectedError(
+            "trusted verification authority is required; "
+            "use trusted_verification_sha256"
+        )
+
+    def trusted_verification_sha256(
+        self,
+        *,
+        expected_verification_policy_sha256: str,
+        expected_required_checkers: tuple[tuple[str, str], ...],
+    ) -> str:
+        """Expose promotion evidence only under externally trusted authority."""
+
+        if type(self) is not CandidateDatasetVerification:
+            raise LearningVerificationValidationError(
+                "verification must be an exact CandidateDatasetVerification"
+            )
+
+        canonical = CandidateDatasetVerification.create(
+            candidate_material_sha256=self.candidate_material_sha256,
+            verification_policy_sha256=self.verification_policy_sha256,
+            required_check_ids=self.required_check_ids,
+            checks=self.checks,
+        )
+        if type(self.schema_version) is not int or self.schema_version != _SCHEMA_VERSION:
+            raise LearningVerificationValidationError(
+                "unsupported learning-verification schema"
+            )
+        if self != canonical:
+            raise LearningVerificationValidationError(
+                "verification receipt is not canonical"
+            )
+
+        trusted_policy = _require_sha256(
+            expected_verification_policy_sha256,
+            field="expected_verification_policy_sha256",
+        )
+        if not hmac.compare_digest(
+            canonical.verification_policy_sha256,
+            trusted_policy,
+        ):
+            raise LearningVerificationRejectedError(
+                "verification policy does not match the trusted expectation"
+            )
+
+        trusted_checkers = _canonical_trusted_checkers(
+            expected_required_checkers
+        )
+        receipt_checkers = tuple(
+            (item.check_id, item.checker_sha256) for item in canonical.checks
+        )
+        if receipt_checkers != trusted_checkers:
+            raise LearningVerificationRejectedError(
+                "verification checker authority does not match the trusted expectation"
+            )
+
+        if not canonical.is_verified:
             raise LearningVerificationRejectedError(
                 "candidate dataset verification did not pass every required check"
             )
-        return self.receipt_sha256
+        return canonical.receipt_sha256
 
     def to_json(self) -> str:
         payload = self.canonical_payload()
@@ -319,7 +412,7 @@ class CandidateDatasetVerification:
             )
 
         declared_digest = parsed.get("receipt_sha256")
-        if not isinstance(declared_digest, str) or not _SHA256_RE.fullmatch(
+        if type(declared_digest) is not str or not _SHA256_RE.fullmatch(
             declared_digest
         ):
             raise LearningVerificationIntegrityError(
@@ -333,7 +426,7 @@ class CandidateDatasetVerification:
                 )
             except LearningVerificationValidationError as exc:
                 raise LearningVerificationIntegrityError(str(exc)) from exc
-            if declared_digest != trusted_digest:
+            if not hmac.compare_digest(declared_digest, trusted_digest):
                 raise LearningVerificationIntegrityError(
                     "trusted learning-verification digest mismatch"
                 )
