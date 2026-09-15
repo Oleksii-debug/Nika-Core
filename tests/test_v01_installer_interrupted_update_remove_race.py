@@ -76,11 +76,11 @@ def _run(
     )
 
 
-def test_interrupted_cleanup_revalidates_retired_before_recursive_remove() -> None:
+def test_interrupted_cleanup_revalidates_retired_before_no_follow_remove() -> None:
     payload = SCRIPT.read_text(encoding="utf-8")
     recovery = payload[
         payload.index("function Resolve-NikaInterruptedUpdate") :
-        payload.index('if ([string]::IsNullOrWhiteSpace($Destination))')
+        payload.index("function Resolve-NikaInterruptedRollback")
     ]
     branch = recovery[
         recovery.index("elseif ($hasDestination -and $hasRollback) {") :
@@ -89,20 +89,16 @@ def test_interrupted_cleanup_revalidates_retired_before_recursive_remove() -> No
             'verified image."'
         )
     ]
-    remove = "Remove-Item -LiteralPath $RetiredRollbackPath -Recurse -Force"
+    remove = "Remove-NikaTreeNoFollow -Path $RetiredRollbackPath"
     reparse = "Assert-NikaNoReparsePathChain -Path $RetiredRollbackPath"
-    separation = (
-        "Assert-NikaDataMutationSeparation -DataRoot $DataRoot -MutationPaths @("
-    )
+    separation = "Assert-NikaDataMutationSeparation -DataRoot $DataRoot -MutationPaths @("
 
     assert branch.index(reparse) < branch.index(remove)
     assert branch.index(separation) < branch.index(remove)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
-def test_interrupted_cleanup_rejects_retired_junction_before_remove(
-    tmp_path: Path,
-) -> None:
+def test_interrupted_cleanup_rejects_retired_junction_before_remove(tmp_path: Path) -> None:
     shell = _powershell()
     if shell is None:
         pytest.skip("PowerShell is unavailable")
@@ -110,32 +106,22 @@ def test_interrupted_cleanup_rejects_retired_junction_before_remove(
     bundle_v1 = _bundle(tmp_path / "version-1", "v1")
     bundle_v2 = _bundle(tmp_path / "version-2", "v2")
     bundle_v3 = _bundle(tmp_path / "version-3", "v3")
+    bundle_v4 = _bundle(tmp_path / "version-4", "v4")
     destination = tmp_path / "install" / "Nika Core"
     rollback = destination.parent / f".{destination.name}.rollback"
     retired = destination.parent / f".{destination.name}.rollback-retired"
 
-    installed = _run(
-        shell,
-        script=SCRIPT,
-        mode="Install",
-        destination=destination,
-        bundle=bundle_v1,
-    )
+    installed = _run(shell, script=SCRIPT, mode="Install", destination=destination, bundle=bundle_v1)
     assert installed.returncode == 0, installed.stderr or installed.stdout
-
-    updated = _run(
-        shell,
-        script=SCRIPT,
-        mode="Update",
-        destination=destination,
-        bundle=bundle_v2,
-    )
-    assert updated.returncode == 0, updated.stderr or updated.stdout
-    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
-    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    first_update = _run(shell, script=SCRIPT, mode="Update", destination=destination, bundle=bundle_v2)
+    assert first_update.returncode == 0, first_update.stderr or first_update.stdout
+    second_update = _run(shell, script=SCRIPT, mode="Update", destination=destination, bundle=bundle_v3)
+    assert second_update.returncode == 0, second_update.stderr or second_update.stdout
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v3"
+    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
 
     shutil.copytree(rollback, retired)
-    assert (retired / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    assert (retired / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
 
     external_target = tmp_path / "external-retired-cleanup-target"
     external_target.mkdir()
@@ -158,10 +144,7 @@ def test_interrupted_cleanup_rejects_retired_junction_before_remove(
         "        }\n"
     )
     instrumented = tmp_path / "install_nika_core_remove_toctou_fault.ps1"
-    instrumented.write_text(
-        payload.replace(needle, injected, 1),
-        encoding="utf-8",
-    )
+    instrumented.write_text(payload.replace(needle, injected, 1), encoding="utf-8")
     race_original = Path(str(retired) + ".race-original")
 
     failed = _run(
@@ -169,13 +152,13 @@ def test_interrupted_cleanup_rejects_retired_junction_before_remove(
         script=instrumented,
         mode="Update",
         destination=destination,
-        bundle=bundle_v3,
+        bundle=bundle_v4,
     )
     assert failed.returncode != 0, failed.stdout
     assert "Reparse points are forbidden" in failed.stderr
-    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
-    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
-    assert (race_original / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v3"
+    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+    assert (race_original / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
     assert sentinel.read_text(encoding="utf-8") == "must-not-change"
 
     removed = subprocess.run(
