@@ -215,6 +215,8 @@ class ProductFactoryCoordinator:
         return record.request
 
     def record_result(self, envelope: WorkerResultEnvelope) -> WorkRecord:
+        if type(envelope) is not WorkerResultEnvelope:
+            raise CoordinatorError("worker result must be exact WorkerResultEnvelope")
         record = self._record(envelope.component_id)
         if record.state is not WorkState.RUNNING:
             raise CoordinatorError("worker result is only valid for a running component")
@@ -231,6 +233,8 @@ class ProductFactoryCoordinator:
         return updated
 
     def review(self, component_id: str, decision: ReviewDecision) -> WorkRecord:
+        if type(decision) is not ReviewDecision:
+            raise CoordinatorError("independent review decision must be exact ReviewDecision")
         record = self._record(component_id)
         if record.state is not WorkState.REVIEW_REQUIRED or record.result is None:
             raise CoordinatorError("component is not awaiting independent review")
@@ -375,6 +379,11 @@ class ProductFactoryCoordinator:
         result = record.result
         review = record.review
         blocker = record.blocker
+
+        if result is not None and type(result) is not WorkerResultEnvelope:
+            raise CoordinatorError("worker result must be exact WorkerResultEnvelope")
+        if review is not None and type(review) is not ReviewDecision:
+            raise CoordinatorError("independent review decision must be exact ReviewDecision")
 
         if result is not None:
             self._validate_result_identity(request, result)
