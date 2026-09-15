@@ -4,6 +4,7 @@ import asyncio
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
 from threading import Event, Lock
 from typing import Any
@@ -210,8 +211,16 @@ class FoundryLocalProvider:
             raise ValueError(
                 "download authorization provider does not match Foundry Local provider"
             )
-        if timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be greater than zero")
+        if isinstance(timeout_seconds, bool) or not isinstance(
+            timeout_seconds, (int, float)
+        ):
+            raise TypeError("timeout_seconds must be numeric")
+        try:
+            finite_timeout = isfinite(float(timeout_seconds))
+        except OverflowError:
+            finite_timeout = False
+        if not finite_timeout or timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be finite and greater than zero")
         if (
             self._expected_model_id is not None
             and authorization.expected_model_id is not None
