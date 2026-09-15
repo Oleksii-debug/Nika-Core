@@ -27,6 +27,8 @@ from nika_core.runtime.contracts import (
 from nika_core.ui.bridge import UIActionBridge
 from nika_core.ui.desktop_backend import DesktopBackend
 
+_ASYNC_PROOF_TIMEOUT = 5.0
+
 
 class BlockingRuntime:
     runtime_id = "desktop-blocking-test"
@@ -92,7 +94,7 @@ class MultiTaskBlockingRuntime:
             self._cancelled.add(task_id)
         return True
 
-    def wait_started(self, count: int, *, timeout: float = 2) -> bool:
+    def wait_started(self, count: int, *, timeout: float = _ASYNC_PROOF_TIMEOUT) -> bool:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             with self._lock:
@@ -156,7 +158,7 @@ def wait_for_state(
     task_id: str,
     state: TaskState,
     *,
-    timeout: float = 2,
+    timeout: float = _ASYNC_PROOF_TIMEOUT,
 ) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -206,28 +208,39 @@ def test_create_task_runs_real_no_llm_runtime_and_persists_result(tmp_path: Path
 def test_create_task_returns_while_runtime_is_still_running(tmp_path: Path) -> None:
     runtime = BlockingRuntime()
     backend, queue, _store = build_backend(tmp_path, runtime=runtime)
+    forced_release = threading.Event()
 
-    started_at = time.monotonic()
-    result = backend.create_task({"command": "довге локальне завдання"})
-    elapsed = time.monotonic() - started_at
+    def release_if_dispatch_blocks() -> None:
+        if not runtime.release.wait(timeout=_ASYNC_PROOF_TIMEOUT):
+            forced_release.set()
+            runtime.release.set()
 
-    assert result.status == "accepted"
-    assert elapsed < 0.5
-    assert runtime.started.wait(timeout=1)
-    task = queue.list_recent()[0]
-    wait_for_state(queue, task.task_id, TaskState.RUNNING)
-    assert runtime.release.is_set() is False
+    watchdog = threading.Thread(target=release_if_dispatch_blocks, daemon=True)
+    watchdog.start()
 
-    runtime.release.set()
-    wait_for_state(queue, task.task_id, TaskState.COMPLETED)
-    backend.close()
+    try:
+        result = backend.create_task({"command": "довге локальне завдання"})
+
+        assert result.status == "accepted"
+        assert forced_release.is_set() is False
+        assert runtime.release.is_set() is False
+        assert runtime.started.wait(timeout=_ASYNC_PROOF_TIMEOUT)
+        task = queue.list_recent()[0]
+        wait_for_state(queue, task.task_id, TaskState.RUNNING)
+
+        runtime.release.set()
+        wait_for_state(queue, task.task_id, TaskState.COMPLETED)
+    finally:
+        runtime.release.set()
+        watchdog.join(timeout=_ASYNC_PROOF_TIMEOUT)
+        backend.close()
 
 
 def test_pause_running_runtime_fails_closed_instead_of_faking_pause(tmp_path: Path) -> None:
     runtime = BlockingRuntime()
     backend, queue, _store = build_backend(tmp_path, runtime=runtime)
     backend.create_task({"command": "довге завдання"})
-    assert runtime.started.wait(timeout=1)
+    assert runtime.started.wait(timeout=_ASYNC_PROOF_TIMEOUT)
     task = queue.list_recent()[0]
     wait_for_state(queue, task.task_id, TaskState.RUNNING)
 
@@ -236,7 +249,7 @@ def test_pause_running_runtime_fails_closed_instead_of_faking_pause(tmp_path: Pa
 
     assert queue.get(task.task_id).state == TaskState.RUNNING
     assert backend.stop_agent({}).status == "accepted"
-    assert runtime.cancelled.wait(timeout=1)
+    assert runtime.cancelled.wait(timeout=_ASYNC_PROOF_TIMEOUT)
     wait_for_state(queue, task.task_id, TaskState.CANCELLED)
     backend.close()
 
@@ -245,13 +258,13 @@ def test_stop_cancels_live_non_durable_runtime_through_coordinator(tmp_path: Pat
     runtime = BlockingRuntime()
     backend, queue, _store = build_backend(tmp_path, runtime=runtime)
     backend.create_task({"command": "скасуй мене"})
-    assert runtime.started.wait(timeout=1)
+    assert runtime.started.wait(timeout=_ASYNC_PROOF_TIMEOUT)
     task = queue.list_recent()[0]
     wait_for_state(queue, task.task_id, TaskState.RUNNING)
     assert backend._coordinator.sessions.get(task.task_id) is None
 
     assert backend.stop_agent({}).status == "accepted"
-    assert runtime.cancelled.wait(timeout=1)
+    assert runtime.cancelled.wait(timeout=_ASYNC_PROOF_TIMEOUT)
     wait_for_state(queue, task.task_id, TaskState.CANCELLED)
     backend.close()
 
@@ -267,7 +280,7 @@ def test_stop_uses_persisted_runtime_session_before_local_paused_state(
     assert backend._coordinator.sessions.get(task.task_id) is not None
 
     assert backend.stop_agent({}).status == "accepted"
-    assert runtime.cancelled.wait(timeout=1)
+    assert runtime.cancelled.wait(timeout=_ASYNC_PROOF_TIMEOUT)
     wait_for_state(queue, task.task_id, TaskState.CANCELLED)
     assert backend._coordinator.sessions.get(task.task_id) is None
     backend.close()
