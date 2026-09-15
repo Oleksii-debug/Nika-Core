@@ -1,0 +1,653 @@
+from __future__ import annotations
+
+import math
+import os
+import shutil
+import sqlite3
+import stat
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import StrEnum
+from functools import cache
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from nika_core.config import AppConfig
+from nika_core.data.multi_agent_state_schema import MULTI_AGENT_STATE_SCHEMA_VERSION
+from nika_core.data.schema import SCHEMA_VERSION
+from nika_core.data.sqlite import SQLiteStore
+from nika_core.product_project_schema import PRODUCT_PROJECT_SCHEMA_VERSION
+from nika_core.resources.contracts import ResourceObserverPort, ResourceSnapshot
+
+SUPPORTED_CONFIG_SCHEMA_VERSION = 1
+_MAX_RESOURCE_MEMORY_BYTES = (1 << 64) - 1
+
+
+class HealthStatus(StrEnum):
+    PASS = "pass"
+    WARN = "warn"
+    FAIL = "fail"
+
+
+_STATUS_RANK = {
+    HealthStatus.PASS: 0,
+    HealthStatus.WARN: 1,
+    HealthStatus.FAIL: 2,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class HealthCheck:
+    check_id: str
+    status: HealthStatus
+    summary: str
+
+    def __post_init__(self) -> None:
+        if type(self.status) is not HealthStatus:
+            raise TypeError("status must be a canonical HealthStatus")
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "check_id": self.check_id,
+            "status": self.status.value,
+            "summary": self.summary,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class HealthReport:
+    generated_at: datetime
+    checks: tuple[HealthCheck, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.checks) is not tuple:
+            raise TypeError("checks must be an immutable tuple")
+        canonical_checks: list[HealthCheck] = []
+        for check in self.checks:
+            if type(check) is not HealthCheck:
+                raise TypeError("checks must contain canonical HealthCheck values")
+            canonical_checks.append(
+                HealthCheck(
+                    check_id=check.check_id,
+                    status=check.status,
+                    summary=check.summary,
+                )
+            )
+        object.__setattr__(self, "checks", tuple(canonical_checks))
+
+    @property
+    def overall(self) -> HealthStatus:
+        if not self.checks:
+            return HealthStatus.FAIL
+        return max(self.checks, key=lambda item: _STATUS_RANK[item.status]).status
+
+    @property
+    def exit_code(self) -> int:
+        return _STATUS_RANK[self.overall]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "schema": "nika-health-report:v1",
+            "generated_at": self.generated_at.astimezone(UTC).isoformat(),
+            "overall": self.overall.value,
+            "checks": [check.as_dict() for check in self.checks],
+        }
+
+    def render_text(self) -> str:
+        lines = [
+            f"Nika Core health: {self.overall.value.upper()}",
+            f"Checked at: {self.generated_at.astimezone(UTC).isoformat()}",
+        ]
+        for index, check in enumerate(self.checks, start=1):
+            lines.append(
+                f"{index}. {check.status.value.upper()}: {check.check_id}. {check.summary}"
+            )
+        return "\n".join(lines)
+
+
+@dataclass(frozen=True, slots=True)
+class _FileIdentity:
+    device: int
+    inode: int
+    size: int
+    modified_ns: int
+
+
+SchemaColumn = tuple[str, str, int, int]
+SchemaForeignKey = tuple[int, int, str, str, str, str, str, str]
+SchemaIndexColumn = tuple[int, int, str, int, str, int]
+SchemaIndex = tuple[str, int, str, int, str, tuple[SchemaIndexColumn, ...]]
+SchemaTrigger = tuple[str, str]
+SchemaTable = tuple[
+    str,
+    tuple[SchemaColumn, ...],
+    tuple[SchemaForeignKey, ...],
+    tuple[SchemaIndex, ...],
+    tuple[SchemaTrigger, ...],
+]
+SchemaSignature = tuple[tuple[str, SchemaTable], ...]
+
+
+class HealthService:
+    """Read-only deterministic health aggregation over canonical Nika Core surfaces."""
+
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        resource_observer: ResourceObserverPort | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._config = config
+        self._resource_observer = resource_observer
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def run(self) -> HealthReport:
+        checks = [self._check_configuration()]
+        checks.extend(self._check_database())
+        checks.append(self._check_resources())
+        return HealthReport(generated_at=self._normalized_now(), checks=tuple(checks))
+
+    def _normalized_now(self) -> datetime:
+        value = self._clock()
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("health clock must return a timezone-aware datetime")
+        return value.astimezone(UTC)
+
+    def _check_configuration(self) -> HealthCheck:
+        # The provider value is intentionally not echoed because AppConfig accepts arbitrary
+        # provider identifiers, and a malformed identifier may contain credential material.
+        if self._config.schema_version != SUPPORTED_CONFIG_SCHEMA_VERSION:
+            return HealthCheck(
+                check_id="configuration",
+                status=HealthStatus.FAIL,
+                summary="Application configuration schema is not supported by this build.",
+            )
+        if not self._config.app_version.strip():
+            return HealthCheck(
+                check_id="configuration",
+                status=HealthStatus.FAIL,
+                summary="Application version is empty.",
+            )
+        return HealthCheck(
+            check_id="configuration",
+            status=HealthStatus.PASS,
+            summary=(
+                "Typed configuration loaded; provider identity is present but intentionally hidden."
+            ),
+        )
+
+    def _check_database(self) -> list[HealthCheck]:
+        path = Path(self._config.database_path)
+        if not path.exists():
+            return [
+                HealthCheck(
+                    check_id="database.present",
+                    status=HealthStatus.FAIL,
+                    summary="Canonical SQLite database file does not exist.",
+                )
+            ]
+        try:
+            self._file_identity(path)
+        except OSError:
+            return [
+                HealthCheck(
+                    check_id="database.present",
+                    status=HealthStatus.FAIL,
+                    summary="Configured SQLite database path is not a regular file.",
+                )
+            ]
+
+        checks = [
+            HealthCheck(
+                check_id="database.present",
+                status=HealthStatus.PASS,
+                summary="Canonical SQLite database file is present.",
+            )
+        ]
+        try:
+            with self._read_only_connection(path) as conn:
+                checks.append(self._check_database_integrity(conn))
+                checks.append(self._check_foreign_keys(conn))
+                checks.append(
+                    self._check_migration_history(
+                        conn,
+                        query=(
+                            "SELECT version, typeof(version) FROM schema_migrations "
+                            "ORDER BY version LIMIT ?"
+                        ),
+                        supported_version=SCHEMA_VERSION,
+                        check_id="database.schema.core",
+                    )
+                )
+                checks.append(
+                    self._check_migration_history(
+                        conn,
+                        query=(
+                            "SELECT version, typeof(version) "
+                            "FROM multi_agent_state_schema_migrations "
+                            "ORDER BY version LIMIT ?"
+                        ),
+                        supported_version=MULTI_AGENT_STATE_SCHEMA_VERSION,
+                        check_id="database.schema.multi-agent-state",
+                    )
+                )
+                checks.append(
+                    self._check_migration_history(
+                        conn,
+                        query=(
+                            "SELECT version, typeof(version) "
+                            "FROM product_project_schema_migrations "
+                            "ORDER BY version LIMIT ?"
+                        ),
+                        supported_version=PRODUCT_PROJECT_SCHEMA_VERSION,
+                        check_id="database.schema.product-project",
+                    )
+                )
+                checks.append(self._check_schema_shape(conn))
+        except (OSError, sqlite3.Error):
+            checks.append(
+                HealthCheck(
+                    check_id="database.open",
+                    status=HealthStatus.FAIL,
+                    summary=(
+                        "SQLite database could not be snapshotted safely for read-only health."
+                    ),
+                )
+            )
+        return checks
+
+    @classmethod
+    @contextmanager
+    def _read_only_connection(cls, path: Path) -> Iterator[sqlite3.Connection]:
+        """Inspect one identity-fenced private database family without opening the source."""
+        with TemporaryDirectory(prefix="nika-health-db-") as directory:
+            snapshot = Path(directory) / "nika-health.db"
+            sidecars = (
+                ("WAL", Path(f"{path}-wal"), Path(f"{snapshot}-wal")),
+                (
+                    "rollback journal",
+                    Path(f"{path}-journal"),
+                    Path(f"{snapshot}-journal"),
+                ),
+            )
+
+            main_before = cls._file_identity(path)
+            sidecars_before = tuple(
+                cls._optional_file_identity(source) for _, source, _ in sidecars
+            )
+            copied_main = cls._copy_stable_file(path, snapshot)
+            if copied_main != main_before:
+                raise OSError("SQLite main file changed before health snapshot completed")
+            for (label, source, destination), expected in zip(
+                sidecars, sidecars_before, strict=True
+            ):
+                if expected is None:
+                    continue
+                copied = cls._copy_stable_file(source, destination)
+                if copied != expected:
+                    raise OSError(f"SQLite {label} changed before health snapshot completed")
+
+            if cls._file_identity(path) != main_before:
+                raise OSError("SQLite main file changed while health snapshot was captured")
+            for (label, source, _), expected in zip(
+                sidecars, sidecars_before, strict=True
+            ):
+                if cls._optional_file_identity(source) != expected:
+                    raise OSError(f"SQLite {label} changed while health snapshot was captured")
+
+            # A copied rollback journal may be hot. SQLite must be allowed to recover only
+            # the private copy before the connection becomes query-only. The source DB is
+            # never opened, and any WAL/-shm/journal writes remain inside this temp family.
+            uri = f"{snapshot.resolve().as_uri()}?mode=rw"
+            conn = sqlite3.connect(uri, uri=True)
+            try:
+                conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+                conn.execute("PRAGMA query_only = ON")
+                yield conn
+            finally:
+                conn.close()
+
+    @classmethod
+    def _copy_stable_file(cls, source: Path, destination: Path) -> _FileIdentity:
+        before = cls._file_identity(source)
+        with source.open("rb") as source_file, destination.open("xb") as destination_file:
+            shutil.copyfileobj(source_file, destination_file)
+            descriptor_after = cls._identity_from_stat(os.fstat(source_file.fileno()))
+        after = cls._file_identity(source)
+        if before != descriptor_after or before != after:
+            raise OSError("SQLite source file changed while being copied")
+        return before
+
+    @classmethod
+    def _optional_file_identity(cls, path: Path) -> _FileIdentity | None:
+        try:
+            return cls._file_identity(path)
+        except FileNotFoundError:
+            return None
+
+    @classmethod
+    def _file_identity(cls, path: Path) -> _FileIdentity:
+        metadata = os.stat(path, follow_symlinks=False)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OSError("health source is not a regular file")
+        return cls._identity_from_stat(metadata)
+
+    @staticmethod
+    def _identity_from_stat(metadata: os.stat_result) -> _FileIdentity:
+        return _FileIdentity(
+            device=metadata.st_dev,
+            inode=metadata.st_ino,
+            size=metadata.st_size,
+            modified_ns=metadata.st_mtime_ns,
+        )
+
+    @staticmethod
+    def _check_database_integrity(conn: sqlite3.Connection) -> HealthCheck:
+        rows = tuple(row[0] for row in conn.execute("PRAGMA quick_check"))
+        if rows == ("ok",):
+            return HealthCheck(
+                check_id="database.integrity",
+                status=HealthStatus.PASS,
+                summary="SQLite quick_check passed.",
+            )
+        return HealthCheck(
+            check_id="database.integrity",
+            status=HealthStatus.FAIL,
+            summary="SQLite quick_check reported corruption or structural inconsistency.",
+        )
+
+    @staticmethod
+    def _check_foreign_keys(conn: sqlite3.Connection) -> HealthCheck:
+        row = conn.execute("PRAGMA foreign_key_check").fetchone()
+        if row is None:
+            return HealthCheck(
+                check_id="database.foreign-keys",
+                status=HealthStatus.PASS,
+                summary="SQLite foreign-key integrity passed.",
+            )
+        return HealthCheck(
+            check_id="database.foreign-keys",
+            status=HealthStatus.FAIL,
+            summary="SQLite foreign-key integrity violation detected.",
+        )
+
+    @staticmethod
+    def _check_migration_history(
+        conn: sqlite3.Connection,
+        *,
+        query: str,
+        supported_version: int,
+        check_id: str,
+    ) -> HealthCheck:
+        try:
+            rows = tuple(conn.execute(query, (supported_version + 1,)))
+        except sqlite3.Error:
+            return HealthCheck(
+                check_id=check_id,
+                status=HealthStatus.FAIL,
+                summary="Required migration history is missing or unreadable.",
+            )
+
+        expected = tuple(range(1, supported_version + 1))
+        versions = tuple(row[0] for row in rows)
+        storage_types = tuple(row[1] for row in rows)
+        if versions == expected and all(value == "integer" for value in storage_types):
+            return HealthCheck(
+                check_id=check_id,
+                status=HealthStatus.PASS,
+                summary=(
+                    "Migration history is contiguous through supported version "
+                    f"{supported_version}."
+                ),
+            )
+        return HealthCheck(
+            check_id=check_id,
+            status=HealthStatus.FAIL,
+            summary=(
+                "Migration history is missing, non-integer, non-contiguous, "
+                "or newer than this build."
+            ),
+        )
+
+    @classmethod
+    def _check_schema_shape(cls, conn: sqlite3.Connection) -> HealthCheck:
+        expected = dict(cls._canonical_schema_signature())
+        actual = dict(cls._schema_signature(conn))
+        valid = actual.keys() == expected.keys()
+        if valid:
+            for table_name, table_signature in expected.items():
+                actual_table = actual.get(table_name)
+                if actual_table is None or not cls._schema_table_matches(
+                    table_signature, actual_table
+                ):
+                    valid = False
+                    break
+        if valid:
+            return HealthCheck(
+                check_id="database.schema.shape",
+                status=HealthStatus.PASS,
+                summary="Required schema shape matches the canonical SQLite store.",
+            )
+        return HealthCheck(
+            check_id="database.schema.shape",
+            status=HealthStatus.FAIL,
+            summary=(
+                "Required canonical tables, definitions, columns, foreign keys, indexes, or "
+                "triggers are missing or malformed."
+            ),
+        )
+
+    @staticmethod
+    @cache
+    def _canonical_schema_signature() -> SchemaSignature:
+        """Derive required shape from the canonical migration authority, never a second schema list."""
+        with TemporaryDirectory(prefix="nika-health-schema-") as directory:
+            database = Path(directory) / "canonical.db"
+            SQLiteStore(database).initialize()
+            conn = sqlite3.connect(database)
+            try:
+                return HealthService._schema_signature(conn)
+            finally:
+                conn.close()
+
+    @staticmethod
+    def _schema_signature(conn: sqlite3.Connection) -> SchemaSignature:
+        table_names = tuple(
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            )
+        )
+        signature: list[tuple[str, SchemaTable]] = []
+        for table_name in table_names:
+            table_sql_row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table_name,),
+            ).fetchone()
+            table_sql = (
+                ""
+                if table_sql_row is None or table_sql_row[0] is None
+                else str(table_sql_row[0])
+            )
+            rows = conn.execute(
+                'SELECT name, type, "notnull", pk FROM pragma_table_info(?) ORDER BY cid',
+                (table_name,),
+            )
+            columns = tuple(
+                (str(row[0]), str(row[1]), int(row[2]), int(row[3])) for row in rows
+            )
+            foreign_keys = tuple(
+                (
+                    int(row[0]),
+                    int(row[1]),
+                    str(row[2]),
+                    str(row[3]),
+                    "" if row[4] is None else str(row[4]),
+                    str(row[5]),
+                    str(row[6]),
+                    str(row[7]),
+                )
+                for row in conn.execute(
+                    "SELECT * FROM pragma_foreign_key_list(?) ORDER BY id, seq",
+                    (table_name,),
+                )
+            )
+            indexes: list[SchemaIndex] = []
+            for row in conn.execute(
+                "SELECT * FROM pragma_index_list(?) ORDER BY seq",
+                (table_name,),
+            ):
+                index_name = str(row[1])
+                index_columns = tuple(
+                    (
+                        int(column[0]),
+                        int(column[1]),
+                        "" if column[2] is None else str(column[2]),
+                        int(column[3]),
+                        "" if column[4] is None else str(column[4]),
+                        int(column[5]),
+                    )
+                    for column in conn.execute(
+                        "SELECT * FROM pragma_index_xinfo(?) ORDER BY seqno",
+                        (index_name,),
+                    )
+                )
+                index_sql_row = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+                    (index_name,),
+                ).fetchone()
+                index_sql = (
+                    ""
+                    if index_sql_row is None or index_sql_row[0] is None
+                    else str(index_sql_row[0])
+                )
+                indexes.append(
+                    (
+                        index_name,
+                        int(row[2]),
+                        str(row[3]),
+                        int(row[4]),
+                        index_sql,
+                        index_columns,
+                    )
+                )
+            triggers = tuple(
+                (
+                    str(row[0]),
+                    "" if row[1] is None else str(row[1]),
+                )
+                for row in conn.execute(
+                    "SELECT name, sql FROM sqlite_master "
+                    "WHERE type = 'trigger' AND tbl_name = ? ORDER BY name",
+                    (table_name,),
+                )
+            )
+            signature.append(
+                (
+                    str(table_name),
+                    (table_sql, columns, foreign_keys, tuple(indexes), triggers),
+                )
+            )
+        return tuple(signature)
+
+    @staticmethod
+    def _schema_table_matches(expected: SchemaTable, actual: SchemaTable) -> bool:
+        (
+            expected_sql,
+            expected_columns,
+            expected_foreign_keys,
+            expected_indexes,
+            expected_triggers,
+        ) = expected
+        (
+            actual_sql,
+            actual_columns,
+            actual_foreign_keys,
+            actual_indexes,
+            actual_triggers,
+        ) = actual
+        return (
+            actual_sql == expected_sql
+            and actual_columns == expected_columns
+            and actual_foreign_keys == expected_foreign_keys
+            and len(actual_indexes) == len(expected_indexes)
+            and all(index in actual_indexes for index in expected_indexes)
+            and actual_triggers == expected_triggers
+        )
+
+    def _check_resources(self) -> HealthCheck:
+        observer = self._resource_observer
+        if observer is None:
+            return HealthCheck(
+                check_id="resources.observer",
+                status=HealthStatus.WARN,
+                summary=(
+                    "Optional resource observer is not configured; "
+                    "no system load claim is made."
+                ),
+            )
+        try:
+            snapshot = observer.snapshot()
+        except Exception:  # noqa: BLE001
+            # Provider-controlled diagnostics may contain credentials and must not cross
+            # this public boundary.
+            return HealthCheck(
+                check_id="resources.observer",
+                status=HealthStatus.WARN,
+                summary=(
+                    "Resource observer failed; provider diagnostics were intentionally omitted."
+                ),
+            )
+        values = (
+            self._validated_resource_values(snapshot)
+            if type(snapshot) is ResourceSnapshot
+            else None
+        )
+        if values is None:
+            return HealthCheck(
+                check_id="resources.observer",
+                status=HealthStatus.FAIL,
+                summary="Resource observer returned invalid or non-finite measurements.",
+            )
+        cpu_percent, memory_percent, available_memory_bytes = values
+        available_mib = available_memory_bytes // (1024 * 1024)
+        return HealthCheck(
+            check_id="resources.observer",
+            status=HealthStatus.PASS,
+            summary=(
+                f"Resource observation valid: CPU {cpu_percent:.1f}%, "
+                f"memory {memory_percent:.1f}%, available memory {available_mib} MiB."
+            ),
+        )
+
+    @classmethod
+    def _validated_resource_values(
+        cls,
+        snapshot: ResourceSnapshot,
+    ) -> tuple[float, float, int] | None:
+        cpu_percent = snapshot.cpu_percent
+        memory_percent = snapshot.memory_percent
+        available_memory_bytes = snapshot.available_memory_bytes
+        if (
+            not cls._valid_percent(cpu_percent)
+            or not cls._valid_percent(memory_percent)
+            or type(available_memory_bytes) is not int
+            or available_memory_bytes < 0
+            or available_memory_bytes > _MAX_RESOURCE_MEMORY_BYTES
+        ):
+            return None
+        return float(cpu_percent), float(memory_percent), available_memory_bytes
+
+    @staticmethod
+    def _valid_percent(value: object) -> bool:
+        if type(value) is not int and type(value) is not float:
+            return False
+        try:
+            number = float(value)
+        except OverflowError:
+            return False
+        return math.isfinite(number) and 0.0 <= number <= 100.0
