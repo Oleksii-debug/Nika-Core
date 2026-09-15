@@ -165,6 +165,63 @@ def test_terminal_rollback_crash_same_operation_is_idempotent_and_new_operation_
 
 
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
+def test_same_rollback_operation_rejects_verified_pair_substitution_without_mutation(
+    tmp_path: Path,
+) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    bundle_v1 = _bundle(tmp_path / "v1", "v1")
+    bundle_v2 = _bundle(tmp_path / "v2", "v2")
+    bundle_v3 = _bundle(tmp_path / "v3", "v3")
+    destination = tmp_path / "install" / "Nika Core"
+    rollback = destination.parent / f".{destination.name}.rollback"
+    operation_id = "3" * 32
+
+    assert _run(
+        shell,
+        script=SCRIPT,
+        mode="Install",
+        destination=destination,
+        bundle=bundle_v1,
+    ).returncode == 0
+    assert _run(
+        shell,
+        script=SCRIPT,
+        mode="Update",
+        destination=destination,
+        bundle=bundle_v2,
+    ).returncode == 0
+    completed = _run(
+        shell,
+        script=SCRIPT,
+        mode="Rollback",
+        destination=destination,
+        operation_id=operation_id,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+
+    shutil.rmtree(rollback)
+    shutil.copytree(bundle_v3, rollback)
+    before_destination = (destination / "NikaCore.exe").read_bytes()
+    before_rollback = (rollback / "NikaCore.exe").read_bytes()
+
+    rejected = _run(
+        shell,
+        script=SCRIPT,
+        mode="Rollback",
+        destination=destination,
+        operation_id=operation_id,
+    )
+    assert rejected.returncode != 0
+    assert (destination / "NikaCore.exe").read_bytes() == before_destination
+    assert (rollback / "NikaCore.exe").read_bytes() == before_rollback
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
 def test_malformed_rollback_operation_identity_fails_before_mutation(tmp_path: Path) -> None:
     shell = _powershell()
     if shell is None:
@@ -198,6 +255,48 @@ def test_malformed_rollback_operation_identity_fails_before_mutation(tmp_path: P
         mode="Rollback",
         destination=destination,
         operation_id="NOT-CANONICAL",
+    )
+    assert rejected.returncode != 0
+    assert (destination / "NikaCore.exe").read_bytes() == before_destination
+    assert (rollback / "NikaCore.exe").read_bytes() == before_rollback
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
+def test_malformed_rollback_operation_marker_fails_before_mutation(tmp_path: Path) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    bundle_v1 = _bundle(tmp_path / "v1", "v1")
+    bundle_v2 = _bundle(tmp_path / "v2", "v2")
+    destination = tmp_path / "install" / "Nika Core"
+    rollback = destination.parent / f".{destination.name}.rollback"
+    marker = destination.parent / f".{destination.name}.rollback-operation.json"
+
+    assert _run(
+        shell,
+        script=SCRIPT,
+        mode="Install",
+        destination=destination,
+        bundle=bundle_v1,
+    ).returncode == 0
+    assert _run(
+        shell,
+        script=SCRIPT,
+        mode="Update",
+        destination=destination,
+        bundle=bundle_v2,
+    ).returncode == 0
+
+    marker.write_text('{"marker_version":1,"operation_id":', encoding="utf-8")
+    before_destination = (destination / "NikaCore.exe").read_bytes()
+    before_rollback = (rollback / "NikaCore.exe").read_bytes()
+    rejected = _run(
+        shell,
+        script=SCRIPT,
+        mode="Rollback",
+        destination=destination,
+        operation_id="4" * 32,
     )
     assert rejected.returncode != 0
     assert (destination / "NikaCore.exe").read_bytes() == before_destination
