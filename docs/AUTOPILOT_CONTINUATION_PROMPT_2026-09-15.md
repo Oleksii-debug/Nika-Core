@@ -65,14 +65,30 @@ Canonical direction:
 
 Nika-Core і ChatGPT Autopilot НЕ зливай у один runtime. Nika owns global intent/planning/ownership/model/factory/release truth; Autopilot owns hardened ChatGPT-Web session/tab/send/recovery execution. Інтеграція між ними — малий versioned TaskEnvelope/WorkerResult-style contract через existing concepts, а не shared scheduler/runtime.
 
-### 4. REUSE BEFORE REWRITE
+### 4. REUSE BEFORE REWRITE — cross-project preflight is mandatory
 
-Before custom code:
+Before writing any new **generic infrastructure**:
 
-1. search current Nika code;
-2. search current maintained upstream/open-source component;
-3. reuse package/API/adapter where possible;
-4. write only thin Nika-specific glue/policy/domain logic.
+1. search current Nika source/tests and active PRs/issues/owners;
+2. search canonical `Oleksii-debug/Autosport` for an already-proven equivalent mechanism;
+3. search canonical `Oleksii-debug/ChatGPT-Autopilot-ExtensionChatGPT-Autopilot-Extension`, while respecting Autopilot source-convergence Issue #123 — old `main` is not proof of modern 0.9.19 implementation;
+4. search maintained upstream/open-source components;
+5. for any first-party donor verify exact repo + exact SHA + exact path + tests/evidence + dependencies/license before treating it as reusable source;
+6. classify the candidate: `REUSE_NOW | ADAPT | PORTABLE_CANDIDATE | PRODUCT_SPECIFIC | DO_NOT_REUSE`;
+7. reuse/adapt only when it reduces total engineering time and does not create a second authority;
+8. otherwise implement the minimum Nika-required capability behind a clean seam;
+9. mark `PORTABLE_CANDIDATE` only when another real product plausibly needs the same semantic contract;
+10. extract a shared package only when a second real consumer actually needs it, the semantic contract is stable, conformance tests exist, and extraction is cheaper than continued local ownership.
+
+Binding principle:
+
+`BUILD ONCE -> PROVE IN A REAL PRODUCT -> EXTRACT WHEN A SECOND REAL CONSUMER EXISTS -> REUSE`.
+
+Do not assume implementation facts from research prose. Names such as `.nika/traces`, Rust `nika-kernel-runtime`, `agents_core::Checkpointer`, `ToolRegistry` or `EventDispatcher` are donor hypotheses unless current canonical source proves them. Current Nika is Python/pyproject-based at the verified source checkpoint. Current published Autopilot `main` is not the modern source baseline; Issue #123 owns convergence of qualified 0.9.19 source.
+
+Prefer transferring **conformance tests / adversarial bug knowledge** when sharing implementation would couple products. Candidate families include idempotent external effects, semantic interaction, durable recovery, experiment promotion, evidence/provenance, accessibility and release-source truth.
+
+Do not build a universal Event Bus merely because projects emit events. Stabilize small event/evidence envelopes first; keep storage/transport product-local until multiple real consumers prove identical semantics.
 
 Do not implement generic coding-agent engine, inference server, OCR engine, speech engine, browser engine, Git client, PDF/Office parser or vector database if a maintained component already satisfies the requirement.
 
@@ -196,7 +212,7 @@ Capability Registry повинна з часом описувати reconciliati
 - cross-repository `oleksii-shared` god-project;
 - перенесення Autosport/12-6 domain machinery у Nika тільки тому, що їхні invariants сильні.
 
-Спільне між репозиторіями витягуй спочатку як contracts/workflows/evidence schema. Shared application package з'являється лише після кількох реальних consumers і доказу стабільної семантики.
+Спільне між репозиторіями витягуй спочатку як contracts/workflows/evidence schema. Shared application package з'являється лише після реального другого consumer і доказу стабільної семантики; portability ніколи не має затримувати поточний product delivery.
 
 ### 13. Кінець запуску
 
