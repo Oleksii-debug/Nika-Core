@@ -200,3 +200,79 @@ These findings do **not** displace the current product blockers. Order remains:
 5. then implement the cross-project contract/coordination optimizations above where they remove measured duplication/read cost.
 
 The only immediate governance exception is existing #450: `main` protection is already a real proven repository-integrity defect and should be configured through repository settings without creating a competing source PR.
+
+## 14. BUILD ONCE → PROVE → EXTRACT only after a real second consumer
+
+Cross-project portability is a consequence of clean boundaries, not a product feature to build speculatively.
+
+Before implementing any **generic infrastructure** in Nika, a worker must:
+
+1. refresh Nika live `main`, canonical PR/head, active ownership and relevant issues;
+2. search Nika source/tests first;
+3. search the canonical Autosport repository for an equivalent proven mechanism;
+4. search the canonical Autopilot repository, while respecting its current source-convergence state;
+5. inspect active PRs/issues so a donor or competing implementation is not already in flight;
+6. verify any proposed first-party donor by exact repository + exact source SHA + exact path + tests/evidence + dependency/license provenance;
+7. classify the result as `REUSE_NOW`, `ADAPT`, `PORTABLE_CANDIDATE`, `PRODUCT_SPECIFIC`, or `DO_NOT_REUSE`;
+8. choose reuse/adaptation only when it reduces total engineering time without creating a second authority;
+9. otherwise implement the minimum product-required capability behind a clean seam;
+10. extract a shared package only after another real product actually needs the same stable semantic contract and extraction is cheaper than continued local ownership.
+
+Binding rule:
+
+`BUILD ONCE -> PROVE IN A REAL PRODUCT -> EXTRACT WHEN A SECOND REAL CONSUMER EXISTS -> REUSE`.
+
+Current product delivery wins over abstract portability.
+
+## 15. Research claims are donor hypotheses until source-proven
+
+Deep-research reports are useful for discovering reuse candidates, but implementation-specific claims must not silently become architecture truth.
+
+Current verified corrections:
+
+- canonical Nika-Core is a Python/`pyproject.toml` repository at the inspected source checkpoint; do not assume a Rust `nika-kernel-runtime` or Loom implementation unless exact owner-source evidence is later found;
+- the currently published Autopilot GitHub `main` is a Chrome-extension/Node-style tree, while Autopilot Issue #123 explicitly says old `main` is **not** the modern product baseline and gates convergence of qualified 0.9.19 source;
+- names such as `.nika/traces`, `nika trace verify`, `agents_core::Checkpointer`, `agents_core::ToolRegistry`, or `agents_core::EventDispatcher` are not current donor facts unless exact canonical repo/SHA/path/test evidence proves them;
+- Autosport already has product-authoritative run registry, transactional paper-run recovery and reconciliation semantics, so Nika/Autopilot concepts must not replace those with a generic Checkpointer/runtime.
+
+Strong source-proven donor directions instead include:
+
+- Nika idempotency/effect-uncertainty semantics for future external execution boundaries;
+- Nika semantic interaction contracts for observe → resolve → validate → authorize → act → verify flows;
+- Nika experiment/champion-challenger mechanics where they can fill a measured gap without replacing Autosport evidence/evaluation authority;
+- Autosport causal/no-future-leakage, exact-vs-approximate, durable-recovery and provenance adversarial knowledge as reusable conformance patterns;
+- Autopilot browser/session/recovery mechanics only after the exact modern source has converged and been inventoried through its canonical source-truth path.
+
+Do not use a namesake public repository or stale branch to manufacture a donor implementation.
+
+## 16. Prefer conformance/test reuse when implementation reuse would couple products
+
+The cheapest cross-project reuse is often **bug knowledge and behavioral tests**, not shared runtime code.
+
+Candidate portable conformance families include:
+
+- `IdempotentExternalEffectConformance`;
+- `SemanticInteractionConformance`;
+- `DurableRecoveryConformance`;
+- `ExperimentPromotionConformance`;
+- `EvidenceProvenanceConformance`;
+- `AccessibilityConformance`;
+- `ReleaseSourceTruthConformance`.
+
+A product may implement the same contract with different storage/runtime/framework internals while sharing the adversarial oracle.
+
+This allows Autosport, Nika and Autopilot to avoid rediscovering the same failure classes without forcing them onto one database, scheduler, browser engine or runtime.
+
+## 17. Event/logging reuse: stable envelopes first, no universal Event Bus
+
+Do not create a shared RabbitMQ/Kafka/Redis/event-bus layer merely because all products emit events or logs.
+
+Prefer:
+
+`GENERIC MECHANISM + PRODUCT ADAPTER + PRODUCT DOMAIN AUTHORITY`.
+
+If multiple products need comparable lifecycle/audit events, first stabilize small boundary envelopes and conformance rules such as identity, timestamp, source/evidence references, terminal state and redaction. Keep storage/transport local to the product until two real consumers prove identical semantics and measured duplication justifies extraction.
+
+`NO DUPLICATE FIRST-PARTY ENGINE WITHOUT CROSS-PROJECT SEARCH.`
+
+`CURRENT PRODUCT DELIVERY WINS OVER ABSTRACT PORTABILITY.`
