@@ -32,6 +32,24 @@ Team cancellation first verifies that the team is still active, then calls the r
 
 Team completion is **explicit**, not automatic after each fan-out wave. Auto-closing after one wave would make legal later/nested fan-out impossible. `finalize_team()` fails while any child is `spawned`, `running` or `waiting_approval`. Once all children are terminal, a team with at least one completed child is `completed` even if another child failed (failure containment); a team with failures and no completed child is `failed`; an all-cancelled active team becomes `cancelled`.
 
+## True simultaneous multi-project / multi-team execution
+
+Binding extension: `docs/LOCAL_INFERENCE_FABRIC.md`.
+
+M7 must support many independent teams in many ProductProjects remaining active at the same time. Team concurrency is not limited to one globally selected team or one globally selected model. Each team member owns its own runtime/thread/task identity and may invoke ModelGateway concurrently with members of the same team or unrelated teams.
+
+A valid deployment may have, for example, ten active projects with 3–15 agents each. Different teams may concurrently use:
+
+- the same local model through one concurrent server;
+- several independent replicas of the same model;
+- different local models/engines;
+- local and cloud/API routes together;
+- different provider routes per architect/implementer/reviewer/specialist role.
+
+A team-level quota is a configured safety/ownership boundary for that team; it must not accidentally become an installation-wide global serialization primitive. Failure, pause, cancellation or model-route failure in one project must not stop unrelated projects.
+
+Project/team/agent context, model-route identity, handoffs and persisted results remain isolated. Shared memory exists only through explicit Nika contracts; parallel agents must not share implicit mutable conversation/model state.
+
 ## Evaluator
 Evaluator aggregation is deterministic arithmetic over typed `EvaluationScore` records. Scores must be finite. One aggregate operation represents exactly one metric; attempting to combine records from different metrics fails closed instead of silently averaging unlike quantities such as quality and latency. M7 does not use an LLM to decide whether a score exists or to invent a metric. More advanced learning/promotion policy belongs to M8.
 
@@ -47,6 +65,11 @@ Before the durable lifecycle successor is integrated:
 8. mixed success/failure and all-failure team finalization policies are deterministic;
 9. completed/failed teams reject later cancellation before runtime side effects;
 10. activated-definition/grant/quota/cancellation/evaluator regressions remain green;
-11. exact branch/SHA and CI evidence are recorded before merge.
+11. exact branch/SHA and CI evidence are recorded before merge;
+12. two independent teams can execute model-backed work concurrently without cross-talk;
+13. two different ProductProjects can remain active and progress concurrently;
+14. pausing/cancelling one team does not suspend unrelated teams;
+15. concurrent members can bind distinct provider/model routes without a process-global current-model race;
+16. a stress proof demonstrates that Nika does not enforce one-team-at-a-time or one-model-call-at-a-time behavior globally.
 
 `PACKAGED`, `HUMAN_TESTED` and `NVDA_VERIFIED` are separate later gates and are not claimed by this M7 successor.
