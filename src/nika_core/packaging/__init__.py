@@ -1,5 +1,12 @@
 """Windows release packaging primitives."""
 
+from .recovery import (
+    ReleaseDatabaseRecovery,
+    ReleaseDatabaseRecoveryError,
+    ReleaseDatabaseRestorePlan,
+    ReleaseDatabaseRestoreResult,
+    ReleaseDatabaseSnapshot,
+)
 from .release import (
     ReleaseFile,
     ReleaseManifest,
@@ -10,6 +17,11 @@ from .release import (
 from .windows import WindowsBuildPlan, default_windows_plan
 
 __all__ = [
+    "ReleaseDatabaseRecovery",
+    "ReleaseDatabaseRecoveryError",
+    "ReleaseDatabaseRestorePlan",
+    "ReleaseDatabaseRestoreResult",
+    "ReleaseDatabaseSnapshot",
     "ReleaseFile",
     "ReleaseManifest",
     "WindowsBuildPlan",
