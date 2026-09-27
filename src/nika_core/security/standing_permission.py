@@ -305,6 +305,8 @@ class StandingPermissionStore:
     ) -> StoredStandingPermission:
         """Persist a root scope already granted through canonical user authority."""
         _permission_id(permission_id)
+        if type(scope) is not StandingPermissionScope:
+            raise TypeError("grant scope must be an exact StandingPermissionScope value")
         material = _material(scope)
         with self._store.connection() as conn:
             existing = self._get(conn, permission_id)
@@ -335,6 +337,8 @@ class StandingPermissionStore:
         _permission_id(parent_permission_id)
         _permission_id(permission_id)
         _identity(delegated_by_subject_id, "delegated_by_subject_id")
+        if type(scope) is not StandingPermissionScope:
+            raise TypeError("delegated scope must be an exact StandingPermissionScope value")
         if parent_permission_id == permission_id:
             raise PermissionError("permission cannot delegate to itself")
         child = _material(scope)
@@ -392,6 +396,8 @@ class StandingPermissionStore:
         now: datetime | None = None,
     ) -> StoredStandingPermission:
         _permission_id(permission_id)
+        if type(use) is not StandingPermissionUse:
+            raise TypeError("authorization use must be an exact StandingPermissionUse value")
         instant = _utc(now or datetime.now(UTC), "now")
         try:
             with self._store.connection() as conn:
@@ -667,6 +673,8 @@ class StandingPermissionPolicy:
         *,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
+        if type(binding) is not StandingPermissionBinding:
+            raise TypeError("standing policy binding must be an exact StandingPermissionBinding value")
         self._permissions = permissions
         self._binding = binding
         self._clock = clock or (lambda: datetime.now(UTC))
