@@ -6,7 +6,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
-import pytest
 
 from nika_core.builder.compiler import AgentCompiler
 from nika_core.builder.repository import AgentDefinitionRepository
@@ -27,7 +26,6 @@ from nika_core.security.standing_permission import (
 )
 from nika_core.tools import ToolRisk
 from nika_core.v01_model_settings import (
-    ModelSetupError,
     V01BoundModelRuntimeFactory,
     V01ModelSettings,
 )
@@ -293,7 +291,7 @@ def test_missing_host_authority_fails_before_credentials_or_transport(
     assert transport.calls == 0
 
 
-def test_wrong_task_authority_is_rejected_before_runtime_construction(
+def test_wrong_task_authority_is_rejected_at_effect_admission(
     tmp_path: Path,
 ) -> None:
     now = datetime(2026, 9, 27, 12, 0, tzinfo=UTC)
@@ -324,7 +322,7 @@ def test_wrong_task_authority_is_rejected_before_runtime_construction(
     resolver = _CountingCredentialResolver()
     transport = _CountingTransport()
 
-    factory = _factory(
+    runtime = _factory(
         store=store,
         settings=settings,
         definitions=definitions,
@@ -332,10 +330,13 @@ def test_wrong_task_authority_is_rejected_before_runtime_construction(
         transport=transport,
         authorizer=authorizer,
         authority_resolver=lambda _task_id: wrong_authority,
-    )
-    with pytest.raises(ModelSetupError, match="не належить цьому завданню"):
-        factory.for_task(task_id)
+    ).for_task(task_id)
+    assert runtime is not None
 
+    result = asyncio.run(runtime.run(_runtime_request(task_id)))
+
+    assert result.outcome is RuntimeOutcome.FAILED
+    assert result.output["model_error_code"] == "invalid_request"
     assert resolver.references == []
     assert transport.calls == 0
 

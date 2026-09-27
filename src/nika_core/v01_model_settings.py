@@ -507,29 +507,27 @@ class V01ModelSettings:
 
 
 class _TaskBoundCloudEffectAuthorizer:
-    """Enter standing authority on the exact task that admits the cloud effect."""
+    """Resolve and enter current standing authority on the exact effect task."""
 
     def __init__(
         self,
         *,
         delegate: StandingPermissionCloudEffectAuthorizer,
         task_id: str,
-        authority: StandingPermissionExecutionAuthority,
+        authority_resolver: Callable[
+            [str],
+            StandingPermissionExecutionAuthority | None,
+        ],
     ) -> None:
         if type(delegate) is not StandingPermissionCloudEffectAuthorizer:
             raise TypeError("delegate must be StandingPermissionCloudEffectAuthorizer")
         if type(task_id) is not str or not task_id:
             raise TypeError("task_id must be exact non-empty text")
-        if type(authority) is not StandingPermissionExecutionAuthority:
-            raise TypeError("authority must be StandingPermissionExecutionAuthority")
-        if authority.context.task_id != task_id:
-            raise ValueError("cloud execution authority does not match the bound task")
+        if not callable(authority_resolver):
+            raise TypeError("authority_resolver must be callable")
         self._delegate = delegate
         self._task_id = task_id
-        self._authority = StandingPermissionExecutionAuthority(
-            subject_id=authority.subject_id,
-            context=authority.context,
-        )
+        self._authority_resolver = authority_resolver
 
     def authorize_cloud_effect(
         self,
@@ -545,7 +543,15 @@ class _TaskBoundCloudEffectAuthorizer:
             or len(request_id) == len(task_prefix)
         ):
             raise PermissionError("cloud model request does not belong to the bound task")
-        with self._delegate.execution_scope(self._authority):
+        try:
+            authority = self._authority_resolver(self._task_id)
+        except Exception:  # noqa: BLE001 - trusted host resolver boundary
+            raise PermissionError("cloud execution authority could not be resolved") from None
+        if type(authority) is not StandingPermissionExecutionAuthority:
+            raise PermissionError("cloud execution has no current host authority")
+        if authority.context.task_id != self._task_id:
+            raise PermissionError("cloud execution authority belongs to another task")
+        with self._delegate.execution_scope(authority):
             self._delegate.authorize_cloud_effect(
                 request=request,
                 provider=provider,
@@ -686,30 +692,11 @@ class V01BoundModelRuntimeFactory:
         resolver = self._cloud_execution_authority_resolver
         if authorizer is None or resolver is None:
             return None
-        try:
-            authority = resolver(task_id)
-        except Exception:  # noqa: BLE001 - trusted host resolver boundary
-            raise ModelSetupError(
-                "Не вдалося перевірити дозвіл для хмарної моделі."
-            ) from None
-        if type(authority) is not StandingPermissionExecutionAuthority:
-            raise ModelSetupError(
-                "Для цього завдання немає чинного дозволу на хмарну модель."
-            )
-        if authority.context.task_id != task_id:
-            raise ModelSetupError(
-                "Дозвіл на хмарну модель не належить цьому завданню."
-            )
-        try:
-            return _TaskBoundCloudEffectAuthorizer(
-                delegate=authorizer,
-                task_id=task_id,
-                authority=authority,
-            )
-        except (TypeError, ValueError):
-            raise ModelSetupError(
-                "Дозвіл на хмарну модель має некоректну прив'язку."
-            ) from None
+        return _TaskBoundCloudEffectAuthorizer(
+            delegate=authorizer,
+            task_id=task_id,
+            authority_resolver=resolver,
+        )
 
     def _runtime_for_selection(
         self,
