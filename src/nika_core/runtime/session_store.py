@@ -31,6 +31,17 @@ def _require_exact_text(
     return value
 
 
+def _resume_token_for_storage(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("runtime resume token must be text")
+    snapshot = str.__str__(value)
+    if not snapshot.strip():
+        return None
+    return snapshot
+
+
 def _stored_text(row: sqlite3.Row, field_name: str, *, non_empty: bool = True) -> str:
     value = row[field_name]
     if type(value) is not str:
@@ -202,9 +213,8 @@ class RuntimeSessionStore:
         task_id = _require_exact_text(task_id, field_name="task_id", non_empty=True)
         runtime_id = _require_exact_text(runtime_id, field_name="runtime_id", non_empty=True)
         thread_id = _require_exact_text(thread_id, field_name="thread_id", non_empty=True)
-        if not isinstance(resume_token, str):
-            raise TypeError("active runtime resume token must be text")
-        if not str.__str__(resume_token).strip():
+        resume_token_snapshot = _resume_token_for_storage(resume_token)
+        if resume_token_snapshot is None:
             raise ValueError("active runtime resume token must not be empty")
         now = self._next_updated_at(None)
         try:
@@ -214,7 +224,14 @@ class RuntimeSessionStore:
                     task_id, runtime_id, thread_id, resume_token, outcome, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (task_id, runtime_id, thread_id, resume_token, _ACTIVE_MARKER, now),
+                (
+                    task_id,
+                    runtime_id,
+                    thread_id,
+                    resume_token_snapshot,
+                    _ACTIVE_MARKER,
+                    now,
+                ),
             )
         except sqlite3.IntegrityError as exc:
             raise ValueError(
@@ -251,7 +268,11 @@ class RuntimeSessionStore:
         task_id = _require_exact_text(task_id, field_name="task_id", non_empty=True)
         runtime_id = _require_exact_text(runtime_id, field_name="runtime_id", non_empty=True)
         thread_id = _require_exact_text(thread_id, field_name="thread_id", non_empty=True)
-        if result.outcome not in _RESUMABLE_OUTCOMES or not result.resume_token:
+        if result.outcome not in _RESUMABLE_OUTCOMES:
+            self.delete_with_connection(conn, task_id)
+            return
+        resume_token_snapshot = _resume_token_for_storage(result.resume_token)
+        if resume_token_snapshot is None:
             self.delete_with_connection(conn, task_id)
             return
 
@@ -278,7 +299,7 @@ class RuntimeSessionStore:
                 task_id,
                 runtime_id,
                 thread_id,
-                result.resume_token,
+                resume_token_snapshot,
                 result.outcome.value,
                 now,
             ),
