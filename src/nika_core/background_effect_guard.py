@@ -3,7 +3,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from inspect import isasyncgenfunction, isawaitable, iscoroutinefunction, isgenerator
+from inspect import isasyncgen, isasyncgenfunction, isawaitable, iscoroutinefunction
+from inspect import isgenerator
 from inspect import isgeneratorfunction
 from math import isfinite
 from threading import Lock
@@ -302,7 +303,7 @@ class BackgroundEffectGuard:
             )
 
         result = synchronous_effect()
-        if isawaitable(result) or isgenerator(result):
+        if isawaitable(result) or isgenerator(result) or isasyncgen(result):
             close = getattr(result, "close", None)
             if callable(close):
                 close()
