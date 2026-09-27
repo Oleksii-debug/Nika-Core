@@ -52,6 +52,12 @@ def _snapshot_runtime(runtime: AgentRuntimePort) -> RuntimeDescriptor:
     )
 
 
+def _require_effect_callables(runtime: AgentRuntimePort) -> None:
+    for effect_name in ("run", "resume", "cancel"):
+        if not callable(getattr(runtime, effect_name, None)):
+            raise TypeError(f"runtime effect must be callable: {effect_name}")
+
+
 class RuntimeRegistry:
     def __init__(self) -> None:
         self._runtimes: dict[str, _RegisteredRuntime] = {}
@@ -60,6 +66,7 @@ class RuntimeRegistry:
         if not isinstance(runtime, AgentRuntimePort):
             raise TypeError("runtime must implement AgentRuntimePort")
         descriptor = _snapshot_runtime(runtime)
+        _require_effect_callables(runtime)
         if descriptor.runtime_id in self._runtimes:
             raise ValueError(f"Runtime already registered: {descriptor.runtime_id}")
         self._runtimes[descriptor.runtime_id] = _RegisteredRuntime(
