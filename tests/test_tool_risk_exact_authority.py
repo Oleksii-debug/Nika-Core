@@ -43,7 +43,11 @@ def _forged_read_only_risk() -> _ForgedRisk:
     return _ForgedRisk(ToolRisk.READ_ONLY.value)
 
 
-def _scope(*, risk_ceiling: ToolRisk) -> StandingPermissionScope:
+def _scope(
+    *,
+    risk_ceiling: ToolRisk,
+    action_class: str = "safe.read",
+) -> StandingPermissionScope:
     now = datetime(2026, 9, 27, tzinfo=UTC)
     return StandingPermissionScope(
         subject_id="agent-1",
@@ -52,7 +56,7 @@ def _scope(*, risk_ceiling: ToolRisk) -> StandingPermissionScope:
             project_id="project-1",
             task_id="task-1",
         ),
-        action_class="safe.read",
+        action_class=action_class,
         targets=("target-1",),
         sites=(),
         resources=("resource-1",),
@@ -173,13 +177,16 @@ def test_forged_standing_risk_cannot_leave_durable_authority(tmp_path) -> None:
     assert row_count == 0
 
 
-def _canonical_permission(tmp_path):
+def _canonical_permission(tmp_path, *, action_class: str = "safe.read"):
     store = SQLiteStore(tmp_path / "durable-authority.db")
     permissions = StandingPermissionStore(store)
     permissions.initialize()
     permission = permissions.grant(
         permission_id="perm-durable",
-        scope=_scope(risk_ceiling=ToolRisk.READ_ONLY),
+        scope=_scope(
+            risk_ceiling=ToolRisk.READ_ONLY,
+            action_class=action_class,
+        ),
     )
     return store, permission
 
@@ -234,7 +241,9 @@ def test_unknown_durable_scope_field_is_rejected(tmp_path) -> None:
 
 
 def test_durable_scope_scalar_type_is_not_string_coerced(tmp_path) -> None:
-    store, _permission = _canonical_permission(tmp_path)
+    # "7" is a valid canonical action class. Replacing the JSON string with numeric
+    # 7 used to round-trip through str(7) and preserve the stored fingerprint.
+    store, _permission = _canonical_permission(tmp_path, action_class="7")
     with store.connection() as conn:
         row = conn.execute(
             "SELECT scope_json FROM standing_permissions WHERE permission_id = ?",
