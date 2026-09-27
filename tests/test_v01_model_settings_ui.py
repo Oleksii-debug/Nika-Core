@@ -14,6 +14,13 @@ def test_model_settings_form_is_semantic_and_action_registered() -> None:
     actions = (ROOT / "src/nika_core/kernel/default_actions.py").read_text(encoding="utf-8")
     assert '<section aria-labelledby="model-settings-heading">' in html
     assert '<label for="model-route-kind">Тип маршруту моделі</label>' in html
+    for route_kind in (
+        "deterministic",
+        "foundry_local",
+        "ollama",
+        "openai_compatible",
+    ):
+        assert f'<option value="{route_kind}">' in html
     assert '<label for="model-provider">Ідентифікатор постачальника</label>' in html
     assert '<label for="model-name">Назва моделі</label>' in html
     assert '<label for="model-base-url">Базова адреса постачальника</label>' in html
@@ -57,8 +64,8 @@ def test_packaged_bridge_reuses_integrated_model_settings_and_freezes_task_choic
     assert "from nika_core.v01_model_settings import V01ModelSettings" in script
     assert "model_settings = V01ModelSettings(store)" in script
     assert "source_bound = source_settings.prepare_task_payload(payload)" in script
-    assert 'if model_snapshot.get("status") == "missing":' in script
-    assert "return dict(source_bound)" in script
+    assert 'if model_snapshot.get("status") == "missing":' not in script
+    assert "model_snapshot = model_settings.snapshot()" not in script
     assert "return model_settings.prepare_task_payload(source_bound)" in script
     assert 'state["v01_model_settings"] = model_settings.snapshot()' in script
     assert '"settings.model.configure": model_settings.configure' in script
