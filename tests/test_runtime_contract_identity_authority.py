@@ -70,16 +70,21 @@ def test_runtime_resume_probe_rejects_behavioral_checkpoint_id() -> None:
         )
 
 
-
-
 @pytest.mark.parametrize("max_steps", (True, 1.0))
-def test_runtime_request_rejects_non_exact_step_count(max_steps: object) -> None:
+def test_runtime_requests_reject_non_exact_step_count(max_steps: object) -> None:
     with pytest.raises(TypeError, match="max_steps must be an exact integer"):
         RuntimeRequest(task_id="task", thread_id="thread", max_steps=max_steps)
+    with pytest.raises(TypeError, match="max_steps must be an exact integer"):
+        RuntimeResumeRequest(
+            task_id="task",
+            thread_id="thread",
+            resume_token="resume",
+            max_steps=max_steps,
+        )
 
 
 @pytest.mark.parametrize("timeout_seconds", (True, "1"))
-def test_runtime_request_rejects_non_numeric_timeout_carriers(
+def test_runtime_requests_reject_non_numeric_timeout_carriers(
     timeout_seconds: object,
 ) -> None:
     with pytest.raises(TypeError, match="timeout_seconds must be numeric"):
@@ -88,10 +93,20 @@ def test_runtime_request_rejects_non_numeric_timeout_carriers(
             thread_id="thread",
             timeout_seconds=timeout_seconds,
         )
+    with pytest.raises(TypeError, match="timeout_seconds must be numeric"):
+        RuntimeResumeRequest(
+            task_id="task",
+            thread_id="thread",
+            resume_token="resume",
+            timeout_seconds=timeout_seconds,
+        )
 
 
-@pytest.mark.parametrize("timeout_seconds", (float("nan"), float("inf"), float("-inf")))
-def test_runtime_requests_reject_non_finite_timeouts(timeout_seconds: float) -> None:
+@pytest.mark.parametrize(
+    "timeout_seconds",
+    (float("nan"), float("inf"), float("-inf"), 10**10000),
+)
+def test_runtime_requests_reject_non_finite_timeouts(timeout_seconds: object) -> None:
     with pytest.raises(ValueError, match="timeout_seconds must be finite and positive"):
         RuntimeRequest(
             task_id="task",
