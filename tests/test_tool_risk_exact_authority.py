@@ -32,6 +32,24 @@ class _MutableContext:
         self.task_id = "task-1"
 
 
+class _HashRebindingText(str):
+    def __new__(cls, visible: str, hashed_as: str):
+        value = super().__new__(cls, visible)
+        value._hashed_as = hashed_as
+        return value
+
+    def encode(self, encoding="utf-8", errors="strict"):
+        return self._hashed_as.encode(encoding, errors)
+
+
+class _TupleCarrier(tuple):
+    pass
+
+
+class _DateTimeCarrier(datetime):
+    pass
+
+
 class _IntentCarrier:
     tool_id = "safe.read"
     target = "target-1"
@@ -71,6 +89,51 @@ def _grant_with_forged_risk(permissions: StandingPermissionStore) -> None:
         permission_id="forged-risk",
         scope=_scope(risk_ceiling=_forged_read_only_risk()),  # type: ignore[arg-type]
     )
+
+
+def test_hash_rebinding_text_cannot_enter_permission_context() -> None:
+    forged_user = _HashRebindingText("user-visible", "user-authorized")
+
+    assert str(forged_user) == "user-visible"
+    assert forged_user.encode() == b"user-authorized"
+    with pytest.raises(ValueError, match="canonical identity"):
+        PermissionContext(
+            user_id=forged_user,  # type: ignore[arg-type]
+            project_id="project-1",
+            task_id="task-1",
+        )
+
+
+def test_scope_vectors_require_exact_tuple_container() -> None:
+    now = datetime(2026, 9, 27, tzinfo=UTC)
+    with pytest.raises(ValueError, match="explicit non-empty tuple"):
+        StandingPermissionScope(
+            subject_id="agent-1",
+            context=PermissionContext("user-1", "project-1", "task-1"),
+            action_class="safe.read",
+            targets=_TupleCarrier(("target-1",)),  # type: ignore[arg-type]
+            sites=(),
+            resources=("resource-1",),
+            risk_ceiling=ToolRisk.READ_ONLY,
+            granted_at=now,
+            expires_at=now + timedelta(minutes=5),
+        )
+
+
+def test_scope_times_require_exact_datetime_carrier() -> None:
+    forged_time = _DateTimeCarrier(2026, 9, 27, tzinfo=UTC)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        StandingPermissionScope(
+            subject_id="agent-1",
+            context=PermissionContext("user-1", "project-1", "task-1"),
+            action_class="safe.read",
+            targets=("target-1",),
+            sites=(),
+            resources=("resource-1",),
+            risk_ceiling=ToolRisk.READ_ONLY,
+            granted_at=forged_time,
+            expires_at=datetime(2026, 9, 27, 0, 5, tzinfo=UTC),
+        )
 
 
 def test_nested_context_carriers_must_be_canonical_permission_context() -> None:
