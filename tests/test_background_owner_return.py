@@ -87,6 +87,18 @@ def _running_runtime_state(
         thread_id=thread_id,
         resume_token="resume-token",
     )
+    audit.append(
+        event_type="background.dispatch_permitted",
+        entity_type="task",
+        entity_id=task.task_id,
+        payload={"work_kind": "reading_research", "resumed": False},
+    )
+    audit.append(
+        event_type="runtime.started",
+        entity_type="task",
+        entity_id=task.task_id,
+        payload={"runtime_id": PausableRuntime.runtime_id, "thread_id": thread_id},
+    )
     return queue, audit, coordinator, task.task_id, thread_id
 
 
@@ -313,3 +325,47 @@ def test_presence_freshness_configuration_is_bounded(
             max_future_skew_seconds=max_future,  # type: ignore[arg-type]
             clock=lambda: now,
         )
+
+
+def test_foreground_running_task_without_background_provenance_is_never_paused(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    store = SQLiteStore(tmp_path / "foreground.db")
+    store.initialize()
+    queue = TaskQueue(store)
+    audit = AuditLog(store)
+    coordinator = TaskRuntimeCoordinator(queue, audit, recovery_owner_id="foreground-test")
+    task = queue.create(workspace_id="default", agent_id="nika")
+    queue.transition(task.task_id, TaskState.READY)
+    queue.transition(task.task_id, TaskState.RUNNING)
+    thread_id = f"foreground-{task.task_id}"
+    coordinator.sessions.record_active(
+        task_id=task.task_id,
+        runtime_id=PausableRuntime.runtime_id,
+        thread_id=thread_id,
+        resume_token="foreground-token",
+    )
+    runtime = PausableRuntime()
+    controller = WindowsBackgroundOwnerReturnController(
+        coordinator=coordinator,
+        audit=audit,
+        presence=_presence(audit, presence=OwnerPresence.ACTIVE, observed_at=now),
+        clock=lambda: now,
+    )
+
+    with pytest.raises(ValueError, match="background dispatch provenance"):
+        asyncio.run(
+            controller.reconcile(
+                runtime=runtime,
+                task_id=task.task_id,
+                thread_id=thread_id,
+            )
+        )
+
+    assert queue.get(task.task_id).state is TaskState.RUNNING
+    assert runtime.cancel_calls == []
+    assert audit.list_for(
+        entity_type="owner_presence_source",
+        entity_id="win32-owner-presence",
+    ) == ()
