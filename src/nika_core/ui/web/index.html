@@ -60,10 +60,12 @@
     </section>
     <section aria-labelledby="model-settings-heading">
       <h2 id="model-settings-heading" tabindex="-1">Модель для нових завдань</h2>
-      <p id="model-settings-help">Вибір зберігається до створення нового завдання і не змінює модель уже прийнятого завдання. Для локального Ollama використовується лише локальна адреса. Для API вкажіть лише посилання на змінну середовища у форматі env:НАЗВА; сам ключ у це поле не вводьте.</p>
+      <p id="model-settings-help">Вибір зберігається до створення нового завдання і не змінює режим уже прийнятого завдання. Детермінований режим працює без LLM. Foundry Local використовує вбудовану локальну модель без мережевої адреси. Ollama використовує лише локальну адресу. Для API вкажіть лише посилання на змінну середовища у форматі env:НАЗВА; сам ключ у це поле не вводьте.</p>
 
       <label for="model-route-kind">Тип маршруту моделі</label>
       <select id="model-route-kind" aria-describedby="model-settings-help model-settings-status">
+        <option value="deterministic">Детермінований режим без LLM</option>
+        <option value="foundry_local">Foundry Local</option>
         <option value="ollama">Локальний Ollama</option>
         <option value="openai_compatible">Сумісний API</option>
       </select>
@@ -85,7 +87,7 @@
         <input id="model-private-data" type="checkbox" aria-describedby="model-private-help">
         Дозволити приватні дані для вибраного API
       </label>
-      <p id="model-private-help">Для локального Ollama цей параметр завжди дозволений локально. Для зовнішнього API вмикайте лише коли політика постачальника це дозволяє.</p>
+      <p id="model-private-help">Для детермінованого та локальних режимів цей параметр не потребує зміни. Для зовнішнього API вмикайте лише коли політика постачальника це дозволяє.</p>
 
       <label for="model-timeout">Тайм-аут моделі, секунд</label>
       <input id="model-timeout" type="number" min="1" max="600" step="1" inputmode="decimal" aria-describedby="model-settings-help">
