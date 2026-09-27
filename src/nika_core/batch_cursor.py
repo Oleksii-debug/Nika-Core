@@ -74,6 +74,16 @@ class TargetCursor(BaseModel):
                 raise ValueError("uncertain target requires only uncertain_result")
         elif self.confirmed_result is not None or self.uncertain_result is not None:
             raise ValueError("non-terminal target cannot contain result evidence")
+        for name, evidence in (
+            ("confirmed_result", self.confirmed_result),
+            ("uncertain_result", self.uncertain_result),
+        ):
+            if evidence is None:
+                continue
+            try:
+                _canonical_json(evidence)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{name} must be canonical finite JSON") from exc
         return self
 
 
