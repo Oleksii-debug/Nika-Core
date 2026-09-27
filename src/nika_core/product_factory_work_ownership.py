@@ -129,7 +129,7 @@ class ProductFactoryWorkOwnership:
             _assert_exact(current, owner_id=owner_id, fence=fence, now=instant)
             assert current is not None
             if expires_at < current.expires_at:
-                raise WorkOwnershipError("renewal must not shorten the current lease")
+                raise WorkOwnershipError("renewal must extend or preserve the current lease")
             if expires_at > current.expires_at:
                 connection.execute(
                     "UPDATE product_factory_work_ownership SET expires_at = ? "
