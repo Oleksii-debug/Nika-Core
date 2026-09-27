@@ -57,6 +57,19 @@ class PreviousObservationExpectation:
                 raise ValueError(f"{field_name} must be a positive integer")
 
 
+def _canonical_expectation(expected: object) -> PreviousObservationExpectation:
+    if type(expected) is not PreviousObservationExpectation:
+        raise TypeError("expected must be an exact PreviousObservationExpectation")
+    return PreviousObservationExpectation(
+        series_id=expected.series_id,
+        workspace_id=expected.workspace_id,
+        profile_id=expected.profile_id,
+        profile_version=expected.profile_version,
+        source_set_id=expected.source_set_id,
+        source_set_version=expected.source_set_version,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class DurablePreviousObservation:
     task_id: str
@@ -85,6 +98,7 @@ class DurablePreviousObservationLoader:
         self._tasks = TaskQueue(store)
 
     def load(self, expected: PreviousObservationExpectation) -> DurablePreviousObservation:
+        expected = _canonical_expectation(expected)
         rows = self._latest_history_rows(expected.series_id)
         if not rows:
             self._fail(

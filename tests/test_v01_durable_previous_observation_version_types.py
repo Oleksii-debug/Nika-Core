@@ -131,3 +131,23 @@ def test_expectation_rejects_behavioral_version_subclasses(field_name: str) -> N
     with pytest.raises(TypeError, match=rf"{field_name} must be an exact int"):
         PreviousObservationExpectation(**values)  # type: ignore[arg-type]
 
+def test_loader_revalidates_forged_exact_expectation_before_lookup(tmp_path: Path) -> None:
+    forged = object.__new__(PreviousObservationExpectation)
+    object.__setattr__(forged, "series_id", _BehavioralIdentity("series"))
+    object.__setattr__(forged, "workspace_id", "ws")
+    object.__setattr__(forged, "profile_id", "monitor")
+    object.__setattr__(forged, "profile_version", 1)
+    object.__setattr__(forged, "source_set_id", "sources")
+    object.__setattr__(forged, "source_set_version", 1)
+
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    loader = DurablePreviousObservationLoader(
+        store=store,
+        profiles=ResearchProfileRepository(store),
+        network_repository=NetworkResearchRepository(store),
+    )
+
+    with pytest.raises(TypeError, match=r"series_id must be an exact str"):
+        loader.load(forged)
+
