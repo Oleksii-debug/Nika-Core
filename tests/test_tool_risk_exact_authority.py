@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -9,6 +11,7 @@ from nika_core.security.policy import ActionIntent
 from nika_core.security.standing_permission import (
     PermissionContext,
     StandingPermissionBinding,
+    StandingPermissionIntegrityError,
     StandingPermissionScope,
     StandingPermissionStore,
     StandingPermissionUse,
@@ -168,6 +171,151 @@ def test_forged_standing_risk_cannot_leave_durable_authority(tmp_path) -> None:
             "SELECT COUNT(*) AS count FROM standing_permissions"
         ).fetchone()["count"]
     assert row_count == 0
+
+
+def _canonical_permission(tmp_path):
+    store = SQLiteStore(tmp_path / "durable-authority.db")
+    permissions = StandingPermissionStore(store)
+    permissions.initialize()
+    permission = permissions.grant(
+        permission_id="perm-durable",
+        scope=_scope(risk_ceiling=ToolRisk.READ_ONLY),
+    )
+    return store, permission
+
+
+def test_scope_json_blob_storage_fails_closed_on_restart(tmp_path) -> None:
+    store, _permission = _canonical_permission(tmp_path)
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT scope_json FROM standing_permissions WHERE permission_id = ?",
+            ("perm-durable",),
+        ).fetchone()
+        conn.execute(
+            "UPDATE standing_permissions SET scope_json = ? WHERE permission_id = ?",
+            (sqlite3.Binary(row["scope_json"].encode("utf-8")), "perm-durable"),
+        )
+
+    restarted = StandingPermissionStore(store)
+    restarted.initialize()
+    with pytest.raises(StandingPermissionIntegrityError, match="storage type"):
+        restarted.get("perm-durable")
+
+
+def test_unknown_durable_scope_field_is_rejected(tmp_path) -> None:
+    store, _permission = _canonical_permission(tmp_path)
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT scope_json FROM standing_permissions WHERE permission_id = ?",
+            ("perm-durable",),
+        ).fetchone()
+        payload = json.loads(row["scope_json"])
+        payload["ignored_authority"] = "must-not-normalize"
+        conn.execute(
+            "UPDATE standing_permissions SET scope_json = ? WHERE permission_id = ?",
+            (
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "perm-durable",
+            ),
+        )
+
+    restarted = StandingPermissionStore(store)
+    restarted.initialize()
+    with pytest.raises(
+        StandingPermissionIntegrityError,
+        match="unexpected durable fields",
+    ):
+        restarted.get("perm-durable")
+
+
+def test_durable_scope_scalar_type_is_not_string_coerced(tmp_path) -> None:
+    store, _permission = _canonical_permission(tmp_path)
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT scope_json FROM standing_permissions WHERE permission_id = ?",
+            ("perm-durable",),
+        ).fetchone()
+        payload = json.loads(row["scope_json"])
+        payload["action_class"] = 7
+        conn.execute(
+            "UPDATE standing_permissions SET scope_json = ? WHERE permission_id = ?",
+            (
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "perm-durable",
+            ),
+        )
+
+    restarted = StandingPermissionStore(store)
+    restarted.initialize()
+    with pytest.raises(StandingPermissionIntegrityError, match="durable text"):
+        restarted.get("perm-durable")
+
+
+def test_text_migration_version_is_not_integer_coerced(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "bad-migration.db")
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TABLE standing_permission_schema_migrations ("
+            "version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO standing_permission_schema_migrations(version, applied_at) "
+            "VALUES (?, ?)",
+            ("1", datetime(2026, 9, 27, tzinfo=UTC).isoformat()),
+        )
+
+    permissions = StandingPermissionStore(store)
+    with pytest.raises(StandingPermissionIntegrityError, match="schema version.*storage type"):
+        permissions.initialize()
+
+
+def test_standing_permission_schema_shape_is_validated(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "bad-shape.db")
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TABLE standing_permission_schema_migrations ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO standing_permission_schema_migrations(version, applied_at) "
+            "VALUES (1, ?)",
+            (datetime(2026, 9, 27, tzinfo=UTC).isoformat(),),
+        )
+        conn.execute(
+            "CREATE TABLE standing_permissions ("
+            "permission_id TEXT PRIMARY KEY, "
+            "parent_permission_id TEXT, "
+            "scope_json BLOB NOT NULL, "
+            "scope_fingerprint TEXT NOT NULL, "
+            "revoked_at TEXT)"
+        )
+
+    permissions = StandingPermissionStore(store)
+    with pytest.raises(StandingPermissionIntegrityError, match="schema shape"):
+        permissions.initialize()
+
+
+def test_canonical_durable_authority_survives_restart(tmp_path) -> None:
+    store, original = _canonical_permission(tmp_path)
+
+    restarted = StandingPermissionStore(store)
+    restarted.initialize()
+    restored = restarted.get("perm-durable")
+
+    assert restored is not None
+    assert restored.permission_id == original.permission_id
+    assert restored.scope_fingerprint == original.scope_fingerprint
+    assert restored.parent_permission_id is None
 
 
 @pytest.mark.parametrize(
