@@ -15,7 +15,6 @@ from nika_core.intelligence.modes import IntelligenceModePolicy
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.multi_agent.contracts import AgentHandoff, ChildRequest, HandoffKind, TeamQuota
 from nika_core.multi_agent.store import MultiAgentStore
-from nika_core.multi_agent.supervisor import MultiAgentSupervisor
 from nika_core.runtime.contracts import RuntimeOutcome, RuntimeRequest
 from nika_core.security.model_cloud_authority import (
     StandingPermissionCloudEffectAuthorizer,
@@ -321,7 +320,7 @@ def test_real_authority_survives_canonical_multi_agent_member_identities(
     authority_requests: list[str] = []
     resolver = _CountingCredentialResolver()
     transport = _CountingTransport()
-    runtime = _factory(
+    factory = _factory(
         store=store,
         settings=settings,
         definitions=definitions,
@@ -332,8 +331,7 @@ def test_real_authority_survives_canonical_multi_agent_member_identities(
             authority_requests.append(candidate_task)
             or (authority if candidate_task == outer_task else None)
         ),
-    ).for_task(outer_task)
-    assert runtime is not None
+    )
 
     team_id = "authority-team"
     team_store = MultiAgentStore(store)
@@ -360,10 +358,9 @@ def test_real_authority_survives_canonical_multi_agent_member_identities(
             correlation_id="team:authority-team:root",
         ),
     )
-    supervisor = MultiAgentSupervisor(
-        runtime=runtime,
+    supervisor = factory.supervisor_for_task(
+        outer_task,
         store=team_store,
-        definitions=definitions,
     )
 
     async def scenario() -> tuple[object, ...]:
