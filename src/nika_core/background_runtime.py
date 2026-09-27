@@ -32,6 +32,7 @@ _SOURCE_ENTITY_TYPE = "owner_presence_source"
 _OBSERVED_EVENT = "background.owner_presence_observed"
 _DISPATCH_OPERATION_TYPE = "background.dispatch"
 _MAX_IDENTITY_LENGTH = 256
+_MAX_CONFIGURED_PRESENCE_AGE_SECONDS = 60.0
 
 
 class PresenceEvidencePhase(StrEnum):
@@ -121,14 +122,21 @@ class BackgroundDispatchGuard:
             raise TypeError("max_presence_age_seconds must be exact built-in int or float")
         if type(max_presence_age_seconds) is float and not isfinite(max_presence_age_seconds):
             raise ValueError("max_presence_age_seconds must be finite")
-        if max_presence_age_seconds <= 0:
-            raise ValueError("max_presence_age_seconds must be greater than zero")
+        if not 0 < max_presence_age_seconds <= _MAX_CONFIGURED_PRESENCE_AGE_SECONDS:
+            raise ValueError(
+                "max_presence_age_seconds must be in "
+                f"(0, {_MAX_CONFIGURED_PRESENCE_AGE_SECONDS:g}]"
+            )
         if type(max_future_skew_seconds) not in (int, float):
             raise TypeError("max_future_skew_seconds must be exact built-in int or float")
         if type(max_future_skew_seconds) is float and not isfinite(max_future_skew_seconds):
             raise ValueError("max_future_skew_seconds must be finite")
         if max_future_skew_seconds < 0:
             raise ValueError("max_future_skew_seconds must be non-negative")
+        if max_future_skew_seconds > max_presence_age_seconds:
+            raise ValueError(
+                "max_future_skew_seconds must not exceed max_presence_age_seconds"
+            )
         self._queue = queue
         self._audit = audit
         self._resources = resources
