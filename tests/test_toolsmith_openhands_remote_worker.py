@@ -586,12 +586,12 @@ def test_acquisition_failure_redacts_untrusted_provider_diagnostics(
     assert not result.succeeded
     assert result.failure is not None
     assert result.failure.kind.value == "internal_error"
-    assert result.failure.retryable is True
+    assert result.failure.retryable is False
     assert result.failure.message == (
         "remote sandbox acquisition failed without trusted diagnostics"
     )
     assert "password" not in result.failure.message
-    assert result.recovery_state == RecoveryState("interrupted")
+    assert result.recovery_state == RecoveryState("manual_reconcile_required")
     assert provider.released == []
 
 
@@ -711,6 +711,31 @@ def test_cancel_during_sandbox_acquire_never_dispatches_remote_runtime(tmp_path:
     assert runtime.calls == []
     assert runtime.cancelled == []
     assert provider.released == [("job-1", "sandbox-1", False)]
+
+
+def test_task_cancellation_during_unresolved_sandbox_acquire_requires_manual_reconciliation(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    provider = BlockingAcquireProvider()
+    runtime = Runtime()
+    worker = OpenHandsRemoteCodingWorker(provider, runtime)
+    job = _job(root)
+
+    async def scenario():
+        execution = asyncio.create_task(worker.execute(job))
+        await asyncio.wait_for(provider.acquire_started.wait(), timeout=2)
+        execution.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+        return await worker.inspect(job.job_id)
+
+    state = _run(scenario())
+
+    assert state == RecoveryState("manual_reconcile_required")
+    assert runtime.calls == []
+    assert runtime.cancelled == ["job-1"]
+    assert provider.released == []
 
 
 def test_cancelled_recovery_is_terminal_and_never_reexecutes(tmp_path: Path) -> None:
