@@ -1623,6 +1623,7 @@ def test_crash_window_confirm_rejects_conflicting_durable_deadline_without_mutat
     assert ledger.require(grant.operation_key).result == before_ledger
     assert cursor.state.targets[0].attempt_state is AttemptState.IN_FLIGHT
 
+
 def test_confirmed_begin_effect_rejects_rebound_durable_identity_without_mutation(
     tmp_path: Path,
 ) -> None:
