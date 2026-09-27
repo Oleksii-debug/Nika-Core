@@ -4,7 +4,7 @@ import json
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
@@ -47,7 +47,7 @@ def _stored_text(row: sqlite3.Row, field_name: str) -> str:
         raise RuntimeError(
             f"persisted idempotency field {field_name} has invalid SQLite storage class"
         )
-    if not value:
+    if not value.strip():
         raise RuntimeError(f"persisted idempotency field {field_name} is empty")
     return value
 
@@ -60,7 +60,7 @@ def _stored_timestamp(row: sqlite3.Row, field_name: str) -> str:
         raise RuntimeError(f"persisted idempotency {field_name} is invalid") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise RuntimeError(f"persisted idempotency {field_name} must be timezone-aware")
-    if parsed.utcoffset() != UTC.utcoffset(parsed):
+    if parsed.utcoffset() != timedelta(0):
         raise RuntimeError(f"persisted idempotency {field_name} must be UTC")
     if parsed.astimezone(UTC).isoformat() != value:
         raise RuntimeError(f"persisted idempotency {field_name} is not canonical")
@@ -136,6 +136,7 @@ class IdempotencyLedger:
         record. Concurrent callers therefore get one durable winner and one non-created result.
         """
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             return self.reserve_with_connection(
                 conn,
                 operation_key=operation_key,
@@ -243,6 +244,7 @@ class IdempotencyLedger:
     def release_pending(self, operation_key: str) -> None:
         """Forget a proven-not-applied side effect so a later explicit attempt may retry."""
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             self.release_pending_with_connection(conn, operation_key)
 
     def release_pending_with_connection(
@@ -264,15 +266,21 @@ class IdempotencyLedger:
         result: Mapping[str, Any] | None = None,
     ) -> IdempotencyRecord:
         """Close an UNCERTAIN record only after an external system proves completion."""
-        current = self.require(operation_key)
-        if current.status != IdempotencyStatus.UNCERTAIN:
-            raise IdempotencyConflictError("only uncertain operations require reconciliation")
-        return self._set_status(
-            operation_key,
-            IdempotencyStatus.COMPLETED,
-            result,
-            allow_uncertain_completion=True,
-        )
+        operation_key = _require_exact_text(operation_key, field_name="operation_key")
+        with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._require_with_connection(conn, operation_key)
+            if current.status is not IdempotencyStatus.UNCERTAIN:
+                raise IdempotencyConflictError(
+                    "only uncertain operations require reconciliation"
+                )
+            return self._set_status_with_connection(
+                conn,
+                operation_key,
+                IdempotencyStatus.COMPLETED,
+                result,
+                allow_uncertain_completion=True,
+            )
 
     def get(self, operation_key: str) -> IdempotencyRecord | None:
         operation_key = _require_exact_text(operation_key, field_name="operation_key")
@@ -349,6 +357,7 @@ class IdempotencyLedger:
         allow_uncertain_completion: bool = False,
     ) -> IdempotencyRecord:
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             return self._set_status_with_connection(
                 conn,
                 operation_key,
@@ -371,6 +380,8 @@ class IdempotencyLedger:
             raise TypeError("status must be an IdempotencyStatus")
         current = self._require_with_connection(conn, operation_key)
         result_json = _serialize_result(result)
+        if status is not IdempotencyStatus.COMPLETED and result_json is not None:
+            raise ValueError("only completed idempotency records may carry result evidence")
         if current.status is IdempotencyStatus.COMPLETED:
             if status is not IdempotencyStatus.COMPLETED:
                 raise IdempotencyConflictError("completed operation cannot be reopened")
