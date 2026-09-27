@@ -369,3 +369,34 @@ def test_foreground_running_task_without_background_provenance_is_never_paused(
         entity_type="owner_presence_source",
         entity_id="win32-owner-presence",
     ) == ()
+
+
+def test_presence_from_different_audit_store_cannot_authorize_continue(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    queue, audit, coordinator, task_id, thread_id = _running_runtime_state(tmp_path)
+    foreign_store = SQLiteStore(tmp_path / "foreign-presence.db")
+    foreign_store.initialize()
+    foreign_audit = AuditLog(foreign_store)
+    foreign_presence = _presence(
+        foreign_audit,
+        presence=OwnerPresence.AWAY,
+        observed_at=now,
+    )
+    runtime = PausableRuntime()
+    controller = WindowsBackgroundOwnerReturnController(
+        coordinator=coordinator,
+        audit=audit,
+        presence=foreign_presence,
+        clock=lambda: now,
+    )
+
+    result = asyncio.run(
+        controller.reconcile(runtime=runtime, task_id=task_id, thread_id=thread_id)
+    )
+
+    assert result.action is RunningBackgroundAction.PAUSED
+    assert result.reason == "owner_presence_untrusted"
+    assert queue.get(task_id).state is TaskState.PAUSED
+    assert runtime.cancel_calls == [(task_id, thread_id)]
