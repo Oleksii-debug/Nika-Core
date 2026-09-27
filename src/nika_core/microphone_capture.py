@@ -89,12 +89,13 @@ class MicrophoneCapturePolicy:
             minimum=2,
             maximum=_MAX_AUDIO_BYTES,
         )
-        _finite_float(
+        timeout_seconds = _finite_float(
             self.timeout_seconds,
             field="timeout_seconds",
             minimum_exclusive=0.0,
             maximum=120.0,
         )
+        object.__setattr__(self, "timeout_seconds", timeout_seconds)
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +125,7 @@ class MicrophoneCaptureRequest:
         )
         if type(self.policy) is not MicrophoneCapturePolicy:
             raise TypeError("policy must be an exact MicrophoneCapturePolicy")
+        object.__setattr__(self, "policy", _snapshot_policy(self.policy))
 
     @property
     def expected_audio_bytes(self) -> int:
@@ -228,8 +230,7 @@ class MicrophoneCaptureService:
         return bool(self._cleanup_tasks)
 
     async def capture(self, request: MicrophoneCaptureRequest) -> MicrophoneCaptureResult:
-        if type(request) is not MicrophoneCaptureRequest:
-            raise TypeError("request must be an exact MicrophoneCaptureRequest")
+        request = _snapshot_request(request)
 
         if self.cleanup_pending:
             return self._failure(
@@ -263,8 +264,9 @@ class MicrophoneCaptureService:
             )
 
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + float(request.policy.timeout_seconds)
-        capture_task = asyncio.create_task(self._adapter.capture(request))
+        deadline = loop.time() + request.policy.timeout_seconds
+        adapter_request = _snapshot_request(request)
+        capture_task = asyncio.create_task(self._adapter.capture(adapter_request))
         try:
             done, _ = await asyncio.wait(
                 {capture_task},
@@ -296,15 +298,16 @@ class MicrophoneCaptureService:
                 retryable=False,
             )
         except MicrophoneCaptureAdapterError as error:
+            code, retryable = _normalized_adapter_error(error)
             status = (
                 MicrophoneCaptureStatus.UNAVAILABLE
-                if error.code is MicrophoneCaptureFailureCode.UNAVAILABLE
+                if code is MicrophoneCaptureFailureCode.UNAVAILABLE
                 else MicrophoneCaptureStatus.FAILED
             )
             return self._failure(
                 request,
-                code=error.code,
-                retryable=error.retryable,
+                code=code,
+                retryable=retryable,
                 status=status,
             )
         except Exception:  # noqa: BLE001 - adapter trust boundary
@@ -392,19 +395,20 @@ class MicrophoneCaptureService:
     def _read_capabilities(self) -> MicrophoneCaptureCapabilities:
         try:
             capabilities = self._adapter.capabilities
-        except Exception as error:
+        except Exception:  # noqa: BLE001 - adapter capability boundary
             raise MicrophoneCaptureAdapterError(
                 MicrophoneCaptureFailureCode.ADAPTER_ERROR,
                 "microphone capabilities are unavailable",
                 retryable=False,
-            ) from error
-        if type(capabilities) is not MicrophoneCaptureCapabilities:
+            ) from None
+        try:
+            return _snapshot_capabilities(capabilities)
+        except (AttributeError, TypeError, ValueError):
             raise MicrophoneCaptureAdapterError(
                 MicrophoneCaptureFailureCode.ADAPTER_ERROR,
                 "microphone capabilities are invalid",
                 retryable=False,
-            )
-        return capabilities
+            ) from None
 
     @staticmethod
     def _validate_route(
@@ -477,6 +481,57 @@ class MicrophoneCaptureService:
         return MicrophoneCaptureResult(pcm_s16le=None, evidence=evidence)
 
 
+def _snapshot_capabilities(value: object) -> MicrophoneCaptureCapabilities:
+    if type(value) is not MicrophoneCaptureCapabilities:
+        raise TypeError("capabilities must be an exact MicrophoneCaptureCapabilities")
+    return MicrophoneCaptureCapabilities(
+        provider_id=value.provider_id,
+        device_id=value.device_id,
+        min_sample_rate_hz=value.min_sample_rate_hz,
+        max_sample_rate_hz=value.max_sample_rate_hz,
+    )
+
+
+def _snapshot_policy(value: object) -> MicrophoneCapturePolicy:
+    if type(value) is not MicrophoneCapturePolicy:
+        raise TypeError("policy must be an exact MicrophoneCapturePolicy")
+    return MicrophoneCapturePolicy(
+        max_audio_bytes=value.max_audio_bytes,
+        timeout_seconds=value.timeout_seconds,
+    )
+
+
+def _snapshot_request(value: object) -> MicrophoneCaptureRequest:
+    if type(value) is not MicrophoneCaptureRequest:
+        raise TypeError("request must be an exact MicrophoneCaptureRequest")
+    try:
+        return MicrophoneCaptureRequest(
+            request_id=value.request_id,
+            provider_id=value.provider_id,
+            device_id=value.device_id,
+            sample_rate_hz=value.sample_rate_hz,
+            sample_count=value.sample_count,
+            policy=_snapshot_policy(value.policy),
+        )
+    except AttributeError:
+        raise TypeError("microphone capture request is incomplete") from None
+
+
+def _normalized_adapter_error(
+    error: MicrophoneCaptureAdapterError,
+) -> tuple[MicrophoneCaptureFailureCode, bool]:
+    if type(error) is not MicrophoneCaptureAdapterError:
+        return MicrophoneCaptureFailureCode.ADAPTER_ERROR, False
+    try:
+        code = error.code
+        retryable = error.retryable
+    except AttributeError:
+        return MicrophoneCaptureFailureCode.ADAPTER_ERROR, False
+    if type(code) is not MicrophoneCaptureFailureCode or type(retryable) is not bool:
+        return MicrophoneCaptureFailureCode.ADAPTER_ERROR, False
+    return code, retryable
+
+
 def _consume_task_result(task: asyncio.Task[MicrophoneCaptureResponse]) -> None:
     try:
         task.result()
@@ -515,7 +570,7 @@ def _finite_float(
     minimum_exclusive: float,
     maximum: float,
 ) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if type(value) not in (int, float):
         raise TypeError(f"{field} must be a finite number")
     try:
         converted = float(value)
@@ -529,7 +584,7 @@ def _finite_float(
 def _validated_latency(value: object) -> float | None:
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if type(value) not in (int, float):
         raise TypeError("latency_ms must be a finite non-negative number")
     try:
         converted = float(value)

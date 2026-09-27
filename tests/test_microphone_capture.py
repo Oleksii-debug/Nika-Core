@@ -61,6 +61,40 @@ class _FakeAdapter:
         )
 
 
+class _InPlaceCapabilityDriftAdapter(_FakeAdapter):
+    async def capture(self, request: MicrophoneCaptureRequest) -> MicrophoneCaptureResponse:
+        self.calls += 1
+        object.__setattr__(self._capabilities, "device_id", "replacement-input")
+        return MicrophoneCaptureResponse(
+            request_id=request.request_id,
+            provider_id=request.provider_id,
+            device_id=request.device_id,
+            sample_rate_hz=request.sample_rate_hz,
+            pcm_s16le=b"\x01\x00" * request.sample_count,
+        )
+
+
+class _RequestMutatingAdapter(_FakeAdapter):
+    async def capture(self, request: MicrophoneCaptureRequest) -> MicrophoneCaptureResponse:
+        self.calls += 1
+        object.__setattr__(request, "request_id", "adapter-mutated-request")
+        object.__setattr__(request, "device_id", "replacement-input")
+        return MicrophoneCaptureResponse(
+            request_id=request.request_id,
+            provider_id=request.provider_id,
+            device_id=request.device_id,
+            sample_rate_hz=request.sample_rate_hz,
+            pcm_s16le=b"\x01\x00" * request.sample_count,
+        )
+
+
+class _BehavioralAdapterError(MicrophoneCaptureAdapterError):
+    def __getattribute__(self, name: str) -> object:
+        if name in {"code", "retryable"}:
+            raise RuntimeError("SENSITIVE_ERROR_ATTRIBUTE_CANARY")
+        return super().__getattribute__(name)
+
+
 def test_success_returns_transient_pcm_and_minimized_evidence() -> None:
     adapter = _FakeAdapter()
     result = asyncio.run(MicrophoneCaptureService(adapter).capture(_request()))
@@ -363,3 +397,75 @@ def test_invalid_latency_is_rejected() -> None:
     )
 
     assert result.evidence.error_code is MicrophoneCaptureFailureCode.INVALID_RESPONSE
+
+
+
+def test_in_place_capability_mutation_cannot_launder_route_drift() -> None:
+    result = asyncio.run(
+        MicrophoneCaptureService(_InPlaceCapabilityDriftAdapter()).capture(_request())
+    )
+
+    assert result.evidence.error_code is MicrophoneCaptureFailureCode.ROUTE_MISMATCH
+    assert result.pcm_s16le is None
+
+
+def test_adapter_request_mutation_cannot_rewrite_authorized_evidence() -> None:
+    original = _request()
+    result = asyncio.run(MicrophoneCaptureService(_RequestMutatingAdapter()).capture(original))
+
+    assert result.evidence.error_code is MicrophoneCaptureFailureCode.ROUTE_MISMATCH
+    assert result.pcm_s16le is None
+    assert original.request_id == "capture-1"
+    assert original.device_id == "default-input"
+
+
+def test_request_detaches_caller_policy_alias() -> None:
+    policy = MicrophoneCapturePolicy(max_audio_bytes=4_000, timeout_seconds=35.0)
+    request = _request(policy=policy)
+    object.__setattr__(policy, "max_audio_bytes", 2)
+
+    result = asyncio.run(MicrophoneCaptureService(_FakeAdapter()).capture(request))
+
+    assert result.evidence.status is MicrophoneCaptureStatus.SUCCEEDED
+    assert result.pcm_s16le is not None
+
+
+def test_forged_capabilities_are_revalidated_before_effect() -> None:
+    capabilities = MicrophoneCaptureCapabilities(
+        provider_id="local-microphone",
+        device_id="default-input",
+    )
+    object.__setattr__(capabilities, "max_sample_rate_hz", "48000")
+    adapter = _FakeAdapter(capabilities=capabilities)
+
+    result = asyncio.run(MicrophoneCaptureService(adapter).capture(_request()))
+
+    assert result.evidence.error_code is MicrophoneCaptureFailureCode.ADAPTER_ERROR
+    assert adapter.calls == 0
+
+
+def test_behavioral_adapter_error_subclass_is_reduced_to_generic_failure() -> None:
+    class _BehavioralFailureAdapter(_FakeAdapter):
+        async def capture(self, request: MicrophoneCaptureRequest) -> MicrophoneCaptureResponse:
+            del request
+            raise _BehavioralAdapterError(
+                MicrophoneCaptureFailureCode.UNAVAILABLE,
+                "SENSITIVE_ERROR_MESSAGE_CANARY",
+                retryable=True,
+            )
+
+    result = asyncio.run(MicrophoneCaptureService(_BehavioralFailureAdapter()).capture(_request()))
+
+    assert result.evidence.status is MicrophoneCaptureStatus.FAILED
+    assert result.evidence.error_code is MicrophoneCaptureFailureCode.ADAPTER_ERROR
+    assert result.evidence.retryable is False
+    assert "SENSITIVE" not in repr(result.evidence.as_dict())
+
+
+def test_behavioral_timeout_numeric_carrier_is_rejected() -> None:
+    class _BehavioralFloat(float):
+        def __float__(self) -> float:
+            return 35.0
+
+    with pytest.raises(TypeError):
+        MicrophoneCapturePolicy(timeout_seconds=_BehavioralFloat(35.0))
