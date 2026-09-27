@@ -658,7 +658,22 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                     retryable=False,
                     state=RecoveryState("manual_reconcile_required"),
                 )
-            durable_state = await self._recovery_probe.inspect(job.job_id)
+            try:
+                durable_state = await self._recovery_probe.inspect(job.job_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - host recovery probe boundary
+                _LOGGER.error(
+                    "OpenHands durable recovery probe failed (%s)",
+                    type(exc).__name__,
+                )
+                return _failure_result(
+                    job,
+                    WorkerFailureKind.INTERNAL_ERROR,
+                    "durable worker recovery state could not be inspected",
+                    retryable=False,
+                    state=RecoveryState("manual_reconcile_required"),
+                )
             if durable_state != state:
                 return _failure_result(
                     job,
