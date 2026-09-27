@@ -120,6 +120,19 @@ class CognitionEvidenceRef:
         }
 
 
+def _canonical_evidence_ref(value: object) -> CognitionEvidenceRef:
+    if type(value) is not CognitionEvidenceRef:
+        raise TypeError("evidence must contain CognitionEvidenceRef values")
+    try:
+        return CognitionEvidenceRef(
+            source_type=value.source_type,
+            source_id=value.source_id,
+            evidence_sha256=value.evidence_sha256,
+        )
+    except AttributeError as exc:
+        raise TypeError("cognition evidence is missing canonical fields") from exc
+
+
 @dataclass(frozen=True, slots=True)
 class CognitionCandidate:
     candidate_id: str
@@ -166,22 +179,42 @@ class CognitionCandidate:
         statement: str,
         evidence: tuple[CognitionEvidenceRef, ...],
     ) -> CognitionCandidate:
-        _require_bounded_tuple(
+        if cls is not CognitionCandidate:
+            raise TypeError("candidate factory must produce the canonical type")
+        bounded_evidence = _require_bounded_tuple(
             evidence,
             field="evidence",
             minimum=1,
             maximum=_MAX_EVIDENCE_REFS,
         )
-        if any(type(item) is not CognitionEvidenceRef for item in evidence):
-            raise TypeError("evidence must contain CognitionEvidenceRef values")
+        canonical_evidence = tuple(_canonical_evidence_ref(item) for item in bounded_evidence)
         return cls(
             candidate_id=candidate_id,
             workspace_id=workspace_id,
             agent_id=agent_id,
             kind=kind,
             statement=_normalized_statement(statement),
-            evidence=tuple(sorted(evidence, key=_evidence_sort_key)),
+            evidence=tuple(sorted(canonical_evidence, key=_evidence_sort_key)),
         )
+
+    @classmethod
+    def revalidate(cls, value: object) -> CognitionCandidate:
+        """Return a canonical copy after reconstructing every candidate invariant."""
+        if cls is not CognitionCandidate:
+            raise TypeError("candidate revalidation must use the canonical type")
+        if type(value) is not CognitionCandidate:
+            raise TypeError("candidate must be the canonical exact type")
+        try:
+            return cls.create(
+                candidate_id=value.candidate_id,
+                workspace_id=value.workspace_id,
+                agent_id=value.agent_id,
+                kind=value.kind,
+                statement=value.statement,
+                evidence=value.evidence,
+            )
+        except AttributeError as exc:
+            raise TypeError("candidate is missing canonical fields") from exc
 
     @property
     def statement_sha256(self) -> str:
@@ -253,9 +286,20 @@ def _canonical_requirements(
         minimum=1,
         maximum=_MAX_REQUIRED_CHECKS,
     )
-    if any(type(item) is not CognitionVerificationRequirement for item in bounded):
-        raise TypeError(f"{field} must contain CognitionVerificationRequirement values")
-    ordered = tuple(sorted(bounded, key=_requirement_sort_key))
+    canonical: list[CognitionVerificationRequirement] = []
+    for item in bounded:
+        if type(item) is not CognitionVerificationRequirement:
+            raise TypeError(f"{field} must contain CognitionVerificationRequirement values")
+        try:
+            canonical.append(
+                CognitionVerificationRequirement(
+                    check_id=item.check_id,
+                    verifier_sha256=item.verifier_sha256,
+                )
+            )
+        except AttributeError as exc:
+            raise TypeError(f"{field} contains an incomplete requirement") from exc
+    ordered = tuple(sorted(canonical, key=_requirement_sort_key))
     requirement_ids = tuple(item.check_id for item in ordered)
     if len(set(requirement_ids)) != len(requirement_ids):
         raise ValueError("verification requirement ids must be unique")
@@ -269,9 +313,22 @@ def _canonical_checks(value: object) -> tuple[CognitionVerificationCheck, ...]:
         minimum=0,
         maximum=_MAX_REQUIRED_CHECKS,
     )
-    if any(type(item) is not CognitionVerificationCheck for item in bounded):
-        raise TypeError("checks must contain CognitionVerificationCheck values")
-    ordered = tuple(sorted(bounded, key=_check_sort_key))
+    canonical: list[CognitionVerificationCheck] = []
+    for item in bounded:
+        if type(item) is not CognitionVerificationCheck:
+            raise TypeError("checks must contain CognitionVerificationCheck values")
+        try:
+            canonical.append(
+                CognitionVerificationCheck(
+                    check_id=item.check_id,
+                    verifier_sha256=item.verifier_sha256,
+                    evidence_sha256=item.evidence_sha256,
+                    passed=item.passed,
+                )
+            )
+        except AttributeError as exc:
+            raise TypeError("checks contain an incomplete verification check") from exc
+    ordered = tuple(sorted(canonical, key=_check_sort_key))
     check_ids = tuple(item.check_id for item in ordered)
     if len(set(check_ids)) != len(check_ids):
         raise ValueError("verification check ids must be unique")
@@ -296,8 +353,9 @@ class CognitionVerification:
         expected_verification_policy_sha256: str,
         expected_requirements: tuple[CognitionVerificationRequirement, ...],
     ) -> CognitionVerification:
-        if type(candidate) is not CognitionCandidate:
-            raise TypeError("candidate must be a CognitionCandidate")
+        if cls is not CognitionVerification:
+            raise TypeError("verification factory must produce the canonical type")
+        canonical_candidate = CognitionCandidate.revalidate(candidate)
 
         proposed_policy_sha256 = _require_sha256(
             verification_policy_sha256,
@@ -331,7 +389,7 @@ class CognitionVerification:
                 raise ValueError("verification check does not match the required verifier")
 
         instance = object.__new__(cls)
-        object.__setattr__(instance, "candidate_sha256", candidate.candidate_sha256)
+        object.__setattr__(instance, "candidate_sha256", canonical_candidate.candidate_sha256)
         object.__setattr__(
             instance,
             "verification_policy_sha256",
@@ -340,6 +398,39 @@ class CognitionVerification:
         object.__setattr__(instance, "requirements", trusted_requirements)
         object.__setattr__(instance, "checks", canonical_checks)
         return instance
+
+    @classmethod
+    def revalidate(
+        cls,
+        value: object,
+        *,
+        candidate: CognitionCandidate,
+        expected_verification_policy_sha256: str,
+        expected_requirements: tuple[CognitionVerificationRequirement, ...],
+    ) -> CognitionVerification:
+        """Return a canonical trusted receipt after reconstructing received evidence."""
+        if cls is not CognitionVerification:
+            raise TypeError("verification revalidation must use the canonical type")
+        if type(value) is not CognitionVerification:
+            raise TypeError("verification must be the canonical exact type")
+        try:
+            canonical = cls.create(
+                candidate=candidate,
+                verification_policy_sha256=value.verification_policy_sha256,
+                requirements=value.requirements,
+                checks=value.checks,
+                expected_verification_policy_sha256=expected_verification_policy_sha256,
+                expected_requirements=expected_requirements,
+            )
+            received_candidate_sha256 = _require_sha256(
+                value.candidate_sha256,
+                field="candidate_sha256",
+            )
+        except AttributeError as exc:
+            raise TypeError("verification is missing canonical fields") from exc
+        if canonical.candidate_sha256 != received_candidate_sha256:
+            raise ValueError("verification candidate does not match the trusted candidate")
+        return canonical
 
     @property
     def required_check_ids(self) -> tuple[str, ...]:

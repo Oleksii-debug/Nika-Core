@@ -8,6 +8,8 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_state import TaskState
 from nika_core.scheduler.contracts import ScheduledJob, TriggerKind
 
+IMMUTABLE_JOB_BINDING_KEY = "_nika_immutable_job_binding_v1"
+
 
 class ScheduledJobStore:
     def __init__(self, store: SQLiteStore) -> None:
@@ -15,6 +17,7 @@ class ScheduledJobStore:
 
     def upsert(self, job: ScheduledJob) -> None:
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             self.upsert_with_connection(conn, job)
 
     def upsert_with_connection(self, conn: sqlite3.Connection, job: ScheduledJob) -> None:
@@ -22,8 +25,19 @@ class ScheduledJobStore:
         _validate_job(job)
         now = datetime.now(UTC).isoformat()
         existing = conn.execute(
-            "SELECT created_at FROM scheduled_jobs WHERE job_id = ?", (job.job_id,)
+            "SELECT created_at, payload_json FROM scheduled_jobs WHERE job_id = ?",
+            (job.job_id,),
         ).fetchone()
+        if existing is not None:
+            incoming_binding = job.payload.get(IMMUTABLE_JOB_BINDING_KEY)
+            if incoming_binding is not None:
+                existing_payload = json.loads(existing["payload_json"])
+                existing_binding = existing_payload.get(IMMUTABLE_JOB_BINDING_KEY)
+                if (
+                    existing_binding is not None
+                    and existing_binding != incoming_binding
+                ):
+                    raise ValueError("scheduled job immutable binding conflict")
         created_at = existing["created_at"] if existing else now
         conn.execute(
             """INSERT INTO scheduled_jobs(
@@ -107,6 +121,11 @@ def _validate_job(job: ScheduledJob) -> None:
         raise ValueError("misfire_grace_seconds must be greater than zero or None")
     if not job.trigger:
         raise ValueError("trigger configuration must not be empty")
+    immutable_binding = job.payload.get(IMMUTABLE_JOB_BINDING_KEY)
+    if immutable_binding is not None and (
+        not isinstance(immutable_binding, str) or not immutable_binding.strip()
+    ):
+        raise ValueError("scheduled job immutable binding must be a non-empty string")
 
 
 def _from_row(row: object) -> ScheduledJob:
