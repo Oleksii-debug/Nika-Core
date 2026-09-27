@@ -54,6 +54,22 @@ after spreadsheet-formula neutralization, because the protective apostrophe can 
 value over the Excel limit. Oversized XLSX fields fail closed with the offending field name; they are
 never silently truncated by openpyxl. Other report formats remain independently available.
 
+## Canonical artifact-input boundary
+
+Before generating a filename or any TXT/CSV/HTML/DOCX/XLSX payload,
+`ResearchReportExporter` reconstructs the supplied report into detached canonical carriers.
+The boundary requires the exact Nika report/card/review/evidence dataclass identities, exact
+immutable tuple containers, exact built-in text/integer/float primitives, finite rank values,
+and exact `ResearchReviewState`, `SourceKind` and `FreshnessState` enum members.
+Review workspace/document identity must agree with the enclosing report/card.
+
+This fence is intentionally at the public artifact boundary because the underlying research
+dataclasses are lightweight transport models and Python type annotations alone do not validate
+runtime carriers. It prevents behavior-changing `str` subclasses from bypassing spreadsheet
+formula neutralization or source-reference hashing, prevents forged objects from injecting HTML
+through numeric formatting, and prevents NaN/Infinity from becoming report truth. HTML language
+tags likewise require an exact built-in string before BCP47 normalization.
+
 ## Deterministic Office artifacts
 
 `python-docx` and `openpyxl` correctly own the Office document model, but ordinary saves can include
