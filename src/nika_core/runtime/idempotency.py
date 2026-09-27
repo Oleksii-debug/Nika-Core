@@ -52,6 +52,23 @@ def _stored_text(row: sqlite3.Row, field_name: str) -> str:
     return value
 
 
+def _select_operation_row(
+    conn: sqlite3.Connection,
+    operation_key: str,
+) -> sqlite3.Row | None:
+    rows = conn.execute(
+        """
+        SELECT * FROM idempotency_records
+        WHERE operation_key = ?
+           OR (typeof(operation_key) != 'text' AND CAST(operation_key AS TEXT) = ?)
+        """,
+        (operation_key, operation_key),
+    ).fetchall()
+    if len(rows) > 1:
+        raise RuntimeError("multiple persisted idempotency operation_key storage aliases")
+    return None if not rows else rows[0]
+
+
 def _stored_timestamp(row: sqlite3.Row, field_name: str) -> str:
     value = _stored_text(row, field_name)
     try:
@@ -161,10 +178,7 @@ class IdempotencyLedger:
             field_name="input_fingerprint",
         )
 
-        existing = conn.execute(
-            "SELECT * FROM idempotency_records WHERE operation_key = ?",
-            (operation_key,),
-        ).fetchone()
+        existing = _select_operation_row(conn, operation_key)
         if existing is not None:
             record = self._from_row(existing)
             if (
@@ -195,10 +209,7 @@ class IdempotencyLedger:
                 now,
             ),
         )
-        row = conn.execute(
-            "SELECT * FROM idempotency_records WHERE operation_key = ?",
-            (operation_key,),
-        ).fetchone()
+        row = _select_operation_row(conn, operation_key)
         if row is None:  # pragma: no cover - SQLite insert/select invariant
             raise RuntimeError("idempotency reservation disappeared inside transaction")
         return self._from_row(row), True
@@ -283,10 +294,7 @@ class IdempotencyLedger:
     def get(self, operation_key: str) -> IdempotencyRecord | None:
         operation_key = _require_exact_text(operation_key, field_name="operation_key")
         with self._store.connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM idempotency_records WHERE operation_key = ?",
-                (operation_key,),
-            ).fetchone()
+            row = _select_operation_row(conn, operation_key)
         return None if row is None else self._from_row(row)
 
     def require(self, operation_key: str) -> IdempotencyRecord:
@@ -305,15 +313,20 @@ class IdempotencyLedger:
         task_id = _require_exact_text(task_id, field_name="task_id")
         if status is not None and type(status) is not IdempotencyStatus:
             raise TypeError("status must be an IdempotencyStatus when provided")
-        query = "SELECT * FROM idempotency_records WHERE task_id = ?"
-        params: tuple[object, ...] = (task_id,)
-        if status is not None:
-            query += " AND status = ?"
-            params += (status.value,)
-        query += " ORDER BY created_at, operation_key"
         with self._store.connection() as conn:
-            rows = conn.execute(query, params).fetchall()
-        return tuple(self._from_row(row) for row in rows)
+            rows = conn.execute(
+                """
+                SELECT * FROM idempotency_records
+                WHERE task_id = ?
+                   OR (typeof(task_id) != 'text' AND CAST(task_id AS TEXT) = ?)
+                ORDER BY created_at, operation_key
+                """,
+                (task_id, task_id),
+            ).fetchall()
+        records = tuple(self._from_row(row) for row in rows)
+        if status is None:
+            return records
+        return tuple(record for record in records if record.status is status)
 
     def list_uncertain_for_task(self, task_id: str) -> tuple[IdempotencyRecord, ...]:
         """Return external operations that must be reconciled before automatic recovery."""
@@ -335,9 +348,10 @@ class IdempotencyLedger:
                 """
                 SELECT * FROM idempotency_records
                 WHERE task_id = ?
+                   OR (typeof(task_id) != 'text' AND CAST(task_id AS TEXT) = ?)
                 ORDER BY created_at, operation_key
                 """,
-                (task_id,),
+                (task_id, task_id),
             ).fetchall()
             task_records = tuple(self._from_row(row) for row in task_rows)
             records = tuple(
