@@ -48,6 +48,10 @@ class OpenHandsWorkspaceMutationError(RuntimeError):
     """Raised when a local staging mutation cannot be proven rolled back."""
 
 
+class OpenHandsSandboxAcquisitionError(RuntimeError):
+    """Raised when the injected sandbox provider fails before endpoint validation."""
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class OpenHandsSandboxEndpoint:
     """Attested control-plane endpoint for one fresh remote sandbox.
@@ -213,7 +217,18 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                 local_root = _validate_local_workspace(job)
                 source_evidence = collect_tree_evidence(local_root)
                 _validate_source_identity(job, source_evidence)
-                endpoint = await self._sandbox_provider.acquire(job)
+                try:
+                    endpoint = await self._sandbox_provider.acquire(job)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - sandbox provider boundary
+                    _LOGGER.error(
+                        "OpenHands sandbox acquisition failed (%s)",
+                        type(exc).__name__,
+                    )
+                    raise OpenHandsSandboxAcquisitionError(
+                        "remote sandbox acquisition failed"
+                    ) from None
                 _validate_endpoint(job, endpoint)
                 prompt = _build_prompt(job)
                 async with self._lock:
@@ -354,6 +369,17 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                         changed_files=changed,
                         test_evidence=tests,
                     )
+            except OpenHandsSandboxAcquisitionError:
+                state = RecoveryState("interrupted")
+                result = _failure_result(
+                    job,
+                    WorkerFailureKind.INTERNAL_ERROR,
+                    "remote sandbox acquisition failed without trusted diagnostics",
+                    retryable=True,
+                    state=state,
+                    changed_files=changed,
+                    test_evidence=tests,
+                )
             except OpenHandsWorkspaceMutationError:
                 state = RecoveryState("manual_reconcile_required")
                 result = _failure_result(
