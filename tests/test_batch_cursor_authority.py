@@ -8,6 +8,7 @@ import pytest
 from nika_core.batch_cursor import (
     AttemptState,
     BatchCursor,
+    BatchCursorBlockedError,
     BatchCursorStateError,
     BatchTargetSpec,
     IntentKind,
@@ -510,4 +511,66 @@ def test_failed_second_begin_checkpoint_rolls_back_to_last_durable_prepared_stat
     replay = cursor.begin_effect("target-0")
     assert replay.execute is False
     assert replay.reason == "effect_already_reserved"
+
+@pytest.mark.parametrize("restart_after", tuple(range(1, 21)))
+def test_twenty_target_plan_restores_exactly_after_every_target(
+    tmp_path: Path,
+    restart_after: int,
+) -> None:
+    memory, ledger, _ = _services(tmp_path)
+    targets = _targets(20)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=targets,
+        batch_size=5,
+    )
+
+    for index in range(restart_after):
+        if cursor.next_target() is None:
+            intent = cursor.state.next_scheduled_intent
+            assert intent is not None
+            assert intent.kind is IntentKind.INTER_BATCH_WAIT
+            cursor.release_inter_batch_wait()
+        grant = cursor.begin_effect(f"target-{index}")
+        assert grant.execute is True
+        cursor.confirm(f"target-{index}", {"confirmed": index})
+
+    restarted = BatchCursor.restore(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=targets,
+        batch_size=5,
+    )
+    assert restarted.state.confirmed_count == restart_after
+    assert len(ledger.list_for_task("task")) == restart_after
+
+    if restart_after == 20:
+        assert restarted.next_target() is None
+        assert restarted.state.next_scheduled_intent is None
+        return
+
+    if restart_after % 5 == 0:
+        assert restarted.next_target() is None
+        intent = restarted.state.next_scheduled_intent
+        assert intent is not None
+        assert intent.kind is IntentKind.INTER_BATCH_WAIT
+        assert intent.target_id == f"target-{restart_after}"
+        assert intent.batch_index == restart_after // 5
+    else:
+        next_target = restarted.next_target()
+        assert next_target is not None
+        assert next_target.target_id == f"target-{restart_after}"
+        assert next_target.position == restart_after
+        assert next_target.batch_index == restart_after // 5
+        assert next_target.batch_position == restart_after % 5
+
+    replay = restarted.begin_effect("target-0")
+    assert replay.execute is False
+    assert replay.reason == "already_confirmed"
+    assert len(ledger.list_for_task("task")) == restart_after
 
