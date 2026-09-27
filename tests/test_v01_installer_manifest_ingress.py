@@ -101,8 +101,11 @@ def test_manifest_property_projection_preserves_only_collection_authority() -> N
     getter = payload[getter_start:getter_end]
 
     assert "[switch]$PreserveCollection" in getter
-    assert "Write-Output -NoEnumerate ($Object.$Name)" in getter
-    assert "return $Object.$Name" in getter
+    assert "$value = $Object.$Name" in getter
+    assert "Write-Output -NoEnumerate ($value)" in getter
+    assert "if ($value -is [System.Array])" in getter
+    assert 'throw "Release manifest scalar metadata must not be a collection."' in getter
+    assert "return $value" in getter
     assert (
         '$rawFiles = Get-NikaManifestProperty -Object $manifest -Name "files" '
         "-PreserveCollection"
@@ -174,6 +177,42 @@ def _array_product(payload: dict[str, object]) -> None:
     payload["product"] = ["NikaCore"]
 
 
+def _array_manifest_version(payload: dict[str, object]) -> None:
+    payload["manifest_version"] = [2]
+
+
+def _array_version(payload: dict[str, object]) -> None:
+    payload["version"] = ["0.0.2"]
+
+
+def _array_source_sha(payload: dict[str, object]) -> None:
+    payload["source_sha"] = [SOURCE_SHA]
+
+
+def _first_file(payload: dict[str, object]) -> dict[str, object]:
+    files = payload["files"]
+    assert isinstance(files, list)
+    assert len(files) == 1
+    entry = files[0]
+    assert isinstance(entry, dict)
+    return entry
+
+
+def _array_file_path(payload: dict[str, object]) -> None:
+    entry = _first_file(payload)
+    entry["path"] = [entry["path"]]
+
+
+def _array_file_size(payload: dict[str, object]) -> None:
+    entry = _first_file(payload)
+    entry["size"] = [entry["size"]]
+
+
+def _array_file_sha256(payload: dict[str, object]) -> None:
+    entry = _first_file(payload)
+    entry["sha256"] = [entry["sha256"]]
+
+
 def _float_manifest_version(payload: dict[str, object]) -> None:
     payload["manifest_version"] = 2.0
 
@@ -189,7 +228,19 @@ def _missing_version(payload: dict[str, object]) -> None:
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell manifest proof is Windows-only")
 @pytest.mark.parametrize(
     "mutate",
-    [_case_variant, _array_product, _float_manifest_version, _extra_top_level, _missing_version],
+    [
+        _case_variant,
+        _array_product,
+        _array_manifest_version,
+        _array_version,
+        _array_source_sha,
+        _array_file_path,
+        _array_file_size,
+        _array_file_sha256,
+        _float_manifest_version,
+        _extra_top_level,
+        _missing_version,
+    ],
 )
 def test_noncanonical_manifest_shape_fails_before_install_mutation(
     tmp_path: Path,

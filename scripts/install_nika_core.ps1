@@ -406,11 +406,19 @@ function Get-NikaManifestProperty {
     if ($Object.PSObject.Properties.Name -notcontains $Name) {
         throw "Release manifest is missing required metadata."
     }
+
+    $value = $Object.$Name
     if ($PreserveCollection) {
-        Write-Output -NoEnumerate ($Object.$Name)
+        Write-Output -NoEnumerate ($value)
         return
     }
-    return $Object.$Name
+    # Nested JSON arrays are System.Array values after ConvertFrom-Json. Reject
+    # them before normal function-output enumeration can collapse a one-item
+    # array into a scalar and erase the manifest's authoritative JSON shape.
+    if ($value -is [System.Array]) {
+        throw "Release manifest scalar metadata must not be a collection."
+    }
+    return $value
 }
 
 function Assert-NikaReleaseBundle {
