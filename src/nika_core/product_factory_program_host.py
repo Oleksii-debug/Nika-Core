@@ -89,8 +89,9 @@ class ProductFactoryProgramHost:
        lost authority fails closed and canonical recovery owns the durable work;
     4. reconcile returned evidence under the same fence and atomically persist the
        result checkpoint plus ledger completion;
-    5. release the lease only after a terminal durable transition, or after durable
-       UNCERTAIN has made duplicate dispatch impossible.
+    5. release the lease after terminal durable reconciliation, after durable UNCERTAIN
+       has made replay recovery-safe, or on a proven pre-effect exit where no worker
+       effect was admitted.
 
     SQLite transactions never span an external worker await.
     """

@@ -1225,3 +1225,60 @@ def test_result_reconcile_marker_failure_reports_actual_pending_ledger_status(tm
     assert outcomes[0].disposition is ProgramWorkDisposition.UNCERTAIN
     assert outcomes[0].operation_status is IdempotencyStatus.PENDING
     assert "uncertainty marker failed" in outcomes[0].detail
+
+
+def test_heartbeat_authority_loss_cancels_inflight_effect_and_marks_uncertain(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    cancelled = asyncio.Event()
+
+    class LoseHeartbeatOwnership(ProductFactoryWorkOwnership):
+        def __init__(self, target_store):
+            super().__init__(target_store)
+            self.renew_calls = 0
+
+        def renew(self, **kwargs):
+            self.renew_calls += 1
+            if self.renew_calls >= 2:
+                raise WorkOwnershipError("forced heartbeat authority loss")
+            return super().renew(**kwargs)
+
+    class CancellableWorker(FakeProgramWorker):
+        async def dispatch(self, request):
+            self.dispatch_calls.append(request)
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    authority = LoseHeartbeatOwnership(store)
+    worker = CancellableWorker()
+    host = ProductFactoryProgramHost(
+        store,
+        worker,
+        ownership=authority,
+        owner_id="program-host:heartbeat-loss",
+        lease_seconds=3,
+    )
+    monkeypatch.setattr(program_host_module, "_lease_heartbeat_interval", lambda _: 0.001)
+
+    outcomes = _run(
+        host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_count=1,
+        )
+    )
+
+    request = _record(coordinator, "component-0").request
+    assert cancelled.is_set()
+    assert authority.renew_calls >= 2
+    assert outcomes[0].disposition is ProgramWorkDisposition.UNCERTAIN
+    assert outcomes[0].operation_status is IdempotencyStatus.UNCERTAIN
+    assert IdempotencyLedger(store).require(
+        f"pf-worker:{request.work_id}"
+    ).status is IdempotencyStatus.UNCERTAIN
