@@ -154,6 +154,29 @@ class Runtime:
         return self.cancel_verified
 
 
+class DeferredCancelRuntime:
+    def __init__(self) -> None:
+        self.execute_started = asyncio.Event()
+        self.allow_execute_finish = asyncio.Event()
+        self.cancel_started = asyncio.Event()
+        self.allow_cancel_finish = asyncio.Event()
+
+    async def execute(self, job, endpoint, prompt, source_root, source_evidence):
+        del job, endpoint, prompt
+        self.execute_started.set()
+        await self.allow_execute_finish.wait()
+        files = tuple(
+            RemoteFile(item.path, (source_root / item.path).read_bytes())
+            for item in source_evidence.files
+        )
+        return OpenHandsRunEvidence("conversation-race", files)
+
+    async def cancel(self, _job_id):
+        self.cancel_started.set()
+        await self.allow_cancel_finish.wait()
+        return False
+
+
 def _workspace(tmp_path: Path) -> Path:
     root = tmp_path / "worker root"
     (root / "src").mkdir(parents=True)
@@ -719,6 +742,38 @@ def test_unverified_cancel_requires_manual_reconciliation(tmp_path: Path) -> Non
     assert result.failure is not None
     assert result.failure.retryable is False
     assert runtime.calls == []
+
+
+def test_pending_cancel_never_becomes_terminal_before_stop_proof(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    provider = Provider()
+    runtime = DeferredCancelRuntime()
+    worker = OpenHandsRemoteCodingWorker(provider, runtime)
+    job = _job(root)
+
+    async def scenario():
+        execution = asyncio.create_task(worker.execute(job))
+        await asyncio.wait_for(runtime.execute_started.wait(), timeout=2)
+        cancellation = asyncio.create_task(worker.cancel(job.job_id))
+        await asyncio.wait_for(runtime.cancel_started.wait(), timeout=2)
+
+        runtime.allow_execute_finish.set()
+        result = await asyncio.wait_for(execution, timeout=2)
+
+        runtime.allow_cancel_finish.set()
+        await asyncio.wait_for(cancellation, timeout=2)
+        return result
+
+    result = _run(scenario())
+
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.kind.value == "internal_error"
+    assert result.recovery_state == RecoveryState("manual_reconcile_required")
+    assert _run(worker.inspect(job.job_id)) == RecoveryState("manual_reconcile_required")
+    assert provider.released == [("job-1", "sandbox-1", False)]
 
 
 def test_worker_cancel_stops_inflight_acceptance_process_tree(tmp_path: Path) -> None:
