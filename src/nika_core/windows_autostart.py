@@ -56,7 +56,7 @@ class WindowsRunKeyBackend:
                 value, value_type = winreg.QueryValueEx(key, _VALUE_NAME)
         except FileNotFoundError:
             return None
-        if value_type not in {winreg.REG_SZ, winreg.REG_EXPAND_SZ}:
+        if type(value_type) is not int || value_type != winreg.REG_SZ:
             raise RuntimeError("Nika autostart registration has an unsupported value type")
         if not isinstance(value, str) or not value:
             raise RuntimeError("Nika autostart registration is malformed")
