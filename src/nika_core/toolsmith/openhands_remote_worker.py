@@ -524,6 +524,27 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
 
         async with self._lock:
             current = self._states.get(job.job_id)
+        if current is None:
+            if self._recovery_probe is None:
+                return _failure_result(
+                    job,
+                    WorkerFailureKind.INTERNAL_ERROR,
+                    "interrupted worker identity is not durably reconstructable; host reconciliation is required",
+                    retryable=False,
+                    state=RecoveryState("manual_reconcile_required"),
+                )
+            durable_state = await self._recovery_probe.inspect(job.job_id)
+            if durable_state != state:
+                return _failure_result(
+                    job,
+                    WorkerFailureKind.INVALID_REQUEST,
+                    "recovery state does not match durable worker identity",
+                    retryable=False,
+                    state=durable_state or RecoveryState("manual_reconcile_required"),
+                )
+
+        async with self._lock:
+            current = self._states.get(job.job_id)
             if current is not None and current != state:
                 return _failure_result(
                     job,
@@ -619,6 +640,15 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
 
 
 def _validate_source_identity(job: CodingJob, evidence: TreeEvidence) -> None:
+    if any(
+        part.casefold() == ".git"
+        for item in evidence.files
+        for part in pathlib.PurePosixPath(item.path).parts
+    ):
+        raise OpenHandsWorkerError(
+            "worker-visible staging workspace must not expose nested .git metadata"
+        )
+
     expected = job.repository.tree_digest.casefold()
     if len(expected) != 64 or any(character not in "0123456789abcdef" for character in expected):
         raise OpenHandsWorkerError(
