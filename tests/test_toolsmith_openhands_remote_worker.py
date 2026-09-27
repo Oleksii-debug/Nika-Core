@@ -1952,6 +1952,58 @@ def test_agent_server_post_run_status_failure_is_manual_reconcile_and_not_replay
         _run(runtime.execute(job, endpoint, "do work", root, evidence))
 
 
+def test_agent_server_cancel_between_status_polls_observes_remote_pause(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    job = _job(root)
+    evidence = collect_tree_evidence(root)
+    endpoint = _endpoint()
+    first_status_seen = threading.Event()
+    interrupt_seen = threading.Event()
+    status_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal status_count
+        if request.url.path == "/api/file/upload":
+            return httpx.Response(200, json={"success": True})
+        if request.url.path == "/api/conversations" and request.method == "POST":
+            payload = json.loads(request.content)
+            return httpx.Response(201, json={"id": payload["conversation_id"]})
+        if request.url.path.endswith("/events") or request.url.path.endswith("/run"):
+            return httpx.Response(200, json={"success": True})
+        if request.url.path.endswith("/interrupt"):
+            interrupt_seen.set()
+            return httpx.Response(200, json={"success": True})
+        if request.method == "GET" and request.url.path.startswith("/api/conversations/"):
+            status_count += 1
+            if status_count == 1:
+                first_status_seen.set()
+                return httpx.Response(200, json={"execution_status": "running"})
+            assert interrupt_seen.is_set()
+            return httpx.Response(200, json={"execution_status": "paused"})
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    runtime = OpenHandsAgentServerRuntime(
+        client_factory=lambda supplied: _agent_server_client(supplied, handler),
+        agent_profile_id_factory=lambda _job, _endpoint: PROFILE_ID,
+        poll_interval_seconds=0.2,
+    )
+
+    async def scenario() -> None:
+        execution = asyncio.create_task(
+            runtime.execute(job, endpoint, "do work", root, evidence)
+        )
+        assert await asyncio.to_thread(first_status_seen.wait, 2)
+        assert await runtime.cancel(job.job_id) is True
+        with pytest.raises(OpenHandsAgentServerExecutionCancelled):
+            await execution
+
+    _run(scenario())
+
+    assert status_count >= 2
+
+
 def test_agent_server_cancel_interrupts_active_conversation(
     tmp_path: Path,
 ) -> None:
