@@ -73,6 +73,52 @@ def test_record_active_uses_underlying_resume_token_text_not_overridden_strip(
     assert _raw_session(store, task_id) is None
 
 
+def test_record_result_rejects_nontext_resume_token_without_rebinding_session(
+    tmp_path,
+) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    sessions = RuntimeSessionStore(store)
+    sessions.record_active(
+        task_id=task_id,
+        runtime_id="runtime",
+        thread_id="thread",
+        resume_token="resume-1",
+    )
+
+    with pytest.raises(TypeError, match="resume token"):
+        sessions.record_result(
+            task_id=task_id,
+            runtime_id="runtime",
+            thread_id="thread",
+            result=RuntimeResult(
+                outcome=RuntimeOutcome.FAILED,
+                resume_token=b"resume-2",
+                error="retry later",
+            ),
+        )
+
+    raw = _raw_session(store, task_id)
+    assert raw is not None
+    assert raw["resume_token"] == "resume-1"
+    assert raw["outcome"] == "__ACTIVE__"
+
+
+def test_record_active_snapshots_behavioral_resume_token_as_plain_text(tmp_path) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    sessions = RuntimeSessionStore(store)
+    sessions.record_active(
+        task_id=task_id,
+        runtime_id="runtime",
+        thread_id="thread",
+        resume_token=_BehavioralText("resume"),
+    )
+
+    raw = _raw_session(store, task_id)
+    assert raw is not None
+    assert type(raw["resume_token"]) is str
+    assert raw["resume_token"] == "resume"
+
+
 def test_lookup_rejects_noncanonical_task_identity_carrier(tmp_path) -> None:
     store, task_id = _store_with_task(tmp_path)
     sessions = RuntimeSessionStore(store)
