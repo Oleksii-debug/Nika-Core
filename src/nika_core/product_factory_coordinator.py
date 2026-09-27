@@ -83,17 +83,10 @@ class ComponentWorkRequest:
     attempt: int = 1
 
     def __post_init__(self) -> None:
-        if not all(
-            value.strip()
-            for value in (self.work_id, self.project_id, self.component_id, self.repository_id, self.goal)
-        ):
-            raise CoordinatorError("work request identity and goal must not be empty")
-        _validate_sha(self.base_sha, "base_sha")
+        _validate_work_request_scalar_authority(self)
         _validate_allowed_paths(self.allowed_paths)
         _validate_permission_ceiling(self.permission_ceiling)
         _validate_acceptance_commands(self.acceptance_commands)
-        if self.attempt < 1:
-            raise CoordinatorError("attempt must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,11 +100,7 @@ class WorkerResultEnvelope:
     coding_result: CodingResult
 
     def __post_init__(self) -> None:
-        if not all(value.strip() for value in (self.work_id, self.component_id, self.repository_id)):
-            raise CoordinatorError("worker result identity must not be empty")
-        _validate_sha(self.base_sha, "base_sha")
-        _validate_sha(self.result_sha, "result_sha")
-        _validate_digest(self.diff_digest, "diff_digest")
+        _validate_worker_result_scalar_authority(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,8 +167,14 @@ class ProductFactoryCoordinator:
             _validate_acceptance_commands(component.test_commands)
             repository = repositories[component.repository_id]
             base_sha = base_shas.get(repository.repository_id)
-            goal = goals.get(component_id, "").strip()
-            if base_sha is None or not goal:
+            raw_goal = goals.get(component_id)
+            if base_sha is None or raw_goal is None:
+                raise CoordinatorError(f"missing base SHA or goal for component {component_id}")
+            _validate_sha(base_sha, "base_sha")
+            if type(raw_goal) is not str:
+                raise CoordinatorError("component goal must be an exact string")
+            goal = raw_goal.strip()
+            if not goal:
                 raise CoordinatorError(f"missing base SHA or goal for component {component_id}")
             request = ComponentWorkRequest(
                 work_id=_work_id(project_id=self.graph.project_id, component_id=component_id, repository_id=repository.repository_id, goal=goal, base_sha=base_sha, allowed_paths=component.paths, permission_ceiling=permission_ceiling, acceptance_commands=component.test_commands, attempt=1),
@@ -209,6 +204,7 @@ class ProductFactoryCoordinator:
         return record.request
 
     def record_result(self, envelope: WorkerResultEnvelope) -> WorkRecord:
+        _validate_worker_result_scalar_authority(envelope)
         record = self._record(envelope.component_id)
         if record.state is not WorkState.RUNNING:
             raise CoordinatorError("worker result is only valid for a running component")
@@ -273,6 +269,7 @@ class ProductFactoryCoordinator:
         return updated
 
     def prepare_repair(self, component_id: str, *, base_sha: str, reason: str) -> ComponentWorkRequest:
+        _validate_sha(base_sha, "base_sha")
         record = self._record(component_id)
         if record.state is not WorkState.REPAIR_REQUIRED:
             raise CoordinatorError("repair can only be prepared from repair_required")
@@ -444,6 +441,8 @@ class ProductFactoryCoordinator:
 
     @staticmethod
     def _validate_result_identity(request: ComponentWorkRequest, envelope: WorkerResultEnvelope) -> None:
+        _validate_work_request_scalar_authority(request)
+        _validate_worker_result_scalar_authority(envelope)
         if envelope.component_id != request.component_id:
             raise CoordinatorError("worker result component does not match active request")
         if envelope.work_id != request.work_id or envelope.repository_id != request.repository_id:
@@ -495,6 +494,7 @@ def trusted_plan_fingerprint(plan: tuple[ComponentWorkRequest, ...]) -> str:
     if not plan:
         raise CoordinatorError("trusted plan descriptor must not be empty")
     for request in plan:
+        _validate_work_request_scalar_authority(request)
         _validate_allowed_paths(request.allowed_paths)
         _validate_permission_ceiling(request.permission_ceiling)
         _validate_acceptance_commands(request.acceptance_commands)
@@ -510,6 +510,10 @@ def validate_trusted_plan_snapshot(snapshot: CoordinatorSnapshot, authority_fing
         raise CoordinatorError("snapshot is missing immutable trusted plan descriptor")
     if trusted_plan_fingerprint(plan) != authority_fingerprint:
         raise CoordinatorError("snapshot trusted plan does not match external authority")
+    for request in plan:
+        _validate_work_request_scalar_authority(request)
+    for record in snapshot.records:
+        _validate_work_request_scalar_authority(record.request)
     plan_ids = [request.component_id for request in plan]
     if len(plan_ids) != len(set(plan_ids)):
         raise CoordinatorError("trusted plan repeats component identity")
@@ -527,6 +531,7 @@ def validate_trusted_plan_snapshot(snapshot: CoordinatorSnapshot, authority_fing
             raise CoordinatorError("trusted plan contains invalid attempt-one work identity")
     for record in snapshot.records:
         request = record.request
+        _validate_work_request_scalar_authority(request)
         _validate_allowed_paths(request.allowed_paths)
         _validate_permission_ceiling(request.permission_ceiling)
         _validate_acceptance_commands(request.acceptance_commands)
@@ -687,11 +692,51 @@ def _stable_id(prefix: str, *parts: object) -> str:
     return f"{prefix}-{hashlib.sha256(payload.encode()).hexdigest()[:24]}"
 
 
-def _validate_sha(value: str, label: str) -> None:
-    if len(value) != 40 or any(char not in "0123456789abcdef" for char in value.casefold()):
-        raise CoordinatorError(f"{label} must be a 40-character hexadecimal SHA")
+def _validate_work_request_scalar_authority(request: ComponentWorkRequest) -> None:
+    text_values = (
+        request.work_id,
+        request.project_id,
+        request.component_id,
+        request.repository_id,
+        request.goal,
+    )
+    if any(type(value) is not str for value in text_values):
+        raise CoordinatorError("work request identity and goal must be exact strings")
+    if not all(value.strip() for value in text_values):
+        raise CoordinatorError("work request identity and goal must not be empty")
+    _validate_sha(request.base_sha, "base_sha")
+    if type(request.attempt) is not int or request.attempt < 1:
+        raise CoordinatorError("attempt must be an exact positive integer")
 
 
-def _validate_digest(value: str, label: str) -> None:
-    if len(value) != 64 or any(char not in "0123456789abcdef" for char in value.casefold()):
-        raise CoordinatorError(f"{label} must be a 64-character hexadecimal digest")
+def _validate_worker_result_scalar_authority(envelope: WorkerResultEnvelope) -> None:
+    identity_values = (envelope.work_id, envelope.component_id, envelope.repository_id)
+    if any(type(value) is not str for value in identity_values):
+        raise CoordinatorError("worker result identity must be exact strings")
+    if not all(value.strip() for value in identity_values):
+        raise CoordinatorError("worker result identity must not be empty")
+    _validate_sha(envelope.base_sha, "base_sha")
+    _validate_sha(envelope.result_sha, "result_sha")
+    _validate_digest(envelope.diff_digest, "diff_digest")
+    if type(envelope.coding_result) is not CodingResult:
+        raise CoordinatorError("worker result coding result must be an exact CodingResult")
+    if type(envelope.coding_result.job_id) is not str or not envelope.coding_result.job_id.strip():
+        raise CoordinatorError("coding result job id must be an exact non-empty string")
+
+
+def _validate_sha(value: object, label: str) -> None:
+    if (
+        type(value) is not str
+        or len(value) != 40
+        or any(char not in "0123456789abcdef" for char in value.casefold())
+    ):
+        raise CoordinatorError(f"{label} must be an exact 40-character hexadecimal SHA")
+
+
+def _validate_digest(value: object, label: str) -> None:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(char not in "0123456789abcdef" for char in value.casefold())
+    ):
+        raise CoordinatorError(f"{label} must be an exact 64-character hexadecimal digest")
