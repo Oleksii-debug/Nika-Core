@@ -276,7 +276,7 @@ def _load_conversation_type() -> type[Any]:
         )
     try:
         from openhands.sdk import Conversation
-    except Exception as exc:  # noqa: BLE001 - pinned optional dependency import boundary
+    except Exception as exc:
         raise OpenHandsSdkCompatibilityError("OpenHands SDK import failed") from exc
     return Conversation
 
