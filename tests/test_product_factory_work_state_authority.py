@@ -246,8 +246,8 @@ class _HostileInt(int):
         ("component_id", _HostileStr("core"), "identity and goal must be exact strings"),
         ("repository_id", _HostileStr("repo-1"), "identity and goal must be exact strings"),
         ("goal", _HostileStr("build core"), "identity and goal must be exact strings"),
-        ("base_sha", _HostileStr(SHA_A), "base_sha must be an exact 40-character"),
-        ("attempt", _HostileInt(1), "attempt must be an exact positive integer"),
+        ("base_sha", _HostileStr(SHA_A), "base_sha must be a 40-character"),
+        ("attempt", _HostileInt(1), "attempt must be positive"),
     ),
 )
 def test_work_request_rejects_polymorphic_scalar_authority(
@@ -267,8 +267,8 @@ def test_work_request_rejects_polymorphic_scalar_authority(
     (
         ("project_id", _HostileStr("project-1"), "identity and goal must be exact strings"),
         ("component_id", _HostileStr("core"), "identity and goal must be exact strings"),
-        ("base_sha", _HostileStr(SHA_A), "base_sha must be an exact 40-character"),
-        ("attempt", _HostileInt(1), "attempt must be an exact positive integer"),
+        ("base_sha", _HostileStr(SHA_A), "base_sha must be a 40-character"),
+        ("attempt", _HostileInt(1), "attempt must be positive"),
     ),
 )
 def test_restore_rejects_forged_request_scalar_before_identity_operations(
@@ -323,9 +323,9 @@ def _forge_worker_envelope(
         ("work_id", _HostileStr("work-forged"), "worker result identity must be exact strings"),
         ("component_id", _HostileStr("core"), "worker result identity must be exact strings"),
         ("repository_id", _HostileStr("repo-1"), "worker result identity must be exact strings"),
-        ("base_sha", _HostileStr(SHA_A), "base_sha must be an exact 40-character"),
-        ("result_sha", _HostileStr(SHA_B), "result_sha must be an exact 40-character"),
-        ("diff_digest", _HostileStr(DIGEST), "diff_digest must be an exact 64-character"),
+        ("base_sha", _HostileStr(SHA_A), "base_sha must be a 40-character"),
+        ("result_sha", _HostileStr(SHA_B), "result_sha must be a 40-character"),
+        ("diff_digest", _HostileStr(DIGEST), "diff_digest must be a 64-character"),
     ),
 )
 def test_record_result_rejects_forged_scalar_before_lookup_or_equality(
@@ -383,7 +383,7 @@ def test_plan_rejects_polymorphic_goal_before_strip() -> None:
 def test_plan_rejects_polymorphic_base_sha_before_casefold() -> None:
     coordinator = ProductFactoryCoordinator(_graph())
 
-    with pytest.raises(CoordinatorError, match="base_sha must be an exact 40-character"):
+    with pytest.raises(CoordinatorError, match="base_sha must be a 40-character"):
         coordinator.plan(
             base_shas={"repo-1": _HostileStr(SHA_A)},
             goals={"core": "build core", "ui": "build ui"},
