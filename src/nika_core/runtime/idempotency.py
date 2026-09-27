@@ -452,10 +452,7 @@ class IdempotencyLedger:
         operation_key: str,
     ) -> IdempotencyRecord:
         operation_key = _require_exact_text(operation_key, field_name="operation_key")
-        row = conn.execute(
-            "SELECT * FROM idempotency_records WHERE operation_key = ?",
-            (operation_key,),
-        ).fetchone()
+        row = _select_operation_row(conn, operation_key)
         if row is None:
             raise KeyError(f"Unknown idempotency operation: {operation_key}")
         return IdempotencyLedger._from_row(row)

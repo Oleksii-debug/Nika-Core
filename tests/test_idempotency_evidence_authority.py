@@ -178,6 +178,80 @@ def test_blob_operation_key_alias_cannot_hide_existing_effect_or_allow_duplicate
     assert rows[0]["operation_key"] == b"effect:alias"
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    ["complete", "mark_uncertain", "release_pending"],
+)
+def test_blob_operation_key_alias_cannot_disappear_from_mutation_boundary(
+    tmp_path,
+    mutation: str,
+) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    ledger = IdempotencyLedger(store)
+    _reserve(ledger, task_id, key="effect:alias-mutation")
+
+    with store.connection() as conn:
+        conn.execute(
+            """
+            UPDATE idempotency_records
+            SET operation_key = CAST(? AS BLOB)
+            WHERE operation_key = ?
+            """,
+            ("effect:alias-mutation", "effect:alias-mutation"),
+        )
+
+    with pytest.raises(RuntimeError, match=r"operation_key.*SQLite storage class"):
+        if mutation == "complete":
+            ledger.complete("effect:alias-mutation", {"ok": True})
+        elif mutation == "mark_uncertain":
+            ledger.mark_uncertain("effect:alias-mutation")
+        else:
+            ledger.release_pending("effect:alias-mutation")
+
+    with store.connection() as conn:
+        raw = conn.execute(
+            "SELECT operation_key, status, result_json FROM idempotency_records"
+        ).fetchone()
+    assert raw is not None
+    assert raw["operation_key"] == b"effect:alias-mutation"
+    assert raw["status"] == IdempotencyStatus.PENDING.value
+    assert raw["result_json"] is None
+
+
+def test_blob_operation_key_alias_cannot_disappear_from_reconciliation_boundary(
+    tmp_path,
+) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    ledger = IdempotencyLedger(store)
+    _reserve(ledger, task_id, key="effect:alias-reconcile")
+    ledger.mark_uncertain("effect:alias-reconcile")
+
+    with store.connection() as conn:
+        conn.execute(
+            """
+            UPDATE idempotency_records
+            SET operation_key = CAST(? AS BLOB)
+            WHERE operation_key = ?
+            """,
+            ("effect:alias-reconcile", "effect:alias-reconcile"),
+        )
+
+    with pytest.raises(RuntimeError, match=r"operation_key.*SQLite storage class"):
+        ledger.reconcile_completed(
+            "effect:alias-reconcile",
+            {"remote_id": "r-1"},
+        )
+
+    with store.connection() as conn:
+        raw = conn.execute(
+            "SELECT operation_key, status, result_json FROM idempotency_records"
+        ).fetchone()
+    assert raw is not None
+    assert raw["operation_key"] == b"effect:alias-reconcile"
+    assert raw["status"] == IdempotencyStatus.UNCERTAIN.value
+    assert raw["result_json"] is None
+
+
 def test_blob_task_id_alias_cannot_disappear_from_task_inventory(tmp_path) -> None:
     store, task_id = _store_with_task(tmp_path)
     ledger = IdempotencyLedger(store)
