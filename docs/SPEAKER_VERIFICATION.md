@@ -28,6 +28,12 @@ Input is transient mono signed-16-bit little-endian PCM:
 - a required lowercase 64-hex SHA-256 digest identifying the exact enrollment revision;
 - bounded timeout and pre-effect cancellation.
 
+All authority-bearing request, policy, capability and response values are reconstructed into private
+canonical snapshots at the service boundary. The verifier receives a separate request snapshot, so
+adapter-side mutation cannot rewrite the request retained for evidence. Exposed capabilities are
+detached copies rather than aliases of the bound route. Exact built-in primitive and enum carriers
+are required before identity comparison or evidence construction.
+
 The adapter returns a finite confidence in `0..1`. The default deterministic policy is:
 
 - `<= 0.60`: `NO_MATCH`;

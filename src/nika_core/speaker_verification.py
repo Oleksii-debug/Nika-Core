@@ -60,7 +60,7 @@ class SpeakerVerifierCapabilities:
     def __post_init__(self) -> None:
         _require_safe_id(self.provider_id, field="provider_id")
         _require_safe_id(self.model_id, field="model_id")
-        if not isinstance(self.kind, SpeakerVerifierKind):
+        if type(self.kind) is not SpeakerVerifierKind:
             raise SpeakerVerificationError(
                 SpeakerVerificationErrorCode.INVALID_REQUEST,
                 "speaker verifier kind must be a SpeakerVerifierKind",
@@ -85,6 +85,8 @@ class SpeakerVerificationPolicy:
                 SpeakerVerificationErrorCode.INVALID_REQUEST,
                 "speaker verification thresholds must be strictly ordered",
             )
+        object.__setattr__(self, "no_match_at_or_below", low)
+        object.__setattr__(self, "match_at_or_above", high)
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,18 +203,16 @@ class SpeakerVerificationService:
         policy: SpeakerVerificationPolicy | None = None,
     ) -> None:
         capabilities = _read_capabilities(adapter)
-        if policy is not None and not isinstance(policy, SpeakerVerificationPolicy):
-            raise SpeakerVerificationError(
-                SpeakerVerificationErrorCode.INVALID_REQUEST,
-                "speaker verification policy must use the canonical type",
-            )
+        policy_snapshot = (
+            SpeakerVerificationPolicy() if policy is None else _snapshot_policy(policy)
+        )
         self._adapter = adapter
         self._bound_capabilities = capabilities
-        self._policy = policy if policy is not None else SpeakerVerificationPolicy()
+        self._policy = policy_snapshot
 
     @property
     def capabilities(self) -> SpeakerVerifierCapabilities:
-        return self._bound_capabilities
+        return _snapshot_capabilities(self._bound_capabilities)
 
     def verify(
         self,
@@ -221,11 +221,7 @@ class SpeakerVerificationService:
         timeout_seconds: float = 15.0,
         cancel_event: Event | None = None,
     ) -> SpeakerVerificationEvidence:
-        if not isinstance(request, SpeakerVerificationRequest):
-            raise SpeakerVerificationError(
-                SpeakerVerificationErrorCode.INVALID_REQUEST,
-                "request must be a SpeakerVerificationRequest",
-            )
+        request_snapshot = _snapshot_request(request)
         timeout = _validated_timeout(timeout_seconds)
         if cancel_event is not None and cancel_event.is_set():
             raise SpeakerVerificationError(
@@ -240,14 +236,15 @@ class SpeakerVerificationService:
                 "speaker verifier route changed after service binding",
             )
 
+        adapter_request = _snapshot_request(request_snapshot)
         try:
             response = self._adapter.verify(
-                request,
+                adapter_request,
                 timeout_seconds=timeout,
                 cancel_event=cancel_event,
             )
-        except SpeakerVerificationError:
-            raise
+        except SpeakerVerificationError as error:
+            raise _bounded_adapter_error(error) from None
         except TimeoutError:
             raise SpeakerVerificationError(
                 SpeakerVerificationErrorCode.ADAPTER_TIMEOUT,
@@ -266,18 +263,18 @@ class SpeakerVerificationService:
                 SpeakerVerificationErrorCode.ROUTE_MISMATCH,
                 "speaker verifier route changed during verification",
             )
-        confidence = self._validate_response(response, request)
+        confidence = self._validate_response(response, request_snapshot)
         outcome = self._classify(confidence)
         return SpeakerVerificationEvidence(
-            request_id=request.request_id,
+            request_id=request_snapshot.request_id,
             provider_id=self._bound_capabilities.provider_id,
             model_id=self._bound_capabilities.model_id,
-            profile_id_sha256=_sha256_text(request.profile_id),
-            profile_revision_sha256=request.profile_revision_sha256,
-            audio_sha256=hashlib.sha256(request.pcm_s16le).hexdigest(),
-            audio_byte_count=len(request.pcm_s16le),
-            sample_rate_hz=request.sample_rate_hz,
-            duration_seconds=request.duration_seconds,
+            profile_id_sha256=_sha256_text(request_snapshot.profile_id),
+            profile_revision_sha256=request_snapshot.profile_revision_sha256,
+            audio_sha256=hashlib.sha256(request_snapshot.pcm_s16le).hexdigest(),
+            audio_byte_count=len(request_snapshot.pcm_s16le),
+            sample_rate_hz=request_snapshot.sample_rate_hz,
+            duration_seconds=request_snapshot.duration_seconds,
             confidence=confidence,
             outcome=outcome,
         )
@@ -287,35 +284,27 @@ class SpeakerVerificationService:
         response: SpeakerVerifierResponse,
         request: SpeakerVerificationRequest,
     ) -> float:
-        if not isinstance(response, SpeakerVerifierResponse):
-            raise SpeakerVerificationError(
-                SpeakerVerificationErrorCode.INVALID_RESPONSE,
-                "speaker verifier returned an invalid response type",
-            )
+        response_snapshot = _snapshot_response(response)
         if (
-            response.provider_id != self._bound_capabilities.provider_id
-            or response.model_id != self._bound_capabilities.model_id
+            response_snapshot.provider_id != self._bound_capabilities.provider_id
+            or response_snapshot.model_id != self._bound_capabilities.model_id
         ):
             raise SpeakerVerificationError(
                 SpeakerVerificationErrorCode.ROUTE_MISMATCH,
                 "speaker verifier response route does not match configured authority",
             )
-        if response.profile_id != request.profile_id:
+        if response_snapshot.profile_id != request.profile_id:
             raise SpeakerVerificationError(
                 SpeakerVerificationErrorCode.INVALID_RESPONSE,
                 "speaker verifier response profile does not match the request",
             )
-        response_revision = _require_sha256(
-            response.profile_revision_sha256,
-            field="profile_revision_sha256",
-            response=True,
-        )
+        response_revision = response_snapshot.profile_revision_sha256
         if response_revision != request.profile_revision_sha256:
             raise SpeakerVerificationError(
                 SpeakerVerificationErrorCode.INVALID_RESPONSE,
                 "speaker verifier response profile revision does not match the request",
             )
-        return _confidence(response.confidence, field="confidence", response=True)
+        return response_snapshot.confidence
 
     def _classify(self, confidence: float) -> SpeakerVerificationOutcome:
         if confidence >= self._policy.match_at_or_above:
@@ -328,34 +317,149 @@ class SpeakerVerificationService:
 def _read_capabilities(adapter: SpeakerVerifierAdapter) -> SpeakerVerifierCapabilities:
     try:
         capabilities = adapter.capabilities
-    except SpeakerVerificationError:
-        raise
     except Exception:  # noqa: BLE001 - adapter capability access is a provider boundary
         raise SpeakerVerificationError(
             SpeakerVerificationErrorCode.ADAPTER_FAILURE,
             "speaker verifier capabilities are unavailable",
         ) from None
-    return _validated_capabilities(capabilities)
+    return _snapshot_capabilities(capabilities)
 
 
-def _validated_capabilities(value: object) -> SpeakerVerifierCapabilities:
-    if not isinstance(value, SpeakerVerifierCapabilities):
+def _snapshot_capabilities(value: object) -> SpeakerVerifierCapabilities:
+    if type(value) is not SpeakerVerifierCapabilities:
         raise SpeakerVerificationError(
             SpeakerVerificationErrorCode.INVALID_REQUEST,
             "speaker verifier capabilities must use the canonical type",
         )
-    _require_safe_id(value.provider_id, field="provider_id")
-    _require_safe_id(value.model_id, field="model_id")
-    if not isinstance(value.kind, SpeakerVerifierKind) or value.kind is not SpeakerVerifierKind.LOCAL:
+    try:
+        provider_id = _require_safe_id(value.provider_id, field="provider_id")
+        model_id = _require_safe_id(value.model_id, field="model_id")
+        kind = value.kind
+    except AttributeError:
+        raise SpeakerVerificationError(
+            SpeakerVerificationErrorCode.INVALID_REQUEST,
+            "speaker verifier capabilities are incomplete",
+        ) from None
+    if (
+        type(kind) is not SpeakerVerifierKind
+        or kind is not SpeakerVerifierKind.LOCAL
+    ):
         raise SpeakerVerificationError(
             SpeakerVerificationErrorCode.INVALID_REQUEST,
             "speaker verifier capabilities must declare local execution",
         )
-    return value
+    return SpeakerVerifierCapabilities(
+        provider_id=provider_id,
+        model_id=model_id,
+        kind=kind,
+    )
+
+
+def _snapshot_policy(value: object) -> SpeakerVerificationPolicy:
+    if type(value) is not SpeakerVerificationPolicy:
+        raise SpeakerVerificationError(
+            SpeakerVerificationErrorCode.INVALID_REQUEST,
+            "speaker verification policy must use the canonical type",
+        )
+    try:
+        low = value.no_match_at_or_below
+        high = value.match_at_or_above
+    except AttributeError:
+        raise SpeakerVerificationError(
+            SpeakerVerificationErrorCode.INVALID_REQUEST,
+            "speaker verification policy is incomplete",
+        ) from None
+    return SpeakerVerificationPolicy(
+        no_match_at_or_below=low,
+        match_at_or_above=high,
+    )
+
+
+def _snapshot_request(value: object) -> SpeakerVerificationRequest:
+    if type(value) is not SpeakerVerificationRequest:
+        raise SpeakerVerificationError(
+            SpeakerVerificationErrorCode.INVALID_REQUEST,
+            "request must be a SpeakerVerificationRequest",
+        )
+    try:
+        return SpeakerVerificationRequest(
+            request_id=value.request_id,
+            profile_id=value.profile_id,
+            profile_revision_sha256=value.profile_revision_sha256,
+            pcm_s16le=value.pcm_s16le,
+            sample_rate_hz=value.sample_rate_hz,
+        )
+    except AttributeError:
+        raise SpeakerVerificationError(
+            SpeakerVerificationErrorCode.INVALID_REQUEST,
+            "speaker verification request is incomplete",
+        ) from None
+
+
+def _snapshot_response(value: object) -> SpeakerVerifierResponse:
+    if type(value) is not SpeakerVerifierResponse:
+        raise SpeakerVerificationError(
+            SpeakerVerificationErrorCode.INVALID_RESPONSE,
+            "speaker verifier returned an invalid response type",
+        )
+    try:
+        provider_id = _require_safe_id(
+            value.provider_id,
+            field="provider_id",
+            response=True,
+        )
+        model_id = _require_safe_id(value.model_id, field="model_id", response=True)
+        profile_id = _require_safe_id(value.profile_id, field="profile_id", response=True)
+        revision = _require_sha256(
+            value.profile_revision_sha256,
+            field="profile_revision_sha256",
+            response=True,
+        )
+        confidence = _confidence(value.confidence, field="confidence", response=True)
+    except AttributeError:
+        raise SpeakerVerificationError(
+            SpeakerVerificationErrorCode.INVALID_RESPONSE,
+            "speaker verifier response is incomplete",
+        ) from None
+    return SpeakerVerifierResponse(
+        provider_id=provider_id,
+        model_id=model_id,
+        profile_id=profile_id,
+        profile_revision_sha256=revision,
+        confidence=confidence,
+    )
+
+
+def _bounded_adapter_error(error: SpeakerVerificationError) -> SpeakerVerificationError:
+    try:
+        code = error.code
+        retryable = error.retryable
+    except AttributeError:
+        code = SpeakerVerificationErrorCode.ADAPTER_FAILURE
+        retryable = False
+    if type(code) is not SpeakerVerificationErrorCode or type(retryable) is not bool:
+        code = SpeakerVerificationErrorCode.ADAPTER_FAILURE
+        retryable = False
+    messages = {
+        SpeakerVerificationErrorCode.ADAPTER_UNAVAILABLE: (
+            "local speaker verification is not configured"
+        ),
+        SpeakerVerificationErrorCode.ADAPTER_FAILURE: "speaker verification adapter failed",
+        SpeakerVerificationErrorCode.ADAPTER_TIMEOUT: (
+            "speaker verification exceeded its deadline"
+        ),
+        SpeakerVerificationErrorCode.CANCELLED: "speaker verification was cancelled",
+    }
+    message = messages.get(code)
+    if message is None:
+        code = SpeakerVerificationErrorCode.ADAPTER_FAILURE
+        message = messages[code]
+        retryable = False
+    return SpeakerVerificationError(code, message, retryable=retryable)
 
 
 def _validated_timeout(value: object) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if type(value) not in (int, float):
         raise SpeakerVerificationError(
             SpeakerVerificationErrorCode.INVALID_REQUEST,
             "speaker verification timeout must be numeric",
@@ -381,7 +485,7 @@ def _confidence(value: object, *, field: str, response: bool = False) -> float:
         if response
         else SpeakerVerificationErrorCode.INVALID_REQUEST
     )
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if type(value) not in (int, float):
         raise SpeakerVerificationError(code, f"{field} must be numeric")
     try:
         confidence = float(value)
@@ -392,12 +496,14 @@ def _confidence(value: object, *, field: str, response: bool = False) -> float:
     return confidence
 
 
-def _require_safe_id(value: object, *, field: str) -> str:
-    if not isinstance(value, str) or len(value) > MAX_ID_CHARS or not _SAFE_ID_RE.fullmatch(value):
-        raise SpeakerVerificationError(
-            SpeakerVerificationErrorCode.INVALID_REQUEST,
-            f"{field} must be a bounded safe identifier",
-        )
+def _require_safe_id(value: object, *, field: str, response: bool = False) -> str:
+    code = (
+        SpeakerVerificationErrorCode.INVALID_RESPONSE
+        if response
+        else SpeakerVerificationErrorCode.INVALID_REQUEST
+    )
+    if type(value) is not str or len(value) > MAX_ID_CHARS or not _SAFE_ID_RE.fullmatch(value):
+        raise SpeakerVerificationError(code, f"{field} must be a bounded safe identifier")
     return value
 
 

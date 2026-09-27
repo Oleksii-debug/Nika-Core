@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import math
 import threading
 
@@ -91,6 +92,37 @@ class _CapabilitiesFailingVerifier(FakeVerifier):
         if self._capability_reads == self._fail_on_read:
             raise RuntimeError("SENSITIVE_CAPABILITY_DIAGNOSTIC_CANARY")
         return self._capabilities
+
+
+class _RequestMutatingVerifier(FakeVerifier):
+    def verify(
+        self,
+        request: SpeakerVerificationRequest,
+        *,
+        timeout_seconds: float,
+        cancel_event: threading.Event | None,
+    ) -> SpeakerVerifierResponse:
+        original_profile = request.profile_id
+        original_revision = request.profile_revision_sha256
+        object.__setattr__(request, "request_id", "adapter-mutated-request")
+        object.__setattr__(request, "pcm_s16le", b"\x01\x00" * 16_000)
+        self.calls += 1
+        self.seen_timeout = timeout_seconds
+        return SpeakerVerifierResponse(
+            provider_id=self._capabilities.provider_id,
+            model_id=self._capabilities.model_id,
+            profile_id=original_profile,
+            profile_revision_sha256=original_revision,
+            confidence=self.confidence,
+        )
+
+
+class _BehavioralStr(str):
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __hash__(self) -> int:
+        return 0
 
 
 def _request(
@@ -387,3 +419,131 @@ def test_float_overflowing_response_confidence_fails_as_invalid_response() -> No
         service.verify(_request())
 
     assert error.value.code is SpeakerVerificationErrorCode.INVALID_RESPONSE
+
+
+
+def test_adapter_capability_alias_mutation_is_detected_as_route_drift() -> None:
+    adapter = FakeVerifier()
+    capability_alias = adapter.capabilities
+    service = SpeakerVerificationService(adapter)
+
+    object.__setattr__(capability_alias, "provider_id", "different-engine")
+
+    with pytest.raises(SpeakerVerificationError) as error:
+        service.verify(_request())
+
+    assert error.value.code is SpeakerVerificationErrorCode.ROUTE_MISMATCH
+    assert adapter.calls == 0
+
+
+def test_public_capabilities_are_detached_from_internal_authority() -> None:
+    service = SpeakerVerificationService(FakeVerifier())
+    exposed = service.capabilities
+
+    object.__setattr__(exposed, "provider_id", "different-engine")
+
+    assert service.capabilities.provider_id == "local-speaker-engine"
+    assert service.verify(_request()).provider_id == "local-speaker-engine"
+
+
+def test_caller_policy_mutation_cannot_change_bound_classification() -> None:
+    policy = SpeakerVerificationPolicy(no_match_at_or_below=0.60, match_at_or_above=0.85)
+    service = SpeakerVerificationService(FakeVerifier(confidence=0.70), policy=policy)
+
+    object.__setattr__(policy, "match_at_or_above", 0.65)
+
+    assert service.verify(_request()).outcome is SpeakerVerificationOutcome.UNCERTAIN
+
+
+def test_adapter_request_mutation_cannot_rewrite_retained_evidence_input() -> None:
+    request = _request()
+    expected_audio_sha256 = hashlib.sha256(request.pcm_s16le).hexdigest()
+    service = SpeakerVerificationService(_RequestMutatingVerifier())
+
+    evidence = service.verify(request)
+
+    assert evidence.request_id == "voice-req-1"
+    assert evidence.audio_sha256 == expected_audio_sha256
+    assert request.request_id == "voice-req-1"
+
+
+def test_forged_request_is_revalidated_before_adapter_effect() -> None:
+    adapter = FakeVerifier()
+    service = SpeakerVerificationService(adapter)
+    request = _request()
+    object.__setattr__(request, "profile_id", "invalid profile id with spaces")
+
+    with pytest.raises(SpeakerVerificationError) as error:
+        service.verify(request)
+
+    assert error.value.code is SpeakerVerificationErrorCode.INVALID_REQUEST
+    assert adapter.calls == 0
+
+
+def test_behavioral_string_request_identity_is_rejected() -> None:
+    with pytest.raises(SpeakerVerificationError) as error:
+        SpeakerVerificationRequest(
+            request_id=_BehavioralStr("voice-req-1"),
+            profile_id="owner-profile",
+            profile_revision_sha256=_PROFILE_REVISION_SHA256,
+            pcm_s16le=_pcm(),
+        )
+
+    assert error.value.code is SpeakerVerificationErrorCode.INVALID_REQUEST
+
+
+def test_behavioral_response_route_cannot_spoof_bound_authority() -> None:
+    response = SpeakerVerifierResponse(
+        provider_id=_BehavioralStr("different-engine"),
+        model_id="speaker-model-v1",
+        profile_id="owner-profile",
+        profile_revision_sha256=_PROFILE_REVISION_SHA256,
+        confidence=0.99,
+    )
+
+    class _BehavioralResponseVerifier(FakeVerifier):
+        def verify(
+            self,
+            request: SpeakerVerificationRequest,
+            *,
+            timeout_seconds: float,
+            cancel_event: threading.Event | None,
+        ) -> SpeakerVerifierResponse:
+            del request, timeout_seconds, cancel_event
+            self.calls += 1
+            return response
+
+    service = SpeakerVerificationService(_BehavioralResponseVerifier())
+    with pytest.raises(SpeakerVerificationError) as error:
+        service.verify(_request())
+
+    assert error.value.code is SpeakerVerificationErrorCode.INVALID_RESPONSE
+
+
+def test_adapter_typed_error_diagnostic_is_minimized() -> None:
+    adapter = FakeVerifier()
+    adapter.failure = SpeakerVerificationError(
+        SpeakerVerificationErrorCode.ADAPTER_FAILURE,
+        "SENSITIVE_TYPED_ADAPTER_DIAGNOSTIC",
+        retryable=True,
+    )
+    service = SpeakerVerificationService(adapter)
+
+    with pytest.raises(SpeakerVerificationError) as error:
+        service.verify(_request())
+
+    assert error.value.code is SpeakerVerificationErrorCode.ADAPTER_FAILURE
+    assert error.value.retryable is True
+    assert "SENSITIVE_TYPED_ADAPTER_DIAGNOSTIC" not in str(error.value)
+
+
+def test_forged_policy_is_revalidated_at_service_boundary() -> None:
+    adapter = FakeVerifier()
+    policy = SpeakerVerificationPolicy()
+    object.__setattr__(policy, "match_at_or_above", math.nan)
+
+    with pytest.raises(SpeakerVerificationError) as error:
+        SpeakerVerificationService(adapter, policy=policy)
+
+    assert error.value.code is SpeakerVerificationErrorCode.INVALID_REQUEST
+    assert adapter.calls == 0
