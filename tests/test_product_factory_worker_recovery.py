@@ -70,6 +70,22 @@ def _run(coroutine):
     return asyncio.run(coroutine)
 
 
+class _DuckFailure:
+    message = "duck failure"
+
+
+class _DuckTestEvidence:
+    command = ("python", "-m", "pytest", "tests/core")
+    exit_code = 0
+    output_digest = "duck-output"
+
+
+class _BehavioralText(str):
+    def strip(self, *args, **kwargs):
+        del args, kwargs
+        return "trusted"
+
+
 class FakeRecoveryPort:
     def __init__(
         self,
@@ -276,6 +292,94 @@ def test_envelope_with_non_coding_result_is_contained() -> None:
 
     assert outcome.disposition is WorkerRecoveryDisposition.BLOCKED_INVALID_EVIDENCE
     assert outcome.record.state is WorkState.BLOCKED
+    assert outcome.recovery_state == state
+    assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
+
+
+def test_duck_typed_failure_evidence_is_rejected_before_coordinator_persistence() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    state = RecoveryState("interrupted", "resume-token")
+    malformed = WorkerResultEnvelope(
+        work_id=request.work_id,
+        component_id=request.component_id,
+        repository_id=request.repository_id,
+        base_sha=request.base_sha,
+        result_sha=SHA_B,
+        diff_digest=DIGEST,
+        coding_result=CodingResult(
+            job_id=request.work_id,
+            recovery_state=state,
+            failure=_DuckFailure(),  # type: ignore[arg-type]
+        ),
+    )
+    worker = FakeRecoveryPort(state, envelope_override=malformed)
+
+    outcome = _run(ProductFactoryWorkerRecovery(worker).recover_running(coordinator, "core"))
+
+    assert outcome.disposition is WorkerRecoveryDisposition.BLOCKED_INVALID_EVIDENCE
+    assert outcome.record.state is WorkState.BLOCKED
+    assert outcome.record.result is None
+    assert outcome.recovery_state == state
+    assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
+
+
+def test_duck_typed_test_evidence_is_rejected_before_coordinator_persistence() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    state = RecoveryState("interrupted", "resume-token")
+    malformed = WorkerResultEnvelope(
+        work_id=request.work_id,
+        component_id=request.component_id,
+        repository_id=request.repository_id,
+        base_sha=request.base_sha,
+        result_sha=SHA_B,
+        diff_digest=DIGEST,
+        coding_result=CodingResult(
+            job_id=request.work_id,
+            test_evidence=(_DuckTestEvidence(),),  # type: ignore[arg-type]
+            recovery_state=state,
+        ),
+    )
+    worker = FakeRecoveryPort(state, envelope_override=malformed)
+
+    outcome = _run(ProductFactoryWorkerRecovery(worker).recover_running(coordinator, "core"))
+
+    assert outcome.disposition is WorkerRecoveryDisposition.BLOCKED_INVALID_EVIDENCE
+    assert outcome.record.state is WorkState.BLOCKED
+    assert outcome.record.result is None
+    assert outcome.recovery_state == state
+    assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
+
+
+def test_behavioral_primitive_inside_canonical_failure_is_rejected() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    state = RecoveryState("interrupted", "resume-token")
+    behavioral_failure = WorkerFailure(
+        WorkerFailureKind.INTERNAL_ERROR,
+        _BehavioralText(""),
+    )
+    malformed = WorkerResultEnvelope(
+        work_id=request.work_id,
+        component_id=request.component_id,
+        repository_id=request.repository_id,
+        base_sha=request.base_sha,
+        result_sha=SHA_B,
+        diff_digest=DIGEST,
+        coding_result=CodingResult(
+            job_id=request.work_id,
+            recovery_state=state,
+            failure=behavioral_failure,
+        ),
+    )
+    worker = FakeRecoveryPort(state, envelope_override=malformed)
+
+    outcome = _run(ProductFactoryWorkerRecovery(worker).recover_running(coordinator, "core"))
+
+    assert outcome.disposition is WorkerRecoveryDisposition.BLOCKED_INVALID_EVIDENCE
+    assert outcome.record.state is WorkState.BLOCKED
+    assert outcome.record.result is None
     assert outcome.recovery_state == state
     assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
 

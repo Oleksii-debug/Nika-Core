@@ -12,7 +12,15 @@ from nika_core.product_factory_coordinator import (
     WorkRecord,
     WorkState,
 )
-from nika_core.toolsmith.contracts import CodingResult, RecoveryState
+from nika_core.toolsmith.contracts import (
+    ArtifactEvidence,
+    ChangedFile,
+    CodingResult,
+    RecoveryState,
+    TestEvidence,
+    WorkerFailure,
+    WorkerFailureKind,
+)
 
 
 class WorkerRecoveryDisposition(StrEnum):
@@ -87,7 +95,7 @@ class ProductFactoryWorkerRecovery:
                 record=blocked,
                 recovery_state=None,
             )
-        if type(state) is not RecoveryState:
+        if not _valid_recovery_state_carrier(state):
             blocked = coordinator.block(
                 component_id,
                 "worker recovery evidence is invalid; host reconciliation required",
@@ -112,10 +120,7 @@ class ProductFactoryWorkerRecovery:
                 record=blocked,
                 recovery_state=state,
             )
-        if (
-            type(envelope) is not WorkerResultEnvelope
-            or type(envelope.coding_result) is not CodingResult
-        ):
+        if not _valid_recovery_envelope_carriers(envelope):
             blocked = coordinator.block(
                 component_id,
                 "worker recovery evidence is invalid; host reconciliation required",
@@ -156,6 +161,91 @@ class ProductFactoryWorkerRecovery:
             record=updated,
             recovery_state=state,
         )
+
+
+def _valid_recovery_state_carrier(value: object) -> bool:
+    return (
+        type(value) is RecoveryState
+        and type(value.phase) is str
+        and (value.opaque_token is None or type(value.opaque_token) is str)
+    )
+
+
+def _valid_changed_file_carrier(value: object) -> bool:
+    return (
+        type(value) is ChangedFile
+        and type(value.path) is str
+        and type(value.sha256) is str
+        and type(value.size_bytes) is int
+    )
+
+
+def _valid_test_evidence_carrier(value: object) -> bool:
+    return (
+        type(value) is TestEvidence
+        and type(value.command) is tuple
+        and all(type(part) is str for part in value.command)
+        and type(value.exit_code) is int
+        and type(value.output_digest) is str
+    )
+
+
+def _valid_artifact_evidence_carrier(value: object) -> bool:
+    return (
+        type(value) is ArtifactEvidence
+        and type(value.name) is str
+        and type(value.digest) is str
+        and type(value.media_type) is str
+    )
+
+
+def _valid_worker_failure_carrier(value: object) -> bool:
+    return (
+        type(value) is WorkerFailure
+        and type(value.kind) is WorkerFailureKind
+        and type(value.message) is str
+        and type(value.retryable) is bool
+    )
+
+
+def _valid_recovery_envelope_carriers(value: object) -> bool:
+    if type(value) is not WorkerResultEnvelope:
+        return False
+    if not all(
+        type(item) is str
+        for item in (
+            value.work_id,
+            value.component_id,
+            value.repository_id,
+            value.base_sha,
+            value.result_sha,
+            value.diff_digest,
+        )
+    ):
+        return False
+
+    result = value.coding_result
+    if type(result) is not CodingResult or type(result.job_id) is not str:
+        return False
+    if type(result.changed_files) is not tuple or not all(
+        _valid_changed_file_carrier(item) for item in result.changed_files
+    ):
+        return False
+    if type(result.test_evidence) is not tuple or not all(
+        _valid_test_evidence_carrier(item) for item in result.test_evidence
+    ):
+        return False
+    if type(result.artifacts) is not tuple or not all(
+        _valid_artifact_evidence_carrier(item) for item in result.artifacts
+    ):
+        return False
+    if result.recovery_state is not None and not _valid_recovery_state_carrier(
+        result.recovery_state
+    ):
+        return False
+    if result.failure is not None and not _valid_worker_failure_carrier(result.failure):
+        return False
+    return True
 
 
 def _record_from_snapshot(
