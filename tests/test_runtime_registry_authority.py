@@ -23,6 +23,20 @@ def test_registry_rejects_noncanonical_runtime_id_carriers() -> None:
         registry.get(_TextSubclass("reference"))
 
 
+def test_registry_rejects_unbounded_or_control_runtime_ids() -> None:
+    registry = RuntimeRegistry()
+
+    too_long = ReferenceRuntime()
+    too_long.runtime_id = "r" * 129
+    with pytest.raises(ValueError, match="at most 128"):
+        registry.register(too_long)
+
+    control = ReferenceRuntime()
+    control.runtime_id = "reference\nforged"
+    with pytest.raises(ValueError, match="control characters"):
+        registry.register(control)
+
+
 def test_registry_rejects_noncanonical_capability_carriers() -> None:
     registry = RuntimeRegistry()
     runtime = ReferenceRuntime()
