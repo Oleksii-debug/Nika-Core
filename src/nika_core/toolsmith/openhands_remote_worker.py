@@ -506,11 +506,25 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                 return
 
         if unknown_process_state:
-            durable_state = (
-                await self._recovery_probe.inspect(job_id)
-                if self._recovery_probe is not None
-                else None
-            )
+            try:
+                durable_state = (
+                    await self._recovery_probe.inspect(job_id)
+                    if self._recovery_probe is not None
+                    else None
+                )
+            except asyncio.CancelledError:
+                async with self._lock:
+                    current = self._states.get(job_id)
+                    if current is not None and current.phase == "cancel_probe_pending":
+                        self._states[job_id] = RecoveryState("manual_reconcile_required")
+                raise
+            except Exception as exc:  # noqa: BLE001 - host recovery probe boundary
+                _LOGGER.error(
+                    "OpenHands durable cancellation probe failed (%s)",
+                    type(exc).__name__,
+                )
+                durable_state = None
+
             async with self._lock:
                 current = self._states.get(job_id)
                 if current is None or current.phase != "cancel_probe_pending":
@@ -564,7 +578,11 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                 retryable=False,
                 state=state,
             )
-        if state.phase in {"cancel_requested", "manual_reconcile_required"}:
+        if state.phase in {
+            "cancel_requested",
+            "cancel_probe_pending",
+            "manual_reconcile_required",
+        }:
             return _failure_result(
                 job,
                 WorkerFailureKind.INTERNAL_ERROR,
