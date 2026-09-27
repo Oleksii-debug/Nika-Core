@@ -7,6 +7,7 @@ import sys
 import tarfile
 import threading
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -825,7 +826,7 @@ class BlockingUploadWorkspace(FakeRemoteWorkspace):
 
 
 class FakeConversation:
-    instances = []
+    instances: ClassVar[list["FakeConversation"]] = []
 
     def __init__(self, *, agent, workspace, max_iteration_per_run, visualizer, delete_on_close, tags):
         self.agent = agent
