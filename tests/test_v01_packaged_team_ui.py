@@ -331,6 +331,25 @@ def test_renderer_accepts_actual_packaged_team_and_rejects_duplicate_member_iden
     assert (
         bridge.dispatch(
             {
+                "request_id": "live-model",
+                "action_id": "settings.model.configure",
+                "payload": {
+                    "revision": 0,
+                    "route_kind": "deterministic",
+                    "provider_id": None,
+                    "model": None,
+                    "base_url": None,
+                    "credential_ref": None,
+                    "private_data_allowed": True,
+                    "timeout_seconds": 60,
+                },
+            }
+        )["status"]
+        == "completed"
+    )
+    assert (
+        bridge.dispatch(
+            {
                 "request_id": "live-task",
                 "action_id": "task.create",
                 "payload": {"command": "Порівняй джерела"},
