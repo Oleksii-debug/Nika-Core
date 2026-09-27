@@ -57,6 +57,8 @@ class RuntimeRegistry:
         self._runtimes: dict[str, _RegisteredRuntime] = {}
 
     def register(self, runtime: AgentRuntimePort) -> None:
+        if not isinstance(runtime, AgentRuntimePort):
+            raise TypeError("runtime must implement AgentRuntimePort")
         descriptor = _snapshot_runtime(runtime)
         if descriptor.runtime_id in self._runtimes:
             raise ValueError(f"Runtime already registered: {descriptor.runtime_id}")
