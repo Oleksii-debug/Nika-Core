@@ -75,12 +75,11 @@ def test_query_columns_cannot_launder_record_into_another_workspace(tmp_path: Pa
 def test_migration_history_rejects_non_integer_storage_type(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "state.sqlite3")
     initialize_artifact_registry_schema(store)
-    with store.connection() as conn:
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute(
-                "UPDATE artifact_registry_schema_migrations SET version = ?",
-                (1.5,),
-            )
+    with store.connection() as conn, pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "UPDATE artifact_registry_schema_migrations SET version = ?",
+            (1.5,),
+        )
 
     # SQLite INTEGER PRIMARY KEY is itself a fail-closed storage boundary:
     # the invalid storage class never reaches Nika or mutates migration truth.
