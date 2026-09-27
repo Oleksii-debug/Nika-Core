@@ -19,7 +19,7 @@ def test_registry_rejects_incomplete_runtime_adapter() -> None:
     registry = RuntimeRegistry()
 
     with pytest.raises(TypeError, match="AgentRuntimePort"):
-        registry.register(_IncompleteRuntime())  # type: ignore[arg-type]
+        registry.register(_IncompleteRuntime())
 
 
 def test_registry_rejects_noncanonical_runtime_id_carriers() -> None:
