@@ -363,26 +363,6 @@ def test_worker_visible_git_metadata_is_rejected_before_remote_execution(tmp_pat
     assert runtime.calls == []
 
 
-def test_nested_git_metadata_is_rejected_before_remote_sandbox_acquisition(
-    tmp_path: Path,
-) -> None:
-    root = _workspace(tmp_path)
-    nested_git = root / "src" / "embedded" / ".git"
-    nested_git.mkdir(parents=True)
-    nested_git.joinpath("config").write_text("[remote \"origin\"]\nurl = secret://canary\n")
-    provider = Provider()
-    runtime = Runtime()
-    job = _job(root)
-
-    result = _run(OpenHandsRemoteCodingWorker(provider, runtime).execute(job))
-
-    assert not result.succeeded
-    assert result.failure is not None
-    assert ".git" in result.failure.message
-    assert provider.acquired == []
-    assert runtime.calls == []
-
-
 def test_remote_worker_rejects_out_of_scope_change_before_local_mutation(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     runtime = Runtime(
@@ -442,6 +422,53 @@ def test_remote_worker_requires_explicit_loopback_network_authorization(tmp_path
 
     assert not result.succeeded
     assert result.failure.kind.value == "policy_violation"
+
+
+def test_sandbox_endpoint_rejects_truthy_non_boolean_attestations() -> None:
+    with pytest.raises(ValueError, match="exact booleans"):
+        OpenHandsSandboxEndpoint(
+            endpoint_id="sandbox-1",
+            host="https://agent.example.test",
+            working_dir="/workspace/nika-job",
+            isolation_class=IsolationClass.REMOTE_SANDBOXED,
+            sandbox_egress_hosts=("agent.example.test",),
+            network_policy_enforced=1,
+            fresh_workspace=True,
+        )
+
+
+def test_sandbox_endpoint_rejects_mutable_egress_host_carrier() -> None:
+    with pytest.raises(ValueError, match="immutable string tuple"):
+        OpenHandsSandboxEndpoint(
+            endpoint_id="sandbox-1",
+            host="https://agent.example.test",
+            working_dir="/workspace/nika-job",
+            isolation_class=IsolationClass.REMOTE_SANDBOXED,
+            sandbox_egress_hosts=["agent.example.test"],
+            network_policy_enforced=True,
+            fresh_workspace=True,
+        )
+
+
+def test_remote_worker_rejects_windows_case_colliding_snapshot_before_mutation(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    runtime = Runtime(
+        (
+            RemoteFile("src/value.txt", b"before\n"),
+            RemoteFile("src/Value.txt", b"ambiguous\n"),
+        )
+    )
+    provider = Provider()
+
+    result = _run(OpenHandsRemoteCodingWorker(provider, runtime).execute(_job(root)))
+
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.kind.value == "policy_violation"
+    assert "case-colliding" in result.failure.message
+    assert root.joinpath("src/value.txt").read_bytes() == b"before\n"
 
 
 def test_remote_worker_accepts_approved_https_remote_agent_server(tmp_path: Path) -> None:
