@@ -40,6 +40,7 @@ class NeverExecuteRuntime:
     def __init__(self) -> None:
         self.execute_calls = 0
         self.cancel_calls: list[str] = []
+        self.bound_cancel_calls = []
 
     async def execute(self, *_args):
         self.execute_calls += 1
@@ -48,6 +49,23 @@ class NeverExecuteRuntime:
     async def cancel(self, job_id):
         self.cancel_calls.append(job_id)
         return True
+
+    async def cancel_recovery(self, binding):
+        self.bound_cancel_calls.append(binding)
+        return True
+
+
+class CleanupProvider:
+    def __init__(self) -> None:
+        self.acquired = []
+        self.released = []
+
+    async def acquire(self, job):
+        self.acquired.append(job.job_id)
+        raise AssertionError("restart cancellation must not acquire a sandbox")
+
+    async def release(self, job, endpoint, *, succeeded):
+        self.released.append((job.job_id, endpoint.endpoint_id, succeeded))
 
 
 def _job(root: Path, work_id: str) -> CodingJob:
@@ -278,3 +296,115 @@ def test_probe_rejects_rebinding_remote_identity(tmp_path: Path) -> None:
             second_conversation,
             "11111111-1111-4111-8111-111111111111",
         )
+
+
+def test_restart_cancel_uses_bound_conversation_and_cleanup_without_replay(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    task = TaskQueue(store).create(
+        workspace_id="ws-1",
+        agent_id="product-factory",
+        payload={"kind": "product_factory", "product_project_id": "project-1"},
+    )
+    work_id = "work-bound-cancel"
+    ledger = IdempotencyLedger(store)
+    ledger.reserve(
+        operation_key=f"pf-worker:{work_id}",
+        task_id=task.task_id,
+        operation_type="product_factory.coding_worker",
+        input_fingerprint="c" * 64,
+    )
+    probe = ProductFactoryOpenHandsRecoveryProbe(ledger)
+    endpoint = _endpoint()
+    conversation_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"nika-core:openhands:{endpoint.endpoint_id}:{work_id}",
+        )
+    )
+    binding = probe.bind(
+        _job(tmp_path / "worker", work_id),
+        endpoint,
+        conversation_id,
+        "11111111-1111-4111-8111-111111111111",
+    )
+    runtime = NeverExecuteRuntime()
+    provider = CleanupProvider()
+    worker = OpenHandsRemoteCodingWorker(
+        provider,
+        runtime,
+        recovery_probe=probe,
+    )
+
+    asyncio.run(worker.cancel(work_id))
+    state = asyncio.run(worker.inspect(work_id))
+
+    assert state == RecoveryState("cancelled", binding.opaque_token)
+    assert runtime.cancel_calls == []
+    assert runtime.bound_cancel_calls == [binding]
+    result = asyncio.run(worker.recover(_job(tmp_path / "worker", work_id), state))
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.kind.value == "cancelled"
+    assert result.failure.retryable is False
+    assert runtime.execute_calls == 0
+    assert provider.acquired == []
+    assert provider.released == [(work_id, endpoint.endpoint_id, False)]
+
+
+def test_restart_bound_cancel_without_stop_proof_remains_manual(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    task = TaskQueue(store).create(
+        workspace_id="ws-1",
+        agent_id="product-factory",
+        payload={"kind": "product_factory", "product_project_id": "project-1"},
+    )
+    work_id = "work-bound-cancel-ambiguous"
+    ledger = IdempotencyLedger(store)
+    ledger.reserve(
+        operation_key=f"pf-worker:{work_id}",
+        task_id=task.task_id,
+        operation_type="product_factory.coding_worker",
+        input_fingerprint="d" * 64,
+    )
+    probe = ProductFactoryOpenHandsRecoveryProbe(ledger)
+    endpoint = _endpoint()
+    conversation_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"nika-core:openhands:{endpoint.endpoint_id}:{work_id}",
+        )
+    )
+    binding = probe.bind(
+        _job(tmp_path / "worker", work_id),
+        endpoint,
+        conversation_id,
+        "11111111-1111-4111-8111-111111111111",
+    )
+
+    class AmbiguousRuntime(NeverExecuteRuntime):
+        async def cancel_recovery(self, supplied):
+            self.bound_cancel_calls.append(supplied)
+            return False
+
+    runtime = AmbiguousRuntime()
+    worker = OpenHandsRemoteCodingWorker(
+        CleanupProvider(),
+        runtime,
+        recovery_probe=probe,
+    )
+
+    asyncio.run(worker.cancel(work_id))
+    state = asyncio.run(worker.inspect(work_id))
+
+    assert state == RecoveryState(
+        "manual_reconcile_required",
+        binding.opaque_token,
+    )
+    assert runtime.cancel_calls == []
+    assert runtime.bound_cancel_calls == [binding]

@@ -1817,6 +1817,55 @@ def test_agent_server_binding_failure_stops_before_message_or_run(
     assert paths == ["/api/file/upload", "/api/conversations"]
 
 
+def test_agent_server_restart_cancel_targets_only_bound_conversation(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    job = _job(root)
+    endpoint = _endpoint()
+    conversation_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"nika-core:openhands:{endpoint.endpoint_id}:{job.job_id}",
+        )
+    )
+    binding = OpenHandsRecoveryBinding(
+        job.job_id,
+        endpoint,
+        conversation_id,
+        PROFILE_ID,
+    )
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if (
+            request.method == "POST"
+            and request.url.path == f"/api/conversations/{conversation_id}/interrupt"
+        ):
+            return httpx.Response(200, json={"success": True})
+        if (
+            request.method == "GET"
+            and request.url.path == f"/api/conversations/{conversation_id}"
+        ):
+            return httpx.Response(200, json={"execution_status": "paused"})
+        raise AssertionError(
+            f"restart cancellation must not dispatch effects: {request.method} {request.url}"
+        )
+
+    runtime = OpenHandsAgentServerRuntime(
+        client_factory=lambda supplied: _agent_server_client(supplied, handler),
+        agent_profile_id_factory=lambda _job, _endpoint: PROFILE_ID,
+        poll_interval_seconds=0.01,
+    )
+
+    assert _run(runtime.cancel_recovery(binding)) is True
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("POST", f"/api/conversations/{conversation_id}/interrupt"),
+        ("GET", f"/api/conversations/{conversation_id}"),
+    ]
+
+
 def test_agent_server_reconcile_uses_only_existing_conversation_and_snapshot(
     tmp_path: Path,
 ) -> None:

@@ -298,6 +298,8 @@ class OpenHandsRemoteRuntimePort(Protocol):
         source_evidence: TreeEvidence,
     ) -> OpenHandsRunEvidence: ...
 
+    async def cancel_recovery(self, binding: OpenHandsRecoveryBinding) -> bool: ...
+
     async def cancel(self, job_id: str) -> bool: ...
 
 
@@ -732,12 +734,20 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                 return
 
         if unknown_process_state:
+            binding: OpenHandsRecoveryBinding | None = None
             try:
                 durable_state = (
                     await self._recovery_probe.inspect(job_id)
                     if self._recovery_probe is not None
                     else None
                 )
+                binding_store = self._recovery_binding_store
+                if (
+                    durable_state is not None
+                    and durable_state.phase == "remote_reconcile_required"
+                    and binding_store is not None
+                ):
+                    binding = binding_store.load(job_id)
             except asyncio.CancelledError:
                 async with self._lock:
                     current = self._states.get(job_id)
@@ -750,6 +760,40 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                     type(exc).__name__,
                 )
                 durable_state = None
+                binding = None
+
+            stopped = False
+            if (
+                durable_state is not None
+                and durable_state.phase == "remote_reconcile_required"
+                and binding is not None
+                and binding.job_id == job_id
+                and binding.opaque_token == durable_state.opaque_token
+            ):
+                cancel_recovery = getattr(self._runtime, "cancel_recovery", None)
+                if callable(cancel_recovery):
+                    try:
+                        stopped = await cancel_recovery(binding)
+                    except asyncio.CancelledError:
+                        async with self._lock:
+                            current = self._states.get(job_id)
+                            if current is not None and current.phase == "cancel_probe_pending":
+                                self._states[job_id] = RecoveryState(
+                                    "manual_reconcile_required",
+                                    binding.opaque_token,
+                                )
+                        raise
+                    except Exception as exc:  # noqa: BLE001 - remote cancel boundary
+                        _LOGGER.error(
+                            "OpenHands bound restart cancellation failed (%s)",
+                            type(exc).__name__,
+                        )
+                        stopped = False
+                    if type(stopped) is not bool:
+                        _LOGGER.error(
+                            "OpenHands bound restart cancellation returned non-boolean proof"
+                        )
+                        stopped = False
 
             async with self._lock:
                 current = self._states.get(job_id)
@@ -757,6 +801,11 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                     return
                 if durable_state is not None and durable_state.phase == "cancelled":
                     self._states[job_id] = durable_state
+                elif stopped and binding is not None:
+                    self._states[job_id] = RecoveryState(
+                        "cancelled",
+                        binding.opaque_token,
+                    )
                 else:
                     self._states[job_id] = RecoveryState(
                         "manual_reconcile_required",
@@ -851,6 +900,8 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                 state=RecoveryState("manual_reconcile_required"),
             )
         if state.phase == "cancelled":
+            if state.opaque_token is not None and self._recovery_binding_store is not None:
+                return await self._recover_cancelled_binding(job, state)
             return _failure_result(
                 job,
                 WorkerFailureKind.CANCELLED,
@@ -930,6 +981,66 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
             self._cancel_events.pop(job.job_id, None)
             self._finalized_results.pop(job.job_id, None)
         return await self.execute(job)
+
+    async def _recover_cancelled_binding(
+        self,
+        job: CodingJob,
+        state: RecoveryState,
+    ) -> CodingResult:
+        binding_store = self._recovery_binding_store
+        assert binding_store is not None
+        try:
+            binding = binding_store.load(job.job_id)
+        except Exception as exc:  # noqa: BLE001 - durable cleanup identity boundary
+            _LOGGER.error(
+                "OpenHands cancelled binding lookup failed (%s)",
+                type(exc).__name__,
+            )
+            binding = None
+        if (
+            binding is None
+            or binding.job_id != job.job_id
+            or binding.opaque_token != state.opaque_token
+        ):
+            result = _failure_result(
+                job,
+                WorkerFailureKind.INTERNAL_ERROR,
+                "cancelled remote binding could not be proven for cleanup",
+                retryable=False,
+                state=RecoveryState("manual_reconcile_required", state.opaque_token),
+            )
+            return await self._finalize_result(job, result)
+
+        try:
+            await self._sandbox_provider.release(
+                job,
+                binding.endpoint,
+                succeeded=False,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - sandbox cleanup boundary
+            _LOGGER.error(
+                "Cancelled OpenHands sandbox cleanup failed (%s)",
+                type(exc).__name__,
+            )
+            result = _failure_result(
+                job,
+                WorkerFailureKind.INTERNAL_ERROR,
+                "cancelled remote sandbox cleanup could not be proven",
+                retryable=False,
+                state=RecoveryState("manual_reconcile_required", binding.opaque_token),
+            )
+            return await self._finalize_result(job, result)
+
+        result = _failure_result(
+            job,
+            WorkerFailureKind.CANCELLED,
+            "coding job cancellation was confirmed; cancelled work is terminal",
+            retryable=False,
+            state=state,
+        )
+        return await self._finalize_result(job, result)
 
     async def _recover_remote(
         self,

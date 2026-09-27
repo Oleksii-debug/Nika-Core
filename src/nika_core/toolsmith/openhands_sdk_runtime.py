@@ -263,6 +263,60 @@ class OpenHandsAgentServerRuntime:
                 if self._active.get(job.job_id) is active:
                     self._active.pop(job.job_id, None)
 
+    async def cancel_recovery(self, binding: OpenHandsRecoveryBinding) -> bool:
+        if type(binding) is not OpenHandsRecoveryBinding:
+            raise OpenHandsAgentServerCompatibilityError(
+                "OpenHands restart cancellation requires an exact recovery binding"
+            )
+        with self._active_lock:
+            if binding.job_id in self._active:
+                return False
+        return await asyncio.to_thread(self._cancel_recovery_sync, binding)
+
+    def _cancel_recovery_sync(self, binding: OpenHandsRecoveryBinding) -> bool:
+        client: httpx.Client | None = None
+        try:
+            client = self._client_factory(binding.endpoint)
+            self._validate_client(client, binding.endpoint)
+            self._interrupt_sync(client, binding.conversation_id)
+            deadline = time.monotonic() + _MAX_HTTP_BLOCK_SECONDS
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                info = self._request_json(
+                    client,
+                    "GET",
+                    f"/api/conversations/{binding.conversation_id}",
+                    operation="restart cancellation status",
+                    timeout_seconds=remaining,
+                )
+                if type(info) is not dict:
+                    return False
+                status = info.get("execution_status")
+                if type(status) is not str:
+                    return False
+                if status in {"paused", "finished", *_TERMINAL_FAILURE_STATUSES}:
+                    return True
+                if status not in {"idle", "running", "waiting_for_confirmation", "deleting"}:
+                    return False
+                time.sleep(min(self._poll_interval_seconds, remaining))
+        except Exception as exc:  # noqa: BLE001 - remote restart-cancel boundary
+            _LOGGER.warning(
+                "OpenHands restart cancellation remains unverified (%s)",
+                type(exc).__name__,
+            )
+            return False
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception as exc:  # noqa: BLE001 - transport cleanup boundary
+                    _LOGGER.warning(
+                        "OpenHands restart cancellation client close failed (%s)",
+                        type(exc).__name__,
+                    )
+
     async def cancel(self, job_id: str) -> bool:
         with self._active_lock:
             active = self._active.get(job_id)
