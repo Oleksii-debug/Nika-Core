@@ -13,6 +13,8 @@ from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.task_state import TaskState
 from nika_core.resources import ResourceBudget, ResourceManager, ResourceSnapshot
+from nika_core.runtime.contracts import RuntimeOutcome, RuntimeRequest, RuntimeResult
+from nika_core.runtime.coordinator import TaskRuntimeCoordinator
 
 
 class SequencePresence:
@@ -260,6 +262,7 @@ def test_resource_pressure_race_at_final_admission_defers_without_effect(
     assert result.reason == "cpu_limit"
     assert queue.get(task_id).state is TaskState.READY
     assert manager.active_count(scope="background_life", owner_id="living-agent") == 0
+    assert manager.queued(scope="background_life", owner_id="living-agent") == ()
 
 
 def test_stale_presence_fails_closed_and_records_only_error_type(tmp_path: Path) -> None:
@@ -462,6 +465,67 @@ def test_effect_exception_still_releases_resource_grant(tmp_path: Path) -> None:
 
     assert resources.active_count(scope="background_life", owner_id="living-agent") == 0
 
+
+
+class CompletingRuntime:
+    runtime_id = "background-test-runtime"
+    capabilities = frozenset()
+
+    async def run(self, request: RuntimeRequest) -> RuntimeResult:
+        return RuntimeResult(
+            outcome=RuntimeOutcome.COMPLETED,
+            output={"task_id": request.task_id},
+        )
+
+    async def resume(self, request) -> RuntimeResult:  # pragma: no cover - not used here
+        raise AssertionError("resume must not be called")
+
+    async def cancel(self, *, task_id: str, thread_id: str) -> bool:
+        return False
+
+
+def test_guard_composes_with_canonical_task_runtime_coordinator(tmp_path: Path) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    store = _store(tmp_path)
+    guard, queue, audit, resources = _guard(
+        store=store,
+        observations=[
+            _obs(90, OwnerPresence.AWAY, now=now),
+            _obs(91, OwnerPresence.AWAY, now=now),
+            _obs(92, OwnerPresence.AWAY, now=now),
+        ],
+        now=now,
+    )
+    task_id = _ready_task(queue)
+    coordinator = TaskRuntimeCoordinator(queue, audit)
+    runtime = CompletingRuntime()
+
+    async def effect() -> object:
+        return await coordinator.start(
+            runtime,
+            RuntimeRequest(task_id=task_id, thread_id="background-thread"),
+        )
+
+    result = asyncio.run(
+        guard.dispatch(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.UNFINISHED_WORK,
+            effect=effect,
+        )
+    )
+
+    assert result.executed is True
+    assert isinstance(result.effect_result, RuntimeResult)
+    assert result.effect_result.outcome is RuntimeOutcome.COMPLETED
+    assert queue.get(task_id).state is TaskState.COMPLETED
+    assert resources.active_count(scope="background_life", owner_id="living-agent") == 0
+    event_types = [
+        event.event_type for event in audit.list_for(entity_type="task", entity_id=task_id)
+    ]
+    assert "background.dispatch_permitted" in event_types
+    assert "runtime.started" in event_types
+    assert "runtime.finished" in event_types
+    assert "background.dispatch_returned" in event_types
 
 def test_presence_observation_requires_exact_utc_carrier() -> None:
     now = datetime(2030, 1, 1, tzinfo=UTC)
