@@ -21,6 +21,16 @@ class WorkOwnershipLease:
     issued_at: datetime
     expires_at: datetime
 
+    def __post_init__(self) -> None:
+        _identity(self.project_id, self.work_id, self.owner_id)
+        _strict_fence(self.fence)
+        issued_at = _aware(self.issued_at)
+        expires_at = _aware(self.expires_at)
+        if issued_at != self.issued_at or expires_at != self.expires_at:
+            raise WorkOwnershipError("work ownership lease times must be canonical UTC datetimes")
+        if expires_at <= issued_at:
+            raise WorkOwnershipError("work ownership lease expiry must follow issuance")
+
 
 class ProductFactoryWorkOwnership:
     """Durable single-writer lease authority for Product Factory work slices.
@@ -74,7 +84,7 @@ class ProductFactoryWorkOwnership:
                     if current_issued is not None or current_expires is not None:
                         raise WorkOwnershipError("corrupt work ownership record")
                 elif (
-                    not isinstance(current_owner, str)
+                    type(current_owner) is not str
                     or not current_owner.strip()
                     or current_owner != current_owner.strip()
                     or current_issued is None
@@ -195,8 +205,8 @@ class ProductFactoryWorkOwnership:
             raise
         except Exception as exc:
             raise WorkOwnershipError("work ownership clock failed") from exc
-        if not isinstance(value, datetime):
-            raise WorkOwnershipError("work ownership clock must return datetime")
+        if type(value) is not datetime:
+            raise WorkOwnershipError("work ownership clock must return exact datetime")
         return _aware(value)
 
 
@@ -278,24 +288,26 @@ def _is_busy_or_locked(exc: sqlite3.OperationalError) -> bool:
 
 def _identity(*values: str) -> None:
     if not values or any(
-        not isinstance(value, str) or not value.strip() or value != value.strip()
+        type(value) is not str or not value or value != value.strip()
         for value in values
     ):
-        raise WorkOwnershipError("work ownership identity must be canonical non-empty text")
+        raise WorkOwnershipError("work ownership identity must be exact canonical non-empty text")
 
 
 def _strict_fence(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise WorkOwnershipError("work ownership fence must be a positive integer")
+    if type(value) is not int or value < 1:
+        raise WorkOwnershipError("work ownership fence must be an exact positive integer")
     return value
 
 
 def _lease_seconds(value: int) -> None:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise WorkOwnershipError("lease_seconds must be a positive integer")
+    if type(value) is not int or value <= 0:
+        raise WorkOwnershipError("lease_seconds must be an exact positive integer")
 
 
 def _aware(value: datetime) -> datetime:
+    if type(value) is not datetime:
+        raise WorkOwnershipError("work ownership time must be an exact datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise WorkOwnershipError("work ownership time must be timezone-aware")
     return value.astimezone(UTC)
@@ -318,7 +330,7 @@ def _expiry(instant: datetime, lease_seconds: int) -> datetime:
 def _optional_time(value: object) -> datetime | None:
     if value is None:
         return None
-    if not isinstance(value, str):
+    if type(value) is not str:
         raise WorkOwnershipError("corrupt work ownership timestamp")
     try:
         return _aware(datetime.fromisoformat(value))

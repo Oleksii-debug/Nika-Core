@@ -11,7 +11,26 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_factory_work_ownership import (
     ProductFactoryWorkOwnership,
     WorkOwnershipError,
+    WorkOwnershipLease,
 )
+
+
+class BehavioralText(str):
+    def strip(self, *args, **kwargs):  # pragma: no cover - must not execute
+        raise AssertionError("behavioral text authority executed")
+
+
+class BehavioralInt(int):
+    def __lt__(self, other):  # pragma: no cover - must not execute
+        raise AssertionError("behavioral integer authority executed")
+
+    def __eq__(self, other):  # pragma: no cover - must not execute
+        raise AssertionError("behavioral integer authority executed")
+
+
+class BehavioralDateTime(datetime):
+    def utcoffset(self):  # pragma: no cover - must not execute
+        raise AssertionError("behavioral datetime authority executed")
 
 
 class FakeClock:
@@ -62,6 +81,66 @@ def test_table_is_created_by_canonical_ordered_migration(tmp_path) -> None:
 
     assert table is not None
     assert version == 3
+
+
+def test_public_authority_rejects_behavioral_primitive_subclasses_before_use(tmp_path) -> None:
+    service, _ = _service(tmp_path)
+
+    with pytest.raises(WorkOwnershipError, match="exact canonical"):
+        service.acquire(
+            project_id=BehavioralText("project-1"),
+            work_id="work-1",
+            owner_id="worker-a",
+        )
+
+    lease = _acquire(service)
+    with pytest.raises(WorkOwnershipError, match="exact positive integer"):
+        service.assert_owner(
+            project_id=lease.project_id,
+            work_id=lease.work_id,
+            owner_id=lease.owner_id,
+            fence=BehavioralInt(lease.fence),
+        )
+    with pytest.raises(WorkOwnershipError, match="exact positive integer"):
+        service.renew(
+            project_id=lease.project_id,
+            work_id=lease.work_id,
+            owner_id=lease.owner_id,
+            fence=lease.fence,
+            lease_seconds=BehavioralInt(120),
+        )
+
+
+def test_clock_rejects_behavioral_datetime_subclass_before_timezone_use(tmp_path) -> None:
+    clock = lambda: BehavioralDateTime(2026, 9, 11, 12, 0, tzinfo=UTC)
+    service = ProductFactoryWorkOwnership(_store(tmp_path), clock=clock)
+
+    with pytest.raises(WorkOwnershipError, match="exact datetime"):
+        _acquire(service)
+
+
+def test_lease_carrier_rejects_behavioral_identity_and_fence_subclasses() -> None:
+    issued_at = NOW
+    expires_at = NOW + timedelta(seconds=60)
+
+    with pytest.raises(WorkOwnershipError, match="exact canonical"):
+        WorkOwnershipLease(
+            BehavioralText("project-1"),
+            "work-1",
+            "worker-a",
+            1,
+            issued_at,
+            expires_at,
+        )
+    with pytest.raises(WorkOwnershipError, match="exact positive integer"):
+        WorkOwnershipLease(
+            "project-1",
+            "work-1",
+            "worker-a",
+            BehavioralInt(1),
+            issued_at,
+            expires_at,
+        )
 
 
 def test_one_writer_lease_survives_restart_and_blocks_competitor(tmp_path) -> None:
