@@ -1764,6 +1764,48 @@ def test_agent_server_cancel_covers_upload_before_conversation_creation(
     assert paths == ["/api/file/upload"]
 
 
+def test_worker_does_not_release_sandbox_before_cancelled_http_thread_unwinds(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    job = _job(root)
+    endpoint = _endpoint()
+    upload_started = threading.Event()
+    allow_upload = threading.Event()
+    provider = Provider(endpoint)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/file/upload":
+            upload_started.set()
+            assert allow_upload.wait(timeout=5)
+            return httpx.Response(200, json={"success": True})
+        raise AssertionError("remote dispatch must not continue after cancellation")
+
+    runtime = OpenHandsAgentServerRuntime(
+        client_factory=lambda supplied: _agent_server_client(supplied, handler),
+        agent_profile_id_factory=lambda _job, _endpoint: PROFILE_ID,
+    )
+    worker = OpenHandsRemoteCodingWorker(
+        provider,
+        runtime,
+        acceptance_runtime=AcceptanceRuntime(),
+    )
+
+    async def scenario() -> None:
+        execution = asyncio.create_task(worker.execute(job))
+        assert await asyncio.to_thread(upload_started.wait, 2)
+        execution.cancel()
+        await asyncio.sleep(0.05)
+        assert provider.released == []
+        allow_upload.set()
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+
+    _run(scenario())
+
+    assert provider.released == [(job.job_id, endpoint.endpoint_id, False)]
+
+
 def test_agent_server_task_cancellation_preserves_one_shot_stop_proof(
     tmp_path: Path,
 ) -> None:
