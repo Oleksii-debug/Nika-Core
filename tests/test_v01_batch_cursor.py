@@ -82,6 +82,79 @@ def test_restart_after_three_of_five_preserves_exact_next_target(tmp_path: Path)
     assert restarted.state.next_scheduled_intent.target_id == "target-3"
 
 
+def test_ready_batch_allows_five_effect_reservations_without_releasing_next_batch(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    task_id = _task(store, "parallel-ready-batch")
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id=task_id,
+        cursor_id="cursor",
+        targets=_targets(10),
+        batch_size=5,
+    )
+
+    grants = [cursor.begin_effect(f"target-{index}") for index in range(5)]
+
+    assert all(grant.execute for grant in grants)
+    assert cursor.state.ready_batch_index == 0
+    assert [target.attempt_state for target in cursor.state.targets[:5]] == [
+        AttemptState.IN_FLIGHT,
+    ] * 5
+    assert len(ledger.list_for_task(task_id)) == 5
+
+    with pytest.raises(BatchCursorBlockedError, match="next executable"):
+        cursor.begin_effect("target-5")
+
+
+def test_parallel_batch_out_of_order_completion_preserves_one_durable_wait(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    task_id = _task(store, "parallel-complete")
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id=task_id,
+        cursor_id="cursor",
+        targets=_targets(10),
+        batch_size=5,
+    )
+    due = datetime(2030, 2, 3, 4, 5, 6, tzinfo=UTC)
+
+    for index in range(5):
+        assert cursor.begin_effect(f"target-{index}").execute is True
+    for index in (3, 1, 4, 0, 2):
+        cursor.confirm(
+            f"target-{index}",
+            {"confirmed": index},
+            next_batch_not_before=due,
+        )
+
+    state = cursor.state
+    assert state.confirmed_count == 5
+    assert state.next_scheduled_intent is not None
+    assert state.next_scheduled_intent.kind is IntentKind.INTER_BATCH_WAIT
+    assert state.next_scheduled_intent.target_id == "target-5"
+    assert state.next_scheduled_intent.not_before == due.isoformat()
+
+    restarted = BatchCursor.restore(
+        memory,
+        ledger,
+        task_id=task_id,
+        cursor_id="cursor",
+        targets=_targets(10),
+        batch_size=5,
+    )
+    intent = restarted.state.next_scheduled_intent
+    assert intent is not None
+    assert intent.kind is IntentKind.INTER_BATCH_WAIT
+    assert intent.not_before == due.isoformat()
+    with pytest.raises(BatchCursorBlockedError, match="next executable"):
+        restarted.begin_effect("target-5")
+
 def test_restart_exactly_between_batches_preserves_durable_next_intent(
     tmp_path: Path,
 ) -> None:
@@ -132,6 +205,72 @@ def test_restart_exactly_between_batches_preserves_durable_next_intent(
     assert restarted.state.next_scheduled_intent is not None
     assert restarted.state.next_scheduled_intent.kind is IntentKind.TARGET
 
+
+def test_external_authority_prepare_survives_restart_without_claiming_effect(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    task_id = _task(store, "external-prepare")
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id=task_id,
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=2,
+    )
+
+    grant = cursor.prepare_external_effect("target-0")
+    assert grant.execute is True
+    assert grant.reason == "external_authority_prepared"
+    assert ledger.list_for_task(task_id) == ()
+    assert cursor.state.targets[0].attempt_state is AttemptState.PREPARED
+
+    restarted = BatchCursor.restore(
+        memory,
+        ledger,
+        task_id=task_id,
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=2,
+    )
+    assert restarted.state.targets[0].attempt_state is AttemptState.PREPARED
+    assert ledger.list_for_task(task_id) == ()
+
+    restarted.confirm_external_effect("target-0", {"verified": True})
+    record = ledger.require(grant.operation_key)
+    assert record.status.value == "completed"
+    assert restarted.state.targets[0].attempt_state is AttemptState.CONFIRMED
+
+
+def test_external_authority_unknown_outcome_becomes_restart_stable_uncertain(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    task_id = _task(store, "external-uncertain")
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id=task_id,
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=2,
+    )
+    cursor.prepare_external_effect("target-0")
+    cursor.mark_external_uncertain("target-0", {"reason": "tool_effect_unknown"})
+
+    restarted = BatchCursor.restore(
+        memory,
+        ledger,
+        task_id=task_id,
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=2,
+    )
+    assert restarted.state.targets[0].attempt_state is AttemptState.UNCERTAIN
+    assert restarted.state.targets[0].uncertain_result == {"reason": "tool_effect_unknown"}
+    with pytest.raises(BatchCursorBlockedError, match="uncertain"):
+        restarted.prepare_external_effect("target-1")
 
 def test_completed_target_never_executes_twice_after_restart(tmp_path: Path) -> None:
     memory, ledger, store = _services(tmp_path)
