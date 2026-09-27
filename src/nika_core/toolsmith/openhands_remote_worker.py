@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import hashlib
+import logging
 import os
 import pathlib
 import tempfile
@@ -24,6 +25,8 @@ from nika_core.toolsmith.contracts import (
     WorkerFailureKind,
 )
 from nika_core.toolsmith.execution import run_typed_process
+
+_LOGGER = logging.getLogger(__name__)
 from nika_core.toolsmith.workspace_security import (
     TreeEvidence,
     WorkspacePathPolicy,
@@ -64,6 +67,17 @@ class OpenHandsSandboxEndpoint:
         parsed = urlparse(self.host)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise ValueError("OpenHands endpoint host must be an absolute http(s) URL")
+        if (
+            parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.params
+            or parsed.path not in {"", "/"}
+        ):
+            raise ValueError(
+                "OpenHands endpoint host must contain authority only and no embedded credentials"
+            )
         if not self.working_dir.startswith("/"):
             raise ValueError("OpenHands remote working_dir must be an absolute POSIX path")
         if self.isolation_class is not IsolationClass.REMOTE_SANDBOXED:
@@ -126,7 +140,7 @@ class OpenHandsRemoteRuntimePort(Protocol):
         source_evidence: TreeEvidence,
     ) -> OpenHandsRunEvidence: ...
 
-    async def cancel(self, job_id: str) -> None: ...
+    async def cancel(self, job_id: str) -> bool: ...
 
 
 class OpenHandsRemoteCodingWorker(CodingWorkerPort):
@@ -177,7 +191,13 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
             )
             changed = _validate_and_apply_snapshot(job, local_root, source_evidence, run.files)
             applied = True
+            candidate_evidence = collect_tree_evidence(local_root)
             tests = _run_acceptance(job, local_root)
+            post_acceptance_evidence = collect_tree_evidence(local_root)
+            if post_acceptance_evidence != candidate_evidence:
+                raise OpenHandsWorkspaceMutationError(
+                    "acceptance commands mutated the validated candidate"
+                )
             failed_test = next((evidence for evidence in tests if evidence.exit_code != 0), None)
             if failed_test is not None:
                 state = RecoveryState("repair_required", run.conversation_id)
@@ -202,21 +222,21 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                 recovery_state=RecoveryState("completed", run.conversation_id),
             )
         except TimeoutError:
-            await self._runtime.cancel(job.job_id)
-            state = RecoveryState("interrupted")
+            stopped = await self._runtime.cancel(job.job_id)
+            state = RecoveryState("interrupted" if stopped else "manual_reconcile_required")
             await self._set_state(job.job_id, state)
             return _failure_result(
                 job,
                 WorkerFailureKind.TIMEOUT,
                 "remote coding worker exceeded its Nika resource deadline",
-                retryable=not applied,
+                retryable=stopped and not applied,
                 state=state,
                 changed_files=changed,
                 test_evidence=tests,
             )
         except asyncio.CancelledError:
-            await self._runtime.cancel(job.job_id)
-            state = RecoveryState("cancelled")
+            stopped = await self._runtime.cancel(job.job_id)
+            state = RecoveryState("cancelled" if stopped else "manual_reconcile_required")
             await self._set_state(job.job_id, state)
             raise
         except OpenHandsWorkspaceMutationError:
@@ -243,7 +263,7 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                 changed_files=changed,
                 test_evidence=tests,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - untrusted coding-engine boundary
             state = RecoveryState("interrupted")
             await self._set_state(job.job_id, state)
             return _failure_result(
@@ -259,21 +279,39 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
             if endpoint is not None:
                 try:
                     await self._sandbox_provider.release(job, endpoint, succeeded=succeeded)
-                except Exception:
-                    # Release failures must not replace the typed worker result. The
-                    # provider is responsible for durable cleanup/reconciliation.
-                    pass
+                except Exception as exc:  # noqa: BLE001 - sandbox provider boundary
+                    _LOGGER.warning(
+                        "OpenHands sandbox release requires provider reconciliation (%s)",
+                        type(exc).__name__,
+                    )
 
     async def cancel(self, job_id: str) -> None:
-        await self._runtime.cancel(job_id)
-        await self._set_state(job_id, RecoveryState("cancelled"))
+        stopped = await self._runtime.cancel(job_id)
+        phase = "cancelled" if stopped else "manual_reconcile_required"
+        await self._set_state(job_id, RecoveryState(phase))
 
     async def inspect(self, job_id: str) -> RecoveryState | None:
         async with self._lock:
             return self._states.get(job_id)
 
     async def recover(self, job: CodingJob, state: RecoveryState) -> CodingResult:
-        if state.phase not in {"interrupted", "cancelled"}:
+        if state.phase == "cancelled":
+            return _failure_result(
+                job,
+                WorkerFailureKind.CANCELLED,
+                "coding job cancellation was confirmed; cancelled work is terminal",
+                retryable=False,
+                state=state,
+            )
+        if state.phase == "manual_reconcile_required":
+            return _failure_result(
+                job,
+                WorkerFailureKind.INTERNAL_ERROR,
+                "coding job stop could not be proven; host reconciliation is required",
+                retryable=False,
+                state=state,
+            )
+        if state.phase != "interrupted":
             return _failure_result(
                 job,
                 WorkerFailureKind.INVALID_REQUEST,
@@ -281,9 +319,8 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                 retryable=False,
                 state=state,
             )
-        # Only pre-apply interruption/cancellation is restartable with the same snapshot.
-        # Failed acceptance already changed the private staging tree and requires a new
-        # Nika-owned repository snapshot/job before another coding attempt.
+        # Only a proven-stopped pre-apply interruption is restartable with the same
+        # snapshot. Explicit cancellation is terminal and can never re-enter execute().
         return await self.execute(job)
 
     async def _set_state(self, job_id: str, state: RecoveryState) -> None:
@@ -307,7 +344,7 @@ def _validate_local_workspace(job: CodingJob) -> pathlib.Path:
     if job.lease.isolation_class is IsolationClass.POLICY_ONLY:
         raise OpenHandsWorkerError("local staging workspace lacks enforced process isolation")
     try:
-        expires = datetime.fromisoformat(job.lease.expires_at.replace("Z", "+00:00"))
+        expires = datetime.fromisoformat(job.lease.expires_at)
     except ValueError as exc:
         raise OpenHandsWorkerError("workspace lease has an invalid expiry") from exc
     if expires.tzinfo is None or expires.utcoffset() is None:
@@ -417,6 +454,19 @@ def _validate_and_apply_snapshot(
                 temporary.chmod(previous_mode)
             os.replace(temporary, destination)
         after = collect_tree_evidence(local_root)
+        after_map = {item.path: item for item in after.files}
+        effective = sorted(
+            (
+                path
+                for path in set(before_map) | set(after_map)
+                if before_map.get(path) != after_map.get(path)
+            ),
+            key=str.casefold,
+        )
+        if effective != changed_paths:
+            raise OpenHandsWorkerError(
+                "local post-apply evidence differs from validated remote delta"
+            )
     except Exception:
         rollback_failed = False
         for destination, previous, previous_mode in reversed(backups):
@@ -434,18 +484,6 @@ def _validate_and_apply_snapshot(
                 "local staging mutation could not be proven rolled back"
             ) from None
         raise
-
-    after_map = {item.path: item for item in after.files}
-    effective = sorted(
-        (
-            path
-            for path in set(before_map) | set(after_map)
-            if before_map.get(path) != after_map.get(path)
-        ),
-        key=str.casefold,
-    )
-    if effective != changed_paths:
-        raise OpenHandsWorkerError("local post-apply evidence differs from validated remote delta")
 
     return tuple(
         ChangedFile(path, after_map[path].sha256, after_map[path].size_bytes)
