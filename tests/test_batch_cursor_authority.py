@@ -34,6 +34,17 @@ class BehavioralDict(dict[str, object]):
 def _services(tmp_path: Path) -> tuple[MemoryService, IdempotencyLedger, SQLiteStore]:
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
+    now = datetime.now(UTC).isoformat()
+    with store.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO tasks(
+                task_id, workspace_id, agent_id, state, payload_json, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("task", "batch-cursor-fixture", "batch-cursor-fixture", "created", "{}", now, now),
+        )
     return MemoryService(store), IdempotencyLedger(store), store
 
 
