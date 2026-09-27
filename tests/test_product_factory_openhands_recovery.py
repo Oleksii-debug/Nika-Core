@@ -408,3 +408,63 @@ def test_restart_bound_cancel_without_stop_proof_remains_manual(
     )
     assert runtime.cancel_calls == []
     assert runtime.bound_cancel_calls == [binding]
+
+
+def test_fabricated_bound_cancelled_state_cannot_release_remote_sandbox(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    task = TaskQueue(store).create(
+        workspace_id="ws-1",
+        agent_id="product-factory",
+        payload={"kind": "product_factory", "product_project_id": "project-1"},
+    )
+    work_id = "work-fabricated-cancel"
+    ledger = IdempotencyLedger(store)
+    ledger.reserve(
+        operation_key=f"pf-worker:{work_id}",
+        task_id=task.task_id,
+        operation_type="product_factory.coding_worker",
+        input_fingerprint="e" * 64,
+    )
+    probe = ProductFactoryOpenHandsRecoveryProbe(ledger)
+    endpoint = _endpoint()
+    conversation_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"nika-core:openhands:{endpoint.endpoint_id}:{work_id}",
+        )
+    )
+    binding = probe.bind(
+        _job(tmp_path / "worker", work_id),
+        endpoint,
+        conversation_id,
+        "11111111-1111-4111-8111-111111111111",
+    )
+    provider = CleanupProvider()
+    runtime = NeverExecuteRuntime()
+    worker = OpenHandsRemoteCodingWorker(
+        provider,
+        runtime,
+        recovery_probe=probe,
+    )
+
+    result = asyncio.run(
+        worker.recover(
+            _job(tmp_path / "worker", work_id),
+            RecoveryState("cancelled", binding.opaque_token),
+        )
+    )
+
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.kind.value == "invalid_request"
+    assert result.recovery_state == RecoveryState(
+        "manual_reconcile_required",
+        binding.opaque_token,
+    )
+    assert provider.released == []
+    assert runtime.execute_calls == 0
+    assert runtime.cancel_calls == []
+    assert runtime.bound_cancel_calls == []
