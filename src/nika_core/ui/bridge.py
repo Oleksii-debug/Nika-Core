@@ -140,7 +140,7 @@ class UIActionBridge:
     def restore_default(self, action_id: str) -> dict[str, Any]:
         try:
             self._keymap.restore_default(action_id)
-        except KeyError as exc:
+        except (KeyError, TypeError, ValueError) as exc:
             return {"ok": False, "message": str(exc)}
         return {"ok": True, "message": "Default shortcut restored."}
 

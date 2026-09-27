@@ -67,3 +67,16 @@ def test_bridge_contains_unexpected_state_failure_without_exposing_details(
     assert secret_canary not in response["message"]
     assert secret_canary not in caplog.text
     assert "OSError" in caplog.text
+
+
+def test_restore_default_expected_conflict_returns_bounded_error(tmp_path: Path, monkeypatch) -> None:
+    bridge = _bridge(tmp_path)
+
+    def reject_restore(_self: Keymap, _action_id: str) -> None:
+        raise ValueError("shortcut conflict with nav.tasks")
+
+    monkeypatch.setattr(Keymap, "restore_default", reject_restore)
+    response = bridge.restore_default("nav.agents")
+
+    assert response["ok"] is False
+    assert response["message"] == "shortcut conflict with nav.tasks"
