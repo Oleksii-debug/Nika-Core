@@ -1474,7 +1474,7 @@ def test_idempotent_confirm_rejects_conflicting_replay_result_without_mutation(
 
     with pytest.raises(
         BatchCursorStateError,
-        match="confirmed replay result contradicts durable completion",
+        match="confirm replay result contradicts durable completion",
     ):
         cursor.confirm("target-0", {"ok": False})
 
@@ -1503,7 +1503,7 @@ def test_idempotent_confirm_rejects_conflicting_replay_deadline_without_mutation
 
     with pytest.raises(
         BatchCursorStateError,
-        match="confirmed replay deadline contradicts durable completion",
+        match="confirm replay deadline contradicts durable completion",
     ):
         cursor.confirm(
             "target-0",
@@ -1548,3 +1548,77 @@ def test_idempotent_confirm_replay_preserves_later_scheduler_deadline(
     assert intent.kind is IntentKind.INTER_BATCH_WAIT
     assert intent.deadline_source == "scheduler"
     assert intent.not_before == scheduler_due.isoformat()
+
+
+def test_crash_window_confirm_rejects_conflicting_durable_result_without_mutation(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, _ = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(1),
+        batch_size=1,
+    )
+    grant = cursor.begin_effect("target-0")
+    durable_completion = {
+        "__nika_batch_cursor_completion_v1__": {
+            "result": {"ok": True},
+            "next_batch_not_before": None,
+        }
+    }
+    ledger.complete(grant.operation_key, durable_completion)
+    before_state = _state_value(memory, "task")
+    before_ledger = ledger.require(grant.operation_key).result
+
+    with pytest.raises(
+        BatchCursorStateError,
+        match="confirm replay result contradicts durable completion",
+    ):
+        cursor.confirm("target-0", {"ok": False})
+
+    assert _state_value(memory, "task") == before_state
+    assert ledger.require(grant.operation_key).result == before_ledger
+    assert cursor.state.targets[0].attempt_state is AttemptState.IN_FLIGHT
+
+
+def test_crash_window_confirm_rejects_conflicting_durable_deadline_without_mutation(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, _ = _services(tmp_path)
+    durable_due = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
+    replay_due = datetime(2030, 1, 2, 4, 4, 5, tzinfo=UTC)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=1,
+    )
+    grant = cursor.begin_effect("target-0")
+    durable_completion = {
+        "__nika_batch_cursor_completion_v1__": {
+            "result": {"ok": True},
+            "next_batch_not_before": durable_due.isoformat(),
+        }
+    }
+    ledger.complete(grant.operation_key, durable_completion)
+    before_state = _state_value(memory, "task")
+    before_ledger = ledger.require(grant.operation_key).result
+
+    with pytest.raises(
+        BatchCursorStateError,
+        match="confirm replay deadline contradicts durable completion",
+    ):
+        cursor.confirm(
+            "target-0",
+            {"ok": True},
+            next_batch_not_before=replay_due,
+        )
+
+    assert _state_value(memory, "task") == before_state
+    assert ledger.require(grant.operation_key).result == before_ledger
+    assert cursor.state.targets[0].attempt_state is AttemptState.IN_FLIGHT
