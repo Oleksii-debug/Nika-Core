@@ -227,14 +227,17 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
         tests: tuple[TestEvidence, ...] = ()
         applied = False
         task_cancelled = False
+        sandbox_acquisition_unresolved = False
         result: CodingResult
         try:
             try:
                 local_root = _validate_local_workspace(job)
                 source_evidence = collect_tree_evidence(local_root)
                 _validate_source_identity(job, source_evidence)
+                sandbox_acquisition_unresolved = True
                 try:
                     endpoint = await self._sandbox_provider.acquire(job)
+                    sandbox_acquisition_unresolved = False
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001 - sandbox provider boundary
@@ -367,7 +370,9 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                 cancel_event.set()
                 stopped = await self._runtime.cancel(job.job_id)
                 state = RecoveryState(
-                    "cancelled" if stopped and not applied else "manual_reconcile_required"
+                    "cancelled"
+                    if stopped and not applied and not sandbox_acquisition_unresolved
+                    else "manual_reconcile_required"
                 )
                 if state.phase == "cancelled":
                     result = _failure_result(
@@ -390,12 +395,12 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                         test_evidence=tests,
                     )
             except OpenHandsSandboxAcquisitionError:
-                state = RecoveryState("interrupted")
+                state = RecoveryState("manual_reconcile_required")
                 result = _failure_result(
                     job,
                     WorkerFailureKind.INTERNAL_ERROR,
                     "remote sandbox acquisition failed without trusted diagnostics",
-                    retryable=True,
+                    retryable=False,
                     state=state,
                     changed_files=changed,
                     test_evidence=tests,
