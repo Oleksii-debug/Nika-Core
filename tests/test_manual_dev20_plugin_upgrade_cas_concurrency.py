@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from threading import Barrier, Event, Thread
 
 from nika_core.plugins import (
@@ -115,3 +116,141 @@ def test_activation_revalidates_registration_after_concurrent_upgrade() -> None:
     assert "changed during activation" in str(failures[0])
     assert created and created[0].closed is True
     assert runtime.manifests()[original.plugin_id].version == replacement.version
+class _BlockingCloseAdapter(_Adapter):
+    def __init__(
+        self,
+        manifest: PluginManifest,
+        *,
+        close_started: Event,
+        release_close: Event,
+    ) -> None:
+        super().__init__(manifest)
+        self._close_started = close_started
+        self._release_close = release_close
+
+    def close(self) -> None:
+        self._close_started.set()
+        assert self._release_close.wait(timeout=5)
+        super().close()
+
+
+class _FailingCloseAdapter(_Adapter):
+    def close(self) -> None:
+        raise RuntimeError("adapter close failed")
+
+
+def _runtime_with_blocked_active_plugin() -> tuple[
+    PluginRuntime,
+    PluginManifest,
+    Event,
+    Event,
+]:
+    runtime = PluginRuntime()
+    manifest = _manifest("1.0.0")
+    close_started = Event()
+    release_close = Event()
+    factory_calls = 0
+
+    def factory() -> _Adapter:
+        nonlocal factory_calls
+        factory_calls += 1
+        if factory_calls == 1:
+            return _BlockingCloseAdapter(
+                manifest,
+                close_started=close_started,
+                release_close=release_close,
+            )
+        return _Adapter(manifest)
+
+    runtime.register(manifest, factory)
+    runtime.activate(manifest.plugin_id)
+    return runtime, manifest, close_started, release_close
+
+
+def _start_blocked_deactivation(
+    runtime: PluginRuntime,
+    plugin_id: str,
+    close_started: Event,
+) -> Thread:
+    thread = Thread(target=runtime.deactivate, args=(plugin_id,))
+    thread.start()
+    assert close_started.wait(timeout=5)
+    return thread
+
+
+def _require_fail_closed(action: Callable[[], object]) -> None:
+    try:
+        action()
+    except Exception:  # noqa: BLE001 - regression accepts ordinary fail-closed rejection.
+        return
+    raise AssertionError(
+        "plugin generation mutation succeeded before prior teardown was proven complete"
+    )
+
+
+def test_reactivation_waits_for_prior_generation_close_completion() -> None:
+    runtime, manifest, close_started, release_close = _runtime_with_blocked_active_plugin()
+    thread = _start_blocked_deactivation(runtime, manifest.plugin_id, close_started)
+
+    try:
+        _require_fail_closed(lambda: runtime.activate(manifest.plugin_id))
+    finally:
+        release_close.set()
+        thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    active = runtime.activate(manifest.plugin_id)
+    assert active.manifest == manifest
+    runtime.deactivate(manifest.plugin_id)
+
+
+def test_upgrade_waits_for_prior_generation_close_completion() -> None:
+    runtime, manifest, close_started, release_close = _runtime_with_blocked_active_plugin()
+    thread = _start_blocked_deactivation(runtime, manifest.plugin_id, close_started)
+    replacement = _manifest("2.0.0")
+
+    try:
+        _require_fail_closed(
+            lambda: runtime.upgrade(
+                replacement,
+                lambda: _Adapter(replacement),
+                expected_version=manifest.version,
+            )
+        )
+    finally:
+        release_close.set()
+        thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    runtime.upgrade(
+        replacement,
+        lambda: _Adapter(replacement),
+        expected_version=manifest.version,
+    )
+    active = runtime.activate(replacement.plugin_id)
+    assert active.manifest == replacement
+    runtime.deactivate(replacement.plugin_id)
+
+
+def test_failed_close_keeps_plugin_generation_fail_stopped() -> None:
+    runtime = PluginRuntime()
+    manifest = _manifest("1.0.0")
+    runtime.register(manifest, lambda: _FailingCloseAdapter(manifest))
+    runtime.activate(manifest.plugin_id)
+
+    try:
+        runtime.deactivate(manifest.plugin_id)
+    except RuntimeError as exc:
+        assert "adapter close failed" in str(exc)
+    else:
+        raise AssertionError("failing adapter close unexpectedly succeeded")
+
+    _require_fail_closed(lambda: runtime.activate(manifest.plugin_id))
+    replacement = _manifest("2.0.0")
+    _require_fail_closed(
+        lambda: runtime.upgrade(
+            replacement,
+            lambda: _Adapter(replacement),
+            expected_version=manifest.version,
+        )
+    )
