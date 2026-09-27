@@ -162,7 +162,11 @@ class BatchCursorState(BaseModel):
             raise ValueError("ready_batch_index exceeds plan batches")
         if first_unfinished is None:
             allowed_ready_batches = {max_batch}
-        elif first_unfinished.batch_index == 0 or first_unfinished.batch_position > 0:
+        elif (
+            first_unfinished.batch_index == 0
+            or first_unfinished.batch_position > 0
+            or first_unfinished.attempt_state is not AttemptState.PENDING
+        ):
             allowed_ready_batches = {first_unfinished.batch_index}
         else:
             allowed_ready_batches = {
@@ -399,11 +403,12 @@ class BatchCursor:
             self._confirm_from_durable(target, durable_result)
             self._advance(durable_due)
         else:
+            clean_evidence = _json_object("evidence", evidence)
             if record.status is IdempotencyStatus.PENDING:
                 self._ledger.mark_uncertain(target.operation_key)
             target.attempt_state = AttemptState.UNCERTAIN
             target.confirmed_result = None
-            target.uncertain_result = _json_object("evidence", evidence)
+            target.uncertain_result = clean_evidence
             self._state.next_scheduled_intent = _reconcile_intent(target)
         self._persist()
 
@@ -787,7 +792,13 @@ def _json_object(name: str, value: dict[str, Any]) -> dict[str, Any]:
 
 
 def _canonical_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
 
 
 def _sha256(value: str) -> str:

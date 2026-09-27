@@ -328,3 +328,81 @@ def test_canonical_utc_deadline_and_released_frontier_still_round_trip(
     assert restarted.state.ready_batch_index == 1
     assert restarted.next_target() is not None
     assert restarted.next_target().target_id == "target-1"
+
+def test_mark_uncertain_validates_evidence_before_ledger_mutation(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, _ = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(1),
+        batch_size=1,
+    )
+    grant = cursor.begin_effect("target-0")
+
+    with pytest.raises(BatchCursorStateError, match="JSON-serializable"):
+        cursor.mark_uncertain("target-0", {"bad": object()})
+
+    durable = ledger.require(grant.operation_key)
+    assert durable.status is IdempotencyStatus.PENDING
+    assert cursor.state.targets[0].attempt_state is AttemptState.IN_FLIGHT
+
+
+def test_confirm_rejects_nonfinite_json_before_completing_effect(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, _ = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(1),
+        batch_size=1,
+    )
+    grant = cursor.begin_effect("target-0")
+
+    with pytest.raises(BatchCursorStateError, match="JSON-serializable"):
+        cursor.confirm("target-0", {"score": float("nan")})
+
+    durable = ledger.require(grant.operation_key)
+    assert durable.status is IdempotencyStatus.PENDING
+    assert cursor.state.targets[0].attempt_state is AttemptState.IN_FLIGHT
+
+
+def test_restore_rejects_active_future_frontier_before_batch_release(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, _ = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=1,
+    )
+    cursor.begin_effect("target-0")
+    cursor.confirm("target-0", {"ok": True})
+
+    state = _state_value(memory, "task")
+    targets = state["targets"]
+    assert isinstance(targets, list)
+    second = targets[1]
+    assert isinstance(second, dict)
+    second["attempt_state"] = "prepared"
+    _replace_state(memory, "task", state)
+
+    with pytest.raises(BatchCursorStateError, match="malformed restored"):
+        BatchCursor.restore(
+            memory,
+            ledger,
+            task_id="task",
+            cursor_id="cursor",
+            targets=_targets(2),
+            batch_size=1,
+        )
+
