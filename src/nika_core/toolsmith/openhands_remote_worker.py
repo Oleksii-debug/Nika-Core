@@ -473,7 +473,18 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
             current = self._states.get(job_id)
             if current is not None and current.phase not in {"running", "cancel_requested"}:
                 return
-            self._states[job_id] = RecoveryState("cancel_requested")
+
+            if current is None:
+                # Missing process-local state is not evidence that no remote execution
+                # exists. After restart, durable Product Factory state may still prove
+                # that this identity crossed the dispatch boundary. Never ask a fresh
+                # runtime instance to manufacture a stop proof for that lost execution.
+                self._states[job_id] = RecoveryState("cancel_probe_pending")
+                unknown_process_state = True
+            else:
+                unknown_process_state = False
+                self._states[job_id] = RecoveryState("cancel_requested")
+
             cancel_event = self._cancel_events.get(job_id)
             if cancel_event is not None:
                 cancel_event.set()
@@ -481,9 +492,32 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
             # Before remote dispatch, or after the remote engine has already returned,
             # Nika can prove there is no remote execution to stop. Mark cancellation
             # terminal without asking a runtime that has no active job.
-            if current is not None and job_id not in self._runtime_inflight:
+            if (
+                not unknown_process_state
+                and current is not None
+                and job_id not in self._runtime_inflight
+            ):
                 self._states[job_id] = RecoveryState("cancelled")
                 return
+
+        if unknown_process_state:
+            durable_state = (
+                await self._recovery_probe.inspect(job_id)
+                if self._recovery_probe is not None
+                else None
+            )
+            async with self._lock:
+                current = self._states.get(job_id)
+                if current is None or current.phase != "cancel_probe_pending":
+                    return
+                if durable_state is not None and durable_state.phase == "cancelled":
+                    self._states[job_id] = durable_state
+                else:
+                    self._states[job_id] = RecoveryState(
+                        "manual_reconcile_required",
+                        durable_state.opaque_token if durable_state is not None else None,
+                    )
+            return
 
         stopped = await self._runtime.cancel(job_id)
         async with self._lock:
