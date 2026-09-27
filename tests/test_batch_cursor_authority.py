@@ -1622,3 +1622,120 @@ def test_crash_window_confirm_rejects_conflicting_durable_deadline_without_mutat
     assert _state_value(memory, "task") == before_state
     assert ledger.require(grant.operation_key).result == before_ledger
     assert cursor.state.targets[0].attempt_state is AttemptState.IN_FLIGHT
+
+def test_confirmed_begin_effect_rejects_rebound_durable_identity_without_mutation(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(1),
+        batch_size=1,
+    )
+    grant = cursor.begin_effect("target-0")
+    cursor.confirm("target-0", {"ok": True})
+    before_state = _state_value(memory, "task")
+
+    with store.connection() as conn:
+        changed = conn.execute(
+            """
+            UPDATE idempotency_records
+            SET operation_type = ?
+            WHERE operation_key = ?
+            """,
+            ("tampered.effect", grant.operation_key),
+        ).rowcount
+    assert changed == 1
+
+    with pytest.raises(BatchCursorStateError, match="belongs to different input"):
+        cursor.begin_effect("target-0")
+
+    assert _state_value(memory, "task") == before_state
+    durable = ledger.require(grant.operation_key)
+    assert durable.status is IdempotencyStatus.COMPLETED
+    assert durable.operation_type == "tampered.effect"
+
+
+def test_crash_window_confirm_rejects_rebound_durable_identity_without_mutation(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(1),
+        batch_size=1,
+    )
+    grant = cursor.begin_effect("target-0")
+    ledger.complete(
+        grant.operation_key,
+        {
+            "__nika_batch_cursor_completion_v1__": {
+                "result": {"ok": True},
+                "next_batch_not_before": None,
+            }
+        },
+    )
+    before_state = _state_value(memory, "task")
+
+    with store.connection() as conn:
+        changed = conn.execute(
+            """
+            UPDATE idempotency_records
+            SET input_fingerprint = ?
+            WHERE operation_key = ?
+            """,
+            ("tampered-fingerprint", grant.operation_key),
+        ).rowcount
+    assert changed == 1
+    before_result = ledger.require(grant.operation_key).result
+
+    with pytest.raises(BatchCursorStateError, match="belongs to different input"):
+        cursor.confirm("target-0", {"ok": True})
+
+    assert _state_value(memory, "task") == before_state
+    durable = ledger.require(grant.operation_key)
+    assert durable.status is IdempotencyStatus.COMPLETED
+    assert durable.result == before_result
+    assert cursor.state.targets[0].attempt_state is AttemptState.IN_FLIGHT
+
+
+def test_mark_uncertain_rejects_rebound_durable_identity_before_mutation(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(1),
+        batch_size=1,
+    )
+    grant = cursor.begin_effect("target-0")
+    before_state = _state_value(memory, "task")
+
+    with store.connection() as conn:
+        changed = conn.execute(
+            """
+            UPDATE idempotency_records
+            SET operation_type = ?
+            WHERE operation_key = ?
+            """,
+            ("tampered.effect", grant.operation_key),
+        ).rowcount
+    assert changed == 1
+
+    with pytest.raises(BatchCursorStateError, match="belongs to different input"):
+        cursor.mark_uncertain("target-0", {"reason": "timeout"})
+
+    assert _state_value(memory, "task") == before_state
+    durable = ledger.require(grant.operation_key)
+    assert durable.status is IdempotencyStatus.PENDING
+    assert durable.operation_type == "tampered.effect"
+    assert cursor.state.targets[0].attempt_state is AttemptState.IN_FLIGHT

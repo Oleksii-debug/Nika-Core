@@ -425,6 +425,7 @@ class BatchCursor:
         if target.attempt_state is not AttemptState.IN_FLIGHT:
             raise BatchCursorBlockedError("only an in-flight target may be confirmed")
         record = self._ledger.require(target.operation_key)
+        self._require_durable_identity(target, record)
         if record.status is IdempotencyStatus.UNCERTAIN:
             raise BatchCursorBlockedError("uncertain effect requires reconciliation")
         if record.status is IdempotencyStatus.PENDING:
@@ -447,6 +448,7 @@ class BatchCursor:
         self._require_persistence_authority()
         target = self._find(target_id)
         record = self._ledger.require(target.operation_key)
+        self._require_durable_identity(target, record)
         if target.attempt_state is AttemptState.CONFIRMED:
             self._require_confirmed_durable_consistency(target, record=record)
             return
@@ -502,12 +504,7 @@ class BatchCursor:
             durable_records.append(durable)
             if durable is None:
                 continue
-            if (
-                durable.task_id != self._state.task_id
-                or durable.operation_type != _OPERATION_TYPE
-                or durable.input_fingerprint != target.input_fingerprint
-            ):
-                raise BatchCursorStateError("idempotency evidence belongs to different input")
+            self._require_durable_identity(target, durable)
             if target.attempt_state is AttemptState.CONFIRMED:
                 self._require_confirmed_durable_consistency(
                     target,
@@ -637,6 +634,15 @@ class BatchCursor:
                 "confirm replay deadline contradicts durable completion"
             )
 
+    def _require_durable_identity(self, target: TargetCursor, record: Any) -> None:
+        if (
+            record.operation_key != target.operation_key
+            or record.task_id != self._state.task_id
+            or record.operation_type != _OPERATION_TYPE
+            or record.input_fingerprint != target.input_fingerprint
+        ):
+            raise BatchCursorStateError("idempotency evidence belongs to different input")
+
     def _require_confirmed_durable_consistency(
         self,
         target: TargetCursor,
@@ -646,6 +652,7 @@ class BatchCursor:
         frontier_index: int | None = None,
     ) -> None:
         durable = record if record is not None else self._ledger.require(target.operation_key)
+        self._require_durable_identity(target, durable)
         if durable.status is not IdempotencyStatus.COMPLETED:
             raise BatchCursorStateError(
                 "confirmed cursor target contradicts idempotency evidence"
