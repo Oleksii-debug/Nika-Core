@@ -475,6 +475,13 @@ class BatchCursor:
                 or durable.input_fingerprint != target.input_fingerprint
             ):
                 raise BatchCursorStateError("idempotency evidence belongs to different input")
+            if (
+                target.attempt_state is AttemptState.CONFIRMED
+                and durable.status is not IdempotencyStatus.COMPLETED
+            ):
+                raise BatchCursorStateError(
+                    "confirmed cursor target contradicts idempotency evidence"
+                )
             if index > frontier_index:
                 raise BatchCursorStateError(
                     "idempotency evidence exists beyond cursor execution frontier"

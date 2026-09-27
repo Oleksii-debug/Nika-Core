@@ -702,3 +702,56 @@ def test_restore_rejects_released_ready_state_that_still_has_future_wait(
     assert len(durable) == 1
     assert durable[0].status is IdempotencyStatus.COMPLETED
 
+@pytest.mark.parametrize(
+    "ledger_status",
+    [IdempotencyStatus.PENDING, IdempotencyStatus.UNCERTAIN],
+)
+def test_restore_rejects_confirmed_cursor_with_noncompleted_ledger_without_mutation(
+    tmp_path: Path,
+    ledger_status: IdempotencyStatus,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(1),
+        batch_size=1,
+    )
+    grant = cursor.begin_effect("target-0")
+    cursor.confirm("target-0", {"ok": True})
+    confirmed_state = _state_value(memory, "task")
+
+    with store.connection() as conn:
+        conn.execute(
+            """
+            UPDATE idempotency_records
+            SET status = ?, result_json = NULL
+            WHERE operation_key = ?
+            """,
+            (ledger_status.value, grant.operation_key),
+        )
+
+    contradictory = ledger.require(grant.operation_key)
+    assert contradictory.status is ledger_status
+    assert contradictory.result is None
+
+    with pytest.raises(
+        BatchCursorStateError,
+        match="confirmed cursor target contradicts idempotency evidence",
+    ):
+        BatchCursor.restore(
+            memory,
+            ledger,
+            task_id="task",
+            cursor_id="cursor",
+            targets=_targets(1),
+            batch_size=1,
+        )
+
+    unchanged = ledger.require(grant.operation_key)
+    assert unchanged.status is ledger_status
+    assert unchanged.result is None
+    assert _state_value(memory, "task") == confirmed_state
+
