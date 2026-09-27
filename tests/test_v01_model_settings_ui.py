@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from nika_core.config import AppConfig
+from nika_core.data.sqlite import SQLiteStore
+from nika_core.v01_model_settings import V01ModelSettings
 from scripts import nika_windows
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,7 +52,10 @@ def test_model_settings_form_is_semantic_and_action_registered() -> None:
         assert f'id="{control_id}"' in html
 
 
-def test_packaged_missing_model_selection_rejects_task_and_focuses_mode(tmp_path: Path) -> None:
+def test_packaged_missing_model_selection_rejects_task_and_focuses_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     source_root = tmp_path / "sources"
     source_root.mkdir()
     (source_root / "a.txt").write_text("alpha", encoding="utf-8")
@@ -60,6 +65,11 @@ def test_packaged_missing_model_selection_rejects_task_and_focuses_mode(tmp_path
         v01_source_root=source_root.resolve(),
         v01_source_a=Path("a.txt"),
         v01_source_b=Path("b.txt"),
+    )
+    monkeypatch.setattr(
+        nika_windows.DesktopBackend,
+        "_schedule_start",
+        lambda _self, _task_id, _command: None,
     )
     bridge, _products = nika_windows.build_windows_bridge(config)
 
@@ -75,6 +85,44 @@ def test_packaged_missing_model_selection_rejects_task_and_focuses_mode(tmp_path
     assert "виберіть режим" in result["message"]
     assert result["focus_id"] == "model-route-kind"
     assert bridge.get_state()["state"]["tasks"] == []
+
+    configured = bridge.dispatch(
+        {
+            "request_id": "save-deterministic-mode",
+            "action_id": "settings.model.configure",
+            "payload": {
+                "revision": 0,
+                "route_kind": "deterministic",
+                "provider_id": None,
+                "model": None,
+                "base_url": None,
+                "credential_ref": None,
+                "private_data_allowed": True,
+                "timeout_seconds": 60,
+            },
+        }
+    )
+    assert configured["status"] == "completed"
+
+    accepted = bridge.dispatch(
+        {
+            "request_id": "explicit-deterministic-mode",
+            "action_id": "task.create",
+            "payload": {"command": "Порівняй два контрольовані джерела."},
+        }
+    )
+    assert accepted["status"] == "accepted"
+    assert accepted["focus_id"] == "tasks-heading"
+    tasks = bridge.get_state()["state"]["tasks"]
+    assert len(tasks) == 1
+    selection = V01ModelSettings(SQLiteStore(config.database_path)).for_task(
+        tasks[0]["task_id"]
+    )
+    assert selection.route_kind == "deterministic"
+    assert selection.provider_id is None
+    assert selection.model is None
+    assert selection.base_url is None
+    assert selection.credential_ref is None
 
 
 def test_model_settings_backend_focus_precedes_potentially_slow_state_refresh() -> None:
