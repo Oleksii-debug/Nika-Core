@@ -58,6 +58,7 @@ class BackgroundSchedulerHost:
             raise TypeError("effect_resolver must be callable")
         if clock is not None and not callable(clock):
             raise TypeError("clock must be callable or None")
+        self._require_shared_authority(store=store, audit=audit, guard=guard)
 
         self._jobs = ScheduledJobStore(store)
         self._bridge = BackgroundRecurrenceBridge(
@@ -146,3 +147,21 @@ class BackgroundSchedulerHost:
         if action_key != DurableRecurrenceService.ACTION_ID:
             raise KeyError(f"unknown scheduler action: {action_key}")
         return self._recurrence.action_handler
+
+    @staticmethod
+    def _require_shared_authority(
+        *,
+        store: SQLiteStore,
+        audit: AuditLog,
+        guard: BackgroundDispatchGuard,
+    ) -> None:
+        """Reject a split scheduler/effect durable world before any runtime object is created."""
+
+        if audit._store is not store:
+            raise ValueError("audit must use the host SQLiteStore instance")
+        if guard._audit is not audit:
+            raise ValueError("guard and scheduler host must share the exact AuditLog")
+        if guard._queue.store is not store:
+            raise ValueError("guard TaskQueue must use the host SQLiteStore instance")
+        if guard._resources._store is not store:
+            raise ValueError("guard ResourceManager must use the host SQLiteStore instance")
