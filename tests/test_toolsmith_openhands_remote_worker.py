@@ -887,6 +887,58 @@ def test_pending_cancel_never_becomes_terminal_before_stop_proof(
     assert provider.released == [("job-1", "sandbox-1", False)]
 
 
+def test_cancel_waits_for_acceptance_stop_proof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    provider = Provider()
+    runtime = Runtime()
+    worker = OpenHandsRemoteCodingWorker(provider, runtime)
+    job = _job(root)
+
+    async def scenario():
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocked_acceptance(
+            _job,
+            _root,
+            _candidate_evidence,
+            cancellation_event,
+        ):
+            started.set()
+            while not cancellation_event.is_set():
+                await asyncio.sleep(0.01)
+            await release.wait()
+            return ()
+
+        monkeypatch.setattr(
+            openhands_worker_module,
+            "_run_acceptance_async",
+            blocked_acceptance,
+        )
+        execution = asyncio.create_task(worker.execute(job))
+        await asyncio.wait_for(started.wait(), timeout=2)
+        cancellation = asyncio.create_task(worker.cancel(job.job_id))
+        await asyncio.sleep(0.1)
+        assert not cancellation.done()
+
+        release.set()
+        result = await asyncio.wait_for(execution, timeout=2)
+        await asyncio.wait_for(cancellation, timeout=2)
+        return result
+
+    result = _run(scenario())
+
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.kind.value == "cancelled"
+    assert result.recovery_state == RecoveryState("cancelled")
+    assert runtime.cancelled == []
+    assert provider.released == [("job-1", "sandbox-1", False)]
+
+
 def test_worker_cancel_stops_inflight_acceptance_process_tree(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     marker = tmp_path / "acceptance-started.txt"

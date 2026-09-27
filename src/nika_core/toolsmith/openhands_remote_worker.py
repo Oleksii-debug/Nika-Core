@@ -204,6 +204,7 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
         self._cancel_events: dict[str, threading.Event] = {}
         self._finalized_results: dict[str, CodingResult] = {}
         self._runtime_inflight: set[str] = set()
+        self._acceptance_inflight: set[str] = set()
         self._lock = asyncio.Lock()
 
     async def execute(self, job: CodingJob) -> CodingResult:
@@ -305,7 +306,7 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                         )
                         applied = True
                         candidate_evidence = collect_tree_evidence(local_root)
-                        tests = await _run_acceptance_async(
+                        tests = await self._run_guarded_acceptance(
                             job,
                             local_root,
                             candidate_evidence,
@@ -474,9 +475,14 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
         return result
 
     async def cancel(self, job_id: str) -> None:
+        wait_for_acceptance = False
         async with self._lock:
             current = self._states.get(job_id)
-            if current is not None and current.phase not in {"running", "cancel_requested"}:
+            if current is not None and current.phase not in {
+                "running",
+                "cancel_requested",
+                "acceptance_cancel_requested",
+            }:
                 return
 
             if current is None:
@@ -488,19 +494,27 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                 unknown_process_state = True
             else:
                 unknown_process_state = False
-                self._states[job_id] = RecoveryState("cancel_requested")
+                runtime_inflight = job_id in self._runtime_inflight
+                acceptance_inflight = job_id in self._acceptance_inflight
+                if acceptance_inflight and not runtime_inflight:
+                    self._states[job_id] = RecoveryState("acceptance_cancel_requested")
+                    wait_for_acceptance = True
+                else:
+                    self._states[job_id] = RecoveryState("cancel_requested")
 
             cancel_event = self._cancel_events.get(job_id)
             if cancel_event is not None:
                 cancel_event.set()
 
-            # Before remote dispatch, or after the remote engine has already returned,
-            # Nika can prove there is no remote execution to stop. Mark cancellation
-            # terminal without asking a runtime that has no active job.
+            # Before any remote or acceptance execution, or after both have returned,
+            # there is no external process left to stop. Only then is an immediate
+            # terminal cancellation proof valid.
             if (
                 not unknown_process_state
                 and current is not None
                 and job_id not in self._runtime_inflight
+                and job_id not in self._acceptance_inflight
+                and not wait_for_acceptance
             ):
                 self._states[job_id] = RecoveryState("cancelled")
                 return
@@ -536,6 +550,19 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                         "manual_reconcile_required",
                         durable_state.opaque_token if durable_state is not None else None,
                     )
+            return
+
+        if wait_for_acceptance:
+            for _ in range(100):
+                async with self._lock:
+                    current = self._states.get(job_id)
+                    if current is None or current.phase != "acceptance_cancel_requested":
+                        return
+                await asyncio.sleep(0.05)
+            async with self._lock:
+                current = self._states.get(job_id)
+                if current is not None and current.phase == "acceptance_cancel_requested":
+                    self._states[job_id] = RecoveryState("manual_reconcile_required")
             return
 
         stopped = await self._runtime.cancel(job_id)
@@ -635,6 +662,39 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
             self._finalized_results.pop(job.job_id, None)
         return await self.execute(job)
 
+    async def _run_guarded_acceptance(
+        self,
+        job: CodingJob,
+        root: pathlib.Path,
+        candidate_evidence: TreeEvidence,
+        cancellation_event: threading.Event,
+    ) -> tuple[TestEvidence, ...]:
+        async with self._lock:
+            current = self._states.get(job.job_id)
+            if current is None or current.phase != "running":
+                return ()
+            self._acceptance_inflight.add(job.job_id)
+
+        acceptance_stopped = False
+        try:
+            evidence = await _run_acceptance_async(
+                job,
+                root,
+                candidate_evidence,
+                cancellation_event,
+            )
+            acceptance_stopped = True
+            return evidence
+        finally:
+            async with self._lock:
+                self._acceptance_inflight.discard(job.job_id)
+                current = self._states.get(job.job_id)
+                if current is not None and current.phase == "acceptance_cancel_requested":
+                    self._states[job.job_id] = RecoveryState(
+                        "cancelled" if acceptance_stopped else "manual_reconcile_required",
+                        current.opaque_token,
+                    )
+
     async def _current_cancellation_result(
         self,
         job: CodingJob,
@@ -646,7 +706,7 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
             state = self._states.get(job.job_id)
         if state is None or state.phase == "running":
             return None
-        if state.phase == "cancel_requested":
+        if state.phase in {"cancel_requested", "acceptance_cancel_requested"}:
             return _failure_result(
                 job,
                 WorkerFailureKind.INTERNAL_ERROR,
@@ -685,7 +745,7 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
             self._states[job_id] = state
             if state.phase == "running":
                 self._cancel_events.setdefault(job_id, threading.Event())
-            elif state.phase not in {"cancel_requested"}:
+            elif state.phase not in {"cancel_requested", "acceptance_cancel_requested"}:
                 self._cancel_events.pop(job_id, None)
 
     async def _finalize_result(self, job: CodingJob, result: CodingResult) -> CodingResult:
@@ -710,6 +770,7 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                     )
                 elif current.phase in {
                     "cancel_requested",
+                    "acceptance_cancel_requested",
                     "cancel_probe_pending",
                     "manual_reconcile_required",
                 }:
