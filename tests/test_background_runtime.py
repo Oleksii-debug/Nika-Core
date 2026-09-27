@@ -1068,3 +1068,35 @@ def test_present_owner_pauses_before_resource_telemetry(
     assert result.action is BackgroundAction.PAUSE
     assert result.reason in {"owner_active", "owner_presence_unknown"}
     assert queue.get(task_id).state is TaskState.PAUSED
+
+
+
+@pytest.mark.parametrize("max_age", [60.0001, 1_000_000.0])
+def test_presence_freshness_window_cannot_disable_staleness(
+    tmp_path: Path,
+    max_age: float,
+) -> None:
+    store = _store(tmp_path)
+    with pytest.raises(ValueError, match="\(0, 60\]"):
+        BackgroundDispatchGuard(
+            queue=TaskQueue(store),
+            audit=AuditLog(store),
+            resources=ResourceManager(store, SequenceResourceObserver()),
+            presence=SequencePresence([]),
+            source_id="win32-owner-presence",
+            max_presence_age_seconds=max_age,
+        )
+
+
+def test_future_skew_cannot_exceed_freshness_window(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    with pytest.raises(ValueError, match="must not exceed"):
+        BackgroundDispatchGuard(
+            queue=TaskQueue(store),
+            audit=AuditLog(store),
+            resources=ResourceManager(store, SequenceResourceObserver()),
+            presence=SequencePresence([]),
+            source_id="win32-owner-presence",
+            max_presence_age_seconds=5.0,
+            max_future_skew_seconds=5.1,
+        )
