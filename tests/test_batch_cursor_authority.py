@@ -329,6 +329,7 @@ def test_canonical_utc_deadline_and_released_frontier_still_round_trip(
     assert restarted.next_target() is not None
     assert restarted.next_target().target_id == "target-1"
 
+
 def test_mark_uncertain_validates_evidence_before_ledger_mutation(
     tmp_path: Path,
 ) -> None:
