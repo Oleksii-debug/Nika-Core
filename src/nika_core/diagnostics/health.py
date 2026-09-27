@@ -66,6 +66,11 @@ class HealthReport:
     checks: tuple[HealthCheck, ...]
 
     def __post_init__(self) -> None:
+        if type(self.generated_at) is not datetime:
+            raise TypeError("generated_at must be a canonical datetime")
+        if self.generated_at.tzinfo is None or self.generated_at.utcoffset() is None:
+            raise ValueError("generated_at must be timezone-aware")
+        object.__setattr__(self, "generated_at", self.generated_at.astimezone(UTC))
         if type(self.checks) is not tuple:
             raise TypeError("checks must be an immutable tuple")
         canonical_checks: list[HealthCheck] = []
@@ -156,6 +161,8 @@ class HealthService:
 
     def _normalized_now(self) -> datetime:
         value = self._clock()
+        if type(value) is not datetime:
+            raise TypeError("health clock must return a canonical datetime")
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("health clock must return a timezone-aware datetime")
         return value.astimezone(UTC)

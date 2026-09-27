@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from enum import StrEnum
 
 import pytest
@@ -8,6 +8,7 @@ import pytest
 from nika_core.diagnostics import (
     HealthCheck,
     HealthReport,
+    HealthService,
     HealthStatus,
     ModelHealthFact,
     ModelHealthSnapshot,
@@ -30,6 +31,11 @@ class _HealthCheckSubclass(HealthCheck):
 
 class _HealthTextSubclass(str):
     pass
+
+
+class _BehavioralDatetime(datetime):
+    def astimezone(self, *args: object, **kwargs: object) -> datetime:
+        raise AssertionError("behavioral datetime must not execute")
 
 
 class _CheckTuple(tuple[HealthCheck, ...]):
@@ -102,6 +108,45 @@ def test_health_check_rejects_noncanonical_status(status: object) -> None:
             summary="canonical status required",
         )
 
+
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["2026-09-27T21:00:00+00:00", _BehavioralDatetime(2026, 9, 27, tzinfo=UTC)],
+)
+def test_health_report_rejects_noncanonical_timestamp_carriers(value: object) -> None:
+    with pytest.raises(TypeError, match="generated_at must be a canonical datetime"):
+        HealthReport(generated_at=value, checks=())  # type: ignore[arg-type]
+
+
+def test_health_report_rejects_naive_timestamp() -> None:
+    with pytest.raises(ValueError, match="generated_at must be timezone-aware"):
+        HealthReport(generated_at=datetime(2026, 9, 27, 21, 0), checks=())
+
+
+def test_health_report_snapshots_timestamp_in_canonical_utc() -> None:
+    local = datetime(
+        2026,
+        9,
+        27,
+        23,
+        0,
+        tzinfo=timezone(timedelta(hours=2)),
+    )
+    report = HealthReport(generated_at=local, checks=())
+
+    assert report.generated_at == datetime(2026, 9, 27, 21, 0, tzinfo=UTC)
+    assert report.generated_at.tzinfo is UTC
+    assert report.as_dict()["generated_at"] == "2026-09-27T21:00:00+00:00"
+
+
+def test_health_service_rejects_behavioral_clock_before_datetime_methods() -> None:
+    service = object.__new__(HealthService)
+    service._clock = lambda: _BehavioralDatetime(2026, 9, 27, tzinfo=UTC)
+
+    with pytest.raises(TypeError, match="health clock must return a canonical datetime"):
+        service._normalized_now()
 
 def test_health_report_rejects_mutable_check_container() -> None:
     check = HealthCheck(
