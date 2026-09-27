@@ -174,12 +174,28 @@ class DeterministicBrain:
             available_actions = tuple(
                 action for action in actions if action.action_id not in completed_set
             )
-            plan = await self._plan(
-                state=current_state,
-                goal=goal,
-                actions=available_actions,
-                planning_deadline=planning_deadline,
-            )
+            try:
+                plan = await self._plan(
+                    state=current_state,
+                    goal=goal,
+                    actions=available_actions,
+                    planning_deadline=planning_deadline,
+                )
+            except DeterministicPlanningError as exc:
+                if exc.code not in {
+                    DeterministicErrorCode.GOAL_UNREACHABLE,
+                    DeterministicErrorCode.NO_PLAN_FOUND,
+                }:
+                    raise
+                return self._failure(
+                    plan=DeterministicPlan(steps=()),
+                    completed=completed,
+                    state=current_state,
+                    history=history,
+                    replans=replans,
+                    code=DeterministicErrorCode.NO_VALID_PLAN,
+                    message=str(exc),
+                )
             history.append(plan)
 
             validation_failure = self._validate_plan(
@@ -433,7 +449,11 @@ class DeterministicBrain:
             raise
 
         if not result.ok:
-            if result.error in {"approval required", "unknown tool"}:
+            failure_code = self._classify_tool_failure(result.error)
+            if failure_code in {
+                DeterministicErrorCode.MISSING_CAPABILITY,
+                DeterministicErrorCode.POLICY_DENIED_CAPABILITY,
+            }:
                 try:
                     journal.release_pending(reservation.operation_key)
                 except Exception as exc:  # noqa: BLE001 - do not hide a broken durable ledger.
@@ -442,7 +462,7 @@ class DeterministicBrain:
                         f"could not release unused effect reservation: {type(exc).__name__}",
                     )
                 return _ToolExecutionFailure(
-                    DeterministicErrorCode.TOOL_EXECUTION_FAILED,
+                    failure_code,
                     result.error or "tool failed",
                 )
 
@@ -487,6 +507,15 @@ class DeterministicBrain:
         )
         if result.ok:
             return None
+        failure_code = self._classify_tool_failure(result.error)
+        if failure_code in {
+            DeterministicErrorCode.MISSING_CAPABILITY,
+            DeterministicErrorCode.POLICY_DENIED_CAPABILITY,
+        }:
+            return _ToolExecutionFailure(
+                failure_code,
+                result.error or "tool failed",
+            )
         if result.error in {
             "tool effect not safe to execute",
             "tool timed out",
@@ -498,7 +527,7 @@ class DeterministicBrain:
                 result.error,
             )
         return _ToolExecutionFailure(
-            DeterministicErrorCode.TOOL_EXECUTION_FAILED,
+            failure_code,
             result.error or "tool failed",
         )
 
@@ -521,9 +550,19 @@ class DeterministicBrain:
         if result.ok:
             return None
         return _ToolExecutionFailure(
-            DeterministicErrorCode.TOOL_EXECUTION_FAILED,
+            self._classify_tool_failure(result.error),
             result.error or "tool failed",
         )
+
+    @staticmethod
+    def _classify_tool_failure(error: str | None) -> DeterministicErrorCode:
+        if error == "unknown tool":
+            return DeterministicErrorCode.MISSING_CAPABILITY
+        if error == "approval required":
+            return DeterministicErrorCode.POLICY_DENIED_CAPABILITY
+        if error == "tool timed out":
+            return DeterministicErrorCode.TEMPORARILY_UNAVAILABLE_CAPABILITY
+        return DeterministicErrorCode.TOOL_EXECUTION_FAILED
 
     @staticmethod
     def _mark_effect_uncertain_best_effort(
