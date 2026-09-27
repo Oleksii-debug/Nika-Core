@@ -254,3 +254,54 @@ def test_failed_close_keeps_plugin_generation_fail_stopped() -> None:
             expected_version=manifest.version,
         )
     )
+class _ReentrantCloseAdapter(_Adapter):
+    def __init__(
+        self,
+        manifest: PluginManifest,
+        *,
+        on_close: Callable[[], object],
+    ) -> None:
+        super().__init__(manifest)
+        self._on_close = on_close
+
+    def close(self) -> None:
+        self._on_close()
+        super().close()
+
+
+def test_transient_adapter_close_can_reenter_runtime_without_deadlock() -> None:
+    runtime = PluginRuntime()
+    manifest = _manifest("1.0.0")
+    factory_barrier = Barrier(2)
+    results: list[_Adapter] = []
+    failures: list[Exception] = []
+
+    def factory() -> _Adapter:
+        factory_barrier.wait(timeout=5)
+        return _ReentrantCloseAdapter(
+            manifest,
+            on_close=runtime.manifests,
+        )
+
+    runtime.register(manifest, factory)
+
+    def activate() -> None:
+        try:
+            results.append(runtime.activate(manifest.plugin_id))
+        except Exception as exc:  # noqa: BLE001 - regression records thread outcome.
+            failures.append(exc)
+
+    threads = [
+        Thread(target=activate, daemon=True),
+        Thread(target=activate, daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert failures == []
+    assert len(results) == 2
+    assert results[0] is results[1]
+    runtime.deactivate(manifest.plugin_id)
