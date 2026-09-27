@@ -331,15 +331,20 @@ class IdempotencyLedger:
         now = datetime.now(UTC).isoformat()
         with self._store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            pending_rows = conn.execute(
+            task_rows = conn.execute(
                 """
                 SELECT * FROM idempotency_records
-                WHERE task_id = ? AND status = ?
+                WHERE task_id = ?
                 ORDER BY created_at, operation_key
                 """,
-                (task_id, IdempotencyStatus.PENDING.value),
+                (task_id,),
             ).fetchall()
-            records = tuple(self._from_row(row) for row in pending_rows)
+            task_records = tuple(self._from_row(row) for row in task_rows)
+            records = tuple(
+                record
+                for record in task_records
+                if record.status is IdempotencyStatus.PENDING
+            )
             if not records:
                 return ()
 
