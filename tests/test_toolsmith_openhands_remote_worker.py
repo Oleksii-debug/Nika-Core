@@ -154,6 +154,23 @@ class Runtime:
         return self.cancel_verified
 
 
+class BlockingRuntime(Runtime):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def execute(self, job, endpoint, prompt, source_root, source_evidence):
+        self.calls.append((job, endpoint, prompt, source_root, source_evidence))
+        self.started.set()
+        await self.release.wait()
+        files = tuple(
+            RemoteFile(item.path, (source_root / item.path).read_bytes())
+            for item in source_evidence.files
+        )
+        return OpenHandsRunEvidence(f"conversation-{job.job_id}", files)
+
+
 class DeferredCancelRuntime:
     def __init__(self) -> None:
         self.execute_started = asyncio.Event()
@@ -492,6 +509,85 @@ def test_remote_worker_rejects_windows_case_colliding_snapshot_before_mutation(
     assert result.failure.kind.value == "policy_violation"
     assert "case-colliding" in result.failure.message
     assert root.joinpath("src/value.txt").read_bytes() == b"before\n"
+
+
+@pytest.mark.parametrize("endpoint_id", (" sandbox-1", "sandbox-1 ", "sandbox\n1"))
+def test_endpoint_rejects_noncanonical_identity(endpoint_id: str) -> None:
+    with pytest.raises(ValueError, match="identity"):
+        OpenHandsSandboxEndpoint(
+            endpoint_id=endpoint_id,
+            host="https://agent.example.test",
+            working_dir="/workspace/nika-job",
+            isolation_class=IsolationClass.REMOTE_SANDBOXED,
+            sandbox_egress_hosts=("localhost",),
+            network_policy_enforced=True,
+        )
+
+
+def test_worker_blocks_concurrent_reuse_of_attested_fresh_endpoint(
+    tmp_path: Path,
+) -> None:
+    root_one = _workspace(tmp_path / "one")
+    root_two = _workspace(tmp_path / "two")
+    root_three = _workspace(tmp_path / "three")
+    job_one = _job(root_one)
+    base_two = _job(root_two)
+    job_two = CodingJob(
+        "job-2",
+        "task-2",
+        base_two.goal,
+        base_two.repository,
+        base_two.lease,
+        base_two.allowed_paths,
+        base_two.process_policy,
+        base_two.network_policy,
+        base_two.resource_budget,
+        base_two.acceptance_commands,
+        base_two.permission_ceiling,
+    )
+    base_three = _job(root_three)
+    job_three = CodingJob(
+        "job-3",
+        "task-3",
+        base_three.goal,
+        base_three.repository,
+        base_three.lease,
+        base_three.allowed_paths,
+        base_three.process_policy,
+        base_three.network_policy,
+        base_three.resource_budget,
+        base_three.acceptance_commands,
+        base_three.permission_ceiling,
+    )
+    provider = Provider()
+    runtime = BlockingRuntime()
+    worker = OpenHandsRemoteCodingWorker(provider, runtime)
+
+    async def scenario():
+        first = asyncio.create_task(worker.execute(job_one))
+        await asyncio.wait_for(runtime.started.wait(), timeout=2)
+
+        collision = await worker.execute(job_two)
+        assert not collision.succeeded
+        assert collision.failure is not None
+        assert collision.failure.kind.value == "policy_violation"
+        assert "endpoint" in collision.failure.message
+        assert provider.released == []
+
+        runtime.release.set()
+        first_result = await asyncio.wait_for(first, timeout=2)
+        third_result = await asyncio.wait_for(worker.execute(job_three), timeout=2)
+        return first_result, third_result
+
+    first_result, third_result = _run(scenario())
+
+    assert first_result.succeeded
+    assert third_result.succeeded
+    assert [item[0] for item in runtime.calls] == [job_one, job_three]
+    assert provider.released == [
+        ("job-1", "sandbox-1", True),
+        ("job-3", "sandbox-1", True),
+    ]
 
 
 def test_remote_worker_accepts_approved_https_remote_agent_server(tmp_path: Path) -> None:

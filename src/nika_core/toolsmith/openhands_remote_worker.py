@@ -79,6 +79,10 @@ class OpenHandsSandboxEndpoint:
             raise ValueError("OpenHands sandbox attestations must use exact booleans")
         if not self.endpoint_id.strip() or not self.host.strip() or not self.working_dir.strip():
             raise ValueError("OpenHands endpoint identity, host and working_dir are required")
+        if self.endpoint_id != self.endpoint_id.strip() or any(
+            ord(character) < 32 or ord(character) == 127 for character in self.endpoint_id
+        ):
+            raise ValueError("OpenHands endpoint identity must be canonical and control-free")
         parsed = urlparse(self.host)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise ValueError("OpenHands endpoint host must be an absolute http(s) URL")
@@ -205,6 +209,7 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
         self._finalized_results: dict[str, CodingResult] = {}
         self._runtime_inflight: set[str] = set()
         self._acceptance_inflight: set[str] = set()
+        self._active_endpoint_ids: set[str] = set()
         self._lock = asyncio.Lock()
 
     async def execute(self, job: CodingJob) -> CodingResult:
@@ -229,6 +234,8 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
         applied = False
         task_cancelled = False
         sandbox_acquisition_unresolved = False
+        endpoint_reserved = False
+        endpoint_collision = False
         result: CodingResult
         try:
             try:
@@ -250,6 +257,14 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                         "remote sandbox acquisition failed"
                     ) from None
                 _validate_endpoint(job, endpoint)
+                async with self._lock:
+                    if endpoint.endpoint_id in self._active_endpoint_ids:
+                        endpoint_collision = True
+                        raise OpenHandsWorkerError(
+                            "sandbox provider reused an active endpoint identity"
+                        )
+                    self._active_endpoint_ids.add(endpoint.endpoint_id)
+                    endpoint_reserved = True
                 prompt = _build_prompt(job)
                 async with self._lock:
                     current = self._states.get(job.job_id)
@@ -442,7 +457,8 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                     test_evidence=tests,
                 )
         finally:
-            if endpoint is not None:
+            release_proven = False
+            if endpoint is not None and not endpoint_collision:
                 release_succeeded = result.succeeded if "result" in locals() else False
                 async with self._lock:
                     current = self._states.get(job.job_id)
@@ -454,6 +470,7 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                         endpoint,
                         succeeded=release_succeeded,
                     )
+                    release_proven = True
                 except Exception as exc:  # noqa: BLE001 - sandbox provider boundary
                     _LOGGER.error(
                         "OpenHands sandbox release requires provider reconciliation (%s)",
@@ -468,6 +485,9 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                         changed_files=changed,
                         test_evidence=tests,
                     )
+            if endpoint_reserved and release_proven and endpoint is not None:
+                async with self._lock:
+                    self._active_endpoint_ids.discard(endpoint.endpoint_id)
 
         result = await self._finalize_result(job, result)
         if task_cancelled:
