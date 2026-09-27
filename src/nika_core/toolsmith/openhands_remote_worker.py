@@ -6,7 +6,6 @@ import hashlib
 import logging
 import os
 import pathlib
-import shutil
 import tempfile
 import threading
 from datetime import UTC, datetime
@@ -21,12 +20,10 @@ from nika_core.toolsmith.contracts import (
     IsolationClass,
     NetworkMode,
     RecoveryState,
-    ResourceBudget,
     TestEvidence,
     WorkerFailure,
     WorkerFailureKind,
 )
-from nika_core.toolsmith.execution import run_typed_process
 from nika_core.toolsmith.workspace_security import (
     TreeEvidence,
     WorkspacePathPolicy,
@@ -34,7 +31,6 @@ from nika_core.toolsmith.workspace_security import (
     collect_tree_evidence,
     ensure_path_policy,
     normalize_job_relative_path,
-    sterile_git_environment,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -156,6 +152,35 @@ class OpenHandsRunEvidence:
             raise ValueError("OpenHands run evidence requires a conversation id")
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class SandboxedAcceptanceEvidence:
+    isolation_class: IsolationClass
+    candidate_digest: str
+    test_evidence: tuple[TestEvidence, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.isolation_class) is not IsolationClass or self.isolation_class not in {
+            IsolationClass.OS_SANDBOXED,
+            IsolationClass.REMOTE_SANDBOXED,
+        }:
+            raise ValueError(
+                "acceptance evidence must attest OS_SANDBOXED or REMOTE_SANDBOXED isolation"
+            )
+        if (
+            type(self.candidate_digest) is not str
+            or len(self.candidate_digest) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.candidate_digest.casefold()
+            )
+        ):
+            raise ValueError("acceptance evidence requires a canonical sha256 candidate digest")
+        if type(self.test_evidence) is not tuple or any(
+            type(item) is not TestEvidence for item in self.test_evidence
+        ):
+            raise ValueError("acceptance test evidence must be an immutable TestEvidence tuple")
+
+
 @runtime_checkable
 class OpenHandsSandboxProviderPort(Protocol):
     async def acquire(self, job: CodingJob) -> OpenHandsSandboxEndpoint: ...
@@ -190,6 +215,20 @@ class OpenHandsRemoteRuntimePort(Protocol):
     async def cancel(self, job_id: str) -> bool: ...
 
 
+@runtime_checkable
+class SandboxedAcceptanceRuntimePort(Protocol):
+    """Nika-owned verifier boundary; implementations must execute outside the host."""
+
+    async def execute(
+        self,
+        job: CodingJob,
+        candidate_files: tuple[RemoteFile, ...],
+        candidate_evidence: TreeEvidence,
+    ) -> SandboxedAcceptanceEvidence: ...
+
+    async def cancel(self, job_id: str) -> bool: ...
+
+
 class OpenHandsRemoteCodingWorker(CodingWorkerPort):
     """Nika CodingWorker backed by a fresh, remotely sandboxed OpenHands runtime.
 
@@ -203,10 +242,12 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
         sandbox_provider: OpenHandsSandboxProviderPort,
         runtime: OpenHandsRemoteRuntimePort,
         *,
+        acceptance_runtime: SandboxedAcceptanceRuntimePort | None = None,
         recovery_probe: OpenHandsRecoveryStateProbePort | None = None,
     ) -> None:
         self._sandbox_provider = sandbox_provider
         self._runtime = runtime
+        self._acceptance_runtime = acceptance_runtime
         self._recovery_probe = recovery_probe
         self._states: dict[str, RecoveryState] = {}
         self._cancel_events: dict[str, threading.Event] = {}
@@ -246,6 +287,10 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                 local_root = _validate_local_workspace(job)
                 source_evidence = collect_tree_evidence(local_root)
                 _validate_source_identity(job, source_evidence)
+                if job.acceptance_commands and self._acceptance_runtime is None:
+                    raise OpenHandsWorkerError(
+                        "acceptance commands require an OS/remote sandboxed Nika verifier"
+                    )
                 sandbox_acquisition_unresolved = True
                 try:
                     endpoint = await self._sandbox_provider.acquire(job)
@@ -600,16 +645,16 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
             return
 
         if wait_for_acceptance:
-            for _ in range(100):
-                async with self._lock:
-                    current = self._states.get(job_id)
-                    if current is None or current.phase != "acceptance_cancel_requested":
-                        return
-                await asyncio.sleep(0.05)
+            stopped, stop_cancelled = await self._acceptance_stop_proof(job_id)
             async with self._lock:
                 current = self._states.get(job_id)
-                if current is not None and current.phase == "acceptance_cancel_requested":
-                    self._states[job_id] = RecoveryState("manual_reconcile_required")
+                if current is None or current.phase != "acceptance_cancel_requested":
+                    return
+                self._states[job_id] = RecoveryState(
+                    "cancelled" if stopped else "manual_reconcile_required"
+                )
+            if stop_cancelled:
+                raise asyncio.CancelledError
             return
 
         stopped, stop_cancelled = await self._runtime_stop_proof(job_id)
@@ -636,6 +681,26 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
             return False, False
         if type(stopped) is not bool:
             _LOGGER.error("OpenHands runtime returned a non-boolean cancellation proof")
+            return False, False
+        return stopped, False
+
+
+    async def _acceptance_stop_proof(self, job_id: str) -> tuple[bool, bool]:
+        runtime = self._acceptance_runtime
+        if runtime is None:
+            return False, False
+        try:
+            stopped = await runtime.cancel(job_id)
+        except asyncio.CancelledError:
+            return False, True
+        except Exception as exc:  # noqa: BLE001 - trusted verifier transport boundary
+            _LOGGER.error(
+                "acceptance runtime cancellation proof failed (%s)",
+                type(exc).__name__,
+            )
+            return False, False
+        if type(stopped) is not bool:
+            _LOGGER.error("acceptance runtime returned a non-boolean cancellation proof")
             return False, False
         return stopped, False
 
@@ -750,31 +815,45 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
         candidate_evidence: TreeEvidence,
         cancellation_event: threading.Event,
     ) -> tuple[TestEvidence, ...]:
+        if not job.acceptance_commands:
+            return ()
+        runtime = self._acceptance_runtime
+        if runtime is None:
+            raise OpenHandsWorkerError(
+                "acceptance commands require an OS/remote sandboxed Nika verifier"
+            )
+        candidate_files = _freeze_candidate_files(root, candidate_evidence)
         async with self._lock:
             current = self._states.get(job.job_id)
             if current is None or current.phase != "running":
                 return ()
             self._acceptance_inflight.add(job.job_id)
 
-        acceptance_stopped = False
         try:
-            evidence = await _run_acceptance_async(
+            if cancellation_event.is_set():
+                return ()
+            evidence = await runtime.execute(
                 job,
-                root,
+                candidate_files,
                 candidate_evidence,
-                cancellation_event,
             )
-            acceptance_stopped = True
-            return evidence
+            _validate_acceptance_evidence(job, candidate_evidence, evidence)
+            return evidence.test_evidence
+        except asyncio.CancelledError:
+            stopped, _ = await self._acceptance_stop_proof(job.job_id)
+            async with self._lock:
+                current = self._states.get(job.job_id)
+                if current is not None and current.phase in {
+                    "running",
+                    "acceptance_cancel_requested",
+                }:
+                    self._states[job.job_id] = RecoveryState(
+                        "cancelled" if stopped else "manual_reconcile_required"
+                    )
+            raise
         finally:
             async with self._lock:
                 self._acceptance_inflight.discard(job.job_id)
-                current = self._states.get(job.job_id)
-                if current is not None and current.phase == "acceptance_cancel_requested":
-                    self._states[job.job_id] = RecoveryState(
-                        "cancelled" if acceptance_stopped else "manual_reconcile_required",
-                        current.opaque_token,
-                    )
 
     async def _current_cancellation_result(
         self,
@@ -1075,89 +1154,44 @@ def _validate_and_apply_snapshot(
     )
 
 
-async def _run_acceptance_async(
-    job: CodingJob,
+def _freeze_candidate_files(
     root: pathlib.Path,
-    candidate_evidence: TreeEvidence,
-    cancellation_event: threading.Event,
-) -> tuple[TestEvidence, ...]:
-    task = asyncio.create_task(
-        asyncio.to_thread(
-            _run_acceptance,
-            job,
-            root,
-            candidate_evidence,
-            cancellation_event,
-        )
-    )
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        cancellation_event.set()
-        try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=5)
-        except TimeoutError:
-            _LOGGER.warning("acceptance process stop could not be proven before cancellation")
-        except Exception as exc:  # noqa: BLE001 - process cleanup after task cancellation
-            _LOGGER.warning(
-                "acceptance cleanup raised after cancellation (%s)",
-                type(exc).__name__,
-            )
-        raise
-
-
-def _run_acceptance(
-    job: CodingJob,
-    root: pathlib.Path,
-    candidate_evidence: TreeEvidence,
-    cancellation_event: threading.Event,
-) -> tuple[TestEvidence, ...]:
-    with tempfile.TemporaryDirectory(prefix="nika-openhands-acceptance-") as temp_root_text:
-        acceptance_root = pathlib.Path(temp_root_text) / "candidate"
-        shutil.copytree(root, acceptance_root, copy_function=shutil.copy2)
-        copied_evidence = collect_tree_evidence(acceptance_root)
-        if copied_evidence != candidate_evidence:
+    evidence: TreeEvidence,
+) -> tuple[RemoteFile, ...]:
+    files: list[RemoteFile] = []
+    for item in evidence.files:
+        policy = WorkspacePathPolicy((item.path,))
+        path = ensure_path_policy(root, item.path, policy, must_exist=True)
+        if not path.is_file():
+            raise OpenHandsWorkerError("validated candidate contains a non-file path")
+        data = path.read_bytes()
+        if len(data) != item.size_bytes or hashlib.sha256(data).hexdigest() != item.sha256:
             raise OpenHandsWorkspaceMutationError(
-                "acceptance workspace copy does not match validated candidate"
+                "validated candidate changed before sandboxed acceptance dispatch"
             )
+        files.append(RemoteFile(item.path, data))
+    return tuple(files)
 
-        evidence: list[TestEvidence] = []
-        environment = sterile_git_environment(os.environ)
-        for command in job.acceptance_commands:
-            if cancellation_event.is_set():
-                break
-            cwd = acceptance_root
-            if command.cwd != ".":
-                policy = WorkspacePathPolicy((command.cwd,))
-                cwd = ensure_path_policy(
-                    acceptance_root,
-                    command.cwd,
-                    policy,
-                    must_exist=True,
-                )
-                if not cwd.is_dir():
-                    raise OpenHandsWorkerError("acceptance command cwd is not a directory")
-            timeout_seconds = command.timeout_seconds or job.resource_budget.timeout_seconds
-            budget = ResourceBudget(
-                timeout_seconds=timeout_seconds,
-                max_output_bytes=job.resource_budget.max_output_bytes,
-                max_changed_files=job.resource_budget.max_changed_files,
-            )
-            result = run_typed_process(
-                command.argv,
-                process_policy=job.process_policy,
-                resource_budget=budget,
-                cwd=cwd,
-                environment=environment,
-                cancellation_event=cancellation_event,
-            )
-            output_digest = hashlib.sha256(
-                result.stdout.encode("utf-8") + b"\x00" + result.stderr.encode("utf-8")
-            ).hexdigest()
-            evidence.append(TestEvidence(result.argv, result.returncode, output_digest))
-            if result.timed_out or result.cancelled or result.output_limit_exceeded:
-                break
-        return tuple(evidence)
+
+def _validate_acceptance_evidence(
+    job: CodingJob,
+    candidate_evidence: TreeEvidence,
+    evidence: SandboxedAcceptanceEvidence,
+) -> None:
+    if type(evidence) is not SandboxedAcceptanceEvidence:
+        raise OpenHandsWorkerError("acceptance runtime returned non-canonical evidence")
+    if evidence.isolation_class not in {
+        IsolationClass.OS_SANDBOXED,
+        IsolationClass.REMOTE_SANDBOXED,
+    }:
+        raise OpenHandsWorkerError("acceptance runtime did not attest sandbox isolation")
+    if evidence.candidate_digest.casefold() != candidate_evidence.digest.casefold():
+        raise OpenHandsWorkerError("acceptance evidence is bound to a different candidate")
+    if len(evidence.test_evidence) != len(job.acceptance_commands):
+        raise OpenHandsWorkerError("acceptance evidence count does not match declared commands")
+    for command, test in zip(job.acceptance_commands, evidence.test_evidence, strict=True):
+        if test.command != command.argv:
+            raise OpenHandsWorkerError("acceptance evidence command identity does not match job")
 
 
 def _failure_result(
