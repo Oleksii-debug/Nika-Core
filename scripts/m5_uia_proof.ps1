@@ -748,7 +748,7 @@ try {
         Set-BoundControlValue $modelNameControl 'uia-proof-model'
         Set-BoundControlFocus $saveModelControl
         [System.Windows.Forms.SendKeys]::SendWait(' ')
-        Wait-BoundTextEvidence 'Модель збережено для нових завдань.'
+        Wait-BoundTextEvidence 'Модель збережено для нових завдань: ollama, uia-proof-model.'
         Wait-FocusName $commandControl
 
         $sourceRootControl = Wait-DescendantName 'Папка джерел — повний шлях' ([System.Windows.Automation.ControlType]::Edit)
