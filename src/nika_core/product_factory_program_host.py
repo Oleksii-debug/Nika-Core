@@ -391,18 +391,24 @@ class ProductFactoryProgramHost:
                     self.worker.dispatch(request),
                 )
             except asyncio.CancelledError:
-                self._mark_uncertain_fenced(operation_key, lease)
+                self._mark_uncertain_with_status(operation_key, lease)
                 self._release_best_effort(lease)
                 raise
             except Exception as exc:  # noqa: BLE001 - isolate one external worker failure
-                self._mark_uncertain_fenced(operation_key, lease)
+                durable_status, marker_detail = self._mark_uncertain_with_status(
+                    operation_key,
+                    lease,
+                )
                 self._release_best_effort(lease)
                 return _outcome(
                     request,
                     coordinator,
                     ProgramWorkDisposition.UNCERTAIN,
-                    IdempotencyStatus.UNCERTAIN,
-                    f"worker dispatch did not return trusted evidence: {type(exc).__name__}",
+                    durable_status,
+                    (
+                        "worker dispatch did not return trusted evidence: "
+                        f"{type(exc).__name__}{marker_detail}"
+                    ),
                 )
         finally:
             semaphore.release()
@@ -445,7 +451,11 @@ class ProductFactoryProgramHost:
                     if not created:
                         return _existing_operation_outcome(request, operation)
                     try:
-                        envelope = await self.worker.dispatch(request)
+                        envelope, lease = await self._run_effect_with_lease(
+                            request,
+                            lease,
+                            self.worker.dispatch(request),
+                        )
                     except asyncio.CancelledError:
                         self._mark_uncertain_with_status(operation_key, lease)
                         raise
