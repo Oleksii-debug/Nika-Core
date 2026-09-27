@@ -598,8 +598,12 @@ def test_worker_blocks_concurrent_reuse_of_attested_fresh_endpoint(
         collision = await worker.execute(job_two)
         assert not collision.succeeded
         assert collision.failure is not None
-        assert collision.failure.kind.value == "policy_violation"
-        assert "endpoint" in collision.failure.message
+        assert collision.failure.kind.value == "internal_error"
+        assert collision.failure.retryable is False
+        assert collision.recovery_state == RecoveryState("manual_reconcile_required")
+        assert collision.failure.message == (
+            "remote sandbox endpoint identity collision requires provider reconciliation"
+        )
         assert provider.released == []
 
         runtime.release.set()

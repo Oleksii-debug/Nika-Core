@@ -52,6 +52,10 @@ class OpenHandsSandboxAcquisitionError(RuntimeError):
     """Raised when the injected sandbox provider fails before endpoint validation."""
 
 
+class OpenHandsEndpointCollisionError(RuntimeError):
+    """Raised when a provider reuses one active sandbox identity across jobs."""
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class OpenHandsSandboxEndpoint:
     """Attested control-plane endpoint for one fresh remote sandbox.
@@ -260,7 +264,7 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                 async with self._lock:
                     if endpoint.endpoint_id in self._active_endpoint_ids:
                         endpoint_collision = True
-                        raise OpenHandsWorkerError(
+                        raise OpenHandsEndpointCollisionError(
                             "sandbox provider reused an active endpoint identity"
                         )
                     self._active_endpoint_ids.add(endpoint.endpoint_id)
@@ -416,6 +420,17 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                     job,
                     WorkerFailureKind.INTERNAL_ERROR,
                     "remote sandbox acquisition failed without trusted diagnostics",
+                    retryable=False,
+                    state=state,
+                    changed_files=changed,
+                    test_evidence=tests,
+                )
+            except OpenHandsEndpointCollisionError:
+                state = RecoveryState("manual_reconcile_required")
+                result = _failure_result(
+                    job,
+                    WorkerFailureKind.INTERNAL_ERROR,
+                    "remote sandbox endpoint identity collision requires provider reconciliation",
                     retryable=False,
                     state=state,
                     changed_files=changed,
