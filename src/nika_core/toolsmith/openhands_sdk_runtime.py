@@ -34,6 +34,7 @@ _LOGGER = logging.getLogger(__name__)
 _MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024
 _MAX_SNAPSHOT_FILES = 2000
 _MAX_SNAPSHOT_MEMBERS = 10_000
+_MAX_HTTP_BLOCK_SECONDS = 10.0
 _TERMINAL_FAILURE_STATUSES = frozenset({"error", "stuck"})
 _SESSION_HEADER = "X-Session-API-Key"
 
@@ -219,6 +220,7 @@ class OpenHandsAgentServerRuntime:
                 source_root,
                 source_evidence,
                 timeout_seconds=job.resource_budget.timeout_seconds,
+                cancellation_event=active.cancel_requested,
             )
             if active.cancel_requested.is_set():
                 raise OpenHandsAgentServerExecutionCancelled(
@@ -246,6 +248,7 @@ class OpenHandsAgentServerRuntime:
                         "nikatask": _bounded_tag(job.task_id),
                     },
                 },
+                timeout_seconds=job.resource_budget.timeout_seconds,
             )
             if type(created) is not dict:
                 raise OpenHandsAgentServerCompatibilityError(
@@ -276,6 +279,7 @@ class OpenHandsAgentServerRuntime:
                     "content": [{"type": "text", "text": prompt}],
                     "run": False,
                 },
+                timeout_seconds=job.resource_budget.timeout_seconds,
             )
             if active.cancel_requested.is_set():
                 raise OpenHandsAgentServerExecutionCancelled(
@@ -288,6 +292,7 @@ class OpenHandsAgentServerRuntime:
                 f"/api/conversations/{conversation_id}/run",
                 operation="conversation run",
                 json={},
+                timeout_seconds=job.resource_budget.timeout_seconds,
             )
             self._wait_for_completion(
                 client,
@@ -305,6 +310,7 @@ class OpenHandsAgentServerRuntime:
                 endpoint,
                 baseline_paths={item.path for item in source_evidence.files},
                 timeout_seconds=job.resource_budget.timeout_seconds,
+                cancellation_event=active.cancel_requested,
             )
             return OpenHandsRunEvidence(conversation_id, files)
         finally:
@@ -340,11 +346,15 @@ class OpenHandsAgentServerRuntime:
         deadline = time.monotonic() + float(timeout_seconds)
         while True:
             cancel_requested = active.cancel_requested.is_set()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError
             info = self._request_json(
                 client,
                 "GET",
                 f"/api/conversations/{conversation_id}",
                 operation="conversation status",
+                timeout_seconds=remaining,
             )
             if type(info) is not dict:
                 raise OpenHandsAgentServerCompatibilityError(
@@ -418,8 +428,13 @@ class OpenHandsAgentServerRuntime:
         evidence: TreeEvidence,
         *,
         timeout_seconds: int,
+        cancellation_event: threading.Event | None = None,
     ) -> None:
         for item in evidence.files:
+            _raise_if_cancelled(
+                cancellation_event,
+                "OpenHands execution cancelled during source upload",
+            )
             policy = WorkspacePathPolicy((item.path,))
             source = ensure_path_policy(
                 source_root,
@@ -443,9 +458,13 @@ class OpenHandsAgentServerRuntime:
                 "/api/file/upload",
                 params={"path": remote.as_posix()},
                 files={"file": (relative.name, data, "application/octet-stream")},
-                timeout=float(timeout_seconds),
+                timeout=_bounded_http_timeout(timeout_seconds),
             )
             _require_success_status(response, "source upload")
+            _raise_if_cancelled(
+                cancellation_event,
+                "OpenHands execution cancelled during source upload",
+            )
             try:
                 payload = response.json()
             except ValueError as exc:
@@ -478,12 +497,13 @@ class OpenHandsAgentServerRuntime:
         *,
         operation: str,
         json: Any | None = None,
+        timeout_seconds: int | float,
     ) -> Any:
         response = client.request(
             method,
             path,
             json=json,
-            timeout=60.0,
+            timeout=_bounded_http_timeout(timeout_seconds),
         )
         _require_success_status(response, operation)
         try:
@@ -492,6 +512,22 @@ class OpenHandsAgentServerRuntime:
             raise OpenHandsAgentServerCompatibilityError(
                 f"OpenHands {operation} returned invalid JSON"
             ) from exc
+
+
+def _bounded_http_timeout(timeout_seconds: int | float) -> float:
+    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
+        raise ValueError("OpenHands HTTP timeout must be numeric")
+    if timeout_seconds <= 0:
+        raise TimeoutError
+    return min(float(timeout_seconds), _MAX_HTTP_BLOCK_SECONDS)
+
+
+def _raise_if_cancelled(
+    cancellation_event: threading.Event | None,
+    message: str,
+) -> None:
+    if cancellation_event is not None and cancellation_event.is_set():
+        raise OpenHandsAgentServerExecutionCancelled(message)
 
 
 def _canonical_uuid(value: object, *, field: str) -> str:
@@ -534,6 +570,7 @@ def _download_snapshot(
     *,
     baseline_paths: set[str],
     timeout_seconds: int,
+    cancellation_event: threading.Event | None = None,
 ) -> tuple[RemoteFile, ...]:
     with tempfile.SpooledTemporaryFile(max_size=16 * 1024 * 1024, mode="w+b") as spool:
         total = 0
@@ -545,10 +582,14 @@ def _download_snapshot(
                 "format": "tar.gz",
                 "use_default_excludes": "false",
             },
-            timeout=float(timeout_seconds),
+            timeout=_bounded_http_timeout(timeout_seconds),
         ) as response:
             _require_success_status(response, "snapshot archive")
             for chunk in response.iter_bytes():
+                _raise_if_cancelled(
+                    cancellation_event,
+                    "OpenHands execution cancelled during snapshot download",
+                )
                 total += len(chunk)
                 if total > _MAX_SNAPSHOT_BYTES:
                     raise OpenHandsAgentServerCompatibilityError(
@@ -560,6 +601,7 @@ def _download_snapshot(
             spool,
             expected_root=pathlib.PurePosixPath(endpoint.working_dir).name,
             baseline_paths=baseline_paths,
+            cancellation_event=cancellation_event,
         )
 
 
@@ -568,6 +610,7 @@ def _read_snapshot_archive(
     *,
     expected_root: str,
     baseline_paths: set[str],
+    cancellation_event: threading.Event | None = None,
 ) -> tuple[RemoteFile, ...]:
     if not expected_root or expected_root in {".", "/"}:
         raise OpenHandsAgentServerCompatibilityError(
@@ -579,6 +622,10 @@ def _read_snapshot_archive(
     member_count = 0
     with tarfile.open(fileobj=fileobj, mode="r:gz") as archive:
         for member in archive:
+            _raise_if_cancelled(
+                cancellation_event,
+                "OpenHands execution cancelled during snapshot validation",
+            )
             member_count += 1
             if member_count > _MAX_SNAPSHOT_MEMBERS:
                 raise OpenHandsAgentServerCompatibilityError(
