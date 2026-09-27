@@ -34,6 +34,7 @@ class DurableBlockingRuntime:
         self.cancel_entered = threading.Event()
         self.release_cancel = threading.Event()
         self.cancelled = threading.Event()
+        self.allow_run_exit = threading.Event()
         self.run_exited = threading.Event()
         self.resumed = threading.Event()
 
@@ -43,6 +44,8 @@ class DurableBlockingRuntime:
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
         self.started.set()
         while not self.cancelled.is_set():
+            await asyncio.sleep(0.01)
+        while not self.allow_run_exit.is_set():
             await asyncio.sleep(0.01)
         self.run_exited.set()
         return RuntimeResult(outcome=RuntimeOutcome.CANCELLED)
@@ -126,6 +129,7 @@ def test_running_pause_is_nonblocking_serialized_and_durably_resumable(
     with pytest.raises(ValueError, match="завершує безпечне призупинення"):
         backend.resume_task({})
 
+    runtime.allow_run_exit.set()
     assert runtime.run_exited.wait(timeout=1)
     deadline = time.monotonic() + 1
     while time.monotonic() < deadline:
@@ -194,4 +198,6 @@ def test_running_pause_fails_before_effect_without_durable_resume_capability(
     assert stopped.status == "accepted"
     runtime.release_cancel.set()
     _wait_for_state(queue, task_id, TaskState.CANCELLED)
+    runtime.allow_run_exit.set()
+    assert runtime.run_exited.wait(timeout=1)
     backend.close()
