@@ -128,7 +128,7 @@ class BackgroundSchedulerHost:
         return self._recurrence.cancel(_required_identity(recurrence_id, "recurrence_id"))
 
     def runtime_job_installed(self, recurrence_id: str) -> bool:
-        """Return whether the enabled durable recurrence currently has a runtime APScheduler job."""
+        """Return whether this durable recurrence has an installed runtime job."""
 
         recurrence_key = _required_identity(recurrence_id, "recurrence_id")
         matches = []
