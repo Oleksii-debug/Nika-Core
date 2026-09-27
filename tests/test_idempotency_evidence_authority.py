@@ -230,6 +230,69 @@ def test_naive_durable_timestamp_is_rejected_without_normalization(tmp_path) -> 
     assert raw["updated_at"] == corrupted
 
 
+
+def test_recovery_promotion_rejects_corrupt_pending_evidence_without_rewrite(tmp_path) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    ledger = IdempotencyLedger(store)
+    _reserve(ledger, task_id)
+    forged = '{"schema":"recovery-v1","claim_id":"c-1"}'
+
+    with store.connection() as conn:
+        conn.execute(
+            """
+            UPDATE idempotency_records
+            SET result_json = ?
+            WHERE operation_key = ?
+            """,
+            (forged, "effect:1"),
+        )
+
+    with pytest.raises(RuntimeError, match="result_json is not canonical"):
+        ledger.promote_pending_to_uncertain(task_id)
+
+    raw = _raw_record(store, "effect:1")
+    assert raw is not None
+    assert raw["status"] == IdempotencyStatus.PENDING.value
+    assert raw["result_json"] == forged
+
+
+def test_recovery_promotion_rejects_corrupt_timestamp_without_rewrite(tmp_path) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    ledger = IdempotencyLedger(store)
+    _reserve(ledger, task_id)
+    corrupted = "2026-09-27T12:00:00"
+
+    with store.connection() as conn:
+        conn.execute(
+            """
+            UPDATE idempotency_records
+            SET updated_at = ?
+            WHERE operation_key = ?
+            """,
+            (corrupted, "effect:1"),
+        )
+
+    with pytest.raises(RuntimeError, match="updated_at must be timezone-aware"):
+        ledger.promote_pending_to_uncertain(task_id)
+
+    raw = _raw_record(store, "effect:1")
+    assert raw is not None
+    assert raw["status"] == IdempotencyStatus.PENDING.value
+    assert raw["updated_at"] == corrupted
+
+
+def test_recovery_promotion_preserves_atomic_key_set(tmp_path) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    ledger = IdempotencyLedger(store)
+    _reserve(ledger, task_id, key="effect:a")
+    _reserve(ledger, task_id, key="effect:b")
+
+    promoted = ledger.promote_pending_to_uncertain(task_id)
+
+    assert promoted == ("effect:a", "effect:b")
+    assert ledger.require("effect:a").status is IdempotencyStatus.UNCERTAIN
+    assert ledger.require("effect:b").status is IdempotencyStatus.UNCERTAIN
+
 def test_reconciliation_requires_uncertain_state_inside_writer_transaction(tmp_path) -> None:
     store, task_id = _store_with_task(tmp_path)
     ledger = IdempotencyLedger(store)
