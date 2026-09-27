@@ -415,24 +415,12 @@ class BatchCursor:
             record = self._ledger.require(target.operation_key)
             self._require_confirmed_durable_consistency(target, record=record)
             durable_result, durable_due = _decode_completion_result(record.result)
-            if not _canonical_json_equal(clean_result, durable_result):
-                raise BatchCursorStateError(
-                    "confirmed replay result contradicts durable completion"
-                )
-            replay_due = (
-                _as_utc(next_batch_not_before).isoformat()
-                if next_batch_not_before is not None
-                else None
+            self._require_completion_replay_match(
+                clean_result,
+                next_batch_not_before,
+                durable_result,
+                durable_due,
             )
-            durable_due_value = (
-                _as_utc(durable_due).isoformat()
-                if durable_due is not None
-                else None
-            )
-            if replay_due != durable_due_value:
-                raise BatchCursorStateError(
-                    "confirmed replay deadline contradicts durable completion"
-                )
             return
         if target.attempt_state is not AttemptState.IN_FLIGHT:
             raise BatchCursorBlockedError("only an in-flight target may be confirmed")
@@ -445,6 +433,12 @@ class BatchCursor:
                 _completion_envelope(clean_result, next_batch_not_before),
             )
         durable_result, durable_due = _decode_completion_result(record.result)
+        self._require_completion_replay_match(
+            clean_result,
+            next_batch_not_before,
+            durable_result,
+            durable_due,
+        )
         self._confirm_from_durable(target, durable_result)
         self._advance(durable_due)
         self._persist()
@@ -616,6 +610,32 @@ class BatchCursor:
             )
         else:
             self._state.next_scheduled_intent = _target_intent(next_target)
+
+    def _require_completion_replay_match(
+        self,
+        replay_result: dict[str, Any],
+        replay_due: datetime | None,
+        durable_result: dict[str, Any],
+        durable_due: datetime | None,
+    ) -> None:
+        if not _canonical_json_equal(replay_result, durable_result):
+            raise BatchCursorStateError(
+                "confirm replay result contradicts durable completion"
+            )
+        replay_due_value = (
+            _as_utc(replay_due).isoformat()
+            if replay_due is not None
+            else None
+        )
+        durable_due_value = (
+            _as_utc(durable_due).isoformat()
+            if durable_due is not None
+            else None
+        )
+        if replay_due_value != durable_due_value:
+            raise BatchCursorStateError(
+                "confirm replay deadline contradicts durable completion"
+            )
 
     def _require_confirmed_durable_consistency(
         self,
