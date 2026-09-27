@@ -110,6 +110,12 @@ def test_packaged_uia_proof_covers_model_controls_and_selected_model_transport()
     assert "'Зберегти модель'" in proof
     assert "ControlType]::ComboBox" in proof
     assert "Set-BoundControlValue $modelNameControl 'uia-proof-model'" in proof
+    assert (
+        "Wait-BoundTextEvidence 'Модель збережено для нових завдань: "
+        "ollama, uia-proof-model.'"
+        in proof
+    )
+    assert "Wait-BoundTextEvidence 'Модель збережено для нових завдань.'" not in proof
     assert "v01_model_selection" in proof
     assert "v01_model_selections" in proof
     assert "hashlib.sha256(body.encode('utf-8')).hexdigest() != selection_id" in proof
