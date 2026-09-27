@@ -509,3 +509,34 @@ def test_real_win32_last_input_api_smoke_on_windows() -> None:
     assert 0 <= last_tick < (1 << 32)
     assert type(current_tick) is int
     assert 0 <= current_tick <= (1 << 64) - 1
+
+
+def test_first_epoch_future_last_input_tick_fails_closed(tmp_path: Path) -> None:
+    observer, audit = _observer(
+        tmp_path,
+        last_ticks=[10_000, 10_000],
+        current_ticks=[5_000],
+        away_after_seconds=1,
+    )
+
+    with pytest.raises(ValueError, match="ahead of current tick"):
+        observer.observe()
+
+    assert audit.list_for(
+        entity_type="owner_presence_source",
+        entity_id="win32-owner-presence",
+    ) == ()
+
+
+def test_multiwrap_ambiguity_uses_minimum_idle_and_stays_conservatively_active(
+    tmp_path: Path,
+) -> None:
+    wrap = 1 << 32
+    observer, _audit_log = _observer(
+        tmp_path,
+        last_ticks=[900, 900],
+        current_ticks=[3 * wrap + 1_000],
+        away_after_seconds=1,
+    )
+
+    assert observer.observe().presence is OwnerPresence.ACTIVE
