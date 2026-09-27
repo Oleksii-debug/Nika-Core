@@ -360,11 +360,16 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                 )
         finally:
             if endpoint is not None:
+                release_succeeded = result.succeeded if "result" in locals() else False
+                async with self._lock:
+                    current = self._states.get(job.job_id)
+                    if current is not None and current.phase != "running":
+                        release_succeeded = False
                 try:
                     await self._sandbox_provider.release(
                         job,
                         endpoint,
-                        succeeded=result.succeeded if "result" in locals() else False,
+                        succeeded=release_succeeded,
                     )
                 except Exception as exc:  # noqa: BLE001 - sandbox provider boundary
                     _LOGGER.error(
