@@ -109,8 +109,6 @@ def test_health_check_rejects_noncanonical_status(status: object) -> None:
         )
 
 
-
-
 @pytest.mark.parametrize(
     "value",
     ["2026-09-27T21:00:00+00:00", _BehavioralDatetime(2026, 9, 27, tzinfo=UTC)],
