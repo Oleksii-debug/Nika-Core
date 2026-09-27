@@ -11,6 +11,7 @@ from nika_core.interaction import (
     ControlLocator,
     InteractionAction,
     StaleSnapshotError,
+    TargetNotFoundError,
     resolve_strict,
 )
 from nika_core.interaction.windows_uia_adapter import (
@@ -81,6 +82,58 @@ def focus_until_verified(
     )
 
 
+def invoke_and_observe_until(
+    adapter: WindowsUIAInteractionAdapter,
+    node,
+    witness,
+    *,
+    attempts: int = 40,
+    delay_seconds: float = 0.05,
+):
+    """Issue one Invoke effect, then wait only through read-only observations.
+
+    UIA Invoke is asynchronous: return from the provider is not application-level
+    completion evidence. The action is never replayed here. Every observation must
+    retain the exact semantic action identity and Invoke capability; only the
+    caller-supplied semantic witness may end the bounded wait successfully.
+    """
+
+    if attempts <= 0:
+        raise ValueError("attempts must be positive")
+    if delay_seconds < 0:
+        raise ValueError("delay_seconds must be non-negative")
+
+    adapter.act(node, InteractionAction.INVOKE, None)
+    last_missing: TargetNotFoundError | None = None
+    for attempt in range(attempts):
+        snapshot = adapter.observe()
+        current = _resolve(snapshot, role=node.role, name=node.name)
+        if current.node_id != node.node_id:
+            raise StaleSnapshotError(
+                "invoke target identity changed during completion observation"
+            )
+        if current.enabled != node.enabled or current.visible != node.visible:
+            raise StaleSnapshotError(
+                "invoke target actionability changed during completion observation"
+            )
+        if "Invoke" not in adapter.pattern_capabilities(current):
+            raise StaleSnapshotError(
+                "invoke target lost Invoke authority during completion observation"
+            )
+        try:
+            if witness(snapshot):
+                return snapshot
+        except TargetNotFoundError as exc:
+            last_missing = exc
+        if attempt + 1 < attempts:
+            time.sleep(delay_seconds)
+
+    detail = f": {last_missing!r}" if last_missing is not None else ""
+    raise AssertionError(
+        f"UIA Invoke semantic witness did not appear within {attempts} observations{detail}"
+    )
+
+
 def main() -> None:
     process = subprocess.Popen(
         [
@@ -145,25 +198,59 @@ def main() -> None:
 
         apply_button = _resolve(after_toggle, role="button", name="Apply semantic action")
         focus_until_verified(adapter, apply_button)
-        adapter.act(apply_button, InteractionAction.INVOKE, None)
-        after_invoke = adapter.observe()
-        status = _resolve(after_invoke, role="text", name="Applied: Доступність перевірено")
-        assert status.visible
+        after_invoke = invoke_and_observe_until(
+            adapter,
+            apply_button,
+            lambda snapshot: _resolve(
+                snapshot,
+                role="text",
+                name="Applied: Доступність перевірено",
+            ).visible,
+        )
 
         edit_before_move = _resolve(after_invoke, role="edit", name="Problem description")
         move = _resolve(after_invoke, role="button", name="Move and resize window")
         old_bounds = edit_before_move.bounds
-        adapter.act(move, InteractionAction.INVOKE, None)
-        after_move = adapter.observe()
+
+        def move_witness(snapshot) -> bool:
+            current_edit = _resolve(snapshot, role="edit", name="Problem description")
+            if current_edit.node_id != edit_before_move.node_id:
+                raise StaleSnapshotError(
+                    "edit identity changed during move/resize completion observation"
+                )
+            return (
+                current_edit.bounds != old_bounds
+                and _resolve(
+                    snapshot,
+                    role="text",
+                    name="Moved and resized",
+                ).visible
+            )
+
+        after_move = invoke_and_observe_until(adapter, move, move_witness)
         edit_after_move = _resolve(after_move, role="edit", name="Problem description")
         assert edit_after_move.node_id == edit_before_move.node_id
         assert edit_after_move.bounds != old_bounds
-        assert _resolve(after_move, role="text", name="Moved and resized").visible
 
         replaceable = _resolve(after_move, role="button", name="Replaceable semantic action")
         replace_control = _resolve(after_move, role="button", name="Replace semantic target")
-        adapter.act(replace_control, InteractionAction.INVOKE, None)
-        after_replace = adapter.observe()
+
+        def replacement_witness(snapshot) -> bool:
+            replacement = _resolve(
+                snapshot,
+                role="button",
+                name="Replaceable semantic action",
+            )
+            return (
+                replacement.node_id != replaceable.node_id
+                and _resolve(snapshot, role="text", name="Target replaced").visible
+            )
+
+        after_replace = invoke_and_observe_until(
+            adapter,
+            replace_control,
+            replacement_witness,
+        )
         replacement = _resolve(
             after_replace, role="button", name="Replaceable semantic action"
         )

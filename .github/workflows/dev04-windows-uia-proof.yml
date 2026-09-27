@@ -48,5 +48,6 @@ jobs:
           tests/test_interaction_pywinauto_identity.py
           tests/test_interaction_windows_uia_action_authority.py
           tests/test_interaction_windows_uia_focus_ack.py
+          tests/test_dev04_windows_uia_proof.py
       - name: Run live WinForms semantic UIA proof
         run: python scripts/dev04_windows_uia_proof.py
