@@ -14,6 +14,34 @@ from nika_core.packaging.release import (
 )
 
 SOURCE_SHA = "0123456789abcdef0123456789abcdef01234567"
+PRODUCT_VERSION = "1.0.0"
+REQUIRED_TRUE_FIELDS = (
+    "release_manifest_source_sha_bound",
+    "exact_checkout_sha_verified",
+    "core_ci_equivalent",
+    "full_test_suite",
+    "runtime_restart_recovery",
+    "memory_scheduler_resource_regressions",
+    "model_mock_nollm_regressions",
+    "deterministic_brain_regressions",
+    "foundry_local_adapter_regressions",
+    "plugin_workspace_regressions",
+    "security_sandbox_regressions",
+    "integrated_ubuntu",
+    "integrated_windows",
+    "browser_semantic_proof",
+    "windows_uia_semantic_proof",
+    "windows_package_built",
+    "manifest_verified",
+    "third_party_notices_verified",
+    "packaged_uia_keyboard_focus",
+)
+REQUIRED_FALSE_FIELDS = (
+    "physical_windows_foundry_inference_proven",
+    "human_tested",
+    "nvda_verified",
+    "production_release_ready",
+)
 
 
 def _sha256(path: Path) -> str:
@@ -202,10 +230,13 @@ def _write_outer_evidence(evidence: Path, artifact: Path) -> None:
         json.dumps(
             {
                 "schema_version": 3,
+                "product_version": PRODUCT_VERSION,
                 "commit_sha": SOURCE_SHA,
                 "distributable_zip_path": "./dist/NikaCore-1.0.0-windows-x64.zip",
                 "distributable_zip_sha256": _sha256(artifact),
                 "distributable_zip_size": artifact.stat().st_size,
+                **{field: True for field in REQUIRED_TRUE_FIELDS},
+                **{field: False for field in REQUIRED_FALSE_FIELDS},
             }
         ),
         encoding="utf-8",
@@ -320,6 +351,8 @@ def test_m12_cli_rejects_outer_bound_zip_with_inner_manifest_mismatch(
             SOURCE_SHA,
             "--artifact-reference",
             "./dist/NikaCore-1.0.0-windows-x64.zip",
+            "--product-version",
+            PRODUCT_VERSION,
         ],
     )
     with pytest.raises(SystemExit, match="archive:size:NikaCore.exe"):
@@ -345,4 +378,5 @@ def test_outer_evidence_rejects_duplicate_json_keys(tmp_path: Path) -> None:
         evidence,
         source_sha=SOURCE_SHA,
         artifact_reference="ref",
+        expected_product_version=PRODUCT_VERSION,
     ) == ("distributable:invalid-evidence",)

@@ -15,6 +15,7 @@ _SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _MANIFEST_VERSION = 2
 _RELEASE_MANIFEST_NAME = "release-manifest.json"
 _MAX_RELEASE_MANIFEST_BYTES = 4 * 1024 * 1024
+_MAX_PRODUCT_VERSION_CHARS = 128
 _MANIFEST_KEYS = frozenset({"manifest_version", "product", "version", "source_sha", "files"})
 _RELEASE_FILE_KEYS = frozenset({"path", "size", "sha256"})
 _WINDOWS_FORBIDDEN_CHARS = frozenset('<>"|?*')
@@ -24,6 +25,46 @@ _SECRET_CONTENT_SUFFIXES = frozenset(
 )
 _SECRET_SCAN_CHUNK_BYTES = 64 * 1024
 _SECRET_SCAN_OVERLAP_BYTES = 8 * 1024
+_PREHUMAN_EVIDENCE_SCHEMA_VERSION = 3
+_PREHUMAN_REQUIRED_TRUE_FIELDS = (
+    "release_manifest_source_sha_bound",
+    "exact_checkout_sha_verified",
+    "core_ci_equivalent",
+    "full_test_suite",
+    "runtime_restart_recovery",
+    "memory_scheduler_resource_regressions",
+    "model_mock_nollm_regressions",
+    "deterministic_brain_regressions",
+    "foundry_local_adapter_regressions",
+    "plugin_workspace_regressions",
+    "security_sandbox_regressions",
+    "integrated_ubuntu",
+    "integrated_windows",
+    "browser_semantic_proof",
+    "windows_uia_semantic_proof",
+    "windows_package_built",
+    "manifest_verified",
+    "third_party_notices_verified",
+    "packaged_uia_keyboard_focus",
+)
+_PREHUMAN_REQUIRED_FALSE_FIELDS = (
+    "physical_windows_foundry_inference_proven",
+    "human_tested",
+    "nvda_verified",
+    "production_release_ready",
+)
+_PREHUMAN_EVIDENCE_KEYS = frozenset(
+    {
+        "schema_version",
+        "product_version",
+        "commit_sha",
+        "distributable_zip_path",
+        "distributable_zip_sha256",
+        "distributable_zip_size",
+        *_PREHUMAN_REQUIRED_TRUE_FIELDS,
+        *_PREHUMAN_REQUIRED_FALSE_FIELDS,
+    }
+)
 _SECRET_ASSIGNMENT_RE = re.compile(
     rb"""
     [\r\n{,\[]
@@ -138,6 +179,16 @@ def _release_path_is_secret(value: object) -> bool:
 
 def _canonical_release_path(value: object) -> bool:
     return _canonical_relative_path(value) and value != _RELEASE_MANIFEST_NAME
+
+
+def _valid_product_version(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and len(value) <= _MAX_PRODUCT_VERSION_CHARS
+        and value == value.strip()
+        and not any(ord(character) < 32 for character in value)
+    )
 
 
 def _secret_assignment_value_is_placeholder(value: bytes) -> bool:
@@ -421,11 +472,24 @@ def _zip_member_path(member: zipfile.ZipInfo) -> str:
     return member.filename
 
 
-def verify_release_archive(artifact_path: Path, *, source_sha: str) -> tuple[str, ...]:
-    """Verify the embedded manifest against the exact files in a Windows release ZIP."""
+def verify_release_archive(
+    artifact_path: Path,
+    *,
+    source_sha: str,
+    expected_product_version: str | None = None,
+) -> tuple[str, ...]:
+    """Verify the embedded manifest against the exact files in a Windows release ZIP.
+
+    When expected_product_version is provided, bind the embedded manifest version to
+    that trusted release identity in addition to the exact source and file evidence.
+    """
     normalized_source_sha = source_sha.strip().casefold()
     if not _SOURCE_SHA_RE.fullmatch(normalized_source_sha):
         return ("archive:source-sha-format",)
+    if expected_product_version is not None and not _valid_product_version(
+        expected_product_version
+    ):
+        return ("archive:expected-product-version-format",)
     if not artifact_path.is_file():
         return ("archive:missing-artifact",)
 
@@ -486,6 +550,11 @@ def verify_release_archive(artifact_path: Path, *, source_sha: str) -> tuple[str
                 return tuple(f"archive:{finding}" for finding in structure_findings)
             if manifest.source_sha != normalized_source_sha:
                 findings.append("archive:source-sha")
+            if (
+                expected_product_version is not None
+                and manifest.version != expected_product_version
+            ):
+                findings.append("archive:product-version")
 
             expected = {entry.path: entry for entry in manifest.files}
             actual = {
@@ -529,23 +598,50 @@ def verify_distributable_evidence(
     *,
     source_sha: str,
     artifact_reference: str,
+    expected_product_version: str,
 ) -> tuple[str, ...]:
     """Verify that pre-human evidence binds the exact uploaded distributable.
 
     The evidence is intentionally outside the ZIP: embedding its own digest would be
     recursive. The verifier therefore binds an immutable outer artifact by path,
-    byte size, SHA-256, and exact source commit immediately before upload.
+    byte size, SHA-256, exact source commit, and trusted canonical product version
+    immediately before upload.
     """
     findings: list[str] = []
     normalized_source_sha = source_sha.strip().casefold()
     if not _SOURCE_SHA_RE.fullmatch(normalized_source_sha):
         return ("distributable:source-sha-format",)
+    if not _valid_product_version(expected_product_version):
+        return ("distributable:expected-product-version-format",)
     if not artifact_path.is_file():
         return ("distributable:missing-artifact",)
 
     payload = _read_evidence_object(evidence_path)
     if payload is None:
         return ("distributable:invalid-evidence",)
+
+    if frozenset(payload) != _PREHUMAN_EVIDENCE_KEYS:
+        findings.append("distributable:evidence-keys")
+    schema_version = payload.get("schema_version")
+    if (
+        type(schema_version) is not int
+        or schema_version != _PREHUMAN_EVIDENCE_SCHEMA_VERSION
+    ):
+        findings.append("distributable:schema-version")
+
+    product_version = payload.get("product_version")
+    if (
+        not _valid_product_version(product_version)
+        or product_version != expected_product_version
+    ):
+        findings.append("distributable:product-version")
+
+    for field in _PREHUMAN_REQUIRED_TRUE_FIELDS:
+        if payload.get(field) is not True:
+            findings.append(f"distributable:required-true:{field}")
+    for field in _PREHUMAN_REQUIRED_FALSE_FIELDS:
+        if payload.get(field) is not False:
+            findings.append(f"distributable:required-false:{field}")
 
     if payload.get("commit_sha") != normalized_source_sha:
         findings.append("distributable:source-sha")
