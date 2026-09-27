@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 import nika_core.toolsmith.openhands_remote_worker as openhands_worker_module
+import nika_core.toolsmith.openhands_sdk_runtime as openhands_sdk_module
 from nika_core.toolsmith.contracts import (
     AcceptanceCommand,
     AllowedPathPolicy,
@@ -31,6 +32,7 @@ from nika_core.toolsmith.openhands_remote_worker import (
 )
 from nika_core.toolsmith.openhands_sdk_runtime import (
     OpenHandsSdkCompatibilityError,
+    OpenHandsSdkRemoteRuntime,
     _read_snapshot_archive,
 )
 from nika_core.toolsmith.workspace_security import collect_tree_evidence
@@ -502,6 +504,150 @@ def _tar_snapshot(files: dict[str, bytes], *, root: str = "nika-job") -> bytes:
             info.size = len(content)
             archive.addfile(info, io.BytesIO(content))
     return buffer.getvalue()
+
+
+
+class FakeArchiveResponse:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        return False
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def iter_bytes(self):
+        yield self.payload
+
+
+class FakeArchiveClient:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+        self.calls = []
+
+    def stream(self, method, route, *, params, timeout):
+        self.calls.append((method, route, params, timeout))
+        return FakeArchiveResponse(self.payload)
+
+
+class FakeRemoteWorkspace:
+    def __init__(self, endpoint: OpenHandsSandboxEndpoint, payload: bytes) -> None:
+        self.working_dir = endpoint.working_dir
+        self.host = endpoint.host
+        self.api_prefix = "/api"
+        self.client = FakeArchiveClient(payload)
+        self.uploads = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        return False
+
+    def file_upload(self, local_path, remote_path):
+        self.uploads.append((Path(local_path).read_bytes(), remote_path))
+        return type("UploadResult", (), {"success": True})()
+
+
+class FakeConversation:
+    instances = []
+
+    def __init__(self, *, agent, workspace, max_iteration_per_run, visualizer, delete_on_close, tags):
+        self.agent = agent
+        self.workspace = workspace
+        self.max_iteration_per_run = max_iteration_per_run
+        self.visualizer = visualizer
+        self.delete_on_close = delete_on_close
+        self.tags = tags
+        self.id = "conversation-sdk-contract"
+        self.messages = []
+        self.runs = []
+        self.closed = False
+        self.interrupted = False
+        self.on_interrupt = None
+        self.__class__.instances.append(self)
+
+    def send_message(self, prompt, *, sender):
+        self.messages.append((prompt, sender))
+
+    def run(self, *, blocking, timeout):
+        self.runs.append((blocking, timeout))
+
+    def interrupt(self):
+        self.interrupted = True
+        if self.on_interrupt is not None:
+            self.on_interrupt()
+
+    def close(self):
+        self.closed = True
+
+
+def test_sdk_runtime_contract_executes_upload_conversation_archive_and_cancel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    job = _job(root)
+    evidence = collect_tree_evidence(root)
+    endpoint = _endpoint()
+    payload = _tar_snapshot({"src/value.txt": b"after-sdk\n"})
+    workspace = FakeRemoteWorkspace(endpoint, payload)
+    FakeConversation.instances.clear()
+    monkeypatch.setattr(
+        openhands_sdk_module,
+        "_load_conversation_type",
+        lambda: FakeConversation,
+    )
+    runtime = OpenHandsSdkRemoteRuntime(
+        workspace_factory=lambda _endpoint: workspace,
+        agent_factory=lambda _job, _endpoint: object(),
+        max_iterations=7,
+    )
+
+    result = runtime._execute_sync(job, endpoint, "do work", root, evidence)
+
+    assert result.conversation_id == "conversation-sdk-contract"
+    assert result.files == (RemoteFile("src/value.txt", b"after-sdk\n"),)
+    assert workspace.uploads == [(b"before\n", "/workspace/nika-job/src/value.txt")]
+    conversation = FakeConversation.instances[-1]
+    assert conversation.messages == [("do work", "nika-core")]
+    assert conversation.runs == [(True, float(job.resource_budget.timeout_seconds))]
+    assert conversation.closed is True
+
+    cancel_conversation = FakeConversation(
+        agent=object(),
+        workspace=workspace,
+        max_iteration_per_run=7,
+        visualizer=None,
+        delete_on_close=True,
+        tags={},
+    )
+    with runtime._active_lock:
+        runtime._active[job.job_id] = cancel_conversation
+    cancel_conversation.on_interrupt = lambda: runtime._active.pop(job.job_id, None)
+
+    assert _run(runtime.cancel(job.job_id)) is True
+    assert cancel_conversation.interrupted is True
+
+
+def test_sdk_upload_rejects_source_bytes_changed_after_captured_evidence(tmp_path: Path) -> None:
+    root = _workspace(tmp_path)
+    evidence = collect_tree_evidence(root)
+    endpoint = _endpoint()
+    workspace = FakeRemoteWorkspace(
+        endpoint,
+        _tar_snapshot({"src/value.txt": b"unused\n"}),
+    )
+    root.joinpath("src/value.txt").write_text("changed-after-evidence\n", encoding="utf-8")
+
+    with pytest.raises(OpenHandsSdkCompatibilityError, match="captured tree evidence"):
+        OpenHandsSdkRemoteRuntime._upload_source(workspace, endpoint, root, evidence)
+
+    assert workspace.uploads == []
 
 
 def test_sdk_snapshot_reader_removes_only_consistent_synthetic_manifest() -> None:
