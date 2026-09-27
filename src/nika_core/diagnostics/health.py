@@ -45,8 +45,12 @@ class HealthCheck:
     summary: str
 
     def __post_init__(self) -> None:
+        if type(self.check_id) is not str:
+            raise TypeError("check_id must be canonical text")
         if type(self.status) is not HealthStatus:
             raise TypeError("status must be a canonical HealthStatus")
+        if type(self.summary) is not str:
+            raise TypeError("summary must be canonical text")
 
     def as_dict(self) -> dict[str, str]:
         return {

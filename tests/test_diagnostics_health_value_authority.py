@@ -28,6 +28,10 @@ class _HealthCheckSubclass(HealthCheck):
     pass
 
 
+class _HealthTextSubclass(str):
+    pass
+
+
 class _CheckTuple(tuple[HealthCheck, ...]):
     pass
 
@@ -56,6 +60,37 @@ def test_model_health_snapshot_rejects_noncanonical_fact_values(
 
     with pytest.raises(TypeError, match=f"{field_name} must be a canonical ModelHealthFact"):
         ModelHealthSnapshot(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("field_name", ["check_id", "summary"])
+@pytest.mark.parametrize("value", [[], _HealthTextSubclass("noncanonical")])
+def test_health_check_rejects_noncanonical_text_carriers(
+    field_name: str,
+    value: object,
+) -> None:
+    values: dict[str, object] = {
+        "check_id": "authority",
+        "status": HealthStatus.PASS,
+        "summary": "canonical",
+    }
+    values[field_name] = value
+
+    with pytest.raises(TypeError, match=f"{field_name} must be canonical text"):
+        HealthCheck(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("field_name", ["check_id", "summary"])
+def test_health_report_revalidates_constructor_bypassed_text_carriers(
+    field_name: str,
+) -> None:
+    forged = object.__new__(HealthCheck)
+    object.__setattr__(forged, "check_id", "authority")
+    object.__setattr__(forged, "status", HealthStatus.PASS)
+    object.__setattr__(forged, "summary", "canonical")
+    object.__setattr__(forged, field_name, [])
+
+    with pytest.raises(TypeError, match=f"{field_name} must be canonical text"):
+        HealthReport(generated_at=_NOW, checks=(forged,))
 
 
 @pytest.mark.parametrize("status", ["pass", _ForeignHealthStatus.PASS])
