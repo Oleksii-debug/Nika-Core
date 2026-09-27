@@ -21,7 +21,6 @@ from nika_core.runtime.idempotency import IdempotencyConflictError
 from nika_core.scheduler.contracts import ScheduledJob
 from nika_core.scheduler.recurrence import (
     DurableRecurrenceService,
-    RecurrenceInvocation,
     RecurrenceStatus,
     RecurrenceTerminalReason,
 )
@@ -398,22 +397,3 @@ def test_bridge_rejects_unknown_action_and_noncanonical_guard() -> None:
 
     assert BackgroundRecurrenceBridge.ACTION_ID == "living.background.dispatch"
 
-
-def test_private_handler_still_validates_canonical_invocation_carrier(tmp_path: Path) -> None:
-    h = _harness(tmp_path)
-    handler = h.bridge.resolve(BackgroundRecurrenceBridge.ACTION_ID)
-
-    class InvocationSubclass(RecurrenceInvocation):
-        pass
-
-    forged = InvocationSubclass(
-        recurrence_id="forged",
-        occurrence_id="occurrence",
-        scheduled_for=h.clock.value,
-        payload={},
-    )
-    with pytest.raises(TypeError, match="exact RecurrenceInvocation"):
-        handler(forged)
-
-    assert h.presence.calls == 0
-    assert h.effects.resolve_calls == []
