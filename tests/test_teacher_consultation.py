@@ -43,7 +43,7 @@ class _FakeProvider:
         response_request_id: str | None = None,
         response_provider_id: str | None = None,
         response_kind: ProviderKind | None = None,
-        latency_ms: float | int | None = 12.5,
+        latency_ms: float | None = 12.5,
     ) -> None:
         self._capabilities = ProviderCapabilities(
             provider_id=provider_id,
