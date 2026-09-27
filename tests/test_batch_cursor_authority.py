@@ -443,3 +443,71 @@ def test_restore_preflights_future_effect_evidence_without_mutating_ledger(
     assert durable.status is IdempotencyStatus.PENDING
     assert cursor.state.targets[0].attempt_state is AttemptState.PENDING
 
+def test_failed_batch_release_restores_last_durable_cursor_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory, ledger, _ = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=1,
+    )
+    cursor.begin_effect("target-0")
+    cursor.confirm("target-0", {"ok": True})
+    assert cursor.state.ready_batch_index == 0
+    assert cursor.state.next_scheduled_intent is not None
+    assert cursor.state.next_scheduled_intent.kind is IntentKind.INTER_BATCH_WAIT
+
+    def fail_put(**_kwargs: object) -> None:
+        raise RuntimeError("synthetic memory write failure")
+
+    monkeypatch.setattr(memory, "put", fail_put)
+    with pytest.raises(RuntimeError, match="synthetic memory write failure"):
+        cursor.release_inter_batch_wait()
+
+    assert cursor.state.ready_batch_index == 0
+    assert cursor.state.next_scheduled_intent is not None
+    assert cursor.state.next_scheduled_intent.kind is IntentKind.INTER_BATCH_WAIT
+    with pytest.raises(BatchCursorBlockedError, match="waiting for scheduled release"):
+        cursor.begin_effect("target-1")
+
+
+def test_failed_second_begin_checkpoint_rolls_back_to_last_durable_prepared_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory, ledger, _ = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(1),
+        batch_size=1,
+    )
+    original_put = memory.put
+    calls = 0
+
+    def fail_second_put(**kwargs: object):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("synthetic second checkpoint failure")
+        return original_put(**kwargs)
+
+    monkeypatch.setattr(memory, "put", fail_second_put)
+    with pytest.raises(RuntimeError, match="synthetic second checkpoint failure"):
+        cursor.begin_effect("target-0")
+
+    assert cursor.state.targets[0].attempt_state is AttemptState.PREPARED
+    durable = ledger.require(cursor.state.targets[0].operation_key)
+    assert durable.status is IdempotencyStatus.PENDING
+
+    replay = cursor.begin_effect("target-0")
+    assert replay.execute is False
+    assert replay.reason == "effect_already_reserved"
+

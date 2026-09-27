@@ -224,6 +224,7 @@ class BatchCursor:
         self._memory = memory
         self._ledger = ledger
         self._state = state
+        self._durable_state = state.model_copy(deep=True)
 
     @classmethod
     def create(
@@ -594,18 +595,25 @@ class BatchCursor:
 
     def _persist(self) -> None:
         try:
-            self._state = BatchCursorState.model_validate(
+            candidate = BatchCursorState.model_validate(
                 self._state.model_dump(mode="json")
             )
         except (TypeError, ValueError) as exc:
+            self._state = self._durable_state.model_copy(deep=True)
             raise BatchCursorStateError("refusing to persist malformed batch cursor") from exc
-        self._memory.put(
-            scope=MemoryScope.TASK,
-            owner_id=self._state.task_id,
-            namespace=_NAMESPACE,
-            key=self._state.cursor_id,
-            value=self._state.model_dump(mode="json"),
-        )
+        try:
+            self._memory.put(
+                scope=MemoryScope.TASK,
+                owner_id=candidate.task_id,
+                namespace=_NAMESPACE,
+                key=candidate.cursor_id,
+                value=candidate.model_dump(mode="json"),
+            )
+        except Exception:
+            self._state = self._durable_state.model_copy(deep=True)
+            raise
+        self._state = candidate
+        self._durable_state = candidate.model_copy(deep=True)
 
 
 def _normalize_targets(
