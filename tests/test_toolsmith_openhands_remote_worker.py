@@ -1928,7 +1928,11 @@ def test_agent_server_post_run_status_failure_is_manual_reconcile_and_not_replay
 
     result = _run(worker.execute(job))
 
-    run_path = f"/api/conversations/{uuid.uuid5(uuid.NAMESPACE_URL, `nika-core:openhands:${endpoint.endpoint_id}:${job.job_id}`)}/run"
+    conversation_id = uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"nika-core:openhands:{endpoint.endpoint_id}:{job.job_id}",
+    )
+    run_path = f"/api/conversations/{conversation_id}/run"
     assert paths.count(run_path) == 1
     assert not result.succeeded
     assert result.failure is not None
