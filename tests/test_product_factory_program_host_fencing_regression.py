@@ -31,7 +31,7 @@ class _StaleFenceAuthority:
     def __init__(self) -> None:
         self.acquire_calls = 0
 
-    def assert_owner(self, **kwargs) -> None:
+    def renew(self, **kwargs):
         raise WorkOwnershipError("stale work ownership authority")
 
     def acquire(self, **kwargs):
