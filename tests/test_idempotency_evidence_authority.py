@@ -296,6 +296,26 @@ def test_non_json_numeric_completion_evidence_is_rejected_atomically(
     assert after.status is IdempotencyStatus.PENDING
     assert after.result is None
 
+
+def test_persisted_non_json_numeric_evidence_is_classified_as_corruption(tmp_path) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    ledger = IdempotencyLedger(store)
+    _reserve(ledger, task_id)
+    forged = '{"unsafe": NaN}'
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE idempotency_records SET result_json = ? WHERE operation_key = ?",
+            (forged, "effect:1"),
+        )
+
+    with pytest.raises(RuntimeError, match="result_json is invalid"):
+        ledger.require("effect:1")
+
+    raw = _raw_record(store, "effect:1")
+    assert raw is not None
+    assert raw["result_json"] == forged
+
 def test_noncanonical_completed_result_json_is_rejected_without_rewrite(tmp_path) -> None:
     store, task_id = _store_with_task(tmp_path)
     ledger = IdempotencyLedger(store)
