@@ -305,3 +305,70 @@ def test_transient_adapter_close_can_reenter_runtime_without_deadlock() -> None:
     assert len(results) == 2
     assert results[0] is results[1]
     runtime.deactivate(manifest.plugin_id)
+def test_inflight_activation_cannot_publish_during_other_generation_teardown() -> None:
+    runtime = PluginRuntime()
+    manifest = _manifest("1.0.0")
+    slow_factory_started = Event()
+    release_slow_factory = Event()
+    close_started = Event()
+    release_close = Event()
+    factory_calls = 0
+    first_failures: list[Exception] = []
+    second_results: list[_Adapter] = []
+
+    def factory() -> _Adapter:
+        nonlocal factory_calls
+        factory_calls += 1
+        if factory_calls == 1:
+            slow_factory_started.set()
+            assert release_slow_factory.wait(timeout=5)
+            return _Adapter(manifest)
+        if factory_calls == 2:
+            return _BlockingCloseAdapter(
+                manifest,
+                close_started=close_started,
+                release_close=release_close,
+            )
+        return _Adapter(manifest)
+
+    runtime.register(manifest, factory)
+
+    def first_activation() -> None:
+        try:
+            runtime.activate(manifest.plugin_id)
+        except Exception as exc:  # noqa: BLE001 - regression records race outcome.
+            first_failures.append(exc)
+
+    first = Thread(target=first_activation, daemon=True)
+    first.start()
+    assert slow_factory_started.wait(timeout=5)
+
+    second = Thread(
+        target=lambda: second_results.append(runtime.activate(manifest.plugin_id)),
+        daemon=True,
+    )
+    second.start()
+    second.join(timeout=10)
+    assert not second.is_alive()
+    assert len(second_results) == 1
+
+    deactivation = _start_blocked_deactivation(
+        runtime,
+        manifest.plugin_id,
+        close_started,
+    )
+    release_slow_factory.set()
+    first.join(timeout=10)
+
+    assert not first.is_alive()
+    assert len(first_failures) == 1
+    assert isinstance(first_failures[0], RuntimeError)
+    assert "deactivation is still in progress" in str(first_failures[0])
+
+    release_close.set()
+    deactivation.join(timeout=10)
+    assert not deactivation.is_alive()
+
+    active = runtime.activate(manifest.plugin_id)
+    assert active.manifest == manifest
+    runtime.deactivate(manifest.plugin_id)
