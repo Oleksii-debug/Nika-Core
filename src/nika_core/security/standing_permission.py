@@ -187,9 +187,23 @@ class StandingPermissionStore:
                 "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
             )
             row = conn.execute(
-                "SELECT MAX(version) AS version FROM standing_permission_schema_migrations"
+                "SELECT MAX(version) AS version, "
+                "typeof(MAX(version)) AS version_type "
+                "FROM standing_permission_schema_migrations"
             ).fetchone()
-            version = int(row["version"] or 0)
+            raw_version = row["version"]
+            if raw_version is None:
+                if row["version_type"] != "null":
+                    raise StandingPermissionIntegrityError(
+                        "standing permission schema version has invalid storage type"
+                    )
+                version = 0
+            else:
+                if row["version_type"] != "integer" or type(raw_version) is not int:
+                    raise StandingPermissionIntegrityError(
+                        "standing permission schema version has invalid storage type"
+                    )
+                version = raw_version
             if version > 1:
                 raise RuntimeError(
                     f"standing permission schema {version} is newer than supported 1"
@@ -214,6 +228,33 @@ class StandingPermissionStore:
                     "INSERT INTO standing_permission_schema_migrations(version, applied_at) "
                     "VALUES (1, ?)",
                     (datetime.now(UTC).isoformat(),),
+                )
+            self._validate_schema_shape(conn)
+
+    @staticmethod
+    def _validate_schema_shape(conn: sqlite3.Connection) -> None:
+        expected = {
+            "standing_permission_schema_migrations": (
+                ("version", "INTEGER", 1),
+                ("applied_at", "TEXT", 0),
+            ),
+            "standing_permissions": (
+                ("permission_id", "TEXT", 1),
+                ("parent_permission_id", "TEXT", 0),
+                ("scope_json", "TEXT", 0),
+                ("scope_fingerprint", "TEXT", 0),
+                ("revoked_at", "TEXT", 0),
+            ),
+        }
+        for table_name, expected_columns in expected.items():
+            rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+            actual = tuple(
+                (row["name"], str(row["type"]).upper(), int(row["pk"]))
+                for row in rows
+            )
+            if actual != expected_columns:
+                raise StandingPermissionIntegrityError(
+                    f"standing permission schema shape is invalid for {table_name}"
                 )
 
     def grant(
@@ -444,27 +485,73 @@ class StandingPermissionStore:
         permission_id: str,
     ) -> StoredStandingPermission | None:
         row = conn.execute(
-            "SELECT permission_id, parent_permission_id, scope_json, scope_fingerprint, revoked_at "
+            "SELECT permission_id, typeof(permission_id) AS permission_id_type, "
+            "parent_permission_id, typeof(parent_permission_id) AS parent_permission_id_type, "
+            "scope_json, typeof(scope_json) AS scope_json_type, "
+            "scope_fingerprint, typeof(scope_fingerprint) AS scope_fingerprint_type, "
+            "revoked_at, typeof(revoked_at) AS revoked_at_type "
             "FROM standing_permissions WHERE permission_id = ?",
             (permission_id,),
         ).fetchone()
         if row is None:
             return None
+        if (
+            row["permission_id_type"] != "text"
+            or row["scope_json_type"] != "text"
+            or row["scope_fingerprint_type"] != "text"
+            or (
+                row["parent_permission_id"] is None
+                and row["parent_permission_id_type"] != "null"
+            )
+            or (
+                row["parent_permission_id"] is not None
+                and row["parent_permission_id_type"] != "text"
+            )
+            or (row["revoked_at"] is None and row["revoked_at_type"] != "null")
+            or (row["revoked_at"] is not None and row["revoked_at_type"] != "text")
+        ):
+            raise StandingPermissionIntegrityError(
+                "standing permission row has invalid storage type"
+            )
         try:
+            stored_permission_id = row["permission_id"]
+            _permission_id(stored_permission_id)
+            if stored_permission_id != permission_id:
+                raise StandingPermissionIntegrityError(
+                    "standing permission row identity mismatch"
+                )
+            parent_permission_id = row["parent_permission_id"]
+            if parent_permission_id is not None:
+                _permission_id(parent_permission_id)
             scope = _scope_from_json(row["scope_json"])
-            fingerprint = str(row["scope_fingerprint"])
+            fingerprint = row["scope_fingerprint"]
+            if not _is_hash(fingerprint):
+                raise StandingPermissionIntegrityError(
+                    "standing permission scope fingerprint is malformed"
+                )
+            revoked_raw = row["revoked_at"]
             revoked_at = (
                 None
-                if row["revoked_at"] is None
-                else _utc(datetime.fromisoformat(row["revoked_at"]), "revoked_at")
+                if revoked_raw is None
+                else _utc(datetime.fromisoformat(revoked_raw), "revoked_at")
             )
+            if revoked_at is not None and revoked_at.isoformat() != revoked_raw:
+                raise StandingPermissionIntegrityError(
+                    "standing permission revocation time is non-canonical"
+                )
+        except StandingPermissionIntegrityError:
+            raise
         except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
             raise StandingPermissionIntegrityError("standing permission row is malformed") from exc
         if fingerprint != scope.fingerprint:
             raise StandingPermissionIntegrityError("standing permission scope fingerprint mismatch")
+        if revoked_at is not None and revoked_at < scope.granted_at:
+            raise StandingPermissionIntegrityError(
+                "standing permission revocation predates grant"
+            )
         return StoredStandingPermission(
-            permission_id=row["permission_id"],
-            parent_permission_id=row["parent_permission_id"],
+            permission_id=stored_permission_id,
+            parent_permission_id=parent_permission_id,
             scope_fingerprint=fingerprint,
             granted_at=scope.granted_at,
             expires_at=scope.expires_at,
@@ -630,23 +717,52 @@ def _material(scope: StandingPermissionScope) -> _ScopeRecord:
 
 
 def _scope_from_json(payload: str) -> _ScopeRecord:
+    if type(payload) is not str:
+        raise StandingPermissionIntegrityError(
+            "standing permission scope must use text storage"
+        )
     value = json.loads(payload)
-    if not isinstance(value, dict):
+    if type(value) is not dict:
         raise StandingPermissionIntegrityError("standing permission scope is malformed")
+    expected_keys = {
+        "action_class",
+        "expires_at",
+        "granted_at",
+        "project_hash",
+        "resource_hashes",
+        "risk_ceiling",
+        "site_hashes",
+        "subject_hash",
+        "target_hashes",
+        "task_hash",
+        "user_hash",
+    }
+    if set(value) != expected_keys:
+        raise StandingPermissionIntegrityError(
+            "standing permission scope has unexpected durable fields"
+        )
     try:
         scope = _ScopeRecord(
-            subject_hash=str(value["subject_hash"]),
-            user_hash=str(value["user_hash"]),
-            project_hash=str(value["project_hash"]),
-            task_hash=str(value["task_hash"]),
-            action_class=str(value["action_class"]),
-            risk_ceiling=ToolRisk(value["risk_ceiling"]),
-            target_hashes=tuple(value["target_hashes"]),
-            site_hashes=tuple(value["site_hashes"]),
-            resource_hashes=tuple(value["resource_hashes"]),
-            granted_at=_utc(datetime.fromisoformat(value["granted_at"]), "granted_at"),
-            expires_at=_utc(datetime.fromisoformat(value["expires_at"]), "expires_at"),
+            subject_hash=_json_text(value["subject_hash"], "subject_hash"),
+            user_hash=_json_text(value["user_hash"], "user_hash"),
+            project_hash=_json_text(value["project_hash"], "project_hash"),
+            task_hash=_json_text(value["task_hash"], "task_hash"),
+            action_class=_json_text(value["action_class"], "action_class"),
+            risk_ceiling=ToolRisk(_json_text(value["risk_ceiling"], "risk_ceiling")),
+            target_hashes=_json_text_tuple(value["target_hashes"], "target_hashes"),
+            site_hashes=_json_text_tuple(value["site_hashes"], "site_hashes"),
+            resource_hashes=_json_text_tuple(value["resource_hashes"], "resource_hashes"),
+            granted_at=_utc(
+                datetime.fromisoformat(_json_text(value["granted_at"], "granted_at")),
+                "granted_at",
+            ),
+            expires_at=_utc(
+                datetime.fromisoformat(_json_text(value["expires_at"], "expires_at")),
+                "expires_at",
+            ),
         )
+    except StandingPermissionIntegrityError:
+        raise
     except (TypeError, ValueError, KeyError) as exc:
         raise StandingPermissionIntegrityError("standing permission scope is malformed") from exc
     if not all(_is_hash(item) for item in _scope_hashes(scope)):
@@ -661,7 +777,27 @@ def _scope_from_json(payload: str) -> _ScopeRecord:
     _action(scope.action_class)
     if scope.risk_ceiling is ToolRisk.HIGH_IMPACT or scope.expires_at <= scope.granted_at:
         raise StandingPermissionIntegrityError("standing permission scope violates policy")
+    if _json(scope.payload) != payload:
+        raise StandingPermissionIntegrityError(
+            "standing permission scope serialization is non-canonical"
+        )
     return scope
+
+
+def _json_text(value: object, label: str) -> str:
+    if type(value) is not str:
+        raise StandingPermissionIntegrityError(
+            f"standing permission {label} must be durable text"
+        )
+    return value
+
+
+def _json_text_tuple(value: object, label: str) -> tuple[str, ...]:
+    if type(value) is not list or any(type(item) is not str for item in value):
+        raise StandingPermissionIntegrityError(
+            f"standing permission {label} must be a durable text array"
+        )
+    return tuple(value)
 
 
 def _scope_hashes(scope: _ScopeRecord) -> tuple[str, ...]:
