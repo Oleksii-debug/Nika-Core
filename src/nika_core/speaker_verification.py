@@ -431,6 +431,11 @@ def _snapshot_response(value: object) -> SpeakerVerifierResponse:
 
 
 def _bounded_adapter_error(error: SpeakerVerificationError) -> SpeakerVerificationError:
+    if type(error) is not SpeakerVerificationError:
+        return SpeakerVerificationError(
+            SpeakerVerificationErrorCode.ADAPTER_FAILURE,
+            "speaker verification adapter failed",
+        )
     try:
         code = error.code
         retryable = error.retryable

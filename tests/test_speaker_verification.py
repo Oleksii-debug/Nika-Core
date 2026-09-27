@@ -125,6 +125,13 @@ class _BehavioralStr(str):
         return 0
 
 
+class _BehavioralSpeakerError(SpeakerVerificationError):
+    def __getattribute__(self, name: str) -> object:
+        if name in {"code", "retryable"}:
+            raise RuntimeError("SENSITIVE_ERROR_ATTRIBUTE_CANARY")
+        return super().__getattribute__(name)
+
+
 def _request(
     *,
     profile_id: str = "owner-profile",
@@ -421,7 +428,6 @@ def test_float_overflowing_response_confidence_fails_as_invalid_response() -> No
     assert error.value.code is SpeakerVerificationErrorCode.INVALID_RESPONSE
 
 
-
 def test_adapter_capability_alias_mutation_is_detected_as_route_drift() -> None:
     adapter = FakeVerifier()
     capability_alias = adapter.capabilities
@@ -547,3 +553,20 @@ def test_forged_policy_is_revalidated_at_service_boundary() -> None:
 
     assert error.value.code is SpeakerVerificationErrorCode.INVALID_REQUEST
     assert adapter.calls == 0
+
+
+
+def test_behavioral_adapter_error_subclass_cannot_escape_sanitizer() -> None:
+    adapter = FakeVerifier()
+    adapter.failure = _BehavioralSpeakerError(
+        SpeakerVerificationErrorCode.ADAPTER_FAILURE,
+        "SENSITIVE_ERROR_MESSAGE_CANARY",
+    )
+    service = SpeakerVerificationService(adapter)
+
+    with pytest.raises(SpeakerVerificationError) as error:
+        service.verify(_request())
+
+    assert type(error.value) is SpeakerVerificationError
+    assert error.value.code is SpeakerVerificationErrorCode.ADAPTER_FAILURE
+    assert "SENSITIVE" not in str(error.value)
