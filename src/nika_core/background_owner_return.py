@@ -48,6 +48,8 @@ class WindowsBackgroundOwnerReturnController:
     ) -> None:
         if type(presence) is not WindowsOwnerPresenceObserver:
             raise TypeError("presence must be exact WindowsOwnerPresenceObserver")
+        if getattr(presence, "_audit", None) is not audit:
+            raise ValueError("presence observer must use the controller canonical AuditLog")
         self._max_age = self._bounded_seconds(
             max_presence_age_seconds,
             "max_presence_age_seconds",
