@@ -4,10 +4,11 @@ import asyncio
 import io
 import json
 import sys
-import uuid
 import tarfile
 import threading
+import uuid
 from pathlib import Path
+
 import httpx
 import pytest
 
