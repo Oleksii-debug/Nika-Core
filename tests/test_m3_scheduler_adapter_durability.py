@@ -6,7 +6,14 @@ import pytest
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
-from nika_core.scheduler import APSchedulerAdapter, ScheduledJob, ScheduledJobStore, TriggerKind
+from nika_core.scheduler import (
+    APSchedulerAdapter,
+    ScheduledJob,
+    ScheduledJobStore,
+    ScheduleIdentity,
+    TriggerKind,
+)
+from nika_core.scheduler.store import IMMUTABLE_JOB_BINDING_KEY
 
 
 def _store(tmp_path: Path) -> SQLiteStore:
@@ -111,3 +118,64 @@ def test_pause_audit_records_durable_disabled_state(tmp_path: Path) -> None:
     events = audit.list_for(entity_type="scheduled_job", entity_id="pause-me")
     assert events[-1].event_type == "scheduler.job_paused"
     assert events[-1].payload["enabled"] is False
+
+
+def test_schedule_identity_and_recurrence_binding_compose_without_mutation(tmp_path: Path) -> None:
+    jobs = ScheduledJobStore(_store(tmp_path))
+    identity = ScheduleIdentity(
+        scope="product_project",
+        owner_id="project-1",
+        dedup_key="recurrence-1",
+        product_project_id="project-1",
+    )
+    original = ScheduledJob(
+        job_id="composed-binding",
+        action_id="monitor.check",
+        trigger_kind=TriggerKind.INTERVAL,
+        trigger={"minutes": 5, "timezone": "UTC"},
+        payload={IMMUTABLE_JOB_BINDING_KEY: "series-a", "value": 1},
+        identity=identity,
+    )
+    jobs.upsert(original)
+
+    updated = ScheduledJob(
+        job_id=original.job_id,
+        action_id=original.action_id,
+        trigger_kind=original.trigger_kind,
+        trigger=original.trigger,
+        payload={IMMUTABLE_JOB_BINDING_KEY: "series-a", "value": 2},
+        identity=identity,
+    )
+    jobs.upsert(updated)
+    assert jobs.get(original.job_id) == updated
+
+    with pytest.raises(ValueError, match="immutable binding"):
+        jobs.upsert(
+            ScheduledJob(
+                job_id=original.job_id,
+                action_id=original.action_id,
+                trigger_kind=original.trigger_kind,
+                trigger=original.trigger,
+                payload={IMMUTABLE_JOB_BINDING_KEY: "series-b"},
+                identity=identity,
+            )
+        )
+
+    with pytest.raises(ValueError, match="schedule identity"):
+        jobs.upsert(
+            ScheduledJob(
+                job_id=original.job_id,
+                action_id=original.action_id,
+                trigger_kind=original.trigger_kind,
+                trigger=original.trigger,
+                payload={IMMUTABLE_JOB_BINDING_KEY: "series-a"},
+                identity=ScheduleIdentity(
+                    scope="product_project",
+                    owner_id="project-1",
+                    dedup_key="recurrence-2",
+                    product_project_id="project-1",
+                ),
+            )
+        )
+
+    assert jobs.get(original.job_id) == updated

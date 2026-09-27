@@ -609,3 +609,39 @@ def test_psutil_observer_reports_supported_local_metrics(tmp_path: Path) -> None
     assert snapshot.process_rss_bytes is not None and snapshot.process_rss_bytes > 0
     assert snapshot.gpu_percent is None
     assert observer.is_process_alive(identity)
+
+
+def test_durable_resource_queue_and_read_only_capacity_status_compose(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    observer = FakeObserver(cpu=25.0, memory=30.0)
+    manager = ResourceManager(store, observer, manager_id="status-manager")
+    manager.set_budget(
+        ResourceBudget(
+            scope="workspace",
+            owner_id="w",
+            max_concurrent=1,
+            max_cpu_percent=80.0,
+            max_memory_percent=85.0,
+        )
+    )
+
+    assert manager.request(scope="workspace", owner_id="w", request_id="active").granted
+    waiting = manager.request(scope="workspace", owner_id="w", request_id="waiting")
+    assert (waiting.granted, waiting.reason) == (False, "concurrency_limit")
+    before = manager.queued(scope="workspace", owner_id="w")
+
+    status = manager.status(scope="workspace", owner_id="w")
+
+    assert status.active_count == 1
+    assert status.queued_count == 1
+    assert status.concurrency_headroom == 0
+    assert status.cpu_headroom_percent == pytest.approx(55.0)
+    assert status.memory_headroom_percent == pytest.approx(55.0)
+    assert status.pressure_reasons == ("concurrency_limit",)
+    assert manager.queued(scope="workspace", owner_id="w") == before
+
+    restarted = ResourceManager(store, observer, manager_id="status-manager-after-restart")
+    restarted_status = restarted.status(scope="workspace", owner_id="w")
+    assert restarted_status.active_count == 1
+    assert restarted_status.queued_count == 1
+    assert restarted.queued(scope="workspace", owner_id="w") == ("waiting",)
