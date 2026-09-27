@@ -4,8 +4,10 @@ on:
   pull_request:
     paths:
       - "src/nika_core/toolsmith/openhands_remote_worker.py"
+      - "src/nika_core/product_factory_openhands_recovery.py"
       - "src/nika_core/toolsmith/openhands_sdk_runtime.py"
       - "tests/test_toolsmith_openhands_remote_worker.py"
+      - "tests/test_product_factory_openhands_recovery.py"
       - "tests/test_product_factory_coding_worker_adapter.py"
       - "pyproject.toml"
       - ".github/workflows/pf11-openhands-backend.yml"
@@ -66,4 +68,5 @@ jobs:
           python -m pytest
           tests/test_toolsmith_openhands_remote_worker.py
           tests/test_product_factory_coding_worker_adapter.py
+          tests/test_product_factory_openhands_recovery.py
           -q
