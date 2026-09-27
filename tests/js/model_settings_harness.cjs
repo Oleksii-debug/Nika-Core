@@ -154,7 +154,14 @@ function holdNextStateRead() {
 }
 
 global.pywebview = { api: {
-  list_actions: async () => [],
+  list_actions: async () => [{
+    action_id: "nav.tasks",
+    label: "Завдання",
+    category: "Навігація",
+    scope: "app",
+    binding: "Space+Control",
+    may_be_unbound: true,
+  }],
   get_state: async () => {
     if (failRead) throw new Error("PRIVATE_MODEL_CANARY");
     if (deferredStateRead) return deferredStateRead;
@@ -247,8 +254,29 @@ const status = element("model-settings-status");
   await poll();
   assert.match(element("recovery-status").textContent, /Перевірку відновлення завершено/);
 
+  const nonEditable = element("tasks-heading");
+  let shortcutPrevented = false;
+  const beforeShortcut = calls.length;
+  listeners.keydown({
+    target: nonEditable, key: " ", ctrlKey: true, altKey: false, shiftKey: false, metaKey: false,
+    preventDefault() { shortcutPrevented = true; },
+  });
+  await tick(); await tick();
+  assert.equal(shortcutPrevented, true, "Ctrl+Space must be intercepted for a matched app shortcut");
+  assert.equal(calls.length, beforeShortcut + 1);
+  assert.equal(calls.at(-1).action_id, "nav.tasks");
+  assert.deepEqual(calls.at(-1).payload, {});
+
   model.focus();
   let prevented = false;
+  const beforeEditableShortcut = calls.length;
+  listeners.keydown({
+    target: model, key: " ", ctrlKey: true, altKey: false, shiftKey: false, metaKey: false,
+    preventDefault() { prevented = true; },
+  });
+  assert.equal(prevented, false, "Ctrl+Space in an editable model field must remain native");
+  assert.equal(calls.length, beforeEditableShortcut, "Editable Ctrl+Space must not dispatch an app action");
+
   listeners.keydown({
     target: model, key: "a", ctrlKey: true, altKey: false, shiftKey: false, metaKey: false,
     preventDefault() { prevented = true; },
@@ -506,5 +534,5 @@ const status = element("model-settings-status");
   assert.match(element("app-status").textContent, /Немає підтвердження зміни моделі/);
   assert.equal(JSON.stringify(Object.values(elements).map((e) => e.textContent)).includes("PRIVATE_MODEL_CANARY"), false);
 
-  console.log("PASS: model settings + startup recovery renderer, draft/race, keyboard focus, safe credential reference, no blind retry");
+  console.log("PASS: model settings + startup recovery renderer, Ctrl+Space keymap, draft/race, keyboard focus, safe credential reference, no blind retry");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
