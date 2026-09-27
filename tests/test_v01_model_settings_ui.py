@@ -6,6 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from nika_core.config import AppConfig
+from scripts import nika_windows
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -47,6 +50,33 @@ def test_model_settings_form_is_semantic_and_action_registered() -> None:
         assert f'id="{control_id}"' in html
 
 
+def test_packaged_missing_model_selection_rejects_task_and_focuses_mode(tmp_path: Path) -> None:
+    source_root = tmp_path / "sources"
+    source_root.mkdir()
+    (source_root / "a.txt").write_text("alpha", encoding="utf-8")
+    (source_root / "b.txt").write_text("beta", encoding="utf-8")
+    config = AppConfig(
+        database_path=(tmp_path / "nika.db").resolve(),
+        v01_source_root=source_root.resolve(),
+        v01_source_a=Path("a.txt"),
+        v01_source_b=Path("b.txt"),
+    )
+    bridge, _products = nika_windows.build_windows_bridge(config)
+
+    result = bridge.dispatch(
+        {
+            "request_id": "missing-model-mode",
+            "action_id": "task.create",
+            "payload": {"command": "Порівняй два контрольовані джерела."},
+        }
+    )
+
+    assert result["status"] == "rejected"
+    assert "виберіть режим" in result["message"]
+    assert result["focus_id"] == "model-route-kind"
+    assert bridge.get_state()["state"]["tasks"] == []
+
+
 def test_model_settings_backend_focus_precedes_potentially_slow_state_refresh() -> None:
     app = (ROOT / "src/nika_core/ui/web/app.js").read_text(encoding="utf-8")
     start = app.index("  async function dispatchModel(")
@@ -61,12 +91,15 @@ def test_model_settings_backend_focus_precedes_potentially_slow_state_refresh() 
 
 def test_packaged_bridge_reuses_integrated_model_settings_and_freezes_task_choice() -> None:
     script = (ROOT / "scripts/nika_windows.py").read_text(encoding="utf-8")
-    assert "from nika_core.v01_model_settings import V01ModelSettings" in script
+    assert "from nika_core.v01_model_settings import ModelSetupError, V01ModelSettings" in script
     assert "model_settings = V01ModelSettings(store)" in script
     assert "source_bound = source_settings.prepare_task_payload(payload)" in script
     assert 'if model_snapshot.get("status") == "missing":' not in script
     assert "model_snapshot = model_settings.snapshot()" not in script
     assert "return model_settings.prepare_task_payload(source_bound)" in script
+    assert "except ModelSetupError as exc:" in script
+    assert 'focus_id="model-route-kind"' in script
+    assert "ordinary_handler=create_ordinary_task" in script
     assert 'state["v01_model_settings"] = model_settings.snapshot()' in script
     assert '"settings.model.configure": model_settings.configure' in script
     assert '"settings.model.refresh": refresh_model_settings' in script
