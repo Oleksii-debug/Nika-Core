@@ -5,10 +5,13 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.security.policy import ActionIntent
 from nika_core.security.standing_permission import (
     PermissionContext,
+    StandingPermissionBinding,
     StandingPermissionScope,
     StandingPermissionStore,
+    StandingPermissionUse,
 )
 from nika_core.tools import ToolRisk
 
@@ -21,6 +24,22 @@ class _ForgedRisk(str):
 
 def _forged_read_only_risk() -> _ForgedRisk:
     return _ForgedRisk(ToolRisk.READ_ONLY.value)
+
+
+
+
+class _MutableContext:
+    def __init__(self) -> None:
+        self.user_id = "user-1"
+        self.project_id = "project-1"
+        self.task_id = "task-1"
+
+
+class _IntentCarrier:
+    tool_id = "safe.read"
+    target = "target-1"
+    network_host = None
+    risk = ToolRisk.READ_ONLY
 
 
 def _scope(*, risk_ceiling: ToolRisk) -> StandingPermissionScope:
@@ -40,6 +59,87 @@ def _scope(*, risk_ceiling: ToolRisk) -> StandingPermissionScope:
         granted_at=now,
         expires_at=now + timedelta(minutes=5),
     )
+
+
+
+def test_nested_context_carriers_must_be_canonical_permission_context() -> None:
+    fake_context = _MutableContext()
+    now = datetime(2026, 9, 27, tzinfo=UTC)
+
+    with pytest.raises(TypeError, match="exact PermissionContext"):
+        StandingPermissionBinding(
+            permission_id="perm-1",
+            subject_id="agent-1",
+            context=fake_context,  # type: ignore[arg-type]
+            target="target-1",
+            resource_id="resource-1",
+            network_host=None,
+        )
+
+    with pytest.raises(TypeError, match="exact PermissionContext"):
+        StandingPermissionScope(
+            subject_id="agent-1",
+            context=fake_context,  # type: ignore[arg-type]
+            action_class="safe.read",
+            targets=("target-1",),
+            sites=(),
+            resources=("resource-1",),
+            risk_ceiling=ToolRisk.READ_ONLY,
+            granted_at=now,
+            expires_at=now + timedelta(minutes=5),
+        )
+
+    intent = ActionIntent(
+        action_id="call-1",
+        tool_id="safe.read",
+        risk=ToolRisk.READ_ONLY,
+        target="target-1",
+    )
+    with pytest.raises(TypeError, match="exact PermissionContext"):
+        StandingPermissionUse(
+            subject_id="agent-1",
+            context=fake_context,  # type: ignore[arg-type]
+            intent=intent,
+            resource_id="resource-1",
+        )
+
+
+def test_standing_permission_use_requires_exact_action_intent() -> None:
+    with pytest.raises(TypeError, match="exact ActionIntent"):
+        StandingPermissionUse(
+            subject_id="agent-1",
+            context=PermissionContext("user-1", "project-1", "task-1"),
+            intent=_IntentCarrier(),  # type: ignore[arg-type]
+            resource_id="resource-1",
+        )
+
+
+def test_exact_nested_authority_carriers_remain_valid() -> None:
+    context = PermissionContext("user-1", "project-1", "task-1")
+    binding = StandingPermissionBinding(
+        permission_id="perm-1",
+        subject_id="agent-1",
+        context=context,
+        target="target-1",
+        resource_id="resource-1",
+        network_host=None,
+    )
+    intent = ActionIntent(
+        action_id="call-1",
+        tool_id="safe.read",
+        risk=ToolRisk.READ_ONLY,
+        target="target-1",
+    )
+    use = StandingPermissionUse(
+        subject_id="agent-1",
+        context=context,
+        intent=intent,
+        resource_id="resource-1",
+    )
+
+    assert binding.context is context
+    assert use.context is context
+    assert use.intent is intent
 
 
 def test_standing_permission_rejects_equality_compatible_foreign_risk_carrier() -> None:
