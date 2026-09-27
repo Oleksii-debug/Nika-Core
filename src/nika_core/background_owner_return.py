@@ -193,6 +193,26 @@ class WindowsBackgroundOwnerReturnController:
         if observation.source_id != self._source_id:
             raise ValueError("presence observation source changed")
 
+        sample_event = next(
+            (
+                event
+                for event in self._audit.list_for(
+                    entity_type="owner_presence_source",
+                    entity_id=self._source_id,
+                )
+                if event.event_id == observation.sequence
+            ),
+            None,
+        )
+        if (
+            sample_event is None
+            or sample_event.event_type != "background.owner_presence_sampled"
+            or sample_event.payload.get("presence") != observation.presence.value
+        ):
+            raise ValueError(
+                "presence observation is not backed by the canonical sample audit"
+            )
+
         now = self._clock()
         if type(now) is not datetime:
             raise TypeError("controller clock must return exact datetime")
