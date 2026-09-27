@@ -238,7 +238,7 @@ def test_large_uptime_uses_low_dword_without_losing_safe_away_classification(
         ([(1 << 32), (1 << 32)], [100], ValueError, "Win32 DWORD range"),
         ([1, 1], [True], TypeError, "current tick"),
         ([1, 1], [-1], ValueError, "current tick"),
-        ([1, 1], [(1 << 63)], ValueError, "current tick"),
+        ([1, 1], [(1 << 64)], ValueError, "current tick"),
     ],
 )
 def test_hostile_or_out_of_range_tick_carriers_fail_closed_before_audit(
@@ -399,6 +399,13 @@ def test_source_id_requires_exact_trimmed_string(tmp_path: Path) -> None:
             audit,
             away_after_seconds=60,
             source_id=" win32-owner-presence ",
+            api=FakeLastInputApi(last_ticks=[1, 1], current_ticks=[2]),
+        )
+    with pytest.raises(ValueError, match="too long"):
+        WindowsOwnerPresenceObserver(
+            audit,
+            away_after_seconds=60,
+            source_id="x" * 257,
             api=FakeLastInputApi(last_ticks=[1, 1], current_ticks=[2]),
         )
 
