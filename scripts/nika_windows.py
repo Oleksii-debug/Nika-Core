@@ -61,9 +61,6 @@ def build_windows_bridge(
 
     def prepare_task_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         source_bound = source_settings.prepare_task_payload(payload)
-        model_snapshot = model_settings.snapshot()
-        if model_snapshot.get("status") == "missing":
-            return dict(source_bound)
         return model_settings.prepare_task_payload(source_bound)
 
     runtime = V01PackagedThreeAgentRuntime(
