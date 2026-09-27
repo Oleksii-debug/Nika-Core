@@ -330,6 +330,19 @@ class IdempotencyLedger:
         task_id = _require_exact_text(task_id, field_name="task_id")
         now = datetime.now(UTC).isoformat()
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            pending_rows = conn.execute(
+                """
+                SELECT * FROM idempotency_records
+                WHERE task_id = ? AND status = ?
+                ORDER BY created_at, operation_key
+                """,
+                (task_id, IdempotencyStatus.PENDING.value),
+            ).fetchall()
+            records = tuple(self._from_row(row) for row in pending_rows)
+            if not records:
+                return ()
+
             rows = conn.execute(
                 """
                 UPDATE idempotency_records
@@ -344,7 +357,13 @@ class IdempotencyLedger:
                     IdempotencyStatus.PENDING.value,
                 ),
             ).fetchall()
-        return tuple(sorted(row["operation_key"] for row in rows))
+            promoted_keys = tuple(
+                sorted(_stored_text(row, "operation_key") for row in rows)
+            )
+            expected_keys = tuple(sorted(record.operation_key for record in records))
+            if promoted_keys != expected_keys:  # pragma: no cover - writer-lock invariant
+                raise RuntimeError("pending idempotency promotion set changed inside transaction")
+            return promoted_keys
 
     def _set_status(
         self,
