@@ -190,3 +190,34 @@ def test_record_result_snapshots_worker_evidence_before_storing_state() -> None:
     assert persisted.result.diff_digest == DIFF_DIGEST
     assert persisted.result.coding_result.test_evidence[0].output_digest == "tests-ok"
 
+def test_restore_snapshots_result_evidence_before_accepting_snapshot() -> None:
+    source, request = _running_coordinator()
+    evidence = TestEvidence(("pytest",), 0, "tests-ok")
+    source.record_result(
+        _request_envelope(
+            request,
+            CodingResult(job_id=request.work_id, test_evidence=(evidence,)),
+        )
+    )
+    external_snapshot = source.snapshot()
+    external_result = external_snapshot.records[0].result
+    assert external_result is not None
+    external_evidence = external_result.coding_result.test_evidence[0]
+
+    restored = ProductFactoryCoordinator(source.graph)
+    restored.restore(
+        external_snapshot,
+        trusted_plan_fingerprint=source.trusted_plan_fingerprint,
+    )
+
+    object.__setattr__(external_result, "diff_digest", "forged")
+    object.__setattr__(external_evidence, "output_digest", "")
+
+    live = restored.snapshot().records[0]
+    assert live.state is WorkState.REVIEW_REQUIRED
+    assert live.result is not None
+    assert live.result is not external_result
+    assert live.result.diff_digest == DIFF_DIGEST
+    assert live.result.coding_result.test_evidence[0] is not external_evidence
+    assert live.result.coding_result.test_evidence[0].output_digest == "tests-ok"
+

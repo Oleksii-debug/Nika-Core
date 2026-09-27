@@ -360,8 +360,10 @@ class ProductFactoryCoordinator:
                     "snapshot work requests disagree on project permission ceiling"
                 )
 
+        canonical_records: list[WorkRecord] = []
         for record in snapshot.records:
-            request = record.request
+            canonical_record = _canonical_restored_record(record)
+            request = canonical_record.request
             component = components[request.component_id]
             repository = repositories[component.repository_id]
             if request.project_id != self.graph.project_id:
@@ -372,10 +374,12 @@ class ProductFactoryCoordinator:
                 raise CoordinatorError("snapshot work request path scope drifted")
             if request.acceptance_commands != component.test_commands:
                 raise CoordinatorError("snapshot acceptance command scope drifted")
-            self._validate_restored_record(record)
+            self._validate_restored_record(canonical_record)
+            canonical_records.append(canonical_record)
 
-        self._validate_restored_dependencies(snapshot.records)
-        self._records = {record.request.component_id: record for record in snapshot.records}
+        restored_records = tuple(canonical_records)
+        self._validate_restored_dependencies(restored_records)
+        self._records = {record.request.component_id: record for record in restored_records}
         self._revision = snapshot.revision
         self._trusted_plan = plan
         self._trusted_plan_fingerprint = authority
@@ -575,6 +579,19 @@ class ProductFactoryCoordinator:
 
     def _touch(self) -> None:
         self._revision += 1
+
+
+def _canonical_restored_record(record: WorkRecord) -> WorkRecord:
+    result = None
+    if record.result is not None:
+        result = _canonical_worker_result_envelope(record.result)
+    return WorkRecord(
+        request=record.request,
+        state=record.state,
+        result=result,
+        review=record.review,
+        blocker=record.blocker,
+    )
 
 
 def _canonical_worker_result_envelope(value: object) -> WorkerResultEnvelope:
