@@ -838,6 +838,26 @@ def test_cancel_probe_pending_recovery_is_manual_reconciliation(tmp_path: Path) 
     assert result.recovery_state == RecoveryState("manual_reconcile_required")
 
 
+def test_acceptance_cancel_pending_recovery_is_manual_reconciliation(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    worker = OpenHandsRemoteCodingWorker(Provider(), Runtime())
+
+    result = _run(
+        worker.recover(
+            _job(root),
+            RecoveryState("acceptance_cancel_requested"),
+        )
+    )
+
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.kind.value == "internal_error"
+    assert result.failure.retryable is False
+    assert result.recovery_state == RecoveryState("manual_reconcile_required")
+
+
 def test_unverified_cancel_requires_manual_reconciliation(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     runtime = Runtime(cancel_verified=False)

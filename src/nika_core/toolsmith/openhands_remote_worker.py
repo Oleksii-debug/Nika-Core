@@ -607,6 +607,7 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
             )
         if state.phase in {
             "cancel_requested",
+            "acceptance_cancel_requested",
             "cancel_probe_pending",
             "manual_reconcile_required",
         }:
