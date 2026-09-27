@@ -74,6 +74,7 @@ class OpenHandsSdkRemoteRuntime:
         self._max_iterations = max_iterations
         self._active: dict[str, _ActiveExecution] = {}
         self._cancelled_done: set[str] = set()
+        self._pending_cancel: set[str] = set()
         self._active_lock = threading.Lock()
 
     async def execute(
@@ -90,6 +91,9 @@ class OpenHandsSdkRemoteRuntime:
                 raise OpenHandsSdkCompatibilityError(
                     "OpenHands SDK job identity is already active"
                 )
+            if job.job_id in self._pending_cancel:
+                self._pending_cancel.remove(job.job_id)
+                active.cancel_requested.set()
             self._cancelled_done.discard(job.job_id)
             self._active[job.job_id] = active
         try:
@@ -113,7 +117,12 @@ class OpenHandsSdkRemoteRuntime:
                 if job_id in self._cancelled_done:
                     self._cancelled_done.remove(job_id)
                     return True
-                return False
+                # A worker may reserve remote dispatch and be cancelled in the tiny
+                # scheduling window before execute() registers _active. Returning a
+                # proven reservation means a later execute for this job must fail
+                # before any external workspace or conversation effect.
+                self._pending_cancel.add(job_id)
+                return True
             active.cancel_requested.set()
             conversation = active.conversation
 
@@ -146,6 +155,10 @@ class OpenHandsSdkRemoteRuntime:
     ) -> OpenHandsRunEvidence:
         conversation = None
         try:
+            if active.cancel_requested.is_set():
+                raise OpenHandsSdkExecutionCancelled(
+                    "OpenHands execution cancelled before workspace acquisition"
+                )
             Conversation = _load_conversation_type()
             workspace = self._workspace_factory(endpoint)
             if getattr(workspace, "working_dir", None) != endpoint.working_dir:
