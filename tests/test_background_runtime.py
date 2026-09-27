@@ -118,6 +118,7 @@ def test_fresh_away_evidence_dispatches_exactly_once(tmp_path: Path) -> None:
             _obs(2, OwnerPresence.AWAY, now=now),
             _obs(3, OwnerPresence.AWAY, now=now),
             _obs(4, OwnerPresence.AWAY, now=now),
+            _obs(5, OwnerPresence.AWAY, now=now),
         ],
         now=now,
     )
@@ -273,6 +274,43 @@ def test_owner_return_after_resource_grant_is_fenced_and_releases_capacity(
     assert queue.get(task_id).state is TaskState.PAUSED
     assert resources.active_count(scope="background_life", owner_id="living-agent") == 0
     assert resources.queued(scope="background_life", owner_id="living-agent") == ()
+
+
+def test_owner_return_after_post_grant_resource_recheck_blocks_effect(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    store = _store(tmp_path)
+    guard, queue, _audit, resources = _guard(
+        store=store,
+        observations=[
+            _obs(30, OwnerPresence.AWAY, now=now),
+            _obs(31, OwnerPresence.AWAY, now=now),
+            _obs(32, OwnerPresence.AWAY, now=now),
+            _obs(33, OwnerPresence.AWAY, now=now),
+            _obs(34, OwnerPresence.ACTIVE, now=now),
+        ],
+        now=now,
+    )
+    task_id = _ready_task(queue)
+
+    async def effect() -> object:
+        raise AssertionError("effect must not run after owner returns")
+
+    result = asyncio.run(
+        guard.dispatch(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.EVIDENCE_VERIFICATION,
+            effect=effect,
+        )
+    )
+
+    assert result.action is BackgroundAction.PAUSE
+    assert result.reason == "owner_active"
+    assert result.executed is False
+    assert queue.get(task_id).state is TaskState.PAUSED
+    assert resources.active_count(scope="background_life", owner_id="living-agent") == 0
+    assert IdempotencyLedger(store).list_for_task(task_id) == ()
 
 
 def test_resource_pressure_race_at_final_admission_defers_without_effect(
@@ -497,6 +535,7 @@ def test_restart_rejects_replayed_presence_then_new_evidence_resumes(
             _obs(62, OwnerPresence.AWAY, now=now),
             _obs(63, OwnerPresence.AWAY, now=now),
             _obs(64, OwnerPresence.AWAY, now=now),
+            _obs(65, OwnerPresence.AWAY, now=now),
         ],
         now=now,
     )
@@ -569,6 +608,7 @@ def test_effect_exception_still_releases_resource_grant(tmp_path: Path) -> None:
             _obs(81, OwnerPresence.AWAY, now=now),
             _obs(82, OwnerPresence.AWAY, now=now),
             _obs(83, OwnerPresence.AWAY, now=now),
+            _obs(84, OwnerPresence.AWAY, now=now),
         ],
         now=now,
     )
@@ -616,6 +656,7 @@ def test_guard_composes_with_canonical_task_runtime_coordinator(tmp_path: Path) 
             _obs(91, OwnerPresence.AWAY, now=now),
             _obs(92, OwnerPresence.AWAY, now=now),
             _obs(93, OwnerPresence.AWAY, now=now),
+            _obs(94, OwnerPresence.AWAY, now=now),
         ],
         now=now,
     )
@@ -786,6 +827,7 @@ def test_completed_dispatch_claim_blocks_replay_when_task_state_did_not_advance(
             _obs(105, OwnerPresence.AWAY, now=now),
             _obs(106, OwnerPresence.AWAY, now=now),
             _obs(107, OwnerPresence.AWAY, now=now),
+            _obs(108, OwnerPresence.AWAY, now=now),
         ],
         now=now,
     )
@@ -832,6 +874,7 @@ def test_deferred_effect_result_cannot_escape_authority_window(tmp_path: Path) -
             _obs(112, OwnerPresence.AWAY, now=now),
             _obs(113, OwnerPresence.AWAY, now=now),
             _obs(114, OwnerPresence.AWAY, now=now),
+            _obs(115, OwnerPresence.AWAY, now=now),
         ],
         now=now,
     )
@@ -1121,6 +1164,7 @@ def test_process_loss_after_effect_start_leaves_nonreplayable_pending_claim(
             _obs(244, OwnerPresence.AWAY, now=now),
             _obs(245, OwnerPresence.AWAY, now=now),
             _obs(246, OwnerPresence.AWAY, now=now),
+            _obs(247, OwnerPresence.AWAY, now=now),
         ],
         now=now,
     )

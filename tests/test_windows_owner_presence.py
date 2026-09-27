@@ -136,8 +136,8 @@ def test_physical_observer_drives_canonical_background_dispatch_guard(tmp_path: 
         audit,
         away_after_seconds=60,
         api=FakeLastInputApi(
-            last_ticks=[1_000] * 10,
-            current_ticks=[40_000, 100_000, 100_000, 100_000, 100_000],
+            last_ticks=[1_000] * 12,
+            current_ticks=[40_000, 100_000, 100_000, 100_000, 100_000, 100_000],
         ),
         clock=lambda: now,
     )
