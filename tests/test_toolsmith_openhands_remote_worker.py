@@ -124,6 +124,23 @@ class BlockingAcquireProvider(Provider):
         return self.endpoint
 
 
+class BlockingReleaseProvider(Provider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.release_started = asyncio.Event()
+        self.never_release = asyncio.Event()
+        self.release_cancelled = False
+
+    async def release(self, job, endpoint, *, succeeded: bool):
+        self.released.append((job.job_id, endpoint.endpoint_id, succeeded))
+        self.release_started.set()
+        try:
+            await self.never_release.wait()
+        except asyncio.CancelledError:
+            self.release_cancelled = True
+            raise
+
+
 class Runtime:
     def __init__(
         self,
@@ -748,6 +765,55 @@ def test_acquisition_failure_redacts_untrusted_provider_diagnostics(
     assert "password" not in result.failure.message
     assert result.recovery_state == RecoveryState("manual_reconcile_required")
     assert provider.released == []
+
+
+def test_task_cancellation_during_sandbox_release_is_manual_reconciliation(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path / "first")
+    second_root = _workspace(tmp_path / "second")
+    provider = BlockingReleaseProvider()
+    runtime = Runtime()
+    worker = OpenHandsRemoteCodingWorker(provider, runtime)
+    job = _job(root)
+    second_base = _job(second_root)
+    second_job = CodingJob(
+        "job-2",
+        "task-2",
+        second_base.goal,
+        second_base.repository,
+        second_base.lease,
+        second_base.allowed_paths,
+        second_base.process_policy,
+        second_base.network_policy,
+        second_base.resource_budget,
+        second_base.acceptance_commands,
+        second_base.permission_ceiling,
+    )
+
+    async def scenario():
+        execution = asyncio.create_task(worker.execute(job))
+        await asyncio.wait_for(provider.release_started.wait(), timeout=2)
+        execution.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+
+        state = await worker.inspect(job.job_id)
+        second = await worker.execute(second_job)
+        return state, second
+
+    state, second = _run(scenario())
+
+    assert state == RecoveryState("manual_reconcile_required")
+    assert provider.release_cancelled is True
+    assert provider.released == [("job-1", "sandbox-1", True)]
+    assert not second.succeeded
+    assert second.failure is not None
+    assert second.failure.kind.value == "internal_error"
+    assert second.recovery_state == RecoveryState("manual_reconcile_required")
+    assert second.failure.message == (
+        "remote sandbox endpoint identity collision requires provider reconciliation"
+    )
 
 
 def test_release_failure_overrides_success_and_requires_manual_reconciliation(

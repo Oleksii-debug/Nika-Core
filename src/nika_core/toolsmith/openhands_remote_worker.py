@@ -486,6 +486,17 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                         succeeded=release_succeeded,
                     )
                     release_proven = True
+                except asyncio.CancelledError:
+                    task_cancelled = True
+                    result = _failure_result(
+                        job,
+                        WorkerFailureKind.INTERNAL_ERROR,
+                        "remote sandbox cleanup could not be proven",
+                        retryable=False,
+                        state=RecoveryState("manual_reconcile_required"),
+                        changed_files=changed,
+                        test_evidence=tests,
+                    )
                 except Exception as exc:  # noqa: BLE001 - sandbox provider boundary
                     _LOGGER.error(
                         "OpenHands sandbox release requires provider reconciliation (%s)",
