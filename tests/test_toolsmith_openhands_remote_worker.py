@@ -8,6 +8,7 @@ import sys
 import tarfile
 import threading
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -67,6 +68,7 @@ def _job(
     *,
     network: NetworkPolicy | None = None,
     max_changed_files: int = 8,
+    expires_at: str = "2099-01-01T00:00:00Z",
 ) -> CodingJob:
     evidence = collect_tree_evidence(root)
     return CodingJob(
@@ -78,7 +80,7 @@ def _job(
             "lease-1",
             root,
             IsolationClass.PROCESS_CONTAINED,
-            "2099-01-01T00:00:00Z",
+            expires_at,
         ),
         allowed_paths=AllowedPathPolicy(("src",)),
         process_policy=ProcessPolicy((sys.executable,)),
@@ -337,6 +339,64 @@ def test_remote_worker_applies_only_validated_delta_and_runs_nika_acceptance(
     assert len(result.test_evidence[0].output_digest) == 64
     assert provider.released == [("job-1", "sandbox-1", True)]
     assert "Do not commit, push" in runtime.calls[0][2]
+
+
+def test_remote_worker_revalidates_workspace_lease_before_local_apply(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    job = _job(root, expires_at="2030-01-01T00:00:00Z")
+    moments = iter(
+        (
+            datetime(2029, 12, 31, 23, 59, 59, tzinfo=UTC),
+            datetime(2030, 1, 1, 0, 0, 0, tzinfo=UTC),
+        )
+    )
+    monkeypatch.setattr(openhands_worker_module, "_utc_now", lambda: next(moments))
+    runtime = Runtime((RemoteFile("src/value.txt", b"after\n"),))
+    provider = Provider()
+    worker = _worker(provider, runtime)
+
+    result = _run(worker.execute(job))
+
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.kind.value == "policy_violation"
+    assert result.recovery_state == RecoveryState("blocked")
+    assert root.joinpath("src/value.txt").read_bytes() == b"before\n"
+    assert len(runtime.calls) == 1
+    assert provider.released == [(job.job_id, "sandbox-1", False)]
+
+
+def test_remote_worker_requires_manual_reconcile_when_lease_expires_during_acceptance(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    job = _job(root, expires_at="2030-01-01T00:00:00Z")
+    current = {"value": datetime(2029, 12, 31, 23, 59, 59, tzinfo=UTC)}
+    monkeypatch.setattr(openhands_worker_module, "_utc_now", lambda: current["value"])
+
+    def expire_lease() -> None:
+        current["value"] = datetime(2030, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+    runtime = Runtime((RemoteFile("src/value.txt", b"after\n"),))
+    provider = Provider()
+    worker = _worker(
+        provider,
+        runtime,
+        acceptance_runtime=AcceptanceRuntime(on_execute=expire_lease),
+    )
+
+    result = _run(worker.execute(job))
+
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.kind.value == "internal_error"
+    assert result.recovery_state == RecoveryState("manual_reconcile_required")
+    assert root.joinpath("src/value.txt").read_bytes() == b"after\n"
+    assert provider.released == [(job.job_id, "sandbox-1", False)]
 
 
 

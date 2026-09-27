@@ -364,6 +364,7 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                     if cancelled is not None:
                         result = cancelled
                     else:
+                        _validate_workspace_lease(job)
                         changed = _validate_and_apply_snapshot(
                             job,
                             local_root,
@@ -371,6 +372,7 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                             run.files,
                         )
                         applied = True
+                        _validate_workspace_lease(job)
                         candidate_evidence = collect_tree_evidence(local_root)
                         tests = await self._run_guarded_acceptance(
                             job,
@@ -378,6 +380,7 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                             candidate_evidence,
                             cancel_event,
                         )
+                        _validate_workspace_lease(job)
                         post_acceptance_evidence = collect_tree_evidence(local_root)
                         if post_acceptance_evidence != candidate_evidence:
                             raise OpenHandsWorkspaceMutationError(
@@ -392,6 +395,7 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                         if cancelled is not None:
                             result = cancelled
                         else:
+                            _validate_workspace_lease(job)
                             failed_test = next(
                                 (evidence for evidence in tests if evidence.exit_code != 0),
                                 None,
@@ -988,17 +992,31 @@ def _validate_source_identity(job: CodingJob, evidence: TreeEvidence) -> None:
         )
 
 
-def _validate_local_workspace(job: CodingJob) -> pathlib.Path:
-    if job.lease.isolation_class is IsolationClass.POLICY_ONLY:
-        raise OpenHandsWorkerError("local staging workspace lacks enforced process isolation")
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _validate_workspace_lease(job: CodingJob) -> None:
+    expires_at = job.lease.expires_at
+    if type(expires_at) is not str or expires_at != expires_at.strip():
+        raise OpenHandsWorkerError("workspace lease expiry must be an exact canonical string")
     try:
-        expires = datetime.fromisoformat(job.lease.expires_at)
+        expires = datetime.fromisoformat(expires_at)
     except ValueError as exc:
         raise OpenHandsWorkerError("workspace lease has an invalid expiry") from exc
     if expires.tzinfo is None or expires.utcoffset() is None:
         raise OpenHandsWorkerError("workspace lease expiry must be timezone-aware")
-    if expires.astimezone(UTC) <= datetime.now(UTC):
+    now = _utc_now()
+    if type(now) is not datetime or now.tzinfo is None or now.utcoffset() is None:
+        raise OpenHandsWorkerError("workspace lease clock must return an aware exact datetime")
+    if expires.astimezone(UTC) <= now.astimezone(UTC):
         raise OpenHandsWorkerError("workspace lease has expired")
+
+
+def _validate_local_workspace(job: CodingJob) -> pathlib.Path:
+    if job.lease.isolation_class is IsolationClass.POLICY_ONLY:
+        raise OpenHandsWorkerError("local staging workspace lacks enforced process isolation")
+    _validate_workspace_lease(job)
     root = job.lease.workspace_root.resolve(strict=True)
     if not root.is_dir():
         raise OpenHandsWorkerError("local staging workspace is not a directory")
