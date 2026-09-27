@@ -268,6 +268,23 @@ class RuntimeSessionStore:
         task_id = _require_exact_text(task_id, field_name="task_id", non_empty=True)
         runtime_id = _require_exact_text(runtime_id, field_name="runtime_id", non_empty=True)
         thread_id = _require_exact_text(thread_id, field_name="thread_id", non_empty=True)
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        existing_row = conn.execute(
+            """
+            SELECT task_id, runtime_id, thread_id, resume_token, outcome, updated_at
+            FROM runtime_sessions
+            WHERE task_id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+        existing = self._record_from_row(existing_row) if existing_row is not None else None
+        if existing is not None:
+            if existing.runtime_id != runtime_id:
+                raise ValueError("runtime result does not match persisted runtime session")
+            if existing.thread_id != thread_id:
+                raise ValueError("runtime result thread does not match persisted runtime session")
+
         if result.outcome not in _RESUMABLE_OUTCOMES:
             self.delete_with_connection(conn, task_id)
             return
@@ -281,11 +298,7 @@ class RuntimeSessionStore:
             self.delete_with_connection(conn, task_id)
             return
 
-        previous_row = conn.execute(
-            "SELECT updated_at FROM runtime_sessions WHERE task_id = ?",
-            (task_id,),
-        ).fetchone()
-        previous = previous_row["updated_at"] if previous_row is not None else None
+        previous = existing.updated_at if existing is not None else None
         now = self._next_updated_at(previous)
         conn.execute(
             """
