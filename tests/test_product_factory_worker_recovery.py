@@ -720,3 +720,48 @@ def test_stale_recovery_result_after_concurrent_completion_is_ignored() -> None:
     )
     assert all(item.startswith("concurrent-pass-") for item in digests)
     assert len(worker.recovered) == 1
+
+
+def test_new_running_attempt_supersedes_old_recovery_by_exact_work_id() -> None:
+    coordinator = _coordinator()
+    original = coordinator.start("core")
+    replacement = []
+
+    def advance_to_repair_attempt() -> None:
+        failed = WorkerResultEnvelope(
+            work_id=original.work_id,
+            component_id=original.component_id,
+            repository_id=original.repository_id,
+            base_sha=original.base_sha,
+            result_sha=SHA_B,
+            diff_digest=DIGEST,
+            coding_result=CodingResult(
+                job_id=original.work_id,
+                failure=WorkerFailure(
+                    WorkerFailureKind.INTERNAL_ERROR,
+                    "first attempt failed",
+                ),
+            ),
+        )
+        coordinator.record_result(failed)
+        prepared = coordinator.prepare_repair(
+            "core",
+            base_sha=SHA_B,
+            reason="retry after restart race",
+        )
+        replacement.append(coordinator.start("core"))
+        assert replacement[0] == prepared
+
+    worker = FakeRecoveryPort(
+        RecoveryState("interrupted", "old-attempt-token"),
+        inspect_hook=advance_to_repair_attempt,
+    )
+
+    outcome = _run(ProductFactoryWorkerRecovery(worker).recover_running(coordinator, "core"))
+
+    assert outcome.disposition is WorkerRecoveryDisposition.SUPERSEDED
+    assert outcome.record.state is WorkState.RUNNING
+    assert outcome.record.request.work_id == replacement[0].work_id
+    assert outcome.record.request.work_id != original.work_id
+    assert outcome.record.request.attempt == 2
+    assert worker.recovered == []
