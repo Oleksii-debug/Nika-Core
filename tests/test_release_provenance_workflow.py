@@ -41,3 +41,16 @@ def test_m12_prehuman_v4_binds_sbom_claims_and_preserves_exact_final_zip_proof()
     assert "--product-version '${{ steps.release.outputs.version }}'" in workflow
     assert "dist/NikaCore/THIRD_PARTY_SUPPLY_CHAIN.json" in workflow
     assert "dist/NikaCore/THIRD_PARTY_SBOM.cdx.json" in workflow
+
+def test_m11_release_triggers_for_windows_autostart_backend_changes() -> None:
+    workflow = (ROOT / ".github/workflows/m11-windows-release.yml").read_text(
+        encoding="utf-8"
+    )
+    trigger = '      - "src/nika_core/windows_autostart.py"'
+
+    assert workflow.count(trigger) == 2
+    pull_request_block, remainder = workflow.split("  push:\n", 1)
+    push_block, _ = remainder.split("  workflow_dispatch:\n", 1)
+    assert trigger in pull_request_block
+    assert trigger in push_block
+

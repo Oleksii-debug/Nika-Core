@@ -168,6 +168,26 @@ def _prepare_rollback_pair(
     assert not swap.exists()
     if retire_first_update_receipt:
         _retire_committed_first_update_receipt(destination)
+        payload = SCRIPT.read_text(encoding="utf-8")
+        needle = "        [System.IO.Directory]::Move($destinationPath, $swapPath)\n"
+        assert payload.count(needle) == 1
+        instrumented = tmp_path / "install_nika_core_marker_persisted_crash.ps1"
+        instrumented.write_text(
+            payload.replace(needle, "        exit 90\n" + needle, 1),
+            encoding="utf-8",
+        )
+        marker_persisted = _run(
+            shell,
+            script=instrumented,
+            mode="Rollback",
+            destination=destination,
+        )
+        assert marker_persisted.returncode == 90, marker_persisted.stderr or marker_persisted.stdout
+        marker = destination.parent / f".{destination.name}.rollback-operation.json"
+        assert marker.is_file()
+        assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+        assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+        assert not swap.exists()
     return destination, rollback, swap
 
 
@@ -195,6 +215,23 @@ def test_update_replacement_order_preserves_prior_rollback_until_activation() ->
     assert update.index(activate_candidate) < update.index(retire_after_success)
     assert "Remove-Item -LiteralPath $rollbackPath -Recurse -Force" not in update
     assert "Remove-Item -LiteralPath $retiredRollbackPath -Recurse -Force" not in update
+
+
+def test_rollback_marker_replacement_uses_verified_nonempty_backup_path() -> None:
+    payload = SCRIPT.read_text(encoding="utf-8")
+    start = payload.index("function Write-NikaRollbackOperationMarker")
+    end = payload.index("function Remove-NikaRollbackOperationMarker", start)
+    writer = payload[start:end]
+
+    assert '$backupPath = "$MarkerPath.replace-backup"' in writer
+    assert (
+        "[System.IO.File]::Replace($tempPath, $MarkerPath, $backupPath, $true)"
+        in writer
+    )
+    assert "[System.IO.File]::Replace($tempPath, $MarkerPath, $null, $true)" not in writer
+    assert "Assert-NikaNoReparsePathChain -Path $backupPath" in writer
+    assert "replacement backup must not be a reparse point" in writer
+    assert "replacement backup could not be retired" in writer
 
 
 def test_missing_destination_recovery_revalidates_all_authority_before_first_move() -> None:
