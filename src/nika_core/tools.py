@@ -34,8 +34,6 @@ class ToolSpec:
     input_schema: dict[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if type(self.risk) is not ToolRisk:
-            raise TypeError("tool risk must be an exact ToolRisk value")
         if not self.tool_id.strip():
             raise ValueError("tool_id must not be empty")
         if self.timeout_seconds <= 0:
@@ -67,8 +65,6 @@ class ToolAuthorization:
     approval_fingerprint: str
 
     def __post_init__(self) -> None:
-        if type(self.risk) is not ToolRisk:
-            raise TypeError("tool authorization risk must be an exact ToolRisk value")
         required = (
             self.tool_id,
             self.task_id,
