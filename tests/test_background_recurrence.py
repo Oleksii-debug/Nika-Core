@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -22,7 +21,6 @@ from nika_core.runtime.idempotency import IdempotencyConflictError
 from nika_core.scheduler.contracts import ScheduledJob
 from nika_core.scheduler.recurrence import (
     DurableRecurrenceService,
-    RecurrenceDecision,
     RecurrenceInvocation,
     RecurrenceStatus,
     RecurrenceTerminalReason,
@@ -207,22 +205,6 @@ def _create(h: Harness, *, recurrence_id: str = "living-read") -> None:
     )
 
 
-def _current_invocation(h: Harness, recurrence_id: str = "living-read") -> RecurrenceInvocation:
-    state = h.recurrence.get(recurrence_id)
-    assert state is not None
-    assert state.next_due_at is not None
-    assert state.next_occurrence_id is not None
-    job = h.jobs.list_enabled()[0]
-    target_payload = job.payload["target_payload"]
-    assert type(target_payload) is dict
-    return RecurrenceInvocation(
-        recurrence_id=recurrence_id,
-        occurrence_id=state.next_occurrence_id,
-        scheduled_for=state.next_due_at,
-        payload=dict(target_payload),
-    )
-
-
 def test_binding_round_trip_and_exact_carrier_fences() -> None:
     binding = BackgroundRecurrenceBinding(
         recurrence_id="r",
@@ -353,19 +335,6 @@ def test_resource_pressure_defers_without_effect_then_retries_next_slot(tmp_path
     assert finished.status is RecurrenceStatus.COMPLETED
 
 
-def test_completed_dispatch_replay_stops_without_duplicate_effect(tmp_path: Path) -> None:
-    h = _harness(tmp_path)
-    _create(h)
-    invocation = _current_invocation(h)
-
-    first = asyncio.run(h.bridge.dispatch_invocation(invocation))
-    second = asyncio.run(h.bridge.dispatch_invocation(invocation))
-
-    assert first is RecurrenceDecision.STOP
-    assert second is RecurrenceDecision.STOP
-    assert h.effects.effect_calls == 1
-
-
 def test_effect_failure_leaves_occurrence_unadvanced_and_uncertain_blocks_replay(
     tmp_path: Path,
 ) -> None:
@@ -389,81 +358,24 @@ def test_effect_failure_leaves_occurrence_unadvanced_and_uncertain_blocks_replay
     assert h.recurrence.get("living-read") == before
 
 
-def test_forged_recurrence_identity_fails_before_presence_or_effect(tmp_path: Path) -> None:
+def test_no_public_direct_invocation_authority_is_exposed(tmp_path: Path) -> None:
     h = _harness(tmp_path)
-    binding = BackgroundRecurrenceBinding(
-        recurrence_id="real",
-        task_id=h.task_id,
-        work_kind=BackgroundWorkKind.READING_RESEARCH,
-        effect_action_id="background.read",
-    )
-    forged = RecurrenceInvocation(
-        recurrence_id="other",
-        occurrence_id="occurrence",
-        scheduled_for=h.clock.value,
-        payload=binding.to_payload(),
-    )
 
-    with pytest.raises(ValueError, match="identity mismatch"):
-        asyncio.run(h.bridge.dispatch_invocation(forged))
+    assert not hasattr(h.bridge, "dispatch_invocation")
+    assert not hasattr(h.bridge, "occurrence_handler")
+    handler = h.bridge.resolve(BackgroundRecurrenceBridge.ACTION_ID)
+    assert handler.__name__ == "_occurrence_handler"
+
+
+def test_unknown_durable_recurrence_fails_before_presence_or_effect(tmp_path: Path) -> None:
+    h = _harness(tmp_path)
+
+    with pytest.raises(KeyError, match="unknown recurrence"):
+        h.recurrence.action_handler({"recurrence_id": "forged"})
 
     assert h.presence.calls == 0
     assert h.effects.resolve_calls == []
-
-
-def test_non_utc_or_subclass_invocation_fails_before_authority(tmp_path: Path) -> None:
-    h = _harness(tmp_path)
-    binding = BackgroundRecurrenceBinding(
-        recurrence_id="real",
-        task_id=h.task_id,
-        work_kind=BackgroundWorkKind.READING_RESEARCH,
-        effect_action_id="background.read",
-    )
-    non_utc = RecurrenceInvocation(
-        recurrence_id="real",
-        occurrence_id="occurrence",
-        scheduled_for=datetime(2030, 1, 1, 13, 0, tzinfo=timezone(timedelta(hours=1))),
-        payload=binding.to_payload(),
-    )
-    with pytest.raises(ValueError, match="must use UTC"):
-        asyncio.run(h.bridge.dispatch_invocation(non_utc))
-
-    class InvocationSubclass(RecurrenceInvocation):
-        pass
-
-    subclass = InvocationSubclass(
-        recurrence_id="real",
-        occurrence_id="occurrence",
-        scheduled_for=h.clock.value,
-        payload=binding.to_payload(),
-    )
-    with pytest.raises(TypeError, match="exact RecurrenceInvocation"):
-        asyncio.run(h.bridge.dispatch_invocation(subclass))
-    assert h.presence.calls == 0
-
-
-def test_sync_handler_refuses_nested_event_loop_before_any_effect(tmp_path: Path) -> None:
-    h = _harness(tmp_path)
-    binding = BackgroundRecurrenceBinding(
-        recurrence_id="real",
-        task_id=h.task_id,
-        work_kind=BackgroundWorkKind.READING_RESEARCH,
-        effect_action_id="background.read",
-    )
-    invocation = RecurrenceInvocation(
-        recurrence_id="real",
-        occurrence_id="occurrence",
-        scheduled_for=h.clock.value,
-        payload=binding.to_payload(),
-    )
-
-    async def exercise() -> None:
-        with pytest.raises(RuntimeError, match="active event loop"):
-            h.bridge.occurrence_handler(invocation)
-
-    asyncio.run(exercise())
-    assert h.presence.calls == 0
-    assert h.effects.resolve_calls == []
+    assert h.effects.effect_calls == 0
 
 
 def test_resolver_is_only_touched_inside_permitted_effect_window(tmp_path: Path) -> None:
@@ -484,8 +396,24 @@ def test_bridge_rejects_unknown_action_and_noncanonical_guard() -> None:
     with pytest.raises(TypeError, match="guard"):
         BackgroundRecurrenceBridge(guard=Dummy(), effect_resolver=lambda _key: None)
 
-    # The resolver itself is a narrow application authority, not a fallback router.
-    class StubGuard(BackgroundDispatchGuard):
+    assert BackgroundRecurrenceBridge.ACTION_ID == "living.background.dispatch"
+
+
+def test_private_handler_still_validates_canonical_invocation_carrier(tmp_path: Path) -> None:
+    h = _harness(tmp_path)
+    handler = h.bridge.resolve(BackgroundRecurrenceBridge.ACTION_ID)
+
+    class InvocationSubclass(RecurrenceInvocation):
         pass
 
-    assert BackgroundRecurrenceBridge.ACTION_ID == "living.background.dispatch"
+    forged = InvocationSubclass(
+        recurrence_id="forged",
+        occurrence_id="occurrence",
+        scheduled_for=h.clock.value,
+        payload={},
+    )
+    with pytest.raises(TypeError, match="exact RecurrenceInvocation"):
+        handler(forged)
+
+    assert h.presence.calls == 0
+    assert h.effects.resolve_calls == []
