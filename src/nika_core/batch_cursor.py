@@ -181,14 +181,28 @@ class BatchCursorState(BaseModel):
             self.input_count,
         ):
             raise ValueError("batch plan fingerprint mismatch")
-        if self.next_scheduled_intent is not None:
-            intent = self.next_scheduled_intent
-            target = next(
-                (item for item in self.targets if item.target_id == intent.target_id),
-                None,
-            )
-            if target is None or target.batch_index != intent.batch_index:
-                raise ValueError("scheduled intent target/batch identity is invalid")
+        intent = self.next_scheduled_intent
+        if first_unfinished is None:
+            if intent is not None:
+                raise ValueError("completed cursor must not retain a scheduled intent")
+            return self
+        if intent is None:
+            raise ValueError("unfinished cursor must retain a scheduled intent")
+        if (
+            intent.target_id != first_unfinished.target_id
+            or intent.batch_index != first_unfinished.batch_index
+        ):
+            raise ValueError("scheduled intent must reference the cursor frontier")
+        if first_unfinished.attempt_state is AttemptState.UNCERTAIN:
+            expected_kind = IntentKind.RECONCILE
+        elif first_unfinished.batch_index > self.ready_batch_index:
+            expected_kind = IntentKind.INTER_BATCH_WAIT
+        else:
+            expected_kind = IntentKind.TARGET
+        if intent.kind is not expected_kind:
+            raise ValueError("scheduled intent kind is inconsistent with cursor frontier")
+        if expected_kind is not IntentKind.INTER_BATCH_WAIT and intent.not_before is not None:
+            raise ValueError("only an inter-batch wait may carry not_before")
         return self
 
     @property

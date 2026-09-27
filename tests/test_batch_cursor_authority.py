@@ -574,3 +574,41 @@ def test_twenty_target_plan_restores_exactly_after_every_target(
     assert replay.reason == "already_confirmed"
     assert len(ledger.list_for_task("task")) == restart_after
 
+def test_restore_rejects_released_ready_state_that_still_has_future_wait(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, _ = _services(tmp_path)
+    due = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=1,
+    )
+    cursor.begin_effect("target-0")
+    cursor.confirm("target-0", {"ok": True}, next_batch_not_before=due)
+    assert cursor.state.ready_batch_index == 0
+    assert cursor.state.next_scheduled_intent is not None
+    assert cursor.state.next_scheduled_intent.kind is IntentKind.INTER_BATCH_WAIT
+    assert cursor.state.next_scheduled_intent.not_before == due.isoformat()
+
+    state = _state_value(memory, "task")
+    state["ready_batch_index"] = 1
+    _replace_state(memory, "task", state)
+
+    with pytest.raises(BatchCursorStateError, match="malformed restored"):
+        BatchCursor.restore(
+            memory,
+            ledger,
+            task_id="task",
+            cursor_id="cursor",
+            targets=_targets(2),
+            batch_size=1,
+        )
+
+    durable = ledger.list_for_task("task")
+    assert len(durable) == 1
+    assert durable[0].status is IdempotencyStatus.COMPLETED
+
