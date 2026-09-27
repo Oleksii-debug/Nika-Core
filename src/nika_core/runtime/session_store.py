@@ -273,6 +273,11 @@ class RuntimeSessionStore:
             return
         resume_token_snapshot = _resume_token_for_storage(result.resume_token)
         if resume_token_snapshot is None:
+            if result.outcome in {
+                RuntimeOutcome.WAITING_APPROVAL,
+                RuntimeOutcome.PAUSED,
+            }:
+                raise ValueError("resumable runtime outcome requires a usable resume token")
             self.delete_with_connection(conn, task_id)
             return
 
