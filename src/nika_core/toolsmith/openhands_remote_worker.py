@@ -8,6 +8,7 @@ import os
 import pathlib
 import shutil
 import tempfile
+import threading
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 from urllib.parse import urlparse
@@ -174,6 +175,8 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
         self._runtime = runtime
         self._recovery_probe = recovery_probe
         self._states: dict[str, RecoveryState] = {}
+        self._cancel_events: dict[str, threading.Event] = {}
+        self._completed_results: dict[str, CodingResult] = {}
         self._lock = asyncio.Lock()
 
     async def execute(self, job: CodingJob) -> CodingResult:
@@ -187,15 +190,17 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                     retryable=False,
                     state=existing,
                 )
+            cancel_event = threading.Event()
             self._states[job.job_id] = RecoveryState("running")
+            self._cancel_events[job.job_id] = cancel_event
 
         endpoint: OpenHandsSandboxEndpoint | None = None
         local_root: pathlib.Path | None = None
         changed: tuple[ChangedFile, ...] = ()
         tests: tuple[TestEvidence, ...] = ()
         applied = False
-        succeeded = False
         task_cancelled = False
+        result: CodingResult
         try:
             try:
                 local_root = _validate_local_workspace(job)
@@ -208,49 +213,75 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                     self._runtime.execute(job, endpoint, prompt, local_root, source_evidence),
                     timeout=job.resource_budget.timeout_seconds,
                 )
-                changed = _validate_and_apply_snapshot(job, local_root, source_evidence, run.files)
-                applied = True
-                candidate_evidence = collect_tree_evidence(local_root)
-                tests = _run_acceptance(job, local_root, candidate_evidence)
-                post_acceptance_evidence = collect_tree_evidence(local_root)
-                if post_acceptance_evidence != candidate_evidence:
-                    raise OpenHandsWorkspaceMutationError(
-                        "acceptance commands mutated the validated candidate"
-                    )
-                failed_test = next(
-                    (evidence for evidence in tests if evidence.exit_code != 0),
-                    None,
-                )
-                if failed_test is not None:
-                    state = RecoveryState("repair_required", run.conversation_id)
-                    await self._set_state(job.job_id, state)
-                    return CodingResult(
-                        job_id=job.job_id,
-                        changed_files=changed,
-                        test_evidence=tests,
-                        recovery_state=state,
-                        failure=WorkerFailure(
-                            WorkerFailureKind.PROCESS_FAILED,
-                            "one or more Nika acceptance commands failed",
-                            retryable=True,
-                        ),
-                    )
-                succeeded = True
-                state = RecoveryState("completed", run.conversation_id)
-                await self._set_state(job.job_id, state)
-                return CodingResult(
-                    job_id=job.job_id,
+
+                cancelled = await self._current_cancellation_result(
+                    job,
                     changed_files=changed,
                     test_evidence=tests,
-                    recovery_state=state,
                 )
+                if cancelled is not None:
+                    result = cancelled
+                else:
+                    changed = _validate_and_apply_snapshot(
+                        job,
+                        local_root,
+                        source_evidence,
+                        run.files,
+                    )
+                    applied = True
+                    candidate_evidence = collect_tree_evidence(local_root)
+                    tests = await _run_acceptance_async(
+                        job,
+                        local_root,
+                        candidate_evidence,
+                        cancel_event,
+                    )
+                    post_acceptance_evidence = collect_tree_evidence(local_root)
+                    if post_acceptance_evidence != candidate_evidence:
+                        raise OpenHandsWorkspaceMutationError(
+                            "acceptance commands mutated the validated candidate"
+                        )
+
+                    cancelled = await self._current_cancellation_result(
+                        job,
+                        changed_files=changed,
+                        test_evidence=tests,
+                    )
+                    if cancelled is not None:
+                        result = cancelled
+                    else:
+                        failed_test = next(
+                            (evidence for evidence in tests if evidence.exit_code != 0),
+                            None,
+                        )
+                        if failed_test is not None:
+                            state = RecoveryState("repair_required", run.conversation_id)
+                            result = CodingResult(
+                                job_id=job.job_id,
+                                changed_files=changed,
+                                test_evidence=tests,
+                                recovery_state=state,
+                                failure=WorkerFailure(
+                                    WorkerFailureKind.PROCESS_FAILED,
+                                    "one or more Nika acceptance commands failed",
+                                    retryable=True,
+                                ),
+                            )
+                        else:
+                            state = RecoveryState("completed", run.conversation_id)
+                            result = CodingResult(
+                                job_id=job.job_id,
+                                changed_files=changed,
+                                test_evidence=tests,
+                                recovery_state=state,
+                            )
             except TimeoutError:
+                cancel_event.set()
                 stopped = await self._runtime.cancel(job.job_id)
                 state = RecoveryState(
-                    "interrupted" if stopped else "manual_reconcile_required"
+                    "interrupted" if stopped and not applied else "manual_reconcile_required"
                 )
-                await self._set_state(job.job_id, state)
-                return _failure_result(
+                result = _failure_result(
                     job,
                     WorkerFailureKind.TIMEOUT,
                     "remote coding worker exceeded its Nika resource deadline",
@@ -261,16 +292,34 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                 )
             except asyncio.CancelledError:
                 task_cancelled = True
+                cancel_event.set()
                 stopped = await self._runtime.cancel(job.job_id)
                 state = RecoveryState(
-                    "cancelled" if stopped else "manual_reconcile_required"
+                    "cancelled" if stopped and not applied else "manual_reconcile_required"
                 )
-                await self._set_state(job.job_id, state)
-                raise
+                if state.phase == "cancelled":
+                    result = _failure_result(
+                        job,
+                        WorkerFailureKind.CANCELLED,
+                        "coding job cancellation was confirmed; cancelled work is terminal",
+                        retryable=False,
+                        state=state,
+                        changed_files=changed,
+                        test_evidence=tests,
+                    )
+                else:
+                    result = _failure_result(
+                        job,
+                        WorkerFailureKind.INTERNAL_ERROR,
+                        "coding job stop could not be proven; host reconciliation is required",
+                        retryable=False,
+                        state=state,
+                        changed_files=changed,
+                        test_evidence=tests,
+                    )
             except OpenHandsWorkspaceMutationError:
                 state = RecoveryState("manual_reconcile_required")
-                await self._set_state(job.job_id, state)
-                return _failure_result(
+                result = _failure_result(
                     job,
                     WorkerFailureKind.INTERNAL_ERROR,
                     "local staging mutation could not be proven rolled back",
@@ -281,8 +330,7 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                 )
             except (WorkspaceSecurityError, ValueError, OpenHandsWorkerError) as exc:
                 state = RecoveryState("blocked")
-                await self._set_state(job.job_id, state)
-                return _failure_result(
+                result = _failure_result(
                     job,
                     WorkerFailureKind.POLICY_VIOLATION,
                     _safe_message(exc, "remote coding result violated Nika policy"),
@@ -295,8 +343,7 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                 state = RecoveryState(
                     "manual_reconcile_required" if applied else "interrupted"
                 )
-                await self._set_state(job.job_id, state)
-                return _failure_result(
+                result = _failure_result(
                     job,
                     WorkerFailureKind.INTERNAL_ERROR,
                     "remote coding engine failed without trusted diagnostics",
@@ -305,41 +352,52 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                     changed_files=changed,
                     test_evidence=tests,
                 )
-            finally:
-                if endpoint is not None:
-                    try:
-                        await self._sandbox_provider.release(
-                            job,
-                            endpoint,
-                            succeeded=succeeded,
-                        )
-                    except Exception as exc:  # noqa: BLE001 - sandbox provider boundary
-                        raise OpenHandsSandboxReleaseError(
-                            "remote sandbox cleanup could not be proven"
-                        ) from exc
-        except OpenHandsSandboxReleaseError as exc:
-            state = RecoveryState("manual_reconcile_required")
-            await self._set_state(job.job_id, state)
-            _LOGGER.error(
-                "OpenHands sandbox release requires provider reconciliation (%s)",
-                type(exc.__cause__).__name__ if exc.__cause__ is not None else "unknown",
-            )
-            if task_cancelled:
-                raise asyncio.CancelledError from exc
-            return _failure_result(
-                job,
-                WorkerFailureKind.INTERNAL_ERROR,
-                "remote sandbox cleanup could not be proven",
-                retryable=False,
-                state=state,
-                changed_files=changed,
-                test_evidence=tests,
-            )
+        finally:
+            if endpoint is not None:
+                try:
+                    await self._sandbox_provider.release(
+                        job,
+                        endpoint,
+                        succeeded=result.succeeded if "result" in locals() else False,
+                    )
+                except Exception as exc:  # noqa: BLE001 - sandbox provider boundary
+                    _LOGGER.error(
+                        "OpenHands sandbox release requires provider reconciliation (%s)",
+                        type(exc).__name__,
+                    )
+                    result = _failure_result(
+                        job,
+                        WorkerFailureKind.INTERNAL_ERROR,
+                        "remote sandbox cleanup could not be proven",
+                        retryable=False,
+                        state=RecoveryState("manual_reconcile_required"),
+                        changed_files=changed,
+                        test_evidence=tests,
+                    )
+
+        result = await self._finalize_result(job, result)
+        if task_cancelled:
+            raise asyncio.CancelledError
+        return result
 
     async def cancel(self, job_id: str) -> None:
+        async with self._lock:
+            current = self._states.get(job_id)
+            if current is not None and current.phase not in {"running", "cancel_requested"}:
+                return
+            self._states[job_id] = RecoveryState("cancel_requested")
+            cancel_event = self._cancel_events.get(job_id)
+            if cancel_event is not None:
+                cancel_event.set()
+
         stopped = await self._runtime.cancel(job_id)
-        phase = "cancelled" if stopped else "manual_reconcile_required"
-        await self._set_state(job_id, RecoveryState(phase))
+        async with self._lock:
+            current = self._states.get(job_id)
+            if current is None or current.phase != "cancel_requested":
+                return
+            self._states[job_id] = RecoveryState(
+                "cancelled" if stopped else "manual_reconcile_required"
+            )
 
     async def inspect(self, job_id: str) -> RecoveryState | None:
         async with self._lock:
@@ -351,6 +409,18 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
         return await self._recovery_probe.inspect(job_id)
 
     async def recover(self, job: CodingJob, state: RecoveryState) -> CodingResult:
+        if state.phase == "completed":
+            async with self._lock:
+                completed = self._completed_results.get(job.job_id)
+            if completed is not None and completed.recovery_state == state:
+                return completed
+            return _failure_result(
+                job,
+                WorkerFailureKind.INTERNAL_ERROR,
+                "completed worker result is unavailable; host reconciliation is required",
+                retryable=False,
+                state=RecoveryState("manual_reconcile_required"),
+            )
         if state.phase == "cancelled":
             return _failure_result(
                 job,
@@ -359,13 +429,13 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                 retryable=False,
                 state=state,
             )
-        if state.phase == "manual_reconcile_required":
+        if state.phase in {"cancel_requested", "manual_reconcile_required"}:
             return _failure_result(
                 job,
                 WorkerFailureKind.INTERNAL_ERROR,
                 "coding job stop could not be proven; host reconciliation is required",
                 retryable=False,
-                state=state,
+                state=RecoveryState("manual_reconcile_required", state.opaque_token),
             )
         if state.phase != "interrupted":
             return _failure_result(
@@ -375,13 +445,92 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                 retryable=False,
                 state=state,
             )
-        # Only a proven-stopped pre-apply interruption is restartable with the same
-        # snapshot. Explicit cancellation is terminal and can never re-enter execute().
+
+        async with self._lock:
+            current = self._states.get(job.job_id)
+            if current is not None and current != state:
+                return _failure_result(
+                    job,
+                    WorkerFailureKind.INVALID_REQUEST,
+                    "recovery state is stale for the current worker identity",
+                    retryable=False,
+                    state=current,
+                )
+            self._states.pop(job.job_id, None)
+            self._cancel_events.pop(job.job_id, None)
         return await self.execute(job)
 
-    async def _set_state(self, job_id: str, state: RecoveryState) -> None:
+    async def _current_cancellation_result(
+        self,
+        job: CodingJob,
+        *,
+        changed_files: tuple[ChangedFile, ...],
+        test_evidence: tuple[TestEvidence, ...],
+    ) -> CodingResult | None:
         async with self._lock:
-            self._states[job_id] = state
+            state = self._states.get(job.job_id)
+        if state is None or state.phase == "running":
+            return None
+        if state.phase in {"cancel_requested", "cancelled"}:
+            return _failure_result(
+                job,
+                WorkerFailureKind.CANCELLED,
+                "coding job cancellation was confirmed; cancelled work is terminal",
+                retryable=False,
+                state=RecoveryState("cancelled", state.opaque_token),
+                changed_files=changed_files,
+                test_evidence=test_evidence,
+            )
+        if state.phase == "manual_reconcile_required":
+            return _failure_result(
+                job,
+                WorkerFailureKind.INTERNAL_ERROR,
+                "coding job stop could not be proven; host reconciliation is required",
+                retryable=False,
+                state=state,
+                changed_files=changed_files,
+                test_evidence=test_evidence,
+            )
+        return None
+
+    async def _finalize_result(self, job: CodingJob, result: CodingResult) -> CodingResult:
+        async with self._lock:
+            current = self._states.get(job.job_id)
+            result_state = result.recovery_state
+            if result_state is None:
+                result_state = RecoveryState("manual_reconcile_required")
+                result = dataclasses.replace(result, recovery_state=result_state)
+
+            if result_state.phase != "manual_reconcile_required" and current is not None:
+                if current.phase in {"cancel_requested", "cancelled"}:
+                    result_state = RecoveryState("cancelled", current.opaque_token)
+                    result = _failure_result(
+                        job,
+                        WorkerFailureKind.CANCELLED,
+                        "coding job cancellation was confirmed; cancelled work is terminal",
+                        retryable=False,
+                        state=result_state,
+                        changed_files=result.changed_files,
+                        test_evidence=result.test_evidence,
+                    )
+                elif current.phase == "manual_reconcile_required":
+                    result_state = current
+                    result = _failure_result(
+                        job,
+                        WorkerFailureKind.INTERNAL_ERROR,
+                        "coding job stop could not be proven; host reconciliation is required",
+                        retryable=False,
+                        state=result_state,
+                        changed_files=result.changed_files,
+                        test_evidence=result.test_evidence,
+                    )
+
+            self._states[job.job_id] = result_state
+            self._cancel_events.pop(job.job_id, None)
+            self._completed_results.pop(job.job_id, None)
+            if result.succeeded and result_state.phase == "completed":
+                self._completed_results[job.job_id] = result
+            return result
 
 
 def _validate_source_identity(job: CodingJob, evidence: TreeEvidence) -> None:
