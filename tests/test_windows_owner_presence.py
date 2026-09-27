@@ -136,8 +136,8 @@ def test_physical_observer_drives_canonical_background_dispatch_guard(tmp_path: 
         audit,
         away_after_seconds=60,
         api=FakeLastInputApi(
-            last_ticks=[1_000] * 8,
-            current_ticks=[100_000] * 4,
+            last_ticks=[1_000] * 10,
+            current_ticks=[40_000, 100_000, 100_000, 100_000, 100_000],
         ),
         clock=lambda: now,
     )
@@ -152,6 +152,8 @@ def test_physical_observer_drives_canonical_background_dispatch_guard(tmp_path: 
     task = queue.create(workspace_id="living", agent_id="nika")
     queue.transition(task.task_id, TaskState.READY)
     calls: list[str] = []
+
+    assert observer.observe().presence is OwnerPresence.ACTIVE
 
     async def effect() -> object:
         calls.append("run")
@@ -171,14 +173,15 @@ def test_physical_observer_drives_canonical_background_dispatch_guard(tmp_path: 
     assert calls == ["run"]
 
 
-def test_idle_at_threshold_is_away(tmp_path: Path) -> None:
+def test_idle_at_threshold_is_away_after_stability_probation(tmp_path: Path) -> None:
     observer, _audit_log = _observer(
         tmp_path,
-        last_ticks=[20_000, 20_000],
-        current_ticks=[80_000],
+        last_ticks=[20_000, 20_000, 20_000, 20_000],
+        current_ticks=[80_000, 140_000],
         away_after_seconds=60,
     )
 
+    assert observer.observe().presence is OwnerPresence.ACTIVE
     assert observer.observe().presence is OwnerPresence.AWAY
 
 
@@ -195,13 +198,15 @@ def test_fractional_threshold_rounds_up_to_millisecond(tmp_path: Path) -> None:
 
 
 def test_dword_wrap_is_classified_without_false_recent_arithmetic(tmp_path: Path) -> None:
+    wrap = 1 << 32
     observer, _audit_log = _observer(
         tmp_path,
-        last_ticks=[0xFFFFFF00, 0xFFFFFF00],
-        current_ticks=[(1 << 32) + 1_000],
+        last_ticks=[0xFFFFFF00] * 4,
+        current_ticks=[wrap + 1_000, wrap + 2_000],
         away_after_seconds=1,
     )
 
+    assert observer.observe().presence is OwnerPresence.ACTIVE
     assert observer.observe().presence is OwnerPresence.AWAY
 
 
@@ -222,11 +227,12 @@ def test_large_uptime_uses_low_dword_without_losing_safe_away_classification(
     wrap = 1 << 32
     observer, _audit_log = _observer(
         tmp_path,
-        last_ticks=[500, 500],
-        current_ticks=[3 * wrap + 2_000],
+        last_ticks=[500] * 4,
+        current_ticks=[3 * wrap + 2_000, 3 * wrap + 3_000],
         away_after_seconds=1,
     )
 
+    assert observer.observe().presence is OwnerPresence.ACTIVE
     assert observer.observe().presence is OwnerPresence.AWAY
 
 
@@ -534,12 +540,59 @@ def test_multiwrap_ambiguity_uses_minimum_idle_and_stays_conservatively_active(
     wrap = 1 << 32
     observer, _audit_log = _observer(
         tmp_path,
-        last_ticks=[900, 900],
-        current_ticks=[3 * wrap + 1_000],
+        last_ticks=[1_500] * 4,
+        current_ticks=[3 * wrap + 1_000, 3 * wrap + 2_000],
         away_after_seconds=1,
     )
 
     assert observer.observe().presence is OwnerPresence.ACTIVE
+    assert observer.observe().presence is OwnerPresence.ACTIVE
+
+
+def test_first_stable_ancient_tick_cannot_authorize_away(tmp_path: Path) -> None:
+    observer, _audit_log = _observer(
+        tmp_path,
+        last_ticks=[1, 1],
+        current_ticks=[1_000_000],
+        away_after_seconds=1,
+    )
+
+    assert observer.observe().presence is OwnerPresence.ACTIVE
+
+
+def test_changed_last_input_tick_resets_stability_probation(tmp_path: Path) -> None:
+    observer, _audit_log = _observer(
+        tmp_path,
+        last_ticks=[1_000, 1_000, 2_000, 2_000, 2_000, 2_000, 2_000, 2_000],
+        current_ticks=[5_000, 6_000, 6_500, 7_000],
+        away_after_seconds=1,
+    )
+
+    assert observer.observe().presence is OwnerPresence.ACTIVE
+    assert observer.observe().presence is OwnerPresence.ACTIVE
+    assert observer.observe().presence is OwnerPresence.ACTIVE
+    assert observer.observe().presence is OwnerPresence.AWAY
+
+
+def test_tick_count64_regression_fails_closed_and_resets_probation(tmp_path: Path) -> None:
+    observer, audit = _observer(
+        tmp_path,
+        last_ticks=[1_000] * 6,
+        current_ticks=[10_000, 9_000, 12_000],
+        away_after_seconds=1,
+    )
+
+    assert observer.observe().presence is OwnerPresence.ACTIVE
+    with pytest.raises(ValueError, match="GetTickCount64 regressed"):
+        observer.observe()
+    assert observer.observe().presence is OwnerPresence.ACTIVE
+
+    sampled = audit.list_for(
+        entity_type="owner_presence_source",
+        entity_id="win32-owner-presence",
+    )
+    assert len(sampled) == 2
+    assert [event.payload["presence"] for event in sampled] == ["active", "active"]
 
 
 def test_input_after_current_tick_sample_can_legitimately_be_ahead_and_is_active(
