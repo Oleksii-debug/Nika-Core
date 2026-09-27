@@ -251,6 +251,26 @@ def test_inference_evidence_is_bound_to_exact_loopback_route() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "item",
+    [
+        {"name": 7},
+        {"name": ""},
+        {"size": 123},
+        {"model": "local-model:1", "name": None},
+    ],
+)
+def test_malformed_catalog_item_proves_reachability_only(item: dict[str, object]) -> None:
+    probe, calls = _probe(tags=_Response({"models": [item]}))
+
+    snapshot = probe.snapshot()
+
+    assert snapshot.reachable is ModelHealthFact.YES
+    assert snapshot.model_present is ModelHealthFact.UNKNOWN
+    assert snapshot.model_ready is ModelHealthFact.UNKNOWN
+    assert calls == ["http://localhost:11434/api/tags"]
+
+
 def test_malformed_catalog_proves_reachability_only() -> None:
     probe, calls = _probe(tags=_Response({"models": "not-a-list"}))
 

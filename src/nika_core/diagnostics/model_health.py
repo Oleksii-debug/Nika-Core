@@ -315,10 +315,15 @@ class OllamaModelHealthProbe:
         for item in raw_models:
             if type(item) is not dict:
                 return None
+            item_identities: list[str] = []
             for key in ("model", "name"):
-                value = item.get(key)
-                if isinstance(value, str) and type(value) is not str:
+                if key not in item:
+                    continue
+                value = item[key]
+                if type(value) is not str or not value:
                     return None
-                if type(value) is str and value:
-                    identities.add(value)
+                item_identities.append(value)
+            if not item_identities:
+                return None
+            identities.update(item_identities)
         return identities
