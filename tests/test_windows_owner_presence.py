@@ -19,7 +19,7 @@ from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.task_state import TaskState
 from nika_core.resources import ResourceBudget, ResourceManager, ResourceSnapshot
-from nika_core.windows_owner_presence import WindowsOwnerPresenceObserver
+from nika_core.windows_owner_presence import Win32LastInputApi, WindowsOwnerPresenceObserver
 
 
 class FakeLastInputApi:
@@ -489,3 +489,16 @@ def test_concurrent_observers_allocate_unique_durable_sequences(tmp_path: Path) 
     )
     assert len(events) == 8
     assert {event.event_id for event in events} == set(sequences)
+
+
+@pytest.mark.skipif(presence_module.os.name != "nt", reason="requires Windows APIs")
+def test_real_win32_last_input_api_smoke_on_windows() -> None:
+    api = Win32LastInputApi()
+
+    last_tick = api.get_last_input_tick_ms()
+    current_tick = api.get_tick_count64_ms()
+
+    assert type(last_tick) is int
+    assert 0 <= last_tick < (1 << 32)
+    assert type(current_tick) is int
+    assert 0 <= current_tick <= (1 << 64) - 1
