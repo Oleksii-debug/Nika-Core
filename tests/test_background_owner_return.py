@@ -511,3 +511,63 @@ def test_foreign_runtime_start_after_permission_cannot_prove_background_origin(
 
     assert queue.get(task.task_id).state is TaskState.RUNNING
     assert runtime.cancel_calls == []
+
+
+def test_controller_rejects_coordinator_from_different_audit_authority(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    queue, audit, _coordinator, _task_id, _thread_id = _running_runtime_state(tmp_path)
+    foreign_store = SQLiteStore(tmp_path / "foreign-coordinator.db")
+    foreign_store.initialize()
+    foreign_queue = TaskQueue(foreign_store)
+    foreign_audit = AuditLog(foreign_store)
+    foreign_coordinator = TaskRuntimeCoordinator(
+        foreign_queue,
+        foreign_audit,
+        recovery_owner_id="foreign-coordinator",
+    )
+
+    with pytest.raises(ValueError, match="canonical AuditLog"):
+        WindowsBackgroundOwnerReturnController(
+            coordinator=foreign_coordinator,
+            audit=audit,
+            presence=_presence(audit, presence=OwnerPresence.ACTIVE, observed_at=now),
+            clock=lambda: now,
+        )
+
+    assert audit.list_for(
+        entity_type="owner_presence_source",
+        entity_id="win32-owner-presence",
+    ) == ()
+    assert queue.count_ready == 0
+
+
+def test_controller_rejects_queue_and_audit_from_different_stores(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    store = SQLiteStore(tmp_path / "queue-store.db")
+    store.initialize()
+    queue = TaskQueue(store)
+    audit_store = SQLiteStore(tmp_path / "audit-store.db")
+    audit_store.initialize()
+    audit = AuditLog(audit_store)
+    coordinator = TaskRuntimeCoordinator(
+        queue,
+        audit,
+        recovery_owner_id="split-authority",
+    )
+
+    with pytest.raises(ValueError, match="same SQLiteStore"):
+        WindowsBackgroundOwnerReturnController(
+            coordinator=coordinator,
+            audit=audit,
+            presence=_presence(audit, presence=OwnerPresence.ACTIVE, observed_at=now),
+            clock=lambda: now,
+        )
+
+    assert audit.list_for(
+        entity_type="owner_presence_source",
+        entity_id="win32-owner-presence",
+    ) == ()
