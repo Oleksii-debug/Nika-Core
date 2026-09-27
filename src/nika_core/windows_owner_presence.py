@@ -5,6 +5,7 @@ import os
 from collections.abc import Callable
 from datetime import UTC, datetime
 from math import ceil, isfinite
+from threading import Lock
 from typing import Protocol
 
 from nika_core.background_life import OwnerPresence
@@ -118,6 +119,10 @@ class WindowsOwnerPresenceObserver:
         self._threshold_ms = threshold_ms
         self._api = api if api is not None else Win32LastInputApi()
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._sample_lock = Lock()
+        self._previous_current_tick: int | None = None
+        self._stable_last_input_tick: int | None = None
+        self._stable_since_current_tick: int | None = None
 
     @property
     def source_id(self) -> str:
@@ -128,6 +133,14 @@ class WindowsOwnerPresenceObserver:
         return self._threshold_ms / 1000.0
 
     def observe(self) -> OwnerPresenceObservation:
+        with self._sample_lock:
+            try:
+                return self._observe_locked()
+            except Exception:
+                self._reset_stability()
+                raise
+
+    def _observe_locked(self) -> OwnerPresenceObservation:
         last_before = self._validated_last_input_tick(
             self._api.get_last_input_tick_ms(),
             field_name="last input tick before sample",
@@ -138,17 +151,35 @@ class WindowsOwnerPresenceObserver:
             field_name="last input tick after sample",
         )
 
+        previous_current_tick = self._previous_current_tick
+        if previous_current_tick is not None and current_tick < previous_current_tick:
+            raise ValueError("GetTickCount64 regressed between owner-presence samples")
+
+        next_stable_last_input_tick = self._stable_last_input_tick
+        next_stable_since_current_tick = self._stable_since_current_tick
         if last_after != last_before:
             presence = OwnerPresence.ACTIVE
+            next_stable_last_input_tick = None
+            next_stable_since_current_tick = None
         else:
             if current_tick < _DWORD_MODULUS and last_after > current_tick:
                 raise ValueError(
                     "last input tick cannot be ahead of current tick before the first DWORD wrap"
                 )
             idle_ms = ((current_tick & _DWORD_MAX) - last_after) & _DWORD_MAX
+            if (
+                next_stable_last_input_tick != last_after
+                or next_stable_since_current_tick is None
+            ):
+                next_stable_last_input_tick = last_after
+                next_stable_since_current_tick = current_tick
+                stable_elapsed_ms = 0
+            else:
+                stable_elapsed_ms = current_tick - next_stable_since_current_tick
             presence = (
                 OwnerPresence.AWAY
                 if idle_ms >= self._threshold_ms
+                and stable_elapsed_ms >= self._threshold_ms
                 else OwnerPresence.ACTIVE
             )
 
@@ -166,12 +197,20 @@ class WindowsOwnerPresenceObserver:
         if type(sequence) is not int or not 0 <= sequence <= _MAX_SIGNED_64:
             raise RuntimeError("audit event id is outside the supported sequence range")
 
+        self._previous_current_tick = current_tick
+        self._stable_last_input_tick = next_stable_last_input_tick
+        self._stable_since_current_tick = next_stable_since_current_tick
         return OwnerPresenceObservation(
             source_id=self._source_id,
             sequence=sequence,
             presence=presence,
             observed_at=observed_at,
         )
+
+    def _reset_stability(self) -> None:
+        self._previous_current_tick = None
+        self._stable_last_input_tick = None
+        self._stable_since_current_tick = None
 
     @staticmethod
     def _validated_last_input_tick(value: object, *, field_name: str) -> int:
