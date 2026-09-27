@@ -183,6 +183,7 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
         self._states: dict[str, RecoveryState] = {}
         self._cancel_events: dict[str, threading.Event] = {}
         self._finalized_results: dict[str, CodingResult] = {}
+        self._runtime_inflight: set[str] = set()
         self._lock = asyncio.Lock()
 
     async def execute(self, job: CodingJob) -> CodingResult:
@@ -215,38 +216,40 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                 endpoint = await self._sandbox_provider.acquire(job)
                 _validate_endpoint(job, endpoint)
                 prompt = _build_prompt(job)
-                run = await asyncio.wait_for(
-                    self._runtime.execute(job, endpoint, prompt, local_root, source_evidence),
-                    timeout=job.resource_budget.timeout_seconds,
-                )
+                async with self._lock:
+                    current = self._states.get(job.job_id)
+                    dispatch_remote = current is not None and current.phase == "running"
+                    if dispatch_remote:
+                        self._runtime_inflight.add(job.job_id)
 
-                cancelled = await self._current_cancellation_result(
-                    job,
-                    changed_files=changed,
-                    test_evidence=tests,
-                )
-                if cancelled is not None:
+                if not dispatch_remote:
+                    cancelled = await self._current_cancellation_result(
+                        job,
+                        changed_files=changed,
+                        test_evidence=tests,
+                    )
+                    if cancelled is None:
+                        raise OpenHandsWorkerError(
+                            "coding job state changed before remote dispatch"
+                        )
                     result = cancelled
                 else:
-                    changed = _validate_and_apply_snapshot(
-                        job,
-                        local_root,
-                        source_evidence,
-                        run.files,
-                    )
-                    applied = True
-                    candidate_evidence = collect_tree_evidence(local_root)
-                    tests = await _run_acceptance_async(
-                        job,
-                        local_root,
-                        candidate_evidence,
-                        cancel_event,
-                    )
-                    post_acceptance_evidence = collect_tree_evidence(local_root)
-                    if post_acceptance_evidence != candidate_evidence:
-                        raise OpenHandsWorkspaceMutationError(
-                            "acceptance commands mutated the validated candidate"
+                    try:
+                        run = await asyncio.wait_for(
+                            self._runtime.execute(
+                                job,
+                                endpoint,
+                                prompt,
+                                local_root,
+                                source_evidence,
+                            ),
+                            timeout=job.resource_budget.timeout_seconds,
                         )
+                    finally:
+                        # Event-loop tasks cannot interleave between the completed await
+                        # and this synchronous discard. cancel() therefore never mistakes
+                        # an already-finished remote run for an in-flight one.
+                        self._runtime_inflight.discard(job.job_id)
 
                     cancelled = await self._current_cancellation_result(
                         job,
@@ -256,31 +259,59 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                     if cancelled is not None:
                         result = cancelled
                     else:
-                        failed_test = next(
-                            (evidence for evidence in tests if evidence.exit_code != 0),
-                            None,
+                        changed = _validate_and_apply_snapshot(
+                            job,
+                            local_root,
+                            source_evidence,
+                            run.files,
                         )
-                        if failed_test is not None:
-                            state = RecoveryState("repair_required", run.conversation_id)
-                            result = CodingResult(
-                                job_id=job.job_id,
-                                changed_files=changed,
-                                test_evidence=tests,
-                                recovery_state=state,
-                                failure=WorkerFailure(
-                                    WorkerFailureKind.PROCESS_FAILED,
-                                    "one or more Nika acceptance commands failed",
-                                    retryable=True,
-                                ),
+                        applied = True
+                        candidate_evidence = collect_tree_evidence(local_root)
+                        tests = await _run_acceptance_async(
+                            job,
+                            local_root,
+                            candidate_evidence,
+                            cancel_event,
+                        )
+                        post_acceptance_evidence = collect_tree_evidence(local_root)
+                        if post_acceptance_evidence != candidate_evidence:
+                            raise OpenHandsWorkspaceMutationError(
+                                "acceptance commands mutated the validated candidate"
                             )
+
+                        cancelled = await self._current_cancellation_result(
+                            job,
+                            changed_files=changed,
+                            test_evidence=tests,
+                        )
+                        if cancelled is not None:
+                            result = cancelled
                         else:
-                            state = RecoveryState("completed", run.conversation_id)
-                            result = CodingResult(
-                                job_id=job.job_id,
-                                changed_files=changed,
-                                test_evidence=tests,
-                                recovery_state=state,
+                            failed_test = next(
+                                (evidence for evidence in tests if evidence.exit_code != 0),
+                                None,
                             )
+                            if failed_test is not None:
+                                state = RecoveryState("repair_required", run.conversation_id)
+                                result = CodingResult(
+                                    job_id=job.job_id,
+                                    changed_files=changed,
+                                    test_evidence=tests,
+                                    recovery_state=state,
+                                    failure=WorkerFailure(
+                                        WorkerFailureKind.PROCESS_FAILED,
+                                        "one or more Nika acceptance commands failed",
+                                        retryable=True,
+                                    ),
+                                )
+                            else:
+                                state = RecoveryState("completed", run.conversation_id)
+                                result = CodingResult(
+                                    job_id=job.job_id,
+                                    changed_files=changed,
+                                    test_evidence=tests,
+                                    recovery_state=state,
+                                )
             except TimeoutError:
                 cancel_event.set()
                 stopped = await self._runtime.cancel(job.job_id)
@@ -400,6 +431,13 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
             cancel_event = self._cancel_events.get(job_id)
             if cancel_event is not None:
                 cancel_event.set()
+
+            # Before remote dispatch, or after the remote engine has already returned,
+            # Nika can prove there is no remote execution to stop. Mark cancellation
+            # terminal without asking a runtime that has no active job.
+            if current is not None and job_id not in self._runtime_inflight:
+                self._states[job_id] = RecoveryState("cancelled")
+                return
 
         stopped = await self._runtime.cancel(job_id)
         async with self._lock:
