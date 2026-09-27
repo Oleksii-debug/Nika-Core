@@ -9,17 +9,20 @@ from enum import StrEnum
 from typing import Any
 
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.memory.contracts import MemoryRecord, MemoryScope
+from nika_core.memory.contracts import MemoryScope
 from nika_core.memory.service import MemoryService
 
 _NAMESPACE = "autobiography"
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _MAX_SIGNED_64 = (1 << 63) - 1
+_MAX_LIST_LIMIT = 100
 _TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+_ATTESTATION_FIELD = "autobiographical_category"
 _VALUE_KEYS = frozenset(
     {
         "schema_version",
+        "agent_id",
         "category",
         "audit_event_id",
         "audit_event_sha256",
@@ -52,6 +55,12 @@ class AutobiographicalEntry:
     remembered_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class _AuditEvidence:
+    category: AutobiographicalCategory
+    sha256: str
+
+
 class AutobiographicalMemory:
     """Privacy-minimized index over immutable canonical audit evidence.
 
@@ -75,37 +84,45 @@ class AutobiographicalMemory:
         safe_agent_id = _require_token(agent_id, field="agent_id")
         safe_category = _require_category(category)
         safe_event_id = _require_event_id(audit_event_id)
-        evidence_sha256 = self._audit_event_sha256(safe_event_id)
+        evidence = self._audit_evidence_many((safe_event_id,))[safe_event_id]
+        if evidence.category is not safe_category:
+            raise AutobiographicalMemoryIntegrityError(
+                "audit evidence does not attest requested autobiographical category"
+            )
         key = _memory_key(safe_category, safe_event_id)
 
-        existing = self._memory.get(
-            scope=MemoryScope.AGENT,
-            owner_id=safe_agent_id,
-            namespace=_NAMESPACE,
-            key=key,
-        )
+        existing = self._load_record(agent_id=safe_agent_id, key=key)
         if existing is not None:
-            entry = self._decode_record(existing)
-            if entry.audit_event_sha256 != evidence_sha256:
+            if existing.audit_event_sha256 != evidence.sha256:
                 raise AutobiographicalMemoryIntegrityError(
                     "autobiographical evidence changed after it was remembered"
                 )
-            return entry
+            return existing
+        if self._last_memory_event(agent_id=safe_agent_id, key=key) == "memory.upserted":
+            raise AutobiographicalMemoryIntegrityError(
+                "durable autobiographical record is missing after prior persistence"
+            )
 
-        record = self._memory.put(
+        self._memory.put(
             scope=MemoryScope.AGENT,
             owner_id=safe_agent_id,
             namespace=_NAMESPACE,
             key=key,
             value={
                 "schema_version": _SCHEMA_VERSION,
+                "agent_id": safe_agent_id,
                 "category": safe_category.value,
                 "audit_event_id": safe_event_id,
-                "audit_event_sha256": evidence_sha256,
+                "audit_event_sha256": evidence.sha256,
             },
         )
-        entry = self._decode_record(record)
-        if self._audit_event_sha256(safe_event_id) != evidence_sha256:
+        entry = self._load_record(agent_id=safe_agent_id, key=key)
+        if entry is None:
+            raise AutobiographicalMemoryIntegrityError(
+                "durable autobiographical record disappeared after persistence"
+            )
+        current = self._audit_evidence_many((safe_event_id,))[safe_event_id]
+        if current.category is not safe_category or current.sha256 != evidence.sha256:
             self._memory.delete(
                 scope=MemoryScope.AGENT,
                 owner_id=safe_agent_id,
@@ -117,23 +134,29 @@ class AutobiographicalMemory:
             )
         return entry
 
-    def list_entries(self, *, agent_id: str) -> tuple[AutobiographicalEntry, ...]:
+    def list_entries(
+        self, *, agent_id: str, limit: int
+    ) -> tuple[AutobiographicalEntry, ...]:
         safe_agent_id = _require_token(agent_id, field="agent_id")
-        records = self._memory.list_namespace(
-            scope=MemoryScope.AGENT,
-            owner_id=safe_agent_id,
-            namespace=_NAMESPACE,
+        safe_limit = _require_limit(limit)
+        rows = self._list_rows(agent_id=safe_agent_id, limit=safe_limit)
+        entries = tuple(
+            self._decode_row(row, expected_agent_id=safe_agent_id) for row in rows
         )
-        entries: list[AutobiographicalEntry] = []
-        for record in records:
-            entry = self._decode_record(record)
-            current_sha256 = self._audit_event_sha256(entry.audit_event_id)
-            if current_sha256 != entry.audit_event_sha256:
+        evidence_by_id = self._audit_evidence_many(
+            tuple(entry.audit_event_id for entry in entries)
+        )
+        for entry in entries:
+            evidence = evidence_by_id[entry.audit_event_id]
+            if evidence.category is not entry.category:
+                raise AutobiographicalMemoryIntegrityError(
+                    "audit evidence no longer attests autobiographical category"
+                )
+            if evidence.sha256 != entry.audit_event_sha256:
                 raise AutobiographicalMemoryIntegrityError(
                     "autobiographical evidence changed after it was remembered"
                 )
-            entries.append(entry)
-        return tuple(entries)
+        return entries
 
     def forget_audit_event(
         self,
@@ -145,86 +168,138 @@ class AutobiographicalMemory:
         safe_agent_id = _require_token(agent_id, field="agent_id")
         safe_category = _require_category(category)
         safe_event_id = _require_event_id(audit_event_id)
+        key = _memory_key(safe_category, safe_event_id)
+        existing = self._load_record(agent_id=safe_agent_id, key=key)
+        if existing is None:
+            return False
         return self._memory.delete(
             scope=MemoryScope.AGENT,
             owner_id=safe_agent_id,
             namespace=_NAMESPACE,
-            key=_memory_key(safe_category, safe_event_id),
+            key=key,
         )
 
-    def _audit_event_sha256(self, audit_event_id: int) -> str:
+    def _load_record(
+        self, *, agent_id: str, key: str
+    ) -> AutobiographicalEntry | None:
         with self._store.connection() as conn:
             row = conn.execute(
-                "SELECT event_type, entity_type, entity_id, payload_json, created_at "
-                "FROM audit_events WHERE event_id = ?",
-                (audit_event_id,),
+                "SELECT scope, owner_id, namespace, memory_key, value_json, "
+                "user_approved, expires_at, created_at, updated_at "
+                "FROM memory_records WHERE scope = ? AND owner_id = ? "
+                "AND namespace = ? AND memory_key = ?",
+                (MemoryScope.AGENT.value, agent_id, _NAMESPACE, key),
             ).fetchone()
         if row is None:
+            return None
+        return self._decode_row(row, expected_agent_id=agent_id)
+
+    def _list_rows(self, *, agent_id: str, limit: int) -> tuple[Any, ...]:
+        with self._store.connection() as conn:
+            rows = conn.execute(
+                "SELECT scope, owner_id, namespace, memory_key, value_json, "
+                "user_approved, expires_at, created_at, updated_at "
+                "FROM memory_records WHERE scope = ? AND owner_id = ? "
+                "AND namespace = ? ORDER BY created_at DESC, memory_key DESC LIMIT ?",
+                (MemoryScope.AGENT.value, agent_id, _NAMESPACE, limit),
+            ).fetchall()
+        return tuple(rows)
+
+    def _last_memory_event(self, *, agent_id: str, key: str) -> str | None:
+        entity_id = f"{MemoryScope.AGENT.value}:{agent_id}:{_NAMESPACE}:{key}"
+        with self._store.connection() as conn:
+            row = conn.execute(
+                "SELECT event_type FROM audit_events WHERE entity_type = ? "
+                "AND entity_id = ? ORDER BY event_id DESC LIMIT 1",
+                ("memory", entity_id),
+            ).fetchone()
+        if row is None:
+            return None
+        event_type = _required_text(row["event_type"], field="event_type")
+        if event_type not in {"memory.upserted", "memory.deleted"}:
+            raise AutobiographicalMemoryIntegrityError(
+                "autobiographical memory audit history is invalid"
+            )
+        return event_type
+
+    def _audit_evidence_many(
+        self, audit_event_ids: tuple[int, ...]
+    ) -> dict[int, _AuditEvidence]:
+        if not audit_event_ids:
+            return {}
+        unique_ids = tuple(dict.fromkeys(audit_event_ids))
+        placeholders = ",".join("?" for _ in unique_ids)
+        with self._store.connection() as conn:
+            rows = conn.execute(
+                "SELECT event_id, event_type, entity_type, entity_id, payload_json, "
+                f"created_at FROM audit_events WHERE event_id IN ({placeholders})",
+                unique_ids,
+            ).fetchall()
+        evidence: dict[int, _AuditEvidence] = {}
+        for row in rows:
+            event_id = _require_event_id(row["event_id"])
+            if event_id in evidence:
+                raise AutobiographicalMemoryIntegrityError(
+                    "duplicate autobiographical audit evidence"
+                )
+            evidence[event_id] = _audit_evidence_from_row(row)
+        missing = set(unique_ids).difference(evidence)
+        if missing:
             raise AutobiographicalMemoryIntegrityError(
                 "referenced autobiographical audit evidence does not exist"
             )
+        return evidence
 
-        event_type = _required_text(row["event_type"], field="event_type")
-        entity_type = _required_text(row["entity_type"], field="entity_type")
-        entity_id = _required_text(row["entity_id"], field="entity_id")
-        payload_json = _canonical_audit_payload(row["payload_json"])
-        created_at = _required_timestamp(row["created_at"])
-        payload = {
-            "event_type": event_type,
-            "entity_type": entity_type,
-            "entity_id": entity_id,
-            "payload_json": payload_json,
-            "created_at": created_at,
-        }
-        encoded = json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-        return hashlib.sha256(encoded).hexdigest()
-
-    def _decode_record(self, record: MemoryRecord) -> AutobiographicalEntry:
-        if record.scope is not MemoryScope.AGENT or record.namespace != _NAMESPACE:
+    def _decode_row(self, row: Any, *, expected_agent_id: str) -> AutobiographicalEntry:
+        if row["scope"] != MemoryScope.AGENT.value or row["namespace"] != _NAMESPACE:
             raise AutobiographicalMemoryIntegrityError(
                 "autobiographical memory record has invalid ownership metadata"
             )
-        value = record.value
-        if not isinstance(value, dict) or frozenset(value) != _VALUE_KEYS:
+        owner_id = _require_token(row["owner_id"], field="durable owner_id")
+        if owner_id != expected_agent_id:
             raise AutobiographicalMemoryIntegrityError(
-                "autobiographical memory record has invalid schema"
+                "autobiographical memory owner does not match requested agent"
             )
+        if type(row["user_approved"]) is not int or row["user_approved"] != 0:
+            raise AutobiographicalMemoryIntegrityError(
+                "autobiographical memory approval metadata is invalid"
+            )
+        if row["expires_at"] is not None:
+            raise AutobiographicalMemoryIntegrityError(
+                "autobiographical memory must not have an expiry"
+            )
+        value = _canonical_memory_value(row["value_json"])
         schema_version = value.get("schema_version")
         if type(schema_version) is not int or schema_version != _SCHEMA_VERSION:
             raise AutobiographicalMemoryIntegrityError(
                 "autobiographical memory record has unsupported schema"
             )
-        try:
-            category = AutobiographicalCategory(value.get("category"))
-        except (TypeError, ValueError) as exc:
+        durable_agent_id = _require_token(value.get("agent_id"), field="durable agent_id")
+        if durable_agent_id != expected_agent_id or durable_agent_id != owner_id:
             raise AutobiographicalMemoryIntegrityError(
-                "autobiographical memory category is invalid"
-            ) from exc
+                "autobiographical memory owner binding is invalid"
+            )
+        category = _decode_category(value.get("category"))
         event_id = value.get("audit_event_id")
-        if (
-            type(event_id) is not int
-            or event_id <= 0
-            or event_id > _MAX_SIGNED_64
-        ):
+        if type(event_id) is not int or not 1 <= event_id <= _MAX_SIGNED_64:
             raise AutobiographicalMemoryIntegrityError(
                 "autobiographical audit event id is invalid"
             )
         digest = value.get("audit_event_sha256")
-        if not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest):
+        if type(digest) is not str or not _SHA256_RE.fullmatch(digest):
             raise AutobiographicalMemoryIntegrityError(
                 "autobiographical evidence digest is invalid"
             )
-        if record.key != _memory_key(category, event_id):
+        if row["memory_key"] != _memory_key(category, event_id):
             raise AutobiographicalMemoryIntegrityError(
                 "autobiographical memory key does not match its evidence"
             )
-        remembered_at = _require_memory_timestamp(record.created_at)
+        remembered_at = _parse_memory_timestamp(row["created_at"], field="created_at")
+        updated_at = _parse_memory_timestamp(row["updated_at"], field="updated_at")
+        if updated_at < remembered_at:
+            raise AutobiographicalMemoryIntegrityError(
+                "autobiographical memory timestamps are inconsistent"
+            )
         return AutobiographicalEntry(
             category=category,
             audit_event_id=event_id,
@@ -233,14 +308,37 @@ class AutobiographicalMemory:
         )
 
 
+def _audit_evidence_from_row(row: Any) -> _AuditEvidence:
+    event_type = _required_text(row["event_type"], field="event_type")
+    entity_type = _required_text(row["entity_type"], field="entity_type")
+    entity_id = _required_text(row["entity_id"], field="entity_id")
+    payload_json, payload = _canonical_audit_payload(row["payload_json"])
+    created_at = _required_timestamp(row["created_at"])
+    category = _decode_attested_category(payload.get(_ATTESTATION_FIELD))
+    encoded = json.dumps(
+        {
+            "event_type": event_type,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "payload_json": payload_json,
+            "created_at": created_at,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return _AuditEvidence(category=category, sha256=hashlib.sha256(encoded).hexdigest())
+
+
 def _require_token(value: object, *, field: str) -> str:
-    if not isinstance(value, str) or not _TOKEN_RE.fullmatch(value):
+    if type(value) is not str or not _TOKEN_RE.fullmatch(value):
         raise AutobiographicalMemoryError(f"{field} must be a bounded machine token")
     return value
 
 
 def _require_category(value: object) -> AutobiographicalCategory:
-    if not isinstance(value, AutobiographicalCategory):
+    if type(value) is not AutobiographicalCategory:
         raise AutobiographicalMemoryError("category must be an AutobiographicalCategory")
     return value
 
@@ -253,24 +351,32 @@ def _require_event_id(value: object) -> int:
     return value
 
 
+def _require_limit(value: object) -> int:
+    if type(value) is not int or not 1 <= value <= _MAX_LIST_LIMIT:
+        raise AutobiographicalMemoryError(
+            f"limit must be an integer from 1 through {_MAX_LIST_LIMIT}"
+        )
+    return value
+
+
 def _memory_key(category: AutobiographicalCategory, event_id: int) -> str:
     return f"{category.value}:{event_id}"
 
 
 def _required_text(value: Any, *, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise AutobiographicalMemoryIntegrityError(f"audit {field} is invalid")
     return value
 
 
-def _canonical_audit_payload(value: Any) -> str:
-    if not isinstance(value, str):
+def _canonical_audit_payload(value: Any) -> tuple[str, dict[str, Any]]:
+    if type(value) is not str:
         raise AutobiographicalMemoryIntegrityError("audit payload is invalid")
     try:
         parsed = json.loads(value)
     except (TypeError, json.JSONDecodeError) as exc:
         raise AutobiographicalMemoryIntegrityError("audit payload is invalid JSON") from exc
-    if not isinstance(parsed, dict):
+    if type(parsed) is not dict:
         raise AutobiographicalMemoryIntegrityError(
             "audit payload must be a JSON object"
         )
@@ -288,11 +394,71 @@ def _canonical_audit_payload(value: Any) -> str:
         ) from exc
     if canonical != value:
         raise AutobiographicalMemoryIntegrityError("audit payload is not canonical")
-    return canonical
+    return canonical, parsed
+
+
+def _canonical_memory_value(value: Any) -> dict[str, Any]:
+    if type(value) is not str:
+        raise AutobiographicalMemoryIntegrityError(
+            "autobiographical memory record has invalid schema"
+        )
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise AutobiographicalMemoryIntegrityError(
+            "autobiographical memory record has invalid schema"
+        ) from exc
+    if type(parsed) is not dict or frozenset(parsed) != _VALUE_KEYS:
+        raise AutobiographicalMemoryIntegrityError(
+            "autobiographical memory record has invalid schema"
+        )
+    try:
+        canonical = json.dumps(
+            parsed,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise AutobiographicalMemoryIntegrityError(
+            "autobiographical memory record has invalid schema"
+        ) from exc
+    if canonical != value:
+        raise AutobiographicalMemoryIntegrityError(
+            "autobiographical memory record is not canonical"
+        )
+    return parsed
+
+
+def _decode_category(value: object) -> AutobiographicalCategory:
+    if type(value) is not str:
+        raise AutobiographicalMemoryIntegrityError(
+            "autobiographical memory category is invalid"
+        )
+    try:
+        return AutobiographicalCategory(value)
+    except ValueError as exc:
+        raise AutobiographicalMemoryIntegrityError(
+            "autobiographical memory category is invalid"
+        ) from exc
+
+
+def _decode_attested_category(value: object) -> AutobiographicalCategory:
+    if type(value) is not str:
+        raise AutobiographicalMemoryIntegrityError(
+            "audit evidence lacks autobiographical category attestation"
+        )
+    try:
+        return AutobiographicalCategory(value)
+    except ValueError as exc:
+        raise AutobiographicalMemoryIntegrityError(
+            "audit autobiographical category attestation is invalid"
+        ) from exc
 
 
 def _required_timestamp(value: Any) -> str:
-    if not isinstance(value, str):
+    if type(value) is not str:
         raise AutobiographicalMemoryIntegrityError("audit timestamp is invalid")
     parsed = _parse_aware_timestamp(value, field="audit timestamp")
     if parsed.isoformat() != value:
@@ -300,14 +466,15 @@ def _required_timestamp(value: Any) -> str:
     return value
 
 
-def _require_memory_timestamp(value: datetime) -> datetime:
-    if not isinstance(value, datetime):
-        raise AutobiographicalMemoryIntegrityError("memory timestamp is invalid")
-    if value.tzinfo is None or value.utcoffset() is None:
+def _parse_memory_timestamp(value: Any, *, field: str) -> datetime:
+    if type(value) is not str:
+        raise AutobiographicalMemoryIntegrityError(f"memory {field} is invalid")
+    parsed = _parse_aware_timestamp(value, field=f"memory {field}")
+    if parsed.isoformat() != value:
         raise AutobiographicalMemoryIntegrityError(
-            "memory timestamp must be timezone-aware"
+            f"memory {field} is not canonical"
         )
-    return value
+    return parsed
 
 
 def _parse_aware_timestamp(value: str, *, field: str) -> datetime:
