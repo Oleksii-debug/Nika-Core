@@ -73,6 +73,7 @@ class OpenHandsSdkRemoteRuntime:
         self._agent_factory = agent_factory
         self._max_iterations = max_iterations
         self._active: dict[str, _ActiveExecution] = {}
+        self._cancelled_done: set[str] = set()
         self._active_lock = threading.Lock()
 
     async def execute(
@@ -89,6 +90,7 @@ class OpenHandsSdkRemoteRuntime:
                 raise OpenHandsSdkCompatibilityError(
                     "OpenHands SDK job identity is already active"
                 )
+            self._cancelled_done.discard(job.job_id)
             self._active[job.job_id] = active
         try:
             return await asyncio.to_thread(
@@ -108,6 +110,9 @@ class OpenHandsSdkRemoteRuntime:
         with self._active_lock:
             active = self._active.get(job_id)
             if active is None:
+                if job_id in self._cancelled_done:
+                    self._cancelled_done.remove(job_id)
+                    return True
                 return False
             active.cancel_requested.set()
             conversation = active.conversation
@@ -214,6 +219,8 @@ class OpenHandsSdkRemoteRuntime:
                     )
             active.done.set()
             with self._active_lock:
+                if active.cancel_requested.is_set():
+                    self._cancelled_done.add(job.job_id)
                 if self._active.get(job.job_id) is active:
                     self._active.pop(job.job_id, None)
 
