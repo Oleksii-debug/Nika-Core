@@ -86,6 +86,8 @@ class StandingPermissionScope:
     expires_at: datetime
 
     def __post_init__(self) -> None:
+        if type(self.risk_ceiling) is not ToolRisk:
+            raise TypeError("risk ceiling must be an exact ToolRisk value")
         _identity(self.subject_id, "subject_id")
         _action(self.action_class)
         if self.risk_ceiling is ToolRisk.HIGH_IMPACT:
