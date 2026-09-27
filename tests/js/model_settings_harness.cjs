@@ -105,16 +105,21 @@ let deferredStateRead = null;
 const calls = [];
 
 function safeModelSnapshot(payload) {
+  const providerKind = payload.route_kind === "deterministic"
+    ? null
+    : (payload.route_kind === "openai_compatible" ? "cloud" : "local");
   return {
     status: "ready",
     revision: payload.revision + 1,
     route_kind: payload.route_kind,
     provider_id: payload.provider_id,
-    provider_kind: payload.route_kind === "ollama" ? "local" : "cloud",
+    provider_kind: providerKind,
     model: payload.model,
     base_url: payload.base_url,
     timeout_seconds: payload.timeout_seconds,
-    private_data_allowed: payload.route_kind === "ollama" ? true : payload.private_data_allowed,
+    private_data_allowed: payload.route_kind === "openai_compatible"
+      ? payload.private_data_allowed
+      : true,
     credential_configured: payload.credential_ref !== null,
   };
 }
@@ -293,6 +298,59 @@ const status = element("model-settings-status");
   assert.equal(model.disabled, false);
   assert.equal(provider.disabled, true);
 
+  route.value = "deterministic";
+  fire(route, "change");
+  assert.equal(provider.disabled, true);
+  assert.equal(model.disabled, true);
+  assert.equal(baseUrl.disabled, true);
+  assert.equal(credential.disabled, true);
+  assert.equal(privateData.disabled, true);
+  assert.equal(provider.value, "");
+  assert.equal(model.value, "");
+  assert.equal(baseUrl.value, "");
+  assert.equal(credential.value, "");
+  click(save);
+  await tick(); await tick(); await tick();
+  const afterDeterministic = calls.filter((call) => call.action_id === "settings.model.configure");
+  assert.deepEqual(afterDeterministic[1].payload, {
+    revision: 1,
+    route_kind: "deterministic",
+    provider_id: null,
+    model: null,
+    base_url: null,
+    credential_ref: null,
+    private_data_allowed: true,
+    timeout_seconds: 60,
+  });
+  assert.match(status.textContent, /без LLM/);
+
+  route.value = "foundry_local";
+  fire(route, "change");
+  assert.equal(provider.disabled, true);
+  assert.equal(model.disabled, false);
+  assert.equal(baseUrl.disabled, true);
+  assert.equal(credential.disabled, true);
+  assert.equal(privateData.disabled, true);
+  assert.equal(provider.value, "foundry-local");
+  assert.equal(baseUrl.value, "");
+  assert.equal(credential.value, "");
+  model.value = "phi-4-mini";
+  fire(model, "input");
+  click(save);
+  await tick(); await tick(); await tick();
+  const afterFoundry = calls.filter((call) => call.action_id === "settings.model.configure");
+  assert.deepEqual(afterFoundry[2].payload, {
+    revision: 2,
+    route_kind: "foundry_local",
+    provider_id: "foundry-local",
+    model: "phi-4-mini",
+    base_url: null,
+    credential_ref: null,
+    private_data_allowed: true,
+    timeout_seconds: 60,
+  });
+  assert.match(status.textContent, /Foundry Local, phi-4-mini/);
+
   route.value = "openai_compatible";
   fire(route, "change");
   assert.equal(provider.disabled, false);
@@ -315,9 +373,9 @@ const status = element("model-settings-status");
   await tick(); await tick(); await tick();
 
   const apiCalls = calls.filter((call) => call.action_id === "settings.model.configure");
-  assert.equal(apiCalls.length, 2);
-  assert.deepEqual(apiCalls[1].payload, {
-    revision: 1,
+  assert.equal(apiCalls.length, 4);
+  assert.deepEqual(apiCalls[3].payload, {
+    revision: 3,
     route_kind: "openai_compatible",
     provider_id: "lab-api",
     model: "model-x",
@@ -332,6 +390,27 @@ const status = element("model-settings-status");
 
   credential.value = "env:NIKA_TEST_API_KEY";
   fire(credential, "input");
+  route.value = "deterministic";
+  fire(route, "change");
+  assert.equal(provider.value, "", "API provider identity must not survive a deterministic switch");
+  assert.equal(model.value, "", "API model identity must not survive a deterministic switch");
+  assert.equal(baseUrl.value, "", "API endpoint must not survive a deterministic switch");
+  assert.equal(credential.value, "", "API credential reference must not survive a deterministic switch");
+
+  route.value = "openai_compatible";
+  fire(route, "change");
+  provider.value = "lab-api";
+  fire(provider, "input");
+  model.value = "model-x";
+  fire(model, "input");
+  baseUrl.value = "https://api.example.test/v1";
+  fire(baseUrl, "input");
+  credential.value = "env:NIKA_TEST_API_KEY";
+  fire(credential, "input");
+  privateData.checked = false;
+  fire(privateData, "change");
+  timeout.value = "45";
+  fire(timeout, "input");
   dispatchMode = "reject-provider";
   releaseStateRead = holdNextStateRead();
   click(save);
