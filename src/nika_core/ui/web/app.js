@@ -201,20 +201,57 @@
     return target instanceof HTMLElement && target.isContentEditable;
   }
 
+  const shortcutModifierAliases = Object.freeze({
+    alt: "alt",
+    ctrl: "ctrl",
+    control: "ctrl",
+    shift: "shift",
+    win: "win",
+    windows: "win",
+    meta: "win",
+    super: "win",
+  });
+  const shortcutModifierOrder = Object.freeze(["ctrl", "alt", "shift", "win"]);
+
+  function canonicalEventPrimaryKey(key) {
+    if (key === " ") return "space";
+    return String(key || "").toLowerCase();
+  }
+
   function eventBinding(event) {
     const parts = [];
     if (event.ctrlKey) parts.push("ctrl");
     if (event.altKey) parts.push("alt");
     if (event.shiftKey) parts.push("shift");
     if (event.metaKey) parts.push("win");
-    const key = event.key.toLowerCase();
+    const key = canonicalEventPrimaryKey(event.key);
     if (["control", "alt", "shift", "meta"].includes(key)) return null;
+    if (!key) return null;
     parts.push(key);
     return parts.join("+");
   }
 
   function normalizedBinding(binding) {
-    return String(binding || "").split("+").map((part) => part.trim().toLowerCase()).filter(Boolean).join("+");
+    const rawParts = String(binding || "")
+      .split("+")
+      .map((part) => part.trim().toLowerCase())
+      .filter(Boolean);
+    const modifiers = new Set();
+    const primaryKeys = [];
+    for (const part of rawParts) {
+      const modifier = shortcutModifierAliases[part];
+      if (modifier) {
+        if (modifiers.has(modifier)) return "";
+        modifiers.add(modifier);
+      } else {
+        primaryKeys.push(part);
+      }
+    }
+    if (primaryKeys.length !== 1) return "";
+    return [
+      ...shortcutModifierOrder.filter((modifier) => modifiers.has(modifier)),
+      primaryKeys[0],
+    ].join("+");
   }
 
   function focusElementById(focusId) {
