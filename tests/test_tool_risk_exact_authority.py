@@ -4,8 +4,13 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from nika_core.data.sqlite import SQLiteStore
 from nika_core.security.policy import ActionIntent
-from nika_core.security.standing_permission import PermissionContext, StandingPermissionScope
+from nika_core.security.standing_permission import (
+    PermissionContext,
+    StandingPermissionScope,
+    StandingPermissionStore,
+)
 from nika_core.tools import ToolAuthorization, ToolRisk, ToolSpec
 
 
@@ -63,6 +68,37 @@ def test_standing_permission_rejects_forged_risk_before_materialization() -> Non
             granted_at=now,
             expires_at=now + timedelta(minutes=5),
         )
+
+
+def test_forged_standing_risk_cannot_leave_durable_authority(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    permissions = StandingPermissionStore(store)
+    permissions.initialize()
+    now = datetime(2026, 9, 27, tzinfo=UTC)
+
+    with pytest.raises(TypeError, match="exact ToolRisk"):
+        scope = StandingPermissionScope(
+            subject_id="agent-1",
+            context=PermissionContext(
+                user_id="user-1",
+                project_id="project-1",
+                task_id="task-1",
+            ),
+            action_class="safe.read",
+            targets=("target-1",),
+            sites=(),
+            resources=("resource-1",),
+            risk_ceiling=_forged_read_only_risk(),  # type: ignore[arg-type]
+            granted_at=now,
+            expires_at=now + timedelta(minutes=5),
+        )
+        permissions.grant(permission_id="forged-risk", scope=scope)
+
+    with store.connection() as conn:
+        row_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM standing_permissions"
+        ).fetchone()["count"]
+    assert row_count == 0
 
 
 @pytest.mark.parametrize("risk", tuple(ToolRisk))
