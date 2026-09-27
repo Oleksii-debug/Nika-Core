@@ -1070,7 +1070,6 @@ def test_present_owner_pauses_before_resource_telemetry(
     assert queue.get(task_id).state is TaskState.PAUSED
 
 
-
 @pytest.mark.parametrize("max_age", [60.0001, 1_000_000.0])
 def test_presence_freshness_window_cannot_disable_staleness(
     tmp_path: Path,
