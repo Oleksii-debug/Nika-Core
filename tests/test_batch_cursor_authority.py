@@ -365,6 +365,57 @@ def test_mark_uncertain_validates_evidence_before_ledger_mutation(
     assert cursor.state.targets[0].attempt_state is AttemptState.IN_FLIGHT
 
 
+def test_restore_rejects_nonfinite_uncertain_evidence_before_mutation(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, _ = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(1),
+        batch_size=1,
+    )
+    grant = cursor.begin_effect("target-0")
+    cursor.mark_uncertain("target-0", {"reason": "network"})
+    state = _state_value(memory, "task")
+    targets = state["targets"]
+    assert isinstance(targets, list)
+    first = targets[0]
+    assert isinstance(first, dict)
+    uncertain = first["uncertain_result"]
+    assert isinstance(uncertain, dict)
+    uncertain["score"] = float("nan")
+    _replace_state(memory, "task", state)
+
+    before = ledger.require(grant.operation_key)
+    assert before.status is IdempotencyStatus.UNCERTAIN
+
+    with pytest.raises(BatchCursorStateError, match="malformed restored batch cursor state"):
+        BatchCursor.restore(
+            memory,
+            ledger,
+            task_id="task",
+            cursor_id="cursor",
+            targets=_targets(1),
+            batch_size=1,
+        )
+
+    after = ledger.require(grant.operation_key)
+    assert after.status is IdempotencyStatus.UNCERTAIN
+    persisted = _state_value(memory, "task")
+    persisted_targets = persisted["targets"]
+    assert isinstance(persisted_targets, list)
+    persisted_first = persisted_targets[0]
+    assert isinstance(persisted_first, dict)
+    persisted_uncertain = persisted_first["uncertain_result"]
+    assert isinstance(persisted_uncertain, dict)
+    score = persisted_uncertain["score"]
+    assert isinstance(score, float)
+    assert score != score
+
+
 def test_confirm_rejects_nonfinite_json_before_completing_effect(
     tmp_path: Path,
 ) -> None:
