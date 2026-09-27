@@ -300,6 +300,32 @@ def test_recovery_promotion_rejects_corrupt_timestamp_without_rewrite(tmp_path) 
     assert raw["updated_at"] == corrupted
 
 
+
+def test_recovery_promotion_rejects_corrupt_task_status_without_skipping_record(tmp_path) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    ledger = IdempotencyLedger(store)
+    _reserve(ledger, task_id, key="effect:corrupt-status")
+    _reserve(ledger, task_id, key="effect:pending")
+
+    with store.connection() as conn:
+        conn.execute(
+            """
+            UPDATE idempotency_records
+            SET status = ?
+            WHERE operation_key = ?
+            """,
+            ("pending-corrupt", "effect:corrupt-status"),
+        )
+
+    with pytest.raises(RuntimeError, match="status is unsupported"):
+        ledger.promote_pending_to_uncertain(task_id)
+
+    corrupt = _raw_record(store, "effect:corrupt-status")
+    pending = _raw_record(store, "effect:pending")
+    assert corrupt is not None and pending is not None
+    assert corrupt["status"] == "pending-corrupt"
+    assert pending["status"] == IdempotencyStatus.PENDING.value
+
 def test_recovery_promotion_preserves_atomic_key_set(tmp_path) -> None:
     store, task_id = _store_with_task(tmp_path)
     ledger = IdempotencyLedger(store)
