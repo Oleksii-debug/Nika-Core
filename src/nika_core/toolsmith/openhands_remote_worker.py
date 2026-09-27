@@ -47,10 +47,6 @@ class OpenHandsWorkspaceMutationError(RuntimeError):
     """Raised when a local staging mutation cannot be proven rolled back."""
 
 
-class OpenHandsSandboxReleaseError(RuntimeError):
-    """Raised when provider-owned remote sandbox cleanup cannot be proven."""
-
-
 @dataclasses.dataclass(frozen=True, slots=True)
 class OpenHandsSandboxEndpoint:
     """Attested control-plane endpoint for one fresh remote sandbox.
@@ -493,6 +489,16 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
             )
         return None
 
+    async def _set_state(self, job_id: str, state: RecoveryState) -> None:
+        """Test/recovery seam that preserves the worker's state/event invariants."""
+
+        async with self._lock:
+            self._states[job_id] = state
+            if state.phase == "running":
+                self._cancel_events.setdefault(job_id, threading.Event())
+            elif state.phase not in {"cancel_requested"}:
+                self._cancel_events.pop(job_id, None)
+
     async def _finalize_result(self, job: CodingJob, result: CodingResult) -> CodingResult:
         async with self._lock:
             current = self._states.get(job.job_id)
@@ -701,10 +707,42 @@ def _validate_and_apply_snapshot(
     )
 
 
+async def _run_acceptance_async(
+    job: CodingJob,
+    root: pathlib.Path,
+    candidate_evidence: TreeEvidence,
+    cancellation_event: threading.Event,
+) -> tuple[TestEvidence, ...]:
+    task = asyncio.create_task(
+        asyncio.to_thread(
+            _run_acceptance,
+            job,
+            root,
+            candidate_evidence,
+            cancellation_event,
+        )
+    )
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        cancellation_event.set()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=5)
+        except TimeoutError:
+            _LOGGER.warning("acceptance process stop could not be proven before cancellation")
+        except Exception as exc:  # noqa: BLE001 - process cleanup after task cancellation
+            _LOGGER.warning(
+                "acceptance cleanup raised after cancellation (%s)",
+                type(exc).__name__,
+            )
+        raise
+
+
 def _run_acceptance(
     job: CodingJob,
     root: pathlib.Path,
     candidate_evidence: TreeEvidence,
+    cancellation_event: threading.Event,
 ) -> tuple[TestEvidence, ...]:
     with tempfile.TemporaryDirectory(prefix="nika-openhands-acceptance-") as temp_root_text:
         acceptance_root = pathlib.Path(temp_root_text) / "candidate"
@@ -718,6 +756,8 @@ def _run_acceptance(
         evidence: list[TestEvidence] = []
         environment = sterile_git_environment(os.environ)
         for command in job.acceptance_commands:
+            if cancellation_event.is_set():
+                break
             cwd = acceptance_root
             if command.cwd != ".":
                 policy = WorkspacePathPolicy((command.cwd,))
@@ -741,6 +781,7 @@ def _run_acceptance(
                 resource_budget=budget,
                 cwd=cwd,
                 environment=environment,
+                cancellation_event=cancellation_event,
             )
             output_digest = hashlib.sha256(
                 result.stdout.encode("utf-8") + b"\x00" + result.stderr.encode("utf-8")
