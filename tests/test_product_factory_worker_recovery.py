@@ -78,11 +78,13 @@ class FakeRecoveryPort:
         failure: WorkerFailure | None = None,
         inspect_error: Exception | None = None,
         recover_error: Exception | None = None,
+        component_id_override: str | None = None,
     ) -> None:
         self.state = state
         self.failure = failure
         self.inspect_error = inspect_error
         self.recover_error = recover_error
+        self.component_id_override = component_id_override
         self.inspected: list[str] = []
         self.recovered = []
 
@@ -106,7 +108,7 @@ class FakeRecoveryPort:
         )
         return WorkerResultEnvelope(
             work_id=request.work_id,
-            component_id=request.component_id,
+            component_id=self.component_id_override or request.component_id,
             repository_id=request.repository_id,
             base_sha=request.base_sha,
             result_sha=SHA_B,
@@ -204,6 +206,22 @@ def test_recover_failure_blocks_only_the_affected_component_and_retains_state() 
     assert "host reconciliation required" in (outcome.record.blocker or "")
     assert "secret recover detail" not in (outcome.record.blocker or "")
     assert len(worker.recovered) == 1
+    assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
+
+
+def test_invalid_recovery_evidence_blocks_only_the_affected_component() -> None:
+    coordinator = _coordinator()
+    coordinator.start("core")
+    state = RecoveryState("interrupted", "resume-token")
+    worker = FakeRecoveryPort(state, component_id_override="foreign-component")
+
+    outcome = _run(ProductFactoryWorkerRecovery(worker).recover_running(coordinator, "core"))
+
+    assert outcome.disposition is WorkerRecoveryDisposition.BLOCKED_INVALID_EVIDENCE
+    assert outcome.record.state is WorkState.BLOCKED
+    assert outcome.recovery_state == state
+    assert "host reconciliation required" in (outcome.record.blocker or "")
+    assert "foreign-component" not in (outcome.record.blocker or "")
     assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
 
 
