@@ -46,6 +46,15 @@ class WindowsBackgroundOwnerReturnController:
         max_future_skew_seconds: int | float = 1.0,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
+        if type(coordinator) is not TaskRuntimeCoordinator:
+            raise TypeError("coordinator must be exact TaskRuntimeCoordinator")
+        if type(audit) is not AuditLog:
+            raise TypeError("audit must be exact AuditLog")
+        if getattr(coordinator, "_audit", None) is not audit:
+            raise ValueError("coordinator must use the controller canonical AuditLog")
+        coordinator_queue = getattr(coordinator, "_queue", None)
+        if getattr(audit, "_store", None) is not getattr(coordinator_queue, "store", None):
+            raise ValueError("coordinator queue and audit must use the same SQLiteStore")
         if type(presence) is not WindowsOwnerPresenceObserver:
             raise TypeError("presence must be exact WindowsOwnerPresenceObserver")
         if getattr(presence, "_audit", None) is not audit:
