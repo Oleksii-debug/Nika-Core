@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -75,13 +76,15 @@ def test_migration_history_rejects_non_integer_storage_type(tmp_path: Path) -> N
     store = SQLiteStore(tmp_path / "state.sqlite3")
     initialize_artifact_registry_schema(store)
     with store.connection() as conn:
-        conn.execute(
-            "UPDATE artifact_registry_schema_migrations SET version = ?",
-            (1.5,),
-        )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "UPDATE artifact_registry_schema_migrations SET version = ?",
+                (1.5,),
+            )
 
-    with pytest.raises(TypeError):
-        initialize_artifact_registry_schema(store)
+    # SQLite INTEGER PRIMARY KEY is itself a fail-closed storage boundary:
+    # the invalid storage class never reaches Nika or mutates migration truth.
+    initialize_artifact_registry_schema(store)
 
 
 def test_current_schema_marker_cannot_hide_malformed_owned_tables(tmp_path: Path) -> None:
