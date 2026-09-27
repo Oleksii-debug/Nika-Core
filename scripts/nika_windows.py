@@ -29,7 +29,7 @@ from nika_core.ui.bridge import UIActionBridge
 from nika_core.ui.bridge_models import UIResult
 from nika_core.ui.desktop_backend import DesktopBackend
 from nika_core.ui.shell import launch_windows_shell
-from nika_core.v01_model_settings import V01ModelSettings
+from nika_core.v01_model_settings import ModelSetupError, V01ModelSettings
 from nika_core.v01_packaged_team_runtime import V01PackagedThreeAgentRuntime
 from nika_core.v01_packaged_team_state import V01PackagedTeamStateProvider
 from nika_core.v01_source_settings import V01SourceSettings
@@ -90,9 +90,21 @@ def build_windows_bridge(
         ) from exc
 
     products = ProductProjectCommandService(ProductProjectRepository(store))
+
+    def create_ordinary_task(payload: Mapping[str, Any]) -> UIResult:
+        try:
+            return backend.create_task(payload)
+        except ModelSetupError as exc:
+            return UIResult(
+                request_id="desktop-handler",
+                status="rejected",
+                message=str(exc),
+                focus_id="model-route-kind",
+            )
+
     product_router = PackagedProductCommandRouter(
         products=products,
-        ordinary_handler=backend.create_task,
+        ordinary_handler=create_ordinary_task,
         selection_store=PackagedProductSelectionStore(store),
     )
     command_center = ProductCommandCenter(products)
