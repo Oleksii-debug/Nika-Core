@@ -1451,3 +1451,98 @@ def test_explicit_inter_batch_schedule_survives_restore_as_scheduler_authority(
     assert restored_intent.deadline_source == "scheduler"
     assert restored_intent.not_before == due.isoformat()
 
+
+
+def test_idempotent_confirm_rejects_conflicting_replay_result_without_mutation(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, _ = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(1),
+        batch_size=1,
+    )
+    grant = cursor.begin_effect("target-0")
+    cursor.confirm("target-0", {"ok": True})
+    before_state = _state_value(memory, "task")
+    before_ledger = ledger.require(grant.operation_key).result
+
+    with pytest.raises(
+        BatchCursorStateError,
+        match="confirmed replay result contradicts durable completion",
+    ):
+        cursor.confirm("target-0", {"ok": False})
+
+    assert _state_value(memory, "task") == before_state
+    assert ledger.require(grant.operation_key).result == before_ledger
+
+
+def test_idempotent_confirm_rejects_conflicting_replay_deadline_without_mutation(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, _ = _services(tmp_path)
+    due = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
+    other_due = datetime(2030, 1, 2, 4, 4, 5, tzinfo=UTC)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=1,
+    )
+    grant = cursor.begin_effect("target-0")
+    cursor.confirm("target-0", {"ok": True}, next_batch_not_before=due)
+    before_state = _state_value(memory, "task")
+    before_ledger = ledger.require(grant.operation_key).result
+
+    with pytest.raises(
+        BatchCursorStateError,
+        match="confirmed replay deadline contradicts durable completion",
+    ):
+        cursor.confirm(
+            "target-0",
+            {"ok": True},
+            next_batch_not_before=other_due,
+        )
+
+    assert _state_value(memory, "task") == before_state
+    assert ledger.require(grant.operation_key).result == before_ledger
+
+
+def test_idempotent_confirm_replay_preserves_later_scheduler_deadline(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, _ = _services(tmp_path)
+    completion_due = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
+    scheduler_due = datetime(2030, 1, 2, 5, 4, 5, tzinfo=UTC)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=1,
+    )
+    cursor.begin_effect("target-0")
+    cursor.confirm(
+        "target-0",
+        {"ok": True},
+        next_batch_not_before=completion_due,
+    )
+    cursor.schedule_inter_batch_wait(scheduler_due)
+
+    cursor.confirm(
+        "target-0",
+        {"ok": True},
+        next_batch_not_before=completion_due,
+    )
+
+    intent = cursor.state.next_scheduled_intent
+    assert intent is not None
+    assert intent.kind is IntentKind.INTER_BATCH_WAIT
+    assert intent.deadline_source == "scheduler"
+    assert intent.not_before == scheduler_due.isoformat()
