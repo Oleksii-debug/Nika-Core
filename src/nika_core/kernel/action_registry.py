@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -17,6 +18,7 @@ _MODIFIER_ALIASES = {
     "super": "win",
 }
 _MODIFIER_ORDER = {"ctrl": 0, "alt": 1, "shift": 2, "win": 3}
+_MODIFIER_DISPLAY = {"ctrl": "Ctrl", "alt": "Alt", "shift": "Shift", "win": "Win"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,10 +88,7 @@ class Keymap:
     def resolve(self, action_id: str) -> str | None:
         action = self._actions.get(action_id)
         with self._store.connection() as conn:
-            row = conn.execute(
-                "SELECT binding FROM keymap_overrides WHERE action_id = ?", (action_id,)
-            ).fetchone()
-        return action.default_binding if row is None else row["binding"]
+            return self._resolve_with_connection(conn, action)
 
     def set_binding(self, action_id: str, binding: str | None) -> None:
         action = self._actions.get(action_id)
@@ -97,11 +96,14 @@ class Keymap:
         if cleaned is None and not action.may_be_unbound:
             raise ValueError(f"action {action_id} may not be unbound")
         if cleaned is not None:
-            _binding_key(cleaned)
-        conflict = self.conflict(action_id, cleaned)
-        if conflict is not None:
-            raise ValueError(f"shortcut conflict with {conflict}")
+            cleaned = _canonical_binding(cleaned)
+
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            state = self._effective_bindings(conn)
+            conflict = self._conflict_in_state(action_id, cleaned, state)
+            if conflict is not None:
+                raise ValueError(f"shortcut conflict with {conflict}")
             conn.execute(
                 "INSERT INTO keymap_overrides(action_id, binding, updated_at) VALUES (?, ?, ?) "
                 "ON CONFLICT(action_id) DO UPDATE SET binding=excluded.binding, updated_at=excluded.updated_at",
@@ -109,27 +111,30 @@ class Keymap:
             )
 
     def restore_default(self, action_id: str) -> None:
-        self._actions.get(action_id)
+        action = self._actions.get(action_id)
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            state = self._effective_bindings(conn)
+            conflict = self._conflict_in_state(action_id, action.default_binding, state)
+            if conflict is not None:
+                raise ValueError(f"shortcut conflict with {conflict}")
             conn.execute("DELETE FROM keymap_overrides WHERE action_id = ?", (action_id,))
 
     def conflict(self, action_id: str, binding: str | None) -> str | None:
+        self._actions.get(action_id)
         if binding is None:
             return None
-        action = self._actions.get(action_id)
-        wanted = _binding_key(binding)
-        for other in self._actions.all():
-            if other.action_id == action_id or other.scope != action.scope:
-                continue
-            resolved = self.resolve(other.action_id)
-            if resolved is not None and _binding_key(resolved) == wanted:
-                return other.action_id
-        return None
+        _binding_key(binding)
+        with self._store.connection() as conn:
+            state = self._effective_bindings(conn)
+        return self._conflict_in_state(action_id, binding, state)
 
     def export_json(self) -> str:
+        with self._store.connection() as conn:
+            state = self._effective_bindings(conn)
         payload = {
             "format_version": self.FORMAT_VERSION,
-            "bindings": {action.action_id: self.resolve(action.action_id) for action in self._actions.all()},
+            "bindings": {action.action_id: state[action.action_id] for action in self._actions.all()},
         }
         return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
 
@@ -149,19 +154,14 @@ class Keymap:
             if cleaned is None and not action.may_be_unbound:
                 raise ValueError(f"action {action_id} may not be unbound")
             if cleaned is not None:
-                _binding_key(cleaned)
+                cleaned = _canonical_binding(cleaned)
             proposed[action_id] = cleaned
-        seen: dict[tuple[str, str], str] = {}
-        for action in self._actions.all():
-            binding = proposed.get(action.action_id, self.resolve(action.action_id))
-            if binding is None:
-                continue
-            key = (action.scope, _binding_key(binding))
-            other = seen.get(key)
-            if other is not None:
-                raise ValueError(f"shortcut conflict between {other} and {action.action_id}")
-            seen[key] = action.action_id
+
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            state = self._effective_bindings(conn)
+            state.update(proposed)
+            self._validate_state(state)
             now = datetime.now(UTC).isoformat()
             for action_id, binding in proposed.items():
                 conn.execute(
@@ -169,6 +169,63 @@ class Keymap:
                     "ON CONFLICT(action_id) DO UPDATE SET binding=excluded.binding, updated_at=excluded.updated_at",
                     (action_id, binding, now),
                 )
+
+    def _resolve_with_connection(
+        self, conn: sqlite3.Connection, action: ActionDefinition
+    ) -> str | None:
+        row = conn.execute(
+            "SELECT binding FROM keymap_overrides WHERE action_id = ?", (action.action_id,)
+        ).fetchone()
+        binding = action.default_binding if row is None else row["binding"]
+        if binding is None:
+            return None
+        if type(binding) is not str:
+            raise TypeError("stored keymap binding must be text")
+        return _canonical_binding(binding)
+
+    def _effective_bindings(self, conn: sqlite3.Connection) -> dict[str, str | None]:
+        rows = conn.execute("SELECT action_id, binding FROM keymap_overrides").fetchall()
+        overrides = {str(row["action_id"]): row["binding"] for row in rows}
+        state: dict[str, str | None] = {}
+        for action in self._actions.all():
+            binding = overrides.get(action.action_id, action.default_binding)
+            if binding is None:
+                state[action.action_id] = None
+                continue
+            if type(binding) is not str:
+                raise TypeError("stored keymap binding must be text")
+            state[action.action_id] = _canonical_binding(binding)
+        return state
+
+    def _conflict_in_state(
+        self,
+        action_id: str,
+        binding: str | None,
+        state: dict[str, str | None],
+    ) -> str | None:
+        if binding is None:
+            return None
+        action = self._actions.get(action_id)
+        wanted = _binding_key(binding)
+        for other in self._actions.all():
+            if other.action_id == action_id or other.scope != action.scope:
+                continue
+            resolved = state[other.action_id]
+            if resolved is not None and _binding_key(resolved) == wanted:
+                return other.action_id
+        return None
+
+    def _validate_state(self, state: dict[str, str | None]) -> None:
+        seen: dict[tuple[str, str], str] = {}
+        for action in self._actions.all():
+            binding = state[action.action_id]
+            if binding is None:
+                continue
+            key = (action.scope, _binding_key(binding))
+            other = seen.get(key)
+            if other is not None:
+                raise ValueError(f"shortcut conflict between {other} and {action.action_id}")
+            seen[key] = action.action_id
 
 
 def _clean_binding(binding: str | None) -> str | None:
@@ -178,7 +235,7 @@ def _clean_binding(binding: str | None) -> str | None:
     return cleaned or None
 
 
-def _binding_key(binding: str) -> str:
+def _binding_parts(binding: str) -> tuple[tuple[str, ...], str]:
     cleaned = _clean_binding(binding)
     if cleaned is None:
         raise ValueError("binding must not be empty")
@@ -189,7 +246,7 @@ def _binding_key(binding: str) -> str:
         part = raw_part.casefold()
         modifier = _MODIFIER_ALIASES.get(part)
         if modifier is None:
-            primary_keys.append(part)
+            primary_keys.append(raw_part)
             continue
         if modifier in modifiers:
             raise ValueError(f"duplicate shortcut modifier: {raw_part}")
@@ -198,5 +255,16 @@ def _binding_key(binding: str) -> str:
     if len(primary_keys) != 1:
         raise ValueError("shortcut must contain exactly one primary key")
 
-    ordered_modifiers = sorted(modifiers, key=_MODIFIER_ORDER.__getitem__)
-    return "+".join((*ordered_modifiers, primary_keys[0]))
+    ordered_modifiers = tuple(sorted(modifiers, key=_MODIFIER_ORDER.__getitem__))
+    return ordered_modifiers, primary_keys[0]
+
+
+def _canonical_binding(binding: str) -> str:
+    modifiers, primary_key = _binding_parts(binding)
+    display_modifiers = [_MODIFIER_DISPLAY[modifier] for modifier in modifiers]
+    return "+".join((*display_modifiers, primary_key))
+
+
+def _binding_key(binding: str) -> str:
+    modifiers, primary_key = _binding_parts(binding)
+    return "+".join((*modifiers, primary_key.casefold()))
