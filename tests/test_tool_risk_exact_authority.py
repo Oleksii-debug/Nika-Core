@@ -22,12 +22,6 @@ class _ForgedRisk(str):
         return ToolRisk.HIGH_IMPACT.value
 
 
-def _forged_read_only_risk() -> _ForgedRisk:
-    return _ForgedRisk(ToolRisk.READ_ONLY.value)
-
-
-
-
 class _MutableContext:
     def __init__(self) -> None:
         self.user_id = "user-1"
@@ -40,6 +34,10 @@ class _IntentCarrier:
     target = "target-1"
     network_host = None
     risk = ToolRisk.READ_ONLY
+
+
+def _forged_read_only_risk() -> _ForgedRisk:
+    return _ForgedRisk(ToolRisk.READ_ONLY.value)
 
 
 def _scope(*, risk_ceiling: ToolRisk) -> StandingPermissionScope:
@@ -60,6 +58,12 @@ def _scope(*, risk_ceiling: ToolRisk) -> StandingPermissionScope:
         expires_at=now + timedelta(minutes=5),
     )
 
+
+def _grant_with_forged_risk(permissions: StandingPermissionStore) -> None:
+    permissions.grant(
+        permission_id="forged-risk",
+        scope=_scope(risk_ceiling=_forged_read_only_risk()),  # type: ignore[arg-type]
+    )
 
 
 def test_nested_context_carriers_must_be_canonical_permission_context() -> None:
@@ -157,8 +161,7 @@ def test_forged_standing_risk_cannot_leave_durable_authority(tmp_path) -> None:
     permissions.initialize()
 
     with pytest.raises(TypeError, match="exact ToolRisk"):
-        scope = _scope(risk_ceiling=_forged_read_only_risk())  # type: ignore[arg-type]
-        permissions.grant(permission_id="forged-risk", scope=scope)
+        _grant_with_forged_risk(permissions)
 
     with store.connection() as conn:
         row_count = conn.execute(
