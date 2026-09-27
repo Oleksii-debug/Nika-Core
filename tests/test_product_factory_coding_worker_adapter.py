@@ -6,6 +6,7 @@ import pytest
 from nika_core.product_factory_coding_worker_adapter import (
     CodingWorkerAdapterError,
     CodingWorkerComponentAdapter,
+    ComponentWorkerDisposition,
     CodingWorkerDispatchContext,
     CodingWorkerExecutionEvidence,
 )
@@ -15,6 +16,7 @@ from nika_core.product_factory_orchestration import (
     ProductRepositoryGraph,
     RepositoryRef,
 )
+from nika_core.toolsmith.openhands_remote_worker import OpenHandsRemoteCodingWorker
 from nika_core.toolsmith.contracts import (
     ChangedFile,
     CodingResult,
@@ -152,6 +154,28 @@ class FakeWorker:
         )
 
 
+class NeverUsedSandboxProvider:
+    async def acquire(self, _job):
+        raise AssertionError("cancel recovery must not acquire a new sandbox")
+
+    async def release(self, _job, _endpoint, *, succeeded):
+        raise AssertionError(f"unexpected sandbox release: {succeeded}")
+
+
+class CancelOnlyRemoteRuntime:
+    def __init__(self) -> None:
+        self.execute_calls = []
+        self.cancelled = []
+
+    async def execute(self, *args):
+        self.execute_calls.append(args)
+        raise AssertionError("terminal cancellation must not execute again")
+
+    async def cancel(self, job_id):
+        self.cancelled.append(job_id)
+        return True
+
+
 def test_dispatch_maps_component_scope_to_public_coding_job_and_exact_evidence() -> None:
     coordinator = _coordinator()
     request = coordinator.start("core")
@@ -218,6 +242,23 @@ def test_cancel_and_inspect_delegate_to_same_public_worker_identity() -> None:
     assert worker.cancelled == ["work-1"]
     assert worker.inspected == ["work-1"]
     assert state == RecoveryState("running", "token-1")
+
+
+
+def test_cancel_component_with_openhands_worker_never_reexecutes_cancelled_job() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    runtime = CancelOnlyRemoteRuntime()
+    worker = OpenHandsRemoteCodingWorker(NeverUsedSandboxProvider(), runtime)
+    _run(worker._set_state(request.work_id, RecoveryState("running")))
+    adapter = CodingWorkerComponentAdapter(worker, FakeContexts(), FakeEvidence())
+
+    outcome = _run(adapter.cancel_component(coordinator, "core"))
+
+    assert outcome.disposition is ComponentWorkerDisposition.CANCELLED
+    assert outcome.recovery_state == RecoveryState("cancelled")
+    assert runtime.cancelled == [request.work_id]
+    assert runtime.execute_calls == []
 
 
 def test_recovery_rebuilds_same_bounded_job_and_returns_exact_envelope() -> None:
