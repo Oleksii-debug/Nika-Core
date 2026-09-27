@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Callable
 
 import pytest
 
@@ -70,6 +71,23 @@ def _run(coroutine):
     return asyncio.run(coroutine)
 
 
+def _record_success(coordinator, request):
+    evidence = tuple(
+        TestEvidence(command, 0, f"concurrent-pass-{index}")
+        for index, command in enumerate(request.acceptance_commands)
+    )
+    envelope = WorkerResultEnvelope(
+        work_id=request.work_id,
+        component_id=request.component_id,
+        repository_id=request.repository_id,
+        base_sha=request.base_sha,
+        result_sha=SHA_B,
+        diff_digest=DIGEST,
+        coding_result=CodingResult(job_id=request.work_id, test_evidence=evidence),
+    )
+    return coordinator.record_result(envelope)
+
+
 class _DuckFailure:
     message = "duck failure"
 
@@ -97,6 +115,8 @@ class FakeRecoveryPort:
         component_id_override: str | None = None,
         envelope_override: object | None = None,
         mutate_recover_state: bool = False,
+        inspect_hook: Callable[[], None] | None = None,
+        recover_hook: Callable[[], None] | None = None,
     ) -> None:
         self.state = state
         self.failure = failure
@@ -105,17 +125,23 @@ class FakeRecoveryPort:
         self.component_id_override = component_id_override
         self.envelope_override = envelope_override
         self.mutate_recover_state = mutate_recover_state
+        self.inspect_hook = inspect_hook
+        self.recover_hook = recover_hook
         self.inspected: list[str] = []
         self.recovered = []
 
     async def inspect(self, work_id: str) -> RecoveryState | None:
         self.inspected.append(work_id)
+        if self.inspect_hook is not None:
+            self.inspect_hook()
         if self.inspect_error is not None:
             raise self.inspect_error
         return self.state
 
     async def recover(self, request, state):
         self.recovered.append((request, state))
+        if self.recover_hook is not None:
+            self.recover_hook()
         if self.mutate_recover_state:
             object.__setattr__(state, "phase", "")
         if self.recover_error is not None:
@@ -619,3 +645,78 @@ def test_unknown_component_recovery_fails_closed_without_worker_call() -> None:
         _run(ProductFactoryWorkerRecovery(worker).recover_running(coordinator, "missing"))
 
     assert worker.inspected == []
+
+
+def test_concurrent_completion_during_inspect_stops_before_recover_effect() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    worker = FakeRecoveryPort(
+        RecoveryState("interrupted", "resume-token"),
+        inspect_hook=lambda: _record_success(coordinator, request),
+    )
+
+    outcome = _run(ProductFactoryWorkerRecovery(worker).recover_running(coordinator, "core"))
+
+    assert outcome.disposition is WorkerRecoveryDisposition.SUPERSEDED
+    assert outcome.record.state is WorkState.REVIEW_REQUIRED
+    assert outcome.record.result is not None
+    assert outcome.record.result.coding_result.test_evidence[0].output_digest.startswith(
+        "concurrent-pass-"
+    )
+    assert worker.recovered == []
+
+
+def test_concurrent_completion_during_failed_inspect_is_not_overwritten_by_block() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    worker = FakeRecoveryPort(
+        RecoveryState("interrupted", "resume-token"),
+        inspect_error=RuntimeError("stale inspection failure"),
+        inspect_hook=lambda: _record_success(coordinator, request),
+    )
+
+    outcome = _run(ProductFactoryWorkerRecovery(worker).recover_running(coordinator, "core"))
+
+    assert outcome.disposition is WorkerRecoveryDisposition.SUPERSEDED
+    assert outcome.record.state is WorkState.REVIEW_REQUIRED
+    assert outcome.record.blocker is None
+    assert outcome.record.result is not None
+    assert worker.recovered == []
+
+
+def test_concurrent_completion_during_failed_recover_is_not_overwritten_by_block() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    worker = FakeRecoveryPort(
+        RecoveryState("interrupted", "resume-token"),
+        recover_error=RuntimeError("stale recovery failure"),
+        recover_hook=lambda: _record_success(coordinator, request),
+    )
+
+    outcome = _run(ProductFactoryWorkerRecovery(worker).recover_running(coordinator, "core"))
+
+    assert outcome.disposition is WorkerRecoveryDisposition.SUPERSEDED
+    assert outcome.record.state is WorkState.REVIEW_REQUIRED
+    assert outcome.record.blocker is None
+    assert outcome.record.result is not None
+    assert len(worker.recovered) == 1
+
+
+def test_stale_recovery_result_after_concurrent_completion_is_ignored() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    worker = FakeRecoveryPort(
+        RecoveryState("interrupted", "resume-token"),
+        recover_hook=lambda: _record_success(coordinator, request),
+    )
+
+    outcome = _run(ProductFactoryWorkerRecovery(worker).recover_running(coordinator, "core"))
+
+    assert outcome.disposition is WorkerRecoveryDisposition.SUPERSEDED
+    assert outcome.record.state is WorkState.REVIEW_REQUIRED
+    assert outcome.record.result is not None
+    digests = tuple(
+        item.output_digest for item in outcome.record.result.coding_result.test_evidence
+    )
+    assert all(item.startswith("concurrent-pass-") for item in digests)
+    assert len(worker.recovered) == 1

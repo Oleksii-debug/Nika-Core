@@ -29,6 +29,7 @@ class WorkerRecoveryDisposition(StrEnum):
     BLOCKED_INSPECTION_FAILED = "blocked_inspection_failed"
     BLOCKED_RECOVERY_FAILED = "blocked_recovery_failed"
     BLOCKED_INVALID_EVIDENCE = "blocked_invalid_evidence"
+    SUPERSEDED = "superseded"
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,41 +71,50 @@ class ProductFactoryWorkerRecovery:
             raise CoordinatorError(
                 f"component {component_id} must be running before worker recovery"
             )
+        expected_work_id = record.request.work_id
 
         try:
-            state = await self.worker.inspect(record.request.work_id)
+            state = await self.worker.inspect(expected_work_id)
         except Exception:  # noqa: BLE001 - isolate one external worker boundary failure
-            blocked = coordinator.block(
-                component_id,
-                "worker recovery inspection failed; host reconciliation required",
-            )
-            return WorkerRecoveryOutcome(
+            return _block_or_superseded(
+                coordinator=coordinator,
                 component_id=component_id,
+                expected_work_id=expected_work_id,
                 disposition=WorkerRecoveryDisposition.BLOCKED_INSPECTION_FAILED,
-                record=blocked,
+                reason="worker recovery inspection failed; host reconciliation required",
                 recovery_state=None,
             )
+
+        superseded = _superseded_outcome_if_needed(
+            coordinator,
+            component_id,
+            expected_work_id,
+            recovery_state=None,
+        )
+        if superseded is not None:
+            return superseded
+
         if state is None:
-            blocked = coordinator.block(
-                component_id,
-                "worker recovery state is unavailable after restart; host reconciliation required",
-            )
-            return WorkerRecoveryOutcome(
+            return _block_or_superseded(
+                coordinator=coordinator,
                 component_id=component_id,
+                expected_work_id=expected_work_id,
                 disposition=WorkerRecoveryDisposition.BLOCKED_MISSING_STATE,
-                record=blocked,
+                reason=(
+                    "worker recovery state is unavailable after restart; "
+                    "host reconciliation required"
+                ),
                 recovery_state=None,
             )
+
         observed_state = _canonical_recovery_state(state)
         if observed_state is None:
-            blocked = coordinator.block(
-                component_id,
-                "worker recovery evidence is invalid; host reconciliation required",
-            )
-            return WorkerRecoveryOutcome(
+            return _block_or_superseded(
+                coordinator=coordinator,
                 component_id=component_id,
+                expected_work_id=expected_work_id,
                 disposition=WorkerRecoveryDisposition.BLOCKED_INVALID_EVIDENCE,
-                record=blocked,
+                reason="worker recovery evidence is invalid; host reconciliation required",
                 recovery_state=None,
             )
 
@@ -114,58 +124,106 @@ class ProductFactoryWorkerRecovery:
                 RecoveryState(observed_state.phase, observed_state.opaque_token),
             )
         except Exception:  # noqa: BLE001 - isolate one external worker boundary failure
-            blocked = coordinator.block(
-                component_id,
-                "worker recovery attempt failed; host reconciliation required",
-            )
-            return WorkerRecoveryOutcome(
+            return _block_or_superseded(
+                coordinator=coordinator,
                 component_id=component_id,
+                expected_work_id=expected_work_id,
                 disposition=WorkerRecoveryDisposition.BLOCKED_RECOVERY_FAILED,
-                record=blocked,
+                reason="worker recovery attempt failed; host reconciliation required",
                 recovery_state=observed_state,
             )
+
+        superseded = _superseded_outcome_if_needed(
+            coordinator,
+            component_id,
+            expected_work_id,
+            recovery_state=observed_state,
+        )
+        if superseded is not None:
+            return superseded
+
         canonical_envelope = _canonical_recovery_envelope(envelope)
-        if canonical_envelope is None:
-            blocked = coordinator.block(
-                component_id,
-                "worker recovery evidence is invalid; host reconciliation required",
-            )
-            return WorkerRecoveryOutcome(
+        if canonical_envelope is None or canonical_envelope.component_id != component_id:
+            return _block_or_superseded(
+                coordinator=coordinator,
                 component_id=component_id,
+                expected_work_id=expected_work_id,
                 disposition=WorkerRecoveryDisposition.BLOCKED_INVALID_EVIDENCE,
-                record=blocked,
+                reason="worker recovery evidence is invalid; host reconciliation required",
                 recovery_state=observed_state,
             )
-        if canonical_envelope.component_id != component_id:
-            blocked = coordinator.block(
-                component_id,
-                "worker recovery evidence is invalid; host reconciliation required",
-            )
-            return WorkerRecoveryOutcome(
-                component_id=component_id,
-                disposition=WorkerRecoveryDisposition.BLOCKED_INVALID_EVIDENCE,
-                record=blocked,
-                recovery_state=observed_state,
-            )
+
+        superseded = _superseded_outcome_if_needed(
+            coordinator,
+            component_id,
+            expected_work_id,
+            recovery_state=observed_state,
+        )
+        if superseded is not None:
+            return superseded
+
         try:
             updated = coordinator.record_result(canonical_envelope)
         except (CoordinatorError, AttributeError, TypeError):
-            blocked = coordinator.block(
-                component_id,
-                "worker recovery evidence is invalid; host reconciliation required",
-            )
-            return WorkerRecoveryOutcome(
+            return _block_or_superseded(
+                coordinator=coordinator,
                 component_id=component_id,
+                expected_work_id=expected_work_id,
                 disposition=WorkerRecoveryDisposition.BLOCKED_INVALID_EVIDENCE,
-                record=blocked,
+                reason="worker recovery evidence is invalid; host reconciliation required",
                 recovery_state=observed_state,
             )
+
         return WorkerRecoveryOutcome(
             component_id=component_id,
             disposition=WorkerRecoveryDisposition.RECOVERED,
             record=updated,
             recovery_state=observed_state,
         )
+
+
+def _superseded_outcome_if_needed(
+    coordinator: ProductFactoryCoordinator,
+    component_id: str,
+    expected_work_id: str,
+    *,
+    recovery_state: RecoveryState | None,
+) -> WorkerRecoveryOutcome | None:
+    current = _record_from_snapshot(coordinator, component_id)
+    if current.state is WorkState.RUNNING and current.request.work_id == expected_work_id:
+        return None
+    return WorkerRecoveryOutcome(
+        component_id=component_id,
+        disposition=WorkerRecoveryDisposition.SUPERSEDED,
+        record=current,
+        recovery_state=recovery_state,
+    )
+
+
+def _block_or_superseded(
+    *,
+    coordinator: ProductFactoryCoordinator,
+    component_id: str,
+    expected_work_id: str,
+    disposition: WorkerRecoveryDisposition,
+    reason: str,
+    recovery_state: RecoveryState | None,
+) -> WorkerRecoveryOutcome:
+    superseded = _superseded_outcome_if_needed(
+        coordinator,
+        component_id,
+        expected_work_id,
+        recovery_state=recovery_state,
+    )
+    if superseded is not None:
+        return superseded
+    blocked = coordinator.block(component_id, reason)
+    return WorkerRecoveryOutcome(
+        component_id=component_id,
+        disposition=disposition,
+        record=blocked,
+        recovery_state=recovery_state,
+    )
 
 
 def _canonical_recovery_state(value: object) -> RecoveryState | None:
