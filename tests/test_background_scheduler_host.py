@@ -93,13 +93,12 @@ class Harness:
     presence: MutablePresenceObserver
     resource_observer: MutableResourceObserver
     resources: ResourceManager
-    guard: BackgroundDispatchGuard
     effects: EffectRegistry
     host: BackgroundSchedulerHost
 
 
-def _store(tmp_path: Path) -> SQLiteStore:
-    store = SQLiteStore(tmp_path / "background scheduler host.db")
+def _store(tmp_path: Path, name: str = "background scheduler host.db") -> SQLiteStore:
+    store = SQLiteStore(tmp_path / name)
     store.initialize()
     return store
 
@@ -161,7 +160,6 @@ def _harness(tmp_path: Path) -> Harness:
         clock=clock,
         effects=effects,
     )
-    guard = host._bridge._guard
     return Harness(
         store=store,
         clock=clock,
@@ -171,7 +169,6 @@ def _harness(tmp_path: Path) -> Harness:
         presence=presence,
         resource_observer=resource_observer,
         resources=resources,
-        guard=guard,
         effects=effects,
         host=host,
     )
@@ -336,7 +333,9 @@ def test_resource_pressure_defers_without_effect_and_keeps_bounded_retry(
         h.host._scheduler._dispatch(_only_enabled_job_id(h.host))
 
         assert h.effects.effect_calls == 1
-        assert h.host.get("host-read").status is RecurrenceStatus.COMPLETED
+        finished = h.host.get("host-read")
+        assert finished is not None
+        assert finished.status is RecurrenceStatus.COMPLETED
     finally:
         h.host.shutdown()
 
@@ -346,6 +345,7 @@ def test_terminal_parent_task_suppresses_durable_job_on_fresh_host_start(
 ) -> None:
     h = _harness(tmp_path)
     _create(h)
+    job_id = _only_enabled_job_id(h.host)
     h.queue.transition(h.task_id, TaskState.CANCELLED)
 
     restarted, audit, _, _, _ = _build_host(
@@ -357,7 +357,7 @@ def test_terminal_parent_task_suppresses_durable_job_on_fresh_host_start(
     try:
         assert not restarted.runtime_job_installed("host-read")
         assert restarted._jobs.list_enabled() == ()
-        events = audit.list_for(entity_type="scheduled_job")
+        events = audit.list_for(entity_type="scheduled_job", entity_id=job_id)
         suppressed = [
             event
             for event in events
@@ -384,6 +384,75 @@ def test_scheduler_route_rejects_unknown_or_noncanonical_action_before_handler(
         h.host._resolve_scheduler_action(Text(DurableRecurrenceService.ACTION_ID))
     assert h.presence.calls == 0
     assert h.effects.resolve_calls == []
+
+
+def test_constructor_rejects_split_durable_or_audit_authority(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    other_store = _store(tmp_path, "other-background-host.db")
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    audit = AuditLog(store)
+    other_audit = AuditLog(store)
+    presence = MutablePresenceObserver(clock)
+    resource_observer = MutableResourceObserver()
+    resources = ResourceManager(store, resource_observer)
+    guard = BackgroundDispatchGuard(
+        queue=TaskQueue(store),
+        audit=audit,
+        resources=resources,
+        presence=presence,
+        source_id="host-presence",
+        clock=clock,
+    )
+
+    with pytest.raises(ValueError, match="share the exact AuditLog"):
+        BackgroundSchedulerHost(
+            store=store,
+            audit=other_audit,
+            guard=guard,
+            effect_resolver=EffectRegistry().resolve,
+            clock=clock,
+        )
+
+    split_guard = BackgroundDispatchGuard(
+        queue=TaskQueue(other_store),
+        audit=audit,
+        resources=ResourceManager(other_store, MutableResourceObserver()),
+        presence=presence,
+        source_id="host-presence",
+        clock=clock,
+    )
+    with pytest.raises(ValueError, match="TaskQueue"):
+        BackgroundSchedulerHost(
+            store=store,
+            audit=audit,
+            guard=split_guard,
+            effect_resolver=EffectRegistry().resolve,
+            clock=clock,
+        )
+
+
+def test_constructor_rejects_resource_manager_on_different_store(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    other_store = _store(tmp_path, "other-resources.db")
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    audit = AuditLog(store)
+    guard = BackgroundDispatchGuard(
+        queue=TaskQueue(store),
+        audit=audit,
+        resources=ResourceManager(other_store, MutableResourceObserver()),
+        presence=MutablePresenceObserver(clock),
+        source_id="host-presence",
+        clock=clock,
+    )
+
+    with pytest.raises(ValueError, match="ResourceManager"):
+        BackgroundSchedulerHost(
+            store=store,
+            audit=audit,
+            guard=guard,
+            effect_resolver=EffectRegistry().resolve,
+            clock=clock,
+        )
 
 
 def test_public_identity_and_shutdown_carriers_fail_closed(tmp_path: Path) -> None:
