@@ -22,6 +22,7 @@ from nika_core.speech_to_text import (
 class _RecordingAdapter:
     provider_kind = ProviderKind.LOCAL
     provider_id = "local-stt"
+    supported_models = ("uk-small-v1",)
 
     def __init__(self, response: SpeechToTextAdapterResponse) -> None:
         self.response = response
@@ -49,6 +50,7 @@ class _UntypedRecordingAdapter:
 class _ExplodingAdapter:
     provider_kind = ProviderKind.LOCAL
     provider_id = "local-stt"
+    supported_models = ("uk-small-v1",)
 
     async def transcribe(self, request: SpeechToTextRequest) -> SpeechToTextAdapterResponse:
         del request
@@ -58,6 +60,7 @@ class _ExplodingAdapter:
 class _TypedFailureAdapter:
     provider_kind = ProviderKind.LOCAL
     provider_id = "local-stt"
+    supported_models = ("uk-small-v1",)
 
     def __init__(self, code: SpeechToTextFailureCode, *, retryable: bool) -> None:
         self.code = code
@@ -75,6 +78,7 @@ class _TypedFailureAdapter:
 class _BlockedAdapter:
     provider_kind = ProviderKind.LOCAL
     provider_id = "local-stt"
+    supported_models = ("uk-small-v1",)
 
     def __init__(self) -> None:
         self.entered = asyncio.Event()
@@ -91,6 +95,34 @@ class _BlockedAdapter:
         )
 
 
+class _MalformedModelRouteAdapter(_RecordingAdapter):
+    supported_models = ["uk-small-v1"]
+
+
+class _MalformedTypedFailureAdapter:
+    provider_kind = ProviderKind.LOCAL
+    provider_id = "local-stt"
+    supported_models = ("uk-small-v1",)
+
+    async def transcribe(self, request: SpeechToTextRequest) -> SpeechToTextAdapterResponse:
+        del request
+        raise SpeechToTextAdapterError(  # type: ignore[arg-type]
+            "provider_error",
+            "synthetic malformed typed failure",
+            retryable=1,  # type: ignore[arg-type]
+        )
+
+
+class _BehavioralText(str):
+    def strip(self, *_args: object, **_kwargs: object) -> str:
+        return "forged transcript"
+
+
+class _BehavioralFloat(float):
+    def __float__(self) -> float:
+        return 0.0
+
+
 def _audio(data: bytes = b"RIFFsynthetic-audio") -> SpeechAudio:
     return SpeechAudio(
         data=data,
@@ -105,11 +137,12 @@ def _request(
     audio: SpeechAudio | None = None,
     policy: SpeechToTextPolicy | None = None,
     provider_id: str = "local-stt",
+    model: str = "uk-small-v1",
 ) -> SpeechToTextRequest:
     return SpeechToTextRequest(
         request_id="stt-1",
         provider_id=provider_id,
-        model="uk-small-v1",
+        model=model,
         audio=audio or _audio(),
         language="uk",
         privacy=PrivacyClass.SENSITIVE,
@@ -205,6 +238,43 @@ def test_wrong_provider_route_is_rejected_before_audio_is_sent() -> None:
     assert adapter.calls == []
 
 
+def test_wrong_model_route_is_rejected_before_audio_is_sent() -> None:
+    request = _request(model="unconfigured-model")
+    adapter = _RecordingAdapter(
+        SpeechToTextAdapterResponse(
+            request_id=request.request_id,
+            provider_id=request.provider_id,
+            model=request.model,
+            text="must not run",
+        )
+    )
+
+    result = asyncio.run(SpeechToTextService(adapter).transcribe(request))
+
+    assert result.text is None
+    assert result.evidence.status is SpeechToTextStatus.FAILED
+    assert result.evidence.error_code is SpeechToTextFailureCode.PROVIDER_ERROR
+    assert adapter.calls == []
+
+
+def test_malformed_model_capability_is_rejected_before_audio_is_sent() -> None:
+    request = _request()
+    adapter = _MalformedModelRouteAdapter(
+        SpeechToTextAdapterResponse(
+            request_id=request.request_id,
+            provider_id=request.provider_id,
+            model=request.model,
+            text="must not run",
+        )
+    )
+
+    result = asyncio.run(SpeechToTextService(adapter).transcribe(request))  # type: ignore[arg-type]
+
+    assert result.text is None
+    assert result.evidence.error_code is SpeechToTextFailureCode.PROVIDER_ERROR
+    assert adapter.calls == []
+
+
 def test_audio_bound_fails_before_adapter_call_and_full_digest() -> None:
     request = _request(
         audio=_audio(b"12345"),
@@ -277,6 +347,41 @@ def test_response_identity_mismatch_fails_closed(field: str, replacement: str) -
     assert result.evidence.error_code is SpeechToTextFailureCode.PROVIDER_ERROR
 
 
+def test_behavioral_transcript_carrier_is_rejected() -> None:
+    request = _request()
+    adapter = _RecordingAdapter(
+        SpeechToTextAdapterResponse(
+            request_id=request.request_id,
+            provider_id=request.provider_id,
+            model=request.model,
+            text=_BehavioralText("forged transcript"),
+        )
+    )
+
+    result = asyncio.run(SpeechToTextService(adapter).transcribe(request))
+
+    assert result.text is None
+    assert result.evidence.error_code is SpeechToTextFailureCode.PROVIDER_ERROR
+
+
+def test_behavioral_latency_carrier_is_rejected() -> None:
+    request = _request()
+    adapter = _RecordingAdapter(
+        SpeechToTextAdapterResponse(
+            request_id=request.request_id,
+            provider_id=request.provider_id,
+            model=request.model,
+            text="valid transcript",
+            latency_ms=_BehavioralFloat(1.0),
+        )
+    )
+
+    result = asyncio.run(SpeechToTextService(adapter).transcribe(request))
+
+    assert result.text is None
+    assert result.evidence.error_code is SpeechToTextFailureCode.PROVIDER_ERROR
+
+
 def test_unavailable_adapter_is_explicit_and_has_no_fallback() -> None:
     result = asyncio.run(
         SpeechToTextService(UnavailableSpeechToTextAdapter()).transcribe(_request())
@@ -298,6 +403,18 @@ def test_typed_failure_keeps_only_typed_outcome() -> None:
     assert result.text is None
     assert result.evidence.error_code is SpeechToTextFailureCode.INVALID_AUDIO
     assert "diagnostic" not in repr(result.evidence.as_dict())
+
+
+def test_malformed_typed_failure_becomes_redacted_provider_error() -> None:
+    result = asyncio.run(
+        SpeechToTextService(_MalformedTypedFailureAdapter()).transcribe(_request())
+    )
+
+    assert result.text is None
+    assert result.evidence.status is SpeechToTextStatus.FAILED
+    assert result.evidence.error_code is SpeechToTextFailureCode.PROVIDER_ERROR
+    assert result.evidence.retryable is False
+    assert result.evidence.as_dict()["error_code"] == "provider_error"
 
 
 def test_unknown_adapter_exception_becomes_provider_error_without_diagnostic() -> None:
