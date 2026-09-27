@@ -571,6 +571,69 @@ def test_post_commit_put_exception_reconciles_authoritative_future_wait(
     assert durable_intent["not_before"] == due.isoformat()
 
 
+def test_post_commit_json_alias_conflict_fail_stops_live_cursor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=1,
+    )
+    cursor.begin_effect("target-0")
+    cursor.confirm("target-0", {"value": True})
+    due = datetime.now(UTC) + timedelta(hours=1)
+    original_put = memory.put
+
+    def commit_alias_then_raise(**kwargs: object):
+        committed = original_put(**kwargs)
+        assert committed is not None
+        tampered = json.loads(json.dumps(committed.value))
+        targets = tampered["targets"]
+        assert isinstance(targets, list)
+        first = targets[0]
+        assert isinstance(first, dict)
+        result = first["confirmed_result"]
+        assert isinstance(result, dict)
+        result["value"] = 1
+        tampered_kwargs = dict(kwargs)
+        tampered_kwargs["value"] = tampered
+        original_put(**tampered_kwargs)
+        raise RuntimeError("synthetic canonical-json conflict")
+
+    monkeypatch.setattr(memory, "put", commit_alias_then_raise)
+    with pytest.raises(
+        BatchCursorStateError,
+        match="persistence outcome conflicts with durable state",
+    ):
+        cursor.schedule_inter_batch_wait(due)
+
+    with pytest.raises(BatchCursorBlockedError, match="restore is required"):
+        cursor.release_inter_batch_wait(now=due + timedelta(hours=1))
+    with pytest.raises(BatchCursorBlockedError, match="restore is required"):
+        cursor.begin_effect("target-1")
+
+    durable = MemoryService(store).get(
+        scope=MemoryScope.TASK,
+        owner_id="task",
+        namespace="v01.batch_cursor",
+        key="cursor",
+    )
+    assert durable is not None
+    durable_targets = durable.value["targets"]
+    assert isinstance(durable_targets, list)
+    durable_first = durable_targets[0]
+    assert isinstance(durable_first, dict)
+    durable_result = durable_first["confirmed_result"]
+    assert isinstance(durable_result, dict)
+    assert type(durable_result["value"]) is int
+    assert durable_result["value"] == 1
+
+
 def test_unreadable_post_commit_outcome_fail_stops_live_cursor_until_restore(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -814,6 +877,86 @@ def test_restore_rejects_confirmed_cursor_with_conflicting_completed_result_with
 
     assert ledger.require(grant.operation_key).result == tampered_result
     assert _state_value(memory, "task") == confirmed_state
+
+
+@pytest.mark.parametrize(
+    ("confirmed_value", "tampered_value"),
+    [(True, 1), (1, 1.0)],
+)
+def test_restore_rejects_python_equal_json_numeric_aliases(
+    tmp_path: Path,
+    confirmed_value: object,
+    tampered_value: object,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(1),
+        batch_size=1,
+    )
+    grant = cursor.begin_effect("target-0")
+    cursor.confirm("target-0", {"value": confirmed_value})
+    confirmed_state = _state_value(memory, "task")
+    confirmed_state_json = json.dumps(
+        confirmed_state,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    tampered_result = {
+        "__nika_batch_cursor_completion_v1__": {
+            "result": {"value": tampered_value},
+            "next_batch_not_before": None,
+        }
+    }
+
+    assert {"value": confirmed_value} == {"value": tampered_value}
+    assert json.dumps(
+        {"value": confirmed_value},
+        sort_keys=True,
+        separators=(",", ":"),
+    ) != json.dumps(
+        {"value": tampered_value},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    with store.connection() as conn:
+        conn.execute(
+            """
+            UPDATE idempotency_records
+            SET result_json = ?
+            WHERE operation_key = ?
+            """,
+            (json.dumps(tampered_result, sort_keys=True), grant.operation_key),
+        )
+
+    with pytest.raises(
+        BatchCursorStateError,
+        match="confirmed cursor result contradicts idempotency evidence",
+    ):
+        BatchCursor.restore(
+            memory,
+            ledger,
+            task_id="task",
+            cursor_id="cursor",
+            targets=_targets(1),
+            batch_size=1,
+        )
+
+    durable_result = ledger.require(grant.operation_key).result
+    assert durable_result is not None
+    durable_value = durable_result["__nika_batch_cursor_completion_v1__"]["result"]["value"]
+    assert type(durable_value) is type(tampered_value)
+    assert json.dumps(
+        _state_value(memory, "task"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ) == confirmed_state_json
 
 
 @pytest.mark.parametrize(
