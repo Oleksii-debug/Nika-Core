@@ -347,6 +347,7 @@ class BatchCursor:
 
     @property
     def state(self) -> BatchCursorState:
+        self._require_persistence_authority()
         return self._state.model_copy(deep=True)
 
     def next_target(self) -> TargetCursor | None:
