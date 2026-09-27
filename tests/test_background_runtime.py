@@ -234,7 +234,7 @@ def test_resource_pressure_race_at_final_admission_defers_without_effect(
 ) -> None:
     now = datetime(2030, 1, 1, tzinfo=UTC)
     store = _store(tmp_path)
-    resource_observer = SequenceResourceObserver([10.0, 10.0, 10.0, 95.0])
+    resource_observer = SequenceResourceObserver([10.0, 10.0, 95.0])
     guard, queue, _audit, manager = _guard(
         store=store,
         observations=[
