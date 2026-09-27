@@ -4,7 +4,7 @@ import hashlib
 import inspect
 import json
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from math import isfinite
@@ -197,11 +197,15 @@ class BackgroundDispatchGuard:
             )
 
         request_id = f"background:{task_id}"
-        resource_decision = self._resources.request(
-            scope="background_life",
-            owner_id=owner_id,
-            request_id=request_id,
-        )
+        try:
+            resource_decision = self._resources.request(
+                scope="background_life",
+                owner_id=owner_id,
+                request_id=request_id,
+            )
+        except Exception:
+            self._idempotency.release_pending(claim_key)
+            raise
         if not resource_decision.granted:
             waiting_removed = self._resources.cancel_waiting(
                 scope="background_life",
@@ -226,6 +230,7 @@ class BackgroundDispatchGuard:
                 effect_started=False,
             )
 
+        effect_started = False
         try:
             observation = self._observe_or_pause(
                 task_id=task_id,
@@ -256,7 +261,22 @@ class BackgroundDispatchGuard:
                 self._idempotency.release_pending(claim_key)
                 return denial
 
+            post_grant_decision = self._policy_for_existing_grant(
+                owner_id=owner_id,
+                work_kind=work_kind,
+                presence=observation.presence,
+            )
+            if not post_grant_decision.allowed:
+                denial = self._apply_denial(
+                    task_id=task_id,
+                    decision=post_grant_decision,
+                    phase="post_grant_resource_fence",
+                )
+                self._idempotency.release_pending(claim_key)
+                return denial
+
             self._resume_for_dispatch(task_id=task_id, work_kind=work_kind)
+            effect_started = True
             try:
                 result = await effect()
             except Exception as exc:
@@ -271,7 +291,11 @@ class BackgroundDispatchGuard:
                     },
                 )
                 raise
-            if inspect.isawaitable(result) or inspect.isgenerator(result) or inspect.isasyncgen(result):
+            if (
+                inspect.isawaitable(result)
+                or inspect.isgenerator(result)
+                or inspect.isasyncgen(result)
+            ):
                 if inspect.iscoroutine(result):
                     result.close()
                 self._idempotency.mark_uncertain(claim_key)
@@ -285,7 +309,8 @@ class BackgroundDispatchGuard:
                     },
                 )
                 raise TypeError(
-                    "background effect returned deferred execution outside the checked authority window"
+                    "background effect returned deferred execution outside "
+                    "the checked authority window"
                 )
             self._idempotency.complete(
                 claim_key,
@@ -303,6 +328,12 @@ class BackgroundDispatchGuard:
                 effect_started=True,
                 effect_result=result,
             )
+        except Exception:
+            if not effect_started:
+                record = self._idempotency.get(claim_key)
+                if record is not None and record.status is IdempotencyStatus.PENDING:
+                    self._idempotency.release_pending(claim_key)
+            raise
         finally:
             self._resources.release(
                 scope="background_life",
@@ -358,6 +389,36 @@ class BackgroundDispatchGuard:
             owner_presence=presence,
             work_kind=work_kind,
             capacity=self._resources.status(scope="background_life", owner_id=owner_id),
+        )
+
+    def _policy_for_existing_grant(
+        self,
+        *,
+        owner_id: str,
+        work_kind: BackgroundWorkKind,
+        presence: OwnerPresence,
+    ) -> BackgroundDecision:
+        """Recheck current resource/power facts without counting this guard's own slot."""
+
+        status = self._resources.status(scope="background_life", owner_id=owner_id)
+        if status.active_count < 1:
+            raise RuntimeError("background resource grant disappeared before effect")
+        active_without_self = status.active_count - 1
+        adjusted = replace(
+            status,
+            active_count=active_without_self,
+            concurrency_headroom=max(
+                0,
+                status.budget.max_concurrent - active_without_self,
+            ),
+            pressure_reasons=tuple(
+                reason for reason in status.pressure_reasons if reason != "concurrency_limit"
+            ),
+        )
+        return decide_background_work(
+            owner_presence=presence,
+            work_kind=work_kind,
+            capacity=adjusted,
         )
 
     def _observe_or_pause(
