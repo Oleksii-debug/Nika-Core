@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import inspect
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -19,10 +21,16 @@ from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.task_state import TaskState
 from nika_core.resources.manager import ResourceManager
+from nika_core.runtime.idempotency import (
+    IdempotencyConflictError,
+    IdempotencyLedger,
+    IdempotencyStatus,
+)
 
 _MAX_SIGNED_64 = (1 << 63) - 1
 _SOURCE_ENTITY_TYPE = "owner_presence_source"
 _OBSERVED_EVENT = "background.owner_presence_observed"
+_DISPATCH_OPERATION_TYPE = "background.dispatch"
 
 
 class PresenceEvidencePhase(StrEnum):
@@ -124,6 +132,7 @@ class BackgroundDispatchGuard:
         self._max_age = float(max_presence_age_seconds)
         self._max_future_skew = float(max_future_skew_seconds)
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._idempotency = IdempotencyLedger(queue.store)
 
     async def dispatch(
         self,
@@ -169,6 +178,24 @@ class BackgroundDispatchGuard:
                     phase=phase.value,
                 )
 
+        claim_key, existing_completed = self._reserve_dispatch_claim(
+            task_id=task_id,
+            work_kind=work_kind,
+            owner_id=owner_id,
+        )
+        if existing_completed:
+            self._audit.append(
+                event_type="background.dispatch_duplicate_blocked",
+                entity_type="task",
+                entity_id=task_id,
+                payload={"work_kind": work_kind.value, "reason": "already_completed"},
+            )
+            return BackgroundDispatchResult(
+                action=BackgroundAction.DEFER,
+                reason="dispatch_already_completed",
+                effect_started=False,
+            )
+
         request_id = f"background:{task_id}"
         resource_decision = self._resources.request(
             scope="background_life",
@@ -192,6 +219,7 @@ class BackgroundDispatchGuard:
                     "waiting_removed": waiting_removed,
                 },
             )
+            self._idempotency.release_pending(claim_key)
             return BackgroundDispatchResult(
                 action=BackgroundAction.DEFER,
                 reason=resource_decision.reason,
@@ -204,6 +232,7 @@ class BackgroundDispatchGuard:
                 phase=PresenceEvidencePhase.POST_GRANT_FENCE,
             )
             if observation is None:
+                self._idempotency.release_pending(claim_key)
                 return BackgroundDispatchResult(
                     action=BackgroundAction.PAUSE,
                     reason="owner_presence_untrusted",
@@ -219,14 +248,49 @@ class BackgroundDispatchGuard:
                         else "owner_presence_unknown"
                     ),
                 )
-                return self._apply_denial(
+                denial = self._apply_denial(
                     task_id=task_id,
                     decision=decision,
                     phase=PresenceEvidencePhase.POST_GRANT_FENCE.value,
                 )
+                self._idempotency.release_pending(claim_key)
+                return denial
 
             self._resume_for_dispatch(task_id=task_id, work_kind=work_kind)
-            result = await effect()
+            try:
+                result = await effect()
+            except Exception as exc:
+                self._idempotency.mark_uncertain(claim_key)
+                self._audit.append(
+                    event_type="background.dispatch_uncertain",
+                    entity_type="task",
+                    entity_id=task_id,
+                    payload={
+                        "work_kind": work_kind.value,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                raise
+            if inspect.isawaitable(result) or inspect.isgenerator(result) or inspect.isasyncgen(result):
+                if inspect.iscoroutine(result):
+                    result.close()
+                self._idempotency.mark_uncertain(claim_key)
+                self._audit.append(
+                    event_type="background.dispatch_uncertain",
+                    entity_type="task",
+                    entity_id=task_id,
+                    payload={
+                        "work_kind": work_kind.value,
+                        "error_type": "DeferredEffectResult",
+                    },
+                )
+                raise TypeError(
+                    "background effect returned deferred execution outside the checked authority window"
+                )
+            self._idempotency.complete(
+                claim_key,
+                {"effect_started": True, "work_kind": work_kind.value},
+            )
             self._audit.append(
                 event_type="background.dispatch_returned",
                 entity_type="task",
@@ -245,6 +309,43 @@ class BackgroundDispatchGuard:
                 owner_id=owner_id,
                 request_id=request_id,
             )
+
+    def _reserve_dispatch_claim(
+        self,
+        *,
+        task_id: str,
+        work_kind: BackgroundWorkKind,
+        owner_id: str,
+    ) -> tuple[str, bool]:
+        operation_key = f"background.dispatch:{task_id}"
+        fingerprint_payload = {
+            "schema": "nika-background-dispatch-v1",
+            "task_id": task_id,
+            "work_kind": work_kind.value,
+            "owner_id": owner_id,
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                fingerprint_payload,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        record, created = self._idempotency.reserve_once(
+            operation_key=operation_key,
+            task_id=task_id,
+            operation_type=_DISPATCH_OPERATION_TYPE,
+            input_fingerprint=fingerprint,
+        )
+        if created:
+            return operation_key, False
+        if record.status is IdempotencyStatus.COMPLETED:
+            return operation_key, True
+        raise IdempotencyConflictError(
+            "background dispatch is already pending or uncertain; "
+            "reconcile it before replay"
+        )
 
     def _policy(
         self,
