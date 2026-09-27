@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from nika_core.activation_authority import ActivationAuthorityPort, ActivationSubject
 from nika_core.builder.compiler import CompilationResult
 from nika_core.builder.spec import AgentDefinition
 from nika_core.data.sqlite import SQLiteStore
@@ -23,9 +24,16 @@ class StoredAgentDefinition:
 class AgentDefinitionRepository:
     """Versioned durable storage and atomic activation for Agent Builder definitions."""
 
-    def __init__(self, store: SQLiteStore, *, audit_log: AuditLog | None = None) -> None:
+    def __init__(
+        self,
+        store: SQLiteStore,
+        *,
+        audit_log: AuditLog | None = None,
+        activation_authority: ActivationAuthorityPort | None = None,
+    ) -> None:
         self._store = store
         self._audit_log = audit_log or AuditLog(store)
+        self._activation_authority = activation_authority
 
     def next_version(self, agent_id: str) -> int:
         with self._store.connection() as conn:
@@ -33,7 +41,15 @@ class AgentDefinitionRepository:
                 "SELECT MAX(version) AS version FROM agent_definitions WHERE agent_id = ?",
                 (agent_id,),
             ).fetchone()
-        return int(row["version"] or 0) + 1
+        latest = (
+            0
+            if row["version"] is None
+            else _exact_positive_int(
+                row["version"],
+                field="latest agent version",
+            )
+        )
+        return latest + 1
 
     def save_draft(self, compilation: CompilationResult) -> None:
         definition = compilation.definition
@@ -45,11 +61,20 @@ class AgentDefinitionRepository:
             separators=(",", ":"),
         )
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             latest = conn.execute(
                 "SELECT MAX(version) AS version FROM agent_definitions WHERE agent_id = ?",
                 (definition.agent_id,),
             ).fetchone()
-            expected = int(latest["version"] or 0) + 1
+            latest_version = (
+                0
+                if latest["version"] is None
+                else _exact_positive_int(
+                    latest["version"],
+                    field="latest persisted agent version",
+                )
+            )
+            expected = latest_version + 1
             if definition.version != expected:
                 raise ValueError(
                     f"definition version must be the next immutable version: expected {expected}"
@@ -85,32 +110,73 @@ class AgentDefinitionRepository:
         self,
         definition: AgentDefinition,
         *,
-        approved_tool_ids: frozenset[str] = frozenset(),
+        approval_refs: tuple[str, ...] = (),
     ) -> None:
         if not definition.enabled:
             raise ValueError("disabled agent definition cannot be activated")
-        now = datetime.now(UTC).isoformat()
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT definition_json, required_approvals_json, status FROM agent_definitions "
-                "WHERE agent_id = ? AND version = ?",
+                "SELECT version, definition_json, required_approvals_json, highest_risk, status "
+                "FROM agent_definitions WHERE agent_id = ? AND version = ?",
                 (definition.agent_id, definition.version),
             ).fetchone()
             if row is None:
                 raise KeyError("agent definition draft does not exist")
+            row_version = _exact_positive_int(
+                row["version"],
+                field="persisted agent version",
+            )
             persisted = AgentDefinition.model_validate_json(row["definition_json"])
-            if persisted != definition:
+            if row_version != definition.version or persisted != definition:
                 raise ValueError("activation definition differs from persisted immutable draft")
-            required = tuple(str(item) for item in json.loads(row["required_approvals_json"]))
-            missing = sorted(set(required) - set(approved_tool_ids))
-            if missing:
-                raise PermissionError(
-                    "explicit human approval required for high-impact tools: " + ", ".join(missing)
+
+            required = _decode_required_approvals(row["required_approvals_json"])
+            highest_risk = _exact_nonnegative_int(
+                row["highest_risk"],
+                field="persisted highest risk",
+            )
+            _validate_authority_metadata(
+                definition,
+                required=required,
+                highest_risk=highest_risk,
+            )
+
+            active_row = conn.execute(
+                "SELECT version FROM agent_definitions "
+                "WHERE agent_id = ? AND status = 'active'",
+                (definition.agent_id,),
+            ).fetchone()
+            if active_row is not None:
+                active_version = _exact_positive_int(
+                    active_row["version"],
+                    field="active agent version",
                 )
-            if row["status"] == "active":
-                return
+                if active_version == definition.version:
+                    return
+                if active_version > definition.version:
+                    raise PermissionError(
+                        "stale agent definition cannot replace a newer active version"
+                    )
+
             if row["status"] != "draft":
                 raise ValueError(f"cannot activate definition in status {row['status']}")
+
+            if required:
+                if self._activation_authority is None:
+                    raise PermissionError(
+                        "trusted activation authority is required for high-impact tools"
+                    )
+                subject = ActivationSubject.from_payload(
+                    kind="agent",
+                    subject_id=definition.agent_id,
+                    version=str(definition.version),
+                    payload=definition.model_dump(mode="json"),
+                    high_impact_ids=required,
+                )
+                self._activation_authority.verify(subject, approval_refs)
+
+            now = datetime.now(UTC).isoformat()
             conn.execute(
                 "UPDATE agent_definitions SET status = 'retired' "
                 "WHERE agent_id = ? AND status = 'active'",
@@ -129,14 +195,15 @@ class AgentDefinitionRepository:
                 payload={
                     "agent_id": definition.agent_id,
                     "version": definition.version,
-                    "approved_high_impact_tools": sorted(approved_tool_ids),
+                    "approval_reference_count": len(approval_refs),
+                    "highest_risk": highest_risk,
                 },
             )
 
     def active(self, agent_id: str) -> StoredAgentDefinition | None:
         with self._store.connection() as conn:
             row = conn.execute(
-                "SELECT definition_json, status, required_approvals_json, highest_risk, "
+                "SELECT version, definition_json, status, required_approvals_json, highest_risk, "
                 "created_at, activated_at FROM agent_definitions "
                 "WHERE agent_id = ? AND status = 'active' ORDER BY version DESC LIMIT 1",
                 (agent_id,),
@@ -144,11 +211,7 @@ class AgentDefinitionRepository:
         return self._decode(row) if row is not None else None
 
     def require_active(self, agent_id: str, version: int) -> StoredAgentDefinition:
-        """Return the exact active definition or fail closed.
-
-        Multi-agent execution must never be able to name an arbitrary draft, retired,
-        disabled or nonexistent Agent Builder document and have it treated as runnable.
-        """
+        """Return the exact active definition or fail closed."""
         stored = self.get(agent_id, version)
         if stored is None:
             raise KeyError(f"unknown agent definition: {agent_id}:{version}")
@@ -161,7 +224,7 @@ class AgentDefinitionRepository:
     def get(self, agent_id: str, version: int) -> StoredAgentDefinition | None:
         with self._store.connection() as conn:
             row = conn.execute(
-                "SELECT definition_json, status, required_approvals_json, highest_risk, "
+                "SELECT version, definition_json, status, required_approvals_json, highest_risk, "
                 "created_at, activated_at FROM agent_definitions "
                 "WHERE agent_id = ? AND version = ?",
                 (agent_id, version),
@@ -170,13 +233,86 @@ class AgentDefinitionRepository:
 
     @staticmethod
     def _decode(row) -> StoredAgentDefinition:
-        payload = json.loads(row["definition_json"])
-        required = tuple(str(item) for item in json.loads(row["required_approvals_json"]))
+        row_version = _exact_positive_int(
+            row["version"],
+            field="persisted agent version",
+        )
+        definition = AgentDefinition.model_validate_json(row["definition_json"])
+        if definition.version != row_version:
+            raise PermissionError(
+                "stored agent definition version does not match durable row identity"
+            )
+        required = _decode_required_approvals(row["required_approvals_json"])
+        highest_risk = _exact_nonnegative_int(
+            row["highest_risk"],
+            field="persisted highest risk",
+        )
+        _validate_authority_metadata(
+            definition,
+            required=required,
+            highest_risk=highest_risk,
+        )
         return StoredAgentDefinition(
-            definition=AgentDefinition.model_validate(payload),
+            definition=definition,
             status=str(row["status"]),
             required_human_approvals=required,
-            highest_risk=int(row["highest_risk"]),
+            highest_risk=highest_risk,
             created_at=str(row["created_at"]),
-            activated_at=str(row["activated_at"]) if row["activated_at"] is not None else None,
+            activated_at=(
+                str(row["activated_at"]) if row["activated_at"] is not None else None
+            ),
+        )
+
+
+def _decode_required_approvals(payload: object) -> tuple[str, ...]:
+    try:
+        raw = json.loads(str(payload))
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise PermissionError("persisted high-impact approval metadata is invalid") from exc
+    if not isinstance(raw, list) or any(
+        not isinstance(item, str) or not item for item in raw
+    ):
+        raise PermissionError("persisted high-impact approval metadata is invalid")
+    required = tuple(raw)
+    if required != tuple(sorted(set(required))):
+        raise PermissionError("persisted high-impact approval metadata is not canonical")
+    return required
+
+
+def _exact_positive_int(value: object, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise PermissionError(f"{field} must be an exact positive integer")
+    return value
+
+
+def _exact_nonnegative_int(value: object, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise PermissionError(f"{field} must be an exact non-negative integer")
+    return value
+
+
+def _validate_authority_metadata(
+    definition: AgentDefinition,
+    *,
+    required: tuple[str, ...],
+    highest_risk: int,
+) -> None:
+    declared_highest = max(
+        (grant.max_risk for grant in definition.tool_grants),
+        default=0,
+    )
+    if highest_risk != declared_highest:
+        raise PermissionError(
+            "persisted risk metadata does not match immutable agent definition"
+        )
+    declared_high_impact = tuple(
+        sorted(
+            grant.tool_id
+            for grant in definition.tool_grants
+            if grant.max_risk == 4
+        )
+    )
+    if required != declared_high_impact:
+        raise PermissionError(
+            "persisted high-impact approval metadata does not match definition"
         )
