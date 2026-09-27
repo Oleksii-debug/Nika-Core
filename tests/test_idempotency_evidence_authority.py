@@ -189,6 +189,25 @@ def test_pending_canonical_metadata_remains_readable_for_recovery_claims(tmp_pat
     assert record.result == {"claim_id": "c-1", "schema": "recovery-v1"}
 
 
+
+@pytest.mark.parametrize("unsafe_number", [float("nan"), float("inf"), float("-inf")])
+def test_non_json_numeric_completion_evidence_is_rejected_atomically(
+    tmp_path,
+    unsafe_number,
+) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    ledger = IdempotencyLedger(store)
+    _reserve(ledger, task_id)
+
+    before = ledger.require("effect:1")
+    with pytest.raises(ValueError, match="JSON serializable"):
+        ledger.complete("effect:1", {"unsafe": unsafe_number})
+
+    after = ledger.require("effect:1")
+    assert after == before
+    assert after.status is IdempotencyStatus.PENDING
+    assert after.result is None
+
 def test_noncanonical_completed_result_json_is_rejected_without_rewrite(tmp_path) -> None:
     store, task_id = _store_with_task(tmp_path)
     ledger = IdempotencyLedger(store)
