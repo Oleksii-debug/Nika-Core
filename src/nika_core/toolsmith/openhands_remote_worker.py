@@ -182,7 +182,7 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
         self._recovery_probe = recovery_probe
         self._states: dict[str, RecoveryState] = {}
         self._cancel_events: dict[str, threading.Event] = {}
-        self._completed_results: dict[str, CodingResult] = {}
+        self._finalized_results: dict[str, CodingResult] = {}
         self._lock = asyncio.Lock()
 
     async def execute(self, job: CodingJob) -> CodingResult:
@@ -420,11 +420,12 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
         return await self._recovery_probe.inspect(job_id)
 
     async def recover(self, job: CodingJob, state: RecoveryState) -> CodingResult:
+        async with self._lock:
+            finalized = self._finalized_results.get(job.job_id)
+        if finalized is not None and finalized.recovery_state == state:
+            return finalized
+
         if state.phase == "completed":
-            async with self._lock:
-                completed = self._completed_results.get(job.job_id)
-            if completed is not None and completed.recovery_state == state:
-                return completed
             return _failure_result(
                 job,
                 WorkerFailureKind.INTERNAL_ERROR,
@@ -469,6 +470,7 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                 )
             self._states.pop(job.job_id, None)
             self._cancel_events.pop(job.job_id, None)
+            self._finalized_results.pop(job.job_id, None)
         return await self.execute(job)
 
     async def _current_cancellation_result(
@@ -548,9 +550,7 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
 
             self._states[job.job_id] = result_state
             self._cancel_events.pop(job.job_id, None)
-            self._completed_results.pop(job.job_id, None)
-            if result.succeeded and result_state.phase == "completed":
-                self._completed_results[job.job_id] = result
+            self._finalized_results[job.job_id] = result
             return result
 
 
