@@ -348,3 +348,181 @@ def test_office_export_rejects_timezone_naive_created_at() -> None:
     for report_format in (ResearchReportFormat.DOCX, ResearchReportFormat.XLSX):
         with pytest.raises(ValueError, match="explicit timezone"):
             ResearchReportExporter().render(naive, report_format)
+
+def test_exporter_rejects_behavioral_string_before_formula_neutralization() -> None:
+    class MisleadingFormula(str):
+        def lstrip(self, *args: object, **kwargs: object) -> str:
+            return "safe"
+
+    report = _report()
+    card = report.cards[0]
+    hostile_card = ResearchCard(
+        ordinal=card.ordinal,
+        document_id=card.document_id,
+        title=MisleadingFormula("=WEBSERVICE(\"https://example.invalid\")"),
+        snippet=card.snippet,
+        rank=card.rank,
+        why_matched=card.why_matched,
+        evidence=card.evidence,
+        review=card.review,
+    )
+    hostile_report = AccessibleResearchReport(
+        result_set_id=report.result_set_id,
+        workspace_id=report.workspace_id,
+        query=report.query,
+        created_at=report.created_at,
+        cards=(hostile_card,),
+        text=report.text,
+    )
+
+    with pytest.raises(TypeError, match=r"report\.cards\[0\]\.title must be an exact str"):
+        ResearchReportExporter().render(hostile_report, ResearchReportFormat.CSV)
+
+
+def test_exporter_rejects_forged_html_rank_carrier_before_formatting() -> None:
+    class HtmlRank:
+        def __format__(self, format_spec: str) -> str:
+            return "</dd><script>RANK_CANARY</script><dd>"
+
+    report = _report()
+    card = report.cards[0]
+    hostile_card = ResearchCard(
+        ordinal=card.ordinal,
+        document_id=card.document_id,
+        title=card.title,
+        snippet=card.snippet,
+        rank=HtmlRank(),  # type: ignore[arg-type]
+        why_matched=card.why_matched,
+        evidence=card.evidence,
+        review=card.review,
+    )
+    hostile_report = AccessibleResearchReport(
+        result_set_id=report.result_set_id,
+        workspace_id=report.workspace_id,
+        query=report.query,
+        created_at=report.created_at,
+        cards=(hostile_card,),
+        text=report.text,
+    )
+
+    with pytest.raises(TypeError, match=r"report\.cards\[0\]\.rank must be an exact float"):
+        ResearchReportExporter().render(
+            hostile_report,
+            ResearchReportFormat.HTML,
+            language_tag="uk",
+        )
+
+
+@pytest.mark.parametrize("rank", [float("nan"), float("inf"), float("-inf")])
+def test_exporter_rejects_non_finite_rank(rank: float) -> None:
+    report = _report()
+    card = report.cards[0]
+    hostile_card = ResearchCard(
+        ordinal=card.ordinal,
+        document_id=card.document_id,
+        title=card.title,
+        snippet=card.snippet,
+        rank=rank,
+        why_matched=card.why_matched,
+        evidence=card.evidence,
+        review=card.review,
+    )
+    hostile_report = AccessibleResearchReport(
+        result_set_id=report.result_set_id,
+        workspace_id=report.workspace_id,
+        query=report.query,
+        created_at=report.created_at,
+        cards=(hostile_card,),
+        text=report.text,
+    )
+
+    with pytest.raises(ValueError, match=r"report\.cards\[0\]\.rank must be finite"):
+        ResearchReportExporter().render(hostile_report, ResearchReportFormat.TXT)
+
+
+def test_exporter_rejects_behavioral_nested_evidence_text() -> None:
+    class BehavioralSourceId(str):
+        def encode(self, *args: object, **kwargs: object) -> bytes:
+            return b"different-authority"
+
+    report = _report()
+    card = report.cards[0]
+    evidence = card.evidence[0]
+    hostile_evidence = ResearchEvidence(
+        source_id=BehavioralSourceId(evidence.source_id),
+        source_kind=evidence.source_kind,
+        locator=evidence.locator,
+        observed_at=evidence.observed_at,
+        freshness=evidence.freshness,
+    )
+    hostile_card = ResearchCard(
+        ordinal=card.ordinal,
+        document_id=card.document_id,
+        title=card.title,
+        snippet=card.snippet,
+        rank=card.rank,
+        why_matched=card.why_matched,
+        evidence=(hostile_evidence,),
+        review=card.review,
+    )
+    hostile_report = AccessibleResearchReport(
+        result_set_id=report.result_set_id,
+        workspace_id=report.workspace_id,
+        query=report.query,
+        created_at=report.created_at,
+        cards=(hostile_card,),
+        text=report.text,
+    )
+
+    with pytest.raises(
+        TypeError,
+        match=r"report\.cards\[0\]\.evidence\[0\]\.source_id must be an exact str",
+    ):
+        ResearchReportExporter().render(hostile_report, ResearchReportFormat.TXT)
+
+
+def test_exporter_rejects_review_identity_mismatch() -> None:
+    report = _report()
+    card = report.cards[0]
+    mismatched_review = ResearchReview(
+        workspace_id="other-workspace",
+        document_id=card.document_id,
+        state=card.review.state,
+        note=card.review.note,
+        updated_at=card.review.updated_at,
+    )
+    hostile_card = ResearchCard(
+        ordinal=card.ordinal,
+        document_id=card.document_id,
+        title=card.title,
+        snippet=card.snippet,
+        rank=card.rank,
+        why_matched=card.why_matched,
+        evidence=card.evidence,
+        review=mismatched_review,
+    )
+    hostile_report = AccessibleResearchReport(
+        result_set_id=report.result_set_id,
+        workspace_id=report.workspace_id,
+        query=report.query,
+        created_at=report.created_at,
+        cards=(hostile_card,),
+        text=report.text,
+    )
+
+    with pytest.raises(ValueError, match=r"review workspace mismatch"):
+        ResearchReportExporter().render(hostile_report, ResearchReportFormat.TXT)
+
+
+def test_html_rejects_behavioral_language_tag_before_normalization() -> None:
+    class BehavioralLanguage(str):
+        def strip(self, *args: object, **kwargs: object) -> str:
+            return "uk"
+
+    with pytest.raises(TypeError, match="language_tag must be an exact str"):
+        ResearchReportExporter().render(
+            _report(),
+            ResearchReportFormat.HTML,
+            language_tag=BehavioralLanguage("<script>LANG_CANARY</script>"),
+        )
+
