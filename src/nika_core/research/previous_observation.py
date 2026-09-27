@@ -45,11 +45,15 @@ class PreviousObservationExpectation:
     def __post_init__(self) -> None:
         for field_name in ("series_id", "workspace_id", "profile_id", "source_set_id"):
             value = getattr(self, field_name)
-            if not isinstance(value, str) or not value.strip():
+            if type(value) is not str:
+                raise TypeError(f"{field_name} must be an exact str")
+            if not value.strip():
                 raise ValueError(f"{field_name} is required")
         for field_name in ("profile_version", "source_set_version"):
             value = getattr(self, field_name)
-            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            if type(value) is not int:
+                raise TypeError(f"{field_name} must be an exact int")
+            if value < 1:
                 raise ValueError(f"{field_name} must be a positive integer")
 
 

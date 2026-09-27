@@ -77,3 +77,57 @@ def test_fractional_sqlite_history_versions_fail_closed(
         loader._validate_history_identity(row, expected)
 
     assert caught.value.code is PreviousObservationErrorCode.CORRUPT_BASELINE
+
+class _BehavioralIdentity(str):
+    def strip(self, *args: object, **kwargs: object) -> str:
+        return "accepted"
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+
+class _BehavioralVersion(int):
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["series_id", "workspace_id", "profile_id", "source_set_id"],
+)
+def test_expectation_rejects_behavioral_identity_subclasses(field_name: str) -> None:
+    values: dict[str, object] = {
+        "series_id": "series",
+        "workspace_id": "ws",
+        "profile_id": "monitor",
+        "profile_version": 1,
+        "source_set_id": "sources",
+        "source_set_version": 1,
+    }
+    values[field_name] = _BehavioralIdentity("foreign")
+
+    with pytest.raises(TypeError, match=rf"{field_name} must be an exact str"):
+        PreviousObservationExpectation(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("field_name", ["profile_version", "source_set_version"])
+def test_expectation_rejects_behavioral_version_subclasses(field_name: str) -> None:
+    values: dict[str, object] = {
+        "series_id": "series",
+        "workspace_id": "ws",
+        "profile_id": "monitor",
+        "profile_version": 1,
+        "source_set_id": "sources",
+        "source_set_version": 1,
+    }
+    values[field_name] = _BehavioralVersion(999)
+
+    with pytest.raises(TypeError, match=rf"{field_name} must be an exact int"):
+        PreviousObservationExpectation(**values)  # type: ignore[arg-type]
+
