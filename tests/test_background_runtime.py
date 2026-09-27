@@ -31,15 +31,20 @@ class SequencePresence:
 
 
 class SequenceResourceObserver:
-    def __init__(self, cpu_values: list[float] | None = None) -> None:
+    def __init__(
+        self,
+        cpu_values: list[float] | None = None,
+        power_values: list[bool | None] | None = None,
+    ) -> None:
         self._cpu_values = iter(cpu_values or [10.0] * 20)
+        self._power_values = iter(power_values or [True] * 20)
 
     def snapshot(self) -> ResourceSnapshot:
         return ResourceSnapshot(
             cpu_percent=next(self._cpu_values),
             memory_percent=20.0,
             available_memory_bytes=2_000_000_000,
-            power_plugged=True,
+            power_plugged=next(self._power_values),
         )
 
 
@@ -275,7 +280,7 @@ def test_resource_pressure_race_at_final_admission_defers_without_effect(
 ) -> None:
     now = datetime(2030, 1, 1, tzinfo=UTC)
     store = _store(tmp_path)
-    resource_observer = SequenceResourceObserver([10.0, 10.0, 95.0])
+    resource_observer = SequenceResourceObserver([10.0, 10.0, 10.0, 95.0])
     guard, queue, _audit, manager = _guard(
         store=store,
         observations=[
@@ -305,6 +310,81 @@ def test_resource_pressure_race_at_final_admission_defers_without_effect(
     assert manager.active_count(scope="background_life", owner_id="living-agent") == 0
     assert manager.queued(scope="background_life", owner_id="living-agent") == ()
 
+
+
+def test_resource_pressure_after_grant_is_rechecked_before_effect(tmp_path: Path) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    store = _store(tmp_path)
+    resource_observer = SequenceResourceObserver(
+        [10.0, 10.0, 10.0, 10.0, 95.0]
+    )
+    guard, queue, _audit, manager = _guard(
+        store=store,
+        observations=[
+            _obs(35, OwnerPresence.AWAY, now=now),
+            _obs(36, OwnerPresence.AWAY, now=now),
+            _obs(37, OwnerPresence.AWAY, now=now),
+            _obs(38, OwnerPresence.AWAY, now=now),
+        ],
+        now=now,
+        resource_observer=resource_observer,
+    )
+    task_id = _ready_task(queue)
+
+    async def effect() -> object:
+        raise AssertionError("effect must not run")
+
+    result = asyncio.run(
+        guard.dispatch(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.READING_RESEARCH,
+            effect=effect,
+        )
+    )
+
+    assert result.action is BackgroundAction.DEFER
+    assert result.reason == "resource_pressure"
+    assert queue.get(task_id).state is TaskState.READY
+    assert manager.active_count(scope="background_life", owner_id="living-agent") == 0
+    assert IdempotencyLedger(store).list_for_task(task_id) == ()
+
+
+def test_high_impact_power_change_after_grant_blocks_effect(tmp_path: Path) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    store = _store(tmp_path)
+    resource_observer = SequenceResourceObserver(
+        [10.0, 10.0, 10.0, 10.0, 10.0],
+        [True, True, True, True, False],
+    )
+    guard, queue, _audit, manager = _guard(
+        store=store,
+        observations=[
+            _obs(45, OwnerPresence.AWAY, now=now),
+            _obs(46, OwnerPresence.AWAY, now=now),
+            _obs(47, OwnerPresence.AWAY, now=now),
+            _obs(48, OwnerPresence.AWAY, now=now),
+        ],
+        now=now,
+        resource_observer=resource_observer,
+    )
+    task_id = _ready_task(queue)
+
+    async def effect() -> object:
+        raise AssertionError("effect must not run")
+
+    result = asyncio.run(
+        guard.dispatch(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.EVALUATION,
+            effect=effect,
+        )
+    )
+
+    assert result.action is BackgroundAction.DEFER
+    assert result.reason == "battery_power"
+    assert queue.get(task_id).state is TaskState.READY
+    assert manager.active_count(scope="background_life", owner_id="living-agent") == 0
+    assert IdempotencyLedger(store).list_for_task(task_id) == ()
 
 def test_stale_presence_fails_closed_and_records_only_error_type(tmp_path: Path) -> None:
     now = datetime(2030, 1, 1, tzinfo=UTC)
