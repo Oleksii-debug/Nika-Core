@@ -5,6 +5,7 @@ import io
 import json
 import sys
 import tarfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -237,12 +238,17 @@ def test_completed_job_identity_cannot_be_executed_twice(tmp_path: Path) -> None
 
     first = _run(worker.execute(job))
     second = _run(worker.execute(job))
+    _run(worker.cancel(job.job_id))
+    state = _run(worker.inspect(job.job_id))
+    recovered = _run(worker.recover(job, state))
 
     assert first.succeeded
     assert not second.succeeded
     assert second.failure is not None
     assert second.failure.kind.value == "invalid_request"
     assert second.recovery_state == first.recovery_state
+    assert state == first.recovery_state
+    assert recovered == first
     assert len(runtime.calls) == 1
 
 
@@ -686,6 +692,19 @@ class FakeRemoteWorkspace:
         return type("UploadResult", (), {"success": True})()
 
 
+class BlockingUploadWorkspace(FakeRemoteWorkspace):
+    def __init__(self, endpoint: OpenHandsSandboxEndpoint, payload: bytes) -> None:
+        super().__init__(endpoint, payload)
+        self.upload_started = threading.Event()
+        self.allow_upload = threading.Event()
+
+    def file_upload(self, local_path, remote_path):
+        self.upload_started.set()
+        if not self.allow_upload.wait(timeout=5):
+            raise RuntimeError("test upload release was not signalled")
+        return super().file_upload(local_path, remote_path)
+
+
 class FakeConversation:
     instances = []
 
@@ -719,7 +738,7 @@ class FakeConversation:
         self.closed = True
 
 
-def test_sdk_runtime_contract_executes_upload_conversation_archive_and_cancel(
+def test_sdk_runtime_contract_executes_upload_conversation_and_archive(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -741,7 +760,7 @@ def test_sdk_runtime_contract_executes_upload_conversation_archive_and_cancel(
         max_iterations=7,
     )
 
-    result = runtime._execute_sync(job, endpoint, "do work", root, evidence)
+    result = _run(runtime.execute(job, endpoint, "do work", root, evidence))
 
     assert result.conversation_id == "conversation-sdk-contract"
     assert result.files == (RemoteFile("src/value.txt", b"after-sdk\n"),)
@@ -751,20 +770,48 @@ def test_sdk_runtime_contract_executes_upload_conversation_archive_and_cancel(
     assert conversation.runs == [(True, float(job.resource_budget.timeout_seconds))]
     assert conversation.closed is True
 
-    cancel_conversation = FakeConversation(
-        agent=object(),
-        workspace=workspace,
-        max_iteration_per_run=7,
-        visualizer=None,
-        delete_on_close=True,
-        tags={},
-    )
-    with runtime._active_lock:
-        runtime._active[job.job_id] = cancel_conversation
-    cancel_conversation.on_interrupt = lambda: runtime._active.pop(job.job_id, None)
 
-    assert _run(runtime.cancel(job.job_id)) is True
-    assert cancel_conversation.interrupted is True
+def test_sdk_cancel_covers_pre_conversation_upload_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    job = _job(root)
+    evidence = collect_tree_evidence(root)
+    endpoint = _endpoint()
+    workspace = BlockingUploadWorkspace(
+        endpoint,
+        _tar_snapshot({"src/value.txt": b"unused\n"}),
+    )
+    FakeConversation.instances.clear()
+    monkeypatch.setattr(
+        openhands_sdk_module,
+        "_load_conversation_type",
+        lambda: FakeConversation,
+    )
+    runtime = OpenHandsSdkRemoteRuntime(
+        workspace_factory=lambda _endpoint: workspace,
+        agent_factory=lambda _job, _endpoint: object(),
+        max_iterations=7,
+    )
+
+    async def scenario() -> None:
+        execution = asyncio.create_task(
+            runtime.execute(job, endpoint, "do work", root, evidence)
+        )
+        started = await asyncio.to_thread(workspace.upload_started.wait, 2)
+        assert started
+        cancellation = asyncio.create_task(runtime.cancel(job.job_id))
+        await asyncio.sleep(0)
+        workspace.allow_upload.set()
+        assert await cancellation is True
+        with pytest.raises(openhands_sdk_module.OpenHandsSdkExecutionCancelled):
+            await execution
+
+    _run(scenario())
+
+    assert FakeConversation.instances == []
+    assert workspace.uploads == [(b"before\n", "/workspace/nika-job/src/value.txt")]
 
 
 def test_sdk_upload_rejects_source_bytes_changed_after_captured_evidence(tmp_path: Path) -> None:
