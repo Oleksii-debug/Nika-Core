@@ -75,6 +75,17 @@ def test_registry_fails_closed_after_runtime_identity_drift() -> None:
         registry.describe()
 
 
+def test_registry_normalizes_malformed_post_registration_drift() -> None:
+    registry = RuntimeRegistry()
+    runtime = ReferenceRuntime()
+    registry.register(runtime)
+
+    runtime.capabilities = frozenset({"deterministic_no_llm"})
+
+    with pytest.raises(RuntimeError, match="became invalid"):
+        registry.get("reference")
+
+
 def test_registry_blocks_post_registration_capability_expansion() -> None:
     registry = RuntimeRegistry()
     runtime = ReferenceRuntime()
