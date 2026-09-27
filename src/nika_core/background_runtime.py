@@ -103,17 +103,18 @@ class BackgroundDispatchGuard:
             raise TypeError("source_id must be exact built-in str")
         if not source_id or source_id != source_id.strip():
             raise ValueError("source_id must be non-empty without surrounding whitespace")
-        for name, value, minimum in (
-            ("max_presence_age_seconds", max_presence_age_seconds, 0.0),
-            ("max_future_skew_seconds", max_future_skew_seconds, -1.0),
-        ):
-            if type(value) not in (int, float):
-                raise TypeError(f"{name} must be exact built-in int or float")
-            if type(value) is float and not isfinite(value):
-                raise ValueError(f"{name} must be finite")
-            if value <= minimum:
-                comparator = "greater than zero" if minimum == 0.0 else "non-negative"
-                raise ValueError(f"{name} must be {comparator}")
+        if type(max_presence_age_seconds) not in (int, float):
+            raise TypeError("max_presence_age_seconds must be exact built-in int or float")
+        if type(max_presence_age_seconds) is float and not isfinite(max_presence_age_seconds):
+            raise ValueError("max_presence_age_seconds must be finite")
+        if max_presence_age_seconds <= 0:
+            raise ValueError("max_presence_age_seconds must be greater than zero")
+        if type(max_future_skew_seconds) not in (int, float):
+            raise TypeError("max_future_skew_seconds must be exact built-in int or float")
+        if type(max_future_skew_seconds) is float and not isfinite(max_future_skew_seconds):
+            raise ValueError("max_future_skew_seconds must be finite")
+        if max_future_skew_seconds < 0:
+            raise ValueError("max_future_skew_seconds must be non-negative")
         self._queue = queue
         self._audit = audit
         self._resources = resources
@@ -143,37 +144,29 @@ class BackgroundDispatchGuard:
         if not owner_id or owner_id != owner_id.strip():
             raise ValueError("owner_id must be non-empty without surrounding whitespace")
 
-        preflight = self._observe_or_pause(
-            task_id=task_id,
-            phase=PresenceEvidencePhase.PREFLIGHT,
-        )
-        if preflight is None:
-            return BackgroundDispatchResult(
-                action=BackgroundAction.PAUSE,
-                reason="owner_presence_untrusted",
-                effect_started=False,
+        for phase in (
+            PresenceEvidencePhase.PREFLIGHT,
+            PresenceEvidencePhase.EFFECT_RECHECK,
+            PresenceEvidencePhase.EFFECT_COMMIT,
+        ):
+            observation = self._observe_or_pause(task_id=task_id, phase=phase)
+            if observation is None:
+                return BackgroundDispatchResult(
+                    action=BackgroundAction.PAUSE,
+                    reason="owner_presence_untrusted",
+                    effect_started=False,
+                )
+            decision = self._policy(
+                owner_id=owner_id,
+                work_kind=work_kind,
+                presence=observation.presence,
             )
-        decision = self._policy(owner_id=owner_id, work_kind=work_kind, presence=preflight.presence)
-        if not decision.allowed:
-            return self._apply_denial(task_id=task_id, decision=decision)
-
-        effect_recheck = self._observe_or_pause(
-            task_id=task_id,
-            phase=PresenceEvidencePhase.EFFECT_RECHECK,
-        )
-        if effect_recheck is None:
-            return BackgroundDispatchResult(
-                action=BackgroundAction.PAUSE,
-                reason="owner_presence_untrusted",
-                effect_started=False,
-            )
-        decision = self._policy(
-            owner_id=owner_id,
-            work_kind=work_kind,
-            presence=effect_recheck.presence,
-        )
-        if not decision.allowed:
-            return self._apply_denial(task_id=task_id, decision=decision)
+            if not decision.allowed:
+                return self._apply_denial(
+                    task_id=task_id,
+                    decision=decision,
+                    phase=phase.value,
+                )
 
         request_id = f"background:{task_id}"
         resource_decision = self._resources.request(
@@ -199,28 +192,6 @@ class BackgroundDispatchGuard:
             )
 
         try:
-            effect_commit = self._observe_or_pause(
-                task_id=task_id,
-                phase=PresenceEvidencePhase.EFFECT_COMMIT,
-            )
-            if effect_commit is None:
-                return BackgroundDispatchResult(
-                    action=BackgroundAction.PAUSE,
-                    reason="owner_presence_untrusted",
-                    effect_started=False,
-                )
-            if effect_commit.presence is not OwnerPresence.AWAY:
-                decision = BackgroundDecision(
-                    action=BackgroundAction.PAUSE,
-                    work_kind=work_kind,
-                    reason=(
-                        "owner_active"
-                        if effect_commit.presence is OwnerPresence.ACTIVE
-                        else "owner_presence_unknown"
-                    ),
-                )
-                return self._apply_denial(task_id=task_id, decision=decision)
-
             self._resume_for_dispatch(task_id=task_id, work_kind=work_kind)
             result = await effect()
             self._audit.append(
@@ -361,13 +332,10 @@ class BackgroundDispatchGuard:
         *,
         task_id: str,
         decision: BackgroundDecision,
+        phase: str,
     ) -> BackgroundDispatchResult:
         if decision.action is BackgroundAction.PAUSE:
-            self._pause_task(
-                task_id=task_id,
-                reason=decision.reason,
-                phase="policy",
-            )
+            self._pause_task(task_id=task_id, reason=decision.reason, phase=phase)
         else:
             self._audit.append(
                 event_type="background.dispatch_deferred",
@@ -376,7 +344,7 @@ class BackgroundDispatchGuard:
                 payload={
                     "reason": decision.reason,
                     "work_kind": decision.work_kind.value,
-                    "phase": "policy",
+                    "phase": phase,
                 },
             )
         return BackgroundDispatchResult(
@@ -428,9 +396,7 @@ class BackgroundDispatchGuard:
             raise ValueError("task_id must be non-empty without surrounding whitespace")
         state = self._queue.get(task_id).state
         if state not in {TaskState.READY, TaskState.PAUSED}:
-            raise ValueError(
-                "background dispatch requires a durable READY or PAUSED task"
-            )
+            raise ValueError("background dispatch requires a durable READY or PAUSED task")
 
     @staticmethod
     def _task_state_with_connection(conn, task_id: str) -> TaskState:
