@@ -34,6 +34,7 @@ class DurableBlockingRuntime:
         self.cancel_entered = threading.Event()
         self.release_cancel = threading.Event()
         self.cancelled = threading.Event()
+        self.run_exited = threading.Event()
         self.resumed = threading.Event()
 
     def initial_resume_token(self, *, task_id: str, thread_id: str) -> str:
@@ -43,6 +44,7 @@ class DurableBlockingRuntime:
         self.started.set()
         while not self.cancelled.is_set():
             await asyncio.sleep(0.01)
+        self.run_exited.set()
         return RuntimeResult(outcome=RuntimeOutcome.CANCELLED)
 
     async def resume(self, request: RuntimeResumeRequest) -> RuntimeResult:
@@ -120,6 +122,20 @@ def test_running_pause_is_nonblocking_serialized_and_durably_resumable(
 
     runtime.release_cancel.set()
     _wait_for_state(queue, task_id, TaskState.PAUSED)
+
+    with pytest.raises(ValueError, match="завершує безпечне призупинення"):
+        backend.resume_task({})
+
+    assert runtime.run_exited.wait(timeout=1)
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        with backend._active_lock:
+            pending_pause = backend._pause_futures.get(task_id)
+        if pending_pause is None:
+            break
+        time.sleep(0.01)
+    with backend._active_lock:
+        assert backend._pause_futures.get(task_id) is None
 
     pause_events = audit.list_for(entity_type="task", entity_id=task_id)
     assert any(item.event_type == "runtime.pause_confirmed" for item in pause_events)
