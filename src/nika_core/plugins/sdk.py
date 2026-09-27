@@ -386,12 +386,8 @@ class PluginRuntime:
                 return
             self._deactivating.add(plugin_id)
 
-        try:
-            adapter.close()
-        except Exception:
-            # Teardown was not proven complete. Keep this generation fail-stopped
-            # until the in-memory runtime is reconstructed.
-            raise
-        else:
-            with self._registry_lock:
-                self._deactivating.remove(plugin_id)
+        # Clear the fail-stop marker only after teardown is proven complete.
+        # If close() raises, this runtime keeps the plugin generation blocked.
+        adapter.close()
+        with self._registry_lock:
+            self._deactivating.remove(plugin_id)
