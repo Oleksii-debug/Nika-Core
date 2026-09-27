@@ -45,7 +45,7 @@ def _decode_payload(payload_json: str, checksum_sha256: str) -> dict[str, object
     except (json.JSONDecodeError, ValueError) as exc:
         raise ValueError("Checkpoint payload is invalid JSON") from exc
     if not isinstance(payload, dict):
-        raise ValueError("Checkpoint payload must be a JSON object")
+        raise TypeError("Checkpoint payload must be a JSON object")
     if _canonical_json(payload) != payload_json:
         raise ValueError("Checkpoint payload is not canonical JSON")
     return payload

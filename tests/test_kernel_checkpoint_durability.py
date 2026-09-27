@@ -122,7 +122,7 @@ def test_latest_rejects_non_object_payload_even_with_matching_checksum(tmp_path:
         payload_json="[]",
     )
 
-    with pytest.raises(ValueError, match="JSON object"):
+    with pytest.raises(TypeError, match="JSON object"):
         checkpoints.latest(task_id)
 
 
