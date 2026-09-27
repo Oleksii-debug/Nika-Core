@@ -326,7 +326,7 @@ def test_process_tree_termination_uses_supplied_trusted_taskkill_path(monkeypatc
     monkeypatch.setattr(speech_windows.subprocess, "run", fake_run)
     trusted_taskkill = Path("/trusted/System32/taskkill.exe")
 
-    speech_windows._terminate_process_tree(  # noqa: SLF001 - focused private-boundary regression
+    speech_windows._terminate_process_tree(
         process,  # type: ignore[arg-type]
         taskkill_executable=trusted_taskkill,
     )
