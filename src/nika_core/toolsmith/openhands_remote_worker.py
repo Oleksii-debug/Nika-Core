@@ -25,8 +25,6 @@ from nika_core.toolsmith.contracts import (
     WorkerFailureKind,
 )
 from nika_core.toolsmith.execution import run_typed_process
-
-_LOGGER = logging.getLogger(__name__)
 from nika_core.toolsmith.workspace_security import (
     TreeEvidence,
     WorkspacePathPolicy,
@@ -35,6 +33,8 @@ from nika_core.toolsmith.workspace_security import (
     ensure_path_policy,
     sterile_git_environment,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class OpenHandsWorkerError(RuntimeError):
