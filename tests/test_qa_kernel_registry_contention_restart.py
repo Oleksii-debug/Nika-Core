@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import collections.abc
-import concurrent.futures
 import functools
-import pathlib
 import sqlite3
-import threading
+from concurrent.futures import Future, ThreadPoolExecutor
+from pathlib import Path
+from threading import Barrier
 
 import pytest
 
@@ -14,17 +13,14 @@ from nika_core.kernel.agent_registry import AgentDefinition, AgentRegistry
 from nika_core.kernel.workspace_registry import WorkspaceDefinition, WorkspaceRegistry
 
 
-RegisterCall = collections.abc.Callable[[], None]
+def _run_together(calls: list[functools.partial]) -> list[Future[None]]:
+    barrier = Barrier(len(calls))
 
-
-def _run_together(calls: list[RegisterCall]) -> list[concurrent.futures.Future[None]]:
-    barrier = threading.Barrier(len(calls))
-
-    def invoke(call: RegisterCall) -> None:
+    def invoke(call: functools.partial) -> None:
         barrier.wait(timeout=5)
         call()
 
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(calls))
+    executor = ThreadPoolExecutor(max_workers=len(calls))
     try:
         futures = [executor.submit(invoke, call) for call in calls]
         for future in futures:
@@ -39,7 +35,7 @@ def _run_together(calls: list[RegisterCall]) -> list[concurrent.futures.Future[N
         executor.shutdown(wait=True)
 
 
-def _count_successes(futures: list[concurrent.futures.Future[None]]) -> int:
+def _count_successes(futures: list[Future[None]]) -> int:
     successes = 0
     for future in futures:
         try:
@@ -51,7 +47,7 @@ def _count_successes(futures: list[concurrent.futures.Future[None]]) -> int:
 
 
 def test_agent_registry_duplicate_contention_is_contract_safe_and_restart_durable(
-    tmp_path: pathlib.Path,
+    tmp_path: Path,
 ) -> None:
     database = tmp_path / "agent registry contention.db"
     store = SQLiteStore(database)
@@ -72,7 +68,7 @@ def test_agent_registry_duplicate_contention_is_contract_safe_and_restart_durabl
 
 
 def test_workspace_registry_duplicate_contention_is_contract_safe_and_restart_durable(
-    tmp_path: pathlib.Path,
+    tmp_path: Path,
 ) -> None:
     database = tmp_path / "workspace registry contention.db"
     store = SQLiteStore(database)
@@ -93,7 +89,7 @@ def test_workspace_registry_duplicate_contention_is_contract_safe_and_restart_du
 
 
 def test_agent_registry_mixed_versions_converge_to_highest_after_restart(
-    tmp_path: pathlib.Path,
+    tmp_path: Path,
 ) -> None:
     database = tmp_path / "agent mixed versions.db"
     store = SQLiteStore(database)
@@ -119,7 +115,7 @@ def test_agent_registry_mixed_versions_converge_to_highest_after_restart(
 
 
 def test_workspace_registry_mixed_versions_converge_to_highest_after_restart(
-    tmp_path: pathlib.Path,
+    tmp_path: Path,
 ) -> None:
     database = tmp_path / "workspace mixed versions.db"
     store = SQLiteStore(database)
