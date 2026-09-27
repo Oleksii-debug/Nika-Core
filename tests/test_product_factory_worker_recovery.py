@@ -96,6 +96,7 @@ class FakeRecoveryPort:
         recover_error: Exception | None = None,
         component_id_override: str | None = None,
         envelope_override: object | None = None,
+        mutate_recover_state: bool = False,
     ) -> None:
         self.state = state
         self.failure = failure
@@ -103,6 +104,7 @@ class FakeRecoveryPort:
         self.recover_error = recover_error
         self.component_id_override = component_id_override
         self.envelope_override = envelope_override
+        self.mutate_recover_state = mutate_recover_state
         self.inspected: list[str] = []
         self.recovered = []
 
@@ -114,6 +116,8 @@ class FakeRecoveryPort:
 
     async def recover(self, request, state):
         self.recovered.append((request, state))
+        if self.mutate_recover_state:
+            object.__setattr__(state, "phase", "")
         if self.recover_error is not None:
             raise self.recover_error
         if self.envelope_override is not None:
@@ -226,6 +230,26 @@ def test_recover_failure_blocks_only_the_affected_component_and_retains_state() 
     assert "host reconciliation required" in (outcome.record.blocker or "")
     assert "secret recover detail" not in (outcome.record.blocker or "")
     assert len(worker.recovered) == 1
+    assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
+
+
+def test_recover_failure_retains_private_state_when_worker_mutates_argument() -> None:
+    coordinator = _coordinator()
+    coordinator.start("core")
+    state = RecoveryState("interrupted", "resume-token")
+    worker = FakeRecoveryPort(
+        state,
+        recover_error=RuntimeError("worker failed after mutation"),
+        mutate_recover_state=True,
+    )
+
+    outcome = _run(ProductFactoryWorkerRecovery(worker).recover_running(coordinator, "core"))
+
+    assert outcome.disposition is WorkerRecoveryDisposition.BLOCKED_RECOVERY_FAILED
+    assert outcome.record.state is WorkState.BLOCKED
+    assert outcome.recovery_state == RecoveryState("interrupted", "resume-token")
+    assert state == RecoveryState("interrupted", "resume-token")
+    assert worker.recovered[0][1].phase == ""
     assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
 
 
