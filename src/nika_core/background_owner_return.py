@@ -75,6 +75,11 @@ class WindowsBackgroundOwnerReturnController:
     ) -> RunningBackgroundReconcileResult:
         self._require_identity(task_id, "task_id")
         self._require_identity(thread_id, "thread_id")
+        self._require_background_runtime_provenance(
+            runtime=runtime,
+            task_id=task_id,
+            thread_id=thread_id,
+        )
 
         reason: str
         try:
@@ -145,6 +150,41 @@ class WindowsBackgroundOwnerReturnController:
             action=RunningBackgroundAction.PAUSED,
             reason=reason,
             pause_applied=True,
+        )
+
+    def _require_background_runtime_provenance(
+        self,
+        *,
+        runtime: AgentRuntimePort,
+        task_id: str,
+        thread_id: str,
+    ) -> None:
+        runtime_id = getattr(runtime, "runtime_id", None)
+        self._require_identity(runtime_id, "runtime.runtime_id")
+        events = self._audit.list_for(entity_type="task", entity_id=task_id)
+
+        permitted_id: int | None = None
+        for event in events:
+            if event.event_type == "background.dispatch_permitted":
+                permitted_id = event.event_id
+
+        if permitted_id is None:
+            raise ValueError("task lacks durable background dispatch provenance")
+
+        for event in events:
+            if event.event_id <= permitted_id or event.event_type != "runtime.started":
+                continue
+            event_runtime_id = event.payload.get("runtime_id")
+            event_thread_id = event.payload.get("thread_id")
+            if (
+                type(event_runtime_id) is str
+                and type(event_thread_id) is str
+                and event_runtime_id == runtime_id
+                and event_thread_id == thread_id
+            ):
+                return
+        raise ValueError(
+            "task lacks matching runtime start after background dispatch permission"
         )
 
     def _validate_observation(self, observation: object) -> None:
