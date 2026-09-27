@@ -147,7 +147,6 @@ class BackgroundDispatchGuard:
         for phase in (
             PresenceEvidencePhase.PREFLIGHT,
             PresenceEvidencePhase.EFFECT_RECHECK,
-            PresenceEvidencePhase.EFFECT_COMMIT,
         ):
             observation = self._observe_or_pause(task_id=task_id, phase=phase)
             if observation is None:
@@ -198,6 +197,28 @@ class BackgroundDispatchGuard:
             )
 
         try:
+            observation = self._observe_or_pause(
+                task_id=task_id,
+                phase=PresenceEvidencePhase.EFFECT_COMMIT,
+            )
+            if observation is None:
+                return BackgroundDispatchResult(
+                    action=BackgroundAction.PAUSE,
+                    reason="owner_presence_untrusted",
+                    effect_started=False,
+                )
+            decision = self._policy(
+                owner_id=owner_id,
+                work_kind=work_kind,
+                presence=observation.presence,
+            )
+            if not decision.allowed:
+                return self._apply_denial(
+                    task_id=task_id,
+                    decision=decision,
+                    phase=PresenceEvidencePhase.EFFECT_COMMIT.value,
+                )
+
             self._resume_for_dispatch(task_id=task_id, work_kind=work_kind)
             result = await effect()
             self._audit.append(
