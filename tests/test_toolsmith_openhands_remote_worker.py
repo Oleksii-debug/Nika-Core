@@ -559,6 +559,53 @@ def test_unverified_cancel_requires_manual_reconciliation(tmp_path: Path) -> Non
     assert runtime.calls == []
 
 
+def test_worker_cancel_stops_inflight_acceptance_process_tree(tmp_path: Path) -> None:
+    root = _workspace(tmp_path)
+    marker = tmp_path / "acceptance-started.txt"
+    base = _job(root)
+    command = (
+        "from pathlib import Path; import time; "
+        f"Path({str(marker)!r}).write_text('started', encoding='utf-8'); "
+        "time.sleep(30)"
+    )
+    job = CodingJob(
+        base.job_id,
+        base.task_id,
+        base.goal,
+        base.repository,
+        base.lease,
+        base.allowed_paths,
+        base.process_policy,
+        base.network_policy,
+        base.resource_budget,
+        (AcceptanceCommand((sys.executable, "-c", command)),),
+        base.permission_ceiling,
+    )
+    provider = Provider()
+    runtime = Runtime()
+    worker = OpenHandsRemoteCodingWorker(provider, runtime)
+
+    async def scenario():
+        execution = asyncio.create_task(worker.execute(job))
+        for _ in range(100):
+            if marker.exists():
+                break
+            await asyncio.sleep(0.05)
+        assert marker.exists()
+        await worker.cancel(job.job_id)
+        return await asyncio.wait_for(execution, timeout=5)
+
+    result = _run(scenario())
+
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.kind.value == "cancelled"
+    assert result.recovery_state == RecoveryState("cancelled")
+    assert result.test_evidence
+    assert result.test_evidence[-1].exit_code != 0
+    assert provider.released == [("job-1", "sandbox-1", False)]
+
+
 def test_post_apply_evidence_mismatch_rolls_back_preimage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -854,6 +901,49 @@ def test_sdk_cancel_covers_pre_conversation_upload_window(
 
     assert FakeConversation.instances == []
     assert workspace.uploads == [(b"before\n", "/workspace/nika-job/src/value.txt")]
+
+
+def test_sdk_task_cancellation_preserves_one_shot_stop_proof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    job = _job(root)
+    evidence = collect_tree_evidence(root)
+    endpoint = _endpoint()
+    workspace = BlockingUploadWorkspace(
+        endpoint,
+        _tar_snapshot({"src/value.txt": b"unused\n"}),
+    )
+    FakeConversation.instances.clear()
+    monkeypatch.setattr(
+        openhands_sdk_module,
+        "_load_conversation_type",
+        lambda: FakeConversation,
+    )
+    runtime = OpenHandsSdkRemoteRuntime(
+        workspace_factory=lambda _endpoint: workspace,
+        agent_factory=lambda _job, _endpoint: object(),
+        max_iterations=7,
+    )
+
+    async def scenario() -> None:
+        execution = asyncio.create_task(
+            runtime.execute(job, endpoint, "do work", root, evidence)
+        )
+        started = await asyncio.to_thread(workspace.upload_started.wait, 2)
+        assert started
+        execution.cancel()
+        await asyncio.sleep(0)
+        workspace.allow_upload.set()
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+        assert await runtime.cancel(job.job_id) is True
+        assert await runtime.cancel(job.job_id) is False
+
+    _run(scenario())
+
+    assert FakeConversation.instances == []
 
 
 def test_sdk_upload_rejects_source_bytes_changed_after_captured_evidence(tmp_path: Path) -> None:
