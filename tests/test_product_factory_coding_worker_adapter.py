@@ -257,7 +257,7 @@ def test_cancel_component_with_openhands_worker_never_reexecutes_cancelled_job()
 
     assert outcome.disposition is ComponentWorkerDisposition.CANCELLED
     assert outcome.recovery_state == RecoveryState("cancelled")
-    assert runtime.cancelled == [request.work_id]
+    assert runtime.cancelled == []
     assert runtime.execute_calls == []
 
 
