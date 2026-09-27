@@ -33,6 +33,7 @@ from nika_core.toolsmith.workspace_security import (
     WorkspaceSecurityError,
     collect_tree_evidence,
     ensure_path_policy,
+    normalize_job_relative_path,
     sterile_git_environment,
 )
 
@@ -80,8 +81,17 @@ class OpenHandsSandboxEndpoint:
             raise ValueError(
                 "OpenHands endpoint host must contain authority only and no embedded credentials"
             )
-        if not self.working_dir.startswith("/"):
-            raise ValueError("OpenHands remote working_dir must be an absolute POSIX path")
+        working_dir = pathlib.PurePosixPath(self.working_dir)
+        if (
+            not self.working_dir.startswith("/")
+            or "\\" in self.working_dir
+            or ".." in working_dir.parts
+            or working_dir == pathlib.PurePosixPath("/")
+            or working_dir.as_posix() != self.working_dir
+        ):
+            raise ValueError(
+                "OpenHands remote working_dir must be a canonical absolute POSIX directory"
+            )
         if self.isolation_class is not IsolationClass.REMOTE_SANDBOXED:
             raise ValueError("OpenHands endpoint must attest REMOTE_SANDBOXED isolation")
         if not self.fresh_workspace:
@@ -612,10 +622,16 @@ def _validate_and_apply_snapshot(
     staged: dict[str, RemoteFile] = {}
     total_bytes = 0
     for item in remote_files:
-        path = item.path.replace("\\", "/")
+        try:
+            path = normalize_job_relative_path(item.path).as_posix()
+        except WorkspaceSecurityError as exc:
+            raise OpenHandsWorkerError("remote snapshot contains an unsafe file path") from exc
+        if path != item.path:
+            raise OpenHandsWorkerError(
+                "remote snapshot file path is not in canonical POSIX spelling"
+            )
         if path in staged:
             raise OpenHandsWorkerError("remote snapshot contains duplicate file paths")
-        # Canonical Nika path validation is performed by ensure_path_policy below.
         staged[path] = RemoteFile(path, item.data)
         total_bytes += len(item.data)
         if total_bytes > 256 * 1024 * 1024:
