@@ -1026,3 +1026,45 @@ def test_presence_source_identity_is_bounded(tmp_path: Path) -> None:
             presence=OwnerPresence.AWAY,
             observed_at=now,
         )
+
+
+
+class ExplodingResourceObserver:
+    def snapshot(self) -> ResourceSnapshot:
+        raise AssertionError("resource telemetry must not be read")
+
+
+@pytest.mark.parametrize("presence", [OwnerPresence.ACTIVE, OwnerPresence.UNKNOWN])
+def test_present_owner_pauses_before_resource_telemetry(
+    tmp_path: Path,
+    presence: OwnerPresence,
+) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    store = _store(tmp_path)
+    queue = TaskQueue(store)
+    audit = AuditLog(store)
+    resources = ResourceManager(store, ExplodingResourceObserver())
+    guard = BackgroundDispatchGuard(
+        queue=queue,
+        audit=audit,
+        resources=resources,
+        presence=SequencePresence([_obs(230, presence, now=now)]),
+        source_id="win32-owner-presence",
+        clock=lambda: now,
+    )
+    task_id = _ready_task(queue)
+
+    async def effect() -> object:
+        raise AssertionError("effect must not run")
+
+    result = asyncio.run(
+        guard.dispatch(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.BOUNDED_ML_PILOT,
+            effect=effect,
+        )
+    )
+
+    assert result.action is BackgroundAction.PAUSE
+    assert result.reason in {"owner_active", "owner_presence_unknown"}
+    assert queue.get(task_id).state is TaskState.PAUSED
