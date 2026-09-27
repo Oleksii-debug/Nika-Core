@@ -40,6 +40,7 @@ class PresenceEvidencePhase(StrEnum):
     EFFECT_RECHECK = "effect_recheck"
     EFFECT_COMMIT = "effect_commit"
     POST_GRANT_FENCE = "post_grant_fence"
+    EFFECT_START_FENCE = "effect_start_fence"
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,6 +287,35 @@ class BackgroundDispatchGuard:
                     task_id=task_id,
                     decision=post_grant_decision,
                     phase="post_grant_resource_fence",
+                )
+                self._idempotency.release_pending(claim_key)
+                return denial
+
+            final_observation = self._observe_or_pause(
+                task_id=task_id,
+                phase=PresenceEvidencePhase.EFFECT_START_FENCE,
+            )
+            if final_observation is None:
+                self._idempotency.release_pending(claim_key)
+                return BackgroundDispatchResult(
+                    action=BackgroundAction.PAUSE,
+                    reason="owner_presence_untrusted",
+                    effect_started=False,
+                )
+            if final_observation.presence is not OwnerPresence.AWAY:
+                final_decision = BackgroundDecision(
+                    action=BackgroundAction.PAUSE,
+                    work_kind=work_kind,
+                    reason=(
+                        "owner_active"
+                        if final_observation.presence is OwnerPresence.ACTIVE
+                        else "owner_presence_unknown"
+                    ),
+                )
+                denial = self._apply_denial(
+                    task_id=task_id,
+                    decision=final_decision,
+                    phase=PresenceEvidencePhase.EFFECT_START_FENCE.value,
                 )
                 self._idempotency.release_pending(claim_key)
                 return denial
