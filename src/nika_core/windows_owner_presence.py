@@ -14,6 +14,8 @@ from nika_core.kernel.audit import AuditLog
 _DWORD_MODULUS = 1 << 32
 _DWORD_MAX = _DWORD_MODULUS - 1
 _MAX_SIGNED_64 = (1 << 63) - 1
+_MAX_UNSIGNED_64 = (1 << 64) - 1
+_MAX_IDENTITY_LENGTH = 256
 _SOURCE_ENTITY_TYPE = "owner_presence_source"
 _SAMPLED_EVENT = "background.owner_presence_sampled"
 _DEFAULT_SOURCE_ID = "win32-owner-presence"
@@ -92,6 +94,8 @@ class WindowsOwnerPresenceObserver:
             raise TypeError("source_id must be exact built-in str")
         if not source_id or source_id != source_id.strip():
             raise ValueError("source_id must be non-empty without surrounding whitespace")
+        if len(source_id) > _MAX_IDENTITY_LENGTH:
+            raise ValueError("source_id is too long")
         if type(away_after_seconds) not in (int, float):
             raise TypeError("away_after_seconds must be exact built-in int or float")
         if type(away_after_seconds) is float and not isfinite(away_after_seconds):
@@ -177,7 +181,7 @@ class WindowsOwnerPresenceObserver:
     def _validated_current_tick(value: object) -> int:
         if type(value) is not int:
             raise TypeError("current tick must be exact built-in int")
-        if not 0 <= value <= _MAX_SIGNED_64:
+        if not 0 <= value <= _MAX_UNSIGNED_64:
             raise ValueError("current tick is outside the supported integer range")
         return value
 
