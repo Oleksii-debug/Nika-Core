@@ -76,18 +76,26 @@ class FakeRecoveryPort:
         state: RecoveryState | None,
         *,
         failure: WorkerFailure | None = None,
+        inspect_error: Exception | None = None,
+        recover_error: Exception | None = None,
     ) -> None:
         self.state = state
         self.failure = failure
+        self.inspect_error = inspect_error
+        self.recover_error = recover_error
         self.inspected: list[str] = []
         self.recovered = []
 
     async def inspect(self, work_id: str) -> RecoveryState | None:
         self.inspected.append(work_id)
+        if self.inspect_error is not None:
+            raise self.inspect_error
         return self.state
 
     async def recover(self, request, state):
         self.recovered.append((request, state))
+        if self.recover_error is not None:
+            raise self.recover_error
         result = CodingResult(
             job_id=request.work_id,
             test_evidence=()
@@ -138,6 +146,45 @@ def test_missing_worker_state_blocks_only_the_lost_component() -> None:
     assert outcome.disposition is WorkerRecoveryDisposition.BLOCKED_MISSING_STATE
     assert outcome.record.state is WorkState.BLOCKED
     assert "host reconciliation required" in (outcome.record.blocker or "")
+    assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
+
+
+def test_inspect_failure_blocks_only_the_affected_component() -> None:
+    coordinator = _coordinator()
+    coordinator.start("core")
+    worker = FakeRecoveryPort(
+        RecoveryState("running", "unused"),
+        inspect_error=RuntimeError("secret worker detail"),
+    )
+
+    outcome = _run(ProductFactoryWorkerRecovery(worker).recover_running(coordinator, "core"))
+
+    assert outcome.disposition is WorkerRecoveryDisposition.BLOCKED_INSPECTION_FAILED
+    assert outcome.record.state is WorkState.BLOCKED
+    assert outcome.recovery_state is None
+    assert "host reconciliation required" in (outcome.record.blocker or "")
+    assert "secret worker detail" not in (outcome.record.blocker or "")
+    assert worker.recovered == []
+    assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
+
+
+def test_recover_failure_blocks_only_the_affected_component_and_retains_state() -> None:
+    coordinator = _coordinator()
+    coordinator.start("core")
+    state = RecoveryState("interrupted", "resume-token")
+    worker = FakeRecoveryPort(
+        state,
+        recover_error=RuntimeError("secret recover detail"),
+    )
+
+    outcome = _run(ProductFactoryWorkerRecovery(worker).recover_running(coordinator, "core"))
+
+    assert outcome.disposition is WorkerRecoveryDisposition.BLOCKED_RECOVERY_FAILED
+    assert outcome.record.state is WorkState.BLOCKED
+    assert outcome.recovery_state == state
+    assert "host reconciliation required" in (outcome.record.blocker or "")
+    assert "secret recover detail" not in (outcome.record.blocker or "")
+    assert len(worker.recovered) == 1
     assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
 
 
