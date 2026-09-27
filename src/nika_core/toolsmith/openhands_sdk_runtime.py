@@ -339,10 +339,7 @@ class OpenHandsAgentServerRuntime:
     ) -> None:
         deadline = time.monotonic() + float(timeout_seconds)
         while True:
-            if active.cancel_requested.is_set():
-                raise OpenHandsAgentServerExecutionCancelled(
-                    "OpenHands execution cancelled during conversation run"
-                )
+            cancel_requested = active.cancel_requested.is_set()
             info = self._request_json(
                 client,
                 "GET",
@@ -360,6 +357,10 @@ class OpenHandsAgentServerRuntime:
                 )
             if status == "finished":
                 active.stop_proven = True
+                if cancel_requested:
+                    raise OpenHandsAgentServerExecutionCancelled(
+                        "OpenHands conversation finished after cancellation"
+                    )
                 return
             if status in _TERMINAL_FAILURE_STATUSES:
                 active.stop_proven = True
@@ -377,7 +378,7 @@ class OpenHandsAgentServerRuntime:
                     "OpenHands conversation returned an unknown execution status"
                 )
             if status in {"paused", "waiting_for_confirmation", "deleting"}:
-                if status == "paused" and active.cancel_requested.is_set():
+                if status == "paused" and cancel_requested:
                     active.stop_proven = True
                     raise OpenHandsAgentServerExecutionCancelled(
                         "OpenHands conversation paused after cancellation"
