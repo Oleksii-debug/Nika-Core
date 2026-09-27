@@ -421,10 +421,7 @@ class BatchCursor:
                 target.operation_key,
                 _completion_envelope(clean_result, next_batch_not_before),
             )
-        durable_result, durable_due = _decode_completion_result(
-            record.result,
-            fallback_result=clean_result,
-        )
+        durable_result, durable_due = _decode_completion_result(record.result)
         self._confirm_from_durable(target, durable_result)
         self._advance(durable_due)
         self._persist()
@@ -433,6 +430,17 @@ class BatchCursor:
         self._require_persistence_authority()
         target = self._find(target_id)
         record = self._ledger.require(target.operation_key)
+        if target.attempt_state is AttemptState.CONFIRMED:
+            if record.status is not IdempotencyStatus.COMPLETED:
+                raise BatchCursorStateError(
+                    "confirmed cursor target contradicts idempotency evidence"
+                )
+            durable_result, _ = _decode_completion_result(record.result)
+            if not _canonical_json_equal(target.confirmed_result, durable_result):
+                raise BatchCursorStateError(
+                    "confirmed cursor result contradicts idempotency evidence"
+                )
+            return
         if record.status is IdempotencyStatus.COMPLETED:
             durable_result, durable_due = _decode_completion_result(record.result)
             self._confirm_from_durable(target, durable_result)
@@ -878,13 +886,9 @@ def _completion_envelope(
 
 def _decode_completion_result(
     raw: Any,
-    *,
-    fallback_result: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], datetime | None]:
     if raw is None:
-        if fallback_result is None:
-            raise BatchCursorStateError("completed effect is missing durable result")
-        return _json_copy(fallback_result), None
+        raise BatchCursorStateError("completed effect is missing durable result")
     if not isinstance(raw, dict):
         raise BatchCursorStateError("completed effect result is malformed")
 
