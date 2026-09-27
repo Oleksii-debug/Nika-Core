@@ -130,6 +130,13 @@ class OpenHandsSandboxProviderPort(Protocol):
 
 
 @runtime_checkable
+class OpenHandsRecoveryStateProbePort(Protocol):
+    """Host-owned durable/reconstructable state lookup used after process restart."""
+
+    async def inspect(self, job_id: str) -> RecoveryState | None: ...
+
+
+@runtime_checkable
 class OpenHandsRemoteRuntimePort(Protocol):
     async def execute(
         self,
@@ -155,9 +162,12 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
         self,
         sandbox_provider: OpenHandsSandboxProviderPort,
         runtime: OpenHandsRemoteRuntimePort,
+        *,
+        recovery_probe: OpenHandsRecoveryStateProbePort | None = None,
     ) -> None:
         self._sandbox_provider = sandbox_provider
         self._runtime = runtime
+        self._recovery_probe = recovery_probe
         self._states: dict[str, RecoveryState] = {}
         self._lock = asyncio.Lock()
 
@@ -292,7 +302,12 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
 
     async def inspect(self, job_id: str) -> RecoveryState | None:
         async with self._lock:
-            return self._states.get(job_id)
+            state = self._states.get(job_id)
+        if state is not None:
+            return state
+        if self._recovery_probe is None:
+            return None
+        return await self._recovery_probe.inspect(job_id)
 
     async def recover(self, job: CodingJob, state: RecoveryState) -> CodingResult:
         if state.phase == "cancelled":
