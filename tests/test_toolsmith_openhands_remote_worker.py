@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import sys
@@ -32,6 +33,7 @@ from nika_core.toolsmith.openhands_remote_worker import (
     OpenHandsRunEvidence,
     OpenHandsSandboxEndpoint,
     RemoteFile,
+    SandboxedAcceptanceEvidence,
 )
 from nika_core.toolsmith.openhands_sdk_runtime import (
     OpenHandsAgentServerCompatibilityError,
@@ -225,6 +227,90 @@ class DeferredCancelRuntime:
         return False
 
 
+
+class AcceptanceRuntime:
+    def __init__(
+        self,
+        *,
+        error: Exception | None = None,
+        cancel_verified: object = True,
+        isolation_class: IsolationClass = IsolationClass.OS_SANDBOXED,
+        on_execute=None,
+    ) -> None:
+        self.error = error
+        self.cancel_verified = cancel_verified
+        self.isolation_class = isolation_class
+        self.on_execute = on_execute
+        self.calls = []
+        self.cancelled = []
+
+    async def execute(self, job, candidate_files, candidate_evidence):
+        self.calls.append((job, candidate_files, candidate_evidence))
+        if self.on_execute is not None:
+            self.on_execute()
+        if self.error is not None:
+            raise self.error
+        tests = []
+        for command in job.acceptance_commands:
+            joined = "\0".join(command.argv)
+            exit_code = 7 if "SystemExit(7)" in joined else 0
+            output_digest = hashlib.sha256(joined.encode("utf-8")).hexdigest()
+            tests.append(
+                openhands_worker_module.TestEvidence(
+                    command.argv,
+                    exit_code,
+                    output_digest,
+                )
+            )
+        return SandboxedAcceptanceEvidence(
+            self.isolation_class,
+            candidate_evidence.digest,
+            tuple(tests),
+        )
+
+    async def cancel(self, job_id):
+        self.cancelled.append(job_id)
+        return self.cancel_verified
+
+
+class DeferredAcceptanceRuntime(AcceptanceRuntime):
+    def __init__(self) -> None:
+        super().__init__()
+        self.execute_started = asyncio.Event()
+        self.allow_execute_finish = asyncio.Event()
+        self.cancel_started = asyncio.Event()
+        self.allow_cancel_finish = asyncio.Event()
+
+    async def execute(self, job, candidate_files, candidate_evidence):
+        self.execute_started.set()
+        await self.allow_execute_finish.wait()
+        return await super().execute(job, candidate_files, candidate_evidence)
+
+    async def cancel(self, job_id):
+        self.cancelled.append(job_id)
+        self.cancel_started.set()
+        await self.allow_cancel_finish.wait()
+        self.allow_execute_finish.set()
+        return True
+
+
+def _worker(
+    provider,
+    runtime,
+    *,
+    acceptance_runtime=None,
+    **kwargs,
+):
+    verifier = acceptance_runtime
+    if verifier is None:
+        verifier = AcceptanceRuntime()
+    return OpenHandsRemoteCodingWorker(
+        provider,
+        runtime,
+        acceptance_runtime=verifier,
+        **kwargs,
+    )
+
 def _workspace(tmp_path: Path) -> Path:
     root = tmp_path / "worker root"
     (root / "src").mkdir(parents=True)
@@ -238,7 +324,7 @@ def test_remote_worker_applies_only_validated_delta_and_runs_nika_acceptance(
     root = _workspace(tmp_path)
     runtime = Runtime((RemoteFile("src/value.txt", b"after\n"),))
     provider = Provider()
-    worker = OpenHandsRemoteCodingWorker(provider, runtime)
+    worker = _worker(provider, runtime)
 
     result = _run(worker.execute(_job(root)))
 
@@ -271,7 +357,7 @@ def test_remote_worker_does_not_disclose_acceptance_arguments_to_engine(tmp_path
     )
     runtime = Runtime()
 
-    result = _run(OpenHandsRemoteCodingWorker(Provider(), runtime).execute(job))
+    result = _run(_worker(Provider(), runtime).execute(job))
 
     assert result.succeeded
     assert canary not in runtime.calls[0][2]
@@ -297,7 +383,7 @@ def test_failed_acceptance_preserves_changed_evidence_and_requires_new_job(
         job.permission_ceiling,
     )
     runtime = Runtime((RemoteFile("src/value.txt", b"after\n"),))
-    worker = OpenHandsRemoteCodingWorker(Provider(), runtime)
+    worker = _worker(Provider(), runtime)
 
     result = _run(worker.execute(job))
 
@@ -320,7 +406,7 @@ def test_failed_acceptance_preserves_changed_evidence_and_requires_new_job(
 def test_completed_job_identity_cannot_be_executed_twice(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     runtime = Runtime()
-    worker = OpenHandsRemoteCodingWorker(Provider(), runtime)
+    worker = _worker(Provider(), runtime)
     job = _job(root)
 
     first = _run(worker.execute(job))
@@ -342,7 +428,7 @@ def test_completed_job_identity_cannot_be_executed_twice(tmp_path: Path) -> None
 def test_late_cancel_of_finalized_interruption_never_restarts_job(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     runtime = Runtime(error=RuntimeError("untrusted engine failure"))
-    worker = OpenHandsRemoteCodingWorker(Provider(), runtime)
+    worker = _worker(Provider(), runtime)
     job = _job(root)
 
     result = _run(worker.execute(job))
@@ -367,7 +453,7 @@ def test_fresh_worker_recovery_probe_failure_is_redacted_manual_reconciliation(
     root = _workspace(tmp_path)
     provider = Provider()
     runtime = Runtime()
-    worker = OpenHandsRemoteCodingWorker(
+    worker = _worker(
         provider,
         runtime,
         recovery_probe=FailingProbe(),
@@ -388,7 +474,7 @@ def test_fresh_worker_recovery_probe_failure_is_redacted_manual_reconciliation(
 def test_unfinalized_interrupted_state_can_resume_exact_job_once(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     runtime = Runtime()
-    worker = OpenHandsRemoteCodingWorker(Provider(), runtime)
+    worker = _worker(Provider(), runtime)
     job = _job(root)
     interrupted = RecoveryState("interrupted")
     _run(worker._set_state(job.job_id, interrupted))
@@ -405,7 +491,7 @@ def test_fresh_worker_cannot_replay_caller_supplied_interrupted_state_without_du
     root = _workspace(tmp_path)
     provider = Provider()
     runtime = Runtime()
-    worker = OpenHandsRemoteCodingWorker(provider, runtime)
+    worker = _worker(provider, runtime)
     job = _job(root)
 
     result = _run(worker.recover(job, RecoveryState("interrupted")))
@@ -421,17 +507,13 @@ def test_fresh_worker_cannot_replay_caller_supplied_interrupted_state_without_du
 
 def test_unexpected_post_apply_failure_requires_manual_reconciliation(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = _workspace(tmp_path)
     runtime = Runtime((RemoteFile("src/value.txt", b"after\n"),))
-    worker = OpenHandsRemoteCodingWorker(Provider(), runtime)
+    acceptance = AcceptanceRuntime(error=RuntimeError("untrusted post-apply failure"))
+    worker = _worker(Provider(), runtime, acceptance_runtime=acceptance)
     job = _job(root)
 
-    def fail_acceptance(*_args):
-        raise RuntimeError("untrusted post-apply failure")
-
-    monkeypatch.setattr(openhands_worker_module, "_run_acceptance", fail_acceptance)
     result = _run(worker.execute(job))
 
     assert not result.succeeded
@@ -454,7 +536,7 @@ def test_worker_visible_git_metadata_is_rejected_before_remote_execution(tmp_pat
     provider = Provider()
     runtime = Runtime()
 
-    result = _run(OpenHandsRemoteCodingWorker(provider, runtime).execute(job))
+    result = _run(_worker(provider, runtime).execute(job))
 
     assert not result.succeeded
     assert ".git" in result.failure.message
@@ -470,7 +552,7 @@ def test_remote_worker_rejects_out_of_scope_change_before_local_mutation(tmp_pat
             RemoteFile("docs/escape.txt", b"not allowed\n"),
         )
     )
-    worker = OpenHandsRemoteCodingWorker(Provider(), runtime)
+    worker = _worker(Provider(), runtime)
 
     result = _run(worker.execute(_job(root)))
 
@@ -492,7 +574,7 @@ def test_remote_worker_rejects_backslash_path_spelling_without_reinterpretation(
         )
     )
 
-    result = _run(OpenHandsRemoteCodingWorker(Provider(), runtime).execute(_job(root)))
+    result = _run(_worker(Provider(), runtime).execute(_job(root)))
 
     assert not result.succeeded
     assert result.failure is not None
@@ -505,7 +587,7 @@ def test_remote_worker_rejects_deletion_fail_closed(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     runtime = Runtime(())
 
-    result = _run(OpenHandsRemoteCodingWorker(Provider(), runtime).execute(_job(root)))
+    result = _run(_worker(Provider(), runtime).execute(_job(root)))
 
     assert not result.succeeded
     assert "deletion" in result.failure.message
@@ -515,7 +597,7 @@ def test_remote_worker_rejects_deletion_fail_closed(tmp_path: Path) -> None:
 def test_remote_worker_requires_explicit_loopback_network_authorization(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     denied = _job(root, network=NetworkPolicy())
-    worker = OpenHandsRemoteCodingWorker(Provider(), Runtime())
+    worker = _worker(Provider(), Runtime())
 
     result = _run(worker.execute(denied))
 
@@ -561,7 +643,7 @@ def test_remote_worker_rejects_windows_case_colliding_snapshot_before_mutation(
     )
     provider = Provider()
 
-    result = _run(OpenHandsRemoteCodingWorker(provider, runtime).execute(_job(root)))
+    result = _run(_worker(provider, runtime).execute(_job(root)))
 
     assert not result.succeeded
     assert result.failure is not None
@@ -620,7 +702,7 @@ def test_worker_blocks_concurrent_reuse_of_attested_fresh_endpoint(
     )
     provider = Provider()
     runtime = BlockingRuntime()
-    worker = OpenHandsRemoteCodingWorker(provider, runtime)
+    worker = _worker(provider, runtime)
 
     async def scenario():
         first = asyncio.create_task(worker.execute(job_one))
@@ -664,7 +746,7 @@ def test_remote_worker_accepts_approved_https_remote_agent_server(tmp_path: Path
         ),
     )
 
-    result = _run(OpenHandsRemoteCodingWorker(provider, Runtime()).execute(job))
+    result = _run(_worker(provider, Runtime()).execute(job))
 
     assert result.succeeded
 
@@ -680,7 +762,7 @@ def test_remote_worker_rejects_cleartext_non_loopback_control_plane(tmp_path: Pa
         ),
     )
 
-    result = _run(OpenHandsRemoteCodingWorker(provider, Runtime()).execute(job))
+    result = _run(_worker(provider, Runtime()).execute(job))
 
     assert not result.succeeded
     assert "HTTPS" in result.failure.message
@@ -725,7 +807,7 @@ def test_remote_worker_rejects_stale_local_tree_before_acquiring_sandbox(tmp_pat
     root.joinpath("src/value.txt").write_text("changed after evidence\n", encoding="utf-8")
     provider = Provider()
 
-    result = _run(OpenHandsRemoteCodingWorker(provider, Runtime()).execute(job))
+    result = _run(_worker(provider, Runtime()).execute(job))
 
     assert not result.succeeded
     assert "tree evidence" in result.failure.message
@@ -749,7 +831,7 @@ def test_remote_result_cannot_clobber_local_change_made_during_remote_execution(
 
     runtime = ConcurrentMutationRuntime()
 
-    result = _run(OpenHandsRemoteCodingWorker(provider, runtime).execute(_job(root)))
+    result = _run(_worker(provider, runtime).execute(_job(root)))
 
     assert not result.succeeded
     assert result.failure is not None
@@ -767,7 +849,7 @@ def test_acquisition_failure_redacts_untrusted_provider_diagnostics(
         acquire_error=ValueError("password=must-not-surface endpoint=https://private.invalid"),
     )
 
-    result = _run(OpenHandsRemoteCodingWorker(provider, Runtime()).execute(_job(root)))
+    result = _run(_worker(provider, Runtime()).execute(_job(root)))
 
     assert not result.succeeded
     assert result.failure is not None
@@ -788,7 +870,7 @@ def test_task_cancellation_during_sandbox_release_is_manual_reconciliation(
     second_root = _workspace(tmp_path / "second")
     provider = BlockingReleaseProvider()
     runtime = Runtime()
-    worker = OpenHandsRemoteCodingWorker(provider, runtime)
+    worker = _worker(provider, runtime)
     job = _job(root)
     second_base = _job(second_root)
     second_job = CodingJob(
@@ -837,7 +919,7 @@ def test_release_failure_overrides_success_and_requires_manual_reconciliation(
     provider = Provider(
         release_error=RuntimeError("secret cleanup_token=must-not-surface"),
     )
-    worker = OpenHandsRemoteCodingWorker(provider, Runtime())
+    worker = _worker(provider, Runtime())
 
     result = _run(worker.execute(_job(root)))
 
@@ -857,7 +939,7 @@ def test_remote_worker_redacts_untrusted_engine_exception(tmp_path: Path) -> Non
     provider = Provider()
     runtime = Runtime(error=RuntimeError("secret access_token=should-never-surface"))
 
-    result = _run(OpenHandsRemoteCodingWorker(provider, runtime).execute(_job(root)))
+    result = _run(_worker(provider, runtime).execute(_job(root)))
 
     assert not result.succeeded
     assert "access_token" not in result.failure.message
@@ -882,7 +964,7 @@ def test_remote_worker_rejects_policy_only_local_staging(tmp_path: Path) -> None
         job.permission_ceiling,
     )
 
-    result = _run(OpenHandsRemoteCodingWorker(Provider(), Runtime()).execute(job))
+    result = _run(_worker(Provider(), Runtime()).execute(job))
 
     assert not result.succeeded
     assert "isolation" in result.failure.message
@@ -898,7 +980,7 @@ def test_remote_worker_enforces_max_changed_files_before_apply(tmp_path: Path) -
     )
 
     result = _run(
-        OpenHandsRemoteCodingWorker(Provider(), runtime).execute(
+        _worker(Provider(), runtime).execute(
             _job(root, max_changed_files=1)
         )
     )
@@ -927,7 +1009,7 @@ def test_cancel_during_sandbox_acquire_never_dispatches_remote_runtime(tmp_path:
     root = _workspace(tmp_path)
     provider = BlockingAcquireProvider()
     runtime = Runtime()
-    worker = OpenHandsRemoteCodingWorker(provider, runtime)
+    worker = _worker(provider, runtime)
     job = _job(root)
 
     async def scenario():
@@ -954,7 +1036,7 @@ def test_task_cancellation_during_unresolved_sandbox_acquire_requires_manual_rec
     root = _workspace(tmp_path)
     provider = BlockingAcquireProvider()
     runtime = Runtime()
-    worker = OpenHandsRemoteCodingWorker(provider, runtime)
+    worker = _worker(provider, runtime)
     job = _job(root)
 
     async def scenario():
@@ -976,7 +1058,7 @@ def test_task_cancellation_during_unresolved_sandbox_acquire_requires_manual_rec
 def test_cancelled_recovery_is_terminal_and_never_reexecutes(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     runtime = Runtime()
-    worker = OpenHandsRemoteCodingWorker(Provider(), runtime)
+    worker = _worker(Provider(), runtime)
 
     result = _run(worker.recover(_job(root), RecoveryState("cancelled")))
 
@@ -992,7 +1074,7 @@ def test_unknown_process_cancel_probe_failure_becomes_manual_reconciliation() ->
         async def inspect(self, _job_id):
             raise RuntimeError("database diagnostic must not escape")
 
-    worker = OpenHandsRemoteCodingWorker(
+    worker = _worker(
         Provider(),
         Runtime(),
         recovery_probe=FailingProbe(),
@@ -1016,7 +1098,7 @@ def test_cancelled_unknown_process_probe_does_not_leave_transient_state() -> Non
 
     async def scenario():
         probe = BlockingProbe()
-        worker = OpenHandsRemoteCodingWorker(
+        worker = _worker(
             Provider(),
             Runtime(),
             recovery_probe=probe,
@@ -1035,7 +1117,7 @@ def test_cancelled_unknown_process_probe_does_not_leave_transient_state() -> Non
 
 def test_cancel_probe_pending_recovery_is_manual_reconciliation(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
-    worker = OpenHandsRemoteCodingWorker(Provider(), Runtime())
+    worker = _worker(Provider(), Runtime())
 
     result = _run(worker.recover(_job(root), RecoveryState("cancel_probe_pending")))
 
@@ -1050,7 +1132,7 @@ def test_acceptance_cancel_pending_recovery_is_manual_reconciliation(
     tmp_path: Path,
 ) -> None:
     root = _workspace(tmp_path)
-    worker = OpenHandsRemoteCodingWorker(Provider(), Runtime())
+    worker = _worker(Provider(), Runtime())
 
     result = _run(
         worker.recover(
@@ -1076,7 +1158,7 @@ def test_runtime_cancel_exception_is_fail_closed_and_redacted(
     )
     provider = Provider()
 
-    result = _run(OpenHandsRemoteCodingWorker(provider, runtime).execute(_job(root)))
+    result = _run(_worker(provider, runtime).execute(_job(root)))
 
     assert not result.succeeded
     assert result.failure is not None
@@ -1095,7 +1177,7 @@ def test_non_boolean_runtime_cancel_proof_is_not_trusted(
     runtime = Runtime(error=TimeoutError(), cancel_verified=1)
     provider = Provider()
 
-    result = _run(OpenHandsRemoteCodingWorker(provider, runtime).execute(_job(root)))
+    result = _run(_worker(provider, runtime).execute(_job(root)))
 
     assert not result.succeeded
     assert result.failure is not None
@@ -1113,7 +1195,7 @@ def test_direct_cancel_runtime_failure_becomes_manual_reconciliation(
         cancel_error=RuntimeError("secret stop_token=must-not-surface"),
     )
     provider = Provider()
-    worker = OpenHandsRemoteCodingWorker(provider, runtime)
+    worker = _worker(provider, runtime)
     job = _job(root)
 
     async def scenario():
@@ -1139,7 +1221,7 @@ def test_direct_cancel_runtime_failure_becomes_manual_reconciliation(
 def test_unverified_cancel_requires_manual_reconciliation(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     runtime = Runtime(cancel_verified=False)
-    worker = OpenHandsRemoteCodingWorker(Provider(), runtime)
+    worker = _worker(Provider(), runtime)
     job = _job(root)
 
     _run(worker.cancel(job.job_id))
@@ -1159,7 +1241,7 @@ def test_pending_cancel_never_becomes_terminal_before_stop_proof(
     root = _workspace(tmp_path)
     provider = Provider()
     runtime = DeferredCancelRuntime()
-    worker = OpenHandsRemoteCodingWorker(provider, runtime)
+    worker = _worker(provider, runtime)
     job = _job(root)
 
     async def scenario():
@@ -1185,46 +1267,25 @@ def test_pending_cancel_never_becomes_terminal_before_stop_proof(
     assert provider.released == [("job-1", "sandbox-1", False)]
 
 
-def test_cancel_waits_for_acceptance_stop_proof(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_cancel_waits_for_acceptance_stop_proof(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     provider = Provider()
     runtime = Runtime()
-    worker = OpenHandsRemoteCodingWorker(provider, runtime)
+    acceptance = DeferredAcceptanceRuntime()
+    worker = _worker(provider, runtime, acceptance_runtime=acceptance)
     job = _job(root)
 
     async def scenario():
-        started = asyncio.Event()
-        release = asyncio.Event()
-
-        async def blocked_acceptance(
-            _job,
-            _root,
-            _candidate_evidence,
-            cancellation_event,
-        ):
-            started.set()
-            while not cancellation_event.is_set():
-                await asyncio.sleep(0.01)
-            await release.wait()
-            return ()
-
-        monkeypatch.setattr(
-            openhands_worker_module,
-            "_run_acceptance_async",
-            blocked_acceptance,
-        )
         execution = asyncio.create_task(worker.execute(job))
-        await asyncio.wait_for(started.wait(), timeout=2)
+        await asyncio.wait_for(acceptance.execute_started.wait(), timeout=2)
         cancellation = asyncio.create_task(worker.cancel(job.job_id))
-        await asyncio.sleep(0.1)
+        await asyncio.wait_for(acceptance.cancel_started.wait(), timeout=2)
+        await asyncio.sleep(0)
         assert not cancellation.done()
 
-        release.set()
-        result = await asyncio.wait_for(execution, timeout=2)
+        acceptance.allow_cancel_finish.set()
         await asyncio.wait_for(cancellation, timeout=2)
+        result = await asyncio.wait_for(execution, timeout=2)
         return result
 
     result = _run(scenario())
@@ -1234,44 +1295,26 @@ def test_cancel_waits_for_acceptance_stop_proof(
     assert result.failure.kind.value == "cancelled"
     assert result.recovery_state == RecoveryState("cancelled")
     assert runtime.cancelled == []
+    assert acceptance.cancelled == ["job-1"]
     assert provider.released == [("job-1", "sandbox-1", False)]
 
 
-def test_worker_cancel_stops_inflight_acceptance_process_tree(tmp_path: Path) -> None:
+def test_worker_cancel_stops_inflight_sandboxed_acceptance(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
-    marker = tmp_path / "acceptance-started.txt"
-    base = _job(root)
-    command = (
-        "from pathlib import Path; import time; "
-        f"Path({str(marker)!r}).write_text('started', encoding='utf-8'); "
-        "time.sleep(30)"
-    )
-    job = CodingJob(
-        base.job_id,
-        base.task_id,
-        base.goal,
-        base.repository,
-        base.lease,
-        base.allowed_paths,
-        base.process_policy,
-        base.network_policy,
-        base.resource_budget,
-        (AcceptanceCommand((sys.executable, "-c", command)),),
-        base.permission_ceiling,
-    )
     provider = Provider()
     runtime = Runtime()
-    worker = OpenHandsRemoteCodingWorker(provider, runtime)
+    acceptance = DeferredAcceptanceRuntime()
+    worker = _worker(provider, runtime, acceptance_runtime=acceptance)
+    job = _job(root)
 
     async def scenario():
         execution = asyncio.create_task(worker.execute(job))
-        for _ in range(100):
-            if marker.exists():
-                break
-            await asyncio.sleep(0.05)
-        assert marker.exists()
-        await worker.cancel(job.job_id)
-        return await asyncio.wait_for(execution, timeout=5)
+        await asyncio.wait_for(acceptance.execute_started.wait(), timeout=2)
+        cancellation = asyncio.create_task(worker.cancel(job.job_id))
+        await asyncio.wait_for(acceptance.cancel_started.wait(), timeout=2)
+        acceptance.allow_cancel_finish.set()
+        await asyncio.wait_for(cancellation, timeout=2)
+        return await asyncio.wait_for(execution, timeout=2)
 
     result = _run(scenario())
 
@@ -1279,8 +1322,7 @@ def test_worker_cancel_stops_inflight_acceptance_process_tree(tmp_path: Path) ->
     assert result.failure is not None
     assert result.failure.kind.value == "cancelled"
     assert result.recovery_state == RecoveryState("cancelled")
-    assert result.test_evidence
-    assert result.test_evidence[-1].exit_code != 0
+    assert acceptance.cancelled == ["job-1"]
     assert provider.released == [("job-1", "sandbox-1", False)]
 
 
@@ -1340,66 +1382,66 @@ def test_rollback_evidence_mismatch_escalates_to_manual_reconcile_error(
     assert root.joinpath("src/value.txt").read_bytes() == b"before\n"
 
 
-def test_acceptance_side_effects_are_isolated_from_validated_candidate(tmp_path: Path) -> None:
+def test_acceptance_receives_immutable_candidate_bytes_not_host_workspace(
+    tmp_path: Path,
+) -> None:
     root = _workspace(tmp_path)
-    base = _job(root)
-    job = CodingJob(
-        base.job_id,
-        base.task_id,
-        base.goal,
-        base.repository,
-        base.lease,
-        base.allowed_paths,
-        base.process_policy,
-        base.network_policy,
-        base.resource_budget,
-        (
-            AcceptanceCommand(
-                (
-                    sys.executable,
-                    "-c",
-                    "from pathlib import Path; Path('src/acceptance.txt').write_text('mutated')",
-                )
-            ),
-        ),
-        base.permission_ceiling,
+    acceptance = AcceptanceRuntime()
+    result = _run(
+        _worker(
+            Provider(),
+            Runtime((RemoteFile("src/value.txt", b"after\n"),)),
+            acceptance_runtime=acceptance,
+        ).execute(_job(root))
     )
-
-    result = _run(OpenHandsRemoteCodingWorker(Provider(), Runtime()).execute(job))
 
     assert result.succeeded
-    assert not root.joinpath("src/acceptance.txt").exists()
+    _, candidate_files, candidate_evidence = acceptance.calls[0]
+    assert candidate_files == (RemoteFile("src/value.txt", b"after\n"),)
+    assert candidate_evidence == collect_tree_evidence(root)
 
 
-def test_acceptance_escape_mutation_invalidates_original_candidate(tmp_path: Path) -> None:
+def test_host_mutation_during_external_acceptance_forces_manual_reconciliation(
+    tmp_path: Path,
+) -> None:
     root = _workspace(tmp_path)
-    base = _job(root)
     escaped = root / "src" / "acceptance-escape.txt"
-    command = (
-        "from pathlib import Path; "
-        f"Path({str(escaped)!r}).write_text('mutated', encoding='utf-8')"
-    )
-    job = CodingJob(
-        base.job_id,
-        base.task_id,
-        base.goal,
-        base.repository,
-        base.lease,
-        base.allowed_paths,
-        base.process_policy,
-        base.network_policy,
-        base.resource_budget,
-        (AcceptanceCommand((sys.executable, "-c", command)),),
-        base.permission_ceiling,
-    )
 
-    result = _run(OpenHandsRemoteCodingWorker(Provider(), Runtime()).execute(job))
+    def mutate_host() -> None:
+        escaped.write_text("mutated", encoding="utf-8")
+
+    acceptance = AcceptanceRuntime(on_execute=mutate_host)
+    result = _run(
+        _worker(
+            Provider(),
+            Runtime((RemoteFile("src/value.txt", b"after\n"),)),
+            acceptance_runtime=acceptance,
+        ).execute(_job(root))
+    )
 
     assert not result.succeeded
     assert result.failure is not None
     assert result.failure.kind.value == "internal_error"
     assert result.recovery_state == RecoveryState("manual_reconcile_required")
     assert escaped.read_text(encoding="utf-8") == "mutated"
+
+
+def test_missing_sandboxed_acceptance_runtime_fails_before_remote_effect(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    provider = Provider()
+    runtime = Runtime()
+    worker = OpenHandsRemoteCodingWorker(provider, runtime)
+
+    result = _run(worker.execute(_job(root)))
+
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.kind.value == "policy_violation"
+    assert "OS/remote sandboxed" in result.failure.message
+    assert provider.acquired == []
+    assert runtime.calls == []
 
 
 def _tar_snapshot(files: dict[str, bytes], *, root: str = "nika-job") -> bytes:
