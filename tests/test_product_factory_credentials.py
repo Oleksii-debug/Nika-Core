@@ -27,6 +27,7 @@ class FakeProtectedStore:
     _handles: dict[str, tuple[str, int]] = field(default_factory=dict)
     _operation_handles: dict[str, str] = field(default_factory=dict)
     _next_handle: int = 1
+    _snapshot_checkpoint: str | None = None
 
     def seed(self, secret_ref: str, generation: int, raw_secret: str) -> None:
         self._material[(secret_ref, generation)] = raw_secret
@@ -111,6 +112,21 @@ class FakeProtectedStore:
     ) -> str | None:
         del secret_ref, generation, project_id, audience, scopes, expires_at
         return self._operation_handles.get(operation_id)
+
+    def snapshot_checkpoint_matches(self, *, checkpoint_fingerprint: str) -> bool:
+        return self._snapshot_checkpoint == checkpoint_fingerprint
+
+    def seal_snapshot_checkpoint(
+        self,
+        *,
+        expected_fingerprint: str | None,
+        checkpoint_fingerprint: str,
+    ) -> None:
+        if self._snapshot_checkpoint == checkpoint_fingerprint:
+            return
+        if self._snapshot_checkpoint != expected_fingerprint:
+            raise RuntimeError("snapshot checkpoint conflict")
+        self._snapshot_checkpoint = checkpoint_fingerprint
 
     def revoke_handles(self, secret_ref: str, generation: int) -> None:
         for handle in [

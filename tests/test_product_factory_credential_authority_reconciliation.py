@@ -29,6 +29,7 @@ class _AuthorityStore:
     fail_after_effect_once: bool = False
     fail_before_effect: bool = False
     fail_retirement_after_effect_once: bool = False
+    _snapshot_checkpoint: str | None = None
 
     def contains(self, secret_ref: str, generation: int) -> bool:
         return (secret_ref, generation) in self.material
@@ -135,6 +136,21 @@ class _AuthorityStore:
         ):
             raise RuntimeError("operation conflict")
         return handle
+
+    def snapshot_checkpoint_matches(self, *, checkpoint_fingerprint: str) -> bool:
+        return self._snapshot_checkpoint == checkpoint_fingerprint
+
+    def seal_snapshot_checkpoint(
+        self,
+        *,
+        expected_fingerprint: str | None,
+        checkpoint_fingerprint: str,
+    ) -> None:
+        if self._snapshot_checkpoint == checkpoint_fingerprint:
+            return
+        if self._snapshot_checkpoint != expected_fingerprint:
+            raise RuntimeError("snapshot checkpoint conflict")
+        self._snapshot_checkpoint = checkpoint_fingerprint
 
     def revoke_handles(self, secret_ref: str, generation: int) -> None:
         for operation_id, (_handle, binding) in list(self.operation_handles.items()):

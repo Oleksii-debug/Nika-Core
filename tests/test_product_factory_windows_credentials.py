@@ -33,6 +33,7 @@ class FakeWinVaultBackend:
     read_error: Exception | None = None
     write_error: Exception | None = None
     delete_error: Exception | None = None
+    fail_after_write_once: bool = False
 
     def get_password(self, service: str, username: str) -> str | None:
         if self.read_error is not None:
@@ -44,6 +45,9 @@ class FakeWinVaultBackend:
             raise self.write_error
         self.set_calls.append((service, username))
         self.passwords[(service, username)] = password
+        if self.fail_after_write_once:
+            self.fail_after_write_once = False
+            raise RuntimeError("synthetic acknowledgement lost after write")
 
     def delete_password(self, service: str, username: str) -> None:
         if self.delete_error is not None:
@@ -84,6 +88,51 @@ def issue(store: WindowsCredentialStore, *, ttl_seconds: int = 300) -> str:
         scopes=frozenset({SCOPE, "checks:read"}),
         expires_at=NOW + timedelta(seconds=ttl_seconds),
     )
+
+
+def test_snapshot_checkpoint_is_persistent_idempotent_and_conflict_fails_closed() -> None:
+    store = new_store()
+    first = hashlib.sha256(b"snapshot-one").hexdigest()
+    second = hashlib.sha256(b"snapshot-two").hexdigest()
+    foreign = hashlib.sha256(b"snapshot-foreign").hexdigest()
+
+    assert store.snapshot_checkpoint_matches(checkpoint_fingerprint=first) is False
+    store.seal_snapshot_checkpoint(
+        expected_fingerprint=None,
+        checkpoint_fingerprint=first,
+    )
+    store.seal_snapshot_checkpoint(
+        expected_fingerprint=None,
+        checkpoint_fingerprint=first,
+    )
+    assert store.snapshot_checkpoint_matches(checkpoint_fingerprint=first)
+
+    store.seal_snapshot_checkpoint(
+        expected_fingerprint=first,
+        checkpoint_fingerprint=second,
+    )
+    assert store.snapshot_checkpoint_matches(checkpoint_fingerprint=second)
+    with pytest.raises(ProtectedCredentialStoreError, match="checkpoint conflicts"):
+        store.seal_snapshot_checkpoint(
+            expected_fingerprint=foreign,
+            checkpoint_fingerprint=first,
+        )
+    assert store.delete_snapshot_checkpoint() is True
+    assert store.snapshot_checkpoint_matches(checkpoint_fingerprint=second) is False
+
+
+def test_snapshot_checkpoint_reconciles_lost_write_acknowledgement() -> None:
+    backend = FakeWinVaultBackend(fail_after_write_once=True)
+    store = new_store(backend)
+    checkpoint = hashlib.sha256(b"snapshot-lost-ack").hexdigest()
+
+    store.seal_snapshot_checkpoint(
+        expected_fingerprint=None,
+        checkpoint_fingerprint=checkpoint,
+    )
+
+    assert store.snapshot_checkpoint_matches(checkpoint_fingerprint=checkpoint)
+    assert len(backend.set_calls) == 1
 
 
 def test_target_is_deterministic_hashed_and_generation_scoped() -> None:

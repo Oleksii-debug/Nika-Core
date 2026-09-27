@@ -46,6 +46,7 @@ class FakeProtectedStore:
     generations: set[tuple[str, int]] = field(default_factory=set)
     authorities: dict[tuple[str, int], str] = field(default_factory=dict)
     operation_handles: dict[str, tuple[str, str, int]] = field(default_factory=dict)
+    _snapshot_checkpoint: str | None = None
 
     def contains(self, secret_ref: str, generation: int) -> bool:
         return (secret_ref, generation) in self.generations
@@ -121,6 +122,21 @@ class FakeProtectedStore:
         if (bound_ref, bound_generation) != (secret_ref, generation):
             raise RuntimeError("operation identity conflicts")
         return handle
+
+    def snapshot_checkpoint_matches(self, *, checkpoint_fingerprint: str) -> bool:
+        return self._snapshot_checkpoint == checkpoint_fingerprint
+
+    def seal_snapshot_checkpoint(
+        self,
+        *,
+        expected_fingerprint: str | None,
+        checkpoint_fingerprint: str,
+    ) -> None:
+        if self._snapshot_checkpoint == checkpoint_fingerprint:
+            return
+        if self._snapshot_checkpoint != expected_fingerprint:
+            raise RuntimeError("snapshot checkpoint conflict")
+        self._snapshot_checkpoint = checkpoint_fingerprint
 
     def revoke_handles(self, secret_ref: str, generation: int) -> None:
         for operation_id in [

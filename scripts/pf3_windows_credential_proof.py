@@ -62,6 +62,10 @@ def _cleanup(store: WindowsCredentialStore | None, secret_ref: str) -> list[str]
             store.delete_authority(secret_ref, generation)
         except ProtectedCredentialStoreError as exc:
             errors.append(f"generation-{generation}:{type(exc).__name__}")
+    try:
+        store.delete_snapshot_checkpoint()
+    except ProtectedCredentialStoreError as exc:
+        errors.append(f"snapshot-checkpoint:{type(exc).__name__}")
     return errors
 
 
