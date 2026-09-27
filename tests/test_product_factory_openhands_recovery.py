@@ -32,13 +32,15 @@ class NeverAcquireProvider:
 class NeverExecuteRuntime:
     def __init__(self) -> None:
         self.execute_calls = 0
+        self.cancel_calls: list[str] = []
 
     async def execute(self, *_args):
         self.execute_calls += 1
         raise AssertionError("lost in-flight work must not be replayed")
 
-    async def cancel(self, _job_id):
-        return False
+    async def cancel(self, job_id):
+        self.cancel_calls.append(job_id)
+        return True
 
 
 def _job(root: Path, work_id: str) -> CodingJob:
@@ -108,6 +110,40 @@ def test_fresh_worker_reconstructs_lost_inflight_identity_without_duplicate_exec
         "manual_reconcile_required", "pf-ledger:pending"
     )
     assert runtime_b.execute_calls == 0
+
+
+def test_restart_cancel_never_fabricates_stop_proof_from_fresh_runtime(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "nika.db"
+    store = SQLiteStore(database)
+    store.initialize()
+    task = TaskQueue(store).create(
+        workspace_id="ws-1",
+        agent_id="product-factory",
+        payload={"kind": "product_factory", "product_project_id": "project-1"},
+    )
+    work_id = "work-restart-cancel-1"
+    IdempotencyLedger(store).reserve(
+        operation_key=f"pf-worker:{work_id}",
+        task_id=task.task_id,
+        operation_type="product_factory.coding_worker",
+        input_fingerprint="e" * 64,
+    )
+
+    runtime = NeverExecuteRuntime()
+    worker = OpenHandsRemoteCodingWorker(
+        NeverAcquireProvider(),
+        runtime,
+        recovery_probe=ProductFactoryOpenHandsRecoveryProbe(IdempotencyLedger(store)),
+    )
+
+    asyncio.run(worker.cancel(work_id))
+    state = asyncio.run(worker.inspect(work_id))
+
+    assert state == RecoveryState("manual_reconcile_required", "pf-ledger:pending")
+    assert runtime.cancel_calls == []
+    assert runtime.execute_calls == 0
 
 
 def test_missing_durable_operation_remains_unknown_after_restart(tmp_path: Path) -> None:
