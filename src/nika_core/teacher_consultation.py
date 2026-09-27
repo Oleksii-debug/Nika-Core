@@ -49,11 +49,17 @@ class TeacherConsultationPolicy:
             self.timeout_seconds, (int, float)
         ):
             raise TypeError("timeout_seconds must be a finite number")
-        timeout = float(self.timeout_seconds)
+        try:
+            timeout = float(self.timeout_seconds)
+        except (OverflowError, ValueError) as error:
+            raise ValueError(
+                f"timeout_seconds must be in the range (0, {_MAX_TIMEOUT_SECONDS:g}]"
+            ) from error
         if not math.isfinite(timeout) or not 0 < timeout <= _MAX_TIMEOUT_SECONDS:
             raise ValueError(
                 f"timeout_seconds must be in the range (0, {_MAX_TIMEOUT_SECONDS:g}]"
             )
+        object.__setattr__(self, "timeout_seconds", timeout)
         if self.max_observed_total_tokens is not None:
             _positive_int(
                 self.max_observed_total_tokens, "max_observed_total_tokens"
@@ -83,12 +89,26 @@ class TeacherConsultationSpec:
             raise ValueError("teacher provider_kind must be local or cloud")
         if not isinstance(self.privacy, PrivacyClass):
             raise TypeError("privacy must be a PrivacyClass")
-        if not isinstance(self.messages, tuple) or not self.messages:
+        if type(self.policy) is not TeacherConsultationPolicy:
+            raise TypeError("policy must be a TeacherConsultationPolicy")
+        canonical_policy = TeacherConsultationPolicy(
+            max_request_chars=self.policy.max_request_chars,
+            max_response_chars=self.policy.max_response_chars,
+            timeout_seconds=self.policy.timeout_seconds,
+            max_observed_total_tokens=self.policy.max_observed_total_tokens,
+        )
+        object.__setattr__(self, "policy", canonical_policy)
+        if type(self.messages) is not tuple or not self.messages:
             raise ValueError("messages must be a non-empty tuple")
-        if any(not isinstance(message, ModelMessage) for message in self.messages):
+        if any(type(message) is not ModelMessage for message in self.messages):
             raise TypeError("messages must contain ModelMessage values")
-        request_chars = sum(len(message.content) for message in self.messages)
-        if request_chars > self.policy.max_request_chars:
+        canonical_messages = tuple(
+            ModelMessage(role=message.role, content=message.content)
+            for message in self.messages
+        )
+        object.__setattr__(self, "messages", canonical_messages)
+        request_chars = sum(len(message.content) for message in canonical_messages)
+        if request_chars > canonical_policy.max_request_chars:
             raise ValueError("teacher consultation request exceeds max_request_chars")
 
 
@@ -158,6 +178,7 @@ class TeacherConsultationService:
     async def consult(
         self, spec: TeacherConsultationSpec
     ) -> TeacherConsultationResult:
+        spec = _snapshot_spec(spec)
         request_chars = sum(len(message.content) for message in spec.messages)
         request_fingerprint = _fingerprint_messages(spec.messages)
         request = ModelRequest(
@@ -279,6 +300,21 @@ class TeacherConsultationService:
         return TeacherConsultationResult(text=response.text, evidence=evidence)
 
 
+def _snapshot_spec(spec: object) -> TeacherConsultationSpec:
+    if type(spec) is not TeacherConsultationSpec:
+        raise TypeError("spec must be a TeacherConsultationSpec")
+    return TeacherConsultationSpec(
+        consultation_id=spec.consultation_id,
+        provider_id=spec.provider_id,
+        provider_kind=spec.provider_kind,
+        model=spec.model,
+        messages=spec.messages,
+        privacy=spec.privacy,
+        temperature=spec.temperature,
+        policy=spec.policy,
+    )
+
+
 def _positive_int(value: object, name: str) -> int:
     if type(value) is not int or value <= 0:
         raise ValueError(f"{name} must be a positive integer")
@@ -343,7 +379,12 @@ def _validated_latency(value: float | None) -> float | None:
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError("latency_ms must be a finite non-negative number or None")
-    normalized = float(value)
+    try:
+        normalized = float(value)
+    except (OverflowError, ValueError) as error:
+        raise ValueError(
+            "latency_ms must be a finite non-negative number or None"
+        ) from error
     if not math.isfinite(normalized) or normalized < 0:
         raise ValueError("latency_ms must be a finite non-negative number or None")
     return normalized

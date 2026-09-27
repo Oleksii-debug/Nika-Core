@@ -43,6 +43,7 @@ class _FakeProvider:
         response_request_id: str | None = None,
         response_provider_id: str | None = None,
         response_kind: ProviderKind | None = None,
+        latency_ms: float | int | None = 12.5,
     ) -> None:
         self._capabilities = ProviderCapabilities(
             provider_id=provider_id,
@@ -58,6 +59,7 @@ class _FakeProvider:
         self.response_request_id = response_request_id
         self.response_provider_id = response_provider_id
         self.response_kind = response_kind
+        self.latency_ms = latency_ms
         self.requests: list[ModelRequest] = []
 
     @property
@@ -79,7 +81,7 @@ class _FakeProvider:
                 output_tokens=self.output_tokens,
                 total_tokens=self.total_tokens,
             ),
-            latency_ms=12.5,
+            latency_ms=self.latency_ms,
         )
 
 
@@ -202,6 +204,39 @@ def test_private_consultation_fails_before_provider_without_private_data_support
 def test_provider_kind_requires_typed_enum(kind: object) -> None:
     with pytest.raises(TypeError, match="ProviderKind"):
         _spec(kind=kind)
+
+
+def test_mutated_message_is_revalidated_before_gateway_call() -> None:
+    provider = _FakeProvider(provider_id="teacher-local", kind=ProviderKind.LOCAL)
+    gateway = ModelGateway()
+    gateway.register(provider)
+    service = TeacherConsultationService(gateway)
+    spec = _spec(
+        policy=TeacherConsultationPolicy(
+            max_request_chars=100,
+            max_response_chars=100,
+        )
+    )
+    object.__setattr__(spec.messages[0], "content", "x" * 101)
+
+    with pytest.raises(ValueError, match="max_request_chars"):
+        asyncio.run(service.consult(spec))
+
+    assert provider.requests == []
+
+
+def test_mutated_policy_is_revalidated_before_gateway_call() -> None:
+    provider = _FakeProvider(provider_id="teacher-local", kind=ProviderKind.LOCAL)
+    gateway = ModelGateway()
+    gateway.register(provider)
+    service = TeacherConsultationService(gateway)
+    spec = _spec()
+    object.__setattr__(spec.policy, "max_request_chars", 1)
+
+    with pytest.raises(ValueError, match="max_request_chars"):
+        asyncio.run(service.consult(spec))
+
+    assert provider.requests == []
 
 
 def test_request_bound_fails_before_gateway_call() -> None:
@@ -341,3 +376,25 @@ def test_caller_cancellation_propagates_instead_of_becoming_learning_evidence() 
 def test_timeout_policy_is_finite_positive_and_bounded(timeout: float) -> None:
     with pytest.raises(ValueError, match="timeout_seconds"):
         TeacherConsultationPolicy(timeout_seconds=timeout)
+
+
+def test_huge_integer_timeout_is_normalized_to_value_error() -> None:
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        TeacherConsultationPolicy(timeout_seconds=1 << 100_000)
+
+
+def test_huge_provider_latency_fails_closed_as_provider_error() -> None:
+    provider = _FakeProvider(
+        provider_id="teacher-local",
+        kind=ProviderKind.LOCAL,
+        latency_ms=1 << 100_000,
+    )
+    gateway = ModelGateway()
+    gateway.register(provider)
+    service = TeacherConsultationService(gateway)
+
+    result = asyncio.run(service.consult(_spec()))
+
+    assert result.text is None
+    assert result.evidence.status is TeacherConsultationStatus.FAILED
+    assert result.evidence.error_code is ModelErrorCode.PROVIDER_ERROR
