@@ -9,6 +9,7 @@ on:
       - "scripts/nika_windows.py"
       - "scripts/m11_release.py"
       - "scripts/m5_uia_proof.ps1"
+      - "scripts/v01_autostart_uia_proof.ps1"
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
       - "tests/test_qa_workflow_lineage.py"
@@ -24,6 +25,7 @@ on:
       - "scripts/nika_windows.py"
       - "scripts/m11_release.py"
       - "scripts/m5_uia_proof.ps1"
+      - "scripts/v01_autostart_uia_proof.ps1"
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
       - "tests/test_qa_workflow_lineage.py"
@@ -49,6 +51,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ env.NIKA_CANDIDATE_SHA }}
+          persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.12"
@@ -73,7 +76,7 @@ jobs:
           --source-sha '${{ env.NIKA_CANDIDATE_SHA }}'
       - name: Verify packaged WebView2 UI Automation and keyboard focus
         shell: pwsh
-        run: ./scripts/m5_uia_proof.ps1 -ExePath ./dist/NikaCore/NikaCore.exe -WindowTitle 'Nika Core ${{ steps.release.outputs.version }}'
+        run: ./scripts/v01_autostart_uia_proof.ps1 -ExePath ./dist/NikaCore/NikaCore.exe -WindowTitle 'Nika Core ${{ steps.release.outputs.version }}'
       - name: Create distributable ZIP
         shell: pwsh
         run: Compress-Archive -Path ./dist/NikaCore/* -DestinationPath ./dist/NikaCore-${{ steps.release.outputs.version }}-windows-x64.zip -Force
