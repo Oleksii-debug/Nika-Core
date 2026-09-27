@@ -68,6 +68,23 @@ def _run(
     )
 
 
+def _retire_committed_first_update_receipt(destination: Path) -> None:
+    prefix = f".{destination.name}.first-update-"
+    receipts = [
+        entry
+        for entry in destination.parent.iterdir()
+        if entry.name.lower().startswith(prefix.lower())
+    ]
+    assert len(receipts) == 1
+    receipt = receipts[0]
+    assert receipt.is_dir()
+    target_digest = receipt.name[len(prefix) :]
+    assert len(target_digest) == 64
+    assert all(character in "0123456789abcdef" for character in target_digest)
+    assert not (receipt / "candidate").exists()
+    receipt.rmdir()
+
+
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
 def test_markerless_interrupted_rollback_swap_fails_before_recovery_mutation(
     tmp_path: Path,
@@ -101,6 +118,7 @@ def test_markerless_interrupted_rollback_swap_fails_before_recovery_mutation(
     assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
     assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
 
+    _retire_committed_first_update_receipt(destination)
     destination.rename(swap)
     assert not destination.exists()
     assert not marker.exists()
@@ -152,6 +170,7 @@ def test_markerless_interrupted_rollback_after_activation_fails_without_mutation
     assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
     assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
 
+    _retire_committed_first_update_receipt(destination)
     destination.rename(swap)
     rollback.rename(destination)
     assert not rollback.exists()

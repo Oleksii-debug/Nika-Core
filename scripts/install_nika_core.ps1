@@ -400,12 +400,17 @@ function Assert-NikaExactJsonObjectShape {
 function Get-NikaManifestProperty {
     param(
         [Parameter(Mandatory=$true)][object]$Object,
-        [Parameter(Mandatory=$true)][string]$Name
+        [Parameter(Mandatory=$true)][string]$Name,
+        [switch]$PreserveCollection
     )
     if ($Object.PSObject.Properties.Name -notcontains $Name) {
         throw "Release manifest is missing required metadata."
     }
-    Write-Output -NoEnumerate ($Object.$Name)
+    if ($PreserveCollection) {
+        Write-Output -NoEnumerate ($Object.$Name)
+        return
+    }
+    return $Object.$Name
 }
 
 function Assert-NikaReleaseBundle {
@@ -440,7 +445,7 @@ function Assert-NikaReleaseBundle {
     $product = Get-NikaManifestProperty -Object $manifest -Name "product"
     $version = Get-NikaManifestProperty -Object $manifest -Name "version"
     $sourceSha = Get-NikaManifestProperty -Object $manifest -Name "source_sha"
-    $rawFiles = Get-NikaManifestProperty -Object $manifest -Name "files"
+    $rawFiles = Get-NikaManifestProperty -Object $manifest -Name "files" -PreserveCollection
 
     if (
         $manifestVersion -is [bool] -or
@@ -638,11 +643,38 @@ function Write-NikaRollbackOperationMarker {
     }
 
     $tempPath = "$MarkerPath.new-$([Guid]::NewGuid().ToString('N'))"
+    $backupPath = "$MarkerPath.replace-backup"
     Assert-NikaNoReparsePathChain -Path $MarkerPath
     Assert-NikaNoReparsePathChain -Path $tempPath
-    Assert-NikaDataMutationSeparation -DataRoot $DataRoot -MutationPaths @($MarkerPath, $tempPath)
+    Assert-NikaNoReparsePathChain -Path $backupPath
+    Assert-NikaDataMutationSeparation -DataRoot $DataRoot -MutationPaths @(
+        $MarkerPath,
+        $tempPath,
+        $backupPath
+    )
     if (Test-Path -LiteralPath $tempPath) {
         throw "Rollback operation marker staging path already exists."
+    }
+    if (Test-Path -LiteralPath $backupPath) {
+        Assert-NikaNoReparsePathChain -Path $backupPath
+        if (-not (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
+            throw "Rollback operation marker replacement backup is not a regular file."
+        }
+        $backupItem = Get-Item -LiteralPath $backupPath -Force
+        if (($backupItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Rollback operation marker replacement backup must not be a reparse point."
+        }
+        if (-not (Test-Path -LiteralPath $MarkerPath -PathType Leaf)) {
+            throw "Rollback operation marker replacement backup requires valid marker authority."
+        }
+        $existingMarker = Get-NikaRollbackOperationMarker -MarkerPath $MarkerPath -DataRoot $DataRoot
+        if ($null -eq $existingMarker) {
+            throw "Rollback operation marker replacement backup requires valid marker authority."
+        }
+        Remove-Item -LiteralPath $backupPath -Force
+        if (Test-Path -LiteralPath $backupPath) {
+            throw "Rollback operation marker replacement backup could not be retired."
+        }
     }
 
     $payload = [ordered]@{
@@ -676,7 +708,7 @@ function Write-NikaRollbackOperationMarker {
             if (-not (Test-Path -LiteralPath $MarkerPath -PathType Leaf)) {
                 throw "Rollback operation marker authority is not a regular file."
             }
-            [System.IO.File]::Replace($tempPath, $MarkerPath, $null, $true)
+            [System.IO.File]::Replace($tempPath, $MarkerPath, $backupPath, $true)
         }
         else {
             [System.IO.File]::Move($tempPath, $MarkerPath)
@@ -697,6 +729,21 @@ function Write-NikaRollbackOperationMarker {
         [string]$written.TargetDigest -cne $TargetDigest
     ) {
         throw "Rollback operation marker write verification failed."
+    }
+
+    if (Test-Path -LiteralPath $backupPath) {
+        Assert-NikaNoReparsePathChain -Path $backupPath
+        if (-not (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
+            throw "Rollback operation marker replacement backup is not a regular file."
+        }
+        $backupItem = Get-Item -LiteralPath $backupPath -Force
+        if (($backupItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Rollback operation marker replacement backup must not be a reparse point."
+        }
+        Remove-Item -LiteralPath $backupPath -Force
+        if (Test-Path -LiteralPath $backupPath) {
+            throw "Rollback operation marker replacement backup could not be retired."
+        }
     }
 }
 

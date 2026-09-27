@@ -217,6 +217,23 @@ def test_update_replacement_order_preserves_prior_rollback_until_activation() ->
     assert "Remove-Item -LiteralPath $retiredRollbackPath -Recurse -Force" not in update
 
 
+def test_rollback_marker_replacement_uses_verified_nonempty_backup_path() -> None:
+    payload = SCRIPT.read_text(encoding="utf-8")
+    start = payload.index("function Write-NikaRollbackOperationMarker")
+    end = payload.index("function Remove-NikaRollbackOperationMarker", start)
+    writer = payload[start:end]
+
+    assert '$backupPath = "$MarkerPath.replace-backup"' in writer
+    assert (
+        "[System.IO.File]::Replace($tempPath, $MarkerPath, $backupPath, $true)"
+        in writer
+    )
+    assert "[System.IO.File]::Replace($tempPath, $MarkerPath, $null, $true)" not in writer
+    assert "Assert-NikaNoReparsePathChain -Path $backupPath" in writer
+    assert "replacement backup must not be a reparse point" in writer
+    assert "replacement backup could not be retired" in writer
+
+
 def test_missing_destination_recovery_revalidates_all_authority_before_first_move() -> None:
     payload = SCRIPT.read_text(encoding="utf-8")
     recovery = payload[
