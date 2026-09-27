@@ -634,6 +634,70 @@ def test_post_commit_json_alias_conflict_fail_stops_live_cursor(
     assert durable_result["value"] == 1
 
 
+def test_post_commit_nonfinite_conflict_fail_stops_live_cursor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=1,
+    )
+    cursor.begin_effect("target-0")
+    cursor.confirm("target-0", {"value": 0})
+    due = datetime.now(UTC) + timedelta(hours=1)
+    original_put = memory.put
+
+    def commit_nonfinite_then_raise(**kwargs: object):
+        committed = original_put(**kwargs)
+        assert committed is not None
+        tampered = json.loads(json.dumps(committed.value))
+        targets = tampered["targets"]
+        assert isinstance(targets, list)
+        first = targets[0]
+        assert isinstance(first, dict)
+        result = first["confirmed_result"]
+        assert isinstance(result, dict)
+        result["value"] = float("nan")
+        tampered_kwargs = dict(kwargs)
+        tampered_kwargs["value"] = tampered
+        original_put(**tampered_kwargs)
+        raise RuntimeError("synthetic non-finite durable conflict")
+
+    monkeypatch.setattr(memory, "put", commit_nonfinite_then_raise)
+    with pytest.raises(
+        BatchCursorStateError,
+        match="persistence outcome conflicts with durable state",
+    ):
+        cursor.schedule_inter_batch_wait(due)
+
+    with pytest.raises(BatchCursorBlockedError, match="restore is required"):
+        cursor.next_target()
+    with pytest.raises(BatchCursorBlockedError, match="restore is required"):
+        cursor.begin_effect("target-1")
+
+    durable = MemoryService(store).get(
+        scope=MemoryScope.TASK,
+        owner_id="task",
+        namespace="v01.batch_cursor",
+        key="cursor",
+    )
+    assert durable is not None
+    durable_targets = durable.value["targets"]
+    assert isinstance(durable_targets, list)
+    durable_first = durable_targets[0]
+    assert isinstance(durable_first, dict)
+    durable_result = durable_first["confirmed_result"]
+    assert isinstance(durable_result, dict)
+    durable_value = durable_result["value"]
+    assert isinstance(durable_value, float)
+    assert durable_value != durable_value
+
+
 def test_unreadable_post_commit_outcome_fail_stops_live_cursor_until_restore(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
