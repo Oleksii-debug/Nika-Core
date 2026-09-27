@@ -78,7 +78,7 @@ def _serialize_result(result: Mapping[str, Any] | None) -> str | None:
         raise ValueError("idempotency result must be JSON serializable") from exc
 
 
-def _stored_result(row: sqlite3.Row, status: IdempotencyStatus) -> Mapping[str, Any] | None:
+def _stored_result(row: sqlite3.Row) -> Mapping[str, Any] | None:
     raw = row["result_json"]
     if raw is None:
         return None
@@ -86,8 +86,6 @@ def _stored_result(row: sqlite3.Row, status: IdempotencyStatus) -> Mapping[str, 
         raise RuntimeError(
             "persisted idempotency field result_json has invalid SQLite storage class"
         )
-    if status is not IdempotencyStatus.COMPLETED:
-        raise RuntimeError("non-completed idempotency record must not carry result evidence")
     try:
         decoded = json.loads(raw)
     except (TypeError, ValueError) as exc:
@@ -380,8 +378,6 @@ class IdempotencyLedger:
             raise TypeError("status must be an IdempotencyStatus")
         current = self._require_with_connection(conn, operation_key)
         result_json = _serialize_result(result)
-        if status is not IdempotencyStatus.COMPLETED and result_json is not None:
-            raise ValueError("only completed idempotency records may carry result evidence")
         if current.status is IdempotencyStatus.COMPLETED:
             if status is not IdempotencyStatus.COMPLETED:
                 raise IdempotencyConflictError("completed operation cannot be reopened")
@@ -435,7 +431,7 @@ class IdempotencyLedger:
             operation_type=_stored_text(row, "operation_type"),
             input_fingerprint=_stored_text(row, "input_fingerprint"),
             status=status,
-            result=_stored_result(row, status),
+            result=_stored_result(row),
             created_at=_stored_timestamp(row, "created_at"),
             updated_at=_stored_timestamp(row, "updated_at"),
         )
