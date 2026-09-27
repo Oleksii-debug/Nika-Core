@@ -31,6 +31,7 @@ _MAX_SIGNED_64 = (1 << 63) - 1
 _SOURCE_ENTITY_TYPE = "owner_presence_source"
 _OBSERVED_EVENT = "background.owner_presence_observed"
 _DISPATCH_OPERATION_TYPE = "background.dispatch"
+_MAX_IDENTITY_LENGTH = 256
 
 
 class PresenceEvidencePhase(StrEnum):
@@ -54,6 +55,8 @@ class OwnerPresenceObservation:
             raise TypeError("source_id must be exact built-in str")
         if not self.source_id or self.source_id != self.source_id.strip():
             raise ValueError("source_id must be non-empty without surrounding whitespace")
+        if len(self.source_id) > _MAX_IDENTITY_LENGTH:
+            raise ValueError("source_id is too long")
         if type(self.sequence) is not int:
             raise TypeError("sequence must be exact built-in int")
         if not 0 <= self.sequence <= _MAX_SIGNED_64:
@@ -112,6 +115,8 @@ class BackgroundDispatchGuard:
             raise TypeError("source_id must be exact built-in str")
         if not source_id or source_id != source_id.strip():
             raise ValueError("source_id must be non-empty without surrounding whitespace")
+        if len(source_id) > _MAX_IDENTITY_LENGTH:
+            raise ValueError("source_id is too long")
         if type(max_presence_age_seconds) not in (int, float):
             raise TypeError("max_presence_age_seconds must be exact built-in int or float")
         if type(max_presence_age_seconds) is float and not isfinite(max_presence_age_seconds):
@@ -153,6 +158,8 @@ class BackgroundDispatchGuard:
             raise TypeError("owner_id must be exact built-in str")
         if not owner_id or owner_id != owner_id.strip():
             raise ValueError("owner_id must be non-empty without surrounding whitespace")
+        if len(owner_id) > _MAX_IDENTITY_LENGTH:
+            raise ValueError("owner_id is too long")
 
         for phase in (
             PresenceEvidencePhase.PREFLIGHT,
@@ -385,11 +392,15 @@ class BackgroundDispatchGuard:
         work_kind: BackgroundWorkKind,
         presence: OwnerPresence,
     ) -> BackgroundDecision:
-        return decide_background_work(
+        status = self._resources.status(scope="background_life", owner_id=owner_id)
+        decision = decide_background_work(
             owner_presence=presence,
             work_kind=work_kind,
-            capacity=self._resources.status(scope="background_life", owner_id=owner_id),
+            capacity=status,
         )
+        if presence is OwnerPresence.AWAY and status.budget.owner_id != owner_id:
+            raise ValueError("resource capacity owner_id does not match background owner")
+        return decision
 
     def _policy_for_existing_grant(
         self,
@@ -401,6 +412,13 @@ class BackgroundDispatchGuard:
         """Recheck current resource/power facts without counting this guard's own slot."""
 
         status = self._resources.status(scope="background_life", owner_id=owner_id)
+        decide_background_work(
+            owner_presence=OwnerPresence.AWAY,
+            work_kind=work_kind,
+            capacity=status,
+        )
+        if status.budget.owner_id != owner_id:
+            raise ValueError("resource capacity owner_id does not match background owner")
         if status.active_count < 1:
             raise RuntimeError("background resource grant disappeared before effect")
         active_without_self = status.active_count - 1
@@ -428,7 +446,7 @@ class BackgroundDispatchGuard:
         phase: PresenceEvidencePhase,
     ) -> OwnerPresenceObservation | None:
         try:
-            observation = self._presence.observe()
+            observation = self._snapshot_observation(self._presence.observe())
             self._accept_observation(task_id=task_id, phase=phase, observation=observation)
         except Exception as exc:  # noqa: BLE001 - provider/evidence boundary fails closed
             self._audit.append(
@@ -445,6 +463,24 @@ class BackgroundDispatchGuard:
             return None
         return observation
 
+    @staticmethod
+    def _snapshot_observation(raw: object) -> OwnerPresenceObservation:
+        """Detach and revalidate untrusted provider evidence at the authority boundary."""
+
+        if type(raw) is not OwnerPresenceObservation:
+            raise OwnerPresenceEvidenceError(
+                "presence observer returned a non-canonical carrier"
+            )
+        try:
+            return OwnerPresenceObservation(
+                source_id=raw.source_id,
+                sequence=raw.sequence,
+                presence=raw.presence,
+                observed_at=raw.observed_at,
+            )
+        except (TypeError, ValueError) as exc:
+            raise OwnerPresenceEvidenceError("presence observation is malformed") from exc
+
     def _accept_observation(
         self,
         *,
@@ -453,7 +489,7 @@ class BackgroundDispatchGuard:
         observation: OwnerPresenceObservation,
     ) -> None:
         if type(observation) is not OwnerPresenceObservation:
-            raise OwnerPresenceEvidenceError("presence observer returned a non-canonical carrier")
+            raise OwnerPresenceEvidenceError("presence observation is not canonical")
         if observation.source_id != self._source_id:
             raise OwnerPresenceEvidenceError("presence observation came from the wrong source")
 
@@ -485,6 +521,10 @@ class BackgroundDispatchGuard:
                     raise OwnerPresenceEvidenceError(
                         "stored presence evidence has invalid sequence"
                     )
+                if not 0 <= previous_sequence <= _MAX_SIGNED_64:
+                    raise OwnerPresenceEvidenceError(
+                        "stored presence evidence sequence is out of range"
+                    )
                 if observation.sequence <= previous_sequence:
                     raise OwnerPresenceEvidenceError(
                         "presence observation sequence did not advance"
@@ -502,6 +542,10 @@ class BackgroundDispatchGuard:
                 if previous_dt.tzinfo is None or previous_dt.utcoffset() is None:
                     raise OwnerPresenceEvidenceError(
                         "stored presence evidence timestamp lacks timezone"
+                    )
+                if previous_dt.utcoffset().total_seconds() != 0:
+                    raise OwnerPresenceEvidenceError(
+                        "stored presence evidence timestamp is not UTC"
                     )
                 if observation.observed_at < previous_dt:
                     raise OwnerPresenceEvidenceError(
