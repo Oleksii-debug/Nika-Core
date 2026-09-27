@@ -30,8 +30,17 @@ def test_registry_rejects_noncanonical_runtime_id_carriers() -> None:
     with pytest.raises(TypeError, match="exact string"):
         registry.register(runtime)
 
-    with pytest.raises(TypeError, match="exact string"):
+    with pytest.raises(KeyError, match="Unknown runtime identifier"):
         registry.get(_TextSubclass("reference"))
+
+
+def test_registry_malformed_lookup_preserves_unknown_runtime_contract() -> None:
+    registry = RuntimeRegistry()
+    registry.register(ReferenceRuntime())
+
+    for runtime_id in (" reference", "reference\nforged", "r" * 129):
+        with pytest.raises(KeyError, match="Unknown runtime identifier"):
+            registry.get(runtime_id)
 
 
 def test_registry_rejects_unbounded_or_control_runtime_ids() -> None:
