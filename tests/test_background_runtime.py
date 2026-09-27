@@ -1099,3 +1099,62 @@ def test_future_skew_cannot_exceed_freshness_window(tmp_path: Path) -> None:
             max_presence_age_seconds=5.0,
             max_future_skew_seconds=5.1,
         )
+
+
+
+class SimulatedBackgroundProcessLoss(BaseException):
+    pass
+
+
+def test_process_loss_after_effect_start_leaves_nonreplayable_pending_claim(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    store = _store(tmp_path)
+    guard, queue, _audit, resources = _guard(
+        store=store,
+        observations=[
+            _obs(240, OwnerPresence.AWAY, now=now),
+            _obs(241, OwnerPresence.AWAY, now=now),
+            _obs(242, OwnerPresence.AWAY, now=now),
+            _obs(243, OwnerPresence.AWAY, now=now),
+            _obs(244, OwnerPresence.AWAY, now=now),
+            _obs(245, OwnerPresence.AWAY, now=now),
+            _obs(246, OwnerPresence.AWAY, now=now),
+        ],
+        now=now,
+    )
+    task_id = _ready_task(queue)
+
+    async def crash() -> object:
+        raise SimulatedBackgroundProcessLoss()
+
+    with pytest.raises(SimulatedBackgroundProcessLoss):
+        asyncio.run(
+            guard.dispatch(
+                task_id=task_id,
+                work_kind=BackgroundWorkKind.UNFINISHED_WORK,
+                effect=crash,
+            )
+        )
+
+    records = [
+        record
+        for record in IdempotencyLedger(store).list_for_task(task_id)
+        if record.operation_type == "background.dispatch"
+    ]
+    assert len(records) == 1
+    assert records[0].status is IdempotencyStatus.PENDING
+    assert resources.active_count(scope="background_life", owner_id="living-agent") == 0
+
+    async def replay() -> object:
+        raise AssertionError("replay effect must not run")
+
+    with pytest.raises(IdempotencyConflictError, match="pending or uncertain"):
+        asyncio.run(
+            guard.dispatch(
+                task_id=task_id,
+                work_kind=BackgroundWorkKind.UNFINISHED_WORK,
+                effect=replay,
+            )
+        )
