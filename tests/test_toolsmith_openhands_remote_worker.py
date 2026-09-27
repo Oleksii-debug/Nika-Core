@@ -1726,6 +1726,7 @@ def test_agent_server_cancel_covers_upload_before_conversation_creation(
     tmp_path: Path,
 ) -> None:
     root = _workspace(tmp_path)
+    root.joinpath("src/second.txt").write_bytes(b"second\n")
     job = _job(root)
     evidence = collect_tree_evidence(root)
     endpoint = _endpoint()
