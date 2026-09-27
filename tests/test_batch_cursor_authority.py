@@ -407,3 +407,39 @@ def test_restore_rejects_active_future_frontier_before_batch_release(
             batch_size=1,
         )
 
+def test_restore_preflights_future_effect_evidence_without_mutating_ledger(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, _ = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=2,
+    )
+    future = cursor.state.targets[1]
+    record, created = ledger.reserve_once(
+        operation_key=future.operation_key,
+        task_id="task",
+        operation_type="v01.batch_target_effect",
+        input_fingerprint=future.input_fingerprint,
+    )
+    assert created is True
+    assert record.status is IdempotencyStatus.PENDING
+
+    with pytest.raises(BatchCursorStateError, match="beyond cursor execution frontier"):
+        BatchCursor.restore(
+            memory,
+            ledger,
+            task_id="task",
+            cursor_id="cursor",
+            targets=_targets(2),
+            batch_size=2,
+        )
+
+    durable = ledger.require(future.operation_key)
+    assert durable.status is IdempotencyStatus.PENDING
+    assert cursor.state.targets[0].attempt_state is AttemptState.PENDING
+

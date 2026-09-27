@@ -433,8 +433,32 @@ class BatchCursor:
 
     def _reconcile_effect_evidence(self) -> bool:
         changed = False
-        for target in self._state.targets:
+        frontier_index = next(
+            (
+                index
+                for index, target in enumerate(self._state.targets)
+                if target.attempt_state is not AttemptState.CONFIRMED
+            ),
+            len(self._state.targets),
+        )
+        durable_records = []
+        for index, target in enumerate(self._state.targets):
             durable = self._ledger.get(target.operation_key)
+            durable_records.append(durable)
+            if durable is None:
+                continue
+            if (
+                durable.task_id != self._state.task_id
+                or durable.operation_type != _OPERATION_TYPE
+                or durable.input_fingerprint != target.input_fingerprint
+            ):
+                raise BatchCursorStateError("idempotency evidence belongs to different input")
+            if index > frontier_index:
+                raise BatchCursorStateError(
+                    "idempotency evidence exists beyond cursor execution frontier"
+                )
+
+        for target, durable in zip(self._state.targets, durable_records, strict=True):
             if durable is None:
                 if target.attempt_state in {
                     AttemptState.IN_FLIGHT,
@@ -445,12 +469,6 @@ class BatchCursor:
                         "cursor terminal/in-flight state has no idempotency evidence"
                     )
                 continue
-            if (
-                durable.task_id != self._state.task_id
-                or durable.operation_type != _OPERATION_TYPE
-                or durable.input_fingerprint != target.input_fingerprint
-            ):
-                raise BatchCursorStateError("idempotency evidence belongs to different input")
             if durable.status is IdempotencyStatus.COMPLETED:
                 result, durable_due = _decode_completion_result(durable.result)
                 prior_intent = self._state.next_scheduled_intent.model_copy(deep=True) if self._state.next_scheduled_intent is not None else None
