@@ -15,6 +15,11 @@ from nika_core.kernel.task_state import TaskState
 from nika_core.resources import ResourceBudget, ResourceManager, ResourceSnapshot
 from nika_core.runtime.contracts import RuntimeOutcome, RuntimeRequest, RuntimeResult
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
+from nika_core.runtime.idempotency import (
+    IdempotencyConflictError,
+    IdempotencyLedger,
+    IdempotencyStatus,
+)
 
 
 class SequencePresence:
@@ -597,3 +602,187 @@ def test_guard_rejects_negative_future_skew(tmp_path: Path) -> None:
             source_id="win32-owner-presence",
             max_future_skew_seconds=-0.1,
         )
+
+
+class IncrementingPresence:
+    def __init__(self, *, now: datetime) -> None:
+        self._now = now
+        self._sequence = 0
+
+    def observe(self) -> OwnerPresenceObservation:
+        self._sequence += 1
+        return _obs(self._sequence, OwnerPresence.AWAY, now=self._now)
+
+
+def test_concurrent_dispatch_for_same_task_has_one_durable_effect_winner(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        now = datetime(2030, 1, 1, tzinfo=UTC)
+        store = _store(tmp_path)
+        queue = TaskQueue(store)
+        audit = AuditLog(store)
+        resources = ResourceManager(store, SequenceResourceObserver())
+        resources.set_budget(
+            ResourceBudget(
+                scope="background_life",
+                owner_id="living-agent",
+                max_concurrent=2,
+                max_cpu_percent=80.0,
+                max_memory_percent=80.0,
+            )
+        )
+        guard = BackgroundDispatchGuard(
+            queue=queue,
+            audit=audit,
+            resources=resources,
+            presence=IncrementingPresence(now=now),
+            source_id="win32-owner-presence",
+            clock=lambda: now,
+        )
+        task_id = _ready_task(queue)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        calls: list[str] = []
+
+        async def first_effect() -> object:
+            calls.append("first")
+            entered.set()
+            await release.wait()
+            return "done"
+
+        async def second_effect() -> object:
+            calls.append("second")
+            return "should-not-run"
+
+        first = asyncio.create_task(
+            guard.dispatch(
+                task_id=task_id,
+                work_kind=BackgroundWorkKind.UNFINISHED_WORK,
+                effect=first_effect,
+            )
+        )
+        await entered.wait()
+
+        with pytest.raises(IdempotencyConflictError, match="pending or uncertain"):
+            await guard.dispatch(
+                task_id=task_id,
+                work_kind=BackgroundWorkKind.UNFINISHED_WORK,
+                effect=second_effect,
+            )
+
+        release.set()
+        result = await first
+        assert result.executed is True
+        assert calls == ["first"]
+
+        records = [
+            record
+            for record in IdempotencyLedger(store).list_for_task(task_id)
+            if record.operation_type == "background.dispatch"
+        ]
+        assert len(records) == 1
+        assert records[0].status is IdempotencyStatus.COMPLETED
+        assert records[0].result == {
+            "effect_started": True,
+            "work_kind": BackgroundWorkKind.UNFINISHED_WORK.value,
+        }
+
+    asyncio.run(scenario())
+
+
+def test_completed_dispatch_claim_blocks_replay_when_task_state_did_not_advance(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    store = _store(tmp_path)
+    guard, queue, audit, _resources = _guard(
+        store=store,
+        observations=[
+            _obs(101, OwnerPresence.AWAY, now=now),
+            _obs(102, OwnerPresence.AWAY, now=now),
+            _obs(103, OwnerPresence.AWAY, now=now),
+            _obs(104, OwnerPresence.AWAY, now=now),
+            _obs(105, OwnerPresence.AWAY, now=now),
+            _obs(106, OwnerPresence.AWAY, now=now),
+            _obs(107, OwnerPresence.AWAY, now=now),
+        ],
+        now=now,
+    )
+    task_id = _ready_task(queue)
+    calls: list[str] = []
+
+    async def effect() -> object:
+        calls.append("run")
+        return "ok"
+
+    first = asyncio.run(
+        guard.dispatch(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.READING_RESEARCH,
+            effect=effect,
+        )
+    )
+    second = asyncio.run(
+        guard.dispatch(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.READING_RESEARCH,
+            effect=effect,
+        )
+    )
+
+    assert first.executed is True
+    assert second.action is BackgroundAction.DEFER
+    assert second.reason == "dispatch_already_completed"
+    assert second.executed is False
+    assert calls == ["run"]
+    assert any(
+        event.event_type == "background.dispatch_duplicate_blocked"
+        for event in audit.list_for(entity_type="task", entity_id=task_id)
+    )
+
+
+def test_deferred_effect_result_cannot_escape_authority_window(tmp_path: Path) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    store = _store(tmp_path)
+    guard, queue, audit, resources = _guard(
+        store=store,
+        observations=[
+            _obs(111, OwnerPresence.AWAY, now=now),
+            _obs(112, OwnerPresence.AWAY, now=now),
+            _obs(113, OwnerPresence.AWAY, now=now),
+            _obs(114, OwnerPresence.AWAY, now=now),
+        ],
+        now=now,
+    )
+    task_id = _ready_task(queue)
+
+    async def later() -> object:
+        return "late"
+
+    async def effect() -> object:
+        return later()
+
+    with pytest.raises(TypeError, match="deferred execution"):
+        asyncio.run(
+            guard.dispatch(
+                task_id=task_id,
+                work_kind=BackgroundWorkKind.EVIDENCE_VERIFICATION,
+                effect=effect,
+            )
+        )
+
+    records = [
+        record
+        for record in IdempotencyLedger(store).list_for_task(task_id)
+        if record.operation_type == "background.dispatch"
+    ]
+    assert len(records) == 1
+    assert records[0].status is IdempotencyStatus.UNCERTAIN
+    assert resources.active_count(scope="background_life", owner_id="living-agent") == 0
+    uncertain = [
+        event
+        for event in audit.list_for(entity_type="task", entity_id=task_id)
+        if event.event_type == "background.dispatch_uncertain"
+    ]
+    assert uncertain[-1].payload["error_type"] == "DeferredEffectResult"
