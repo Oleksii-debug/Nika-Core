@@ -69,7 +69,7 @@ def test_runtime_requests_reject_non_numeric_timeout_carriers(
 
 @pytest.mark.parametrize(
     "timeout_seconds",
-    (float("nan"), float("inf"), float("-inf"), 10**10000),
+    (float("nan"), float("inf"), float("-inf"), 10**400),
 )
 def test_runtime_requests_reject_non_finite_timeouts(timeout_seconds: object) -> None:
     with pytest.raises(ValueError, match="timeout_seconds must be finite and positive"):
