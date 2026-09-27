@@ -300,6 +300,26 @@ def test_unfinalized_interrupted_state_can_resume_exact_job_once(tmp_path: Path)
     assert len(runtime.calls) == 1
 
 
+def test_fresh_worker_cannot_replay_caller_supplied_interrupted_state_without_durable_evidence(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    provider = Provider()
+    runtime = Runtime()
+    worker = OpenHandsRemoteCodingWorker(provider, runtime)
+    job = _job(root)
+
+    result = _run(worker.recover(job, RecoveryState("interrupted")))
+
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.kind.value == "internal_error"
+    assert result.failure.retryable is False
+    assert result.recovery_state == RecoveryState("manual_reconcile_required")
+    assert provider.acquired == []
+    assert runtime.calls == []
+
+
 def test_unexpected_post_apply_failure_requires_manual_reconciliation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -338,6 +358,26 @@ def test_worker_visible_git_metadata_is_rejected_before_remote_execution(tmp_pat
     result = _run(OpenHandsRemoteCodingWorker(provider, runtime).execute(job))
 
     assert not result.succeeded
+    assert ".git" in result.failure.message
+    assert provider.acquired == []
+    assert runtime.calls == []
+
+
+def test_nested_git_metadata_is_rejected_before_remote_sandbox_acquisition(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    nested_git = root / "src" / "embedded" / ".git"
+    nested_git.mkdir(parents=True)
+    nested_git.joinpath("config").write_text("[remote \"origin\"]\nurl = secret://canary\n")
+    provider = Provider()
+    runtime = Runtime()
+    job = _job(root)
+
+    result = _run(OpenHandsRemoteCodingWorker(provider, runtime).execute(job))
+
+    assert not result.succeeded
+    assert result.failure is not None
     assert ".git" in result.failure.message
     assert provider.acquired == []
     assert runtime.calls == []
