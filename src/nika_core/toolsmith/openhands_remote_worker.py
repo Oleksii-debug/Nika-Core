@@ -623,13 +623,23 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
             state = self._states.get(job.job_id)
         if state is None or state.phase == "running":
             return None
-        if state.phase in {"cancel_requested", "cancelled"}:
+        if state.phase == "cancel_requested":
+            return _failure_result(
+                job,
+                WorkerFailureKind.INTERNAL_ERROR,
+                "coding job cancellation is pending; remote stop is not yet proven",
+                retryable=False,
+                state=RecoveryState("manual_reconcile_required", state.opaque_token),
+                changed_files=changed_files,
+                test_evidence=test_evidence,
+            )
+        if state.phase == "cancelled":
             return _failure_result(
                 job,
                 WorkerFailureKind.CANCELLED,
                 "coding job cancellation was confirmed; cancelled work is terminal",
                 retryable=False,
-                state=RecoveryState("cancelled", state.opaque_token),
+                state=state,
                 changed_files=changed_files,
                 test_evidence=test_evidence,
             )
@@ -664,8 +674,8 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                 result = dataclasses.replace(result, recovery_state=result_state)
 
             if result_state.phase != "manual_reconcile_required" and current is not None:
-                if current.phase in {"cancel_requested", "cancelled"}:
-                    result_state = RecoveryState("cancelled", current.opaque_token)
+                if current.phase == "cancelled":
+                    result_state = current
                     result = _failure_result(
                         job,
                         WorkerFailureKind.CANCELLED,
@@ -675,8 +685,15 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                         changed_files=result.changed_files,
                         test_evidence=result.test_evidence,
                     )
-                elif current.phase == "manual_reconcile_required":
-                    result_state = current
+                elif current.phase in {
+                    "cancel_requested",
+                    "cancel_probe_pending",
+                    "manual_reconcile_required",
+                }:
+                    result_state = RecoveryState(
+                        "manual_reconcile_required",
+                        current.opaque_token,
+                    )
                     result = _failure_result(
                         job,
                         WorkerFailureKind.INTERNAL_ERROR,
