@@ -13,6 +13,9 @@ from nika_core.builder.spec import AgentDefinition
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.intelligence.modes import IntelligenceModePolicy
 from nika_core.kernel.task_queue import TaskQueue
+from nika_core.multi_agent.contracts import AgentHandoff, ChildRequest, HandoffKind, TeamQuota
+from nika_core.multi_agent.store import MultiAgentStore
+from nika_core.multi_agent.supervisor import MultiAgentSupervisor
 from nika_core.runtime.contracts import RuntimeOutcome, RuntimeRequest
 from nika_core.security.model_cloud_authority import (
     StandingPermissionCloudEffectAuthorizer,
@@ -75,16 +78,17 @@ def _store(tmp_path: Path) -> SQLiteStore:
 
 def _definitions(store: SQLiteStore) -> AgentDefinitionRepository:
     repository = AgentDefinitionRepository(store)
-    definition = AgentDefinition(
-        agent_id="worker",
-        name="worker",
-        goal="Complete the assigned task.",
-        instructions="Return a short factual result.",
-        model_profile="configured",
-    )
     compiler = AgentCompiler(tools=(), model_profiles={"configured"})
-    repository.save_draft(compiler.compile(definition))
-    repository.activate(definition)
+    for agent_id in ("supervisor", "worker"):
+        definition = AgentDefinition(
+            agent_id=agent_id,
+            name=agent_id,
+            goal="Complete the assigned task.",
+            instructions="Return a short factual result.",
+            model_profile="configured",
+        )
+        repository.save_draft(compiler.compile(definition))
+        repository.activate(definition)
     return repository
 
 
@@ -294,6 +298,110 @@ def test_real_standing_authority_reaches_cloud_provider_from_runtime_child_task(
     assert resolver.references == ["env:NIKA_PACKAGED_CLOUD_KEY"]
     assert transport.calls == 1
     assert authority_requests == [task_id]
+
+
+def test_real_authority_survives_canonical_multi_agent_member_identities(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 9, 27, 12, 0, tzinfo=UTC)
+    store = _store(tmp_path)
+    settings = _settings(store)
+    definitions = _definitions(store)
+    outer_task = _task(store, settings)
+    permissions, binding, authority = _standing_authority(
+        store,
+        task_id=outer_task,
+        now=now,
+    )
+    authorizer = StandingPermissionCloudEffectAuthorizer(
+        permissions,
+        lambda candidate: binding if candidate == authority else None,
+        clock=lambda: now + timedelta(minutes=1),
+    )
+    authority_requests: list[str] = []
+    resolver = _CountingCredentialResolver()
+    transport = _CountingTransport()
+    runtime = _factory(
+        store=store,
+        settings=settings,
+        definitions=definitions,
+        resolver=resolver,
+        transport=transport,
+        authorizer=authorizer,
+        authority_resolver=lambda candidate_task: (
+            authority_requests.append(candidate_task)
+            or (authority if candidate_task == outer_task else None)
+        ),
+    ).for_task(outer_task)
+    assert runtime is not None
+
+    team_id = "authority-team"
+    team_store = MultiAgentStore(store)
+    team_store.create_team(
+        team_id=team_id,
+        root_member_id="root",
+        root_agent_id="supervisor",
+        root_agent_version=1,
+        root_thread_id="thread:authority-team:root",
+        root_grants=(),
+        quota=TeamQuota(
+            max_depth=2,
+            max_children_per_parent=2,
+            max_total_agents=3,
+            max_parallel=2,
+        ),
+        root_task_handoff=AgentHandoff(
+            team_id=team_id,
+            sender_id="root",
+            recipient_id="root",
+            kind=HandoffKind.TASK,
+            payload={"work": "Check both worker results."},
+            handoff_id="task:authority-team:root",
+            correlation_id="team:authority-team:root",
+        ),
+    )
+    supervisor = MultiAgentSupervisor(
+        runtime=runtime,
+        store=team_store,
+        definitions=definitions,
+    )
+
+    async def scenario() -> tuple[object, ...]:
+        workers = await supervisor.fan_out(
+            team_id=team_id,
+            parent_id="root",
+            requests=(
+                ChildRequest(
+                    member_id="worker-a",
+                    agent_id="worker",
+                    agent_version=1,
+                    thread_id="thread:authority-team:worker-a",
+                    payload={"work": "Return worker A result."},
+                ),
+                ChildRequest(
+                    member_id="worker-b",
+                    agent_id="worker",
+                    agent_version=1,
+                    thread_id="thread:authority-team:worker-b",
+                    payload={"work": "Return worker B result."},
+                ),
+            ),
+        )
+        root = await supervisor.run_root_member(team_id=team_id, member_id="root")
+        supervisor.finalize_team(team_id)
+        return (*workers, root)
+
+    executions = asyncio.run(scenario())
+
+    assert len(executions) == 3
+    assert all(
+        execution.result is not None
+        and execution.result.outcome is RuntimeOutcome.COMPLETED
+        for execution in executions
+    )
+    assert authority_requests == [outer_task] * 3
+    assert resolver.references == ["env:NIKA_PACKAGED_CLOUD_KEY"] * 3
+    assert transport.calls == 3
 
 
 def test_missing_host_authority_fails_before_credentials_or_transport(
