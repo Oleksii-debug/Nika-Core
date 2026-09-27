@@ -128,15 +128,24 @@ class ProductFactoryWorkOwnership:
             current = _load(connection, project_id, work_id)
             _assert_exact(current, owner_id=owner_id, fence=fence, now=instant)
             assert current is not None
-            if expires_at <= current.expires_at:
-                raise WorkOwnershipError("renewal must extend the current lease")
-            connection.execute(
-                "UPDATE product_factory_work_ownership SET expires_at = ? "
-                "WHERE project_id = ? AND work_id = ?",
-                (_stamp(expires_at), project_id, work_id),
-            )
+            if expires_at < current.expires_at:
+                raise WorkOwnershipError("renewal must not shorten the current lease")
+            if expires_at > current.expires_at:
+                connection.execute(
+                    "UPDATE product_factory_work_ownership SET expires_at = ? "
+                    "WHERE project_id = ? AND work_id = ?",
+                    (_stamp(expires_at), project_id, work_id),
+                )
             _commit_mutation(connection)
-        return WorkOwnershipLease(project_id, work_id, owner_id, fence, current.issued_at, expires_at)
+        effective_expires_at = max(expires_at, current.expires_at)
+        return WorkOwnershipLease(
+            project_id,
+            work_id,
+            owner_id,
+            fence,
+            current.issued_at,
+            effective_expires_at,
+        )
 
     def release(self, *, project_id: str, work_id: str, owner_id: str, fence: int) -> None:
         _identity(project_id, work_id, owner_id)

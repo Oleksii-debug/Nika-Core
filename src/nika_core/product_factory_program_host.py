@@ -4,11 +4,11 @@ import asyncio
 import hashlib
 import json
 import uuid
-from collections.abc import Iterator
+from collections.abc import Awaitable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_factory_checkpoint_host import (
@@ -37,6 +37,7 @@ from nika_core.runtime.idempotency import (
 from nika_core.toolsmith.contracts import RecoveryState
 
 _OPERATION_TYPE = "product_factory.coding_worker"
+_T = TypeVar("_T")
 
 
 class ProductFactoryProgramError(RuntimeError):
@@ -384,7 +385,11 @@ class ProductFactoryProgramHost:
                 return _existing_operation_outcome(request, operation)
 
             try:
-                envelope = await self.worker.dispatch(request)
+                envelope, lease = await self._run_effect_with_lease(
+                    request,
+                    lease,
+                    self.worker.dispatch(request),
+                )
             except asyncio.CancelledError:
                 self._mark_uncertain_fenced(operation_key, lease)
                 self._release_best_effort(lease)
@@ -502,7 +507,11 @@ class ProductFactoryProgramHost:
             try:
                 lease = self._reestablish_effect_authority(request, lease)
                 try:
-                    state = await self.worker.inspect(request.work_id)
+                    state, lease = await self._run_effect_with_lease(
+                        request,
+                        lease,
+                        self.worker.inspect(request.work_id),
+                    )
                 except asyncio.CancelledError:
                     self._mark_uncertain_with_status(operation_key, lease)
                     raise
@@ -548,7 +557,11 @@ class ProductFactoryProgramHost:
                     )
                 lease = self._reestablish_effect_authority(request, lease)
                 try:
-                    envelope = await self.worker.recover(request, state)
+                    envelope, lease = await self._run_effect_with_lease(
+                        request,
+                        lease,
+                        self.worker.recover(request, state),
+                    )
                 except asyncio.CancelledError:
                     self._mark_uncertain_with_status(operation_key, lease)
                     raise
@@ -805,19 +818,52 @@ class ProductFactoryProgramHost:
         request: ComponentWorkRequest,
         lease: WorkOwnershipLease,
     ) -> WorkOwnershipLease:
-        """Require the exact reservation fence immediately before any external effect."""
+        """Refresh the exact existing fence immediately before an external effect."""
         try:
-            self._ownership.assert_owner(
+            return self._ownership.renew(
                 project_id=lease.project_id,
                 work_id=lease.work_id,
                 owner_id=lease.owner_id,
                 fence=lease.fence,
+                lease_seconds=self.lease_seconds,
             )
         except WorkOwnershipError as exc:
             raise ProductFactoryProgramError(
                 f"stale Product Factory authority cannot start external effect for {request.work_id}: {exc}"
             ) from exc
-        return lease
+
+    async def _run_effect_with_lease(
+        self,
+        request: ComponentWorkRequest,
+        lease: WorkOwnershipLease,
+        effect: Awaitable[_T],
+    ) -> tuple[_T, WorkOwnershipLease]:
+        """Keep the exact fence alive while one admitted external effect is in flight."""
+
+        task = asyncio.ensure_future(effect)
+        interval = _lease_heartbeat_interval(self.lease_seconds)
+        try:
+            while True:
+                done, _ = await asyncio.wait((task,), timeout=interval)
+                if done:
+                    return task.result(), lease
+                try:
+                    lease = self._ownership.renew(
+                        project_id=lease.project_id,
+                        work_id=lease.work_id,
+                        owner_id=lease.owner_id,
+                        fence=lease.fence,
+                        lease_seconds=self.lease_seconds,
+                    )
+                except WorkOwnershipError as exc:
+                    await _cancel_effect_task(task)
+                    raise ProductFactoryProgramError(
+                        "Product Factory work ownership was lost during external effect "
+                        f"for {request.work_id}: {exc}"
+                    ) from exc
+        except asyncio.CancelledError:
+            await _cancel_effect_task(task)
+            raise
 
     def _assert_lease(self, connection, lease: WorkOwnershipLease) -> None:
         self._ownership.assert_owner_in_transaction(
@@ -905,6 +951,22 @@ def _outcome(
         operation_status=operation_status,
         detail=detail,
     )
+
+
+def _lease_heartbeat_interval(lease_seconds: int) -> float:
+    return min(30.0, max(0.05, lease_seconds / 3.0))
+
+
+async def _cancel_effect_task(task: asyncio.Future) -> None:
+    if task.done():
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        return
 
 
 def _operation_key(request: ComponentWorkRequest) -> str:
