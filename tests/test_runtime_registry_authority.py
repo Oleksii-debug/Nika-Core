@@ -145,6 +145,37 @@ def test_registry_blocks_post_registration_capability_expansion() -> None:
         registry.select({RuntimeCapability.DETERMINISTIC_NO_LLM})
 
 
+@pytest.mark.parametrize("effect_name", ("run", "resume", "cancel"))
+def test_registry_blocks_post_registration_noncallable_effect_drift(
+    effect_name: str,
+) -> None:
+    class _MutableRuntime:
+        runtime_id = "mutable"
+        capabilities = frozenset({RuntimeCapability.DETERMINISTIC_NO_LLM})
+
+        async def run(self, request) -> None:
+            del request
+
+        async def resume(self, request) -> None:
+            del request
+
+        async def cancel(self, *, task_id: str, thread_id: str) -> bool:
+            del task_id, thread_id
+            return False
+
+    runtime = _MutableRuntime()
+    registry = RuntimeRegistry()
+    registry.register(runtime)
+    setattr(runtime, effect_name, 1)
+
+    with pytest.raises(RuntimeError, match="runtime effects became invalid"):
+        registry.get("mutable")
+    with pytest.raises(RuntimeError, match="runtime effects became invalid"):
+        registry.select({RuntimeCapability.DETERMINISTIC_NO_LLM})
+    with pytest.raises(RuntimeError, match="runtime effects became invalid"):
+        registry.describe()
+
+
 def test_registry_returns_stable_snapshot_descriptors() -> None:
     registry = RuntimeRegistry()
     first = ReferenceRuntime()
