@@ -1007,6 +1007,8 @@ def test_post_commit_nonfinite_conflict_fail_stops_live_cursor(
         cursor.next_target()
     with pytest.raises(BatchCursorBlockedError, match="restore is required"):
         cursor.begin_effect("target-1")
+    with pytest.raises(BatchCursorBlockedError, match="restore is required"):
+        _ = cursor.state
 
     durable = MemoryService(store).get(
         scope=MemoryScope.TASK,
