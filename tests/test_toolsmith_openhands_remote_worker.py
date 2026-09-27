@@ -226,7 +226,7 @@ class DeferredCancelRuntime:
 def _workspace(tmp_path: Path) -> Path:
     root = tmp_path / "worker root"
     (root / "src").mkdir(parents=True)
-    (root / "src" / "value.txt").write_text("before\n", encoding="utf-8")
+    (root / "src" / "value.txt").write_bytes(b"before\n")
     return root
 
 
