@@ -281,3 +281,103 @@ def test_canonical_session_round_trip_preserves_utc_epoch(tmp_path) -> None:
     paused_time = datetime.fromisoformat(paused.updated_at)
     assert paused_time.utcoffset() == timedelta(0)
     assert paused_time >= active_time
+
+
+@pytest.mark.parametrize(
+    ("foreign_field", "foreign_value", "match"),
+    [
+        ("runtime_id", "runtime-b", "does not match persisted runtime session"),
+        ("thread_id", "thread-b", "thread does not match persisted runtime session"),
+    ],
+)
+def test_resumable_result_cannot_rebind_existing_durable_route(
+    tmp_path,
+    foreign_field: str,
+    foreign_value: str,
+    match: str,
+) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    sessions = RuntimeSessionStore(store)
+    sessions.record_active(
+        task_id=task_id,
+        runtime_id="runtime-a",
+        thread_id="thread-a",
+        resume_token="resume-a",
+    )
+    before = dict(_raw_session(store, task_id))
+    values = {
+        "task_id": task_id,
+        "runtime_id": "runtime-a",
+        "thread_id": "thread-a",
+        "result": RuntimeResult(
+            outcome=RuntimeOutcome.PAUSED,
+            resume_token="resume-b",
+        ),
+    }
+    values[foreign_field] = foreign_value
+
+    with pytest.raises(ValueError, match=match):
+        sessions.record_result(**values)
+
+    after = _raw_session(store, task_id)
+    assert after is not None
+    assert dict(after) == before
+
+
+def test_terminal_result_from_foreign_route_cannot_delete_existing_session(tmp_path) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    sessions = RuntimeSessionStore(store)
+    sessions.record_active(
+        task_id=task_id,
+        runtime_id="runtime-a",
+        thread_id="thread-a",
+        resume_token="resume-a",
+    )
+    before = dict(_raw_session(store, task_id))
+
+    with pytest.raises(ValueError, match="does not match persisted runtime session"):
+        sessions.record_result(
+            task_id=task_id,
+            runtime_id="runtime-b",
+            thread_id="thread-a",
+            result=RuntimeResult(outcome=RuntimeOutcome.COMPLETED),
+        )
+
+    after = _raw_session(store, task_id)
+    assert after is not None
+    assert dict(after) == before
+
+
+def test_same_route_result_updates_and_terminal_result_deletes_normally(tmp_path) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    sessions = RuntimeSessionStore(store)
+    sessions.record_active(
+        task_id=task_id,
+        runtime_id="runtime-a",
+        thread_id="thread-a",
+        resume_token="resume-a",
+    )
+
+    sessions.record_result(
+        task_id=task_id,
+        runtime_id="runtime-a",
+        thread_id="thread-a",
+        result=RuntimeResult(
+            outcome=RuntimeOutcome.PAUSED,
+            resume_token="resume-b",
+        ),
+    )
+    paused = sessions.get(task_id)
+    assert paused is not None
+    assert paused.runtime_id == "runtime-a"
+    assert paused.thread_id == "thread-a"
+    assert paused.resume_token == "resume-b"
+    assert paused.outcome is RuntimeOutcome.PAUSED
+
+    sessions.record_result(
+        task_id=task_id,
+        runtime_id="runtime-a",
+        thread_id="thread-a",
+        result=RuntimeResult(outcome=RuntimeOutcome.COMPLETED),
+    )
+    assert sessions.get(task_id) is None
