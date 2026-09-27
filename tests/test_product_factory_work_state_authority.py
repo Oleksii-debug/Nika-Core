@@ -6,9 +6,11 @@ from nika_core.product_factory_coordinator import (
     ComponentWorkRequest,
     CoordinatorError,
     ProductFactoryCoordinator,
+    WorkerResultEnvelope,
     WorkRecord,
 )
-from tests.test_product_factory_coordinator import PERMISSIONS, SHA_A
+from nika_core.toolsmith.contracts import CodingResult
+from tests.test_product_factory_coordinator import DIGEST, PERMISSIONS, SHA_A, SHA_B
 from tests.test_product_factory_work_lifecycle import _coordinator, _core_record, _graph
 
 
@@ -216,3 +218,175 @@ def test_restore_rejects_mutable_authority_in_work_record(
             tampered,
             trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
         )
+
+class _HostileStr(str):
+    def strip(self, *args, **kwargs):  # pragma: no cover - must never execute
+        raise AssertionError("hostile strip executed")
+
+    def casefold(self):  # pragma: no cover - must never execute
+        raise AssertionError("hostile casefold executed")
+
+    def __hash__(self):  # pragma: no cover - must never execute
+        raise AssertionError("hostile hash executed")
+
+    def __eq__(self, other):  # pragma: no cover - must never execute
+        raise AssertionError("hostile equality executed")
+
+
+class _HostileInt(int):
+    def __lt__(self, other):  # pragma: no cover - must never execute
+        raise AssertionError("hostile comparison executed")
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "error_pattern"),
+    (
+        ("work_id", _HostileStr("work-forged"), "identity and goal must be exact strings"),
+        ("project_id", _HostileStr("project-1"), "identity and goal must be exact strings"),
+        ("component_id", _HostileStr("core"), "identity and goal must be exact strings"),
+        ("repository_id", _HostileStr("repo-1"), "identity and goal must be exact strings"),
+        ("goal", _HostileStr("build core"), "identity and goal must be exact strings"),
+        ("base_sha", _HostileStr(SHA_A), "base_sha must be an exact 40-character"),
+        ("attempt", _HostileInt(1), "attempt must be an exact positive integer"),
+    ),
+)
+def test_work_request_rejects_polymorphic_scalar_authority(
+    field_name: str,
+    value: object,
+    error_pattern: str,
+) -> None:
+    coordinator = _coordinator()
+    request = coordinator.snapshot().trusted_plan[0]
+
+    with pytest.raises(CoordinatorError, match=error_pattern):
+        _forge_request_authority(request, field_name, value).__post_init__()
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "error_pattern"),
+    (
+        ("project_id", _HostileStr("project-1"), "identity and goal must be exact strings"),
+        ("component_id", _HostileStr("core"), "identity and goal must be exact strings"),
+        ("base_sha", _HostileStr(SHA_A), "base_sha must be an exact 40-character"),
+        ("attempt", _HostileInt(1), "attempt must be an exact positive integer"),
+    ),
+)
+def test_restore_rejects_forged_request_scalar_before_identity_operations(
+    field_name: str,
+    value: object,
+    error_pattern: str,
+) -> None:
+    coordinator = _coordinator()
+    snapshot = coordinator.snapshot()
+    assert snapshot.trusted_plan is not None
+    forged_plan = tuple(
+        _forge_request_authority(request, field_name, value)
+        if request.component_id == "core"
+        else request
+        for request in snapshot.trusted_plan
+    )
+    tampered = replace(snapshot, trusted_plan=forged_plan)
+
+    with pytest.raises(CoordinatorError, match=error_pattern):
+        ProductFactoryCoordinator(_graph()).restore(
+            tampered,
+            trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
+        )
+
+
+def _forge_worker_envelope(
+    envelope: WorkerResultEnvelope,
+    field_name: str,
+    value: object,
+) -> WorkerResultEnvelope:
+    forged = object.__new__(WorkerResultEnvelope)
+    for envelope_field in (
+        "work_id",
+        "component_id",
+        "repository_id",
+        "base_sha",
+        "result_sha",
+        "diff_digest",
+        "coding_result",
+    ):
+        object.__setattr__(
+            forged,
+            envelope_field,
+            value if envelope_field == field_name else getattr(envelope, envelope_field),
+        )
+    return forged
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "error_pattern"),
+    (
+        ("work_id", _HostileStr("work-forged"), "worker result identity must be exact strings"),
+        ("component_id", _HostileStr("core"), "worker result identity must be exact strings"),
+        ("repository_id", _HostileStr("repo-1"), "worker result identity must be exact strings"),
+        ("base_sha", _HostileStr(SHA_A), "base_sha must be an exact 40-character"),
+        ("result_sha", _HostileStr(SHA_B), "result_sha must be an exact 40-character"),
+        ("diff_digest", _HostileStr(DIGEST), "diff_digest must be an exact 64-character"),
+    ),
+)
+def test_record_result_rejects_forged_scalar_before_lookup_or_equality(
+    field_name: str,
+    value: object,
+    error_pattern: str,
+) -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    envelope = WorkerResultEnvelope(
+        work_id=request.work_id,
+        component_id=request.component_id,
+        repository_id=request.repository_id,
+        base_sha=request.base_sha,
+        result_sha=SHA_B,
+        diff_digest=DIGEST,
+        coding_result=CodingResult(job_id=request.work_id),
+    )
+    forged = _forge_worker_envelope(envelope, field_name, value)
+
+    with pytest.raises(CoordinatorError, match=error_pattern):
+        coordinator.record_result(forged)
+
+
+def test_worker_result_rejects_polymorphic_coding_job_identity() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+
+    with pytest.raises(CoordinatorError, match="coding result job id must be an exact"):
+        WorkerResultEnvelope(
+            work_id=request.work_id,
+            component_id=request.component_id,
+            repository_id=request.repository_id,
+            base_sha=request.base_sha,
+            result_sha=SHA_B,
+            diff_digest=DIGEST,
+            coding_result=CodingResult(job_id=_HostileStr(request.work_id)),
+        )
+
+
+def test_plan_rejects_polymorphic_goal_before_strip() -> None:
+    coordinator = ProductFactoryCoordinator(_graph())
+
+    with pytest.raises(CoordinatorError, match="component goal must be an exact string"):
+        coordinator.plan(
+            base_shas={"repo-1": SHA_A},
+            goals={
+                "core": _HostileStr("build core"),
+                "ui": "build ui",
+            },
+            permission_ceiling=PERMISSIONS,
+        )
+
+
+def test_plan_rejects_polymorphic_base_sha_before_casefold() -> None:
+    coordinator = ProductFactoryCoordinator(_graph())
+
+    with pytest.raises(CoordinatorError, match="base_sha must be an exact 40-character"):
+        coordinator.plan(
+            base_shas={"repo-1": _HostileStr(SHA_A)},
+            goals={"core": "build core", "ui": "build ui"},
+            permission_ceiling=PERMISSIONS,
+        )
+
