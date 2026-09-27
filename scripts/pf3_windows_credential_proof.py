@@ -186,6 +186,12 @@ def main() -> int:
         b"pf3-proof-authority-generation-1-revoked"
     ).hexdigest()
     authority_2 = hashlib.sha256(b"pf3-proof-authority-generation-2-active").hexdigest()
+    snapshot_checkpoint_1 = hashlib.sha256(
+        b"pf3-proof-snapshot-checkpoint-1"
+    ).hexdigest()
+    snapshot_checkpoint_2 = hashlib.sha256(
+        b"pf3-proof-snapshot-checkpoint-2"
+    ).hexdigest()
     operation_id = "pf3-proof-operation-" + uuid.uuid4().hex
     store: WindowsCredentialStore | None = None
     restarted: WindowsCredentialStore | None = None
@@ -209,6 +215,14 @@ def main() -> int:
             authority_fingerprint=authority_1_active,
         ):
             raise RuntimeError("protected credential authority binding was not persisted")
+        store.seal_snapshot_checkpoint(
+            expected_fingerprint=None,
+            checkpoint_fingerprint=snapshot_checkpoint_1,
+        )
+        if not store.snapshot_checkpoint_matches(
+            checkpoint_fingerprint=snapshot_checkpoint_1
+        ):
+            raise RuntimeError("protected snapshot checkpoint was not persisted")
 
         store.provision_secret(secret_ref, 1, raw_secret)
         expires_at = datetime.now(UTC) + timedelta(minutes=5)
@@ -261,6 +275,18 @@ def main() -> int:
             authority_fingerprint=authority_1_active,
         ):
             raise RuntimeError("credential authority did not survive adapter restart")
+        if not restarted.snapshot_checkpoint_matches(
+            checkpoint_fingerprint=snapshot_checkpoint_1
+        ):
+            raise RuntimeError("snapshot checkpoint did not survive adapter restart")
+        restarted.seal_snapshot_checkpoint(
+            expected_fingerprint=snapshot_checkpoint_1,
+            checkpoint_fingerprint=snapshot_checkpoint_2,
+        )
+        if not restarted.snapshot_checkpoint_matches(
+            checkpoint_fingerprint=snapshot_checkpoint_2
+        ):
+            raise RuntimeError("snapshot checkpoint compare-and-advance failed")
         restarted.provision_secret(secret_ref, 1, raw_secret)
         _expect_generation_conflict(restarted, secret_ref)
         _expect_unknown_handle(restarted, handle, datetime.now(UTC))
@@ -300,6 +326,10 @@ def main() -> int:
             authority_fingerprint=authority_1_retired,
         ):
             raise RuntimeError("retired credential authority did not survive adapter restart")
+        if not retired_restart.snapshot_checkpoint_matches(
+            checkpoint_fingerprint=snapshot_checkpoint_2
+        ):
+            raise RuntimeError("advanced snapshot checkpoint did not survive second restart")
 
         retired_restart.provision_secret(secret_ref, 2, exact_windows_limit_material)
         retired_restart.bind_authority(
@@ -345,6 +375,7 @@ def main() -> int:
                 "handle_operation_idempotency": "verified",
                 "handle_restart_invalidation": "verified",
                 "persistence": "local_machine",
+                "protected_snapshot_checkpoint": "verified",
                 "raw_secret_output": False,
                 "status": "ok",
             },
