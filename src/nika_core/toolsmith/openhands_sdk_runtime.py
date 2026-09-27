@@ -52,6 +52,8 @@ class _ActiveExecution:
     conversation_id: str | None = None
     cancel_requested: threading.Event = dataclasses.field(default_factory=threading.Event)
     done: threading.Event = dataclasses.field(default_factory=threading.Event)
+    effect_possible: bool = False
+    stop_proven: bool = False
 
 
 class OpenHandsAgentServerRuntime:
@@ -91,6 +93,8 @@ class OpenHandsAgentServerRuntime:
         self._poll_interval_seconds = float(poll_interval_seconds)
         self._active: dict[str, _ActiveExecution] = {}
         self._cancelled_done: set[str] = set()
+        self._stopped_done: set[str] = set()
+        self._ambiguous_effects: set[str] = set()
         self._pending_cancel: set[str] = set()
         self._active_lock = threading.Lock()
 
@@ -108,10 +112,15 @@ class OpenHandsAgentServerRuntime:
                 raise OpenHandsAgentServerCompatibilityError(
                     "OpenHands Agent Server job identity is already active"
                 )
+            if job.job_id in self._ambiguous_effects:
+                raise OpenHandsAgentServerCompatibilityError(
+                    "OpenHands Agent Server prior effect remains unresolved"
+                )
             if job.job_id in self._pending_cancel:
                 self._pending_cancel.remove(job.job_id)
                 active.cancel_requested.set()
             self._cancelled_done.discard(job.job_id)
+            self._stopped_done.discard(job.job_id)
             self._active[job.job_id] = active
         try:
             return await asyncio.to_thread(
@@ -131,9 +140,14 @@ class OpenHandsAgentServerRuntime:
         with self._active_lock:
             active = self._active.get(job_id)
             if active is None:
+                if job_id in self._ambiguous_effects:
+                    return False
                 if job_id in self._cancelled_done:
                     self._cancelled_done.remove(job_id)
                     self._pending_cancel.add(job_id)
+                    return True
+                if job_id in self._stopped_done:
+                    self._stopped_done.remove(job_id)
                     return True
                 if job_id in self._pending_cancel:
                     return False
@@ -154,9 +168,11 @@ class OpenHandsAgentServerRuntime:
 
         for _ in range(50):
             if active.done.is_set():
-                return True
+                return active.stop_proven or not active.effect_possible
             await asyncio.sleep(0.1)
-        return active.done.is_set()
+        return active.done.is_set() and (
+            active.stop_proven or not active.effect_possible
+        )
 
     def _execute_sync(
         self,
@@ -265,6 +281,7 @@ class OpenHandsAgentServerRuntime:
                 raise OpenHandsAgentServerExecutionCancelled(
                     "OpenHands execution cancelled before conversation run"
                 )
+            active.effect_possible = True
             self._request_json(
                 client,
                 "POST",
@@ -301,8 +318,14 @@ class OpenHandsAgentServerRuntime:
                     )
             active.done.set()
             with self._active_lock:
-                if active.cancel_requested.is_set():
-                    self._cancelled_done.add(job.job_id)
+                if active.effect_possible and not active.stop_proven:
+                    self._ambiguous_effects.add(job.job_id)
+                else:
+                    self._ambiguous_effects.discard(job.job_id)
+                    if active.cancel_requested.is_set():
+                        self._cancelled_done.add(job.job_id)
+                    else:
+                        self._stopped_done.add(job.job_id)
                 if self._active.get(job.job_id) is active:
                     self._active.pop(job.job_id, None)
 
@@ -336,8 +359,10 @@ class OpenHandsAgentServerRuntime:
                     "OpenHands conversation status is missing or non-canonical"
                 )
             if status == "finished":
+                active.stop_proven = True
                 return
             if status in _TERMINAL_FAILURE_STATUSES:
+                active.stop_proven = True
                 raise OpenHandsAgentServerCompatibilityError(
                     f"OpenHands conversation terminated with status {status}"
                 )
@@ -352,6 +377,11 @@ class OpenHandsAgentServerRuntime:
                     "OpenHands conversation returned an unknown execution status"
                 )
             if status in {"paused", "waiting_for_confirmation", "deleting"}:
+                if status == "paused" and active.cancel_requested.is_set():
+                    active.stop_proven = True
+                    raise OpenHandsAgentServerExecutionCancelled(
+                        "OpenHands conversation paused after cancellation"
+                    )
                 raise OpenHandsAgentServerCompatibilityError(
                     f"OpenHands conversation cannot complete unattended from status {status}"
                 )
